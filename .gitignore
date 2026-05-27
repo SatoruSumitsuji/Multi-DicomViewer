@@ -1,0 +1,47 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+.venv/
+venv/
+env/
+.python-version
+
+# --- PyInstaller ---
+build/
+dist/
+*.manifest
+# Keep the .spec file (committed for reproducible builds)
+# *.spec
+
+# --- IDEs / editors ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- OS ---
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# --- Project-specific ---
+# Local backups (not part of the source tree)
+backups/
+
+# Runtime logs
+err.log
+*.log
+
+# Regenerable test data (use `python tools/make_test_data.py sample_data`)
+sample_data/
+
+# Auxiliary documentation assets that bloat the repo
+SSMviewデータ/
+Orthogonal-View_Sample/
+Orthogonal-View.pptx
+
+# Distribution zips produced by package step
+*.zip

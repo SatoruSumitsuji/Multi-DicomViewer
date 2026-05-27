@@ -1,0 +1,74 @@
+name: Build distributables
+
+# Trigger options:
+#   - Push a tag like `v0.1.0` to build BOTH platforms and attach to a Release
+#   - Run manually from the Actions tab (Run workflow) for either platform
+#   - On every push to main: just build and upload as artifacts (no Release)
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
+
+      - name: Build with PyInstaller
+        run: pyinstaller --noconfirm --clean Multi-DicomViewer.spec
+
+      # ----- Windows: zip the onedir output -----
+      - name: Zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/Multi-DicomViewer/* `
+                           -DestinationPath dist/Multi-DicomViewer-windows.zip
+
+      # ----- macOS: zip the .app bundle (preserve symlinks/perms with ditto) -----
+      - name: Zip (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+                Multi-DicomViewer.app Multi-DicomViewer-macos.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Multi-DicomViewer-${{ runner.os }}
+          path: |
+            dist/Multi-DicomViewer-windows.zip
+            dist/Multi-DicomViewer-macos.zip
+          if-no-files-found: ignore
+
+      # ----- On a v* tag: also attach the zips to a GitHub Release -----
+      - name: Attach to Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Multi-DicomViewer-windows.zip
+            dist/Multi-DicomViewer-macos.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
