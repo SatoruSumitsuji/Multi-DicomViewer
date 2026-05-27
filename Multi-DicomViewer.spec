@@ -1,0 +1,118 @@
+# PyInstaller spec for Multi-DicomViewer (Windows + macOS).
+#
+#   Windows:  pyinstaller --noconfirm Multi-DicomViewer.spec
+#   macOS:    pyinstaller --noconfirm Multi-DicomViewer.spec
+#
+# Outputs to dist/Multi-DicomViewer/  (onedir bundle).
+# On macOS the same spec also produces dist/Multi-DicomViewer.app.
+
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
+import sys
+
+# --- VTK: ships many vtkmodules.* C extensions and shader data files ---
+vtk_datas = collect_data_files("vtkmodules")
+vtk_binaries = collect_dynamic_libs("vtkmodules")
+vtk_hidden = collect_submodules("vtkmodules")
+
+# --- pylibjpeg: entry-point plugin discovery ---
+plj_datas, plj_binaries, plj_hidden = collect_all("pylibjpeg")
+pllj_datas, pllj_binaries, pllj_hidden = collect_all("pylibjpeg_libjpeg")
+plop_datas, plop_binaries, plop_hidden = collect_all("pylibjpeg_openjpeg")
+
+# --- imagecodecs: many C extensions, prefer the kitchen-sink helper ---
+ic_datas, ic_binaries, ic_hidden = collect_all("imagecodecs")
+
+# --- pydicom encoders/handlers (plugin discovery) ---
+pyd_datas, pyd_binaries, pyd_hidden = collect_all("pydicom")
+
+# --- imageio + imageio-ffmpeg (MP4 export). The bundled ffmpeg binary
+#     lives inside the imageio_ffmpeg package; collect_all picks it up.
+iio_datas, iio_binaries, iio_hidden = collect_all("imageio")
+iiof_datas, iiof_binaries, iiof_hidden = collect_all("imageio_ffmpeg")
+
+datas = (
+    vtk_datas + plj_datas + pllj_datas + plop_datas + ic_datas + pyd_datas
+    + iio_datas + iiof_datas
+)
+binaries = (
+    vtk_binaries + plj_binaries + pllj_binaries + plop_binaries
+    + ic_binaries + pyd_binaries + iio_binaries + iiof_binaries
+)
+hiddenimports = (
+    vtk_hidden
+    + plj_hidden
+    + pllj_hidden
+    + plop_hidden
+    + ic_hidden
+    + pyd_hidden
+    + iio_hidden
+    + iiof_hidden
+    + ["multi_dicomviewer"]
+)
+
+a = Analysis(
+    ["run.py"],
+    pathex=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[
+        # Trim unused heavy deps if present in the environment
+        "tkinter",
+        "matplotlib",
+        "PySide6",
+        "PyQt5",
+    ],
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="Multi-DicomViewer",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,        # windowed (no console)
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="Multi-DicomViewer",
+)
+
+# macOS: also produce a .app bundle from the same Analysis.
+if sys.platform == "darwin":
+    app = BUNDLE(
+        coll,
+        name="Multi-DicomViewer.app",
+        icon=None,
+        bundle_identifier="org.research.multi-dicomviewer",
+        info_plist={
+            "NSHighResolutionCapable": "True",
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleVersion": "0.1.0",
+        },
+    )

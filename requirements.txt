@@ -1,0 +1,24 @@
+# Multi-DICOMviewer — research multi-modality DICOM viewer
+# Python 3.13 on Windows
+
+PyQt6>=6.7
+vtk>=9.4
+pydicom>=3.0
+numpy>=2.0
+
+# Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pylibjpeg-openjpeg>=2.0
+
+# Fast cine decode (libjpeg-turbo / SIMD): several x quicker than the
+# pylibjpeg reference handler, shrinking the "Buffering…" wait and load.
+# Optional — if absent, decoding transparently falls back to pylibjpeg.
+imagecodecs>=2024.1.1
+
+# MP4 export (right-click Export (MP4) in the series browser). imageio
+# is the writer API; imageio-ffmpeg bundles a static ffmpeg binary so
+# the user does not need a system ffmpeg install. Bitrate (Mbps) is
+# honoured through ffmpeg directly.
+imageio>=2.34
+imageio-ffmpeg>=0.5
