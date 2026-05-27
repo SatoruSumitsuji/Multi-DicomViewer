@@ -459,6 +459,14 @@ _COLOR_PI = {
 
 
 def _is_color_ds(ds) -> bool:
+    # IVUS is fundamentally a grayscale modality. Some scanners export
+    # it as YBR_FULL_422 / SamplesPerPixel=3 for JPEG-baseline storage
+    # efficiency — the chroma channels are near-neutral noise and the Y
+    # channel carries the real signal. Treating those as colour gives
+    # the image a faint tint, which the user sees as a bug. So: force
+    # IVUS to the grayscale path regardless of PhotometricInterpretation.
+    if str(getattr(ds, "Modality", "")).upper() == "IVUS":
+        return False
     if int(getattr(ds, "SamplesPerPixel", 1) or 1) >= 3:
         return True
     return str(getattr(ds, "PhotometricInterpretation", "")) in _COLOR_PI
@@ -601,6 +609,15 @@ def _decode_frame(ds, index: int) -> np.ndarray:
     in display color space (YBR converted, palette LUT applied)."""
     arr = _raw_frame(ds, index)
     if not _is_color_ds(ds):
+        # IVUS encoded as YBR has the luminance in channel 0; pull THAT
+        # rather than averaging Y+Cb+Cr (which would mix in the
+        # near-neutral chroma and produce a faint tint after windowing).
+        # All other grayscale paths fall through to _to_gray2d.
+        pi = str(getattr(ds, "PhotometricInterpretation", ""))
+        if (str(getattr(ds, "Modality", "")).upper() == "IVUS"
+                and pi.startswith("YBR")
+                and arr.ndim == 3 and arr.shape[-1] >= 3):
+            return np.ascontiguousarray(arr[..., 0])
         return _to_gray2d(arr)
 
     pi = str(getattr(ds, "PhotometricInterpretation", "RGB"))
