@@ -431,8 +431,18 @@ class MainWindow(QMainWindow):
         # that study instead of always jumping back to series #1.
         self._last_by_study: dict[str, Series] = {}
         self._anon = False                  # Anonymize toggle (display only)
-        # DICOM tags overlaid on images — restored from the previous run.
-        self._tag_keywords: list[str] = settings.load_tag_keywords()
+        # DICOM tags overlaid on images — restored from the previous run
+        # and remembered per modality so XA / IVUS / CT each keep their
+        # own preferred tag list (the same list also seeds the
+        # Export-DICOM dialog's filename fields).
+        self._tag_keywords_by_modality: dict[str, list[str]] = (
+            settings.load_tag_keywords_by_modality()
+        )
+        # Per-modality Export-DICOM dialog field selection, also
+        # remembered across sessions.
+        self._export_fields_by_modality: dict[str, list[str]] = (
+            settings.load_export_fields_by_modality()
+        )
         self._overlay_hidden = False        # hide the on-image tag text
         # Measurement log, keyed by StudyInstanceUID, kept until the app
         # exits (survives folder reloads / series switches).
@@ -456,8 +466,26 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self._studies_dock = dock
 
+        # Widen the dock separator (the drag handle between the Studies
+        # dock and the central viewer grid) — Qt's default is 4 px which
+        # is hard to grab. Same rule for any future horizontally-docked
+        # widget. Background tone matches the chrome so the bar still
+        # reads as inert until the cursor hovers.
+        self.setStyleSheet(
+            "QMainWindow::separator {"
+            " background:#a8a8a8; width:8px; height:8px;"
+            "}"
+            "QMainWindow::separator:hover {"
+            " background:#4a90d9;"
+            "}"
+        )
+
         # --- configurable viewer grid ---
         self._layout_key = "1x1"
+        # Bi / Lt / Rt switch for biplane XA + dual-pane CT viewers.
+        # Defaults to "Bi" (the natural full display); the buttons
+        # appear unselected/white when no visible viewer responds to it.
+        self._biside = "Bi"
         self._panes: list[ViewerPane] = []
         for i in range(_MAX_PANES):
             pane = ViewerPane(i)
@@ -877,6 +905,28 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _c, k=key: self._apply_layout(k))
             self._layout_group.addButton(btn)
             row.addWidget(btn)
+
+        # Bi / Lt / Rt — switch biplane XA or dual-pane CT between
+        # both panes (Bi), left only (Lt), and right only (Rt). The
+        # buttons are managed manually (not in a QButtonGroup) so that
+        # when no visible viewer responds to them all three can show
+        # the same "unselected/white" state.
+        row.addSpacing(12)
+        self._biside_btns: dict[str, QPushButton] = {}
+        for key, tip in (
+            ("Bi", "Show both planes/panes (biplane XA in 1×1, "
+                    "CT dual MPR)"),
+            ("Lt", "Show only the left plane/pane"),
+            ("Rt", "Show only the right plane/pane"),
+        ):
+            btn = QPushButton(key)
+            btn.setCheckable(True)
+            btn.setAutoExclusive(False)
+            btn.setToolTip(tip)
+            btn.clicked.connect(lambda _c, k=key: self._on_biside_click(k))
+            row.addWidget(btn)
+            self._biside_btns[key] = btn
+
         row.addStretch(1)
         return bar
 
@@ -884,6 +934,39 @@ class MainWindow(QMainWindow):
         vis = not self._studies_dock.isVisible()
         self._studies_dock.setVisible(vis)
         self._info_btn.setText("◀ Info shown" if vis else "Info hidden ▶")
+
+    # -------------------------------------------------- Bi / Lt / Rt
+    def _on_biside_click(self, key: str) -> None:
+        self._biside = key
+        self._apply_biside_to_panes()
+        self._refresh_biside_buttons()
+
+    def _apply_biside_to_panes(self) -> None:
+        """Push the current Bi/Lt/Rt choice onto every visible pane's
+        viewer that knows what to do with it (biplane XA, CT)."""
+        allow_dual = self._layout_key == "1x1"
+        for pane in self._panes:
+            if not pane.isVisible():
+                continue
+            v = pane.current_viewer()
+            if v is not None and hasattr(v, "set_side"):
+                v.set_side(self._biside, allow_dual)
+
+    def _refresh_biside_buttons(self) -> None:
+        """Mark the active button blue only when the active pane's
+        viewer actually responds to the switch — single-plane XA / IVUS
+        / OTHER panes get all-white buttons."""
+        applicable = self._biside_applies()
+        for key, btn in self._biside_btns.items():
+            btn.setChecked(applicable and key == self._biside)
+
+    def _biside_applies(self) -> bool:
+        """True iff the active pane has a viewer that uses Bi/Lt/Rt."""
+        if self._active is None:
+            return False
+        v = self._active.current_viewer()
+        return bool(v is not None
+                    and getattr(v, "supports_side", False))
 
     def _apply_layout(self, key: str) -> None:
         self._layout_key = key
@@ -929,6 +1012,11 @@ class MainWindow(QMainWindow):
         # Front+lateral side by side only when one pane owns the screen.
         for pane in self._panes:
             pane.set_xa_biplane(key == "1x1")
+        # Re-apply the user's Bi/Lt/Rt choice now that allow_dual may
+        # have changed; refresh the buttons to reflect whether the new
+        # active pane is biplane XA / CT or not.
+        self._apply_biside_to_panes()
+        self._refresh_biside_buttons()
         self._sync_layout_gate()      # MultiSync menu = only in 1×2 / 2×2
 
     def _swap_panes(self, src_index: int, dest_index: int) -> None:
@@ -946,6 +1034,10 @@ class MainWindow(QMainWindow):
         for p in self._panes:
             p.set_active(p is pane and p.isVisible())
         self._sync_xa_shortcuts()
+        # Bi/Lt/Rt button visual state tracks the active pane's viewer
+        # (white when single-plane XA / IVUS, otherwise reflect _biside).
+        if hasattr(self, "_biside_btns"):
+            self._refresh_biside_buttons()
 
     # --------------------------------------------------- series navigation
     def _build_shortcuts(self) -> None:
@@ -1238,6 +1330,41 @@ class MainWindow(QMainWindow):
             return None
         return dicom_io._cine_fps(ds)
 
+    @staticmethod
+    def _series_modality_key(series) -> str:
+        """Bucket *series* into one of settings.TAG_MODALITIES so the
+        per-modality tag/export-field memory keys consistently."""
+        mod = getattr(series, "modality", None)
+        val = getattr(mod, "value", None) or str(mod or "")
+        return val if val in settings.TAG_MODALITIES else "OTHER"
+
+    @staticmethod
+    def _label_dicom_tags(series, identifiers: list) -> list:
+        """Resolve ``[(identifier, label)]`` for the Export dialog.
+
+        Reads the first file's header so private tags can show their
+        DICOM element name (e.g. "(0019,1099) Private Field") instead
+        of just the hex literal."""
+        if not identifiers:
+            return []
+        try:
+            import pydicom
+            ds = pydicom.dcmread(
+                series.files[0], stop_before_pixels=True, force=True
+            )
+        except Exception:
+            ds = None
+        from multi_dicomviewer.core.dicom_tags import _lookup
+        out = []
+        for ident in identifiers:
+            elem = _lookup(ds, ident) if ds is not None else None
+            if elem is not None:
+                label = f"{ident}  ({elem.name})" if elem.name else ident
+            else:
+                label = ident
+            out.append((ident, label))
+        return out
+
     def _on_export_requested(self, fmt: str, series_list: list) -> None:
         """Right-click ▸ Export (DICOM)/Export (MP4): show the filename-
         fields dialog, ask for an output folder, run the export with a
@@ -1246,7 +1373,10 @@ class MainWindow(QMainWindow):
         if not series_list or fmt not in ("dicom", "mp4"):
             return
         from multi_dicomviewer.core import export as exporter
-        from multi_dicomviewer.ui.export_dialog import ExportDialog
+        from multi_dicomviewer.ui.export_dialog import (
+            DEFAULT_FIELDS,
+            ExportDialog,
+        )
 
         # FPS default for MP4 = the source cine rate of the FIRST series
         # that has one; falls back to None (the dialog uses 15 fps).
@@ -1258,13 +1388,36 @@ class MainWindow(QMainWindow):
                     default_fps = fps
                     break
 
+        # Modality of the first picked series drives both:
+        #   - the DICOM-tag list we offer in the filename-fields box
+        #     (the same list the user has chosen in DICOM-Tag overlay)
+        #   - per-modality memory of which fields were ticked last time
+        export_mod = self._series_modality_key(series_list[0])
+        tag_idents = list(
+            self._tag_keywords_by_modality.get(export_mod, [])
+        )
+        dicom_tags = self._label_dicom_tags(series_list[0], tag_idents)
+        initial = list(
+            self._export_fields_by_modality.get(export_mod) or []
+        ) or list(DEFAULT_FIELDS)
+
         dlg = ExportDialog(
-            fmt, len(series_list), default_fps=default_fps, parent=self
+            fmt, len(series_list), default_fps=default_fps,
+            dicom_tags=dicom_tags, initial_fields=initial,
+            parent=self,
         )
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
-        settings = dlg.result_settings()
-        if not settings.fields:
+        cfg = dlg.result_settings()
+        # Persist this modality's selection for next time (best-effort).
+        self._export_fields_by_modality[export_mod] = list(cfg.fields)
+        try:
+            settings.save_export_fields_by_modality(
+                self._export_fields_by_modality
+            )
+        except Exception:
+            pass
+        if not cfg.fields:
             self.statusBar().showMessage(
                 "Export cancelled — no filename fields were ticked."
             )
@@ -1302,13 +1455,13 @@ class MainWindow(QMainWindow):
         try:
             if fmt == "dicom":
                 written = exporter.export_dicom(
-                    series_list, out_dir, settings.fields, progress=_cb
+                    series_list, out_dir, cfg.fields, progress=_cb
                 )
             else:
                 written = exporter.export_mp4(
-                    series_list, out_dir, settings.fields,
-                    bitrate_mbps=settings.bitrate_mbps,
-                    fps_override=settings.fps,
+                    series_list, out_dir, cfg.fields,
+                    bitrate_mbps=cfg.bitrate_mbps,
+                    fps_override=cfg.fps,
                     progress=_cb,
                 )
         except RuntimeError as e:
@@ -1400,10 +1553,14 @@ class MainWindow(QMainWindow):
             v = pane.current_viewer()
             if v is not None and hasattr(v, "set_tag_keywords"):
                 v.set_anonymized(self._anon)
-                v.set_tag_keywords(self._effective_kw())
+                v.set_tag_keywords(self._effective_kw(v))
             if series.modality == Modality.XA:
                 self._cur_xa = series
                 pane.set_xa_biplane(self._layout_key == "1x1")
+            # Apply current Bi/Lt/Rt + refresh button state for the
+            # newly resumed viewer.
+            self._apply_biside_to_panes()
+            self._refresh_biside_buttons()
             # Key by raw DICOM Modality (series.kind) so NM/OCT/etc.
             # in the OTHER bucket each get their own resume slot.
             self._last_by_modality[series.kind] = series
@@ -1484,10 +1641,13 @@ class MainWindow(QMainWindow):
         pane.set_shown_series(series.series_uid if v is not None else None)
         if v is not None and hasattr(v, "set_tag_keywords"):
             v.set_anonymized(self._anon)
-            v.set_tag_keywords(self._effective_kw())
+            v.set_tag_keywords(self._effective_kw(v))
         if loaded.modality == Modality.XA:
             self._cur_xa = series
             pane.set_xa_biplane(self._layout_key == "1x1")
+        # Newly loaded viewer must reflect the current Bi/Lt/Rt choice.
+        self._apply_biside_to_panes()
+        self._refresh_biside_buttons()
         # Remember the last series per modality and per study so the
         # cine viewers' First/Prev/Next/Last nav and the Study-row
         # click both resume from here after the user moves away and
@@ -1526,20 +1686,33 @@ class MainWindow(QMainWindow):
             )
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
-            viewer.set_tag_keywords(self._effective_kw())
+            viewer.set_tag_keywords(self._effective_kw(viewer))
 
     # ------------------------------------------- anonymize / DICOM-tag overlay
-    def _effective_kw(self) -> list:
-        """Keywords actually pushed to viewers: none while the overlay is
-        hidden, otherwise the user's selection."""
-        return [] if self._overlay_hidden else self._tag_keywords
+    @staticmethod
+    def _modality_of(viewer) -> str:
+        """Classify *viewer* into one of the persisted-list buckets."""
+        m = getattr(viewer, "handles_modality", "") or "OTHER"
+        return m if m in settings.TAG_MODALITIES else "OTHER"
+
+    def _effective_kw(self, viewer=None) -> list:
+        """Keywords actually pushed to *viewer*: none while the overlay
+        is hidden, otherwise the user's selection FOR THAT VIEWER's
+        modality. Falls back to the active pane's modality when no
+        viewer is supplied."""
+        if self._overlay_hidden:
+            return []
+        if viewer is None and self._active is not None:
+            viewer = self._active.current_viewer()
+        mod = self._modality_of(viewer) if viewer is not None else "OTHER"
+        return list(self._tag_keywords_by_modality.get(mod, []))
 
     def _apply_overlay_hidden(self, hidden: bool) -> None:
-        """Core: push the (possibly empty) overlay to every viewer."""
+        """Core: push the (possibly empty) overlay to every viewer.
+        Each viewer gets its OWN modality's list."""
         self._overlay_hidden = bool(hidden)
-        kw = self._effective_kw()
         for v in self._tag_viewers():
-            v.set_tag_keywords(kw)
+            v.set_tag_keywords(self._effective_kw(v))
         self.statusBar().showMessage(
             "DICOM overlay: hidden" if hidden else "DICOM overlay: shown"
         )
@@ -1596,20 +1769,30 @@ class MainWindow(QMainWindow):
                 "Load a series first, then choose overlay items.",
             )
             return
-        seed = self._tag_keywords or default_overlay_keywords(header)
+        mod = self._modality_of(viewer)
+        current = self._tag_keywords_by_modality.get(mod, [])
+        seed = current or default_overlay_keywords(header)
         dlg = TagSelectionDialog(header, seed, self._anon, self)
         if dlg.exec():
-            self._apply_tag_keywords(dlg.selected_keywords())
+            self._apply_tag_keywords(dlg.selected_keywords(), modality=mod)
 
-    def _apply_tag_keywords(self, keywords, persist: bool = True) -> None:
-        """Set the overlay selection, push it to the viewers, and (by
-        default) persist it so it survives the next app launch."""
-        self._tag_keywords = list(keywords)
-        kw = self._effective_kw()
+    def _apply_tag_keywords(
+        self,
+        keywords,
+        modality: str = "XA",
+        persist: bool = True,
+    ) -> None:
+        """Set the overlay selection FOR *modality*, push it to that
+        modality's viewers, and (by default) persist it so it survives
+        the next app launch."""
+        self._tag_keywords_by_modality[modality] = list(keywords)
         for v in self._tag_viewers():
-            v.set_tag_keywords(kw)
+            if self._modality_of(v) == modality:
+                v.set_tag_keywords(self._effective_kw(v))
         if persist:
-            settings.save_tag_keywords(self._tag_keywords)
+            settings.save_tag_keywords_by_modality(
+                self._tag_keywords_by_modality
+            )
 
     def _export_tag_conditions(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -1621,12 +1804,17 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            settings.export_tag_keywords(path, self._tag_keywords)
+            settings.export_tag_keywords(
+                path, self._tag_keywords_by_modality
+            )
         except OSError as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
             return
+        total = sum(
+            len(v) for v in self._tag_keywords_by_modality.values()
+        )
         self.statusBar().showMessage(
-            f"Exported overlay settings ({len(self._tag_keywords)} items)"
+            f"Exported overlay settings ({total} items across modalities)"
         )
 
     def _import_tag_conditions(self) -> None:
@@ -1639,12 +1827,25 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            kws = settings.import_tag_keywords(path)
+            imported = settings.import_tag_keywords(path)
         except (OSError, ValueError) as exc:
             QMessageBox.critical(self, "Import failed", str(exc))
             return
-        # Imported conditions also become the new persisted default.
-        self._apply_tag_keywords(kws)
+        # Imported conditions become the new persisted defaults — accept
+        # either a legacy single list (applied to every modality) or a
+        # v2 per-modality dict.
+        if isinstance(imported, list):
+            by_mod = {mod: list(imported)
+                       for mod in settings.TAG_MODALITIES}
+        else:
+            by_mod = imported
+        self._tag_keywords_by_modality = by_mod
+        for v in self._tag_viewers():
+            v.set_tag_keywords(self._effective_kw(v))
+        settings.save_tag_keywords_by_modality(
+            self._tag_keywords_by_modality
+        )
+        kws = by_mod.get("XA", [])
         self.statusBar().showMessage(
             f"Imported overlay settings ({len(kws)} items)"
         )

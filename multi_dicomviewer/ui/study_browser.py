@@ -521,13 +521,27 @@ class _ThumbWorker(QThread):
 
 class _ThumbList(QListWidget):
     """Thumbnail grid that groups series under full-width section headers
-    (patient / study-date / kind) and is a drag source for viewer panes."""
+    (patient / study-date / kind) and is a drag source for viewer panes.
+
+    Right-clicking a thumbnail exposes the same Export (DICOM) / Export
+    (MP4) / Delete-from-list actions the Tree view offers; the signals
+    are forwarded by :class:`StudyPanel` so the shell handles both views
+    identically."""
 
     _HEADER_H = 44  # two lines: patient, then study info
+
+    #: ("dicom"|"mp4", [Series])
+    export_requested = pyqtSignal(str, list)
+    #: (kind, key, label) — same shape the Tree's signal uses.
+    delete_requested = pyqtSignal(str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._header_items: list[QListWidgetItem] = []
+        self.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.customContextMenuRequested.connect(self._context_menu)
 
     def add_header(self, text: str) -> QListWidgetItem:
         it = QListWidgetItem(text)
@@ -570,6 +584,83 @@ class _ThumbList(QListWidget):
         if isinstance(se, Series):
             _start_series_drag(self, se)
 
+    # ------------------------------------------------ context menu
+    def _selected_series(self) -> list[Series]:
+        """All Series in the current multi-selection, deduped by UID,
+        in display order. Header items are skipped."""
+        out: list[Series] = []
+        seen: set[str] = set()
+        for it in self.selectedItems():
+            se = it.data(_ROLE)
+            if isinstance(se, Series) and se.series_uid not in seen:
+                out.append(se)
+                seen.add(se.series_uid)
+        return out
+
+    def _context_menu(self, pos) -> None:
+        item = self.itemAt(pos)
+        if item is None:
+            return
+        se = item.data(_ROLE)
+        if not isinstance(se, Series):
+            # Header row → nothing to do.
+            return
+        # Mirror the Tree's behaviour: a right-click on an unselected
+        # thumbnail picks JUST that one so the action targets the row
+        # the user just pointed at (Windows-Explorer style).
+        if not item.isSelected():
+            self.clearSelection()
+            item.setSelected(True)
+            self.setCurrentItem(item)
+        sel = self._selected_series() or [se]
+
+        menu = QMenu(self)
+        n = len(sel)
+        suffix = f" ({n} series)" if n > 1 else ""
+        act_dcm = QAction(f"Export (DICOM){suffix}", self)
+        act_dcm.setToolTip(
+            "Copy the original .dcm files to a chosen folder; one "
+            "subfolder per series; per-file names from the checked "
+            "filename fields. Lossless — no re-encode."
+        )
+        act_dcm.triggered.connect(
+            lambda: self.export_requested.emit("dicom", list(sel))
+        )
+        menu.addAction(act_dcm)
+        act_mp4 = QAction(f"Export (MP4){suffix}", self)
+        act_mp4.setToolTip(
+            "Render each selected series to an .mp4 in a chosen "
+            "folder. Bitrate (Mbps) and FPS configurable."
+        )
+        act_mp4.triggered.connect(
+            lambda: self.export_requested.emit("mp4", list(sel))
+        )
+        menu.addAction(act_mp4)
+        menu.addSeparator()
+        # The Tree's Delete sends ONE row at a time (kind, key, label);
+        # keep the same contract here. Multi-select delete just emits
+        # one signal per selected series so the shell's existing handler
+        # cleans them up the same way Tree-Delete does today.
+        if n == 1:
+            label = "Delete (remove from list)"
+        else:
+            label = f"Delete {n} series (remove from list)"
+        act_del = QAction(label, self)
+        act_del.setToolTip(
+            "Files are not deleted; just removed from the list so they "
+            "can no longer be viewed."
+        )
+
+        def _emit_deletes(targets: list[Series]) -> None:
+            for s in targets:
+                self.delete_requested.emit(
+                    "series", s.series_uid, s.label
+                )
+
+        act_del.triggered.connect(lambda: _emit_deletes(list(sel)))
+        menu.addAction(act_del)
+        menu.exec(self.viewport().mapToGlobal(pos))
+
 
 class StudyPanel(QWidget):
     """Tree view + thumbnail grid with a toggle. Public API mirrors the
@@ -609,8 +700,10 @@ class StudyPanel(QWidget):
             lambda *_: self._resort_thumbs()
         )
 
-        #: thumbnail icon edge in px (driven by the size slider)
-        self._thumb_px = 140
+        #: thumbnail icon edge in px (driven by the size slider).
+        #: Open at the slider's minimum so more series fit on screen by
+        #: default; the user can drag the slider to enlarge as needed.
+        self._thumb_px = _THUMB_MIN_PX
         #: (study_uid, kind) currently shown in the thumbnail grid —
         #: thumbnails show ONLY the selected study, not every study.
         self._cur_study_key: tuple | None = None
@@ -637,7 +730,17 @@ class StudyPanel(QWidget):
         self.thumbs.setWordWrap(True)
         self.thumbs.setDragEnabled(True)
         self.thumbs.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        # Multi-select so right-click Export / Delete can target the
+        # full Ctrl/Shift-built selection just like the Tree view does.
+        self.thumbs.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.thumbs.itemClicked.connect(self._thumb_clicked)
+        # Right-click menu on a thumbnail forwards the same shell-level
+        # signals the Tree view emits, so Export (DICOM/MP4) and Delete-
+        # from-list are reachable from either view.
+        self.thumbs.export_requested.connect(self.export_requested)
+        self.thumbs.delete_requested.connect(self.delete_requested)
         #: (header_item, patient, study, kind) — for anonymize relabel
         self._thumb_headers: list[tuple] = []
         #: series-order list of thumbnail items, aligned with the worker

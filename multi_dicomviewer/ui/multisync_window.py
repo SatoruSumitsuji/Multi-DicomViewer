@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import QRect, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QPainter
 from PyQt6.QtWidgets import (
     QApplication,
@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -43,6 +44,79 @@ from multi_dicomviewer.viewers.image_canvas import to_qimage
 
 _N_SLOTS = 4
 _SLOT_COLORS = ["#33e6ff", "#7cfc00", "#ffd400", "#ff80c0"]
+
+
+class _FlowLayout(QLayout):
+    """Minimal wrapping horizontal layout: lays children left-to-right
+    and overflows onto a new line when the available width runs out.
+    Used by the Sync Point list so all sync points stay visible without
+    a vertical scroll bar when there are many of them."""
+
+    def __init__(self, parent=None, hspacing: int = 6, vspacing: int = 4):
+        super().__init__(parent)
+        self._h = hspacing
+        self._v = vspacing
+        self._items: list = []
+
+    def addItem(self, item) -> None:
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QSize:
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_h = 0
+        for item in self._items:
+            sh = item.sizeHint()
+            next_x = x + sh.width() + self._h
+            if next_x - self._h > effective.right() and line_h > 0:
+                x = effective.x()
+                y = y + line_h + self._v
+                next_x = x + sh.width() + self._h
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), sh))
+            x = next_x
+            line_h = max(line_h, sh.height())
+        return y + line_h - rect.y() + m.bottom()
 
 
 def _to_u8(arr: np.ndarray) -> np.ndarray:
@@ -172,14 +246,12 @@ class _Slot:
         col.setContentsMargins(3, 3, 3, 3)
         col.setSpacing(2)
 
-        head = QHBoxLayout()
-        self.master_radio = QRadioButton(f"Slot {index + 1}")
-        self.master_radio.setToolTip("Make this the playback master")
+        # Top of the slot: just the IVUS-series picker. The Master
+        # radio used to live here but moved to the per-slot nav row
+        # below so all the playhead controls are grouped together.
         self.combo = QComboBox()
         self.combo.setToolTip("Choose the IVUS series for this slot")
-        head.addWidget(self.master_radio)
-        head.addWidget(self.combo, 1)
-        col.addLayout(head)
+        col.addWidget(self.combo)
 
         self.canvas = _SyncCanvas()
         self.canvas.rotated.connect(self._on_rotated)
@@ -194,6 +266,28 @@ class _Slot:
         srow.addWidget(self.slider, 1)
         srow.addWidget(self.lbl)
         col.addLayout(srow)
+
+        # Per-slot navigation row: [Prev] [Next] [Master radio].
+        # When Sync ON, scrubbing or pressing Prev/Next on the master
+        # slot drives the other slots via the sync mapping; on a
+        # non-master slot the controls only move that slot.
+        nav = QHBoxLayout()
+        self.btn_prev = QPushButton("◀ Prev")
+        self.btn_prev.setToolTip("Previous frame")
+        self.btn_prev.clicked.connect(self._on_prev_frame)
+        nav.addWidget(self.btn_prev)
+        self.btn_next = QPushButton("Next ▶")
+        self.btn_next.setToolTip("Next frame")
+        self.btn_next.clicked.connect(self._on_next_frame)
+        nav.addWidget(self.btn_next)
+        nav.addStretch(1)
+        self.master_radio = QRadioButton("Master")
+        self.master_radio.setToolTip(
+            "Make this the master — when Sync ON, only the master's "
+            "controls drive the other slots via the sync mapping"
+        )
+        nav.addWidget(self.master_radio)
+        col.addLayout(nav)
         self._tint(False)
 
     def _tint(self, is_master: bool) -> None:
@@ -268,6 +362,18 @@ class _Slot:
     def _on_slider(self, value: int) -> None:
         self.owner._slot_scrubbed(self.index, int(value))
 
+    def _on_prev_frame(self) -> None:
+        if self.plane is None or self.total < 1:
+            return
+        self.owner._slot_scrubbed(self.index, max(0, self.cur - 1))
+
+    def _on_next_frame(self) -> None:
+        if self.plane is None or self.total < 1:
+            return
+        self.owner._slot_scrubbed(
+            self.index, min(self.total - 1, self.cur + 1)
+        )
+
     def _on_rotated(self, deg: float) -> None:
         self.rotation = deg
 
@@ -295,10 +401,6 @@ class MultiSyncWindow(QMainWindow):
         self.sync_points: list[dict] = []
         self._master = 0
         self._sync_on = True
-        self._playing = False
-        self._speed = 1.0
-        self._loop = True
-        self._accum = 0.0
         # Live link with the main window's panes (per slot, parallel to
         # self.slots). Each entry is the source viewer object or None.
         # While linked, slot frame changes drive the pane and vice versa;
@@ -329,7 +431,11 @@ class MultiSyncWindow(QMainWindow):
         self._grid.setContentsMargins(0, 0, 0, 0)
         root.addWidget(self._grid_host, 1)
 
-        # --- layout 1×2 / 2×2 toggle ---
+        # --- layout 1×2 / 2×2 toggle + Sync ON ---
+        # Everything else (play / nav / speed / loop) moved into the
+        # per-slot rows so each slot has its own ◀ Prev / Next ▶ /
+        # Master controls. This bar only sets the grid shape and the
+        # global Sync-link toggle.
         lay_row = QHBoxLayout()
         lay_row.addWidget(QLabel("Layout:"))
         self._btn_1x2 = QPushButton("1×2")
@@ -340,15 +446,15 @@ class MultiSyncWindow(QMainWindow):
         self._btn_2x2.clicked.connect(lambda: self._apply_layout(4))
         lay_row.addWidget(self._btn_1x2)
         lay_row.addWidget(self._btn_2x2)
+        self._sync_btn = QPushButton("🔗 Sync ON")
+        self._sync_btn.setCheckable(True)
+        self._sync_btn.setChecked(True)
+        self._sync_btn.toggled.connect(self._on_sync_toggle)
+        lay_row.addWidget(self._sync_btn)
         lay_row.addStretch(1)
         root.addLayout(lay_row)
 
-        root.addWidget(self._build_control_bar())
         root.addWidget(self._build_sync_editor())
-
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.timeout.connect(self._tick)
 
         self._apply_layout(2 if layout_count == 2 else 4)
         self._refresh_master_tint()
@@ -400,62 +506,7 @@ class MultiSyncWindow(QMainWindow):
             self._set_master(0)
             self.slots[0].master_radio.setChecked(True)
 
-    # ============================================== control bar
-    def _build_control_bar(self) -> QWidget:
-        bar = QFrame()
-        bar.setFrameShape(QFrame.Shape.StyledPanel)
-        row = QHBoxLayout(bar)
-        row.setContentsMargins(6, 4, 6, 4)
-
-        def _b(text, fn, tip=""):
-            btn = QPushButton(text)
-            btn.setToolTip(tip)
-            btn.clicked.connect(fn)
-            row.addWidget(btn)
-            return btn
-
-        _b("⏮", lambda: self._nav("first"), "First")
-        _b("«", lambda: self._nav("-10"), "-10")
-        _b("◀", lambda: self._nav("-1"), "-1")
-        self._play_btn = _b("▶", self._toggle_play, "Play / Pause")
-        _b("▶", lambda: self._nav("+1"), "+1")
-        _b("»", lambda: self._nav("+10"), "+10")
-        _b("⏭", lambda: self._nav("last"), "Last")
-
-        row.addSpacing(12)
-        row.addWidget(QLabel("Speed:"))
-        self._speed_combo = QComboBox()
-        for s in ("0.25", "0.5", "1", "2", "4"):
-            self._speed_combo.addItem(f"{s}×", float(s))
-        self._speed_combo.setCurrentText("1×")
-        self._speed_combo.currentIndexChanged.connect(
-            lambda _i: setattr(
-                self, "_speed", self._speed_combo.currentData()
-            )
-        )
-        row.addWidget(self._speed_combo)
-
-        row.addSpacing(12)
-        self._loop_btn = QPushButton("↺ Loop ON")
-        self._loop_btn.setCheckable(True)
-        self._loop_btn.setChecked(True)
-        self._loop_btn.toggled.connect(self._on_loop)
-        row.addWidget(self._loop_btn)
-
-        self._sync_btn = QPushButton("🔗 Sync ON")
-        self._sync_btn.setCheckable(True)
-        self._sync_btn.setChecked(True)
-        self._sync_btn.toggled.connect(self._on_sync_toggle)
-        row.addWidget(self._sync_btn)
-
-        row.addStretch(1)
-        row.addWidget(QLabel("Master = the slot whose radio is checked"))
-        return bar
-
-    def _on_loop(self, on: bool) -> None:
-        self._loop = on
-        self._loop_btn.setText("↺ Loop ON" if on else "↺ Loop OFF")
-
+    # ============================================== sync toggle
     def _on_sync_toggle(self, on: bool) -> None:
         self._sync_on = on
         self._sync_btn.setText("🔗 Sync ON" if on else "🔗 Sync OFF")
@@ -501,12 +552,18 @@ class MultiSyncWindow(QMainWindow):
         top.addWidget(self._sync_status, 1)
         outer.addLayout(top)
 
+        # Wrapping list: sync rows pack left-to-right and flow onto
+        # additional lines as the window widens / shrinks, so as many
+        # sync points as possible stay visible at once instead of being
+        # hidden below a vertical scroll bar.
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFixedHeight(170)
+        scroll.setMinimumHeight(80)
+        scroll.setMaximumHeight(260)
         self._sync_rows_host = QWidget()
-        self._sync_rows = QVBoxLayout(self._sync_rows_host)
-        self._sync_rows.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._sync_rows = _FlowLayout(self._sync_rows_host,
+                                       hspacing=6, vspacing=4)
+        self._sync_rows_host.setLayout(self._sync_rows)
         scroll.setWidget(self._sync_rows_host)
         outer.addWidget(scroll)
         return box
@@ -577,11 +634,16 @@ class MultiSyncWindow(QMainWindow):
             sl.canvas.set_at_sync(matched)
 
     def _sync_row(self, pi: int, sp: dict) -> QWidget:
+        # Wrapped by _FlowLayout, so the row needs to report its
+        # natural width — NO addStretch at the end (that would make
+        # each row claim full available width and force one-per-line).
         row = QFrame()
+        row.setFrameShape(QFrame.Shape.StyledPanel)
         h = QHBoxLayout(row)
         h.setContentsMargins(4, 2, 4, 2)
+        h.setSpacing(3)
         lbl = QLabel(f"Sync-{pi + 1}")
-        lbl.setMinimumWidth(56)
+        lbl.setStyleSheet("font-weight:bold;")
         h.addWidget(lbl)
         for slot in range(self._layout_count):
             f = sp["frames"][slot]
@@ -610,7 +672,6 @@ class MultiSyncWindow(QMainWindow):
         dele.setFixedWidth(28)
         dele.clicked.connect(lambda _c, p=pi: self._del_point(p))
         h.addWidget(dele)
-        h.addStretch(1)
         return row
 
     def _set_point_slot(self, pi: int, slot: int) -> None:
@@ -653,7 +714,6 @@ class MultiSyncWindow(QMainWindow):
 
     # ============================================== slot events
     def _slot_series_changed(self, sl: _Slot) -> None:
-        self._stop_play()
         # The user picked a different (or no) series from this slot's
         # combo — the live link to whichever pane originally seeded it
         # no longer makes sense, so drop it.
@@ -698,60 +758,6 @@ class MultiSyncWindow(QMainWindow):
                 self.sync_points, self._master, sl.index, fm
             )
             sl.show_frame(int(round(fb)), rot)
-
-    # ============================================== playback
-    def _toggle_play(self) -> None:
-        if self._playing:
-            self._stop_play()
-        else:
-            m = self.slots[self._master]
-            if m.plane is None or m.total < 2:
-                return
-            self._playing = True
-            self._play_btn.setText("⏸")
-            self._accum = 0.0
-            self._last_ms = None
-            self._timer.start(int(1000.0 / max(1.0, m.fps)))
-
-    def _stop_play(self) -> None:
-        self._playing = False
-        self._play_btn.setText("▶")
-        self._timer.stop()
-
-    def _tick(self) -> None:
-        m = self.slots[self._master]
-        if m.plane is None:
-            self._stop_play()
-            return
-        self._accum += self._speed
-        adv = int(self._accum)
-        if adv < 1:
-            return
-        self._accum -= adv
-        nf = m.cur + adv
-        if nf >= m.total:
-            if self._loop:
-                nf %= m.total
-            else:
-                nf = m.total - 1
-                self._stop_play()
-        m.show_frame(nf)
-        if self._sync_on:
-            self._drive_followers()
-
-    def _nav(self, where: str) -> None:
-        m = self.slots[self._master]
-        if m.plane is None:
-            return
-        cur = m.cur
-        nf = {
-            "first": 0, "last": m.total - 1,
-            "-1": cur - 1, "+1": cur + 1,
-            "-10": cur - 10, "+10": cur + 10,
-        }[where]
-        m.show_frame(nf)
-        if self._sync_on:
-            self._drive_followers()
 
     # ============================================== sync file I/O
     def _save_sync(self) -> None:
@@ -869,7 +875,12 @@ class MultiSyncWindow(QMainWindow):
         ox, oy = (size - dw) // 2, (size - dh) // 2
         cell[oy:oy + dh, ox:ox + dw] = small
         if abs(rotation) > 1e-3:
-            cell = self._rotate_rgb(cell, -rotation)
+            # +rotation matches QPainter.rotate's clockwise-in-screen
+            # convention used by the live _SyncCanvas paintEvent. The
+            # old "-rotation" was the wrong sign and produced a tile
+            # rotated the opposite direction from the live view, which
+            # is what showed up as the export's follower being 90° off.
+            cell = self._rotate_rgb(cell, rotation)
         return cell
 
     @staticmethod
@@ -906,9 +917,11 @@ class MultiSyncWindow(QMainWindow):
         # uses, with the per-file-name checkboxes hidden (the user already
         # picks the path in the Save dialog).
         from multi_dicomviewer.ui.export_dialog import ExportDialog
+        # Always offer 30 fps as the default — the user's source IVUS
+        # cine rate is available as a preset button if they want it.
         dlg_cfg = ExportDialog(
             "mp4", 1,
-            default_fps=float(m.fps) if m.fps else None,
+            default_fps=None,
             show_filename_fields=False,
             title_override="Export composite MP4",
             parent=self,
@@ -925,8 +938,6 @@ class MultiSyncWindow(QMainWindow):
         if not path.lower().endswith(".mp4"):
             path += ".mp4"
 
-        self._stop_play()
-
         # Layout is whichever the user has selected on screen: 1×2 (count
         # 2) → cols=2,rows=1; 2×2 (count 4) → cols=2,rows=2. Hidden slots
         # render as black tiles so an unfilled 2×2 still keeps its shape
@@ -936,14 +947,43 @@ class MultiSyncWindow(QMainWindow):
         cell = 480
         W, H = cell * cols, cell * rows
 
+        # Synced range: span from the earliest virtual master frame at
+        # which any slot's first frame appears, to the latest at which
+        # any slot's last frame appears. The master is the natural
+        # timeline so its [0, total-1] is always included; each follower
+        # extends the range when the sync mapping places its 0th / last
+        # frame outside the master's window. Out-of-master-range frames
+        # render the master frozen at its first/last frame while the
+        # follower keeps playing — and vice versa — so the export shows
+        # everything either video has to offer in synced time.
+        v_min = 0.0
+        v_max = float(m.total - 1)
+        for k in range(self._layout_count):
+            sl = self.slots[k]
+            if sl is m or sl.plane is None or sl.total < 1:
+                continue
+            v_first = multisync.map_frame(
+                self.sync_points, sl.index, self._master, 0,
+                sl.fps, m.fps,
+            )
+            v_last = multisync.map_frame(
+                self.sync_points, sl.index, self._master, sl.total - 1,
+                sl.fps, m.fps,
+            )
+            v_min = min(v_min, v_first, v_last)
+            v_max = max(v_max, v_first, v_last)
+        fm_start = int(math.floor(v_min))
+        fm_end = int(math.ceil(v_max))
+        total_export = fm_end - fm_start + 1
+
         dlg = QProgressDialog(
-            "Exporting composite MP4…", "Cancel", 0, m.total, self
+            "Exporting composite MP4…", "Cancel", 0, total_export, self
         )
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(0)
 
         frames_rgb: list[np.ndarray] = []
-        for fm in range(m.total):
+        for i, fm in enumerate(range(fm_start, fm_end + 1)):
             if dlg.wasCanceled():
                 break
             canvas = np.zeros((H, W, 3), np.uint8)
@@ -952,22 +992,44 @@ class MultiSyncWindow(QMainWindow):
                 if sl.plane is None:
                     continue
                 if sl is m:
-                    fb = fm
+                    # Master plays through its own timeline; clamping
+                    # holds the first / last frame as a still while a
+                    # follower is in its extended pre/post range. The
+                    # master's rotation is whatever the user has dragged
+                    # it to in the live view (constant across all fm —
+                    # live also keeps master rotation constant during
+                    # scrubbing).
+                    fb = max(0, min(fm, m.total - 1))
+                    rot = m.rotation
                 else:
-                    fb = int(round(multisync.map_frame(
+                    # Sync-map the follower; clamping holds its first /
+                    # last frame as a still when the master is the one
+                    # that's still playing past this follower's range.
+                    fb_float = multisync.map_frame(
                         self.sync_points, self._master, sl.index, fm,
                         m.fps, sl.fps,
-                    )))
-                rot = multisync.map_rotation(
-                    self.sync_points, self._master, sl.index, fm
-                )
+                    )
+                    fb = max(0, min(int(round(fb_float)), sl.total - 1))
+                    # Per-fm follower rotation = the same map_rotation
+                    # the live _drive_followers() applies on each master
+                    # scrub. This matches the live PLAYBACK animation
+                    # (rotation interpolated through sync points). If
+                    # sync points captured no rotation, fall back to the
+                    # slot's current drag rotation so a user who only
+                    # dragged (no rotation captured in sync points) still
+                    # gets their orientation in the export.
+                    rot = multisync.map_rotation(
+                        self.sync_points, self._master, sl.index, fm
+                    )
+                    if abs(rot) < 1e-3 and abs(sl.rotation) > 1e-3:
+                        rot = sl.rotation
                 tile = self._render_cell(sl, fb, rot, cell)
                 r, c = divmod(k, cols)
                 canvas[r * cell:(r + 1) * cell,
                        c * cell:(c + 1) * cell] = tile
             frames_rgb.append(canvas)
-            if fm % 8 == 0:
-                dlg.setValue(fm)
+            if i % 8 == 0:
+                dlg.setValue(i)
                 QApplication.processEvents()
         dlg.close()
 
@@ -1049,7 +1111,6 @@ class MultiSyncWindow(QMainWindow):
             self._link_echo_guard = False
 
     def closeEvent(self, e):
-        self._stop_play()
         for i in range(_N_SLOTS):
             self._disconnect_link_for(i)
         for s in self.slots:

@@ -166,6 +166,7 @@ def scan_folder(
             series.files.append(path)
 
     _split_packed_xa_series(patients)
+    _merge_cross_uid_biplane(patients)
     return patients
 
 
@@ -239,6 +240,102 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                         acq_time=_acq_key(ds),
                     )
             study.series = new_series
+
+
+def _merge_cross_uid_biplane(patients: dict[str, Patient]) -> None:
+    """Fuse XA biplane pairs that the vendor split across **different**
+    SeriesInstanceUIDs.
+
+    Standard biplane (e.g. the 20260513 dataset) shares one SeriesUID
+    between the two planes, so the existing per-SeriesUID grouping
+    already produces ``len(files) == 2`` → the viewer treats it as
+    biplane. Some other vendors (e.g. the 20260401 dataset) instead
+    give EACH plane its own SeriesUID; index_folder ends up with two
+    single-file XA series that the viewer would show as singles.
+
+    This pass detects those split pairs by:
+      * same StudyInstanceUID (per-study scoping below)
+      * both series are XA modality with exactly 1 file each
+      * same AcquisitionDateTime (millisecond precision)
+      * same InstanceNumber
+      * resulting group is exactly 2 series (never 3+)
+      * PositionerPrimaryAngle differs between the two files
+        (true biplane = two genuinely different views)
+      * Rows × Columns match exactly (biplane records both planes at
+        the same detector geometry; this catches and rejects the
+        "cine + stitched panorama" pseudo-pairs vendors sometimes
+        emit, where the stitch's image dimensions differ wildly)
+
+    NOTE: a NumberOfFrames-equality check was tried first but real
+    biplane often has small differences (one plane stopping a frame
+    or two earlier), so size-equality is used instead — it is just
+    as discriminating against false pairs and never rejects a true
+    biplane.
+
+    When all checks pass the second file is appended to the first
+    Series' file list and the second Series entry is dropped — the
+    surviving Series now has 2 files and load_xa renders it as biplane
+    (Front / Lateral) automatically.
+
+    Conservative by design: any check that fails leaves the two
+    series untouched, so the worst case is "still shown as singles"
+    (the pre-fix behaviour), not "wrong files glued together".
+    """
+    for patient in patients.values():
+        for study in patient.studies.values():
+            # Bucket XA single-file series by their identity key. Skip
+            # any series that lacks the discriminator fields.
+            buckets: dict[tuple, list[tuple[str, Series]]] = {}
+            for uid, se in study.series.items():
+                if (se.modality != Modality.XA
+                        or len(se.files) != 1
+                        or not se.acq_time
+                        or se.instance_number is None):
+                    continue
+                key = (se.acq_time, int(se.instance_number))
+                buckets.setdefault(key, []).append((uid, se))
+
+            for _key, members in buckets.items():
+                if len(members) != 2:
+                    # Singletons stay singles; ≥3 with the same key are
+                    # suspicious data, never auto-merged.
+                    continue
+                (uid_a, se_a), (uid_b, se_b) = members
+                ds_a = _read_header(se_a.files[0])
+                ds_b = _read_header(se_b.files[0])
+                if ds_a is None or ds_b is None:
+                    continue
+                pa_a = _to_float(
+                    getattr(ds_a, "PositionerPrimaryAngle", None)
+                )
+                pa_b = _to_float(
+                    getattr(ds_b, "PositionerPrimaryAngle", None)
+                )
+                if pa_a is None or pa_b is None:
+                    continue
+                # 1° is well above noise yet small enough not to reject
+                # genuine narrow-separation biplanes.
+                if abs(pa_a - pa_b) < 1.0:
+                    continue
+                # Image-size equality is the strongest signal we have
+                # that the two files were shot on the same biplane
+                # gantry rather than being a cine + a vendor-built
+                # stitched panorama (which differs by a factor of ~10
+                # in both rows and columns).
+                rows_a = int(_to_float(getattr(ds_a, "Rows", 0), 0))
+                cols_a = int(_to_float(getattr(ds_a, "Columns", 0), 0))
+                rows_b = int(_to_float(getattr(ds_b, "Rows", 0), 0))
+                cols_b = int(_to_float(getattr(ds_b, "Columns", 0), 0))
+                if rows_a == 0 or rows_b == 0 or cols_a == 0 or cols_b == 0:
+                    continue
+                if rows_a != rows_b or cols_a != cols_b:
+                    continue
+
+                # All guards passed — merge B's file into A's series.
+                # load_xa re-sorts by |PositionerPrimaryAngle| so the
+                # order at this point doesn't decide Front vs Lateral.
+                se_a.files.append(se_b.files[0])
+                del study.series[uid_b]
 
 
 def merge_patients(

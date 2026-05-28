@@ -133,9 +133,32 @@ def overlay_lines(
     return lines
 
 
-def _lookup(ds, keyword: str):
-    """Header element for *keyword*, or None if absent/empty."""
+def _parse_tag_string(s: str):
+    """Parse '(0019,1099)' → (0x0019, 0x1099). None when *s* is not a
+    tag-string literal — pydicom keywords ('PatientName' etc.) round-trip
+    through the keyword path instead."""
+    if not (isinstance(s, str) and s.startswith("(") and s.endswith(")")
+            and "," in s):
+        return None
     try:
+        g, e = s[1:-1].split(",", 1)
+        return (int(g, 16), int(e, 16))
+    except ValueError:
+        return None
+
+
+def _lookup(ds, keyword: str):
+    """Header element for *keyword*, or None if absent/empty.
+
+    Accepts either a pydicom keyword (``PatientName``) or a tag-string
+    literal (``(0019,1099)``) so the overlay/filename machinery can
+    address private / unknown tags too."""
+    tag = _parse_tag_string(keyword)
+    try:
+        if tag is not None:
+            if tag in ds:
+                return ds[tag]
+            return None
         if keyword not in ds:
             return None
         elem = ds[keyword]
