@@ -26,18 +26,24 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 
-#: The 8 filename components the user can opt in/out of, in the order
-#: they appear in the dialog AND in the order they are concatenated into
-#: the output filename (so the order is predictable across runs).
+#: Filename components the user can opt in/out of, in the order they
+#: appear in the dialog AND in the order they are concatenated into the
+#: output filename (so the order is predictable across runs). Date and
+#: Time are separate keys so CT can drop Time (often missing / not
+#: meaningful) while XA/IVUS keep both.
 FIELD_KEYS = (
-    "date_time",       # acquisition date/time (e.g. 20260227_114526)
+    "date",            # AcquisitionDate (YYYYMMDD)
+    "time",            # AcquisitionTime (HHMMSS)
     "series_no",       # SeriesNumber, 3-digit zero-padded
-    "acq_no",          # AcquisitionNumber, 3-digit zero-padded
+    "instance_no",     # InstanceNumber, 3-digit zero-padded
     "type",            # DICOM Modality (XA/CT/IVUS/…)
     "description",     # SeriesDescription
     "images",          # frame count as Nimg
@@ -46,9 +52,10 @@ FIELD_KEYS = (
 )
 
 FIELD_LABELS = {
-    "date_time":   "Date/Time",
+    "date":        "Date",
+    "time":        "Time",
     "series_no":   "Series No",
-    "acq_no":      "Acquisition No",
+    "instance_no": "Instance No",
     "type":        "Type (Modality)",
     "description": "Description",
     "images":      "Images (count)",
@@ -57,11 +64,11 @@ FIELD_LABELS = {
 }
 
 #: Sensible defaults — enough to identify a series at a glance without a
-#: hopelessly long filename. Both Series No and Acq No are pre-ticked
+#: hopelessly long filename. Both Series No and Instance No are pre-ticked
 #: because in practice one of the two is empty per acquisition style;
 #: ticking both means the populated one always shows up.
 DEFAULT_FIELDS = (
-    "date_time", "series_no", "acq_no", "type", "description"
+    "date", "time", "series_no", "instance_no", "type", "description"
 )
 
 
@@ -70,7 +77,11 @@ class ExportSettings:
     """Result of the dialog, consumed by core.export."""
     fields: tuple[str, ...]   # ordered subset of FIELD_KEYS
     bitrate_mbps: int = 10    # MP4 only
-    fps: float = 15.0         # MP4 only
+    fps: float = 30.0         # MP4 only
+
+
+#: Preset frame-rate buttons shown next to the FPS spinbox.
+FPS_PRESETS = (5, 10, 15, 30, 60)
 
 
 class ExportDialog(QDialog):
@@ -83,7 +94,15 @@ class ExportDialog(QDialog):
                  default_fps: Optional[float] = None,
                  show_filename_fields: bool = True,
                  title_override: Optional[str] = None,
+                 dicom_tags: Optional[list] = None,
+                 initial_fields: Optional[list] = None,
                  parent=None):
+        """``dicom_tags`` is an optional list of ``(identifier, label)``
+        tuples — typically the modality's tag-overlay selection — that
+        the user can also tick to include in the filename. Identifiers
+        are pydicom keywords (``PatientName``) or tag-string literals
+        (``(0019,1099)``). ``initial_fields`` overrides the per-key
+        default-checked state (used for per-modality memory)."""
         super().__init__(parent)
         if mode not in ("dicom", "mp4"):
             raise ValueError(f"unknown export mode: {mode!r}")
@@ -100,7 +119,16 @@ class ExportDialog(QDialog):
 
         # --- filename components -------------------------------------------
         self._checks: dict[str, QCheckBox] = {}
+        # Ordered identifiers seen by this dialog (predefined first,
+        # then DICOM tags) — result_settings preserves this order.
+        self._field_order: list[str] = []
         if show_filename_fields:
+            # Use the caller's stored per-modality selection when given;
+            # otherwise fall back to the static defaults.
+            initial_set = (set(initial_fields)
+                            if initial_fields is not None
+                            else set(DEFAULT_FIELDS))
+
             box = QGroupBox("Filename components (joined with '_')")
             col = QVBoxLayout(box)
             col.addWidget(QLabel(
@@ -110,9 +138,43 @@ class ExportDialog(QDialog):
             ))
             for key in FIELD_KEYS:
                 cb = QCheckBox(FIELD_LABELS[key])
-                cb.setChecked(key in DEFAULT_FIELDS)
+                cb.setChecked(key in initial_set)
                 self._checks[key] = cb
+                self._field_order.append(key)
                 col.addWidget(cb)
+
+            # DICOM tag list (the same items the user picked in the
+            # DICOM-Tag-overlay dialog for this modality). Empty when
+            # the caller passes nothing — in that case the section is
+            # hidden so legacy callers still see exactly the old UI.
+            tags = list(dicom_tags or [])
+            if tags:
+                col.addSpacing(6)
+                col.addWidget(QLabel(
+                    "DICOM tags (chosen in DICOM-Tag overlay) — tick to "
+                    "include the tag's value in the filename:"
+                ))
+                # Long lists deserve a scroll area so the dialog doesn't
+                # explode vertically on series with many tags selected.
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setMinimumHeight(60)
+                scroll.setMaximumHeight(220)
+                host = QWidget()
+                hcol = QVBoxLayout(host)
+                hcol.setContentsMargins(2, 2, 2, 2)
+                hcol.setSpacing(1)
+                for ident, label in tags:
+                    cb = QCheckBox(label)
+                    cb.setChecked(ident in initial_set)
+                    cb.setToolTip(f"DICOM tag identifier: {ident}")
+                    self._checks[ident] = cb
+                    self._field_order.append(ident)
+                    hcol.addWidget(cb)
+                hcol.addStretch(1)
+                scroll.setWidget(host)
+                col.addWidget(scroll)
+
             root.addWidget(box)
 
         # --- MP4 bitrate / fps ---------------------------------------------
@@ -136,13 +198,26 @@ class ExportDialog(QDialog):
             self._fps.setSuffix(" fps")
             self._fps.setValue(
                 float(default_fps) if default_fps and default_fps > 0
-                else 15.0
+                else 30.0
             )
             self._fps.setToolTip(
                 "Playback frame rate. XA/IVUS default = the source cine "
-                "rate; CT default = 15 fps (slice scroll)."
+                "rate when available; otherwise 30 fps."
             )
-            form.addRow("Frame rate:", self._fps)
+            # Preset buttons next to the spinbox: click sets the value.
+            fps_row = QWidget()
+            fps_layout = QHBoxLayout(fps_row)
+            fps_layout.setContentsMargins(0, 0, 0, 0)
+            fps_layout.addWidget(self._fps, 1)
+            for v in FPS_PRESETS:
+                btn = QPushButton(str(v))
+                btn.setFixedWidth(36)
+                btn.setToolTip(f"Set frame rate to {v} fps")
+                btn.clicked.connect(
+                    lambda _c, val=v: self._fps.setValue(float(val))
+                )
+                fps_layout.addWidget(btn)
+            form.addRow("Frame rate:", fps_row)
             root.addWidget(mp4_box)
         else:
             self._bitrate = None
@@ -158,9 +233,13 @@ class ExportDialog(QDialog):
         root.addWidget(btns)
 
     def result_settings(self) -> ExportSettings:
-        """Returns the user's choices. Call only after exec() == Accepted."""
+        """Returns the user's choices. Call only after exec() == Accepted.
+
+        The returned ``fields`` tuple preserves the order the items were
+        shown to the user — predefined components first, then any DICOM
+        tag identifiers — so the output filename is reproducible."""
         chosen = tuple(
-            k for k in FIELD_KEYS
+            k for k in self._field_order
             if k in self._checks and self._checks[k].isChecked()
         )
         if self._mode == "mp4":

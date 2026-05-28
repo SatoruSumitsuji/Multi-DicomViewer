@@ -187,7 +187,13 @@ class IVUSViewer(XAViewer):
 
         self._la_splitter = QSplitter(Qt.Orientation.Vertical)
         self._la_splitter.setChildrenCollapsible(False)
-        self._la_splitter.setHandleWidth(6)
+        # Wider handle + hover tint matches the QMainWindow dock
+        # separators so every drag handle in the app feels the same.
+        self._la_splitter.setHandleWidth(10)
+        self._la_splitter.setStyleSheet(
+            "QSplitter::handle { background:#a8a8a8; }"
+            "QSplitter::handle:hover { background:#4a90d9; }"
+        )
         self._la_splitter.addWidget(self._canvas_area)
         self._la_splitter.addWidget(self._la_scroll)
         # Initial sizes: cross-section keeps most of the height; the

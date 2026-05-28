@@ -948,6 +948,21 @@ class CTViewer(AbstractViewer):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._update_active_frames()
 
+    # -- Bi / Lt / Rt --------------------------------------------------
+    @property
+    def supports_side(self) -> bool:
+        """CT always has two panes, so Bi/Lt/Rt always applies."""
+        return True
+
+    def set_side(self, side: str, allow_dual: bool = True) -> None:
+        """Show only pane A (Lt), only pane B (Rt), or both (Bi).
+
+        ``allow_dual`` is accepted for API parity with the XA viewer
+        but ignored here — CT has its own A/B pane pair independent of
+        the shell's grid layout."""
+        self._frames["A"].setVisible(side != "Rt")
+        self._frames["B"].setVisible(side != "Lt")
+
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         row = QHBoxLayout()

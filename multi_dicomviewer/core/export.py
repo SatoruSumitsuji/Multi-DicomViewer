@@ -52,19 +52,28 @@ def _safe_name(s: str) -> str:
     return s or "_"
 
 
-def _fmt_date_time(acq: str) -> str:
-    """Compact 'YYYYMMDDHHMMSS[.fff]' → 'YYYYMMDD_HHMMSS' for filename
-    use. Empty input yields ''."""
+def _fmt_date(acq: str) -> str:
+    """Date part of an acquisition timestamp → 'YYYYMMDD'. Accepts
+    either 'YYYYMMDDHHMMSS[.fff]' or just 'YYYYMMDD'. Empty input → ''."""
     s = str(acq or "").strip()
     if not s:
         return ""
-    # strip fractional seconds
     s = s.split(".", 1)[0]
-    if len(s) >= 14 and s[:14].isdigit():
-        return f"{s[:8]}_{s[8:14]}"
     if len(s) >= 8 and s[:8].isdigit():
         return s[:8]
     return _safe_name(s)
+
+
+def _fmt_time(acq: str) -> str:
+    """Time part of an acquisition timestamp → 'HHMMSS', or '' when the
+    timestamp has no time component (CT slice headers often don't)."""
+    s = str(acq or "").strip()
+    if not s:
+        return ""
+    s = s.split(".", 1)[0]
+    if len(s) >= 14 and s[:14].isdigit() and s[8:14].isdigit():
+        return s[8:14]
+    return ""
 
 
 def _fmt_int3(value) -> str:
@@ -112,9 +121,10 @@ def _series_fields(series: Series, ds: pydicom.Dataset) -> dict[str, str]:
     if not n_frames:                                # single-frame CT slice
         n_frames = len(series.files)
     out = {
-        "date_time":   _fmt_date_time(series.acq_time),
+        "date":        _fmt_date(series.acq_time),
+        "time":        _fmt_time(series.acq_time),
         "series_no":   _fmt_int3(series.number),
-        "acq_no":      _fmt_int3(series.acq_number),
+        "instance_no": _fmt_int3(series.instance_number),
         "type":        _safe_name(series.kind),
         "description": _safe_name(series.description or ""),
         "images":      f"{n_frames}img",
@@ -128,17 +138,39 @@ def _series_fields(series: Series, ds: pydicom.Dataset) -> dict[str, str]:
     return out
 
 
+def _dicom_tag_value(ds: pydicom.Dataset, identifier: str) -> str:
+    """Filename-safe string for a DICOM tag's value, addressed by either
+    a pydicom keyword (``PatientName``) or a tag-string literal
+    (``(0019,1099)``). Returns ``""`` when the tag is absent or holds
+    nothing useful, so it drops out of the joined filename."""
+    from .dicom_tags import _lookup  # local import — avoid load-time cycle
+    elem = _lookup(ds, identifier)
+    if elem is None:
+        return ""
+    try:
+        text = str(elem.value).strip()
+    except Exception:
+        return ""
+    if not text:
+        return ""
+    return _safe_name(text)
+
+
 def build_filename(fields: Iterable[str],
                    series: Series,
                    ds: pydicom.Dataset) -> str:
     """Join the user-chosen *fields* (in the order given) with '_' for one
     output file. Empty / missing components are dropped. Series- and
     acquisition-level fields are populated from ``series`` / ``ds``;
-    there is no per-instance field — vendors put the meaningful number
-    into either Series Number OR Acquisition Number, so ticking both
-    covers either style."""
+    DICOM-tag identifiers not in the predefined table (anything that
+    looks like a pydicom keyword or a ``(group,element)`` literal) are
+    resolved against the header so the user can mix tag values in
+    alongside the formatted fields."""
     vals = _series_fields(series, ds)
-    parts = [vals.get(k, "") for k in fields]
+    parts = [
+        vals[k] if k in vals else _dicom_tag_value(ds, k)
+        for k in fields
+    ]
     name = "_".join(p for p in parts if p)
     return _safe_name(name) or "export"
 

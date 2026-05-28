@@ -1,11 +1,11 @@
 """DICOM tag list dialog — pick which tags overlay on the image.
 
 Shared by the XA and CT viewers. Shows the loaded series' header as a
-filterable table; ticking a row adds that tag's keyword to the overlay
-selection. Values honour the global anonymization toggle (case-identifying
-fields show the placeholder here too). Rows without a pydicom keyword
-(private/unknown elements) are listed but cannot be selected, since the
-overlay looks tags up by keyword.
+filterable table; ticking a row adds that tag's identifier to the
+overlay selection. Standard tags use their pydicom keyword
+(``PatientName``); private / unknown tags use their tag-string literal
+(``(0019,1099)``) — both are addressable by ``_lookup`` in
+:mod:`dicom_tags`. Values honour the global anonymization toggle.
 """
 from __future__ import annotations
 
@@ -99,21 +99,25 @@ class TagSelectionDialog(QDialog):
         rows = iter_tag_rows(header, anonymized=self._anonymized)
         self.table.setRowCount(len(rows))
         for r, tr in enumerate(rows):
+            # Standard tags identify themselves by their pydicom keyword;
+            # private/unknown tags (no keyword) fall back to the tag-
+            # string literal so they're still selectable and addressable.
+            identifier = tr.keyword or tr.tag
             chk = QTableWidgetItem()
-            selectable = bool(tr.keyword)
-            flags = Qt.ItemFlag.ItemIsUserCheckable
-            if selectable:
-                flags |= Qt.ItemFlag.ItemIsEnabled
-            chk.setFlags(flags)
+            chk.setFlags(
+                Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsEnabled
+            )
             chk.setCheckState(
                 Qt.CheckState.Checked
-                if tr.keyword in selected_set
+                if identifier in selected_set
                 else Qt.CheckState.Unchecked
             )
-            chk.setData(_KW_ROLE, tr.keyword)
-            if not selectable:
+            chk.setData(_KW_ROLE, identifier)
+            if not tr.keyword:
                 chk.setToolTip(
-                    "Tags without a defined keyword can't be selected"
+                    "Private/unknown tag — selected by its (group,"
+                    "element) literal"
                 )
             self.table.setItem(r, 0, chk)
             for c, text in enumerate(
@@ -137,14 +141,15 @@ class TagSelectionDialog(QDialog):
 
     # -------------------------------------------------------------- result
     def selected_keywords(self) -> list[str]:
-        """Checked keywords, prior order kept then new ones in table order."""
+        """Checked identifiers (pydicom keywords + private-tag literals),
+        prior order kept then new ones in table order."""
         checked: list[str] = []
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 0)
             if item.checkState() == Qt.CheckState.Checked:
-                kw = item.data(_KW_ROLE)
-                if kw:
-                    checked.append(kw)
+                ident = item.data(_KW_ROLE)
+                if ident:
+                    checked.append(ident)
         checked_set = set(checked)
         ordered = [k for k in self._prev_order if k in checked_set]
         ordered += [k for k in checked if k not in self._prev_order]

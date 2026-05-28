@@ -317,6 +317,35 @@ class XAViewer(AbstractViewer):
         if self._planes:
             self._relayout()
 
+    # -- Bi / Lt / Rt --------------------------------------------------
+    @property
+    def supports_side(self) -> bool:
+        """True iff Bi/Lt/Rt has anything to switch (biplane only)."""
+        return self._is_biplane
+
+    def set_side(self, side: str, allow_dual: bool = True) -> None:
+        """Bi/Lt/Rt switch driven by the layout-bar buttons.
+
+        * ``Bi`` — side-by-side when ``allow_dual`` is True (which the
+          shell sets to ``layout_key == "1x1"``); otherwise stay on
+          whichever single plane was last active.
+        * ``Lt`` — force single-pane mode showing plane 0.
+        * ``Rt`` — force single-pane mode showing plane 1.
+
+        Single-plane series ignore this (nothing to switch)."""
+        if not self._is_biplane:
+            return
+        if side == "Bi":
+            self._want_dual = bool(allow_dual)
+        elif side == "Lt":
+            self._want_dual = False
+            self._active = 0
+        elif side == "Rt":
+            self._want_dual = False
+            self._active = 1
+        self._rebuild_plane_buttons()
+        self._relayout()
+
     def _rebuild_plane_buttons(self) -> None:
         for b in list(self._plane_group.buttons()):
             self._plane_group.removeButton(b)
