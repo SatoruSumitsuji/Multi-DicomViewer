@@ -103,13 +103,16 @@ coll = COLLECT(
     name="Multi-DicomViewer",
 )
 
-# macOS: also produce a .app bundle from the same Analysis.
+# macOS: also produce a .app bundle from the same Analysis. The Mac
+# build is renamed to "-NoCT" because VTK's OpenGL→Metal path hangs on
+# macOS, so this build ships without the CT viewer. (The pygfx port
+# will eventually restore CT on Mac — see the Mac mini M4 plan.)
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="Multi-DicomViewer.app",
+        name="Multi-DicomViewer-NoCT.app",
         icon=None,
-        bundle_identifier="org.research.multi-dicomviewer",
+        bundle_identifier="org.research.multi-dicomviewer-noct",
         info_plist={
             "NSHighResolutionCapable": "True",
             "CFBundleShortVersionString": "0.1.0",
