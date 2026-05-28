@@ -53,10 +53,13 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
                 Multi-DicomViewer-NoCT.app Multi-DicomViewer-NoCT-macos.zip
 
+      # Artifact name is what GitHub shows in the run's UI; surface the
+      # Mac variant's "-NoCT" suffix here too so the box name matches the
+      # zip inside.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multi-DicomViewer-${{ runner.os }}
+          name: Multi-DicomViewer-${{ runner.os == 'macOS' && 'NoCT-macOS' || runner.os }}
           path: |
             dist/Multi-DicomViewer-windows.zip
             dist/Multi-DicomViewer-NoCT-macos.zip
