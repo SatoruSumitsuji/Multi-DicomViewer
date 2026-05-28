@@ -1,7 +1,22 @@
 """Static config and clinical window/level presets."""
 
-APP_NAME = "Multi-DICOMviewer"
+import sys
+
+# Mac build does not ship the CT viewer (VTK's OpenGL→Metal path hangs on
+# macOS — see the Mac mini M4 / pygfx-port plan). The Mac variant is
+# renamed so users can tell at a glance it does not include CT.
+if sys.platform == "darwin":
+    APP_NAME = "Multi-DicomViewer-NoCT"
+else:
+    APP_NAME = "Multi-DICOMviewer"
 APP_VERSION = "1.0"
+
+# True when CT loading should be blocked at the UI level (Mac build).
+BLOCK_CT = sys.platform == "darwin"
+BLOCK_CT_MESSAGE = (
+    "このアプリはCTデータに対応していません。\n"
+    "（Mac版はCTビューワーを搭載していません）"
+)
 
 # Hounsfield-unit window/level presets for the CT viewer (W, L).
 CT_WL_PRESETS = {

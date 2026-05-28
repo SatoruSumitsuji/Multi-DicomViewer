@@ -41,7 +41,12 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from multi_dicomviewer.config import APP_NAME, APP_VERSION
+from multi_dicomviewer.config import (
+    APP_NAME,
+    APP_VERSION,
+    BLOCK_CT,
+    BLOCK_CT_MESSAGE,
+)
 from multi_dicomviewer.core import dicom_io, settings
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords
 from multi_dicomviewer.core.study_model import Modality, Series
@@ -1371,6 +1376,15 @@ class MainWindow(QMainWindow):
             self._open_series(series, pane)
 
     def _open_series(self, series: Series, pane: ViewerPane) -> None:
+        # Mac build cannot render CT (VTK's OpenGL→Metal path hangs). Tell
+        # the user explicitly and abort the load before any disk read /
+        # viewer construction touches VTK.
+        if BLOCK_CT and series.modality == Modality.CT:
+            QMessageBox.information(self, "未対応のデータ", BLOCK_CT_MESSAGE)
+            self.statusBar().showMessage(
+                "CTデータはこのビルドでは読み込めません。"
+            )
+            return
         # Fast-path: this exact series is already loaded in this pane's
         # cached viewer (XAViewer / IVUSViewer / CTViewer track
         # _loaded_uid). Skip the whole disk read + decode + viewer
