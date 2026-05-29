@@ -1,0 +1,4240 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rupture-Predictor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            width: 100%;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+            min-height: calc(100vh - 40px);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: #2c3e50;
+            color: white;
+            padding: 20px;
+            text-align: center;
+            flex-shrink: 0;
+        }
+
+        .main-content {
+            display: flex;
+            gap: 20px;
+            padding: 20px;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .canvas-section {
+            flex: 1;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .canvas-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 0;
+            overflow: hidden;
+            background: #f8f9fa;
+            border: 2px dashed #ddd;
+            border-radius: 4px;
+        }
+
+        .canvas-container.has-image {
+            background: transparent;
+            border: none;
+        }
+
+        #imageCanvas {
+            border: 2px solid #ddd;
+            border-radius: 4px;
+            cursor: crosshair;
+            display: none;
+        }
+
+        /* For PC only - limit canvas size */
+        @media screen and (min-width: 769px) {
+            #imageCanvas {
+                max-width: 100%;
+                max-height: 100%;
+                object-fit: contain;
+            }
+        }
+
+        #imageCanvas.loaded {
+            display: block;
+        }
+
+        .info-panel {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 15px;
+            margin-top: 15px;
+            font-size: 13px;
+            flex-shrink: 0;
+        }
+
+        .info-panel h4 {
+            margin-bottom: 10px;
+            color: #2c3e50;
+            font-size: 14px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            padding: 3px 0;
+        }
+
+        .info-label {
+            font-weight: 500;
+            color: #495057;
+        }
+
+        .info-value {
+            font-weight: 600;
+            color: #2c3e50;
+        }
+
+        .controls-section {
+            width: 350px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .control-group {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #dee2e6;
+        }
+
+        .control-group h3 {
+            margin-bottom: 12px;
+            color: #2c3e50;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 5px;
+        }
+
+        .input-row {
+            display: flex;
+            align-items: center;
+            margin-bottom: 10px;
+            gap: 8px;
+        }
+
+        .input-row label {
+            min-width: 40px;
+            font-weight: 500;
+            color: #495057;
+        }
+
+        .input-row input {
+            flex: 1;
+            padding: 6px 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .input-row input:focus {
+            outline: none;
+            border-color: #3498db;
+            box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.1);
+        }
+
+        .input-row .unit {
+            color: #6c757d;
+            font-size: 13px;
+            min-width: 30px;
+        }
+
+        button {
+            padding: 10px 20px;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background: #2980b9;
+        }
+
+        button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+
+        .result-box {
+            background: #e8f4f8;
+            border: 2px solid #3498db;
+            border-radius: 6px;
+            padding: 15px;
+            text-align: center;
+        }
+
+        .result-box h3 {
+            color: #2c3e50;
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        .result-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #3498db;
+        }
+
+        .point-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 5px;
+        }
+
+        .instructions {
+            background: #fff3cd;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #ffc107;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #856404;
+        }
+
+        .point-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .point-item {
+            display: flex;
+            align-items: center;
+            padding: 5px 10px;
+            background: white;
+            border-radius: 4px;
+            font-size: 12px;
+            border: 1px solid #dee2e6;
+            cursor: pointer;
+        }
+
+        .point-item:hover {
+            background: #e8f4fd;
+            border-color: #3498db;
+        }
+
+        .point-item.placed {
+            background: #d4edda;
+            border-color: #28a745;
+        }
+
+        .point-item.placed:hover {
+            background: #c3e6cb;
+            border-color: #1e7e34;
+        }
+
+        .point-reset-btn {
+            margin-left: 5px;
+            padding: 2px 6px;
+            font-size: 11px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            display: none;
+        }
+
+        .point-item.placed .point-reset-btn {
+            display: inline-block;
+        }
+
+        .point-reset-btn:hover {
+            background: #c0392b;
+        }
+
+        select {
+            padding: 6px 10px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            font-size: 14px;
+            background: white;
+        }
+
+        .file-upload {
+            margin-bottom: 15px;
+            flex-shrink: 0;
+        }
+
+        .file-upload input[type="file"] {
+            display: none;
+        }
+
+        .file-upload label {
+            display: block;
+            padding: 10px;
+            background: #3498db;
+            color: white;
+            text-align: center;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .file-upload label:hover {
+            background: #2980b9;
+        }
+
+        .file-upload.drag-over label {
+            background: #27ae60;
+            border: 3px dashed #fff;
+            box-shadow: 0 0 15px rgba(39, 174, 96, 0.5);
+        }
+
+        .upload-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .upload-buttons button {
+            flex: 1;
+            padding: 10px;
+            font-size: 14px;
+        }
+
+        #pasteFromClipboard {
+            background: #27ae60;
+        }
+
+        #pasteFromClipboard:hover {
+            background: #229954;
+        }
+
+        /* Zoom Controls */
+        .zoom-controls {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 100;
+            cursor: move;
+            user-select: none;
+        }
+
+        .zoom-controls button {
+            width: 40px;
+            height: 40px;
+            padding: 0;
+            font-size: 20px;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #3498db;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .zoom-controls button:hover {
+            background: #2980b9;
+        }
+
+        .zoom-controls button:active {
+            background: #21618c;
+        }
+
+        .zoom-display {
+            text-align: center;
+            font-size: 14px;
+            font-weight: 600;
+            color: #2c3e50;
+            padding: 5px 0;
+            min-width: 60px;
+        }
+
+        .zoom-reset-btn {
+            background: #95a5a6 !important;
+            font-size: 14px !important;
+        }
+
+        .zoom-reset-btn:hover {
+            background: #7f8c8d !important;
+        }
+
+        /* Responsive Design - Tablet */
+        @media screen and (max-width: 1024px) {
+            .container {
+                max-width: 100%;
+            }
+
+            .controls-section {
+                width: 300px;
+            }
+
+            .header h1 {
+                font-size: 20px;
+            }
+
+            .header p {
+                font-size: 14px;
+            }
+        }
+
+        /* Responsive Design - Mobile */
+        @media screen and (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            .container {
+                min-height: calc(100vh - 20px);
+            }
+
+            .header {
+                padding: 15px;
+            }
+
+            .header h1 {
+                font-size: 18px;
+            }
+
+            .header p {
+                font-size: 13px;
+            }
+
+            .main-content {
+                flex-direction: column;
+                gap: 15px;
+                padding: 10px;
+            }
+
+            .canvas-section {
+                order: 1;
+                width: 100%;
+                flex: none;
+                overflow: visible; /* Allow canvas to overflow when zoomed */
+            }
+
+            .controls-section {
+                width: 100%;
+                order: 2;
+                gap: 15px;
+            }
+
+            .canvas-container {
+                width: 100%;
+                height: 0;
+                padding-bottom: 100%; /* Create square */
+                position: relative;
+                overflow: visible; /* Allow zoomed content to overflow */
+            }
+
+            .canvas-container canvas {
+                position: absolute;
+            }
+
+            #imageCanvas {
+                max-width: none !important;
+                max-height: none !important;
+            }
+
+            #imageCanvas:not(.loaded) {
+                display: none !important;
+            }
+
+            .upload-buttons {
+                flex-direction: column;
+                gap: 8px;
+            }
+
+            .upload-buttons button,
+            .upload-buttons .file-upload {
+                width: 100%;
+            }
+
+            .info-panel {
+                padding: 12px;
+                font-size: 12px;
+            }
+
+            .control-group {
+                padding: 12px;
+            }
+
+            .control-group h3 {
+                font-size: 13px;
+            }
+
+            .instructions {
+                padding: 12px;
+                font-size: 12px;
+            }
+
+            .result-value {
+                font-size: 24px;
+            }
+
+            .point-list {
+                gap: 6px;
+            }
+
+            .point-item {
+                font-size: 11px;
+                padding: 4px 8px;
+            }
+
+            button {
+                padding: 8px 16px;
+                font-size: 13px;
+            }
+
+            #calculateBtn {
+                font-size: 15px !important;
+                padding: 10px !important;
+            }
+        }
+
+        /* Responsive Design - Small Mobile */
+        @media screen and (max-width: 480px) {
+            body {
+                padding: 5px;
+            }
+
+            .container {
+                border-radius: 4px;
+                min-height: calc(100vh - 10px);
+            }
+
+            .header {
+                padding: 12px;
+            }
+
+            .header h1 {
+                font-size: 16px;
+            }
+
+            .header p {
+                font-size: 12px;
+            }
+
+            .main-content {
+                padding: 5px;
+                gap: 10px;
+            }
+
+            .canvas-section {
+                width: 100%;
+                flex: none;
+            }
+
+            .canvas-container {
+                width: 100%;
+                height: 0;
+                padding-bottom: 100%; /* Create square */
+                position: relative;
+                overflow: visible; /* Allow zoomed content to overflow */
+            }
+
+            .canvas-container canvas {
+                position: absolute;
+            }
+
+            #imageCanvas {
+                max-width: none !important;
+                max-height: none !important;
+            }
+
+            #imageCanvas:not(.loaded) {
+                display: none !important;
+            }
+
+            .info-panel {
+                padding: 10px;
+                font-size: 11px;
+            }
+
+            .info-panel h4 {
+                font-size: 12px;
+            }
+
+            .control-group {
+                padding: 10px;
+            }
+
+            .control-group h3 {
+                font-size: 12px;
+            }
+
+            .instructions {
+                padding: 10px;
+                font-size: 11px;
+                line-height: 1.5;
+            }
+
+            .input-row {
+                gap: 6px;
+                margin-bottom: 8px;
+            }
+
+            .input-row label {
+                min-width: 35px;
+                font-size: 13px;
+            }
+
+            .input-row input {
+                padding: 5px 8px;
+                font-size: 13px;
+            }
+
+            .input-row .unit {
+                font-size: 12px;
+            }
+
+            select {
+                padding: 5px 8px;
+                font-size: 13px;
+            }
+
+            .result-box {
+                padding: 12px;
+            }
+
+            .result-box h3 {
+                font-size: 13px;
+            }
+
+            .result-value {
+                font-size: 20px;
+            }
+
+            .point-list {
+                gap: 5px;
+            }
+
+            .point-item {
+                font-size: 10px;
+                padding: 3px 6px;
+            }
+
+            .point-indicator {
+                width: 10px;
+                height: 10px;
+            }
+
+            .point-reset-btn {
+                font-size: 10px;
+                padding: 1px 4px;
+            }
+
+            button {
+                padding: 7px 12px;
+                font-size: 12px;
+            }
+
+            #calculateBtn {
+                font-size: 14px !important;
+                padding: 10px !important;
+            }
+
+            /* Dialog adjustments for mobile */
+            #dialogBox {
+                padding: 20px;
+                max-width: calc(100vw - 40px);
+                left: 20px;
+                right: 20px;
+                transform: translateY(-50%);
+            }
+
+            #dialogMessage {
+                font-size: 14px;
+                margin-bottom: 20px;
+            }
+
+            #dialogBox > div {
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            #dialogBox button {
+                width: 100%;
+                min-width: auto;
+            }
+
+            #dialogInput {
+                max-width: calc(100% - 60px) !important;
+                width: 100% !important;
+                box-sizing: border-box;
+            }
+
+            #referenceDialogBox {
+                padding: 15px;
+                max-width: calc(100vw - 30px);
+                max-height: calc(100vh - 30px);
+            }
+
+            #referenceCloseBtn {
+                padding: 12px 30px;
+                font-size: 14px;
+            }
+
+            /* Zoom controls adjustments for small screens */
+            .zoom-controls {
+                bottom: 10px;
+                right: 10px;
+                padding: 8px;
+                gap: 8px;
+            }
+
+            .zoom-controls button {
+                width: 32px;
+                height: 32px;
+                font-size: 16px;
+            }
+
+            .zoom-display {
+                font-size: 12px;
+                padding: 3px 0;
+            }
+
+            .zoom-reset-btn {
+                font-size: 11px !important;
+            }
+
+            /* Canvas adjustments for small screens */
+            .canvas-section {
+                width: 100%;
+                flex: none;
+            }
+
+            .canvas-container {
+                width: 100%;
+                height: 0;
+                padding-bottom: 100%; /* Create square */
+                position: relative;
+                overflow: visible; /* Allow zoomed content to overflow */
+            }
+
+            .canvas-container canvas {
+                position: absolute;
+            }
+
+            .main-content {
+                padding: 8px;
+            }
+
+            #imageCanvas {
+                max-width: none !important;
+                max-height: none !important;
+            }
+
+            #imageCanvas:not(.loaded) {
+                display: none !important;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Adventitia Stretch Ratio Calculator</h1>
+            <p>血管外膜伸展比計算ツール</p>
+        </div>
+
+        <div class="main-content">
+            <div class="canvas-section">
+                <div class="upload-buttons">
+                    <div class="file-upload" style="flex: 1; margin-bottom: 0;">
+                        <input type="file" id="imageUpload" accept="image/*">
+                        <label for="imageUpload">ファイルから画像を選択</label>
+                    </div>
+                    <button id="pasteFromClipboard">クリップボードから画像を貼り付け (Ctrl+V)</button>
+                </div>
+                <div class="canvas-container">
+                    <canvas id="imageCanvas"></canvas>
+                    <!-- Zoom Controls (hidden - zoom via pinch/scroll) -->
+                    <div class="zoom-controls" id="zoomControls" style="display: none;">
+                        <button id="zoomIn" title="拡大 / Zoom In">+</button>
+                        <div class="zoom-display" id="zoomDisplay">100%</div>
+                        <button id="zoomOut" title="縮小 / Zoom Out">−</button>
+                        <button id="zoomReset" class="zoom-reset-btn" title="リセット / Reset">1:1</button>
+                    </div>
+                </div>
+                <div class="info-panel" id="infoPanel" style="display: none;">
+                    <h4>計算情報 / Calculation Info</h4>
+                    <div class="info-row">
+                        <span class="info-label">Horizontal Calibration:</span>
+                        <span class="info-value" id="info-h-calibration">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Vertical Calibration:</span>
+                        <span class="info-value" id="info-v-calibration">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">元の弧長 (A1-AC-A2):</span>
+                        <span class="info-value" id="info-original-arc">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">角度 ∠A1-C-A2:</span>
+                        <span class="info-value" id="info-angle">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">仮想バルーン直径:</span>
+                        <span class="info-value" id="info-balloon-diameter">-</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">伸展外膜長:</span>
+                        <span class="info-value" id="info-stretched">-</span>
+                    </div>
+                </div>
+
+                <div class="info-panel" id="allResultsSection" style="display: none; margin-top: 15px;">
+                    <h4>全バルーン直径の計算結果</h4>
+                    <div id="allResultsContent" style="max-height: 400px; overflow-y: auto; font-size: 12px; line-height: 1.6;">
+                    </div>
+                </div>
+            </div>
+
+            <div class="controls-section">
+                <div class="instructions">
+                    <strong>使い方:</strong><br>
+                    1. 画像を読み込む<br>
+                    2. キャリブレーション点と値を入力<br>
+                    3. 画像上の点をクリックして配置<br>
+                    4. バルーン直径を入力して計算<br>
+                    <br>
+                    <strong>操作:</strong><br>
+                    • マウスホイール: 拡大/縮小<br>
+                    • Shift+ドラッグ: 画像移動<br>
+                    • 点をドラッグ: 位置調整<br>
+                    • 点にマウスオーバー+矢印キー: 微調整
+                </div>
+
+                <div class="control-group">
+                    <h3>キャリブレーション / Calibration</h3>
+                    <div class="input-row">
+                        <label>CV:</label>
+                        <input type="number" id="cvDistance" list="calibration-values" step="1" placeholder="0">
+                        <datalist id="calibration-values">
+                            <option value="1"></option>
+                            <option value="2"></option>
+                            <option value="3"></option>
+                            <option value="4"></option>
+                            <option value="5"></option>
+                            <option value="6"></option>
+                            <option value="7"></option>
+                            <option value="8"></option>
+                            <option value="9"></option>
+                            <option value="10"></option>
+                            <option value="11"></option>
+                            <option value="12"></option>
+                            <option value="13"></option>
+                            <option value="14"></option>
+                            <option value="15"></option>
+                            <option value="16"></option>
+                            <option value="17"></option>
+                            <option value="18"></option>
+                            <option value="19"></option>
+                            <option value="20"></option>
+                            <option value="21"></option>
+                            <option value="22"></option>
+                            <option value="23"></option>
+                            <option value="24"></option>
+                            <option value="25"></option>
+                            <option value="26"></option>
+                            <option value="27"></option>
+                            <option value="28"></option>
+                            <option value="29"></option>
+                            <option value="30"></option>
+                            <option value="31"></option>
+                            <option value="32"></option>
+                            <option value="33"></option>
+                            <option value="34"></option>
+                            <option value="35"></option>
+                            <option value="36"></option>
+                            <option value="37"></option>
+                            <option value="38"></option>
+                            <option value="39"></option>
+                            <option value="40"></option>
+                            <option value="41"></option>
+                            <option value="42"></option>
+                            <option value="43"></option>
+                            <option value="44"></option>
+                            <option value="45"></option>
+                            <option value="46"></option>
+                            <option value="47"></option>
+                            <option value="48"></option>
+                            <option value="49"></option>
+                            <option value="50"></option>
+                        </datalist>
+                        <span class="unit">mm</span>
+                    </div>
+                    <div class="input-row">
+                        <label>CH:</label>
+                        <input type="number" id="chDistance" list="calibration-values" step="1" placeholder="0">
+                        <span class="unit">mm</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>点の配置 / Point Placement</h3>
+                    <div class="point-list">
+                        <div class="point-item" id="status-CH1">
+                            <span class="point-indicator" style="background: cyan;"></span>CH1
+                        </div>
+                        <div class="point-item" id="status-CH2">
+                            <span class="point-indicator" style="background: cyan;"></span>CH2
+                        </div>
+                        <div class="point-item" id="status-CV1">
+                            <span class="point-indicator" style="background: cyan;"></span>CV1
+                        </div>
+                        <div class="point-item" id="status-CV2">
+                            <span class="point-indicator" style="background: cyan;"></span>CV2
+                        </div>
+                        <div class="point-item" id="status-A1">
+                            <span class="point-indicator" style="background: gold;"></span>A1
+                        </div>
+                        <div class="point-item" id="status-A2">
+                            <span class="point-indicator" style="background: gold;"></span>A2
+                        </div>
+                        <div class="point-item" id="status-AC">
+                            <span class="point-indicator" style="background: greenyellow;"></span>AC
+                        </div>
+                        <div class="point-item" id="status-B">
+                            <span class="point-indicator" style="background: red;"></span>B
+                        </div>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 8px; margin-top: 10px;">
+                        <button id="restartFromCalibration" style="width: 100%; background: #f39c12;">キャリブレーションから再開</button>
+                        <button id="restartFromPoints" style="width: 100%; background: #e67e22;">点指定から再開</button>
+                    </div>
+                </div>
+
+                <div class="control-group" id="expansionRateGroup">
+                    <h3 style="font-size: 15px;">外膜進展率 / Adventitia Expansion Rate</h3>
+                    <div id="expansionRateTable" style="display: none; margin-top: 4px;">
+                        <table style="width: 100%; border-collapse: collapse; font-size: 16px;">
+                            <thead>
+                                <tr style="background: #e8f4e8;">
+                                    <th style="padding: 4px 8px; text-align: left; border-bottom: 2px solid #27ae60;">外膜進展率</th>
+                                    <th style="padding: 4px 8px; text-align: right; border-bottom: 2px solid #27ae60;">バルーン直径 (mm)</th>
+                                </tr>
+                            </thead>
+                            <tbody id="expansionRateTableBody">
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="result-box" id="resultBox" style="display: none;">
+                    <h3>Adventitia Stretch Ratio</h3>
+                    <div class="result-value" id="resultValue">-</div>
+                </div>
+
+                <div class="control-group">
+                    <h3>バルーン直径 / Balloon Diameter</h3>
+                    <div class="input-row">
+                        <select id="balloonDiameterSelect" style="flex: 1;">
+                            <option value="">選択...</option>
+                        </select>
+                    </div>
+                    <div class="input-row">
+                        <label>または:</label>
+                        <input type="number" id="balloonDiameterInput" step="0.01" placeholder="直接入力">
+                        <span class="unit">mm</span>
+                    </div>
+                </div>
+
+                <button id="calculateBtn" style="width: 100%; font-size: 16px; padding: 12px;">計算 / Calculate</button>
+
+                <div id="mobileBottomSection" style="display: none;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Dialog Overlay -->
+    <div id="customDialog" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: transparent; z-index: 1000; pointer-events: none;">
+        <div id="dialogBox" style="background: white; padding: 30px; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); text-align: center; position: absolute; cursor: move; right: 20px; top: 20px; transform: none; pointer-events: auto; border: 2px solid #3498db;">
+            <div id="dialogMessage" style="font-size: 16px; margin-bottom: 25px; line-height: 1.6; color: #2c3e50;"></div>
+            <div style="display: flex; gap: 15px; justify-content: center; flex-wrap: wrap;">
+                <button id="dialogRefBtn" style="padding: 12px 20px; font-size: 14px; min-width: 100px; background: #f39c12; color: white; font-weight: 600; border: none; border-radius: 4px; cursor: pointer; display: none;">点指定の参考図を見る</button>
+                <button id="dialogOkBtn" style="padding: 12px 30px; font-size: 15px; min-width: 120px; background: #2980b9; color: white; font-weight: 600; border: none; border-radius: 4px; cursor: pointer;">OK</button>
+                <button id="dialogCloseBtn" style="padding: 12px 30px; font-size: 15px; min-width: 120px; background: white; color: #3498db; font-weight: 600; border: 2px solid #3498db; border-radius: 4px; cursor: pointer;">閉じる</button>
+                <button id="dialogBackBtn" style="padding: 12px 30px; font-size: 15px; background: #c0392b; color: white; font-weight: 600; min-width: 120px; border: none; border-radius: 4px; cursor: pointer;">戻る</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reference Image Dialog -->
+    <div id="referenceDialog" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; pointer-events: auto;">
+        <div id="referenceDialogBox" style="background: white; padding: 20px; border-radius: 8px; box-shadow: 0 8px 32px rgba(0,0,0,0.5); text-align: center; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); pointer-events: auto; max-width: min(66.67vw, 800px); max-height: 90vh; overflow-y: auto;">
+            <img id="referenceImage" src="Sample_PointPosition.jpg" style="width: 100%; height: auto; display: block; margin: 0 auto;">
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 2px solid #e0e0e0;">
+                <button id="referenceCloseBtn" style="padding: 15px 40px; font-size: 16px; background: #c0392b; color: white; font-weight: 600; min-width: 150px; border: none; border-radius: 4px; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.3);">戻る</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // State management
+        const state = {
+            image: null,
+            points: {
+                CV1: null, CV2: null,
+                CH1: null, CH2: null,
+                A1: null, A2: null, AC: null,
+                B: null
+            },
+            pointOrder: ['CH1', 'CH2', 'CV1', 'CV2', 'A1', 'A2', 'AC', 'B'],
+            currentPointIndex: 0,
+            calibration: {
+                cvDistance: 0,
+                chDistance: 0,
+                pixelsPerMm: 0
+            },
+            transform: {
+                scale: 1.0,
+                translateX: 0,
+                translateY: 0
+            },
+            interaction: {
+                isPanning: false,
+                isDragging: false,
+                draggedPoint: null,
+                lastMouseX: 0,
+                lastMouseY: 0,
+                hoveredPoint: null,
+                selectedPoint: null,
+                isTouchDevice: false, // Flag to detect touch device
+                // Touch interaction state
+                touches: [],
+                lastTouchDistance: 0,
+                lastTouchCenterX: 0,
+                lastTouchCenterY: 0,
+                isTwoFingerGesture: false,
+                touchStartX: 0,
+                touchStartY: 0,
+                touchStartTime: 0,
+                potentialDragPoint: null
+            },
+            workflow: {
+                active: false,
+                waitingForPoint: false,
+                currentStep: null,
+                dialogVisible: false
+            },
+            visualization: {
+                active: false,
+                data: null
+            }
+        };
+
+        // Canvas setup
+        const canvas = document.getElementById('imageCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Point colors
+        const pointColors = {
+            CV1: 'cyan', CV2: 'cyan',
+            CH1: 'cyan', CH2: 'cyan',
+            A1: 'gold', A2: 'gold', AC: 'greenyellow',
+            B: 'red'
+        };
+
+        // Initialize balloon diameter dropdown
+        function initBalloonDiameterSelect() {
+            const select = document.getElementById('balloonDiameterSelect');
+            for (let d = 0.75; d <= 6.00; d += 0.25) {
+                const option = document.createElement('option');
+                option.value = d.toFixed(2);
+                option.textContent = d.toFixed(2) + ' mm';
+                select.appendChild(option);
+            }
+        }
+
+        // Load image from file
+        document.getElementById('imageUpload').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                loadImageFromFile(file);
+            }
+        });
+
+        // Drag & drop support for file upload
+        const fileUploadDiv = document.querySelector('.file-upload');
+        fileUploadDiv.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            fileUploadDiv.classList.add('drag-over');
+        });
+        fileUploadDiv.addEventListener('dragenter', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            fileUploadDiv.classList.add('drag-over');
+        });
+        fileUploadDiv.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            fileUploadDiv.classList.remove('drag-over');
+        });
+        fileUploadDiv.addEventListener('drop', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            fileUploadDiv.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('image/')) {
+                loadImageFromFile(file);
+            }
+        });
+
+        // Load image from file
+        function loadImageFromDataURL(dataURL) {
+            const img = new Image();
+            img.onload = function() {
+                state.image = img;
+                canvas.classList.add('loaded');
+                canvas.parentElement.classList.add('has-image');
+
+                // Clear visualization data when loading new image
+                state.visualization.active = false;
+                state.visualization.data = null;
+
+                resizeCanvas();
+                drawCanvas();
+
+                // Show zoom controls and update display
+                // zoomControls hidden - zoom via pinch/scroll
+                updateZoomDisplay();
+
+                // Auto-adjust zoom if image is too small
+                setTimeout(autoAdjustInitialZoom, 100);
+
+                // Show confirmation dialog after image is loaded
+                showImageConfirmationDialog();
+            };
+            img.src = dataURL;
+        }
+
+        function loadImageFromFile(file) {
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                loadImageFromDataURL(event.target.result);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // Load image from clipboard
+        async function loadImageFromClipboard() {
+            try {
+                const clipboardItems = await navigator.clipboard.read();
+
+                for (const clipboardItem of clipboardItems) {
+                    for (const type of clipboardItem.types) {
+                        if (type.startsWith('image/')) {
+                            const blob = await clipboardItem.getType(type);
+                            const img = new Image();
+                            img.onload = function() {
+                                state.image = img;
+                                canvas.classList.add('loaded');
+                                canvas.parentElement.classList.add('has-image');
+
+                                // Clear visualization data when loading new image
+                                state.visualization.active = false;
+                                state.visualization.data = null;
+
+                                resizeCanvas();
+                                drawCanvas();
+
+                                // Show zoom controls and update display
+                                // zoomControls hidden - zoom via pinch/scroll
+                                updateZoomDisplay();
+
+                                // Auto-adjust zoom if image is too small
+                                setTimeout(autoAdjustInitialZoom, 100);
+
+                                URL.revokeObjectURL(img.src);
+                                // Show confirmation dialog after image is loaded
+                                showImageConfirmationDialog();
+                            };
+                            img.src = URL.createObjectURL(blob);
+                            return;
+                        }
+                    }
+                }
+
+                alert('クリップボードに画像がありません');
+            } catch (err) {
+                console.error('クリップボードからの読み込みエラー:', err);
+                alert('クリップボードから画像を読み込めませんでした。\nブラウザの権限を確認してください。');
+            }
+        }
+
+        // Paste from clipboard button - wrapped to ensure DOM is ready
+        const pasteButton = document.getElementById('pasteFromClipboard');
+        if (pasteButton) {
+            pasteButton.addEventListener('click', function() {
+                loadImageFromClipboard();
+            });
+        }
+
+        // Handle paste event (Ctrl+V)
+        document.addEventListener('paste', function(e) {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    const blob = items[i].getAsFile();
+                    if (blob) {
+                        const reader = new FileReader();
+                        reader.onload = function(event) {
+                            const img = new Image();
+                            img.onload = function() {
+                                state.image = img;
+                                canvas.classList.add('loaded');
+                                canvas.parentElement.classList.add('has-image');
+
+                                // Clear visualization data when loading new image
+                                state.visualization.active = false;
+                                state.visualization.data = null;
+
+                                resizeCanvas();
+                                drawCanvas();
+
+                                // Show zoom controls and update display
+                                // zoomControls hidden - zoom via pinch/scroll
+                                updateZoomDisplay();
+
+                                // Auto-adjust zoom if image is too small
+                                setTimeout(autoAdjustInitialZoom, 100);
+
+                                // Show confirmation dialog after image is loaded
+                                showImageConfirmationDialog();
+                            };
+                            img.src = event.target.result;
+                        };
+                        reader.readAsDataURL(blob);
+                    }
+                    e.preventDefault();
+                    break;
+                }
+            }
+        });
+
+        // Resize canvas to fit available space while maintaining aspect ratio
+        function resizeCanvas() {
+            if (!state.image) return;
+
+            const container = canvas.parentElement;
+            const rect = container.getBoundingClientRect();
+            let containerWidth = rect.width - 4; // Account for border
+            let containerHeight = rect.height - 4;
+
+            // For mobile: Force square container (padding-bottom: 100% may not be reflected in height)
+            if (window.innerWidth < 768) {
+                containerWidth = rect.width;
+                containerHeight = containerWidth; // Square: height = width
+            }
+
+            // Set canvas internal resolution
+            // For mobile: use square resolution to match square display size
+            // For PC: match image size
+            if (window.innerWidth < 768) {
+                const maxSize = Math.max(state.image.width, state.image.height);
+                canvas.width = maxSize;
+                canvas.height = maxSize;
+            } else {
+                canvas.width = state.image.width;
+                canvas.height = state.image.height;
+            }
+
+            // Calculate display size (same logic for PC and mobile)
+            const imgAspect = state.image.width / state.image.height;
+            const containerAspect = containerWidth / containerHeight;
+
+            let displayWidth, displayHeight;
+
+            if (imgAspect > containerAspect) {
+                // Image is wider than container
+                displayWidth = containerWidth;
+                displayHeight = containerWidth / imgAspect;
+            } else {
+                // Image is taller than container
+                displayHeight = containerHeight;
+                displayWidth = containerHeight * imgAspect;
+            }
+
+            // For PC only: Ensure canvas width is not smaller than upload buttons width
+            if (window.innerWidth >= 768) {
+                const uploadButtons = document.querySelector('.upload-buttons');
+                const minCanvasWidth = uploadButtons ? uploadButtons.clientWidth : 0;
+                if (displayWidth < minCanvasWidth) {
+                    displayWidth = minCanvasWidth;
+                    displayHeight = displayWidth / imgAspect;
+                }
+            }
+
+            // For mobile: Use full square container size to allow zooming
+            // For PC: Use calculated size that fits container
+            if (window.innerWidth < 768) {
+                // Use full container size (square) to allow maximum zoom
+                canvas.style.width = containerWidth + 'px';
+                canvas.style.height = containerHeight + 'px';
+                canvas.style.position = 'absolute';
+                canvas.style.top = '0px';
+                canvas.style.left = '0px';
+            } else {
+                // Set canvas display size via CSS
+                canvas.style.width = displayWidth + 'px';
+                canvas.style.height = displayHeight + 'px';
+            }
+
+        }
+
+        // Auto-adjust initial zoom if image is too small
+        function autoAdjustInitialZoom() {
+            if (!state.image) return;
+
+            // Skip auto-zoom for mobile devices - let users zoom manually
+            if (window.innerWidth < 768) {
+                return;
+            }
+
+            const container = canvas.parentElement;
+            const containerRect = container.getBoundingClientRect();
+            const containerWidth = containerRect.width - 4;
+            const containerHeight = containerRect.height - 4;
+
+            const canvasRect = canvas.getBoundingClientRect();
+            const displayWidth = canvasRect.width;
+            const displayHeight = canvasRect.height;
+
+            // Calculate how much of the container the image is using
+            const widthRatio = displayWidth / containerWidth;
+            const heightRatio = displayHeight / containerHeight;
+            const minRatio = Math.min(widthRatio, heightRatio);
+
+            // If image is using less than 60% of the container, zoom it to use more space
+            if (minRatio < 0.6) {
+                // Scale to use about 80% of container
+                const targetScale = 0.8 / minRatio;
+                state.transform.scale = Math.min(targetScale, 2.0); // Cap at 2x to avoid over-zooming
+                drawCanvas();
+                updateZoomDisplay();
+            }
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', function() {
+            if (state.image) {
+                resizeCanvas();
+                drawCanvas();
+            }
+        });
+
+        // Helper function to convert screen coordinates to canvas coordinates
+        function screenToCanvas(screenX, screenY) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const canvasX = (screenX - rect.left) * scaleX;
+            const canvasY = (screenY - rect.top) * scaleY;
+
+            // Apply inverse transformation
+            let x = (canvasX - state.transform.translateX) / state.transform.scale;
+            let y = (canvasY - state.transform.translateY) / state.transform.scale;
+
+            // For mobile: adjust for image offset in square canvas
+            if (window.innerWidth < 768) {
+                const offsetX = (canvas.width - state.image.width) / 2;
+                const offsetY = (canvas.height - state.image.height) / 2;
+                x -= offsetX;
+                y -= offsetY;
+            }
+
+            return { x, y };
+        }
+
+        // Helper function to find point near coordinates
+        function findPointNear(x, y, threshold = 15) {
+            for (const [name, point] of Object.entries(state.points)) {
+                if (point) {
+                    const dist = Math.sqrt(Math.pow(point.x - x, 2) + Math.pow(point.y - y, 2));
+                    // Use maximum of scaled threshold or minimum value for better touch detection
+                    // Larger threshold for touch devices
+                    const minThreshold = state.interaction.isTouchDevice ? 25 : 10;
+                    const effectiveThreshold = Math.max(threshold / state.transform.scale, minThreshold);
+                    if (dist < effectiveThreshold) {
+                        return name;
+                    }
+                }
+            }
+            return null;
+        }
+
+        // Mouse down handler for dragging points or panning
+        canvas.addEventListener('mousedown', function(e) {
+            if (!state.image) return;
+
+            const coords = screenToCanvas(e.clientX, e.clientY);
+            const nearPoint = findPointNear(coords.x, coords.y);
+
+            // Reset movement tracking
+            state.interaction.hasMovedMouse = false;
+            state.interaction.mouseDownX = e.clientX;
+            state.interaction.mouseDownY = e.clientY;
+
+            if (nearPoint) {
+                // Start dragging a point
+                state.interaction.isDragging = true;
+                state.interaction.draggedPoint = nearPoint;
+                canvas.style.cursor = 'move';
+            } else {
+                // Start panning when dragging anywhere without a point
+                state.interaction.isPanning = true;
+                state.interaction.lastMouseX = e.clientX;
+                state.interaction.lastMouseY = e.clientY;
+                canvas.style.cursor = 'grab';
+            }
+        });
+
+        // Mouse move handler
+        canvas.addEventListener('mousemove', function(e) {
+            if (!state.image) return;
+
+            // Track if mouse has moved significantly
+            if (state.interaction.isDragging || state.interaction.isPanning) {
+                const dx = e.clientX - state.interaction.mouseDownX;
+                const dy = e.clientY - state.interaction.mouseDownY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance > 3) {
+                    state.interaction.hasMovedMouse = true;
+                }
+            }
+
+            if (state.interaction.isDragging && state.interaction.draggedPoint) {
+                // Drag point
+                const coords = screenToCanvas(e.clientX, e.clientY);
+                state.points[state.interaction.draggedPoint] = coords;
+
+                // Clear visualization data since points changed
+                state.visualization.active = false;
+                state.visualization.data = null;
+
+                drawCanvas();
+            } else if (state.interaction.isPanning) {
+                // Pan canvas
+                const dx = e.clientX - state.interaction.lastMouseX;
+                const dy = e.clientY - state.interaction.lastMouseY;
+
+                state.transform.translateX += dx * (canvas.width / canvas.getBoundingClientRect().width);
+                state.transform.translateY += dy * (canvas.height / canvas.getBoundingClientRect().height);
+
+                state.interaction.lastMouseX = e.clientX;
+                state.interaction.lastMouseY = e.clientY;
+                drawCanvas();
+            } else {
+                // Check if hovering over a point
+                const coords = screenToCanvas(e.clientX, e.clientY);
+                const nearPoint = findPointNear(coords.x, coords.y);
+                const previousHover = state.interaction.hoveredPoint;
+                state.interaction.hoveredPoint = nearPoint;
+                canvas.style.cursor = nearPoint ? 'pointer' : 'crosshair';
+
+                // Redraw to show hover effect if hover state changed
+                if (nearPoint !== previousHover) {
+                    drawCanvas();
+                }
+            }
+        });
+
+        // Mouse up handler
+        canvas.addEventListener('mouseup', function(e) {
+            if (state.interaction.isDragging) {
+                state.interaction.isDragging = false;
+                state.interaction.draggedPoint = null;
+                canvas.style.cursor = 'crosshair';
+                tryAutoCalculateExpansionRates();
+            } else if (state.interaction.isPanning) {
+                state.interaction.isPanning = false;
+                canvas.style.cursor = 'crosshair';
+            }
+        });
+
+        // Mouse leave handler
+        canvas.addEventListener('mouseleave', function() {
+            const hadHover = state.interaction.hoveredPoint !== null;
+            state.interaction.isDragging = false;
+            state.interaction.isPanning = false;
+            state.interaction.draggedPoint = null;
+            state.interaction.hoveredPoint = null;
+            canvas.style.cursor = 'crosshair';
+
+            // Redraw to remove hover effect
+            if (hadHover && state.image) {
+                drawCanvas();
+            }
+        });
+
+        // Arrow key handler for fine-tuning point position
+        document.addEventListener('keydown', function(e) {
+            if (!state.image) return;
+
+            // Use selected point if available, otherwise use hovered point
+            const pointName = state.interaction.selectedPoint || state.interaction.hoveredPoint;
+            if (!pointName) return;
+
+            const point = state.points[pointName];
+            if (!point) return;
+
+            // Calculate movement in canvas coordinates (accounting for display scale and zoom)
+            const rect = canvas.getBoundingClientRect();
+            const displayScale = canvas.width / rect.width;
+            const moveAmount = 1 / (displayScale * state.transform.scale); // 1 pixel in screen space, accounting for zoom
+
+            let moved = false;
+            switch(e.key) {
+                case 'ArrowUp':
+                    point.y -= moveAmount;
+                    moved = true;
+                    break;
+                case 'ArrowDown':
+                    point.y += moveAmount;
+                    moved = true;
+                    break;
+                case 'ArrowLeft':
+                    point.x -= moveAmount;
+                    moved = true;
+                    break;
+                case 'ArrowRight':
+                    point.x += moveAmount;
+                    moved = true;
+                    break;
+            }
+
+            if (moved) {
+                e.preventDefault();
+                // Clear visualization data since points changed
+                state.visualization.active = false;
+                state.visualization.data = null;
+                drawCanvas();
+                tryAutoCalculateExpansionRates();
+            }
+        });
+
+        // Canvas click handler for placing new points or selecting existing points
+        canvas.addEventListener('click', function(e) {
+            if (!state.image) return;
+            if (state.interaction.isDragging || state.interaction.isPanning) return;
+            // Don't place point if mouse was moved (drag operation)
+            if (state.interaction.hasMovedMouse) return;
+
+            const coords = screenToCanvas(e.clientX, e.clientY);
+            const nearPoint = findPointNear(coords.x, coords.y);
+
+            // If workflow is active and waiting for point placement
+            if (state.workflow.active && state.workflow.waitingForPoint) {
+                // Check if clicking near existing point (don't place new point)
+                if (nearPoint) {
+                    return;
+                }
+                // MDV frame-stack: picks must stay on the frame of the
+                // FIRST pick. Re-route off-lock attempts to a toast.
+                if (typeof _mdvCheckFrameLock === 'function'
+                    && !_mdvCheckFrameLock()) {
+                    return;
+                }
+
+                // Place the current point
+                const pointName = state.workflow.currentStep;
+                if (pointName && state.points[pointName] === null) {
+                    state.points[pointName] = coords;
+                    document.getElementById(`status-${pointName}`).classList.add('placed');
+                    state.workflow.waitingForPoint = false;
+                    // MDV: lock the current frame after the first pick.
+                    if (typeof _mdvAfterPickPlaced === 'function') {
+                        _mdvAfterPickPlaced();
+                    }
+
+                    // Hide the dialog
+                    hideDialog();
+
+                    drawCanvas();
+                    tryAutoCalculateExpansionRates();
+
+                    // Continue to next step after a short delay
+                    setTimeout(function() {
+                        continueWorkflow();
+                    }, 300);
+                }
+            } else {
+                // Not in workflow: handle point selection
+                if (nearPoint) {
+                    // Select the point
+                    state.interaction.selectedPoint = nearPoint;
+                } else {
+                    // Deselect if clicking elsewhere
+                    state.interaction.selectedPoint = null;
+                }
+                drawCanvas();
+            }
+        });
+
+        // Mouse wheel handler for zooming
+        canvas.addEventListener('wheel', function(e) {
+            e.preventDefault();
+            if (!state.image) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = (e.clientX - rect.left) * (canvas.width / rect.width);
+            const mouseY = (e.clientY - rect.top) * (canvas.height / rect.height);
+
+            // Zoom factor
+            const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
+            const oldScale = state.transform.scale;
+            const newScale = Math.max(0.1, Math.min(10, oldScale * zoomFactor));
+
+            // Adjust translation to zoom toward mouse position
+            state.transform.translateX = mouseX - (mouseX - state.transform.translateX) * (newScale / oldScale);
+            state.transform.translateY = mouseY - (mouseY - state.transform.translateY) * (newScale / oldScale);
+            state.transform.scale = newScale;
+
+            drawCanvas();
+            updateZoomDisplay();
+        });
+
+        // Touch event handlers for two-finger zoom and pan
+        canvas.addEventListener('touchstart', function(e) {
+            if (!state.image) return;
+
+            state.interaction.isTouchDevice = true; // Mark as touch device
+            state.interaction.touches = Array.from(e.touches);
+
+            if (e.touches.length === 2) {
+                e.preventDefault();
+                state.interaction.isTwoFingerGesture = true;
+
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+
+                // Calculate initial distance for zoom
+                const dx = touch2.clientX - touch1.clientX;
+                const dy = touch2.clientY - touch1.clientY;
+                state.interaction.lastTouchDistance = Math.sqrt(dx * dx + dy * dy);
+
+                // Calculate initial center point for panning (in canvas coordinates)
+                const rect = canvas.getBoundingClientRect();
+                const centerScreenX = (touch1.clientX + touch2.clientX) / 2;
+                const centerScreenY = (touch1.clientY + touch2.clientY) / 2;
+                state.interaction.lastTouchCenterX = (centerScreenX - rect.left) * (canvas.width / rect.width);
+                state.interaction.lastTouchCenterY = (centerScreenY - rect.top) * (canvas.height / rect.height);
+            } else if (e.touches.length === 1) {
+                // One finger: record touch start position and potential point to drag
+                const touch = e.touches[0];
+                state.interaction.touchStartX = touch.clientX;
+                state.interaction.touchStartY = touch.clientY;
+                state.interaction.touchStartTime = Date.now();
+
+                const coords = screenToCanvas(touch.clientX, touch.clientY);
+                const nearPoint = findPointNear(coords.x, coords.y);
+
+                if (nearPoint) {
+                    // Record potential drag point, but don't start dragging yet
+                    state.interaction.potentialDragPoint = nearPoint;
+
+                    // Set long press timer for point selection (1.5 seconds)
+                    if (state.interaction.longPressTimer) {
+                        clearTimeout(state.interaction.longPressTimer);
+                    }
+                    state.interaction.longPressTimer = setTimeout(function() {
+                        // Long press detected - select the point
+                        if (state.interaction.potentialDragPoint && !state.interaction.isDragging) {
+                            state.interaction.selectedPoint = state.interaction.potentialDragPoint;
+                            drawCanvas();
+                            // Optional: Haptic feedback if available
+                            if (navigator.vibrate) {
+                                navigator.vibrate(50);
+                            }
+                        }
+                    }, 1500);
+                } else {
+                    state.interaction.potentialDragPoint = null;
+                }
+                // Wait for touchmove to determine if it's a drag or touchend for tap
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function(e) {
+            if (!state.image) return;
+
+            if (e.touches.length === 2 && state.interaction.isTwoFingerGesture) {
+                e.preventDefault();
+
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+
+                // Calculate current distance and center
+                const dx = touch2.clientX - touch1.clientX;
+                const dy = touch2.clientY - touch1.clientY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                const rect = canvas.getBoundingClientRect();
+                const centerScreenX = (touch1.clientX + touch2.clientX) / 2;
+                const centerScreenY = (touch1.clientY + touch2.clientY) / 2;
+                const centerX = (centerScreenX - rect.left) * (canvas.width / rect.width);
+                const centerY = (centerScreenY - rect.top) * (canvas.height / rect.height);
+
+                if (state.interaction.lastTouchDistance > 0) {
+                    // Apply zoom based on pinch
+                    const zoomFactor = distance / state.interaction.lastTouchDistance;
+                    const oldScale = state.transform.scale;
+                    const newScale = Math.max(0.1, Math.min(10, oldScale * zoomFactor));
+
+                    // Adjust translation to zoom toward pinch center
+                    state.transform.translateX = centerX - (centerX - state.transform.translateX) * (newScale / oldScale);
+                    state.transform.translateY = centerY - (centerY - state.transform.translateY) * (newScale / oldScale);
+                    state.transform.scale = newScale;
+
+                    updateZoomDisplay();
+                }
+
+                // Apply panning based on center movement
+                const panDeltaX = centerX - state.interaction.lastTouchCenterX;
+                const panDeltaY = centerY - state.interaction.lastTouchCenterY;
+                state.transform.translateX += panDeltaX;
+                state.transform.translateY += panDeltaY;
+
+                // Update last values
+                state.interaction.lastTouchDistance = distance;
+                state.interaction.lastTouchCenterX = centerX;
+                state.interaction.lastTouchCenterY = centerY;
+
+                drawCanvas();
+            } else if (e.touches.length === 1) {
+                const touch = e.touches[0];
+
+                // Calculate movement distance
+                const dx = touch.clientX - state.interaction.touchStartX;
+                const dy = touch.clientY - state.interaction.touchStartY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+
+                // Check if we should start dragging a point or panning
+                if (!state.interaction.isDragging && !state.interaction.isPanning && distance > 8) {
+                    // Cancel long press timer if moving
+                    if (state.interaction.longPressTimer) {
+                        clearTimeout(state.interaction.longPressTimer);
+                        state.interaction.longPressTimer = null;
+                    }
+
+                    if (state.interaction.potentialDragPoint) {
+                        // Start dragging the point
+                        state.interaction.isDragging = true;
+                        state.interaction.draggedPoint = state.interaction.potentialDragPoint;
+                        state.interaction.potentialDragPoint = null;
+                    } else {
+                        // Start panning
+                        state.interaction.isPanning = true;
+                    }
+                }
+
+                // Drag point with one finger
+                if (state.interaction.isDragging && state.interaction.draggedPoint) {
+                    e.preventDefault();
+
+                    const coords = screenToCanvas(touch.clientX, touch.clientY);
+                    state.points[state.interaction.draggedPoint] = { x: coords.x, y: coords.y };
+
+                    // Clear visualization data since points changed
+                    state.visualization.active = false;
+                    state.visualization.data = null;
+
+                    drawCanvas();
+                } else if (state.interaction.isPanning) {
+                    // Pan with one finger
+                    e.preventDefault();
+
+                    const rect = canvas.getBoundingClientRect();
+                    const currentX = (touch.clientX - rect.left) * (canvas.width / rect.width);
+                    const currentY = (touch.clientY - rect.top) * (canvas.height / rect.height);
+                    const lastX = (state.interaction.touchStartX - rect.left) * (canvas.width / rect.width);
+                    const lastY = (state.interaction.touchStartY - rect.top) * (canvas.height / rect.height);
+
+                    state.transform.translateX += currentX - lastX;
+                    state.transform.translateY += currentY - lastY;
+
+                    state.interaction.touchStartX = touch.clientX;
+                    state.interaction.touchStartY = touch.clientY;
+
+                    drawCanvas();
+                }
+            }
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function(e) {
+            if (e.touches.length < 2) {
+                state.interaction.isTwoFingerGesture = false;
+                state.interaction.lastTouchDistance = 0;
+            }
+
+            // Detect tap for point selection or placement
+            if (e.touches.length === 0 && e.changedTouches.length === 1) {
+                const touch = e.changedTouches[0];
+                const dx = touch.clientX - state.interaction.touchStartX;
+                const dy = touch.clientY - state.interaction.touchStartY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const duration = Date.now() - state.interaction.touchStartTime;
+
+                // If movement is small and duration is short, treat as tap
+                if (distance < 10 && duration < 500 && !state.interaction.isDragging && !state.interaction.isPanning) {
+                    // Check if tapping on a potential drag point or elsewhere
+                    if (state.interaction.potentialDragPoint) {
+                        // Tapped on a point without dragging - always allow selection
+                        state.interaction.selectedPoint = state.interaction.potentialDragPoint;
+                        drawCanvas();
+                    } else {
+                        // Tapped elsewhere
+                        const coords = screenToCanvas(touch.clientX, touch.clientY);
+
+                        // If workflow is active and waiting for point placement
+                        if (state.workflow.active && state.workflow.waitingForPoint) {
+                            // MDV frame-stack lock check (same as the
+                            // mouse-click handler — keep parity).
+                            if (typeof _mdvCheckFrameLock === 'function'
+                                && !_mdvCheckFrameLock()) {
+                                return;
+                            }
+                            // Place the current point
+                            const pointName = state.workflow.currentStep;
+                            if (pointName && state.points[pointName] === null) {
+                                state.points[pointName] = { x: coords.x, y: coords.y };
+                                document.getElementById(`status-${pointName}`).classList.add('placed');
+                                state.workflow.waitingForPoint = false;
+                                if (typeof _mdvAfterPickPlaced === 'function') {
+                                    _mdvAfterPickPlaced();
+                                }
+
+                                // Hide the dialog
+                                hideDialog();
+
+                                drawCanvas();
+                                tryAutoCalculateExpansionRates();
+
+                                // Continue to next step after a short delay
+                                setTimeout(function() {
+                                    continueWorkflow();
+                                }, 300);
+                            }
+                        } else {
+                            // Not in workflow: deselect
+                            state.interaction.selectedPoint = null;
+                            drawCanvas();
+                        }
+                    }
+                }
+
+                // Clear long press timer on touch end
+                if (state.interaction.longPressTimer) {
+                    clearTimeout(state.interaction.longPressTimer);
+                    state.interaction.longPressTimer = null;
+                }
+
+                state.interaction.isDragging = false;
+                state.interaction.draggedPoint = null;
+                state.interaction.potentialDragPoint = null;
+                state.interaction.isPanning = false;
+                tryAutoCalculateExpansionRates();
+            }
+
+            state.interaction.touches = Array.from(e.touches);
+        });
+
+        canvas.addEventListener('touchcancel', function(e) {
+            // Clear long press timer on cancel
+            if (state.interaction.longPressTimer) {
+                clearTimeout(state.interaction.longPressTimer);
+                state.interaction.longPressTimer = null;
+            }
+
+            state.interaction.isTwoFingerGesture = false;
+            state.interaction.isDragging = false;
+            state.interaction.draggedPoint = null;
+            state.interaction.potentialDragPoint = null;
+            state.interaction.isPanning = false;
+            state.interaction.lastTouchDistance = 0;
+            state.interaction.touches = [];
+        });
+
+        // Helper: restart workflow from a specific point name
+        /* ── Hand-off from Multi-DicomViewer ──
+           When launched from Multi-DicomViewer a <script> in <head>
+           sets window.MDV_HANDOFF = {hpxmm, vpxmm, image} — the DICOM
+           pixel calibration and the displayed image as a data URL.
+           (Fallback: ?hpxmm=&vpxmm= URL params.) With a calibration
+           present the CH/CV calibration steps are skipped entirely. */
+        const MDV = (window.MDV_HANDOFF
+                     && typeof window.MDV_HANDOFF === 'object')
+            ? window.MDV_HANDOFF : null;
+        const URL_CAL = (function () {
+            let h, v;
+            if (MDV) {
+                h = parseFloat(MDV.hpxmm);
+                v = parseFloat(MDV.vpxmm);
+            } else {
+                const q = new URLSearchParams(location.search);
+                h = parseFloat(q.get('hpxmm'));
+                v = parseFloat(q.get('vpxmm'));
+            }
+            return (isFinite(h) && h > 0 && isFinite(v) && v > 0)
+                ? { h: h, v: v } : null;
+        })();
+
+        function calPointSkipped(name) {
+            return !!URL_CAL &&
+                (name.indexOf('CV') === 0 || name.indexOf('CH') === 0);
+        }
+
+        /* Pixels-per-mm: DICOM-supplied when present, else from the
+           manually placed CH/CV points + entered distances. */
+        function getCalib() {
+            if (URL_CAL) {
+                return { h: URL_CAL.h, v: URL_CAL.v,
+                         avg: (URL_CAL.h + URL_CAL.v) / 2 };
+            }
+            const cvD = parseFloat(document.getElementById('cvDistance').value);
+            const chD = parseFloat(document.getElementById('chDistance').value);
+            if (!cvD || !chD) return null;
+            if (!state.points.CV1 || !state.points.CV2 ||
+                !state.points.CH1 || !state.points.CH2) return null;
+            const h = distance(state.points.CH1, state.points.CH2) / chD;
+            const v = distance(state.points.CV1, state.points.CV2) / cvD;
+            return { h: h, v: v, avg: (h + v) / 2 };
+        }
+
+        // Reflect a DICOM-supplied calibration in the UI and lock the
+        // now-unused manual distance fields.
+        if (URL_CAL) {
+            const _applyCalUI = function () {
+                const set = function (id, t) {
+                    const e = document.getElementById(id);
+                    if (e) e.textContent = t;
+                };
+                set('info-h-calibration',
+                    URL_CAL.h.toFixed(2) + ' px/mm (DICOM)');
+                set('info-v-calibration',
+                    URL_CAL.v.toFixed(2) + ' px/mm (DICOM)');
+                ['cvDistance', 'chDistance'].forEach(function (id) {
+                    const e = document.getElementById(id);
+                    if (e) { e.disabled = true; e.placeholder = 'DICOM'; }
+                });
+            };
+            if (document.readyState === 'loading') {
+                window.addEventListener('DOMContentLoaded', _applyCalUI);
+            } else {
+                _applyCalUI();
+            }
+        }
+
+        function restartWorkflowFromPoint(targetPoint) {
+            if (!state.image) return;
+
+            // DICOM calibration supplied -> the CH/CV steps don't exist;
+            // any request to (re)start there jumps straight to A1.
+            if (calPointSkipped(targetPoint)) targetPoint = 'A1';
+
+            // Find the workflow step index for this point
+            const stepIndex = workflowSteps.findIndex(step => step.point === targetPoint);
+            if (stepIndex === -1) return;
+
+            // Hide any existing dialog
+            hideDialog();
+
+            // Reset this point and all subsequent points
+            for (let i = stepIndex; i < workflowSteps.length; i++) {
+                const step = workflowSteps[i];
+                if (step.type === 'input') {
+                    // Clear the corresponding input field
+                    document.getElementById(step.inputId).value = '';
+                } else if (state.points[step.point] !== undefined) {
+                    state.points[step.point] = null;
+                    const statusEl = document.getElementById(`status-${step.point}`);
+                    if (statusEl) statusEl.classList.remove('placed');
+                }
+            }
+
+            // Clear visualization data
+            state.visualization.active = false;
+            state.visualization.data = null;
+
+            // Hide info panels and result
+            document.getElementById('infoPanel').style.display = 'none';
+            document.getElementById('allResultsSection').style.display = 'none';
+            document.getElementById('resultBox').style.display = 'none';
+            document.getElementById('resultValue').textContent = '-';
+
+            drawCanvas();
+
+            // Start workflow from the target step
+            currentWorkflowStep = stepIndex;
+            state.workflow.active = true;
+            showNextStep();
+        }
+
+        // Point-item click handlers: click to restart from that point
+        const pointToWorkflowMap = {
+            'CH1': 'CH1', 'CH2': 'CH2', 'CV1': 'CV1', 'CV2': 'CV2',
+            'A1': 'A1', 'A2': 'A2', 'AC': 'AC', 'B': 'B'
+        };
+        Object.keys(pointToWorkflowMap).forEach(function(pointName) {
+            const statusEl = document.getElementById(`status-${pointName}`);
+            if (statusEl) {
+                statusEl.addEventListener('click', function() {
+                    restartWorkflowFromPoint(pointToWorkflowMap[pointName]);
+                });
+            }
+        });
+
+        // Restart from calibration (CH1)
+        document.getElementById('restartFromCalibration').addEventListener('click', function() {
+            if (!state.image) return;
+            // Also clear balloon diameter inputs
+            document.getElementById('balloonDiameterInput').value = '';
+            document.getElementById('balloonDiameterSelect').value = '';
+            restartWorkflowFromPoint('CH1');
+        });
+
+        // Restart from point designation (A1)
+        document.getElementById('restartFromPoints').addEventListener('click', function() {
+            if (!state.image) return;
+            // Also clear balloon diameter inputs
+            document.getElementById('balloonDiameterInput').value = '';
+            document.getElementById('balloonDiameterSelect').value = '';
+            restartWorkflowFromPoint('A1');
+        });
+
+        // Zoom helper functions
+        function updateZoomDisplay() {
+            const zoomDisplay = document.getElementById('zoomDisplay');
+            if (zoomDisplay) {
+                const percentage = Math.round(state.transform.scale * 100);
+                zoomDisplay.textContent = percentage + '%';
+            }
+        }
+
+        function zoomToPoint(zoomFactor, centerX, centerY) {
+            if (!state.image) return;
+
+            const oldScale = state.transform.scale;
+            const newScale = Math.max(0.1, Math.min(10, oldScale * zoomFactor));
+
+            // Adjust translation to zoom toward center point
+            state.transform.translateX = centerX - (centerX - state.transform.translateX) * (newScale / oldScale);
+            state.transform.translateY = centerY - (centerY - state.transform.translateY) * (newScale / oldScale);
+            state.transform.scale = newScale;
+
+            drawCanvas();
+            updateZoomDisplay();
+        }
+
+        function zoomIn() {
+            if (!state.image) return;
+            // Zoom toward center of canvas
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            zoomToPoint(1.2, centerX, centerY);
+        }
+
+        function zoomOut() {
+            if (!state.image) return;
+            // Zoom toward center of canvas
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+            zoomToPoint(1 / 1.2, centerX, centerY);
+        }
+
+        function resetZoom() {
+            if (!state.image) return;
+            state.transform.scale = 1.0;
+            state.transform.translateX = 0;
+            state.transform.translateY = 0;
+            drawCanvas();
+            updateZoomDisplay();
+        }
+
+        /* ──────────────────────────────────────────────────────────────
+           MDV frame-stack hand-off (IVUS video).
+
+           Multi-DicomViewer sends `MDV.frames` (array of base-64 PNG
+           data-URLs around the current frame) plus `MDV.currentFrame`
+           (the user's starting index in that array). We:
+             * preload every frame's <img>
+             * inject a stepper bar (⏮ ◀ slider ▶ ⏭ + frame label) at
+               the top of the canvas area
+             * swap `state.image` when the user steps frames
+             * lock the working frame after the FIRST workflow pick so
+               every subsequent pick lands on the same frame
+             * release the lock when the user resets the picks
+           Two helpers exposed in scope (_mdvCheckFrameLock,
+           _mdvAfterPickPlaced, _mdvReleaseFrameLock) are called from the
+           main pick handlers so the gating logic stays out of the
+           critical paths. None of this runs when MDV.frames is absent —
+           static-image launches still hit the existing
+           loadImageFromDataURL path.
+           ────────────────────────────────────────────────────────────── */
+        let _mdvFrameStack = null;
+        function _mdvInstallFrameStack(frameUrls, startIndex) {
+            const total = frameUrls.length;
+            if (total === 0) return;
+            const start = Math.max(0, Math.min(total - 1, startIndex | 0));
+            // Preload — onload of frame[start] kicks off the visible
+            // image; the rest warm in the background.
+            const imgs = new Array(total);
+            for (let i = 0; i < total; i++) {
+                const im = new Image();
+                im.src = frameUrls[i];
+                imgs[i] = im;
+            }
+            _mdvFrameStack = {
+                imgs: imgs,
+                total: total,
+                curIndex: start,
+                startIndex: start,     // the user's original IVUS frame
+                lockIndex: null,
+            };
+            // Build the stepper BEFORE loading the initial image so
+            // resizeCanvas() (triggered by loadImageFromDataURL) sees
+            // the stepper's footprint and constrains the canvas
+            // accordingly — otherwise the canvas sizes itself to the
+            // pre-stepper layout and overflows on top of the slider.
+            _mdvBuildStepperUI();
+            _mdvUpdateStepperUI();
+            const _showInitial = function () {
+                loadImageFromDataURL(frameUrls[start]);
+                // The canvas-container height shrinks once the stepper
+                // is in the flow; rerun resizeCanvas on the next tick
+                // so the canvas re-fits and the slider stays clickable.
+                setTimeout(function () {
+                    if (typeof resizeCanvas === 'function') resizeCanvas();
+                    if (typeof drawCanvas === 'function') drawCanvas();
+                }, 0);
+            };
+            if (imgs[start].complete) _showInitial();
+            else imgs[start].addEventListener('load', _showInitial, { once: true });
+        }
+        function _mdvBuildStepperUI() {
+            if (document.getElementById('mdvFrameStepper')) return;
+            // Place the stepper UNDER the IVUS canvas (right after the
+            // .canvas-container) so the slider sits adjacent to the
+            // image. The slider claims the canvas's full width, with
+            // the nav buttons + label + reset on a second row.
+            const bar = document.createElement('div');
+            bar.id = 'mdvFrameStepper';
+            // flex-shrink:0 + position:relative + z-index keep the
+            // stepper visible/clickable even if the canvas-container
+            // above it tries to overflow downward.
+            bar.style.cssText = (
+                'display:flex;flex-direction:column;gap:4px;'
+                + 'padding:6px 8px;margin-top:4px;'
+                + 'background:#1c2533;color:#cfe8ff;'
+                + 'border:1px solid #2a3a55;border-radius:4px;'
+                + 'font:13px/1.2 sans-serif;'
+                + 'flex-shrink:0;flex-grow:0;'
+                + 'position:relative;z-index:50;'
+            );
+            // Row 1: full-width slider that spans the canvas width.
+            // Row 2: ⏮ ◀ ○ ▶ ⏭   …   [N / Total (Locked X)]  [Reset]
+            bar.innerHTML = (
+                '<input type="range" id="mdvFrSlider" '
+                + 'style="width:100%;margin:0;">'
+                + '<div style="display:flex;align-items:center;'
+                + 'gap:6px;">'
+                +   '<button type="button" id="mdvFrFirst" '
+                +     'title="First frame">⏮</button>'
+                +   '<button type="button" id="mdvFrPrev" '
+                +     'title="Previous frame (1 left)">◀</button>'
+                +   '<button type="button" id="mdvFrCenter" '
+                +     'title="Return to the locked frame, or to '
+                +     'the starting frame before any pick.">○</button>'
+                +   '<button type="button" id="mdvFrNext" '
+                +     'title="Next frame (1 right)">▶</button>'
+                +   '<button type="button" id="mdvFrLast" '
+                +     'title="Last frame">⏭</button>'
+                +   '<span style="flex:1;"></span>'
+                +   '<span id="mdvFrLabel" '
+                +     'style="font-variant-numeric:tabular-nums;">'
+                +   '</span>'
+                +   '<button type="button" id="mdvFrReset" '
+                +     'title="Clear ALL picks so the first pick can '
+                +     'be placed on any frame again.">'
+                +     'Reset Locked Frame</button>'
+                + '</div>'
+            );
+            // Buttons styled minimally — match the page's dark theme.
+            const btnCss = (
+                'background:#243250;color:#eaf2ff;'
+                + 'border:1px solid #3a4d6e;border-radius:4px;'
+                + 'padding:3px 10px;cursor:pointer;'
+                + 'font:13px/1.2 sans-serif;'
+            );
+            ['mdvFrFirst','mdvFrPrev','mdvFrCenter',
+             'mdvFrNext','mdvFrLast'].forEach(
+                function(id){ bar.querySelector('#'+id).style.cssText
+                    = btnCss; });
+            // Make the reset button visually distinct (it changes
+            // workflow state, not just navigation).
+            bar.querySelector('#mdvFrReset').style.cssText = (
+                btnCss
+                + 'background:#5a2a2a;border-color:#8a4040;'
+                + 'font-weight:bold;'
+            );
+            // Insert right after the canvas-container, falling back
+            // to body-end if the layout has changed.
+            const cc = document.querySelector('.canvas-container');
+            if (cc && cc.parentNode) {
+                cc.parentNode.insertBefore(bar, cc.nextSibling);
+            } else {
+                document.body.appendChild(bar);
+            }
+
+            const slider = bar.querySelector('#mdvFrSlider');
+            slider.min = 0;
+            slider.max = _mdvFrameStack.total - 1;
+            slider.step = 1;
+            slider.value = _mdvFrameStack.curIndex;
+            slider.addEventListener('input', function() {
+                _mdvSetFrame(parseInt(slider.value, 10));
+            });
+            bar.querySelector('#mdvFrFirst').onclick =
+                function(){ _mdvSetFrame(0); };
+            bar.querySelector('#mdvFrPrev').onclick =
+                function(){ _mdvSetFrame(_mdvFrameStack.curIndex - 1); };
+            bar.querySelector('#mdvFrCenter').onclick = function(){
+                // Locked? jump back to the locked frame. Otherwise
+                // back to the user's original IVUS frame.
+                const t = (_mdvFrameStack.lockIndex !== null)
+                    ? _mdvFrameStack.lockIndex
+                    : _mdvFrameStack.startIndex;
+                _mdvSetFrame(t);
+            };
+            bar.querySelector('#mdvFrNext').onclick =
+                function(){ _mdvSetFrame(_mdvFrameStack.curIndex + 1); };
+            bar.querySelector('#mdvFrLast').onclick =
+                function(){ _mdvSetFrame(_mdvFrameStack.total - 1); };
+            bar.querySelector('#mdvFrReset').onclick = function(){
+                // Re-uses the existing reset-all path — clears every
+                // workflow point and releases the frame lock via the
+                // resetPoints() hook below.
+                resetPoints();
+                // After resetPoints the user usually needs the
+                // workflow re-armed so the next click drops a point.
+                if (typeof restartWorkflowFromPoint === 'function') {
+                    // Skip CV/CH when DICOM calibration is supplied,
+                    // start at A1 — matches the DICOM-handoff default.
+                    restartWorkflowFromPoint('A1');
+                }
+            };
+        }
+        function _mdvUpdateStepperUI() {
+            if (!_mdvFrameStack) return;
+            const lbl = document.getElementById('mdvFrLabel');
+            const sl = document.getElementById('mdvFrSlider');
+            const center = document.getElementById('mdvFrCenter');
+            if (sl) sl.value = _mdvFrameStack.curIndex;
+            if (lbl) {
+                let txt = (_mdvFrameStack.curIndex + 1) + ' / '
+                          + _mdvFrameStack.total;
+                if (_mdvFrameStack.lockIndex !== null) {
+                    txt += '   (Locked '
+                           + (_mdvFrameStack.lockIndex + 1) + ')';
+                    lbl.style.color =
+                        (_mdvFrameStack.curIndex
+                         === _mdvFrameStack.lockIndex)
+                        ? '#9fffa0' : '#ffa080';
+                } else {
+                    lbl.style.color = '#cfe8ff';
+                }
+                lbl.textContent = txt;
+            }
+            // Center-button tooltip reflects where it'll send you.
+            if (center) {
+                center.title = (_mdvFrameStack.lockIndex !== null)
+                    ? ('Return to the locked frame ('
+                        + (_mdvFrameStack.lockIndex + 1) + ').')
+                    : ('Return to the starting frame ('
+                        + (_mdvFrameStack.startIndex + 1)
+                        + ') — used until the first pick locks it.');
+            }
+        }
+        function _mdvSetFrame(idx) {
+            if (!_mdvFrameStack) return;
+            idx = Math.max(0, Math.min(_mdvFrameStack.total - 1, idx | 0));
+            if (idx === _mdvFrameStack.curIndex) return;
+            _mdvFrameStack.curIndex = idx;
+            const im = _mdvFrameStack.imgs[idx];
+            const _swap = function () {
+                state.image = im;
+                drawCanvas();
+                _mdvUpdateStepperUI();
+            };
+            if (im.complete) _swap();
+            else im.addEventListener('load', _swap, { once: true });
+            _mdvUpdateStepperUI();
+        }
+        function _mdvCheckFrameLock() {
+            if (!_mdvFrameStack) return true;
+            if (_mdvFrameStack.lockIndex === null) return true;
+            if (_mdvFrameStack.curIndex === _mdvFrameStack.lockIndex)
+                return true;
+            _mdvShowLockToast();
+            return false;
+        }
+        function _mdvAfterPickPlaced() {
+            if (!_mdvFrameStack) return;
+            if (_mdvFrameStack.lockIndex === null) {
+                _mdvFrameStack.lockIndex = _mdvFrameStack.curIndex;
+                _mdvUpdateStepperUI();
+            }
+        }
+        function _mdvReleaseFrameLock() {
+            if (!_mdvFrameStack) return;
+            _mdvFrameStack.lockIndex = null;
+            _mdvUpdateStepperUI();
+        }
+        let _mdvToastTimer = null;
+        function _mdvShowLockToast() {
+            let t = document.getElementById('mdvLockToast');
+            if (!t) {
+                t = document.createElement('div');
+                t.id = 'mdvLockToast';
+                t.style.cssText = (
+                    'position:fixed;top:60px;left:50%;'
+                    + 'transform:translateX(-50%);'
+                    + 'background:#742a2a;color:#ffe8e8;'
+                    + 'padding:10px 18px;border-radius:6px;'
+                    + 'font:14px/1.3 sans-serif;font-weight:bold;'
+                    + 'box-shadow:0 4px 12px rgba(0,0,0,.4);'
+                    + 'z-index:200;'
+                );
+                document.body.appendChild(t);
+            }
+            t.textContent =
+                'Picks are locked to frame '
+                + (_mdvFrameStack.lockIndex + 1)
+                + ' — go back to that frame to place the next point.';
+            t.style.display = 'block';
+            if (_mdvToastTimer) clearTimeout(_mdvToastTimer);
+            _mdvToastTimer = setTimeout(function () {
+                t.style.display = 'none';
+            }, 2200);
+        }
+
+        function resetPoints() {
+            // Reset all points
+            for (const key in state.points) {
+                state.points[key] = null;
+                document.getElementById(`status-${key}`).classList.remove('placed');
+            }
+            state.currentPointIndex = 0;
+
+            // MDV frame-stack: release the working-frame lock so the
+            // user can pick again on any frame they like.
+            if (typeof _mdvReleaseFrameLock === 'function') {
+                _mdvReleaseFrameLock();
+            }
+
+            // Clear visualization data
+            state.visualization.active = false;
+            state.visualization.data = null;
+
+            // Keep calibration data (cvDistance and chDistance)
+            // Do NOT clear: document.getElementById('cvDistance').value
+            // Do NOT clear: document.getElementById('chDistance').value
+
+            // Clear balloon diameter inputs
+            document.getElementById('balloonDiameterInput').value = '';
+            document.getElementById('balloonDiameterSelect').value = '';
+
+            // Hide info panels
+            document.getElementById('infoPanel').style.display = 'none';
+            document.getElementById('allResultsSection').style.display = 'none';
+            document.getElementById('resultBox').style.display = 'none';
+            document.getElementById('resultValue').textContent = '-';
+
+            drawCanvas();
+
+            // Do NOT show reset choice dialog - directly go to point placement
+            // User stays in the current workflow state (point placement)
+        }
+
+        // Zoom button event listeners
+        document.getElementById('zoomIn').addEventListener('click', zoomIn);
+        document.getElementById('zoomOut').addEventListener('click', zoomOut);
+        document.getElementById('zoomReset').addEventListener('click', resetZoom);
+
+        // Make zoom controls draggable
+        function makeZoomControlsDraggable() {
+            const zoomControls = document.getElementById('zoomControls');
+            let isDragging = false;
+            let currentX = 0;
+            let currentY = 0;
+            let initialX = 0;
+            let initialY = 0;
+            let xOffset = 0;
+            let yOffset = 0;
+
+            zoomControls.addEventListener('mousedown', dragStart);
+            document.addEventListener('mousemove', drag);
+            document.addEventListener('mouseup', dragEnd);
+
+            zoomControls.addEventListener('touchstart', touchStart, { passive: false });
+            document.addEventListener('touchmove', touchDrag, { passive: false });
+            document.addEventListener('touchend', touchEnd);
+
+            function dragStart(e) {
+                // Don't drag if clicking on buttons
+                if (e.target.tagName === 'BUTTON') {
+                    return;
+                }
+
+                initialX = e.clientX - xOffset;
+                initialY = e.clientY - yOffset;
+
+                if (e.target === zoomControls || e.target.classList.contains('zoom-display')) {
+                    isDragging = true;
+                }
+            }
+
+            function drag(e) {
+                if (isDragging) {
+                    e.preventDefault();
+
+                    currentX = e.clientX - initialX;
+                    currentY = e.clientY - initialY;
+
+                    xOffset = currentX;
+                    yOffset = currentY;
+
+                    setTranslate(currentX, currentY, zoomControls);
+                }
+            }
+
+            function dragEnd(e) {
+                initialX = currentX;
+                initialY = currentY;
+
+                isDragging = false;
+            }
+
+            function touchStart(e) {
+                // Don't drag if touching buttons
+                if (e.target.tagName === 'BUTTON') {
+                    return;
+                }
+
+                const touch = e.touches[0];
+                initialX = touch.clientX - xOffset;
+                initialY = touch.clientY - yOffset;
+
+                if (e.target === zoomControls || e.target.classList.contains('zoom-display')) {
+                    isDragging = true;
+                }
+            }
+
+            function touchDrag(e) {
+                if (isDragging) {
+                    e.preventDefault();
+
+                    const touch = e.touches[0];
+                    currentX = touch.clientX - initialX;
+                    currentY = touch.clientY - initialY;
+
+                    xOffset = currentX;
+                    yOffset = currentY;
+
+                    setTranslate(currentX, currentY, zoomControls);
+                }
+            }
+
+            function touchEnd(e) {
+                initialX = currentX;
+                initialY = currentY;
+
+                isDragging = false;
+            }
+
+            function setTranslate(xPos, yPos, el) {
+                el.style.transform = `translate(${xPos}px, ${yPos}px)`;
+            }
+        }
+
+        makeZoomControlsDraggable();
+
+        // On mobile, move infoPanel, allResultsSection, and instructions below calculate button
+        function rearrangeForMobile() {
+            const mobileBottom = document.getElementById('mobileBottomSection');
+            const infoPanel = document.getElementById('infoPanel');
+            const allResults = document.getElementById('allResultsSection');
+            const instructions = document.querySelector('.controls-section > .instructions');
+
+            if (window.innerWidth < 768) {
+                mobileBottom.style.display = '';
+                if (instructions && instructions.parentElement !== mobileBottom) {
+                    mobileBottom.appendChild(infoPanel);
+                    mobileBottom.appendChild(allResults);
+                    mobileBottom.appendChild(instructions);
+                }
+            } else {
+                mobileBottom.style.display = 'none';
+                // Move back to original positions
+                const canvasSection = document.querySelector('.canvas-section');
+                const controlsSection = document.querySelector('.controls-section');
+                if (infoPanel.parentElement === mobileBottom) {
+                    canvasSection.appendChild(infoPanel);
+                    canvasSection.appendChild(allResults);
+                    controlsSection.insertBefore(instructions, controlsSection.firstChild);
+                }
+            }
+        }
+        rearrangeForMobile();
+        window.addEventListener('resize', rearrangeForMobile);
+
+        // Draw canvas
+        function drawCanvas() {
+            if (!state.image) return;
+
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Apply transformation
+            ctx.translate(state.transform.translateX, state.transform.translateY);
+            ctx.scale(state.transform.scale, state.transform.scale);
+
+            // For mobile: offset to center image in square canvas
+            // This affects all drawing (image, points, lines)
+            if (window.innerWidth < 768) {
+                const offsetX = (canvas.width - state.image.width) / 2;
+                const offsetY = (canvas.height - state.image.height) / 2;
+                ctx.translate(offsetX, offsetY);
+            }
+
+            // Draw image
+            ctx.drawImage(state.image, 0, 0);
+
+            // Calculate display scale factor (image resolution vs screen display size)
+            const rect = canvas.getBoundingClientRect();
+            const displayScale = canvas.width / rect.width;
+            const combinedScale = state.transform.scale / displayScale;
+
+            // Draw points
+            // pointCombinedScale: partial zoom scaling - points shrink when zooming out
+            const pointCombinedScale = Math.sqrt(combinedScale);
+            for (const [name, point] of Object.entries(state.points)) {
+                if (point) {
+                    const isCalibrPoint = name.startsWith('CV') || name.startsWith('CH');
+                    const isPointB = name === 'B';
+                    const isA1A2AC = name === 'A1' || name === 'A2' || name === 'AC';
+                    const isHovered = name === state.interaction.hoveredPoint;
+                    const isSelected = name === state.interaction.selectedPoint;
+                    const pointScale = (isCalibrPoint || isA1A2AC || isPointB) ? 2.0 : 1.0; // Calibration, A1/A2/AC, B points are 2x larger
+                    const hoverScale = isHovered ? 1.3 : 1.0; // Hovered points are 1.3x larger
+
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, (4 * pointScale * hoverScale) / pointCombinedScale, 0, 2 * Math.PI);
+
+                    if (isCalibrPoint) {
+                        // Hollow circle for calibration points
+                        ctx.strokeStyle = pointColors[name];
+                        ctx.lineWidth = (2 * pointScale * hoverScale) / pointCombinedScale;
+                        ctx.stroke();
+                        ctx.strokeStyle = 'white';
+                        ctx.lineWidth = (0.7 * pointScale * hoverScale) / pointCombinedScale;
+                        ctx.stroke();
+                    } else {
+                        // Filled circle for other points
+                        ctx.fillStyle = pointColors[name];
+                        ctx.fill();
+                        ctx.strokeStyle = 'black';
+                        ctx.lineWidth = (1.5 * hoverScale) / pointCombinedScale;
+                        ctx.stroke();
+                    }
+
+                    // Add highlight ring for selected point (brighter and more prominent)
+                    if (isSelected) {
+                        // Outer ring
+                        ctx.strokeStyle = '#00ff00'; // Bright green
+                        ctx.lineWidth = (2 * hoverScale) / pointCombinedScale;
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, (8 * pointScale * hoverScale) / pointCombinedScale, 0, 2 * Math.PI);
+                        ctx.stroke();
+                        // Inner ring
+                        ctx.strokeStyle = '#ffffff'; // White
+                        ctx.lineWidth = (1.5 * hoverScale) / pointCombinedScale;
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, (6.5 * pointScale * hoverScale) / pointCombinedScale, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    } else if (isHovered) {
+                        // Add highlight ring for hovered point (less prominent than selected)
+                        ctx.strokeStyle = 'yellow';
+                        ctx.lineWidth = (1.5 * hoverScale) / pointCombinedScale;
+                        ctx.beginPath();
+                        ctx.arc(point.x, point.y, (6.5 * pointScale * hoverScale) / pointCombinedScale, 0, 2 * Math.PI);
+                        ctx.stroke();
+                    }
+
+                    // Label
+                    ctx.fillStyle = 'white';
+                    ctx.font = `bold ${12 / pointCombinedScale}px Arial`;
+                    ctx.strokeStyle = 'black';
+                    ctx.lineWidth = 2.5 / pointCombinedScale;
+                    ctx.strokeText(name, point.x + 8 / pointCombinedScale, point.y - 8 / pointCombinedScale);
+                    ctx.fillText(name, point.x + 8 / pointCombinedScale, point.y - 8 / pointCombinedScale);
+                }
+            }
+
+            // Draw calibration lines
+            if (state.points.CV1 && state.points.CV2) {
+                ctx.strokeStyle = 'cyan';
+                ctx.lineWidth = 2 / combinedScale;
+                ctx.setLineDash([5 / combinedScale, 5 / combinedScale]);
+                ctx.beginPath();
+                ctx.moveTo(state.points.CV1.x, state.points.CV1.y);
+                ctx.lineTo(state.points.CV2.x, state.points.CV2.y);
+                ctx.stroke();
+            }
+
+            if (state.points.CH1 && state.points.CH2) {
+                ctx.strokeStyle = 'cyan';
+                ctx.lineWidth = 2 / combinedScale;
+                ctx.setLineDash([5 / combinedScale, 5 / combinedScale]);
+                ctx.beginPath();
+                ctx.moveTo(state.points.CH1.x, state.points.CH1.y);
+                ctx.lineTo(state.points.CH2.x, state.points.CH2.y);
+                ctx.stroke();
+            }
+
+            ctx.setLineDash([]);
+
+            // If visualization data exists, redraw it
+            if (state.visualization.active && state.visualization.data) {
+                drawVisualizationLines(state.visualization.data);
+            }
+        }
+
+        // Calculate distance between two points
+        function distance(p1, p2) {
+            return Math.sqrt(Math.pow(p2.x - p1.x, 2) + Math.pow(p2.y - p1.y, 2));
+        }
+
+        // Calculate circle from 3 points
+        function circleFrom3Points(p1, p2, p3) {
+            const ax = p1.x, ay = p1.y;
+            const bx = p2.x, by = p2.y;
+            const cx = p3.x, cy = p3.y;
+
+            const d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+            if (Math.abs(d) < 1e-10) return null;
+
+            const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d;
+            const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d;
+
+            const radius = Math.sqrt((ax - ux) ** 2 + (ay - uy) ** 2);
+
+            return { center: { x: ux, y: uy }, radius };
+        }
+
+        // Calculate arc length
+        // useLongerArc: true = use longer arc, false = use shorter arc
+        function arcLength(p1, p2, center, radius, useLongerArc = false) {
+            const angle1 = Math.atan2(p1.y - center.y, p1.x - center.x);
+            const angle2 = Math.atan2(p2.y - center.y, p2.x - center.x);
+            let angleDiff = angle2 - angle1;
+
+            // Normalize angle
+            while (angleDiff > Math.PI) angleDiff -= 2 * Math.PI;
+            while (angleDiff < -Math.PI) angleDiff += 2 * Math.PI;
+
+            const arcAngle = Math.abs(angleDiff);
+
+            // If useLongerArc is true, use the longer arc (2π - arcAngle)
+            const finalAngle = useLongerArc ? (2 * Math.PI - arcAngle) : arcAngle;
+
+            return finalAngle * radius;
+        }
+
+        // Calculate function for a specific balloon diameter
+        function calculateForBalloonDiameter(balloonDiameter, avgPixelsPerMm) {
+
+            // Calculate original arc (A1-AC-A2)
+            const originalCircle = circleFrom3Points(state.points.A1, state.points.AC, state.points.A2);
+            if (!originalCircle) {
+                alert('A1, AC, A2の点から円を計算できませんでした');
+                return;
+            }
+
+            // Calculate angle A1-C-A2 to determine which arc to use
+            const angle1 = Math.atan2(state.points.A1.y - originalCircle.center.y, state.points.A1.x - originalCircle.center.x);
+            const angle2 = Math.atan2(state.points.A2.y - originalCircle.center.y, state.points.A2.x - originalCircle.center.x);
+            const angleAC = Math.atan2(state.points.AC.y - originalCircle.center.y, state.points.AC.x - originalCircle.center.x);
+
+            // Calculate angle difference A1 to A2
+            let angleDiff_A1_A2 = angle2 - angle1;
+            while (angleDiff_A1_A2 > Math.PI) angleDiff_A1_A2 -= 2 * Math.PI;
+            while (angleDiff_A1_A2 < -Math.PI) angleDiff_A1_A2 += 2 * Math.PI;
+
+            // Calculate angle difference A1 to AC
+            let angleDiff_A1_AC = angleAC - angle1;
+            while (angleDiff_A1_AC > Math.PI) angleDiff_A1_AC -= 2 * Math.PI;
+            while (angleDiff_A1_AC < -Math.PI) angleDiff_A1_AC += 2 * Math.PI;
+
+            // Check if AC is between A1 and A2 on the shorter arc
+            const acOnShorterArc = (angleDiff_A1_A2 > 0 && angleDiff_A1_AC > 0 && angleDiff_A1_AC < angleDiff_A1_A2) ||
+                                   (angleDiff_A1_A2 < 0 && angleDiff_A1_AC < 0 && angleDiff_A1_AC > angleDiff_A1_A2);
+
+            // Calculate the angle of arc A1-AC-A2 (via AC)
+            const angleA1CA2 = acOnShorterArc ? Math.abs(angleDiff_A1_A2) : (2 * Math.PI - Math.abs(angleDiff_A1_A2));
+            const angleA1CA2_deg = angleA1CA2 * 180 / Math.PI;
+
+            // Calculate yellow dotted line: A1-AC-A2 arc (via AC)
+            // This is the sum of A1→AC arc + AC→A2 arc
+            const arcA1_AC = Math.abs(angleDiff_A1_AC) * originalCircle.radius;
+            const angleDiff_AC_A2 = angle2 - angleAC;
+            let normalizedAngleDiff_AC_A2 = angleDiff_AC_A2;
+            while (normalizedAngleDiff_AC_A2 > Math.PI) normalizedAngleDiff_AC_A2 -= 2 * Math.PI;
+            while (normalizedAngleDiff_AC_A2 < -Math.PI) normalizedAngleDiff_AC_A2 += 2 * Math.PI;
+            const arcAC_A2 = Math.abs(normalizedAngleDiff_AC_A2) * originalCircle.radius;
+
+            // Total arc length via AC (yellow dotted line)
+            const originalArcLengthPixels = arcA1_AC + arcAC_A2;
+            const originalArcLengthMm = originalArcLengthPixels / avgPixelsPerMm;
+
+            // Calculate balloon circle at point B
+            const balloonRadiusPixels = (balloonDiameter / 2) * avgPixelsPerMm;
+
+            // Calculate virtual balloon center using geometric method
+            // Step 1: Find the direction vector of line A1-A2
+            const dx_A1A2 = state.points.A2.x - state.points.A1.x;
+            const dy_A1A2 = state.points.A2.y - state.points.A1.y;
+            const len_A1A2 = Math.sqrt(dx_A1A2 * dx_A1A2 + dy_A1A2 * dy_A1A2);
+            const unitX_A1A2 = dx_A1A2 / len_A1A2;
+            const unitY_A1A2 = dy_A1A2 / len_A1A2;
+
+            // Step 2: Project point B onto line A1-A2 to find the foot of perpendicular
+            const dx_A1B = state.points.B.x - state.points.A1.x;
+            const dy_A1B = state.points.B.y - state.points.A1.y;
+            const projection = dx_A1B * unitX_A1A2 + dy_A1B * unitY_A1A2;
+
+            // Foot of perpendicular from B to line A1-A2
+            const footX = state.points.A1.x + projection * unitX_A1A2;
+            const footY = state.points.A1.y + projection * unitY_A1A2;
+
+            // Step 3: Calculate perpendicular direction to line A1-A2
+            // Two perpendicular directions: (-dy, dx) and (dy, -dx) normalized
+            const perpX1 = -unitY_A1A2;
+            const perpY1 = unitX_A1A2;
+            const perpX2 = unitY_A1A2;
+            const perpY2 = -unitX_A1A2;
+
+            // Step 4: Calculate two candidate centers at distance balloonRadius from B
+            const candidate1 = {
+                x: state.points.B.x + balloonRadiusPixels * perpX1,
+                y: state.points.B.y + balloonRadiusPixels * perpY1
+            };
+            const candidate2 = {
+                x: state.points.B.x + balloonRadiusPixels * perpX2,
+                y: state.points.B.y + balloonRadiusPixels * perpY2
+            };
+
+            // Step 5: Choose the candidate that is closer to AC
+            const dist1_to_AC = distance(candidate1, state.points.AC);
+            const dist2_to_AC = distance(candidate2, state.points.AC);
+
+            const virtualBalloonCenter = dist1_to_AC < dist2_to_AC ? candidate1 : candidate2;
+
+            // Step 5: Virtual balloon radius = balloon radius
+            // The virtual balloon has the same diameter as the specified balloon diameter
+            const virtualBalloonRadius = balloonRadiusPixels;
+
+            console.log('Virtual balloon calculation (geometric):');
+            console.log('Balloon radius (pixels):', balloonRadiusPixels);
+            console.log('Balloon diameter (mm):', balloonDiameter);
+            console.log('Point B:', state.points.B);
+            console.log('Point AC:', state.points.AC);
+            console.log('Foot of perpendicular:', {x: footX, y: footY});
+            console.log('Candidate 1:', candidate1, 'Distance to AC:', dist1_to_AC.toFixed(2));
+            console.log('Candidate 2:', candidate2, 'Distance to AC:', dist2_to_AC.toFixed(2));
+            console.log('Selected virtual balloon center C:', virtualBalloonCenter, '(closer to AC)');
+            console.log('Virtual balloon radius (pixels):', virtualBalloonRadius);
+            console.log('Virtual balloon diameter (mm):', (virtualBalloonRadius * 2 / avgPixelsPerMm).toFixed(2));
+            console.log('Distance C to B:', distance(virtualBalloonCenter, state.points.B).toFixed(2));
+            console.log('Distance C to AC:', Math.min(dist1_to_AC, dist2_to_AC).toFixed(2));
+
+            // Save foot point for visualization
+            const footPoint = {x: footX, y: footY};
+
+            // Calculate angle A1-C-AC (at virtual balloon center C)
+            const angleA1_atC = Math.atan2(state.points.A1.y - virtualBalloonCenter.y, state.points.A1.x - virtualBalloonCenter.x);
+            const angleAC_atC = Math.atan2(state.points.AC.y - virtualBalloonCenter.y, state.points.AC.x - virtualBalloonCenter.x);
+            let angleDiff = angleAC_atC - angleA1_atC;
+
+            // Normalize to [0, 2π]
+            while (angleDiff < 0) angleDiff += 2 * Math.PI;
+            while (angleDiff >= 2 * Math.PI) angleDiff -= 2 * Math.PI;
+
+            // NEW METHOD: Calculate intersection points B1, B2
+            // B1, B2 are on the circle and on a line parallel to A1-A2 passing through C
+            // Direction vector parallel to A1-A2
+            const unitX_parallel = unitX_A1A2;
+            const unitY_parallel = unitY_A1A2;
+
+            // B1 and B2 are at distance virtualBalloonRadius from C along the parallel direction
+            const B1 = {
+                x: virtualBalloonCenter.x - virtualBalloonRadius * unitX_parallel,
+                y: virtualBalloonCenter.y - virtualBalloonRadius * unitY_parallel
+            };
+            const B2 = {
+                x: virtualBalloonCenter.x + virtualBalloonRadius * unitX_parallel,
+                y: virtualBalloonCenter.y + virtualBalloonRadius * unitY_parallel
+            };
+
+            // Determine which is closer to A1 and A2
+            const distB1_A1 = distance(B1, state.points.A1);
+            const distB1_A2 = distance(B1, state.points.A2);
+            const distB2_A1 = distance(B2, state.points.A1);
+            const distB2_A2 = distance(B2, state.points.A2);
+
+            // Swap if necessary so B1 is on A1 side and B2 is on A2 side
+            let pointB1 = B1;
+            let pointB2 = B2;
+            if (distB1_A1 > distB2_A1) {
+                pointB1 = B2;
+                pointB2 = B1;
+            }
+
+            // Calculate new stretched adventitia length (red dotted line)
+            // Compare distances: B to virtual center vs B to footPoint
+            const distBToVirtualCenter = distance(state.points.B, virtualBalloonCenter);
+            const distBToFootPoint = distance(state.points.B, footPoint);
+
+            // Calculate arc length B1 to B2 on virtual balloon
+            const angleB1_atC = Math.atan2(pointB1.y - virtualBalloonCenter.y, pointB1.x - virtualBalloonCenter.x);
+            const angleB2_atC = Math.atan2(pointB2.y - virtualBalloonCenter.y, pointB2.x - virtualBalloonCenter.x);
+            let angleDiff_B1B2 = angleB2_atC - angleB1_atC;
+            // Normalize angle to [-π, π]
+            while (angleDiff_B1B2 > Math.PI) angleDiff_B1B2 -= 2 * Math.PI;
+            while (angleDiff_B1B2 < -Math.PI) angleDiff_B1B2 += 2 * Math.PI;
+
+            // Arc length from B1 to B2 (red dotted line excluding A1-B1 and A2-B2)
+            const arcB1_B2 = Math.abs(angleDiff_B1B2) * virtualBalloonRadius;
+
+            const lengthA1_B1 = distance(state.points.A1, pointB1);
+            const lengthA2_B2 = distance(state.points.A2, pointB2);
+
+            let stretchedAdventitiaLengthPixels;
+            const includeA1B1A2B2 = distBToVirtualCenter > distBToFootPoint;
+            if (includeA1B1A2B2) {
+                // Red dotted line = A1-B1 + B1→B2 arc + B2-A2
+                stretchedAdventitiaLengthPixels = lengthA1_B1 + arcB1_B2 + lengthA2_B2;
+            } else {
+                // Red dotted line = B1→B2 arc only
+                stretchedAdventitiaLengthPixels = arcB1_B2;
+            }
+            const stretchedAdventitiaLengthMm = stretchedAdventitiaLengthPixels / avgPixelsPerMm;
+
+            console.log('NEW METHOD - B1, B2 calculation:');
+            console.log('B1 (A1 side):', pointB1);
+            console.log('B2 (A2 side):', pointB2);
+            console.log('Distance B to Virtual Center (green circle):', (distBToVirtualCenter / avgPixelsPerMm).toFixed(2), 'mm');
+            console.log('Distance B to Foot Point (pink circle):', (distBToFootPoint / avgPixelsPerMm).toFixed(2), 'mm');
+            console.log('Algorithm selected:', distBToVirtualCenter > distBToFootPoint ? 'Arc B1-B2 + A1-B1 + A2-B2' : 'Arc B1-B2 only');
+            console.log('A1-B1 distance:', (lengthA1_B1 / avgPixelsPerMm).toFixed(2), 'mm');
+            console.log('A2-B2 distance:', (lengthA2_B2 / avgPixelsPerMm).toFixed(2), 'mm');
+            console.log('Arc B1-B2:', (arcB1_B2 / avgPixelsPerMm).toFixed(2), 'mm');
+            console.log('Total stretched length:', stretchedAdventitiaLengthMm.toFixed(2), 'mm');
+
+            // Calculate stretch ratio
+            const stretchRatio = stretchedAdventitiaLengthMm / originalArcLengthMm;
+
+            // Return results
+            return {
+                balloonDiameter: balloonDiameter,
+                originalArcLengthMm: originalArcLengthMm,
+                stretchedAdventitiaLengthMm: stretchedAdventitiaLengthMm,
+                stretchRatio: stretchRatio,
+                angleA1CA2_deg: angleA1CA2_deg,
+                angleA1CA2_rad: angleA1CA2,
+                originalCircle: originalCircle,
+                virtualBalloonCenter: virtualBalloonCenter,
+                virtualBalloonRadius: virtualBalloonRadius,
+                balloonRadiusPixels: balloonRadiusPixels,
+                footPoint: footPoint,
+                pointB1: pointB1,
+                pointB2: pointB2,
+                includeA1B1A2B2: includeA1B1A2B2
+            };
+        }
+
+        // Auto-calculate expansion rate table when all points and calibration are ready
+        function tryAutoCalculateExpansionRates() {
+            // Check all points are placed (CH/CV skipped under DICOM cal).
+            for (const [name, point] of Object.entries(state.points)) {
+                if (calPointSkipped(name)) continue;
+                if (!point) return;
+            }
+            const cal = getCalib();
+            if (!cal) return;
+            updateExpansionRateResults(cal.avg);
+        }
+
+        // Calculate button
+        document.getElementById('calculateBtn').addEventListener('click', function() {
+            // Validate all points are placed (CH/CV skipped under DICOM cal).
+            for (const [name, point] of Object.entries(state.points)) {
+                if (calPointSkipped(name)) continue;
+                if (!point) {
+                    alert(`点 ${name} が配置されていません`);
+                    return;
+                }
+            }
+
+            // Get balloon diameter
+            let balloonDiameter = parseFloat(document.getElementById('balloonDiameterInput').value);
+            if (!balloonDiameter) {
+                balloonDiameter = parseFloat(document.getElementById('balloonDiameterSelect').value);
+            }
+
+            if (!balloonDiameter) {
+                alert('バルーン直径を入力してください');
+                return;
+            }
+
+            // Pixels per mm — DICOM-supplied when present, else from the
+            // manually placed CH/CV points.
+            const _cal = getCalib();
+            if (!_cal) {
+                alert('キャリブレーション値を入力してください');
+                return;
+            }
+            const hPixelsPerMm = _cal.h;
+            const vPixelsPerMm = _cal.v;
+            const avgPixelsPerMm = _cal.avg;
+            state.calibration.pixelsPerMm = avgPixelsPerMm;
+
+            // Calculate for the selected balloon diameter
+            const mainResult = calculateForBalloonDiameter(balloonDiameter, avgPixelsPerMm);
+            if (!mainResult) {
+                return;
+            }
+
+            console.log('Final calculations:');
+            console.log('Original arc (A1-AC-A2) length (mm):', mainResult.originalArcLengthMm.toFixed(2));
+            console.log('Angle A1-C-A2 (degrees):', mainResult.angleA1CA2_deg.toFixed(2));
+            console.log('Angle A1-C-A2 (radians):', mainResult.angleA1CA2_rad.toFixed(4));
+            console.log('Stretched adventitia length (mm):', mainResult.stretchedAdventitiaLengthMm.toFixed(2));
+            console.log('Stretch ratio:', mainResult.stretchRatio.toFixed(2));
+
+            // Display main result
+            document.getElementById('resultBox').style.display = '';
+            document.getElementById('resultValue').textContent = mainResult.stretchRatio.toFixed(2);
+
+            // Update info panel
+            document.getElementById('infoPanel').style.display = 'block';
+            document.getElementById('info-h-calibration').textContent = `${hPixelsPerMm.toFixed(2)} px/mm`;
+            document.getElementById('info-v-calibration').textContent = `${vPixelsPerMm.toFixed(2)} px/mm`;
+            document.getElementById('info-original-arc').textContent = `${mainResult.originalArcLengthMm.toFixed(2)} mm`;
+            document.getElementById('info-angle').textContent = `${mainResult.angleA1CA2_deg.toFixed(1)}`;
+            document.getElementById('info-stretched').textContent = `${mainResult.stretchedAdventitiaLengthMm.toFixed(2)} mm`;
+            document.getElementById('info-balloon-diameter').textContent = `${mainResult.balloonDiameter.toFixed(2)} mm`;
+
+            // Save visualization data and draw
+            state.visualization.active = true;
+            state.visualization.data = {
+                originalCircle: mainResult.originalCircle,
+                virtualCenter: mainResult.virtualBalloonCenter,
+                virtualRadius: mainResult.virtualBalloonRadius,
+                balloonRadius: mainResult.balloonRadiusPixels,
+                footPoint: mainResult.footPoint,
+                originalArcLengthMm: mainResult.originalArcLengthMm,
+                angleA1CA2_deg: mainResult.angleA1CA2_deg,
+                stretchedAdventitiaLengthMm: mainResult.stretchedAdventitiaLengthMm,
+                pointB1: mainResult.pointB1,
+                pointB2: mainResult.pointB2,
+                includeA1B1A2B2: mainResult.includeA1B1A2B2
+            };
+
+            // Draw visualization for main result
+            drawVisualization();
+
+            // Update expansion rate results
+            updateExpansionRateResults(avgPixelsPerMm);
+
+            // Calculate for all balloon diameters in background
+            const allResults = [];
+            for (let d = 0.75; d <= 6.00; d += 0.25) {
+                const result = calculateForBalloonDiameter(d, avgPixelsPerMm);
+                if (result) {
+                    allResults.push(result);
+                }
+            }
+
+            // Display all results
+            const allResultsSection = document.getElementById('allResultsSection');
+            const allResultsContent = document.getElementById('allResultsContent');
+            allResultsSection.style.display = 'block';
+
+            let html = '<table style="width: 100%; border-collapse: collapse;">';
+            html += '<thead><tr style="background: #e8f4f8; font-weight: bold;">';
+            html += '<th style="padding: 8px; text-align: left; border-bottom: 2px solid #3498db;">バルーン直径 (mm)</th>';
+            html += '<th style="padding: 8px; text-align: right; border-bottom: 2px solid #3498db;">進展外膜長 (mm)</th>';
+            html += '<th style="padding: 8px; text-align: right; border-bottom: 2px solid #3498db;">Stretch Ratio</th>';
+            html += '</tr></thead><tbody>';
+
+            allResults.forEach(result => {
+                const isSelected = Math.abs(result.balloonDiameter - balloonDiameter) < 0.01;
+                const rowStyle = isSelected ? 'background: #d4edda; font-weight: bold;' : '';
+                html += `<tr style="${rowStyle}">`;
+                html += `<td style="padding: 6px; border-bottom: 1px solid #ddd;">${result.balloonDiameter.toFixed(2)}</td>`;
+                html += `<td style="padding: 6px; text-align: right; border-bottom: 1px solid #ddd;">${result.stretchedAdventitiaLengthMm.toFixed(2)}</td>`;
+                html += `<td style="padding: 6px; text-align: right; border-bottom: 1px solid #ddd;">${result.stretchRatio.toFixed(2)}</td>`;
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            allResultsContent.innerHTML = html;
+
+            // After infoPanel + allResultsSection become visible, the
+            // canvas-container shrinks (it's flex:1 with new sibling
+            // claims). The canvas's CSS width/height were set for the
+            // OLD container size, so without this it overflows and
+            // masks the just-revealed result panels. Defer one tick
+            // for layout to settle, then re-fit + redraw + re-overlay
+            // the visualization.
+            setTimeout(function () {
+                if (typeof resizeCanvas === 'function') resizeCanvas();
+                if (typeof drawCanvas === 'function') drawCanvas();
+            }, 0);
+        });
+
+        function drawVisualization() {
+            drawCanvas();
+            // drawCanvas will automatically call drawVisualizationLines if data exists
+        }
+
+        function drawVisualizationLines(vizData) {
+            const { originalCircle, virtualCenter, virtualRadius, balloonRadius, footPoint,
+                    originalArcLengthMm, angleA1CA2_deg, stretchedAdventitiaLengthMm, pointB1, pointB2, includeA1B1A2B2 } = vizData;
+
+            // Calculate combinedScale for consistent line widths with calibration lines
+            const rect = canvas.getBoundingClientRect();
+            const displayScale = canvas.width / rect.width;
+            const combinedScale = state.transform.scale / displayScale;
+
+            // Apply transformation for visualization elements
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.translate(state.transform.translateX, state.transform.translateY);
+            ctx.scale(state.transform.scale, state.transform.scale);
+
+            // For mobile: apply same offset as image
+            if (window.innerWidth < 768) {
+                const offsetX = (canvas.width - state.image.width) / 2;
+                const offsetY = (canvas.height - state.image.height) / 2;
+                ctx.translate(offsetX, offsetY);
+            }
+
+            // Draw line A1-A2 (for reference)
+            ctx.strokeStyle = 'orange';
+            ctx.lineWidth = 2 / state.transform.scale;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(state.points.A1.x, state.points.A1.y);
+            ctx.lineTo(state.points.A2.x, state.points.A2.y);
+            ctx.stroke();
+
+            // Draw perpendicular line from B to foot
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2 / state.transform.scale;
+            ctx.setLineDash([5 / state.transform.scale, 3 / state.transform.scale]);
+            ctx.beginPath();
+            ctx.moveTo(state.points.B.x, state.points.B.y);
+            ctx.lineTo(footPoint.x, footPoint.y);
+            ctx.stroke();
+
+            // Draw line from B to virtual center (point C)
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 3 / state.transform.scale;
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.moveTo(state.points.B.x, state.points.B.y);
+            ctx.lineTo(virtualCenter.x, virtualCenter.y);
+            ctx.stroke();
+
+            // Draw foot of perpendicular
+            ctx.fillStyle = 'magenta';
+            ctx.beginPath();
+            ctx.arc(footPoint.x, footPoint.y, 4 / Math.sqrt(state.transform.scale), 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 1.5 / Math.sqrt(state.transform.scale);
+            ctx.stroke();
+
+            // Draw point C (virtual balloon center)
+            ctx.fillStyle = 'lime';
+            ctx.beginPath();
+            ctx.arc(virtualCenter.x, virtualCenter.y, 4 / Math.sqrt(state.transform.scale), 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 1.5 / Math.sqrt(state.transform.scale);
+            ctx.stroke();
+
+            // Draw virtual balloon FULL CIRCLE (semi-transparent red/pink) centered at C
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.9)';
+            ctx.fillStyle = 'rgba(255, 0, 0, 0.25)';
+            ctx.lineWidth = Math.max(1 / state.transform.scale, 0.5);
+            ctx.setLineDash([]);
+            ctx.beginPath();
+            ctx.arc(virtualCenter.x, virtualCenter.y, virtualRadius, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw original arc A1-AC-A2 (yellow dashed)
+            ctx.strokeStyle = 'yellow';
+            ctx.lineWidth = 2 / combinedScale;
+            ctx.setLineDash([5 / combinedScale, 5 / combinedScale]);
+            ctx.beginPath();
+            const angle1_orig = Math.atan2(state.points.A1.y - originalCircle.center.y, state.points.A1.x - originalCircle.center.x);
+            const angle2_orig = Math.atan2(state.points.A2.y - originalCircle.center.y, state.points.A2.x - originalCircle.center.x);
+            const angleAC_orig = Math.atan2(state.points.AC.y - originalCircle.center.y, state.points.AC.x - originalCircle.center.x);
+
+            // Determine which direction (ccw or cw) passes through AC
+            // Calculate angle from A1 to A2 going counterclockwise
+            let angle_A1_to_A2_ccw = angle2_orig - angle1_orig;
+            if (angle_A1_to_A2_ccw < 0) angle_A1_to_A2_ccw += 2 * Math.PI;
+
+            // Calculate angle from A1 to AC going counterclockwise
+            let angle_A1_to_AC_ccw = angleAC_orig - angle1_orig;
+            if (angle_A1_to_AC_ccw < 0) angle_A1_to_AC_ccw += 2 * Math.PI;
+
+            // If AC is between A1 and A2 going counterclockwise, then angle_A1_to_AC_ccw < angle_A1_to_A2_ccw
+            // But we need the OPPOSITE for Canvas anticlockwise parameter (it's inverted)
+            const ac_on_ccw_path = angle_A1_to_AC_ccw < angle_A1_to_A2_ccw;
+            const ccw_orig = !ac_on_ccw_path;  // Invert for Canvas
+
+            console.log('Arc direction calculation:');
+            console.log('Angle A1:', (angle1_orig * 180 / Math.PI).toFixed(2), 'degrees');
+            console.log('Angle A2:', (angle2_orig * 180 / Math.PI).toFixed(2), 'degrees');
+            console.log('Angle AC:', (angleAC_orig * 180 / Math.PI).toFixed(2), 'degrees');
+            console.log('A1 to A2 (ccw):', (angle_A1_to_A2_ccw * 180 / Math.PI).toFixed(2), 'degrees');
+            console.log('A1 to AC (ccw):', (angle_A1_to_AC_ccw * 180 / Math.PI).toFixed(2), 'degrees');
+            console.log('AC is on ccw path:', ac_on_ccw_path);
+            console.log('Canvas anticlockwise param:', ccw_orig);
+
+            ctx.arc(originalCircle.center.x, originalCircle.center.y, originalCircle.radius, angle1_orig, angle2_orig, ccw_orig);
+            ctx.stroke();
+
+            // Draw parallel line through C (optional - light gray dashed)
+            ctx.strokeStyle = 'rgba(150, 150, 150, 0.4)';
+            ctx.lineWidth = 1.5 / state.transform.scale;
+            ctx.setLineDash([8 / state.transform.scale, 4 / state.transform.scale]);
+            const parallelLength = Math.max(canvas.width, canvas.height);
+            const dx_A1A2_draw = state.points.A2.x - state.points.A1.x;
+            const dy_A1A2_draw = state.points.A2.y - state.points.A1.y;
+            const len_A1A2_draw = Math.sqrt(dx_A1A2_draw * dx_A1A2_draw + dy_A1A2_draw * dy_A1A2_draw);
+            const unitX_A1A2_draw = dx_A1A2_draw / len_A1A2_draw;
+            const unitY_A1A2_draw = dy_A1A2_draw / len_A1A2_draw;
+            ctx.beginPath();
+            ctx.moveTo(virtualCenter.x - parallelLength * unitX_A1A2_draw, virtualCenter.y - parallelLength * unitY_A1A2_draw);
+            ctx.lineTo(virtualCenter.x + parallelLength * unitX_A1A2_draw, virtualCenter.y + parallelLength * unitY_A1A2_draw);
+            ctx.stroke();
+
+            // Draw B1 and B2 points
+            const vizPointScale = Math.sqrt(state.transform.scale);
+            ctx.fillStyle = 'orange';
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 1.5 / vizPointScale;
+            ctx.setLineDash([]);
+
+            // B1 point
+            ctx.beginPath();
+            ctx.arc(pointB1.x, pointB1.y, 4 / vizPointScale, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+
+            // B2 point
+            ctx.beginPath();
+            ctx.arc(pointB2.x, pointB2.y, 4 / vizPointScale, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+
+            // Label B1 and B2
+            ctx.fillStyle = 'white';
+            ctx.font = `bold ${12 / vizPointScale}px Arial`;
+            ctx.strokeStyle = 'black';
+            ctx.lineWidth = 2.5 / vizPointScale;
+            ctx.strokeText('B1', pointB1.x + 8 / vizPointScale, pointB1.y - 8 / vizPointScale);
+            ctx.fillText('B1', pointB1.x + 8 / vizPointScale, pointB1.y - 8 / vizPointScale);
+            ctx.strokeText('B2', pointB2.x + 8 / vizPointScale, pointB2.y - 8 / vizPointScale);
+            ctx.fillText('B2', pointB2.x + 8 / vizPointScale, pointB2.y - 8 / vizPointScale);
+
+            // Draw stretched adventitia path: A1 → B1 → half circle → B2 → A2
+            // If includeA1B1A2B2 is true, all parts are red (included in calculation)
+            // If includeA1B1A2B2 is false, A1-B1 and B2-A2 are black (not included), only half circle is red
+            ctx.lineWidth = 2 / combinedScale;
+            ctx.setLineDash([5 / combinedScale, 5 / combinedScale]);
+
+            // A1 to B1
+            ctx.strokeStyle = includeA1B1A2B2 ? 'red' : 'black';
+            ctx.beginPath();
+            ctx.moveTo(state.points.A1.x, state.points.A1.y);
+            ctx.lineTo(pointB1.x, pointB1.y);
+            ctx.stroke();
+
+            // B1 to B2 (half circle on the side AWAY from B point)
+            // B1 and B2 are diametrically opposite on the circle, so there are exactly 2 semicircles
+            const angleB1 = Math.atan2(pointB1.y - virtualCenter.y, pointB1.x - virtualCenter.x);
+            const angleB2 = Math.atan2(pointB2.y - virtualCenter.y, pointB2.x - virtualCenter.x);
+
+            // Since B1 and B2 are diametrically opposite (180 degrees apart),
+            // the two semicircle midpoints are perpendicular to the B1-B2 line
+            // One midpoint is at angleB1 + π/2, the other is at angleB1 - π/2
+            const angleMid1 = angleB1 + Math.PI / 2;
+            const angleMid2 = angleB1 - Math.PI / 2;
+
+            // Calculate actual midpoint positions
+            const midPoint1 = {
+                x: virtualCenter.x + virtualRadius * Math.cos(angleMid1),
+                y: virtualCenter.y + virtualRadius * Math.sin(angleMid1)
+            };
+            const midPoint2 = {
+                x: virtualCenter.x + virtualRadius * Math.cos(angleMid2),
+                y: virtualCenter.y + virtualRadius * Math.sin(angleMid2)
+            };
+
+            // Choose the semicircle whose midpoint is FARTHER from B
+            const dist1 = distance(state.points.B, midPoint1);
+            const dist2 = distance(state.points.B, midPoint2);
+
+            // Determine which direction gives us the farther midpoint
+            // Check if going counterclockwise from B1 to B2 passes through midPoint1 or midPoint2
+            let angleDiff = angleB2 - angleB1;
+            while (angleDiff < 0) angleDiff += 2 * Math.PI;
+
+            let angleDiff1 = angleMid1 - angleB1;
+            while (angleDiff1 < 0) angleDiff1 += 2 * Math.PI;
+
+            let angleDiff2 = angleMid2 - angleB1;
+            while (angleDiff2 < 0) angleDiff2 += 2 * Math.PI;
+
+            // If midPoint1 is between B1 and B2 in counterclockwise direction, then ccw path passes through midPoint1
+            const ccwPassesThroughMid1 = angleDiff1 < angleDiff;
+
+            // We want the path through the FARTHER midpoint
+            let useCounterClockwise;
+            if (dist1 > dist2) {
+                // midPoint1 is farther, use the path that goes through it
+                useCounterClockwise = !ccwPassesThroughMid1;
+            } else {
+                // midPoint2 is farther, use the path that goes through it
+                useCounterClockwise = ccwPassesThroughMid1;
+            }
+
+            // B1 to B2 half circle (always red - always included in calculation)
+            ctx.strokeStyle = 'red';
+            ctx.beginPath();
+            ctx.arc(virtualCenter.x, virtualCenter.y, virtualRadius, angleB1, angleB2, useCounterClockwise);
+            ctx.stroke();
+
+            // B2 to A2
+            ctx.strokeStyle = includeA1B1A2B2 ? 'red' : 'black';
+            ctx.beginPath();
+            ctx.moveTo(pointB2.x, pointB2.y);
+            ctx.lineTo(state.points.A2.x, state.points.A2.y);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
+        }
+
+        // Sync dropdown and input
+        document.getElementById('balloonDiameterSelect').addEventListener('change', function(e) {
+            if (e.target.value) {
+                document.getElementById('balloonDiameterInput').value = e.target.value;
+            }
+        });
+
+        document.getElementById('balloonDiameterInput').addEventListener('input', function(e) {
+            if (e.target.value) {
+                document.getElementById('balloonDiameterSelect').value = '';
+            }
+        });
+
+        // Auto-calculate expansion rates when calibration values change
+        document.getElementById('cvDistance').addEventListener('input', function() {
+            tryAutoCalculateExpansionRates();
+        });
+        document.getElementById('chDistance').addEventListener('input', function() {
+            tryAutoCalculateExpansionRates();
+        });
+
+        // Find balloon diameter for a target stretch ratio using binary search
+        function findDiameterForStretchRatio(targetRatio, avgPixelsPerMm) {
+            let lo = 0.5, hi = 20.0;
+            // First check if target is achievable
+            const resultLo = calculateForBalloonDiameter(lo, avgPixelsPerMm);
+            const resultHi = calculateForBalloonDiameter(hi, avgPixelsPerMm);
+            if (!resultLo || !resultHi) return null;
+            if (targetRatio < resultLo.stretchRatio || targetRatio > resultHi.stretchRatio) {
+                // Try reversed direction (ratio might decrease with diameter)
+                if (targetRatio > resultLo.stretchRatio || targetRatio < resultHi.stretchRatio) {
+                    return null;
+                }
+            }
+            const increasing = resultHi.stretchRatio > resultLo.stretchRatio;
+            for (let i = 0; i < 50; i++) {
+                const mid = (lo + hi) / 2;
+                const result = calculateForBalloonDiameter(mid, avgPixelsPerMm);
+                if (!result) return null;
+                const diff = result.stretchRatio - targetRatio;
+                if (Math.abs(diff) < 0.001) return mid;
+                if (increasing) {
+                    if (diff > 0) hi = mid; else lo = mid;
+                } else {
+                    if (diff > 0) lo = mid; else hi = mid;
+                }
+            }
+            return (lo + hi) / 2;
+        }
+
+        // Update expansion rate results after calculation
+        function updateExpansionRateResults(avgPixelsPerMm) {
+            const presetRates = [1.5, 1.8, 2.0];
+            const tbody = document.getElementById('expansionRateTableBody');
+            tbody.innerHTML = '';
+            presetRates.forEach(rate => {
+                const diameter = findDiameterForStretchRatio(rate, avgPixelsPerMm);
+                const tr = document.createElement('tr');
+                tr.style.cursor = 'pointer';
+                const diameterStr = diameter !== null ? diameter.toFixed(2) + ' mm' : '範囲外';
+                tr.innerHTML = `<td style="padding: 4px 8px; border-bottom: 1px solid #ddd;">${rate.toFixed(1)}</td>` +
+                    `<td style="padding: 4px 8px; text-align: right; border-bottom: 1px solid #ddd; color: #27ae60; font-weight: bold;">${diameterStr}</td>`;
+                if (diameter !== null) {
+                    tr.addEventListener('click', function() {
+                        document.getElementById('balloonDiameterInput').value = diameter.toFixed(2);
+                        document.getElementById('balloonDiameterSelect').value = '';
+                    });
+                    tr.addEventListener('mouseenter', function() { tr.style.background = '#d4edda'; });
+                    tr.addEventListener('mouseleave', function() { tr.style.background = ''; });
+                }
+                tbody.appendChild(tr);
+            });
+            document.getElementById('expansionRateTable').style.display = 'block';
+        }
+
+        // Workflow functions
+        const workflowSteps = [
+            { point: 'CH1', message: 'Horizontal Calibration (横のキャリブレーション) の1つ目の点 CH1を指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'CH2', message: 'Horizontal Calibration (横のキャリブレーション) の2つ目の点 CH2を指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'CH_INPUT', message: 'CH (横のキャリブレーション) の実際の距離を入力してください', type: 'input', inputId: 'chDistance' },
+            { point: 'CV1', message: 'Vertical Calibration (縦のキャリブレーション) の1つ目の点 CV1を指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'CV2', message: 'Vertical Calibration (縦のキャリブレーション) の2つ目の点 CV2を指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'CV_INPUT', message: 'CV (縦のキャリブレーション) の実際の距離を入力してください', type: 'input', inputId: 'cvDistance' },
+            { point: 'A1', message: '進展する外膜の断端の1つを指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'A2', message: '進展する外膜のもう1つの断端を指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'AC', message: '進展する外膜の真ん中の点（円弧の中心）ACを指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' },
+            { point: 'B', message: 'バルーンが拡張する一番血管側の点 Bを指定してください。このウインドウで点指定がしづらい場合はウインドウを動かすことができます。点の位置は後で調整可能です。' }
+        ];
+        let currentWorkflowStep = 0;
+
+        function showImageConfirmationDialog() {
+            state.workflow.dialogVisible = true;
+            const dialog = document.getElementById('customDialog');
+            const messageEl = document.getElementById('dialogMessage');
+
+            // Reset dialog position to canvas top-right
+            positionDialogToCanvasTopRight();
+
+            messageEl.textContent = 'この画像で解析を進めますか　はい・戻る　戻るを選ぶと画像選択からやり直しとなります';
+            dialog.style.display = 'flex';
+
+            // Setup buttons
+            const okBtn = document.getElementById('dialogOkBtn');
+            const backBtn = document.getElementById('dialogBackBtn');
+            const closeBtnEl = document.getElementById('dialogCloseBtn');
+
+            // Show both buttons, hide close button
+            okBtn.style.display = 'inline-block';
+            backBtn.style.display = 'inline-block';
+            closeBtnEl.style.display = 'none';
+
+            // Change button text to "はい"
+            okBtn.textContent = 'はい';
+
+            // Setup close button
+            const closeBtn = document.getElementById('dialogCloseBtn');
+            const newCloseBtn = closeBtn.cloneNode(true);
+            closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+            document.getElementById('dialogCloseBtn').addEventListener('click', function() {
+                document.getElementById('dialogOkBtn').textContent = 'OK';
+                hideDialog();
+            });
+
+            // Remove old event listeners by cloning
+            const newOkBtn = okBtn.cloneNode(true);
+            okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+            const newBackBtn = backBtn.cloneNode(true);
+            backBtn.parentNode.replaceChild(newBackBtn, backBtn);
+
+            document.getElementById('dialogOkBtn').addEventListener('click', function() {
+                // Restore OK button text
+                this.textContent = 'OK';
+                hideDialog();
+                startWorkflow();
+            });
+
+            document.getElementById('dialogBackBtn').addEventListener('click', function() {
+                hideDialog();
+                clearImage();
+            });
+        }
+
+        function showResetChoiceDialog() {
+            state.workflow.dialogVisible = true;
+            const dialog = document.getElementById('customDialog');
+            const messageEl = document.getElementById('dialogMessage');
+
+            // Reset dialog position to canvas top-right
+            positionDialogToCanvasTopRight();
+
+            messageEl.textContent = '';
+            dialog.style.display = 'flex';
+
+            // Setup buttons
+            const okBtn = document.getElementById('dialogOkBtn');
+            const backBtn = document.getElementById('dialogBackBtn');
+            const closeBtnEl = document.getElementById('dialogCloseBtn');
+
+            // Show both buttons and close button explicitly
+            okBtn.style.display = 'inline-block';
+            backBtn.style.display = 'inline-block';
+            closeBtnEl.style.display = 'inline-block';
+
+            // Change button texts
+            okBtn.textContent = '点の指定を再開する';
+            backBtn.textContent = '画像再選択・再貼付けをする';
+
+            // Setup close button
+            const closeBtn = document.getElementById('dialogCloseBtn');
+            const newCloseBtn = closeBtn.cloneNode(true);
+            closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+            document.getElementById('dialogCloseBtn').addEventListener('click', function() {
+                document.getElementById('dialogOkBtn').textContent = 'OK';
+                document.getElementById('dialogBackBtn').textContent = '戻る';
+                hideDialog();
+            });
+
+            // Remove old event listeners by cloning
+            const newOkBtn = okBtn.cloneNode(true);
+            okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+            const newBackBtn = backBtn.cloneNode(true);
+            backBtn.parentNode.replaceChild(newBackBtn, backBtn);
+
+            document.getElementById('dialogOkBtn').addEventListener('click', function() {
+                // Restore button texts
+                this.textContent = 'OK';
+                document.getElementById('dialogBackBtn').textContent = '戻る';
+                hideDialog();
+                startWorkflow();
+            });
+
+            document.getElementById('dialogBackBtn').addEventListener('click', function() {
+                // Restore button texts
+                document.getElementById('dialogOkBtn').textContent = 'OK';
+                this.textContent = '戻る';
+                hideDialog();
+                clearImage();
+            });
+        }
+
+        function clearImage() {
+            // Clear the image
+            state.image = null;
+            canvas.classList.remove('loaded');
+            canvas.parentElement.classList.remove('has-image');
+
+            // Reset transform
+            state.transform.scale = 1.0;
+            state.transform.translateX = 0;
+            state.transform.translateY = 0;
+
+            // Clear canvas
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Reset all points
+            for (const key in state.points) {
+                state.points[key] = null;
+                const statusEl = document.getElementById(`status-${key}`);
+                if (statusEl) statusEl.classList.remove('placed');
+            }
+
+            // Clear visualization
+            state.visualization.active = false;
+            state.visualization.data = null;
+
+            // Hide info panels
+            document.getElementById('infoPanel').style.display = 'none';
+            document.getElementById('allResultsSection').style.display = 'none';
+            document.getElementById('resultBox').style.display = 'none';
+            document.getElementById('resultValue').textContent = '-';
+
+            // Clear inputs
+            document.getElementById('cvDistance').value = '';
+            document.getElementById('chDistance').value = '';
+            document.getElementById('balloonDiameterInput').value = '';
+            document.getElementById('balloonDiameterSelect').value = '';
+
+            // Reset file input
+            document.getElementById('imageUpload').value = '';
+
+            // Reset workflow state
+            state.workflow.active = false;
+            state.workflow.waitingForPoint = false;
+            state.workflow.currentStep = null;
+            currentWorkflowStep = 0;
+        }
+
+        function startWorkflow() {
+            // Reset all points
+            for (const key in state.points) {
+                state.points[key] = null;
+                const statusEl = document.getElementById(`status-${key}`);
+                if (statusEl) statusEl.classList.remove('placed');
+            }
+            state.currentPointIndex = 0;
+
+            // Clear visualization data
+            state.visualization.active = false;
+            state.visualization.data = null;
+
+            state.workflow.active = true;
+            // With DICOM calibration, skip CH/CV and start at A1.
+            currentWorkflowStep = URL_CAL
+                ? workflowSteps.findIndex(function (s) { return s.point === 'A1'; })
+                : 0;
+            showNextStep();
+        }
+
+        function showNextStep() {
+            if (currentWorkflowStep >= workflowSteps.length) {
+                // Workflow complete
+                state.workflow.active = false;
+                state.workflow.dialogVisible = false;
+                showCompletionDialog();
+                return;
+            }
+
+            const step = workflowSteps[currentWorkflowStep];
+
+            if (step.type === 'input') {
+                // Show input prompt
+                showInputDialog(step.message, step.inputId);
+            } else {
+                // Show point placement prompt
+                showDialog(step.message, step.point);
+            }
+        }
+
+        function showCompletionDialog() {
+            state.workflow.dialogVisible = true;
+            const dialog = document.getElementById('customDialog');
+            const messageEl = document.getElementById('dialogMessage');
+
+            // Reset dialog position to canvas top-right
+            positionDialogToCanvasTopRight();
+
+            messageEl.textContent = '全ての点の配置が完了しました。点のドラッグもしくは点選択後のマウス操作で点の位置調整が可能です。全ての点の位置を確定したらバルーン直径を選択もしくは直接入力し、計算を実行してください。';
+            dialog.style.display = 'flex';
+
+            // Show OK and Ref buttons, hide Back and Close buttons
+            const okBtn = document.getElementById('dialogOkBtn');
+            const backBtn = document.getElementById('dialogBackBtn');
+            const closeBtnEl = document.getElementById('dialogCloseBtn');
+            const refBtn = document.getElementById('dialogRefBtn');
+            okBtn.style.display = 'inline-block';
+            refBtn.style.display = 'inline-block';
+            closeBtnEl.style.display = 'none';
+            backBtn.style.display = 'none';
+
+            // Remove old event listeners by cloning
+            const newOkBtn = okBtn.cloneNode(true);
+            okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+            const newRefBtn = refBtn.cloneNode(true);
+            refBtn.parentNode.replaceChild(newRefBtn, refBtn);
+
+            document.getElementById('dialogRefBtn').addEventListener('click', function() {
+                showReferenceImageDialog();
+            });
+
+            document.getElementById('dialogOkBtn').addEventListener('click', function() {
+                // Restore back button
+                document.getElementById('dialogBackBtn').style.display = 'inline-block';
+                hideDialog();
+            });
+        }
+
+        function showDialog(message, pointName) {
+            state.workflow.currentStep = pointName;
+            state.workflow.dialogVisible = true;
+            state.workflow.waitingForPoint = true; // Set to waiting immediately
+
+            const dialog = document.getElementById('customDialog');
+            const messageEl = document.getElementById('dialogMessage');
+
+            // Reset dialog position to canvas top-right
+            positionDialogToCanvasTopRight();
+
+            messageEl.textContent = message;
+            dialog.style.display = 'flex';
+
+            // Hide OK button for point placement dialogs, but show Back and Close buttons
+            const okBtn = document.getElementById('dialogOkBtn');
+            const backBtn = document.getElementById('dialogBackBtn');
+            const refBtn = document.getElementById('dialogRefBtn');
+            const closeBtnEl = document.getElementById('dialogCloseBtn');
+            okBtn.style.display = 'none';
+            backBtn.style.display = 'inline-block';
+            closeBtnEl.style.display = 'inline-block';
+
+            // Show reference button only for A1, A2, AC, B points
+            if (pointName === 'A1' || pointName === 'A2' || pointName === 'AC' || pointName === 'B') {
+                refBtn.style.display = 'inline-block';
+            } else {
+                refBtn.style.display = 'none';
+            }
+
+            // Remove old event listeners by cloning
+            const newBackBtn = backBtn.cloneNode(true);
+            backBtn.parentNode.replaceChild(newBackBtn, backBtn);
+            const newRefBtn = refBtn.cloneNode(true);
+            refBtn.parentNode.replaceChild(newRefBtn, refBtn);
+
+            // Add close button click handler
+            const closeBtn = document.getElementById('dialogCloseBtn');
+            const newCloseBtn = closeBtn.cloneNode(true);
+            closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+            document.getElementById('dialogCloseBtn').addEventListener('click', function() {
+                hideDialog();
+            });
+
+            // Add reference button click handler
+            document.getElementById('dialogRefBtn').addEventListener('click', function() {
+                showReferenceImageDialog();
+            });
+
+            document.getElementById('dialogBackBtn').addEventListener('click', function() {
+                // Walk back skipping any step that the current
+                // calibration mode hides — under DICOM (URL_CAL) the
+                // CH/CV steps don't exist, so Back from A1 must NOT
+                // jump into them.
+                let prevIdx = currentWorkflowStep - 1;
+                while (prevIdx >= 0
+                       && calPointSkipped(workflowSteps[prevIdx].point)) {
+                    prevIdx--;
+                }
+                if (prevIdx >= 0) {
+                    currentWorkflowStep = prevIdx;
+                    const prevStep = workflowSteps[currentWorkflowStep];
+                    if (prevStep.type !== 'input' && state.points[prevStep.point]) {
+                        state.points[prevStep.point] = null;
+                        const statusEl = document.getElementById(`status-${prevStep.point}`);
+                        if (statusEl) statusEl.classList.remove('placed');
+                        drawCanvas();
+                    }
+                    hideDialog();
+                    showNextStep();
+                } else if (URL_CAL) {
+                    // No valid previous step under DICOM mode — A1 is
+                    // already the first pickable step. Don't bounce
+                    // to the image-selection reset dialog (the user
+                    // can't pick a different image when launched from
+                    // Multi-DicomViewer); leave the current dialog up.
+                    return;
+                } else {
+                    // Classic flow: CH1's back button — show reset
+                    // choice dialog.
+                    hideDialog();
+                    showResetChoiceDialog();
+                }
+            });
+        }
+
+        function showInputDialog(message, inputId) {
+            state.workflow.dialogVisible = true;
+            const dialog = document.getElementById('customDialog');
+            const messageEl = document.getElementById('dialogMessage');
+
+            // Reset dialog position to canvas top-right
+            positionDialogToCanvasTopRight();
+
+            // Get current value from the input field
+            const currentValue = document.getElementById(inputId).value || '';
+
+            // Create input field inside dialog
+            messageEl.innerHTML = `
+                ${message}<br><br>
+                <input type="number" id="dialogInput" list="calibration-values" step="1" placeholder="値を入力してください"
+                       value="${currentValue}"
+                       style="width: 200px; padding: 8px; font-size: 16px; border: 2px solid #3498db; border-radius: 4px; text-align: center;">
+                <span style="margin-left: 8px;">mm</span>
+            `;
+            dialog.style.display = 'flex';
+
+            // Show OK and Back buttons for input dialogs, hide Close button
+            const okBtn = document.getElementById('dialogOkBtn');
+            const backBtn = document.getElementById('dialogBackBtn');
+            const closeBtnEl = document.getElementById('dialogCloseBtn');
+            okBtn.style.display = 'inline-block';
+            backBtn.style.display = 'inline-block';
+            closeBtnEl.style.display = 'none';
+
+            // Focus on the dialog input field
+            setTimeout(function() {
+                const dialogInput = document.getElementById('dialogInput');
+                if (dialogInput) {
+                    dialogInput.focus();
+                    dialogInput.select();
+
+                    // Allow Enter key to submit
+                    dialogInput.addEventListener('keypress', function(e) {
+                        if (e.key === 'Enter') {
+                            document.getElementById('dialogOkBtn').click();
+                        }
+                    });
+                }
+            }, 100);
+
+            // Setup close button
+            const closeBtn = document.getElementById('dialogCloseBtn');
+            const newCloseBtn = closeBtn.cloneNode(true);
+            closeBtn.parentNode.replaceChild(newCloseBtn, closeBtn);
+            document.getElementById('dialogCloseBtn').addEventListener('click', function() {
+                hideDialog();
+            });
+
+            // Setup OK button
+
+            // Remove old event listeners by cloning
+            const newOkBtn = okBtn.cloneNode(true);
+            okBtn.parentNode.replaceChild(newOkBtn, okBtn);
+            const newBackBtn = backBtn.cloneNode(true);
+            backBtn.parentNode.replaceChild(newBackBtn, backBtn);
+
+            document.getElementById('dialogOkBtn').addEventListener('click', function() {
+                const dialogInput = document.getElementById('dialogInput');
+                const value = dialogInput ? dialogInput.value : '';
+
+                if (!value || parseFloat(value) <= 0) {
+                    alert('有効な数値を入力してください。');
+                    return;
+                }
+
+                // Copy value to the actual input field
+                document.getElementById(inputId).value = value;
+
+                hideDialog();
+                currentWorkflowStep++;
+                showNextStep();
+            });
+
+            document.getElementById('dialogBackBtn').addEventListener('click', function() {
+                // Same calibration-aware back-walk as the other
+                // dialog's Back button (search for "calPointSkipped"
+                // — the two handlers stay in lock-step on this rule).
+                let prevIdx = currentWorkflowStep - 1;
+                while (prevIdx >= 0
+                       && calPointSkipped(workflowSteps[prevIdx].point)) {
+                    prevIdx--;
+                }
+                if (prevIdx >= 0) {
+                    currentWorkflowStep = prevIdx;
+                    const prevStep = workflowSteps[currentWorkflowStep];
+                    if (prevStep.type !== 'input' && state.points[prevStep.point]) {
+                        state.points[prevStep.point] = null;
+                        const statusEl = document.getElementById(`status-${prevStep.point}`);
+                        if (statusEl) statusEl.classList.remove('placed');
+                        drawCanvas();
+                    }
+                    hideDialog();
+                    showNextStep();
+                } else if (URL_CAL) {
+                    // MDV / DICOM hand-off — never reset to image
+                    // selection (we can't load a different image).
+                    return;
+                } else {
+                    // Classic flow — reset to image-selection.
+                    resetToImageSelection();
+                }
+            });
+        }
+
+        function positionDialogToCanvasTopRight() {
+            const dialogBox = document.getElementById('dialogBox');
+            const pasteButton = document.getElementById('pasteFromClipboard');
+
+            if (dialogBox && pasteButton) {
+                const buttonRect = pasteButton.getBoundingClientRect();
+
+                // 緑ボタンの2/3の横幅
+                const dialogWidth = buttonRect.width * (2 / 3);
+
+                // 緑ボタンの下に配置（少し間隔を空ける）
+                const topPosition = buttonRect.bottom + 10;
+
+                // 緑ボタンと右揃え
+                const rightPosition = window.innerWidth - buttonRect.right;
+
+                dialogBox.style.width = dialogWidth + 'px';
+                dialogBox.style.maxWidth = dialogWidth + 'px';
+                dialogBox.style.right = rightPosition + 'px';
+                dialogBox.style.top = topPosition + 'px';
+                dialogBox.style.left = 'auto';
+                dialogBox.style.transform = 'none';
+
+                if (window.dialogDragState) {
+                    window.dialogDragState.xOffset = 0;
+                    window.dialogDragState.yOffset = 0;
+                }
+            }
+        }
+
+        function hideDialog() {
+            state.workflow.dialogVisible = false;
+            document.getElementById('customDialog').style.display = 'none';
+            // Reset dialog position
+            positionDialogToCanvasTopRight();
+        }
+
+        function resetToImageSelection() {
+            // Hide dialog
+            hideDialog();
+
+            // Reset workflow state
+            state.workflow.active = false;
+            state.workflow.waitingForPoint = false;
+            state.workflow.currentStep = null;
+            currentWorkflowStep = 0;
+
+            // Reset visualization state
+            state.visualization.active = false;
+            state.visualization.data = null;
+
+            // Reset all points
+            for (const key in state.points) {
+                state.points[key] = null;
+                const statusEl = document.getElementById(`status-${key}`);
+                if (statusEl) statusEl.classList.remove('placed');
+            }
+
+            // Keep the image but redraw canvas without points
+            if (state.image) {
+                drawCanvas();
+            }
+
+            // Hide info panel and results
+            document.getElementById('infoPanel').style.display = 'none';
+            document.getElementById('allResultsSection').style.display = 'none';
+            document.getElementById('resultBox').style.display = 'none';
+            document.getElementById('resultValue').textContent = '-';
+
+            // Clear calibration inputs
+            document.getElementById('cvDistance').value = '';
+            document.getElementById('chDistance').value = '';
+
+            // Clear balloon diameter inputs
+            document.getElementById('balloonDiameterInput').value = '';
+            document.getElementById('balloonDiameterSelect').value = '';
+
+            // User can now select a new image or restart workflow with current image
+            // Show a message to guide the user
+            alert('画像選択画面に戻りました。\n新しい画像を選択するか、同じ画像で再開する場合は再度画像を選択してください。');
+        }
+
+        function continueWorkflow() {
+            currentWorkflowStep++;
+            showNextStep();
+        }
+
+        // Add click event to CH1 to start workflow
+        document.getElementById('status-CH1').addEventListener('click', function() {
+            // Only allow starting workflow if image is loaded and workflow is not active
+            if (state.image && !state.workflow.active) {
+                startWorkflow();
+            } else if (!state.image) {
+                alert('まず画像を選択または貼り付けてください。');
+            }
+        });
+
+        // Make CH1 clickable (add cursor pointer style)
+        document.getElementById('status-CH1').style.cursor = 'pointer';
+        document.getElementById('status-CH1').style.transition = 'background 0.2s';
+        document.getElementById('status-CH1').addEventListener('mouseenter', function() {
+            if (state.image && !state.workflow.active) {
+                this.style.background = '#e8f4f8';
+            }
+        });
+        document.getElementById('status-CH1').addEventListener('mouseleave', function() {
+            if (!this.classList.contains('placed')) {
+                this.style.background = '';
+            }
+        });
+
+        // Make dialog draggable
+        function makeDialogDraggable() {
+            const dialogBox = document.getElementById('dialogBox');
+
+            // Create global state for dialog dragging
+            window.dialogDragState = {
+                isDragging: false,
+                currentX: 0,
+                currentY: 0,
+                initialX: 0,
+                initialY: 0,
+                xOffset: 0,
+                yOffset: 0
+            };
+
+            // Mouse events
+            dialogBox.addEventListener('mousedown', dragStart);
+            document.addEventListener('mousemove', drag);
+            document.addEventListener('mouseup', dragEnd);
+
+            // Touch events
+            dialogBox.addEventListener('touchstart', touchStart, { passive: false });
+            document.addEventListener('touchmove', touchDrag, { passive: false });
+            document.addEventListener('touchend', touchEnd);
+
+            function dragStart(e) {
+                // Don't drag if clicking on buttons or inputs
+                if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') {
+                    return;
+                }
+
+                window.dialogDragState.initialX = e.clientX - window.dialogDragState.xOffset;
+                window.dialogDragState.initialY = e.clientY - window.dialogDragState.yOffset;
+
+                if (e.target === dialogBox || dialogBox.contains(e.target)) {
+                    window.dialogDragState.isDragging = true;
+                }
+            }
+
+            function drag(e) {
+                if (window.dialogDragState.isDragging) {
+                    e.preventDefault();
+
+                    window.dialogDragState.currentX = e.clientX - window.dialogDragState.initialX;
+                    window.dialogDragState.currentY = e.clientY - window.dialogDragState.initialY;
+
+                    window.dialogDragState.xOffset = window.dialogDragState.currentX;
+                    window.dialogDragState.yOffset = window.dialogDragState.currentY;
+
+                    setTranslate(window.dialogDragState.currentX, window.dialogDragState.currentY, dialogBox);
+                }
+            }
+
+            function dragEnd(e) {
+                window.dialogDragState.initialX = window.dialogDragState.currentX;
+                window.dialogDragState.initialY = window.dialogDragState.currentY;
+
+                window.dialogDragState.isDragging = false;
+            }
+
+            function touchStart(e) {
+                // Don't drag if touching buttons or inputs
+                if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') {
+                    return;
+                }
+
+                const touch = e.touches[0];
+                window.dialogDragState.initialX = touch.clientX - window.dialogDragState.xOffset;
+                window.dialogDragState.initialY = touch.clientY - window.dialogDragState.yOffset;
+
+                if (e.target === dialogBox || dialogBox.contains(e.target)) {
+                    window.dialogDragState.isDragging = true;
+                }
+            }
+
+            function touchDrag(e) {
+                if (window.dialogDragState.isDragging) {
+                    e.preventDefault();
+
+                    const touch = e.touches[0];
+                    window.dialogDragState.currentX = touch.clientX - window.dialogDragState.initialX;
+                    window.dialogDragState.currentY = touch.clientY - window.dialogDragState.initialY;
+
+                    window.dialogDragState.xOffset = window.dialogDragState.currentX;
+                    window.dialogDragState.yOffset = window.dialogDragState.currentY;
+
+                    setTranslate(window.dialogDragState.currentX, window.dialogDragState.currentY, dialogBox);
+                }
+            }
+
+            function touchEnd(e) {
+                window.dialogDragState.initialX = window.dialogDragState.currentX;
+                window.dialogDragState.initialY = window.dialogDragState.currentY;
+
+                window.dialogDragState.isDragging = false;
+            }
+
+            function setTranslate(xPos, yPos, el) {
+                el.style.transform = `translate(calc(-50% + ${xPos}px), calc(-50% + ${yPos}px))`;
+            }
+        }
+
+        // Add click-to-close functionality for dialog
+        function addDialogClickToClose() {
+            const dialogBox = document.getElementById('dialogBox');
+            const dialogMessage = document.getElementById('dialogMessage');
+
+            let clickStartX = 0;
+            let clickStartY = 0;
+            let clickStartTime = 0;
+
+            // Track mouse/touch down position
+            dialogBox.addEventListener('mousedown', function(e) {
+                clickStartX = e.clientX;
+                clickStartY = e.clientY;
+                clickStartTime = Date.now();
+            });
+
+            dialogBox.addEventListener('touchstart', function(e) {
+                if (e.touches.length === 1) {
+                    clickStartX = e.touches[0].clientX;
+                    clickStartY = e.touches[0].clientY;
+                    clickStartTime = Date.now();
+                }
+            });
+
+            // Handle click/tap to close (only for point placement dialogs, not input dialogs)
+            dialogBox.addEventListener('click', function(e) {
+                // Don't close if clicking on buttons or inputs
+                if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') {
+                    return;
+                }
+
+                // Don't close input dialogs (CH_INPUT, CV_INPUT) by clicking
+                const currentStep = workflowSteps[currentWorkflowStep];
+                if (currentStep && currentStep.type === 'input') {
+                    return;
+                }
+
+                // Check if this was a drag (not a click)
+                const timeDiff = Date.now() - clickStartTime;
+                const distance = Math.sqrt(
+                    Math.pow(e.clientX - clickStartX, 2) +
+                    Math.pow(e.clientY - clickStartY, 2)
+                );
+
+                // If moved less than 10px and took less than 500ms, treat as click
+                if (distance < 10 && timeDiff < 500) {
+                    hideDialog();
+                    if (state.workflow.active && state.workflow.waitingForPoint) {
+                        // Dialog is closed, user can now click on canvas to place point
+                    }
+                }
+            });
+
+            dialogBox.addEventListener('touchend', function(e) {
+                // Don't close if touching on buttons or inputs
+                const touch = e.changedTouches[0];
+                const element = document.elementFromPoint(touch.clientX, touch.clientY);
+                if (element && (element.tagName === 'BUTTON' || element.tagName === 'INPUT' || element.tagName === 'SPAN' || element.tagName === 'SELECT')) {
+                    return;
+                }
+
+                // Don't close input dialogs (CH_INPUT, CV_INPUT) by tapping
+                const currentStep = workflowSteps[currentWorkflowStep];
+                if (currentStep && currentStep.type === 'input') {
+                    return;
+                }
+
+                // Check if this was a drag (not a tap)
+                const timeDiff = Date.now() - clickStartTime;
+                const distance = Math.sqrt(
+                    Math.pow(touch.clientX - clickStartX, 2) +
+                    Math.pow(touch.clientY - clickStartY, 2)
+                );
+
+                // If moved less than 10px and took less than 500ms, treat as tap
+                if (distance < 10 && timeDiff < 500) {
+                    // Prevent default behavior and stop event propagation for touch devices
+                    e.preventDefault();
+                    e.stopPropagation();
+
+                    hideDialog();
+                    if (state.workflow.active && state.workflow.waitingForPoint) {
+                        // Dialog is closed, user can now tap on canvas to place point
+                    }
+                }
+            });
+        }
+
+        // Show reference image dialog
+        function showReferenceImageDialog() {
+            const refDialog = document.getElementById('referenceDialog');
+            refDialog.style.display = 'flex';
+        }
+
+        // Close reference image dialog
+        document.getElementById('referenceCloseBtn').addEventListener('click', function() {
+            document.getElementById('referenceDialog').style.display = 'none';
+        });
+
+        // Reverse arrow key behavior for calibration inputs
+        function reverseCalibrationArrows() {
+            const cvInput = document.getElementById('cvDistance');
+            const chInput = document.getElementById('chDistance');
+
+            [cvInput, chInput].forEach(input => {
+                let previousValue = parseFloat(input.value) || 0;
+
+                // Handle keyboard arrow keys
+                input.addEventListener('keydown', function(e) {
+                    if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        const currentValue = parseFloat(this.value) || 0;
+                        const step = parseFloat(this.step) || 1;
+                        this.value = Math.max(0, currentValue - step);
+                        previousValue = parseFloat(this.value);
+                    } else if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        const currentValue = parseFloat(this.value) || 0;
+                        const step = parseFloat(this.step) || 1;
+                        this.value = currentValue + step;
+                        previousValue = parseFloat(this.value);
+                    }
+                });
+
+                // Handle spinner button clicks and mouse wheel
+                input.addEventListener('input', function(e) {
+                    const currentValue = parseFloat(this.value) || 0;
+                    const step = parseFloat(this.step) || 1;
+
+                    // Check if value changed by spinner or wheel
+                    if (currentValue !== previousValue) {
+                        const diff = currentValue - previousValue;
+
+                        // If value increased, decrease it instead (and vice versa)
+                        if (Math.abs(diff) === step) {
+                            const reversedValue = previousValue - diff;
+                            this.value = Math.max(0, reversedValue);
+                            previousValue = parseFloat(this.value);
+                        } else {
+                            previousValue = currentValue;
+                        }
+                    }
+                });
+
+                // Handle mouse wheel
+                input.addEventListener('wheel', function(e) {
+                    e.preventDefault();
+                    const currentValue = parseFloat(this.value) || 0;
+                    const step = parseFloat(this.step) || 1;
+
+                    // Reverse the wheel direction
+                    if (e.deltaY < 0) {
+                        // Wheel up - decrease value
+                        this.value = Math.max(0, currentValue - step);
+                    } else {
+                        // Wheel down - increase value
+                        this.value = currentValue + step;
+                    }
+                    previousValue = parseFloat(this.value);
+                });
+
+                // Update previousValue when manually typed
+                input.addEventListener('change', function() {
+                    previousValue = parseFloat(this.value) || 0;
+                });
+            });
+        }
+
+        // Initialize
+        initBalloonDiameterSelect();
+        makeDialogDraggable();
+        addDialogClickToClose();
+        reverseCalibrationArrows();
+
+        // Auto-load the image handed over by Multi-DicomViewer (if any).
+        // Two flavours:
+        //   MDV.frames = [data URL, …] + MDV.currentFrame  → IVUS video
+        //     stack: install the frame-stepper and lock-to-first-pick
+        //     workflow.
+        //   MDV.image                                      → single
+        //     static image (legacy / XA snapshot).
+        if (MDV && Array.isArray(MDV.frames) && MDV.frames.length > 0) {
+            const _mdvAutoLoad = function () {
+                _mdvInstallFrameStack(MDV.frames, MDV.currentFrame || 0);
+            };
+            if (document.readyState === 'complete') {
+                _mdvAutoLoad();
+            } else {
+                window.addEventListener('load', _mdvAutoLoad);
+            }
+        } else if (MDV && typeof MDV.image === 'string' && MDV.image) {
+            const _mdvAutoLoad = function () {
+                loadImageFromDataURL(MDV.image);
+            };
+            if (document.readyState === 'complete') {
+                _mdvAutoLoad();
+            } else {
+                window.addEventListener('load', _mdvAutoLoad);
+            }
+        }
+    </script>
+</body>
+</html>

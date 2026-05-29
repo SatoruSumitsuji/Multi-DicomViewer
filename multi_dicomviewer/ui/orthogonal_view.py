@@ -43,6 +43,7 @@ import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -102,6 +103,17 @@ class _OrthoCanvas(QWidget):
         self.angle1: tuple[float, float] | None = None  # red arrow
         self.angle2: tuple[float, float] | None = None  # blue arrow
         self.cur_angle_text = ""
+        # View-only canvases (panes whose source DICOM lacks C-arm
+        # positioner angles) ignore clicks so the user can't drop
+        # picks where angles can't be computed.
+        self._pickable = True
+
+    def set_pickable(self, on: bool) -> None:
+        self._pickable = bool(on)
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if on
+            else Qt.CursorShape.ArrowCursor
+        )
 
     def set_frame(self, qimg: QImage | None, spacing_mm) -> None:
         self._qimg = qimg.copy() if qimg is not None else None
@@ -151,6 +163,8 @@ class _OrthoCanvas(QWidget):
 
     # ----------------------------------------------------- input
     def mousePressEvent(self, e):
+        if not self._pickable:
+            return
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pt = self._widget_to_image(e.position().toPoint())
@@ -297,10 +311,15 @@ class _OrthoPanel(QWidget):
     biplane study computes its angles independently."""
 
     def __init__(self, qimg: QImage, spacing_mm, beta, alpha,
-                 subtitle: str, parent=None):
+                 subtitle: str, pickable: bool = True, parent=None):
         super().__init__(parent)
         self._beta = beta
         self._alpha = alpha
+        # A pane whose source has no PositionerPrimaryAngle/Secondary
+        # tags shows up as VIEW-ONLY: the image is cloned so the user
+        # still sees it side-by-side with the angio picks on the other
+        # panes, but clicks are inert and the red/blue arrows stay "—".
+        self._pickable = bool(pickable)
 
         col = QVBoxLayout(self)
         col.setContentsMargins(2, 2, 2, 2)
@@ -323,19 +342,23 @@ class _OrthoPanel(QWidget):
         clear_btn = QPushButton("Clear")
         clear_btn.setToolTip("Clear picks and angles on THIS image only")
         clear_btn.clicked.connect(self.clear)
+        clear_btn.setEnabled(self._pickable)
         head.addWidget(clear_btn)
         col.addLayout(head)
 
         self.canvas = _OrthoCanvas()
+        self.canvas.set_pickable(self._pickable)
         self.canvas.point_added.connect(self._on_pick)
         col.addWidget(self.canvas, 1)
 
-        cur = (
-            f"Current image: {_format_angle(beta, alpha)}"
-            if beta is not None and alpha is not None
-            else "Current image: (no Positioner angles in DICOM header — "
-                 "results are relative to image axes only)"
-        )
+        if not self._pickable:
+            cur = ("View only — no C-arm positioner angles in this "
+                    "image's DICOM header")
+        elif beta is not None and alpha is not None:
+            cur = f"Current image: {_format_angle(beta, alpha)}"
+        else:
+            cur = ("Current image: (no Positioner angles in DICOM "
+                    "header — results are relative to image axes only)")
         self._cur_lbl = QLabel(cur)
         self._cur_lbl.setStyleSheet(
             "color:#ffd700; padding:2px 8px;"
@@ -356,7 +379,7 @@ class _OrthoPanel(QWidget):
         col.addWidget(self._blue_lbl)
 
         self.canvas.set_frame(qimg, spacing_mm)
-        if beta is not None and alpha is not None:
+        if self._pickable and beta is not None and alpha is not None:
             self.canvas.set_current_angle_text(_format_angle(beta, alpha))
 
     def clear(self) -> None:
@@ -412,7 +435,15 @@ class OrthogonalViewWindow(QMainWindow):
     def __init__(self, panels, title: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Orthogonal-View — {title}")
-        self.resize(1400 if len(panels) > 1 else 960, 820)
+        n = len(panels)
+        # 4-pane case needs more horizontal room than 1-/2-pane;
+        # height roughly matches the shell viewer.
+        if n >= 3:
+            self.resize(1600, 1000)
+        elif n == 2:
+            self.resize(1400, 820)
+        else:
+            self.resize(960, 820)
 
         central = QWidget()
         col = QVBoxLayout(central)
@@ -423,25 +454,50 @@ class OrthogonalViewWindow(QMainWindow):
             "Click two points on the image to define a vector. "
             "The red and blue arrows mark the two C-arm angles whose "
             "view is orthogonal to that vector."
-            + ("  (Biplane: each pane computes its own orthogonal "
+            + ("  (Multi-pane: each pane computes its own orthogonal "
                "angles independently — use each pane's own Clear "
-               "button to clear just that side.)"
-               if len(panels) > 1 else "")
+               "button to clear just that side. Panes without C-arm "
+               "angles in their DICOM header are view-only.)"
+               if n > 1 else "")
         )
         info.setStyleSheet("color:#ccc; padding:4px;")
         info.setWordWrap(True)
         col.addWidget(info)
 
-        pane_row = QHBoxLayout()
-        pane_row.setSpacing(6)
         self._panels: list[_OrthoPanel] = []
-        for spec in panels:
-            panel = _OrthoPanel(
-                spec["qimg"], spec["spacing"], spec["beta"], spec["alpha"],
-                spec.get("subtitle", ""),
-            )
-            self._panels.append(panel)
-            pane_row.addWidget(panel, 1)
-        col.addLayout(pane_row, 1)
+        # Up to 2 panes → single row; 3+ panes (2×2 shell layout) → 2×N
+        # grid so the panels stay roughly square instead of slim columns.
+        if n <= 2:
+            pane_row = QHBoxLayout()
+            pane_row.setSpacing(6)
+            for spec in panels:
+                panel = _OrthoPanel(
+                    spec["qimg"], spec["spacing"],
+                    spec["beta"], spec["alpha"],
+                    spec.get("subtitle", ""),
+                    pickable=spec.get("pickable", True),
+                )
+                self._panels.append(panel)
+                pane_row.addWidget(panel, 1)
+            col.addLayout(pane_row, 1)
+        else:
+            grid = QGridLayout()
+            grid.setSpacing(6)
+            cols = 2
+            for i, spec in enumerate(panels):
+                panel = _OrthoPanel(
+                    spec["qimg"], spec["spacing"],
+                    spec["beta"], spec["alpha"],
+                    spec.get("subtitle", ""),
+                    pickable=spec.get("pickable", True),
+                )
+                self._panels.append(panel)
+                r, c = divmod(i, cols)
+                grid.addWidget(panel, r, c)
+            for c in range(cols):
+                grid.setColumnStretch(c, 1)
+            for r in range((n + cols - 1) // cols):
+                grid.setRowStretch(r, 1)
+            col.addLayout(grid, 1)
 
         self.setCentralWidget(central)

@@ -604,25 +604,55 @@ class MainWindow(QMainWindow):
         self._ortho_act.setToolTip(
             "Pick a vector on the active XA image and get the two C-arm "
             "angles whose view is orthogonal to it "
-            "(only available in 1×1 with an XA pane active)"
+            "(available whenever the active pane shows an XA series "
+            "with C-arm positioner angles)"
         )
         self._ortho_act.triggered.connect(self._open_orthogonal_view)
         tm.addAction(self._ortho_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
-        """Gate Tools menu items by current layout / active viewer:
-        MultiSync needs 1×2 or 2×2; Orthogonal-View needs 1×1 + an XA
-        pane active."""
+        """Gate Tools menu items by current layout / contents:
+        MultiSync needs 1×2 or 2×2; Orthogonal-View needs at least one
+        VISIBLE pane to hold an XA series with C-arm positioner angles
+        (it works on every visible pane — angio panes are pickable,
+        the rest open view-only)."""
         if hasattr(self, "_sync_act"):
             self._sync_act.setEnabled(self._layout_key in ("1x2", "2x2"))
         if hasattr(self, "_ortho_act"):
-            ok = (
-                self._layout_key == "1x1"
-                and self._active is not None
-                and _is_xa(self._active.current_viewer())
-            )
-            self._ortho_act.setEnabled(ok)
+            self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
+
+    @staticmethod
+    def _viewer_has_positioner_angles(v) -> bool:
+        """True iff *v* is an XA viewer whose first plane has both
+        PositionerPrimaryAngle and PositionerSecondaryAngle present."""
+        if not _is_xa(v):
+            return False
+        planes = getattr(v, "_planes", []) or []
+        for p in planes:
+            ds = getattr(p, "_ds", None)
+            if ds is None:
+                continue
+            if (getattr(ds, "PositionerPrimaryAngle", None) is not None
+                    and getattr(ds, "PositionerSecondaryAngle",
+                                  None) is not None):
+                return True
+        return False
+
+    def _any_visible_pane_has_angles(self) -> bool:
+        """True iff at least one currently visible pane shows an XA
+        series with C-arm angles — the gate for Orthogonal-View."""
+        if self._layout_key == "1x1":
+            v = (self._active.current_viewer()
+                 if self._active is not None else None)
+            return self._viewer_has_positioner_angles(v)
+        _, _, count = _LAYOUTS[self._layout_key]
+        for pane in self._order[:count]:
+            if not pane.isVisible():
+                continue
+            if self._viewer_has_positioner_angles(pane.current_viewer()):
+                return True
+        return False
 
     def _open_multisync(self) -> None:
         """Launch the MultiSync IVUS window, carrying over the current
@@ -693,12 +723,27 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _launch_browser_maximized(uri: str) -> None:
-        """Open *uri* maximised. Prefer Chrome/Edge with
-        --new-window --start-maximized (those honour it cleanly); fall
-        back to the OS default browser if neither is found."""
+        """Open *uri* maximised. Prefer Chrome/Edge with --new-window
+        + an explicit window-position/window-size at the primary
+        screen's available geometry (–-start-maximized alone is often
+        ignored when the user already has a Chrome session running).
+        Falls back to the OS default browser if neither is found."""
         import shutil
         import subprocess
         import webbrowser
+        # Primary-screen geometry so the new window covers the full
+        # work area regardless of the existing browser session's
+        # state. availableGeometry excludes the taskbar, so the
+        # result is effectively a maximised window.
+        from PyQt6.QtGui import QGuiApplication
+        scr = QGuiApplication.primaryScreen()
+        geom = scr.availableGeometry() if scr is not None else None
+        if geom is not None:
+            pos_arg = f"--window-position={geom.x()},{geom.y()}"
+            size_arg = f"--window-size={geom.width()},{geom.height()}"
+        else:
+            pos_arg = None
+            size_arg = None
         for exe in ("msedge", "chrome"):
             p = shutil.which(exe)
             if p is None:
@@ -713,107 +758,283 @@ class MainWindow(QMainWindow):
                         p = guess
                         break
             if p:
+                cmd = [p, "--new-window", "--start-maximized"]
+                if pos_arg and size_arg:
+                    cmd.extend([pos_arg, size_arg])
+                cmd.append(uri)
                 try:
-                    subprocess.Popen(
-                        [p, "--new-window", "--start-maximized", uri]
-                    )
+                    subprocess.Popen(cmd)
                     return
                 except OSError:
                     pass
         webbrowser.open(uri)
 
+    #: Rupture-Predictor hand-off encoding params. 2× upscale + JPEG
+    #: q92 keeps picks at ~100 px/mm (still well above the user's
+    #: clipboard-screenshot reference of 88 px/mm) while shrinking the
+    #: per-frame payload roughly 5–10× vs the previous 3×-PNG, so the
+    #: encoding loop and the browser parse of the inline data URLs are
+    #: both noticeably faster.
+    _RP_HANDOFF_UPSCALE = 2
+    _RP_HANDOFF_JPEG_QUALITY = 92
+
     @staticmethod
-    def _qimage_to_data_url(qimg) -> str:
-        """QImage -> 'data:image/png;base64,...' for HTML hand-off."""
+    def _qimage_to_data_url(qimg, fmt: str = "PNG",
+                             quality: int = -1) -> str:
+        """QImage -> 'data:image/...;base64,...' for HTML hand-off.
+
+        Pass ``fmt='JPEG'`` and a quality 0–100 for compact lossy
+        encodings (used by the Rupture-Predictor hand-off); the default
+        PNG path is kept for any caller that needs lossless."""
         from PyQt6.QtCore import QBuffer, QByteArray
         ba = QByteArray()
         buf = QBuffer(ba)
         buf.open(QBuffer.OpenModeFlag.WriteOnly)
-        qimg.save(buf, "PNG")
+        qimg.save(buf, fmt, quality)
         buf.close()
-        return ("data:image/png;base64,"
+        mime = ("image/jpeg" if fmt.upper() in ("JPG", "JPEG")
+                else "image/png")
+        return (f"data:{mime};base64,"
                 + bytes(ba.toBase64()).decode("ascii"))
 
-    def _open_orthogonal_view(self) -> None:
-        """Tools ▸ Orthogonal-View — clone the active XA pane's currently
-        shown image(s) into the Orthogonal-View tool, pre-loaded with
-        their Positioner angles.
+    @classmethod
+    def _rp_upscaled_data_url(cls, qimg) -> str:
+        """SmoothTransformation upscale (factor = _RP_HANDOFF_UPSCALE)
+        + JPEG (quality = _RP_HANDOFF_JPEG_QUALITY) base64. The single
+        encoding helper for both the IVUS frame burst and the XA
+        single-image fallback so any future tweak (factor / format /
+        quality) lands in one place."""
+        s = cls._RP_HANDOFF_UPSCALE
+        if s != 1:
+            qimg = qimg.scaled(
+                qimg.width() * s, qimg.height() * s,
+                Qt.AspectRatioMode.IgnoreAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        return cls._qimage_to_data_url(
+            qimg, "JPEG", cls._RP_HANDOFF_JPEG_QUALITY,
+        )
 
-        Single-plane XA → one panel (the canvas).
-        Biplane XA      → two panels side by side (Frontal + Lateral),
-                          each computing its own orthogonal angles.
-        """
-        from multi_dicomviewer.ui.orthogonal_view import OrthogonalViewWindow
-        if self._layout_key != "1x1":
-            return
-        v = self._active.current_viewer() if self._active is not None else None
-        if not _is_xa(v):
-            return
+    def _ivus_frame_burst(self, viewer, progress=None):
+        """For an IVUS viewer, render a burst of frames around the
+        currently displayed one as upscaled JPEG data URLs (see
+        :data:`_RP_HANDOFF_UPSCALE` / :data:`_RP_HANDOFF_JPEG_QUALITY`).
+
+        Returns ``(frames, current_index)`` — ``frames`` is a list of
+        ``data:image/jpeg;base64,...`` strings, ``current_index`` is
+        the position in that list corresponding to the frame the user
+        was looking at. Returns ``(None, None)`` if the burst can't be
+        built (no plane / no frames).
+
+        *progress* — optional ``(done, total, message)`` callback fired
+        each frame so the shell can update a QProgressDialog (encoding
+        101 frames at 3× upscale takes a few seconds)."""
+        from multi_dicomviewer.viewers.image_canvas import to_qimage
+        planes = getattr(viewer, "_planes", []) or []
+        if not planes:
+            return None, None
+        plane = planes[getattr(viewer, "_active", 0)]
+        total = getattr(plane, "total_frames", 0)
+        if total <= 0:
+            return None, None
+        cur = max(0, min(int(getattr(viewer, "_frame", 0)), total - 1))
+        # ± _RP_FRAME_HALF_BURST frames around cur, clamped. 50 each
+        # side → 101 frames @ 30fps ≈ ±1.7 s, enough to span at least
+        # one full cardiac cycle for boundary verification. Payload at
+        # 2×-upscaled JPEG q92 (see _rp_upscaled_data_url) runs only
+        # a few MB embedded inline so the browser parse is fast.
+        _RP_FRAME_HALF_BURST = 50
+        start = max(0, cur - _RP_FRAME_HALF_BURST)
+        end = min(total - 1, cur + _RP_FRAME_HALF_BURST)
+        burst_total = end - start + 1
+        frames = []
+        for k, idx in enumerate(range(start, end + 1)):
+            if progress is not None:
+                progress(
+                    k, burst_total,
+                    f"Encoding IVUS frame {k + 1} / {burst_total}…"
+                )
+                if getattr(progress, "cancelled", False):
+                    return None, None
+            try:
+                arr = plane.frame(idx)
+            except Exception:
+                continue
+            qimg = to_qimage(arr)
+            if qimg.isNull():
+                continue
+            frames.append(self._rp_upscaled_data_url(qimg))
+        if progress is not None:
+            progress(burst_total, burst_total, "Frames ready.")
+        if not frames:
+            return None, None
+        return frames, cur - start
+
+    @staticmethod
+    def _read_positioner_angles(ds):
+        """Extract (primary, secondary) angle from a DICOM dataset, with
+        NaN / missing collapsed to None so downstream code can branch on
+        'we have angles or we don't' with a single test."""
+        try:
+            b = float(getattr(ds, "PositionerPrimaryAngle", float("nan")))
+            if math.isnan(b):
+                b = None
+        except (TypeError, ValueError):
+            b = None
+        try:
+            a = float(getattr(ds, "PositionerSecondaryAngle", float("nan")))
+            if math.isnan(a):
+                a = None
+        except (TypeError, ValueError):
+            a = None
+        return b, a
+
+    def _ortho_panels_from_xa_viewer(self, v, pane_label: str = "") -> list:
+        """Build OrthogonalView panel specs for an XA viewer's currently-
+        shown plane(s). In 1×1 with biplane, both planes (Front+Lateral)
+        are exported. In 1×2 / 2×2 the viewer is forced single-plane, so
+        only the active plane is exported."""
         planes = getattr(v, "_planes", []) or []
         if not planes:
-            QMessageBox.information(
-                self, "Orthogonal-View",
-                "Load an XA series into the pane first.",
-            )
-            return
-
-        def _angles(ds):
-            try:
-                b = float(getattr(ds, "PositionerPrimaryAngle", float("nan")))
-                if math.isnan(b):
-                    b = None
-            except (TypeError, ValueError):
-                b = None
-            try:
-                a = float(getattr(
-                    ds, "PositionerSecondaryAngle", float("nan")
-                ))
-                if math.isnan(a):
-                    a = None
-            except (TypeError, ValueError):
-                a = None
-            return b, a
-
-        # Build one panel spec per plane shown by the XA viewer. The
-        # biplane (Front+Lateral) viewer has self.canvas + self.canvas2;
-        # the single-plane viewer just has self.canvas.
-        is_biplane = len(planes) >= 2
+            return []
+        # Mirror the viewer's own canvas usage: dual canvas in biplane
+        # side-by-side (the 1×1 case the shell enables), single canvas
+        # otherwise.
+        is_dual = (
+            self._layout_key == "1x1"
+            and len(planes) >= 2
+            and getattr(v, "canvas2", None) is not None
+            and not getattr(v, "canvas2").isHidden()
+        )
         canvases = [getattr(v, "canvas", None)]
-        if is_biplane:
+        plane_idxs = [getattr(v, "_active", 0)]
+        if is_dual:
             canvases.append(getattr(v, "canvas2", None))
+            plane_idxs = [0, 1]
 
-        panels = []
-        for i, canvas in enumerate(canvases):
-            qimg = (
-                getattr(canvas, "_qimg", None) if canvas is not None else None
-            )
-            if qimg is None or qimg.isNull() or i >= len(planes):
+        out = []
+        for canvas, pi in zip(canvases, plane_idxs):
+            if canvas is None or pi >= len(planes):
                 continue
-            beta, alpha = _angles(planes[i]._ds)
-            subtitle = planes[i].name if is_biplane else ""
-            panels.append({
+            qimg = getattr(canvas, "_qimg", None)
+            if qimg is None or qimg.isNull():
+                continue
+            beta, alpha = self._read_positioner_angles(planes[pi]._ds)
+            # Subtitle: in 1×1-biplane keep the plane name (Front /
+            # Lateral); in multi-pane layouts label by source pane.
+            if is_dual:
+                subtitle = planes[pi].name
+            elif pane_label:
+                subtitle = pane_label
+            else:
+                subtitle = ""
+            out.append({
                 "qimg": qimg,
                 "spacing": getattr(canvas, "spacing_mm", None),
                 "beta": beta,
                 "alpha": alpha,
                 "subtitle": subtitle,
+                "pickable": beta is not None and alpha is not None,
             })
+        return out
 
-        if not panels:
+    def _ortho_panel_view_only(self, v, pane_label: str) -> list:
+        """Clone a non-XA / no-angle pane's current frame as a view-only
+        panel (image shown so the user can refer to it, but clicks are
+        inert). Falls back to a widget-grab when the viewer doesn't
+        expose a canvas QImage."""
+        qimg = None
+        spacing = None
+        canvas = getattr(v, "canvas", None)
+        if canvas is not None:
+            qimg = getattr(canvas, "_qimg", None)
+            spacing = getattr(canvas, "spacing_mm", None)
+        if qimg is None or qimg.isNull():
+            return []  # nothing safe to show
+        return [{
+            "qimg": qimg,
+            "spacing": spacing,
+            "beta": None,
+            "alpha": None,
+            "subtitle": pane_label,
+            "pickable": False,
+        }]
+
+    def _open_orthogonal_view(self) -> None:
+        """Tools ▸ Orthogonal-View — clone every currently visible pane
+        into the Orthogonal-View tool.
+
+        * Panes with an XA series whose header carries the C-arm
+          positioner angles are PICKABLE: clicking two points on the
+          image returns the two orthogonal C-arm angles.
+        * Panes without angles (CT, IVUS, XA missing the tags, etc.)
+          are shown VIEW-ONLY for reference but cannot be clicked.
+
+        The gate is enforced by _sync_layout_gate: the menu item is
+        only enabled when at least one visible pane has angles. The
+        checks below are guard-rails for the manual entry points
+        (keyboard shortcut, script-triggered)."""
+        from multi_dicomviewer.ui.orthogonal_view import OrthogonalViewWindow
+
+        # Enumerate visible panes in display order.
+        if self._layout_key == "1x1":
+            visible_panes = (
+                [self._active] if self._active is not None else []
+            )
+        else:
+            _, _, count = _LAYOUTS[self._layout_key]
+            visible_panes = [p for p in self._order[:count] if p.isVisible()]
+
+        panels = []
+        for pane in visible_panes:
+            v = pane.current_viewer()
+            if v is None:
+                continue
+            pane_label = f"Pane {self._panes.index(pane) + 1}"
+            if _is_xa(v):
+                panels.extend(self._ortho_panels_from_xa_viewer(
+                    v, pane_label
+                ))
+            else:
+                panels.extend(self._ortho_panel_view_only(v, pane_label))
+
+        # Need at least one pickable panel — otherwise the tool is
+        # pointless. The layout-bar gate normally already prevents this.
+        if not any(p["pickable"] for p in panels):
             QMessageBox.information(
                 self, "Orthogonal-View",
-                "No image to clone — the pane is empty.",
+                "No visible pane shows an XA series with C-arm "
+                "positioner angles.",
             )
             return
 
-        title = (
-            self._series_by_uid.get(self._active.shown_series_uid()).label
-            if self._active.shown_series_uid() in self._series_by_uid
-            else "—"
-        )
+        # Title from the active pane's series if available.
+        title = "—"
+        if self._active is not None:
+            uid = self._active.shown_series_uid()
+            se = self._series_by_uid.get(uid) if uid else None
+            if se is not None:
+                title = se.label
         self._ortho_win = OrthogonalViewWindow(panels, title, parent=self)
         self._ortho_win.showMaximized()
         self._ortho_win.raise_()
+
+    @staticmethod
+    def _bundled_resource(rel: str) -> str:
+        """Resolve a file shipped under ``multi_dicomviewer/resources``
+        in both modes:
+
+        * dev (``python -m multi_dicomviewer``): the file sits next to
+          this source tree, so we resolve via ``__file__``.
+        * PyInstaller one-dir (the .exe / .app build): the spec copies
+          the resources into the bundle preserving the layout
+          ``multi_dicomviewer/resources/<file>`` next to the binary's
+          internal modules, so the SAME relative resolution works.
+
+        Returns an absolute filesystem path."""
+        import pathlib as _pl
+        here = _pl.Path(__file__).resolve().parent  # …/multi_dicomviewer/ui
+        return str(here.parent / "resources" / rel)
 
     def _open_rupture_predictor(self) -> None:
         """Open Rupture-Predictor, handing over the active pane's
@@ -826,7 +1047,11 @@ class MainWindow(QMainWindow):
         import json
         import pathlib
         import tempfile
-        src = r"C:\CC_Product\Rupture-Predictor\Rupture-Predictor.html"
+        # The DICOM-aware variant of Rupture-Predictor is bundled with
+        # Multi-DicomViewer (multi_dicomviewer/resources/). The original
+        # standalone HTML at C:\CC_Product\Rupture-Predictor\ stays put
+        # as the MP4 / clipboard variant — outside this app's purview.
+        src = self._bundled_resource("Rupture-Predictor.html")
         if not os.path.exists(src):
             QMessageBox.warning(
                 self, "Rupture-Predictor", f"Not found:\n{src}",
@@ -842,9 +1067,74 @@ class MainWindow(QMainWindow):
                 # px/mm = 1 / (mm/px); PixelSpacing is (row, col).
                 handoff["hpxmm"] = round(1.0 / col_mm, 5)
                 handoff["vpxmm"] = round(1.0 / row_mm, 5)
-        img = self._active_display_image()
-        if img is not None:
-            handoff["image"] = self._qimage_to_data_url(img)
+        # Scale the DICOM-derived calibration to match the upscaled
+        # image that goes into the data URL — see _rp_upscaled_data_url
+        # for why we upscale at all (finer pick granularity than the
+        # native 512² DICOM gives).
+        if "hpxmm" in handoff:
+            handoff["hpxmm"] = round(
+                handoff["hpxmm"] * self._RP_HANDOFF_UPSCALE, 5
+            )
+        if "vpxmm" in handoff:
+            handoff["vpxmm"] = round(
+                handoff["vpxmm"] * self._RP_HANDOFF_UPSCALE, 5
+            )
+
+        # IVUS gets the full FRAME BURST around the current frame so
+        # the user can step ±50 frames in Rupture-Predictor to verify
+        # the rupture / adventitia boundary. Picks lock to the frame
+        # of the first point so the four picks always reference the
+        # same anatomy. Non-IVUS (XA snapshot) still hands over a
+        # single image since stepping doesn't apply.
+        v = (self._active.current_viewer()
+             if self._active is not None else None)
+        is_ivus = (v is not None
+                   and getattr(v, "handles_modality", "") == "IVUS")
+        if is_ivus:
+            # Encoding ~101 frames at 3× upscale takes a couple of
+            # seconds — show a progress dialog so the user knows we
+            # didn't just freeze the app.
+            prog = QProgressDialog(
+                "Preparing IVUS frames for Rupture-Predictor…",
+                "Cancel", 0, 1, self,
+            )
+            prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+            prog.setMinimumDuration(0)
+            prog.setAutoClose(False)
+            prog.setAutoReset(False)
+            prog.setValue(0)
+            prog.show()
+            QApplication.processEvents()
+
+            def _cb(done, total, msg):
+                if prog.wasCanceled():
+                    _cb.cancelled = True
+                    return
+                if total and prog.maximum() != total:
+                    prog.setMaximum(total)
+                prog.setValue(done)
+                if msg:
+                    prog.setLabelText(msg)
+                QApplication.processEvents()
+            _cb.cancelled = False
+
+            frames, cur_idx = self._ivus_frame_burst(v, progress=_cb)
+            if _cb.cancelled:
+                prog.close()
+                return
+            prog.setLabelText("Writing Rupture-Predictor session HTML…")
+            QApplication.processEvents()
+            # We hold prog open until after the HTML write below.
+            self._rupture_progress = prog
+            if frames:
+                handoff["frames"] = frames
+                handoff["currentFrame"] = cur_idx
+        if "frames" not in handoff:
+            img = self._active_display_image()
+            if img is not None:
+                # Same upscale + JPEG path the IVUS burst uses, so
+                # XA snapshots and IVUS frames behave identically.
+                handoff["image"] = self._rp_upscaled_data_url(img)
         if not handoff:
             self._launch_browser_maximized(pathlib.Path(src).as_uri())
             return
@@ -863,12 +1153,23 @@ class MainWindow(QMainWindow):
             with open(tmp, "w", encoding="utf-8") as fh:
                 fh.write(html)
         except OSError as exc:
+            prog = getattr(self, "_rupture_progress", None)
+            if prog is not None:
+                prog.close()
+                self._rupture_progress = None
             QMessageBox.warning(self, "Rupture-Predictor", str(exc))
             self._launch_browser_maximized(pathlib.Path(src).as_uri())
             return
         self._launch_browser_maximized(pathlib.Path(tmp).as_uri())
+        # Tear down the encoding-progress dialog (if we showed one).
+        prog = getattr(self, "_rupture_progress", None)
+        if prog is not None:
+            prog.close()
+            self._rupture_progress = None
         parts = []
-        if "image" in handoff:
+        if "frames" in handoff:
+            parts.append(f"IVUS frame burst ({len(handoff['frames'])} frames)")
+        elif "image" in handoff:
             parts.append("displayed image")
         if "hpxmm" in handoff:
             parts.append("DICOM calibration (CH/CV step skipped)")
