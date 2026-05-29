@@ -395,6 +395,37 @@ class StudyBrowser(QTreeWidget):
                 self.scrollToItem(item)
             self.series_chosen.emit(series)
 
+    def highlight_series(self, series: Series) -> None:
+        """Visually select *series* in the tree WITHOUT emitting the
+        viewer-load signal — used by Tree↔Thumbnail toggle sync where
+        we want the highlight to follow but the displayed viewer to
+        stay put."""
+        item = self._items.get(id(series))
+        if item is None:
+            return
+        study_item = item.parent()
+        patient_item = (
+            study_item.parent() if study_item is not None else None
+        )
+        if patient_item is not None:
+            patient_item.setExpanded(True)
+        if study_item is not None and not study_item.isExpanded():
+            target = study_item
+        else:
+            target = item
+        # Block both itemSelectionChanged + series_chosen so the
+        # silent highlight doesn't trigger thumb rebuilds / viewer
+        # loads.
+        self.blockSignals(True)
+        try:
+            self.clearSelection()
+            target.setSelected(True)
+            self.setCurrentItem(target)
+            if target is item:
+                self.scrollToItem(item)
+        finally:
+            self.blockSignals(False)
+
     def _on_activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
         data = item.data(0, _ROLE)
         if isinstance(data, Series):
@@ -952,7 +983,56 @@ class StudyPanel(QWidget):
             self.thumbs.scrollToItem(item)
 
     # ------------------------------------------------------------- internals
+    def _current_tree_series(self) -> Series | None:
+        """Series currently selected in the Tree view, or None."""
+        items = self.tree.selectedItems()
+        it = items[0] if items else self.tree.currentItem()
+        if it is None:
+            return None
+        data = it.data(0, _ROLE)
+        return data if isinstance(data, Series) else None
+
+    def _current_thumb_series(self) -> Series | None:
+        """Series currently selected in the Thumbnail grid, or None."""
+        items = self.thumbs.selectedItems()
+        it = items[0] if items else self.thumbs.currentItem()
+        if it is None:
+            return None
+        data = it.data(_ROLE)
+        return data if isinstance(data, Series) else None
+
+    def _highlight_thumb_series(self, series: Series) -> None:
+        """Mark *series* as the thumb-grid's current item without
+        firing itemClicked (which would re-load the viewer)."""
+        item = self._item_by_series.get(id(series))
+        if item is None:
+            return
+        self.thumbs.blockSignals(True)
+        try:
+            self.thumbs.clearSelection()
+            item.setSelected(True)
+            self.thumbs.setCurrentItem(item)
+            self.thumbs.scrollToItem(item)
+        finally:
+            self.thumbs.blockSignals(False)
+
     def _show(self, idx: int) -> None:
+        # Tree ↔ Thumbnail selection sync: when the user toggles views,
+        # the highlighted series in the outgoing view becomes the
+        # highlighted series in the incoming view, so it stays obvious
+        # which file they were just looking at. We do NOT emit any
+        # load-the-viewer signal — the toggle is a view switch, not a
+        # series choice.
+        cur = self._stack.currentIndex()
+        if cur != idx:
+            if cur == 0 and idx == 1:
+                se = self._current_tree_series()
+                if se is not None:
+                    self._highlight_thumb_series(se)
+            elif cur == 1 and idx == 0:
+                se = self._current_thumb_series()
+                if se is not None:
+                    self.tree.highlight_series(se)
         self._stack.setCurrentIndex(idx)
         self.btn_info.setChecked(idx == 0)
         self.btn_thumb.setChecked(idx == 1)

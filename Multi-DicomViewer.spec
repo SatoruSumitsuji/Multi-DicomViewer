@@ -38,6 +38,13 @@ iiof_datas, iiof_binaries, iiof_hidden = collect_all("imageio_ffmpeg")
 datas = (
     vtk_datas + plj_datas + pllj_datas + plop_datas + ic_datas + pyd_datas
     + iio_datas + iiof_datas
+    # Resources shipped with the app — the DICOM-aware Rupture-Predictor
+    # HTML is launched from Tools and must be present in the bundle.
+    # Preserve the source-tree path so the dev and bundle layouts match.
+    + [(
+        "multi_dicomviewer/resources/Rupture-Predictor.html",
+        "multi_dicomviewer/resources",
+    )]
 )
 binaries = (
     vtk_binaries + plj_binaries + pllj_binaries + plop_binaries
