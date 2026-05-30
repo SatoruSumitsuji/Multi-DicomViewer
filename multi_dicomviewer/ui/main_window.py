@@ -1,6 +1,6 @@
 """Application shell: study browser + a configurable viewer grid.
 
-The screen is split into 1×1, 1×2 or 2×2 panes. Each pane is modality
+The screen is split into 1×1, 1×2, 2×1 or 2×2 panes. Each pane is modality
 agnostic: drag a series from the left info panel onto a pane and the pane
 spins up the viewer that matches the series' modality (XA / CT today;
 IVUS, OCT/OFDI, NM slot in via _VIEWER_FACTORY as they land). A patient
@@ -91,8 +91,15 @@ _VIEWER_FACTORY = {
 _LAYOUTS = {
     "1x1": (1, 1, 1),
     "1x2": (1, 2, 2),
+    "2x1": (2, 1, 2),
     "2x2": (2, 2, 4),
 }
+#: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
+_MULTI_PANE = ("1x2", "2x1", "2x2")
+#: Layouts where a single pane is wide enough to show a biplane XA as
+#: Front+Lateral side by side (1×1 = whole screen; 2×1 = full-width rows).
+#: 1×2 / 2×2 panes are half-width, so biplane there stays single-plane.
+_DUAL_LAYOUTS = ("1x1", "2x1")
 _MAX_PANES = 4
 
 #: drag payload (source pane index) for swapping pane positions
@@ -593,7 +600,7 @@ class MainWindow(QMainWindow):
         self._sync_act = QAction("MultiSync IVUS viewer…", self)
         self._sync_act.setToolTip(
             "Open the panes' IVUS series in a synchronised viewer "
-            "(only available in the 1×2 / 2×2 layout)"
+            "(only available in the 1×2 / 2×1 / 2×2 layout)"
         )
         self._sync_act.triggered.connect(self._open_multisync)
         tm.addAction(self._sync_act)
@@ -609,6 +616,15 @@ class MainWindow(QMainWindow):
         )
         self._ortho_act.triggered.connect(self._open_orthogonal_view)
         tm.addAction(self._ortho_act)
+        self._coaxial_act = QAction("Coaxial Eval…", self)
+        self._coaxial_act.setToolTip(
+            "Draw a labelled Line (GC / proxLAD / …) on the same vessel in "
+            "2+ angio views, then compute the 3-D GC-to-vessel angle "
+            "(available whenever a visible pane shows an XA series with "
+            "C-arm positioner angles)"
+        )
+        self._coaxial_act.triggered.connect(self._open_coaxial_eval)
+        tm.addAction(self._coaxial_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -618,9 +634,11 @@ class MainWindow(QMainWindow):
         (it works on every visible pane — angio panes are pickable,
         the rest open view-only)."""
         if hasattr(self, "_sync_act"):
-            self._sync_act.setEnabled(self._layout_key in ("1x2", "2x2"))
+            self._sync_act.setEnabled(self._layout_key in _MULTI_PANE)
         if hasattr(self, "_ortho_act"):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
+        if hasattr(self, "_coaxial_act"):
+            self._coaxial_act.setEnabled(self._any_visible_pane_has_angles())
 
     @staticmethod
     def _viewer_has_positioner_angles(v) -> bool:
@@ -658,7 +676,7 @@ class MainWindow(QMainWindow):
         """Launch the MultiSync IVUS window, carrying over the current
         1×2 / 2×2 layout and the IVUS series shown in the panes."""
         from multi_dicomviewer.ui.multisync_window import MultiSyncWindow
-        if self._layout_key not in ("1x2", "2x2"):
+        if self._layout_key not in _MULTI_PANE:
             return
         ivus = [
             se
@@ -674,7 +692,7 @@ class MainWindow(QMainWindow):
                 "pull-backs first.",
             )
             return
-        count = 2 if self._layout_key == "1x2" else 4
+        count = _LAYOUTS[self._layout_key][2]
         # Pre-fill each slot from the matching pane (in display order);
         # non-IVUS panes leave their slot empty. We also hand over the
         # pane's current frame index AND its viewer instance so MultiSync
@@ -901,7 +919,7 @@ class MainWindow(QMainWindow):
         # side-by-side (the 1×1 case the shell enables), single canvas
         # otherwise.
         is_dual = (
-            self._layout_key == "1x1"
+            self._layout_key in _DUAL_LAYOUTS
             and len(planes) >= 2
             and getattr(v, "canvas2", None) is not None
             and not getattr(v, "canvas2").isHidden()
@@ -1018,6 +1036,86 @@ class MainWindow(QMainWindow):
         self._ortho_win = OrthogonalViewWindow(panels, title, parent=self)
         self._ortho_win.showMaximized()
         self._ortho_win.raise_()
+
+    def _coaxial_lines_from_xa_viewer(self, v) -> list:
+        """Collect vessel-labelled Line measures from an XA viewer's
+        canvases, one entry per labelled line ready for
+        core.coaxial.compute_coaxial_angles.
+
+        Each line carries the C-arm angles STAMPED on it when it was drawn
+        (canvas.view_angles → m['beta']/m['alpha'] in _commit_draft). This
+        is correct for biplane shown single-plane too, where one canvas
+        displays different planes — and hence different angles — over time,
+        so the live plane angle can no longer be trusted at collection time.
+        Both canvas and canvas2 are always scanned; the hidden one is simply
+        empty. Older lines without a stamp fall back to the canvas's current
+        view angle."""
+        lines = []
+        for canvas in (getattr(v, "canvas", None), getattr(v, "canvas2", None)):
+            if canvas is None:
+                continue
+            spacing = getattr(canvas, "spacing_mm", None) or (1.0, 1.0)
+            live = getattr(canvas, "view_angles", None)
+            for m in getattr(canvas, "measures", []):
+                if m.get("type") != "line" or not m.get("vessel"):
+                    continue
+                pts = m.get("pts", [])
+                if len(pts) < 2:
+                    continue
+                beta = m.get("beta")
+                alpha = m.get("alpha")
+                if beta is None or alpha is None:
+                    if live is None:
+                        continue
+                    beta, alpha = live
+                lines.append({
+                    "label": m["vessel"],
+                    "beta": beta,
+                    "alpha": alpha,
+                    "line_2d": (tuple(pts[0]), tuple(pts[1])),
+                    "spacing": spacing,
+                })
+        return lines
+
+    def _open_coaxial_eval(self) -> None:
+        """Tools ▸ Coaxial Eval — gather every vessel-labelled Line drawn on
+        the visible XA panes, reconstruct each vessel's 3-D direction from
+        its 2+ views and report the GC-to-vessel angles."""
+        from multi_dicomviewer.core import coaxial
+        from multi_dicomviewer.ui.coaxial_dialog import CoaxialResultDialog
+
+        if self._layout_key == "1x1":
+            visible_panes = (
+                [self._active] if self._active is not None else []
+            )
+        else:
+            _, _, count = _LAYOUTS[self._layout_key]
+            visible_panes = [p for p in self._order[:count] if p.isVisible()]
+
+        all_lines = []
+        for pane in visible_panes:
+            v = pane.current_viewer()
+            if v is None or not _is_xa(v):
+                continue
+            all_lines.extend(self._coaxial_lines_from_xa_viewer(v))
+
+        if not all_lines:
+            QMessageBox.information(
+                self, "Coaxial Eval",
+                "No vessel-labelled lines found.\n\n"
+                "Draw a Line on the same vessel in 2+ angio views, then "
+                "right-click each line ▸ Vessel type ▸ pick GC / proxLAD / "
+                "etc. before running Coaxial Eval.",
+            )
+            return
+
+        view_counts: dict[str, int] = {}
+        for ln in all_lines:
+            view_counts[ln["label"]] = view_counts.get(ln["label"], 0) + 1
+
+        result = coaxial.compute_coaxial_angles(all_lines)
+        dlg = CoaxialResultDialog(result, view_counts, parent=self)
+        dlg.exec()
 
     @staticmethod
     def _bundled_resource(rel: str) -> str:
@@ -1198,6 +1296,7 @@ class MainWindow(QMainWindow):
         for label, key in (
             ("1×1", "1x1"),
             ("1×2", "1x2"),
+            ("2×1", "2x1"),
             ("2×2", "2x2"),
         ):
             btn = QPushButton(label)
@@ -1245,7 +1344,7 @@ class MainWindow(QMainWindow):
     def _apply_biside_to_panes(self) -> None:
         """Push the current Bi/Lt/Rt choice onto every visible pane's
         viewer that knows what to do with it (biplane XA, CT)."""
-        allow_dual = self._layout_key == "1x1"
+        allow_dual = self._layout_key in _DUAL_LAYOUTS
         for pane in self._panes:
             if not pane.isVisible():
                 continue
@@ -1310,9 +1409,10 @@ class MainWindow(QMainWindow):
             self._set_active_pane(self._order[0])
         else:
             self._set_active_pane(self._active)
-        # Front+lateral side by side only when one pane owns the screen.
+        # Front+lateral side by side when a pane is full-width (1×1, or a
+        # 2×1 row). Half-width panes (1×2 / 2×2) stay single-plane.
         for pane in self._panes:
-            pane.set_xa_biplane(key == "1x1")
+            pane.set_xa_biplane(key in _DUAL_LAYOUTS)
         # Re-apply the user's Bi/Lt/Rt choice now that allow_dual may
         # have changed; refresh the buttons to reflect whether the new
         # active pane is biplane XA / CT or not.
@@ -1857,7 +1957,7 @@ class MainWindow(QMainWindow):
                 v.set_tag_keywords(self._effective_kw(v))
             if series.modality == Modality.XA:
                 self._cur_xa = series
-                pane.set_xa_biplane(self._layout_key == "1x1")
+                pane.set_xa_biplane(self._layout_key in _DUAL_LAYOUTS)
             # Apply current Bi/Lt/Rt + refresh button state for the
             # newly resumed viewer.
             self._apply_biside_to_panes()
@@ -1945,7 +2045,7 @@ class MainWindow(QMainWindow):
             v.set_tag_keywords(self._effective_kw(v))
         if loaded.modality == Modality.XA:
             self._cur_xa = series
-            pane.set_xa_biplane(self._layout_key == "1x1")
+            pane.set_xa_biplane(self._layout_key in _DUAL_LAYOUTS)
         # Newly loaded viewer must reflect the current Bi/Lt/Rt choice.
         self._apply_biside_to_panes()
         self._refresh_biside_buttons()

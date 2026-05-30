@@ -9,6 +9,8 @@ biplane layout via set_biplane_layout():
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
@@ -214,6 +216,33 @@ class XAViewer(AbstractViewer):
         )
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
+
+        # Magnifier (click-to-zoom) buttons, right of Measure. 🔍+ / 🔍−
+        # are sticky modes: after pressing one, each click on the image
+        # zooms about that point (×1.1 / ×0.9). 🔍1 resets to the original
+        # fit. Mutually exclusive with the measure tools.
+        self._zoom_in_btn = QPushButton("🔍+")
+        self._zoom_in_btn.setCheckable(True)
+        self._zoom_in_btn.setToolTip(
+            "Click-to-zoom IN — then click a point on the image to magnify "
+            "×1.1 centred on it (click again to zoom further)"
+        )
+        self._zoom_in_btn.clicked.connect(lambda: self._set_zoom_click("in"))
+        row.addWidget(self._zoom_in_btn)
+
+        self._zoom_reset_btn = QPushButton("🔍1")
+        self._zoom_reset_btn.setToolTip("Reset zoom to the original fit")
+        self._zoom_reset_btn.clicked.connect(self._reset_zoom)
+        row.addWidget(self._zoom_reset_btn)
+
+        self._zoom_out_btn = QPushButton("🔍−")
+        self._zoom_out_btn.setCheckable(True)
+        self._zoom_out_btn.setToolTip(
+            "Click-to-zoom OUT — then click a point on the image to shrink "
+            "×0.9 centred on it"
+        )
+        self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
+        row.addWidget(self._zoom_out_btn)
         # Exposed so subclasses (IVUS) can insert their own toggles next
         # to Measure — the trailing stretch is the last item, so use
         # ``insertWidget(count() - 1, ...)`` to land before it.
@@ -619,15 +648,40 @@ class XAViewer(AbstractViewer):
                 else self._wl_lut[f]
         return apply_window(f, self._window, self._level)
 
+    @staticmethod
+    def _plane_angles(plane) -> tuple[float, float] | None:
+        """(PositionerPrimary, Secondary) of a plane's dataset, or None when
+        either tag is missing — used to stamp the angle onto measurements so
+        Coaxial-Eval knows the exact view each line was drawn on."""
+        ds = getattr(plane, "_ds", None)
+        if ds is None:
+            return None
+
+        def _f(name):
+            try:
+                v = float(getattr(ds, name, float("nan")))
+                return None if math.isnan(v) else v
+            except (TypeError, ValueError):
+                return None
+
+        b = _f("PositionerPrimaryAngle")
+        a = _f("PositionerSecondaryAngle")
+        return (b, a) if (b is not None and a is not None) else None
+
     def _render(self):
         if not self._planes:
             return
         if self._dual:
             self.canvas.set_frame(self._frame_of(self._planes[0]))
             self.canvas2.set_frame(self._frame_of(self._planes[1]))
+            self.canvas.view_angles = self._plane_angles(self._planes[0])
+            self.canvas2.view_angles = self._plane_angles(self._planes[1])
         else:
             self._active = min(self._active, len(self._planes) - 1)
             self.canvas.set_frame(self._frame_of(self._planes[self._active]))
+            self.canvas.view_angles = self._plane_angles(
+                self._planes[self._active]
+            )
         n = max(p.volume.shape[0] for p in self._planes)
         self.frame_lbl.setText(f"{self._frame + 1}/{n}")
 
@@ -774,6 +828,8 @@ class XAViewer(AbstractViewer):
     def _toggle_measure(self):
         on = self._meas_btn.isChecked()
         self._measure_bar.setVisible(on)
+        if on:
+            self._clear_zoom_click()
         if not on:
             for c in (self.canvas, self.canvas2):
                 c.set_measure_type("")
@@ -782,6 +838,8 @@ class XAViewer(AbstractViewer):
                 b.setStyleSheet("")
 
     def _set_measure_type(self, key: str):
+        # Choosing a drawing tool cancels any active click-to-zoom mode.
+        self._clear_zoom_click()
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
             b.setStyleSheet(
@@ -789,3 +847,36 @@ class XAViewer(AbstractViewer):
             )
         for c in (self.canvas, self.canvas2):
             c.set_measure_type(key)
+
+    # -------------------------------------------------- click-to-zoom
+    def _set_zoom_click(self, mode: str):
+        """Toggle the 🔍+ / 🔍− click-to-zoom mode. Re-clicking the active
+        button turns it off; switching modes turns the other off; enabling
+        either cancels the measure tools."""
+        btn = self._zoom_in_btn if mode == "in" else self._zoom_out_btn
+        other = self._zoom_out_btn if mode == "in" else self._zoom_in_btn
+        new_mode = mode if btn.isChecked() else ""
+        other.setChecked(False)
+        if new_mode and self._meas_btn.isChecked():
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._style_zoom_btns()
+        for c in (self.canvas, self.canvas2):
+            c.set_zoom_click_mode(new_mode)
+
+    def _clear_zoom_click(self):
+        self._zoom_in_btn.setChecked(False)
+        self._zoom_out_btn.setChecked(False)
+        self._style_zoom_btns()
+        for c in (self.canvas, self.canvas2):
+            c.set_zoom_click_mode("")
+
+    def _style_zoom_btns(self):
+        for b in (self._zoom_in_btn, self._zoom_out_btn):
+            b.setStyleSheet(
+                "background:#1f77b4;color:white;" if b.isChecked() else ""
+            )
+
+    def _reset_zoom(self):
+        for c in (self.canvas, self.canvas2):
+            c.reset_zoom()

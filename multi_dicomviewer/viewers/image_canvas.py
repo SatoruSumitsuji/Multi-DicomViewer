@@ -20,6 +20,7 @@ from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.core import measure_geom as G
+from multi_dicomviewer.core.coaxial import VESSEL_LABELS
 from multi_dicomviewer.core.measurements import Measurement
 
 
@@ -100,7 +101,27 @@ class ImageCanvas(QWidget):
         self.is_ivus: bool = False
         self._plaque_selected: list[int] = []   # ordered, max 2 ids
         # Zoom (Z = zoom in / Shift+Z = zoom out / mouse wheel also).
+        # Wheel zooms toward the cursor; Z/Shift+Z toward the view centre.
         self._zoom: float = 1.0
+        # Pan offset in widget pixels, added on top of the centred fit so
+        # the user can bring a specific region into view. Middle-button OR
+        # Ctrl+left drag pans; reset_zoom clears both zoom and pan.
+        self._pan: list[float] = [0.0, 0.0]
+        self._panning: bool = False
+        self._pan_anchor: tuple[float, float] | None = None
+        # Click-to-zoom mode driven by the toolbar magnifier buttons:
+        # "" off, "in" → each left-click zooms 1.1× about the clicked point,
+        # "out" → 0.9×. Independent of the measure tool (they're made
+        # mutually exclusive by the viewer).
+        self._zoom_click: str = ""
+        # C-arm (PositionerPrimary, Secondary) angles of whatever plane is
+        # CURRENTLY shown on this canvas, set by the XA viewer on every
+        # render. Stamped into a measurement when it is committed so the
+        # Coaxial-Eval tool knows the exact view each line was drawn on —
+        # essential for biplane shown single-plane, where one canvas shows
+        # different planes (hence different angles) over time. None for
+        # non-angio canvases.
+        self.view_angles: tuple[float, float] | None = None
         # Center-Angle pick mode: when set to a measure index, the next
         # 3 left-clicks add perimeter points to that measure and an
         # arc angle is computed.
@@ -143,25 +164,69 @@ class ImageCanvas(QWidget):
         self.update()
 
     # ----------------------------------------------------- zoom (Z key)
-    def zoom_in(self) -> None:
-        self._zoom = min(8.0, self._zoom * 1.25)
+    def _apply_zoom(self, factor: float, ax: float, ay: float) -> None:
+        """Multiply zoom by *factor*, keeping the image point currently
+        under widget pixel (ax, ay) anchored to that same pixel. This is
+        what lets the wheel zoom toward the cursor and a specific region
+        stay put instead of the image always scaling about its centre."""
+        new_zoom = max(0.25, min(8.0, self._zoom * factor))
+        if abs(new_zoom - self._zoom) < 1e-9:
+            return
+        anchor_img = self._widget_to_image_f(ax, ay)
+        self._zoom = new_zoom
+        after = self._image_to_widget_f(anchor_img)
+        self._pan[0] += ax - after[0]
+        self._pan[1] += ay - after[1]
+        self._clamp_pan()
         self.update()
 
+    def zoom_in(self) -> None:
+        self._apply_zoom(1.25, self.width() / 2.0, self.height() / 2.0)
+
     def zoom_out(self) -> None:
-        self._zoom = max(0.25, self._zoom / 1.25)
-        self.update()
+        self._apply_zoom(1 / 1.25, self.width() / 2.0, self.height() / 2.0)
 
     def reset_zoom(self) -> None:
         self._zoom = 1.0
+        self._pan = [0.0, 0.0]
         self.update()
 
-    def wheelEvent(self, e):
-        """Mouse wheel zooms — natural counterpart to the Z / Shift+Z
-        keyboard shortcuts."""
-        if e.angleDelta().y() > 0:
-            self.zoom_in()
+    def set_zoom_click_mode(self, mode: str) -> None:
+        """Enable click-to-zoom: 'in' (1.1× per click), 'out' (0.9×), or ''
+        to turn it off. The cursor becomes a pointing hand while active."""
+        self._zoom_click = mode if mode in ("in", "out") else ""
+        if self._zoom_click:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
-            self.zoom_out()
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self.meas_type
+                else Qt.CursorShape.ArrowCursor
+            )
+
+    def wheelEvent(self, e):
+        """Mouse wheel zooms toward the cursor — natural counterpart to the
+        Z / Shift+Z keyboard shortcuts (which zoom about the view centre)."""
+        pos = e.position()
+        factor = 1.25 if e.angleDelta().y() > 0 else 1 / 1.25
+        self._apply_zoom(factor, pos.x(), pos.y())
+
+    def _clamp_pan(self) -> None:
+        """Keep the image rect overlapping the widget so it can never be
+        panned completely out of sight. Allows the image edge to reach the
+        widget centre, which is enough to inspect any corner."""
+        w, h = self._img_size
+        if w == 0 or h == 0:
+            return
+        cw, ch = self.width(), self.height()
+        base = min(cw / w, ch / h) * self._zoom
+        dw, dh = w * base, h * base
+        # Centred-rect origin before pan.
+        ox, oy = (cw - dw) / 2.0, (ch - dh) / 2.0
+        # Permit panning until the image edge reaches the widget centre
+        # (so any corner can be brought into view, but the image can never
+        # be pushed completely off-screen).
+        self._pan[0] = max(cw / 2.0 - dw - ox, min(cw / 2.0 - ox, self._pan[0]))
+        self._pan[1] = max(ch / 2.0 - dh - oy, min(ch / 2.0 - oy, self._pan[1]))
 
     def set_measure_type(self, t: str) -> None:
         """Select a tool ('' to disable). The list of finished measures
@@ -192,7 +257,9 @@ class ImageCanvas(QWidget):
         cw, ch = self.width(), self.height()
         scale = min(cw / w, ch / h) * self._zoom    # zoom multiplies fit
         dw, dh = int(w * scale), int(h * scale)
-        return QRect((cw - dw) // 2, (ch - dh) // 2, dw, dh)
+        x = (cw - dw) // 2 + int(round(self._pan[0]))
+        y = (ch - dh) // 2 + int(round(self._pan[1]))
+        return QRect(x, y, dw, dh)
 
     def _widget_to_image(self, p: QPoint) -> tuple[float, float] | None:
         r = self._draw_rect()
@@ -203,13 +270,27 @@ class ImageCanvas(QWidget):
         fy = (p.y() - r.y()) / r.height() * h
         return (fx, fy)
 
-    def _image_to_widget(self, pt: tuple[float, float]) -> QPoint:
+    def _widget_to_image_f(self, x: float, y: float) -> tuple[float, float]:
+        """Unbounded widget→image map (no rect-contains gate) for zoom-about
+        -point maths, which must work even when the cursor sits in the
+        letterbox margin outside the image."""
         r = self._draw_rect()
         w, h = self._img_size
-        return QPoint(
-            int(r.x() + pt[0] / w * r.width()),
-            int(r.y() + pt[1] / h * r.height()),
-        )
+        if not r.isValid():
+            return (0.0, 0.0)
+        return ((x - r.x()) / r.width() * w, (y - r.y()) / r.height() * h)
+
+    def _image_to_widget(self, pt: tuple[float, float]) -> QPoint:
+        wf = self._image_to_widget_f(pt)
+        return QPoint(int(wf[0]), int(wf[1]))
+
+    def _image_to_widget_f(self, pt: tuple[float, float]) -> tuple[float, float]:
+        r = self._draw_rect()
+        w, h = self._img_size
+        if not r.isValid():
+            return (0.0, 0.0)
+        return (r.x() + pt[0] / w * r.width(),
+                r.y() + pt[1] / h * r.height())
 
     # ----------------------------------------------------- IVUS centre helpers
     def _ivus_center_widget(self) -> QPoint | None:
@@ -304,7 +385,8 @@ class ImageCanvas(QWidget):
                   if ca and "angle" in ca else "")
         if t == "line":
             L = G.dist(pts_mm[0], pts_mm[1])
-            return f"#{m['id']} Line: {L:.1f} {u}"
+            vtag = f" [{m['vessel']}]" if m.get("vessel") else ""
+            return f"#{m['id']} Line{vtag}: {L:.1f} {u}"
         if t == "polyline":
             L = sum(G.dist(pts_mm[i], pts_mm[i + 1])
                     for i in range(len(pts_mm) - 1))
@@ -455,6 +537,23 @@ class ImageCanvas(QWidget):
                 "Unselect for %PlaqueArea" if sel
                 else "Select for %PlaqueArea"
             )
+        # Vessel type — tag a Line as the Guiding Catheter or a coronary
+        # proximal segment, so the Coaxial-Eval tool can pick it up. Only
+        # meaningful for straight lines; a "(none)" entry clears the tag.
+        vessel_actions: list[tuple] = []
+        if m["type"] == "line":
+            vessel_menu = menu.addMenu("Vessel type")
+            cur = m.get("vessel")
+            none_act = vessel_menu.addAction("(none)")
+            none_act.setCheckable(True)
+            none_act.setChecked(cur is None)
+            vessel_actions.append((none_act, None))
+            vessel_menu.addSeparator()
+            for label in VESSEL_LABELS:
+                a = vessel_menu.addAction(label)
+                a.setCheckable(True)
+                a.setChecked(cur == label)
+                vessel_actions.append((a, label))
         # Change Color — 16-colour submenu (each item carries a swatch).
         color_menu = menu.addMenu("Change Color")
         color_actions: list[tuple] = []
@@ -478,10 +577,18 @@ class ImageCanvas(QWidget):
             del self.measures[mi]
             self._cleanup_plaque_selection()
         else:
-            for act, hexcol in color_actions:
+            for act, label in vessel_actions:
                 if chosen is act:
-                    m["color"] = hexcol
+                    if label is None:
+                        m.pop("vessel", None)
+                    else:
+                        m["vessel"] = label
                     break
+            else:
+                for act, hexcol in color_actions:
+                    if chosen is act:
+                        m["color"] = hexcol
+                        break
         self.update()
 
     def _center_angle_add(self, pt) -> None:
@@ -570,6 +677,27 @@ class ImageCanvas(QWidget):
     def mousePressEvent(self, e):
         pos = e.position()
         sx, sy = pos.x(), pos.y()
+        # Middle-button drag pans the (zoomed) image — independent of the
+        # active measurement tool, so panning never competes with drawing.
+        # Ctrl + left-drag pans too, so a mouse without a middle button (or
+        # a trackpad) can still move the image. Checked before the zoom /
+        # measure handlers so panning always wins regardless of the tool.
+        is_ctrl_pan = (
+            e.button() == Qt.MouseButton.LeftButton
+            and bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        )
+        if e.button() == Qt.MouseButton.MiddleButton or is_ctrl_pan:
+            self._panning = True
+            self._pan_anchor = (sx, sy)
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+        # Click-to-zoom mode (toolbar magnifier buttons): a left-click
+        # zooms about the clicked point and consumes the click so it never
+        # starts a measurement. Repeated clicks zoom progressively.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._zoom_click in ("in", "out")):
+            self._apply_zoom(1.1 if self._zoom_click == "in" else 0.9, sx, sy)
+            return
         # IVUS long-axis rotation-centre marker takes priority over
         # everything else when the feature is on AND the click landed
         # near the marker. Left = start dragging it; right = Reset
@@ -646,6 +774,13 @@ class ImageCanvas(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position()
         sx, sy = pos.x(), pos.y()
+        if self._panning and self._pan_anchor is not None:
+            self._pan[0] += sx - self._pan_anchor[0]
+            self._pan[1] += sy - self._pan_anchor[1]
+            self._pan_anchor = (sx, sy)
+            self._clamp_pan()
+            self.update()
+            return
         if self._ivus_dragging_center:
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is not None:
@@ -673,6 +808,14 @@ class ImageCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, _e):
+        if self._panning:
+            self._panning = False
+            self._pan_anchor = None
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self.meas_type
+                else Qt.CursorShape.ArrowCursor
+            )
+            return
         if self._ivus_dragging_center:
             self._ivus_dragging_center = False
             return
@@ -733,6 +876,11 @@ class ImageCanvas(QWidget):
             pts = list(d["pts"])
         self._meas_seq += 1
         m = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        # Stamp the view's C-arm angles so Coaxial-Eval reads the angle the
+        # line was actually drawn at, not whatever plane happens to be shown
+        # later (matters for biplane in single-plane mode).
+        if self.view_angles is not None:
+            m["beta"], m["alpha"] = self.view_angles
         self.measures.append(m)
         # Shell history: emit a Measurement with the metrics string as
         # label and the tool name as kind ("Line"/"Polyline"/etc.).
@@ -839,7 +987,10 @@ class ImageCanvas(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(yellow)
             a = self._image_to_widget(self._anchor(m))
-            p.drawText(a + QPoint(8, -8), str(m["id"]))
+            tag = str(m["id"])
+            if m.get("vessel"):
+                tag += f" [{m['vessel']}]"
+            p.drawText(a + QPoint(8, -8), tag)
 
         # Center-Angle pick-mode hint.
         if self._center_angle_target >= 0:
