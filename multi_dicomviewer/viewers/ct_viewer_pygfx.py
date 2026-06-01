@@ -57,6 +57,18 @@ from rendercanvas.pyqt6 import RenderCanvas
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.core.measure_geom import (
+    angle_at as _angle_at,
+    central_arc_angle as _central_arc_angle,
+    dist as _dist,
+    ellipse_cab as _ellipse_cab,
+    major_minor as _major_minor,
+    point_in_poly as _point_in_poly,
+    poly_area as _poly_area,
+    seg_dist as _seg_dist,
+    smooth_closed as _smooth_closed,
+    smooth_open as _smooth_open,
+)
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
@@ -128,6 +140,34 @@ def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
             out[m, c] = op * col[c] + (1.0 - op) * g[m]
         assigned |= m
     return out
+
+
+# ----------------------------------------------------------- HU sampling
+def _trilinear_sample(vol: np.ndarray, fx, fy, fz) -> np.ndarray:
+    """Trilinearly sample *vol* (z,y,x) at fractional voxel coords (fx=col,
+    fy=row, fz=slice). Inputs are arrays; out-of-range is clamped to the
+    border. Replaces the VTK reslice-output readback used for HU stats — no
+    scipy. Runs only when a measurement is finalised/edited, not per frame."""
+    nz, ny, nx = vol.shape
+    fx = np.clip(np.asarray(fx, np.float64), 0, nx - 1)
+    fy = np.clip(np.asarray(fy, np.float64), 0, ny - 1)
+    fz = np.clip(np.asarray(fz, np.float64), 0, nz - 1)
+    x0 = np.floor(fx).astype(int); y0 = np.floor(fy).astype(int)
+    z0 = np.floor(fz).astype(int)
+    x1 = np.minimum(x0 + 1, nx - 1); y1 = np.minimum(y0 + 1, ny - 1)
+    z1 = np.minimum(z0 + 1, nz - 1)
+    dx = fx - x0; dy = fy - y0; dz = fz - z0
+    c000 = vol[z0, y0, x0]; c001 = vol[z0, y0, x1]
+    c010 = vol[z0, y1, x0]; c011 = vol[z0, y1, x1]
+    c100 = vol[z1, y0, x0]; c101 = vol[z1, y0, x1]
+    c110 = vol[z1, y1, x0]; c111 = vol[z1, y1, x1]
+    c00 = c000 * (1 - dx) + c001 * dx
+    c01 = c010 * (1 - dx) + c011 * dx
+    c10 = c100 * (1 - dx) + c101 * dx
+    c11 = c110 * (1 - dx) + c111 * dx
+    c0 = c00 * (1 - dy) + c01 * dy
+    c1 = c10 * (1 - dy) + c11 * dy
+    return c0 * (1 - dz) + c1 * dz
 
 
 # ----------------------------------------------------------------- pane
@@ -1086,6 +1126,41 @@ class CTViewer(AbstractViewer):
         lao = f"LAO{pi_}" if pi_ >= 0 else f"RAO{-pi_}"
         cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
         return f"{lao} {cra}"
+
+    def _hu_stats(self, key, pts):
+        """(min, max) HU inside the polygon *pts* (pane output coords) on the
+        pane's oblique plane, by trilinearly sampling the source volume on a
+        grid — replaces the VTK reslice-output readback. Runs on measure
+        finalise/edit only."""
+        if self._vol is None or len(pts) < 3:
+            return 0.0, 0.0
+        u, v, _n = self._frame[key]
+        pc = self._pc[key]
+        sx, sy, sz = self._dims
+        arr = np.asarray(pts, float)
+        xmn, ymn = arr.min(0)
+        xmx, ymx = arr.max(0)
+        diag = math.hypot(xmx - xmn, ymx - ymn)
+        if diag < 1e-6:
+            return 0.0, 0.0
+        step = max(min(self._dims), diag / 160.0)   # cap ~160 samples/side
+        gx = np.arange(xmn, xmx + step, step)
+        gy = np.arange(ymn, ymx + step, step)
+        WX, WY = np.meshgrid(gx, gy)
+        fx_ = WX.ravel()
+        fy_ = WY.ravel()
+        inside = np.fromiter(
+            (_point_in_poly(px, py, pts) for px, py in zip(fx_, fy_)),
+            dtype=bool, count=fx_.size)
+        if not inside.any():
+            return 0.0, 0.0
+        wx = fx_[inside]
+        wy = fy_[inside]
+        X = pc[0] + wx * u[0] + wy * v[0]
+        Y = pc[1] + wx * u[1] + wy * v[1]
+        Z = pc[2] + wx * u[2] + wy * v[2]
+        hu = _trilinear_sample(self._vol, X / sx, Y / sy, Z / sz)
+        return float(np.min(hu)), float(np.max(hu))
 
     def _toggle_centerline(self):
         self._cl_on = self._cl_btn.isChecked()
