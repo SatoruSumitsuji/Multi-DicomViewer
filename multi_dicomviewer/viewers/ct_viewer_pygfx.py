@@ -36,7 +36,7 @@ import numpy as np
 import pygfx as gfx
 import pylinalg as la
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -266,6 +266,10 @@ class _Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
+        # slab-MIP base image (GPU slice is hidden in slab mode)
+        mip = v._mip_img.get(key)
+        if mip is not None:
+            p.drawImage(self.rect(), mip)
         if v._cl_on:
             self._paint_cross(p, key, w, h)
         self._paint_measures(p, key, w, h)
@@ -642,6 +646,7 @@ class CTViewer(AbstractViewer):
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
+        self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -847,9 +852,9 @@ class CTViewer(AbstractViewer):
         self._slab_spin.blockSignals(False)
 
     def _set_slab(self, mm):
-        # Slab-MIP rendering arrives in Phase 7; for now store the value.
         self._thick[self._active_pane] = float(mm)
         self._view_initial = False
+        self._refresh()
 
     # --------------------------------------------------- AbstractViewer
     def load_series(self, loaded: LoadedSeries, title: str) -> None:
@@ -1045,6 +1050,61 @@ class CTViewer(AbstractViewer):
         ccx, ccy = self._cc(key)
         return self._world_to_screen(key, ccx, ccy)
 
+    # ----------------------------------------------------- slab-MIP (CPU)
+    def _slab_mip_hu(self, key, iw, ih):
+        """(ih,iw) HU array = max over N parallel oblique planes within
+        ±thick/2 of the pane plane, sampled across the current viewport.
+        The thin-slice normal direction is the frame normal N."""
+        u, v, n = self._frame[key]
+        pc = self._pc[key]
+        sx, sy, sz = self._dims
+        px, py = self._pan[key]
+        ps = self._ps[key]
+        pw = max(1, self.pane[key].canvas.width())
+        ph = max(1, self.pane[key].canvas.height())
+        hw, hh = ps * (pw / ph), ps
+        gx = np.linspace(px - hw, px + hw, iw)
+        gy = np.linspace(py + hh, py - hh, ih)   # top row = +v (screen up)
+        WX, WY = np.meshgrid(gx, gy)
+        bx = pc[0] + WX * u[0] + WY * v[0]
+        by = pc[1] + WX * u[1] + WY * v[1]
+        bz = pc[2] + WX * u[2] + WY * v[2]
+        th = self._thick[key]
+        step = max(1e-3, min(self._dims))
+        nplanes = int(max(1, min(64, round(th / step))))
+        offs = (np.linspace(-th / 2.0, th / 2.0, nplanes)
+                if nplanes > 1 else np.array([0.0]))
+        mip = np.full((ih, iw), -np.inf, np.float32)
+        for t in offs:
+            hu = _trilinear_sample(self._vol, (bx + t * n[0]) / sx,
+                                   (by + t * n[1]) / sy, (bz + t * n[2]) / sz)
+            mip = np.maximum(mip, hu.astype(np.float32))
+        return mip
+
+    def _build_slab_qimage(self, key):
+        """Render the slab MIP for a pane to a viewport-filling RGB QImage
+        (W/L or HU colormap applied CPU-side)."""
+        pane = self.pane[key]
+        pw = max(1, pane.canvas.width())
+        ph = max(1, pane.canvas.height())
+        iw = min(pw, 480)
+        ih = max(1, int(round(iw * ph / pw)))
+        mip = self._slab_mip_hu(key, iw, ih)
+        if self._color:
+            lut = _band_lut_array(self._bands, self._opacity,
+                                  self._win, self._lvl)        # (512,4)
+            idx = np.clip((mip - _HU_LO) / (_HU_HI - _HU_LO) * 511.0,
+                          0, 511).astype(np.int32)
+            rgb = (lut[idx, :3] * 255.0).astype(np.uint8)       # (ih,iw,3)
+        else:
+            g = np.clip((mip - (self._lvl - self._win / 2.0))
+                        / max(1e-6, self._win), 0.0, 1.0)
+            gg = (g * 255.0).astype(np.uint8)
+            rgb = np.stack([gg, gg, gg], axis=2)
+        rgb = np.ascontiguousarray(rgb)
+        return QImage(rgb.data, iw, ih, 3 * iw,
+                      QImage.Format.Format_RGB888).copy()
+
     def _fit_pane(self, key):
         """Fit the volume content (projected onto the plane) to the viewport
         and record the resulting half-height (ParallelScale equivalent)."""
@@ -1080,6 +1140,15 @@ class CTViewer(AbstractViewer):
                 self._fit_pane(key)
             else:
                 self._config_cam(key)
+            # Slab-MIP (THICK): clipping planes can't bound a GPU MIP slab
+            # (de-risk spike), so when thick>0 we hide the GPU slice and paint
+            # a CPU max-over-N-oblique-planes image in the overlay instead.
+            if self._thick[key] > 0:
+                p.mesh.visible = False
+                self._mip_img[key] = self._build_slab_qimage(key)
+            else:
+                p.mesh.visible = True
+                self._mip_img[key] = None
             p.render()
             self._overlay[key].update()
 
