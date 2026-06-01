@@ -1,18 +1,15 @@
 """Static config and clinical window/level presets."""
 
-import sys
+import sys  # noqa: F401  (kept for platform-specific config if needed)
 
-# Mac build does not ship the CT viewer (VTK's OpenGL→Metal path hangs on
-# macOS — see the Mac mini M4 / pygfx-port plan). The Mac variant is
-# renamed so users can tell at a glance it does not include CT.
-if sys.platform == "darwin":
-    APP_NAME = "Multi-DicomViewer-NoCT"
-else:
-    APP_NAME = "Multi-DICOMviewer"
+# macOS now renders CT via the pygfx (wgpu→Metal) viewer, so the Mac build
+# ships full CT again — same app name and no CT block on every platform.
+APP_NAME = "Multi-DICOMviewer"
 APP_VERSION = "1.0"
 
-# True when CT loading should be blocked at the UI level (Mac build).
-BLOCK_CT = sys.platform == "darwin"
+# CT loads on all platforms now (Windows/Linux: VTK; macOS: pygfx). Kept as a
+# constant so the UI gate below stays in place should a build ever need it.
+BLOCK_CT = False
 BLOCK_CT_MESSAGE = (
     "このアプリはCTデータに対応していません。\n"
     "（Mac版はCTビューワーを搭載していません）"

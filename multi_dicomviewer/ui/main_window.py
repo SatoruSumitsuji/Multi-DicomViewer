@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import traceback
 
 from PyQt6.QtCore import QEvent, QMimeData, Qt, pyqtSignal
@@ -57,19 +58,27 @@ from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
 from multi_dicomviewer.viewers.xa_viewer import XAViewer
 
 try:
-    from multi_dicomviewer.viewers.ct_viewer import CTViewer
+    # macOS renders CT with pygfx (wgpu→Metal): VTK's OpenGL→Metal path hangs.
+    # Windows/Linux keep the proven VTK viewer. Both expose the same CTViewer
+    # interface, so only the import target differs.
+    if sys.platform == "darwin":
+        from multi_dicomviewer.viewers.ct_viewer_pygfx import CTViewer
+    else:
+        from multi_dicomviewer.viewers.ct_viewer import CTViewer
 
     _CT_IMPORT_ERROR = ""
-except Exception as exc:  # VTK missing / broken — keep app usable for XA.
+except Exception as exc:  # backend missing / broken — keep app usable for XA.
     CTViewer = None
     _CT_IMPORT_ERROR = str(exc)
 
 
 def _ct_viewer():
     if CTViewer is None:
+        hint = ("pip install -r requirements-mac.txt" if sys.platform == "darwin"
+                else "pip install vtk")
         raise RuntimeError(
-            "CT viewer unavailable — VTK failed to import:\n"
-            f"{_CT_IMPORT_ERROR}\n\npip install vtk"
+            "CT viewer unavailable — its render backend failed to import:\n"
+            f"{_CT_IMPORT_ERROR}\n\n{hint}"
         )
     return CTViewer()
 
