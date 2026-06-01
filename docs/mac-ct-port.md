@@ -30,7 +30,16 @@ on Windows), which avoids OpenGL entirely.
   was created and `pip install -r requirements-mac.txt` succeeded
   (PyQt6 + pygfx/wgpu/rendercanvas + the 2-D stack, no vtk).
 - **Phase 0 PASSED on the Mac mini M4 (2026-06-01).** See result below.
-  pygfx is the confirmed VTK replacement → proceed to Phases 1-6.
+  pygfx is the confirmed VTK replacement → proceed to Phases 1-8.
+- **Phases 1-8 IMPLEMENTED (2026-06-02), `multi_dicomviewer/viewers/ct_viewer_pygfx.py`.**
+  Dual oblique MPR, all tools (zoom/move/rotate/spin/paging/W-L), QPainter
+  overlays (crosshair/▲/slab guides/info/angio), HU colormap, measurements
+  (line/polyline/ellipse/polygon/angle) with HU stats (numpy trilinear, no
+  scipy), CPU slab-MIP, and the per-OS factory + `BLOCK_CT=False` are done and
+  committed. Logic verified headless on the Mac (M4); GPU/QPainter DISPLAY and
+  interactive picking still need a visual pass on the real CT_Sample series.
+  Dual-pane linkage tuned to the product spec (Rotate relinks, Paging slides
+  the other pane's centreline / keeps its image, SPIN sign +1) — NOT VTK parity.
 
 ## Phase 0 RESULT — PASSED (Mac mini M4 16GB, 2026-06-01)
 
