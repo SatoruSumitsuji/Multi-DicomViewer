@@ -35,7 +35,7 @@ import math
 import numpy as np
 import pygfx as gfx
 import pylinalg as la
-from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (
     QColorDialog,
@@ -45,6 +45,7 @@ from PyQt6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -113,6 +114,16 @@ _DEFAULT_BANDS = [
     {"rgb": (1.0, 0.0, 1.0), "lo": 850,   "hi": 2000, "on": True},
 ]
 _HU_LO, _HU_HI = -1000.0, 2000.0
+
+
+def _hex_to_rgb(hexstr, default=(0x33, 0xE6, 0xFF)):
+    if not hexstr:
+        return default
+    s = hexstr.lstrip("#")
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        return default
 
 
 def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
@@ -257,6 +268,7 @@ class _Overlay(QWidget):
         w, h = self.width(), self.height()
         if v._cl_on:
             self._paint_cross(p, key, w, h)
+        self._paint_measures(p, key, w, h)
         self._paint_info(p, key, w, h)
 
     # -- crosshair + ▲ markers + slab guides -------------------------------
@@ -310,6 +322,89 @@ class _Overlay(QWidget):
                 ox1 = ccx + half * uh[0] + off * uv[0]
                 oy1 = ccy + half * uh[1] + off * uv[1]
                 p.drawLine(S(ox0, oy0), S(ox1, oy1))
+
+    # -- measurements (outlines, calipers, handles, labels, results) -------
+    def _paint_measures(self, p, key, w, h):
+        v = self._v
+
+        def S(pt):
+            sx, sy = v._world_to_screen(key, pt[0], pt[1])
+            return QPointF(sx, sy)
+
+        def poly(pts):
+            return QPolygonF([S(q) for q in pts])
+
+        def draw_outline(pts, rgb, width=1.5):
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(*rgb), width))
+            if len(pts) >= 2:
+                p.drawPolyline(poly(pts))
+
+        def draw_dashed(seg, rgb):
+            pen = QPen(QColor(*rgb), 2.2)
+            pen.setStyle(Qt.PenStyle.DotLine)
+            p.setPen(pen)
+            p.drawLine(S(seg[0]), S(seg[1]))
+
+        def dots(pts, color, r=4.0):
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+            for q in pts:
+                p.drawEllipse(S(q), r, r)
+
+        e = v._edit
+        edit_mi = e["mi"] if (e and e["key"] == key) else -1
+        edit_vi = e["vi"] if (e and e["key"] == key) else -1
+
+        for mi, m in enumerate(v._measures[key]):
+            rgb = _hex_to_rgb(m.get("color"))
+            draw_outline(v._outline(m), rgb)
+            if m["type"] in ("ellipse", "polygon"):
+                maj, mnr, _, _ = _major_minor(m)
+                for seg in (maj, mnr):
+                    if seg is not None:
+                        draw_dashed(seg, rgb)
+            ca = m.get("center_angle")
+            if ca and ca.get("pts"):
+                centre = v._shape_center(m)
+                for q in ca["pts"]:
+                    draw_dashed((centre, q), rgb)
+                dots(ca["pts"], QColor(255, 140, 0), 5.0)   # orange picks
+            idle = [q for vi, q in enumerate(v._handles(m))
+                    if not (mi == edit_mi and vi == edit_vi)]
+            dots(idle, QColor(255, 217, 0), 4.0)            # yellow handles
+            if mi == edit_mi and 0 <= edit_vi < len(m["pts"]):
+                dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
+            # numeric id label at the anchor
+            p.setPen(QColor(255, 217, 0))
+            fb = QFont("monospace", 11)
+            fb.setBold(True)
+            p.setFont(fb)
+            ax, ay = v._world_to_screen(key, *v._anchor(m))
+            p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
+
+        d = v._draft
+        if d and d["pane"] == key and d["pts"]:
+            cyan = _hex_to_rgb(None)
+            if d["type"] == "ellipse" and len(d["pts"]) >= 2:
+                p0, p1 = d["pts"][0], d["pts"][1]
+                cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                a, b = abs(p1[0] - p0[0]) / 2, abs(p1[1] - p0[1]) / 2
+                draw_outline([(cx + a * math.cos(t), cy + b * math.sin(t))
+                              for t in (i * 2 * math.pi / 48
+                                        for i in range(49))], cyan)
+            else:
+                draw_outline(list(d["pts"]), cyan)
+            dots(list(d["pts"]), QColor(255, 217, 0), 4.0)
+
+        # per-measure result strings, stacked top-right
+        lines = v._metrics.get(key, [])
+        if lines:
+            p.setPen(QColor(102, 255, 153))
+            p.setFont(QFont("monospace", 8))
+            p.drawText(QRectF(0, 4, w - 6, h * 0.5),
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+                       "\n".join(lines))
 
     # -- corner info text + angio readout ----------------------------------
     def _paint_info(self, p, key, w, h):
@@ -537,6 +632,16 @@ class CTViewer(AbstractViewer):
         self._cmap_dlg = None
         self._lut_key = None                 # cache key for the colormap tex
         self._lut_tex = None
+        # measurements
+        self._meas_on = False
+        self._meas_type = None               # line|polyline|ellipse|polygon|angle
+        self._measures = {"A": [], "B": []}  # finalized {id,type,pts,...}
+        self._meas_seq = 0
+        self._draft = None                   # {type, pane, pts} in progress
+        self._edit = None                    # {key, mi, vi} handle drag
+        self._center_angle_target = None     # {key, mi} during 3-pt pick
+        self._metrics = {"A": [], "B": []}   # per-measure result strings
+        self._meas_drag = False              # canvas is dragging a handle
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -568,6 +673,9 @@ class CTViewer(AbstractViewer):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.addLayout(self._build_toolbar())
+        self._measure_bar = self._build_measure_bar()
+        self._measure_bar.setVisible(False)
+        lay.addWidget(self._measure_bar)
         lay.addLayout(imgrow, 1)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -586,17 +694,30 @@ class CTViewer(AbstractViewer):
     def _on_down(self, key, ev):
         self._set_active(key)
         self._drag_btn = ev.get("button")
-        self._last = (ev["x"], ev["y"])
+        x, y = ev["x"], ev["y"]
+        self._last = (x, y)
         self._spin_prev = None
-        # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding the
-        # active tool — SSMview behaviour.
+        if self._meas_on:
+            self._cross_grab = False
+            if self._drag_btn == 2:           # right-click: measure menu
+                self._meas_drag = False
+                self._measure_right(key, x, y)
+                return
+            started = self._measure_left(key, x, y)
+            self._meas_drag = bool(started)
+            return
+        # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool.
         self._cross_grab = (self._drag_btn == 1
-                            and self._cross_press(key, ev["x"], ev["y"]))
+                            and self._cross_press(key, x, y))
 
     def _on_move(self, key, ev):
+        x, y = ev["x"], ev["y"]
+        if self._meas_on:
+            if self._meas_drag:
+                self._measure_drag(key, x, y)
+            return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
             return
-        x, y = ev["x"], ev["y"]
         if self._cross_grab:
             self._cross_move(key, x, y)
             self._last = (x, y)
@@ -607,11 +728,17 @@ class CTViewer(AbstractViewer):
         self._drag(key, dx, dy, shift, x, y)
 
     def _on_up(self, key, ev):
+        if self._meas_on and self._meas_drag:
+            self._measure_release()
+        self._meas_drag = False
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
 
     def _on_dblclick(self, key, ev):
+        if self._meas_on:
+            self._measure_finish_draft()
+            return
         self._recenter(key, ev["x"], ev["y"])
 
     def _on_wheel(self, key, ev):
@@ -662,6 +789,13 @@ class CTViewer(AbstractViewer):
         self._slab_spin.setDecimals(1)
         self._slab_spin.valueChanged.connect(self._set_slab)
         row.addWidget(self._slab_spin)
+
+        self._meas_btn = QPushButton("📏 Measure")
+        self._meas_btn.setCheckable(True)
+        self._meas_btn.setToolTip(
+            "Measure on the image (Line / Polyline / Ellipse / Polygon / Angle)")
+        self._meas_btn.clicked.connect(self._toggle_measure)
+        row.addWidget(self._meas_btn)
 
         self._cmap_btn = QPushButton("ColorMap")
         self._cmap_btn.setCheckable(True)
@@ -770,12 +904,17 @@ class CTViewer(AbstractViewer):
     def clear(self) -> None:
         self._vol = None
         self._header = None
+        self._measures = {"A": [], "B": []}
+        self._metrics = {"A": [], "B": []}
+        self._draft = None
+        self._edit = None
         for key in ("A", "B"):
             p = self.pane[key]
             if p.mesh is not None:
                 p.scene.remove(p.mesh)
                 p.mesh = None
             p.render()
+            self._overlay[key].update()
 
     def current_header(self):
         return self._header
@@ -1161,6 +1300,375 @@ class CTViewer(AbstractViewer):
         Z = pc[2] + wx * u[2] + wy * v[2]
         hu = _trilinear_sample(self._vol, X / sx, Y / sy, Z / sz)
         return float(np.min(hu)), float(np.max(hu))
+
+    # ------------------------------------------------------- measurements
+    def _build_measure_bar(self) -> QWidget:
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(6, 2, 6, 2)
+        row.addWidget(QLabel("Measure:"))
+        self._meas_btns = {}
+        for label, key in (("Line", "line"), ("Polyline", "polyline"),
+                           ("Ellipse", "ellipse"), ("Polygon", "polygon"),
+                           ("Angle", "angle")):
+            b = QPushButton(label)
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c, k=key: self._set_measure_type(k))
+            self._meas_btns[key] = b
+            row.addWidget(b)
+        clr = QPushButton("Clear")
+        clr.clicked.connect(self._measure_clear)
+        row.addWidget(clr)
+        row.addWidget(QLabel("  Left-click = add point /"
+                             " right-click finishes Polyline / Polygon"))
+        row.addStretch(1)
+        return bar
+
+    def _toggle_measure(self):
+        self._meas_on = self._meas_btn.isChecked()
+        self._measure_bar.setVisible(self._meas_on)
+        self._draft = None
+        self._edit = None
+        if not self._meas_on:
+            self._meas_type = None
+            for b in self._meas_btns.values():
+                b.setChecked(False)
+                b.setStyleSheet("")
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _set_measure_type(self, key):
+        self._meas_type = key
+        self._draft = None
+        for k, b in self._meas_btns.items():
+            b.setChecked(k == key)
+            b.setStyleSheet("background:#1f77b4;color:white;" if k == key else "")
+
+    def _measure_clear(self):
+        self._measures = {"A": [], "B": []}
+        self._draft = None
+        self._edit = None
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+
+    # ---- per-measure geometry ----
+    def _ellipse_cab(self, m):
+        return _ellipse_cab(m["pts"])
+
+    def _outline(self, m):
+        t = m["type"]
+        if t == "line":
+            return list(m["pts"][:2])
+        if t == "polyline":
+            pts = list(m["pts"])
+            return _smooth_open(pts) if m.get("smooth") else pts
+        if t == "polygon":
+            return _smooth_closed(m["pts"])
+        if t == "angle":
+            a, b, c = m["pts"][:3]
+            return [b, a, c]
+        cx, cy, a, b = self._ellipse_cab(m)
+        return [(cx + a * math.cos(th), cy + b * math.sin(th))
+                for th in (i * 2 * math.pi / 48 for i in range(49))]
+
+    def _handles(self, m):
+        return list(m["pts"])
+
+    def _anchor(self, m):
+        if m["type"] == "ellipse":
+            cx, cy, _a, _b = self._ellipse_cab(m)
+            return (cx, cy)
+        if m["type"] == "polygon":
+            xs = [q[0] for q in m["pts"]]
+            ys = [q[1] for q in m["pts"]]
+            return (sum(xs) / len(xs), sum(ys) / len(ys))
+        return m["pts"][0]
+
+    def _shape_center(self, m):
+        return self._anchor(m)
+
+    def _metrics_text(self, key, m):
+        t = m["type"]
+        pts = m["pts"]
+        ca = m.get("center_angle")
+        ca_str = (f"  CenterAngle:{ca['angle']:.1f}°"
+                  if ca and "angle" in ca else "")
+        if t == "line":
+            return f"#{m['id']} Line: {_dist(pts[0], pts[1]):.1f} mm"
+        if t == "polyline":
+            L = sum(_dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
+            tag = "Polyline (Spline)" if m.get("smooth") else "Polyline"
+            return f"#{m['id']} {tag}: {L:.1f} mm"
+        if t == "angle":
+            return f"#{m['id']} Angle: {_angle_at(pts[0], pts[1], pts[2]):.1f}°"
+        if t == "ellipse":
+            cx, cy, a, b = self._ellipse_cab(m)
+            lo, hi = self._hu_stats(key, self._outline(m))
+            return (f"#{m['id']} Ellipse  Area:{math.pi*a*b:.1f}mm²  "
+                    f"CTmax:{hi:.0f}  CTmin:{lo:.0f}  "
+                    f"Dmax:{2*max(a,b):.1f}  Dmin:{2*min(a,b):.1f}mm{ca_str}")
+        lo, hi = self._hu_stats(key, pts + [pts[0]])
+        _, _, dmax, dmin = _major_minor(m)
+        return (f"#{m['id']} Polygon  Area:{_poly_area(pts):.1f}mm²  "
+                f"CTmax:{hi:.0f}  CTmin:{lo:.0f}  "
+                f"Dmax:{dmax:.1f}  Dmin:{dmin:.1f}mm{ca_str}")
+
+    # ---- drawing (the overlay paints; these just trigger repaint) ----
+    def _redraw_geom(self, key):
+        self._overlay[key].update()
+
+    def _redraw_meas(self, key):
+        self._metrics[key] = [self._metrics_text(key, m)
+                              for m in self._measures[key]]
+        self._overlay[key].update()
+
+    # ---- picking ----
+    def _pick_handle(self, which, sx, sy):
+        for mi in range(len(self._measures[which]) - 1, -1, -1):
+            m = self._measures[which][mi]
+            for vi, q in enumerate(m["pts"]):
+                qx, qy = self._world_to_screen(which, q[0], q[1])
+                if math.hypot(qx - sx, qy - sy) < 12.0:
+                    return mi, vi
+        return None
+
+    def _pick_measure(self, which, sx, sy):
+        wx, wy = self._disp_to_world(which, sx, sy)
+        tol = max(3.0, 0.02 * self._half)
+        best, bi = tol, None
+        for mi, m in enumerate(self._measures[which]):
+            ol = self._outline(m)
+            for i in range(len(ol) - 1):
+                d = _seg_dist(wx, wy, ol[i], ol[i + 1])
+                if d < best:
+                    best, bi = d, mi
+        return bi
+
+    # ---- interaction ----
+    def _measure_left(self, which, sx, sy) -> bool:
+        if not self._meas_on:
+            return False
+        cat = self._center_angle_target
+        if cat and cat.get("key") == which:
+            self._center_angle_add(self._disp_to_world(which, sx, sy))
+            return False
+        hit = self._pick_handle(which, sx, sy)
+        if hit is not None:
+            self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
+            self._redraw_geom(which)
+            return True
+        if not self._meas_type:
+            return False
+        w = self._disp_to_world(which, sx, sy)
+        d = self._draft
+        if d is None or d["pane"] != which or d["type"] != self._meas_type:
+            d = {"type": self._meas_type, "pane": which, "pts": []}
+            self._draft = d
+        d["pts"].append(w)
+        if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
+            self._commit_draft()
+        elif d["type"] == "angle" and len(d["pts"]) >= 3:
+            self._commit_draft()
+        else:
+            self._redraw_geom(which)
+        return False
+
+    def _measure_drag(self, which, sx, sy):
+        e = self._edit
+        if not e:
+            return
+        w = self._disp_to_world(e["key"], sx, sy)
+        m = self._measures[e["key"]][e["mi"]]
+        if m["type"] == "ellipse":
+            self._set_ellipse_handle(m, e["vi"], w)
+        else:
+            m["pts"][e["vi"]] = w
+        self._redraw_geom(e["key"])
+
+    def _measure_release(self):
+        if self._edit:
+            key = self._edit["key"]
+            self._edit = None
+            self._redraw_meas(key)
+
+    def _set_ellipse_handle(self, m, vi, w):
+        pts = [list(q) for q in m["pts"]]    # lft,rgt,top,bot
+        if vi == 0:
+            pts[0][0] = w[0]
+        elif vi == 1:
+            pts[1][0] = w[0]
+        elif vi == 2:
+            pts[2][1] = w[1]
+        else:
+            pts[3][1] = w[1]
+        cx = (pts[0][0] + pts[1][0]) / 2.0
+        cy = (pts[2][1] + pts[3][1]) / 2.0
+        pts[0][1] = pts[1][1] = cy
+        pts[2][0] = pts[3][0] = cx
+        m["pts"] = [tuple(q) for q in pts]
+
+    def _commit_draft(self):
+        d = self._draft
+        self._draft = None
+        if d is None or len(d["pts"]) < 2:
+            return
+        if d["type"] == "ellipse":
+            p0, p1 = d["pts"][0], d["pts"][1]
+            cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+            a, b = abs(p1[0] - p0[0]) / 2, abs(p1[1] - p0[1]) / 2
+            pts = [(cx - a, cy), (cx + a, cy), (cx, cy - b), (cx, cy + b)]
+        elif d["type"] == "line":
+            pts = d["pts"][:2]
+        else:
+            pts = list(d["pts"])
+        self._meas_seq += 1
+        self._measures[d["pane"]].append(
+            {"id": self._meas_seq, "type": d["type"], "pts": pts})
+        self._redraw_meas(d["pane"])
+
+    def _measure_finish_draft(self):
+        d = self._draft
+        if d and d["type"] in ("polyline", "polygon") and len(d["pts"]) >= 2:
+            self._commit_draft()
+
+    def _measure_right(self, which, sx, sy):
+        cat = self._center_angle_target
+        if cat and cat.get("key") == which:
+            mi = cat["mi"]
+            if 0 <= mi < len(self._measures[which]):
+                self._measures[which][mi].pop("center_angle", None)
+            self._center_angle_target = None
+            self._redraw_meas(which)
+            return
+        if self._draft and self._draft["pane"] == which \
+                and self._draft["type"] in ("polyline", "polygon"):
+            self._measure_finish_draft()
+            return
+        hit = self._pick_handle(which, sx, sy)
+        if hit is not None:
+            self._handle_right(which, hit, sx, sy)
+            return
+        mi = self._pick_measure(which, sx, sy)
+        if mi is None:
+            return
+        self._outline_right(which, mi, sx, sy)
+
+    def _handle_right(self, which, hit, sx, sy):
+        mi, vi = hit
+        m = self._measures[which][mi]
+        menu = QMenu(self)
+        del_pt = del_res = None
+        if m["type"] in ("polyline", "polygon"):
+            del_pt = menu.addAction("Delete point")
+            if len(m["pts"]) <= 2:
+                del_pt.setEnabled(False)
+            del_res = menu.addAction("Delete result")
+        else:
+            del_res = menu.addAction("Delete")
+        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+            QPoint(int(sx), int(sy))))
+        if del_pt is not None and chosen is del_pt:
+            self._delete_point(which, mi, vi)
+        elif chosen is del_res:
+            del self._measures[which][mi]
+        self._redraw_meas(which)
+
+    def _outline_right(self, which, mi, sx, sy):
+        from PyQt6.QtGui import QIcon, QPixmap
+        from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
+        m = self._measures[which][mi]
+        menu = QMenu(self)
+        add_pt = menu.addAction("Add point")
+        spline_act = None
+        if m["type"] == "polyline":
+            spline_act = menu.addAction(
+                "UnSpline" if m.get("smooth") else "Spline")
+        center_angle_act = None
+        if m["type"] in ("ellipse", "polygon"):
+            center_angle_act = menu.addAction("Center Angle")
+        color_menu = menu.addMenu("Change Color")
+        color_actions = []
+        for name, hexcol in COLOR_CHOICES:
+            a = color_menu.addAction(name)
+            pix = QPixmap(16, 16)
+            pix.fill(QColor(hexcol))
+            a.setIcon(QIcon(pix))
+            color_actions.append((a, hexcol))
+        del_act = menu.addAction("Delete")
+        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+            QPoint(int(sx), int(sy))))
+        if chosen is add_pt:
+            self._add_point(which, mi, sx, sy)
+        elif spline_act is not None and chosen is spline_act:
+            m["smooth"] = not m.get("smooth", False)
+        elif center_angle_act is not None and chosen is center_angle_act:
+            self._center_angle_target = {"key": which, "mi": mi}
+            m.pop("center_angle", None)
+        elif chosen is del_act:
+            del self._measures[which][mi]
+        else:
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    m["color"] = hexcol
+                    break
+        self._redraw_meas(which)
+
+    def _center_angle_add(self, w) -> None:
+        cat = self._center_angle_target
+        if not cat:
+            return
+        which, mi = cat["key"], cat["mi"]
+        if not (0 <= mi < len(self._measures[which])):
+            self._center_angle_target = None
+            return
+        m = self._measures[which][mi]
+        ca = m.setdefault("center_angle", {"pts": []})
+        ca["pts"].append(w)
+        if len(ca["pts"]) >= 3:
+            centre = self._shape_center(m)
+            p1, p2, p3 = ca["pts"][:3]
+            span, t1, t3, ccw = _central_arc_angle(centre, p1, p2, p3)
+            m["center_angle"] = {"pts": [p1, p2, p3], "angle": span,
+                                 "t1": t1, "t3": t3, "ccw": ccw}
+            self._center_angle_target = None
+        self._redraw_meas(which)
+
+    def _add_point(self, which, mi, sx, sy):
+        m = self._measures[which][mi]
+        wx, wy = self._disp_to_world(which, sx, sy)
+        pt = (wx, wy)
+        if m["type"] == "ellipse":
+            lft, rgt, top, bot = m["pts"]
+            m["type"] = "polygon"
+            m["pts"] = [lft, top, rgt, bot]
+        if m["type"] == "line":
+            m["type"] = "polyline"
+            m["pts"] = [m["pts"][0], pt, m["pts"][1]]
+            return
+        pts = list(m["pts"])
+        n = len(pts)
+        closed = (m["type"] == "polygon")
+        edges = n if closed else n - 1
+        best_i, best_d = 0, float("inf")
+        for i in range(edges):
+            a, b = pts[i], pts[(i + 1) % n]
+            d = _seg_dist(pt[0], pt[1], a, b)
+            if d < best_d:
+                best_d, best_i = d, i
+        pts.insert(best_i + 1, pt)
+        m["pts"] = pts
+
+    def _delete_point(self, which, mi, vi):
+        m = self._measures[which][mi]
+        if m["type"] not in ("polyline", "polygon"):
+            return
+        pts = list(m["pts"])
+        if len(pts) <= 2 or not (0 <= vi < len(pts)):
+            return
+        del pts[vi]
+        if len(pts) == 2:
+            m["type"] = "line"
+        m["pts"] = pts
 
     def _toggle_centerline(self):
         self._cl_on = self._cl_btn.isChecked()
