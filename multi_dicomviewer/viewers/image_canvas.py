@@ -126,6 +126,15 @@ class ImageCanvas(QWidget):
         # 3 left-clicks add perimeter points to that measure and an
         # arc angle is computed.
         self._center_angle_target: int = -1
+        # Draggable measurement labels. ``_drag_label`` = index of the
+        # measure whose id/vessel-tag label is being dragged (-1 = none).
+        # ``_label_rects`` caches each label's on-screen rect from the last
+        # paint for hit-testing. The chosen spot rides in ``m["label_pos"]``
+        # (image coords) so it tracks the shape through zoom/pan and survives
+        # the canvas state save/restore. Lets the user pull a label off an
+        # overlapping neighbour.
+        self._drag_label: int = -1
+        self._label_rects: dict[int, QRect] = {}
         # IVUS long-axis: per-frame rotation-centre marker. Shown only
         # while the IVUS long-axis view is on; the IVUSViewer sets
         # ``ivus_show_center`` and pushes ``ivus_center_image`` whenever
@@ -427,6 +436,26 @@ class ImageCanvas(QWidget):
         """Geometric centre of an Ellipse/Polygon — used as the apex of
         Center Angle annotations."""
         return self._anchor(m)
+
+    # ----------------------------------------------------- label position
+    def _label_topleft(self, m) -> QPoint:
+        """Widget-pixel top-left where this measure's id/vessel label is
+        drawn: a user-dragged offset (``m['label_pos']`` in image coords)
+        when present, else the default just past the anchor."""
+        pos = m.get("label_pos")
+        if pos is not None:
+            return self._image_to_widget(pos)
+        return self._image_to_widget(self._anchor(m)) + QPoint(8, -8)
+
+    def _pick_label(self, sx, sy):
+        """Index of the measure whose drawn label contains widget pixel
+        (sx, sy), topmost-first, or None. Uses the rects cached at paint."""
+        pt = QPoint(int(sx), int(sy))
+        for mi in range(len(self.measures) - 1, -1, -1):
+            rect = self._label_rects.get(mi)
+            if rect is not None and rect.adjusted(-3, -3, 3, 3).contains(pt):
+                return mi
+        return None
 
     # ----------------------------------------------------- hit testing
     def _pick_handle(self, sx, sy):
@@ -754,6 +783,15 @@ class ImageCanvas(QWidget):
             self.update()                       # turn the handle green now
             return
 
+        # Label drag — pull an id/vessel label off an overlapping neighbour.
+        # After handles (more specific) but before drawing, and works with no
+        # tool selected so labels are always repositionable.
+        li = self._pick_label(sx, sy)
+        if li is not None:
+            self._drag_label = li
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
         if not self.meas_type:
             return
         pt = self._widget_to_image(QPoint(int(sx), int(sy)))
@@ -791,6 +829,16 @@ class ImageCanvas(QWidget):
                 self.ivus_center_changed.emit(cx, cy)
                 self.update()
             return
+        if self._drag_label >= 0:
+            # Store the new top-left in IMAGE coords so it tracks the image
+            # through zoom/pan. Unbounded map so the label can be parked in
+            # the letterbox margin too.
+            if 0 <= self._drag_label < len(self.measures):
+                self.measures[self._drag_label]["label_pos"] = (
+                    self._widget_to_image_f(sx, sy)
+                )
+            self.update()
+            return
         if self._edit is not None:
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is None:
@@ -818,6 +866,14 @@ class ImageCanvas(QWidget):
             return
         if self._ivus_dragging_center:
             self._ivus_dragging_center = False
+            return
+        if self._drag_label >= 0:
+            self._drag_label = -1
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self.meas_type
+                else Qt.CursorShape.ArrowCursor
+            )
+            self.update()
             return
         if self._edit is not None:
             self._edit = None
@@ -908,6 +964,9 @@ class ImageCanvas(QWidget):
         r = self._draw_rect()
         p.drawImage(r, self._qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Rebuilt as labels are drawn below; clear so a deleted measure's
+        # stale rect can't linger for the next drag hit-test.
+        self._label_rects = {}
 
         # Major/minor axes (drawn UNDER outlines): thick dotted, in each
         # measure's own colour (alpha-modulated so the outline still
@@ -986,11 +1045,18 @@ class ImageCanvas(QWidget):
                 p.drawEllipse(w, radius, radius)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(yellow)
-            a = self._image_to_widget(self._anchor(m))
             tag = str(m["id"])
             if m.get("vessel"):
                 tag += f" [{m['vessel']}]"
-            p.drawText(a + QPoint(8, -8), tag)
+            # Draw at the dragged position when set, else past the anchor;
+            # cache the rect so _pick_label can hit-test the drag.
+            tl = self._label_topleft(m)
+            fm = p.fontMetrics()
+            self._label_rects[mi] = QRect(
+                tl.x(), tl.y() - fm.ascent(),
+                fm.horizontalAdvance(tag), fm.height(),
+            )
+            p.drawText(tl, tag)
 
         # Center-Angle pick-mode hint.
         if self._center_angle_target >= 0:

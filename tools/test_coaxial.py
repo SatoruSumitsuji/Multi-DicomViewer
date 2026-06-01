@@ -156,6 +156,166 @@ def test_three_views_least_squares():
     assert err < 1.0, f"3-view LS off by {err:.4f} deg"
 
 
+# --------------------------------------------------------------------------
+# 9. line_angle_2d: two perpendicular image lines = 90°, identical = 0°,
+#    and anisotropic spacing is honoured.
+# --------------------------------------------------------------------------
+def test_line_angle_2d_basic():
+    perp = cx.line_angle_2d(_vertical_line(), _horizontal_line())
+    assert abs(perp - 90.0) < 1e-6, f"perp lines: {perp}"
+    same = cx.line_angle_2d(_vertical_line(), _vertical_line())
+    assert same < 1e-6, f"identical lines: {same}"
+    # A 1:1 pixel diagonal becomes 1:2 in mm when columns are half as wide;
+    # vs a vertical line that is 45° in pixels but should differ in mm.
+    aniso = cx.line_angle_2d(((0, 0), (100, 100)), ((0, 0), (0, 100)),
+                             (1.0, 0.5))
+    pix = cx.line_angle_2d(((0, 0), (100, 100)), ((0, 0), (0, 100)),
+                           (1.0, 1.0))
+    assert abs(aniso - pix) > 1.0, "spacing not honoured in 2-D angle"
+
+
+# --------------------------------------------------------------------------
+# 10. per_view_2d / spread_2d are reported, and a perfectly coaxial case
+#     shows ~0° in every view with ~0° spread.
+# --------------------------------------------------------------------------
+def test_per_view_2d_reported():
+    lines = []
+    for beta, alpha in [(0.0, 0.0), (90.0, 0.0)]:
+        lines.append({"label": "GC", "beta": beta, "alpha": alpha,
+                      "line_2d": _vertical_line()})
+        lines.append({"label": "proxLAD", "beta": beta, "alpha": alpha,
+                      "line_2d": _vertical_line()})
+    res = cx.compute_coaxial_angles(lines)
+    det = res["details"]["proxLAD"]
+    assert len(det["per_view_2d"]) == 2, det["per_view_2d"]
+    assert all(p["angle_2d"] < 1e-6 for p in det["per_view_2d"])
+    assert det["spread_2d"] is not None and det["spread_2d"] < 1e-6
+
+
+# --------------------------------------------------------------------------
+# 11. Confidence cues: a 3-view case reports pairwise 2-view angles, a
+#     pairwise spread, leave-one-out entries, and finite conditioning.
+# --------------------------------------------------------------------------
+def test_confidence_three_views():
+    # Three well-separated views (β 0/60/120), GC and vessel both drawn as
+    # near-vertical lines so every 2-view pair reconstructs cleanly.
+    lines = []
+    for beta in (0.0, 60.0, 120.0):
+        lines.append({"label": "GC", "beta": beta, "alpha": 0.0,
+                      "line_2d": _vertical_line()})
+        lines.append({"label": "proxLAD", "beta": beta, "alpha": 0.0,
+                      "line_2d": _vertical_line()})
+    res = cx.compute_coaxial_angles(lines)
+    conf = res["details"]["proxLAD"]["confidence"]
+    assert len(conf["shared_views"]) == 3
+    assert len(conf["pairwise"]) == 3, conf["pairwise"]
+    assert conf["pairwise_spread"] is not None
+    assert len(conf["leave_one_out"]) == 3
+    # All views consistent (perpendicular vessel) → tiny spread.
+    assert conf["pairwise_spread"] < 1.0
+    assert conf["cond_gc"] is not None and conf["cond_vessel"] is not None
+
+
+# --------------------------------------------------------------------------
+# 12. reconstruction_condition: well-separated views give a small kappa;
+#     two near-identical views give a large (ill-conditioned) one.
+# --------------------------------------------------------------------------
+def test_close_pair_does_not_block_when_a_good_pair_exists():
+    """Case A: adding a 3rd view that sits CLOSE to one existing view must
+    not turn a solvable 2-view case unsolvable. Mirrors the user's RCA
+    report: LAO0/CRA30 + LAO50/CRA0 (56 deg apart, fine) plus a LAO30/CRA30
+    view that is only ~26 deg from the first. The vessel must still be
+    reconstructed, with a non-blocking 'two views are close' note."""
+    def line(b, a, lab):
+        return {"label": lab, "beta": b, "alpha": a,
+                "line_2d": _vertical_line()}
+    views = [(0.0, 30.0), (50.0, 0.0), (30.0, 30.0)]
+    lines = []
+    for (b, a) in views:
+        lines.append(line(b, a, "GC"))
+        lines.append(line(b, a, "proxRCA"))
+    res = cx.compute_coaxial_angles(lines)
+    assert "proxRCA" in res["angles"], res["warnings"]
+    det = res["details"]["proxRCA"]
+    # Worst pair is below threshold, best pair is well above it.
+    assert det["separation_deg"] < cx.MIN_VIEW_SEPARATION_DEG
+    assert det["best_separation_deg"] >= cx.MIN_VIEW_SEPARATION_DEG
+    # A note (not a hard failure) mentions the close pair.
+    assert any("close" in w or "add little" in w for w in res["warnings"])
+
+
+def test_two_close_views_still_rejected():
+    """With ONLY a close pair (no well-separated pair), it is still
+    rejected — the best pair is the only pair and it is too close."""
+    lines = [
+        {"label": "GC", "beta": 0.0, "alpha": 0.0, "line_2d": _vertical_line()},
+        {"label": "GC", "beta": 5.0, "alpha": 0.0, "line_2d": _vertical_line()},
+        {"label": "proxRCA", "beta": 0.0, "alpha": 0.0,
+         "line_2d": _horizontal_line()},
+        {"label": "proxRCA", "beta": 5.0, "alpha": 0.0,
+         "line_2d": _horizontal_line()},
+    ]
+    res = cx.compute_coaxial_angles(lines)
+    assert "proxRCA" not in res["angles"]
+    assert any("most-separated pair" in w for w in res["warnings"])
+
+
+def test_angles_from_beam_roundtrip():
+    """angles_from_beam is the exact inverse of beam_direction."""
+    for beta, alpha in [(0, 0), (30, -20), (-45, 25), (90, 0), (0, 40)]:
+        beam = cx.beam_direction(beta, alpha)
+        b2, a2 = cx.angles_from_beam(beam)
+        assert abs(b2 - beta) < 1e-6 and abs(a2 - alpha) < 1e-6, \
+            f"{(beta, alpha)} -> {(b2, a2)}"
+
+
+def test_optimal_projection_perpendicular():
+    """For two perpendicular vessels along +z and +x, the optimal view is
+    along +/- y (i.e. AP / PA: beta 0, alpha 0), and looking down it the
+    two truly are 90 deg apart."""
+    d_gc = [0.0, 0.0, 1.0]
+    d_ves = [1.0, 0.0, 0.0]
+    opt = cx.optimal_projection_angles(d_gc, d_ves)
+    assert opt is not None and len(opt) == 2
+    # Normal is +/- y; angles_from_beam(+y) = (0,0), (-y) = (180,0)/(0,...) —
+    # both must reproduce the y axis as their beam.
+    for (b, a) in opt:
+        beam = cx.beam_direction(b, a)
+        assert abs(abs(beam[1]) - 1.0) < 1e-6, f"beam not along y: {beam}"
+
+
+def test_optimal_projection_coaxial_none():
+    """Near-coaxial directions have no unique optimal view."""
+    assert cx.optimal_projection_angles([0, 0, 1], [0.0, 1e-7, 1]) is None
+
+
+def test_optimal_view_in_details():
+    lines = []
+    for beta in (0.0, 60.0, 120.0):
+        lines.append({"label": "GC", "beta": beta, "alpha": 0.0,
+                      "line_2d": _vertical_line()})
+        lines.append({"label": "proxRCA", "beta": beta, "alpha": 0.0,
+                      "line_2d": _horizontal_line()})
+    res = cx.compute_coaxial_angles(lines)
+    det = res["details"]["proxRCA"]
+    assert "optimal_view" in det
+    assert det["optimal_view"] is None or len(det["optimal_view"]) == 2
+
+
+def test_reconstruction_condition():
+    good = [
+        {"beta": 0.0, "alpha": 0.0, "line_2d": _vertical_line()},
+        {"beta": 90.0, "alpha": 0.0, "line_2d": _vertical_line()},
+    ]
+    bad = [
+        {"beta": 0.0, "alpha": 0.0, "line_2d": _vertical_line()},
+        {"beta": 3.0, "alpha": 0.0, "line_2d": _vertical_line()},
+    ]
+    kg = cx.reconstruction_condition(good)
+    kb = cx.reconstruction_condition(bad)
+    assert kg < kb, f"well-separated should be better-conditioned: {kg} vs {kb}"
+
+
 def _run_all():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
