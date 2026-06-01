@@ -29,8 +29,48 @@ on Windows), which avoids OpenGL entirely.
   git all installed. Repo cloned to `~/Multi-DicomViewer`. A venv `.venv`
   was created and `pip install -r requirements-mac.txt` succeeded
   (PyQt6 + pygfx/wgpu/rendercanvas + the 2-D stack, no vtk).
-- **Next action: run Phase 0 (the pygfx spike) and read its result.** This
-  has NOT been run on the Mac yet.
+- **Phase 0 PASSED on the Mac mini M4 (2026-06-01).** See result below.
+  pygfx is the confirmed VTK replacement → proceed to Phases 1-6.
+
+## Phase 0 RESULT — PASSED (Mac mini M4 16GB, 2026-06-01)
+
+Ran `python tools/pygfx_spike.py` on the Mac mini. All four pass criteria met:
+
+1. Window opens, no crash.
+2. `backend=Metal`, `device=Apple M4` (NOT opengl) — confirmed both via
+   `wgpu.gpu.enumerate_adapters_sync()` and the on-window overlay. The whole
+   point: we escaped the M1/Apple OpenGL-on-Metal hang that kills VTK CT.
+3. **~29.5 fps** for the 256³ volume (continuous render mode, ~30 fps
+   vsync-capped) — comfortably above the 15 fps bar.
+4. Left-drag rotate, right-drag W/L, wheel zoom, `R` reset all work; the
+   oblique slice (grey sphere disk + central cylinder cross-section)
+   renders and updates live.
+
+Versions on the Mac: wgpu 0.31.0, pygfx 0.16.0, Python 3.13.13, PyQt6.
+
+### Gotcha found & fixed in the spike (IMPORTANT for Phases 1-6)
+
+The spike initially rendered a black window: the overlay/fps updated but no
+slice was visible. Root cause was a **coordinate-system bug**, not pygfx:
+
+- pygfx places a `Volume`'s grid at **voxel coordinates** — the box spans
+  `-0.5 .. N-0.5` in world space (verified via `get_world_bounding_box()` →
+  `[-0.5,-0.5,-0.5]..[255.5,255.5,255.5]`), NOT the `-1..1` unit cube the
+  original spike assumed.
+- So the camera (`width=2.2`, looking at origin) framed an empty corner, and
+  the slice plane `(0,0,1,0)` (z=0) cut the air face, not the centre.
+- `VolumeSliceMaterial.plane = (a,b,c,d)` is evaluated in **world space**
+  (see `renderers/wgpu/wgsl/volume_slice.wgsl`: box corners are multiplied by
+  `u_wobject.world_transform` before the `a·x+b·y+c·z+d` test). With an
+  identity object transform, world == voxel coords.
+
+Fix applied to `tools/pygfx_spike.py`: frame the camera on the real volume box
+(`cam.show_object(mesh, view_dir=(0,0,-1), up=(0,1,0), scale=1.2)`) and put the
+slice plane through the volume centre (`d = -n·centre`, centre = `(N-1)/2`).
+**The Phase 1-6 pygfx MPR renderer must likewise work in voxel/world coords
+and pivot the reslice plane about the crosshair centre — not assume a
+normalised cube.** The CT loader's `patient_basis` (voxel→LPS) is what maps
+these voxel coords to physical space.
 
 ## Phase 0 — feasibility spike (DO THIS FIRST on the Mac)
 

@@ -85,10 +85,16 @@ class SpikeWindow(QtWidgets.QMainWindow):
         # pygfx renderer + scene + camera ----------------------------------
         self._renderer = gfx.WgpuRenderer(self._canvas)
         self._scene = gfx.Scene()
+        # NB: pygfx places a Volume's grid at voxel coordinates (the box spans
+        # -0.5 .. N-0.5 in world space), NOT a -1..1 unit cube. So the slice
+        # plane and camera must work in voxel coords: the plane passes through
+        # the volume centre, and the camera is framed on the volume box below
+        # (after the mesh is added). See volume_slice.wgsl: the plane is tested
+        # against the box corners in *world* space.
+        nz, ny, nx = vol.shape
+        self._centre = ((nx - 1) / 2.0, (ny - 1) / 2.0, (nz - 1) / 2.0)
         # Orthographic camera looking down at the slice quad from +Z.
-        self._cam = gfx.OrthographicCamera(width=2.2, height=2.2)
-        self._cam.local.position = (0, 0, 3)
-        self._cam.look_at((0, 0, 0))
+        self._cam = gfx.OrthographicCamera()
 
         # Volume texture ---------------------------------------------------
         # pygfx's Volume expects a Geometry whose ``grid`` attribute is
@@ -103,6 +109,12 @@ class SpikeWindow(QtWidgets.QMainWindow):
         )
         self._mesh = gfx.Volume(geom, self._mat)
         self._scene.add(self._mesh)
+
+        # Frame the camera on the actual volume box, looking down +Z at the
+        # centre. scale>1 leaves a margin so the whole slice stays in view.
+        self._cam.show_object(
+            self._mesh, view_dir=(0, 0, -1), up=(0, 1, 0), scale=1.2
+        )
 
         # Light grey background so a black volume is visible.
         self._scene.add(gfx.Background(material=gfx.BackgroundMaterial(
@@ -166,7 +178,11 @@ class SpikeWindow(QtWidgets.QMainWindow):
         cp = math.cos(self._pitch)
         sp = math.sin(self._pitch)
         nx, ny, nz = sy * cp, sp, cy * cp
-        self._mat.plane = (nx, ny, nz, 0.0)
+        # Plane through the volume centre (world coords): n·x + d = 0 with
+        # d = -n·centre, so rotation pivots about the centre, not the corner.
+        px, py, pz = self._centre
+        d = -(nx * px + ny * py + nz * pz)
+        self._mat.plane = (nx, ny, nz, d)
         self._mat.clim = (
             self._lvl - self._win / 2.0,
             self._lvl + self._win / 2.0,
@@ -185,6 +201,11 @@ class SpikeWindow(QtWidgets.QMainWindow):
                 f"W={self._win:.0f} L={self._lvl:.0f}"
             )
             self._fps_lbl.adjustSize()
+            # Also echo to stdout so a non-GUI observer can record the number.
+            print(f"[spike] {fps:5.1f} fps  "
+                  f"yaw={math.degrees(self._yaw):+.0f} "
+                  f"pitch={math.degrees(self._pitch):+.0f} "
+                  f"W={self._win:.0f} L={self._lvl:.0f}", flush=True)
             self._fps_t0 = now
             self._fps_frames = 0
 
@@ -223,6 +244,9 @@ class SpikeWindow(QtWidgets.QMainWindow):
             self._yaw = self._pitch = 0.0
             self._win, self._lvl = 800.0, 300.0
             self._update_plane()
+            self._cam.show_object(
+                self._mesh, view_dir=(0, 0, -1), up=(0, 1, 0), scale=1.2
+            )
             self._canvas.request_draw()
         elif e["key"] == "Escape":
             self.close()
