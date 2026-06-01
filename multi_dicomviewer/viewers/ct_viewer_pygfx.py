@@ -38,12 +38,17 @@ import pylinalg as la
 from PyQt6.QtCore import QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import (
+    QColorDialog,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -82,6 +87,47 @@ def _rotate(v, axis, deg):
         + np.cross(a, v) * math.sin(th)
         + a * np.dot(a, v) * (1 - math.cos(th))
     )
+
+
+# ------------------------------------------------------------- HU colormap
+#: Default HU colour bands (SSMview-style). Each colours [lo,hi]; "on" toggles.
+#: opacity blends band colour over the windowed grayscale (0=gray, 1=colour).
+_DEFAULT_BANDS = [
+    {"rgb": (1.0, 0.0, 0.0), "lo": -1000, "hi": 0,    "on": True},
+    {"rgb": (1.0, 1.0, 0.0), "lo": 0,     "hi": 50,   "on": True},
+    {"rgb": (0.0, 1.0, 0.0), "lo": 50,    "hi": 250,  "on": True},
+    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": True},
+    {"rgb": (1.0, 1.0, 1.0), "lo": 350,   "hi": 700,  "on": True},
+    {"rgb": (1.0, 0.0, 1.0), "lo": 850,   "hi": 2000, "on": True},
+]
+_HU_LO, _HU_HI = -1000.0, 2000.0
+
+
+def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
+    """512×4 RGBA float32 colormap over HU [_HU_LO,_HU_HI]. Inside the FIRST
+    enabled band containing a HU value: band colour blended over the windowed
+    grayscale by *opacity*. Outside any band: grayscale. The numpy analogue of
+    the VTK viewer's _band_lut (which produced a vtkLookupTable); here it feeds
+    a pygfx 1-D colormap Texture assigned to VolumeSliceMaterial.map."""
+    n = 512
+    hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
+    glo = lvl - win / 2.0
+    span = max(1e-6, float(win))
+    g = np.clip((hu - glo) / span, 0.0, 1.0).astype(np.float32)
+    op = float(min(1.0, max(0.0, opacity)))
+    out = np.stack([g, g, g, np.ones_like(g)], axis=1).astype(np.float32)
+    assigned = np.zeros(n, dtype=bool)
+    for b in bands:
+        if not b["on"]:
+            continue
+        m = (hu >= b["lo"]) & (hu <= b["hi"]) & (~assigned)
+        if not m.any():
+            continue
+        col = b["rgb"]
+        for c in range(3):
+            out[m, c] = op * col[c] + (1.0 - op) * g[m]
+        assigned |= m
+    return out
 
 
 # ----------------------------------------------------------------- pane
@@ -256,6 +302,156 @@ class _Overlay(QWidget):
                        ang)
 
 
+class _ColorMapDialog(QDialog):
+    """SSMview-style HU colour-map editor (colour + HU Min/Max + enable/remove
+    per band, Opacity slider, Add/Reset). Changes apply live via
+    on_change(bands, opacity). Pure Qt — copied verbatim from the VTK viewer."""
+
+    def __init__(self, bands, opacity, on_change, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("ColorMap Setting")
+        self.resize(560, 420)
+        self._bands = [dict(b) for b in bands]
+        self._opacity = float(opacity)
+        self._on_change = on_change
+
+        self._rows_host = QWidget()
+        self._rows = QVBoxLayout(self._rows_host)
+        self._rows.setContentsMargins(4, 4, 4, 4)
+        self._rows.setSpacing(4)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._rows_host)
+
+        op_row = QHBoxLayout()
+        op_row.addWidget(QLabel("Opacity"))
+        self._op = QSlider(Qt.Orientation.Horizontal)
+        self._op.setRange(0, 100)
+        self._op.setValue(int(round(self._opacity * 100)))
+        self._op.valueChanged.connect(self._op_changed)
+        self._op_lbl = QLabel(f"{self._opacity:.2f}")
+        op_row.addWidget(self._op, 1)
+        op_row.addWidget(self._op_lbl)
+
+        btns = QHBoxLayout()
+        add = QPushButton("Add")
+        add.clicked.connect(self._add_band)
+        rst = QPushButton("Reset")
+        rst.clicked.connect(self._reset)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        btns.addWidget(add)
+        btns.addWidget(rst)
+        btns.addStretch(1)
+        btns.addWidget(close)
+
+        col = QVBoxLayout(self)
+        col.addWidget(scroll, 1)
+        col.addLayout(op_row)
+        col.addLayout(btns)
+        self._rebuild()
+
+    def _emit(self):
+        self._on_change(self._bands, self._opacity)
+
+    def _op_changed(self, v):
+        self._opacity = v / 100.0
+        self._op_lbl.setText(f"{self._opacity:.2f}")
+        self._emit()
+
+    def _add_band(self):
+        self._bands.append(
+            {"rgb": (1.0, 1.0, 1.0), "lo": 0, "hi": 100, "on": True})
+        self._rebuild()
+        self._emit()
+
+    def _reset(self):
+        self._bands = [dict(b) for b in _DEFAULT_BANDS]
+        self._opacity = 0.25
+        self._op.blockSignals(True)
+        self._op.setValue(25)
+        self._op.blockSignals(False)
+        self._op_lbl.setText("0.25")
+        self._rebuild()
+        self._emit()
+
+    def set_bands(self, bands, opacity) -> None:
+        self._bands = [dict(b) for b in bands]
+        self._opacity = float(opacity)
+        self._op.blockSignals(True)
+        self._op.setValue(int(round(self._opacity * 100)))
+        self._op.blockSignals(False)
+        self._op_lbl.setText(f"{self._opacity:.2f}")
+        self._rebuild()
+
+    def _rebuild(self):
+        while self._rows.count():
+            it = self._rows.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.setParent(None)
+        for idx in range(len(self._bands)):
+            self._rows.addWidget(self._row_widget(idx))
+        self._rows.addStretch(1)
+
+    def _row_widget(self, idx) -> QWidget:
+        b = self._bands[idx]
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(2, 2, 2, 2)
+        sw = QPushButton()
+        sw.setFixedWidth(40)
+        r, g, bl = (int(c * 255) for c in b["rgb"])
+        sw.setStyleSheet(f"background:rgb({r},{g},{bl});")
+        sw.clicked.connect(lambda _c, i=idx: self._pick_color(i))
+        h.addWidget(sw)
+        h.addWidget(QLabel("Min"))
+        lo = QSpinBox()
+        lo.setRange(-1024, 4096)
+        lo.setValue(int(b["lo"]))
+        lo.valueChanged.connect(lambda v, i=idx: self._set(i, "lo", v))
+        h.addWidget(lo)
+        h.addWidget(QLabel("Max"))
+        hi = QSpinBox()
+        hi.setRange(-1024, 4096)
+        hi.setValue(int(b["hi"]))
+        hi.valueChanged.connect(lambda v, i=idx: self._set(i, "hi", v))
+        h.addWidget(hi)
+        en = QPushButton("Enabled" if b["on"] else "Disabled")
+        en.setCheckable(True)
+        en.setChecked(b["on"])
+        en.clicked.connect(lambda _c, i=idx: self._toggle(i))
+        h.addWidget(en)
+        rm = QPushButton("Remove")
+        rm.clicked.connect(lambda _c, i=idx: self._remove(i))
+        h.addWidget(rm)
+        return w
+
+    def _set(self, idx, key, val):
+        self._bands[idx][key] = val
+        self._emit()
+
+    def _toggle(self, idx):
+        self._bands[idx]["on"] = not self._bands[idx]["on"]
+        self._rebuild()
+        self._emit()
+
+    def _remove(self, idx):
+        del self._bands[idx]
+        self._rebuild()
+        self._emit()
+
+    def _pick_color(self, idx):
+        c0 = self._bands[idx]["rgb"]
+        col = QColorDialog.getColor(
+            QColor(int(c0[0] * 255), int(c0[1] * 255), int(c0[2] * 255)),
+            self, "Band colour")
+        if col.isValid():
+            self._bands[idx]["rgb"] = (col.redF(), col.greenF(), col.blueF())
+            self._rebuild()
+            self._emit()
+
+
 # --------------------------------------------------------------- viewer
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
@@ -295,6 +491,12 @@ class CTViewer(AbstractViewer):
         self._active_pane = "A"
         self._view_initial = True
         self._cl_on = True                   # crosshair/slab overlay visible
+        self._color = False                  # HU colormap on/off
+        self._bands = [dict(b) for b in _DEFAULT_BANDS]
+        self._opacity = 0.25
+        self._cmap_dlg = None
+        self._lut_key = None                 # cache key for the colormap tex
+        self._lut_tex = None
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -420,6 +622,16 @@ class CTViewer(AbstractViewer):
         self._slab_spin.setDecimals(1)
         self._slab_spin.valueChanged.connect(self._set_slab)
         row.addWidget(self._slab_spin)
+
+        self._cmap_btn = QPushButton("ColorMap")
+        self._cmap_btn.setCheckable(True)
+        self._cmap_btn.clicked.connect(self._toggle_color)
+        row.addWidget(self._cmap_btn)
+
+        setting = QPushButton("Setting")
+        setting.setToolTip("HU colour-map settings (band colour, HU range, opacity)")
+        setting.clicked.connect(self._open_setting)
+        row.addWidget(setting)
 
         reset = QPushButton("Reset")
         reset.clicked.connect(self._reset)
@@ -676,8 +888,15 @@ class CTViewer(AbstractViewer):
             pc = self._pc[key]
             p.material.plane = (float(n[0]), float(n[1]), float(n[2]),
                                 float(-np.dot(n, pc)))
-            p.material.clim = (self._lvl - self._win / 2.0,
-                               self._lvl + self._win / 2.0)
+            if self._color:
+                # Colormap bakes W/L into the LUT over [_HU_LO,_HU_HI]; clim
+                # maps that HU span to the LUT's 0..1 domain.
+                p.material.clim = (_HU_LO, _HU_HI)
+                p.material.map = self._lut_texture()
+            else:
+                p.material.map = None
+                p.material.clim = (self._lvl - self._win / 2.0,
+                                   self._lvl + self._win / 2.0)
             if reset_cam:
                 self._fit_pane(key)
             else:
@@ -873,6 +1092,42 @@ class CTViewer(AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
 
+    # ---------------------------------------------------- HU colormap
+    def _lut_texture(self):
+        """1-D colormap Texture for the current bands/opacity/W-L, rebuilt
+        only when those change."""
+        key = (tuple((tuple(b["rgb"]), b["lo"], b["hi"], b["on"])
+                     for b in self._bands),
+               self._opacity, self._win, self._lvl)
+        if key != self._lut_key:
+            arr = _band_lut_array(self._bands, self._opacity,
+                                  self._win, self._lvl)
+            self._lut_tex = gfx.Texture(arr, dim=1)
+            self._lut_key = key
+        return self._lut_tex
+
+    def _toggle_color(self):
+        self._color = self._cmap_btn.isChecked()
+        self._refresh()
+
+    def _open_setting(self):
+        if self._cmap_dlg is None:
+            self._cmap_dlg = _ColorMapDialog(
+                self._bands, self._opacity, self._apply_colormap, self)
+        else:
+            self._cmap_dlg.set_bands(self._bands, self._opacity)
+        self._cmap_dlg.show()
+        self._cmap_dlg.raise_()
+        self._cmap_dlg.activateWindow()
+
+    def _apply_colormap(self, bands, opacity):
+        self._bands = [dict(b) for b in bands]
+        self._opacity = float(opacity)
+        if not self._color:
+            self._color = True
+            self._cmap_btn.setChecked(True)
+        self._refresh()
+
     def _reset(self):
         if self._vol is None:
             return
@@ -896,6 +1151,10 @@ class CTViewer(AbstractViewer):
             self._refresh()
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
+            self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
+            self._toggle_color()
+            return
         tool = _TOOL_KEYS.get(e.key())
         if tool:
             self._set_tool(tool)
