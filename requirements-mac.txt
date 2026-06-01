@@ -1,0 +1,36 @@
+# Mac (Apple Silicon) dependencies for Multi-DicomViewer.
+#
+# The Mac build ships WITHOUT the VTK CT viewer (VTK's OpenGL->Metal path
+# hangs on macOS). The CT viewer is being ported to pygfx (wgpu -> Metal
+# native). This file is the Mac dependency set: the shared 2-D stack plus
+# the pygfx GPU stack, and deliberately NO vtk.
+#
+# Install on the Mac mini with:
+#     pip3 install -r requirements-mac.txt
+#
+# Versions are pinned to >= what is verified working on Windows
+# (pygfx 0.16 / wgpu 0.31 / rendercanvas 2.6) so the Phase 0 spike
+# (tools/pygfx_spike.py) behaves the same on both OSes.
+
+# --- shared 2-D stack (same as requirements.txt, minus vtk) ---
+PyQt6>=6.7
+pydicom>=3.0
+numpy>=2.0
+
+# Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
+pylibjpeg>=2.0
+pylibjpeg-libjpeg>=2.1
+pylibjpeg-openjpeg>=2.0
+
+# Fast cine decode (libjpeg-turbo / SIMD). Optional — falls back to pylibjpeg.
+imagecodecs>=2024.1.1
+
+# MP4 export (right-click Export (MP4) in the series browser).
+imageio>=2.34
+imageio-ffmpeg>=0.5
+
+# --- pygfx GPU stack (replaces VTK for CT MPR on Mac via Metal) ---
+# Phase 0 spike validates these render an oblique CT slice on Metal.
+pygfx>=0.16
+wgpu>=0.31
+rendercanvas>=2.6
