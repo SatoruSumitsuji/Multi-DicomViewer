@@ -121,9 +121,37 @@ CT loader provides `LoadedSeries.slice_mm` (z spacing) and `patient_basis`
 (voxel→LPS). Reuse these; the geometry is already solved — only the renderer
 changes (VTK → pygfx).
 
-## Plan after Phase 0 (rough)
+## De-risk spikes before Phase 1 (Mac mini M4, 2026-06-01)
 
-VTK stays for Windows initially; pygfx replaces it on Mac. Build the pygfx
-MPR renderer behind the same viewer interface, port the tools/colormap/
-readout, verify on `sample_data/ct`, then once pygfx is stable on Windows
-too, retire VTK for a single codebase. Estimated 6-8 weeks.
+Two unknowns not covered by Phase 0 were spiked before committing to the build.
+Full phased plan: the approved plan file (parallel module `viewers/ct_viewer_pygfx.py`,
+GPU `VolumeSliceMaterial` per pane with a face-on ortho camera, QPainter overlays,
+numpy trilinear HU sampling, per-OS factory in `main_window.py`).
+
+- **Overlay compositing — PASS** (`tools/overlay_spike.py`). A transparent
+  `QPainter` QWidget composites correctly OVER the rendercanvas wgpu/Metal
+  surface (crosshair + translucent panel visible), and pointer events route to
+  the canvas handlers (drag moves the painted crosshair). → Crosshair, measures,
+  text and angio readout will be drawn with QPainter on a per-pane overlay, NOT
+  pygfx scene primitives. Reuses the existing 2-D world↔screen math directly.
+
+- **Slab-MIP — approach B REJECTED, use CPU (approach C)** (`tools/slab_spike.py`).
+  `VolumeMipMaterial` full-thickness MIP renders fine with the ortho camera, but
+  its `clipping_planes` clip only the box-SURFACE fragment, not the ray
+  integration: clip ON → entirely black at every thickness (box faces lie
+  outside the slab). So a slab cannot be bounded with clipping planes. The THICK
+  tool will instead CPU-resample N oblique planes within ±t/2 along N (reusing
+  the Phase 6 numpy trilinear sampler), max-composite to a 2-D array, and display
+  it (`gfx.Image`, same colormap). Correct, reuses code, exact HU. (Full-thickness
+  GPU MIP works if ever wanted as a separate mode.)
+
+## Plan after Phase 0 (approved phased plan)
+
+VTK stays for Windows; pygfx replaces it on Mac via a NEW parallel module
+`multi_dicomviewer/viewers/ct_viewer_pygfx.py` reusing the VTK file's pure-numpy
+state machine, dialogs and measure logic verbatim. Phases: 1 minimal end-to-end
+(render + W/L + paging) → 2 tools → 3 QPainter overlays → 4 colormap → 5
+measurements → 6 HU stats (numpy trilinear) → 7 slab-MIP (CPU) → 8 integration
+(per-OS factory, flip `BLOCK_CT` off on darwin, restore `APP_NAME`). Verify each
+phase on the synthetic harness; final phase on real CT through the app on the M4.
+Then, once stable on Windows too, retire VTK for a single codebase. ~6-8 weeks.
