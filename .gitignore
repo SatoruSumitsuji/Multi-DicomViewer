@@ -45,3 +45,6 @@ Orthogonal-View.pptx
 
 # Distribution zips produced by package step
 *.zip
+
+# Real CT verification data (patient DICOM — never commit)
+CT_Sample/

@@ -5,8 +5,11 @@ is obvious) into the real multi_dicomviewer.viewers.ct_viewer_pygfx.CTViewer
 inside a plain Qt window — no DICOM files, no shell. Use it to eyeball each
 phase on the Mac (Metal) without real CT data.
 
-Run:
+Run (synthetic):
     python tools/ct_pygfx_harness.py
+
+Run (real CT folder — scans for the first CT series and loads it):
+    python tools/ct_pygfx_harness.py /Users/satorusumitsuji/Multi-DicomViewer/CT_Sample
 
 The synthetic volume is intentionally ANISOTROPIC (in-plane 0.7 mm, slice
 1.5 mm) and NON-cubic in voxel count, so a wrong spacing/aspect shows up as a
@@ -51,13 +54,12 @@ def make_synthetic_ct(nz=160, ny=224, nx=256) -> np.ndarray:
     return vol
 
 
-def main() -> int:
+def _synthetic() -> LoadedSeries:
     print("[harness] building synthetic CT (160x224x256, "
           "spacing 0.7/0.7/1.5 mm)...", flush=True)
-    vol = make_synthetic_ct()
-    loaded = LoadedSeries(
+    return LoadedSeries(
         modality=Modality.CT,
-        volume=vol,
+        volume=make_synthetic_ct(),
         spacing_mm=(0.7, 0.7),     # (row, col) in-plane mm
         cine_fps=None,
         window=800.0,
@@ -66,6 +68,28 @@ def main() -> int:
         patient_basis=None,        # identity = standard axial supine
         series_uid="synthetic-ct",
     )
+
+
+def _load_real(path: str) -> LoadedSeries:
+    """Scan a folder, pick the first CT series, and load it via the real
+    DICOM pipeline (same code path the app uses)."""
+    from multi_dicomviewer.core import dicom_io
+    print(f"[harness] scanning {path} ...", flush=True)
+    patients = dicom_io.scan_folder(path)
+    for pat in patients.values():
+        for study in pat.studies.values():
+            for se in study.series.values():
+                if se.modality == Modality.CT:
+                    print(f"[harness] loading CT series {se.series_uid} "
+                          f"({len(se.files)} files): {se.description}",
+                          flush=True)
+                    return dicom_io.load_series(se)
+    raise SystemExit(f"[harness] no CT series found under {path}")
+
+
+def main() -> int:
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    loaded = _load_real(path) if path else _synthetic()
     app = QtWidgets.QApplication(sys.argv)
     win = QtWidgets.QMainWindow()
     win.setWindowTitle("pygfx CT viewer — Phase 1 harness")
