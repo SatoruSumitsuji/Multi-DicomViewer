@@ -96,6 +96,20 @@ def main() -> int:
     win.resize(1100, 720)
     viewer = CTViewer()
     win.setCentralWidget(viewer)
+
+    # Wire the DICOM Tags button like the real app does, so it works here too.
+    def _edit_tags():
+        from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
+        from multi_dicomviewer.core.dicom_tags import default_overlay_keywords
+        header = viewer.current_header()
+        if header is None:
+            return
+        seed = list(viewer._tag_keywords) or default_overlay_keywords(header)
+        dlg = TagSelectionDialog(header, seed, False, win)
+        if dlg.exec():
+            viewer.set_tag_keywords(dlg.selected_keywords())
+    viewer.tags_requested.connect(_edit_tags)
+
     win.show()
     viewer.load_series(loaded, "synthetic")
     print("[harness] loaded. Pane A=axial, B=coronal. Tool=PAGING. "
