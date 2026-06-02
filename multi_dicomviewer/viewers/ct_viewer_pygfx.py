@@ -783,7 +783,13 @@ class CTViewer(AbstractViewer):
             self._fit_pane(key)
         else:
             self._config_cam(key)
+        # Rebuild the slab-MIP image at the new size — otherwise the stale
+        # QImage is stretched to the new rect and the aspect ratio distorts
+        # (e.g. when the Measure bar shrinks the canvas height).
+        if self._thick[key] > 0:
+            self._mip_img[key] = self._build_slab_qimage(key)
         self.pane[key].render()
+        self._overlay[key].update()
 
     # -- Bi / Lt / Rt --------------------------------------------------
     @property
