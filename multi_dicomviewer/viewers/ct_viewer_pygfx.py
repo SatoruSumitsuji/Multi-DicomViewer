@@ -1207,8 +1207,8 @@ class CTViewer(AbstractViewer):
                 self._sync_slab_spin()
         elif t == "ROTATE":
             u, v, n = self._frame[which]
-            u = _rotate(_rotate(u, v, dx * 0.5), u, dy * 0.5)
-            v = _rotate(_rotate(v, v, dx * 0.5), u, dy * 0.5)
+            u = _rotate(_rotate(u, v, -dx * 0.5), u, -dy * 0.5)
+            v = _rotate(_rotate(v, v, -dx * 0.5), u, -dy * 0.5)
             self._frame[which] = self._ortho(u, v)
             # Linked: re-derive the OTHER pane as the orthogonal section that
             # shares this pane's horizontal axis and contains its normal, so
