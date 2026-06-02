@@ -216,7 +216,12 @@ class _PygfxPane:
         self.scene.add(self.mesh)
 
     def render(self) -> None:
-        self.canvas.request_draw()
+        # force_draw renders synchronously so the GPU slice tracks the cursor
+        # with no one-frame lag behind the QPainter overlay (MOVE/recenter feel).
+        try:
+            self.canvas.force_draw()
+        except Exception:
+            self.canvas.request_draw()
 
 
 _BORDER = 3  # px; matches the active-pane QFrame border so children inset
