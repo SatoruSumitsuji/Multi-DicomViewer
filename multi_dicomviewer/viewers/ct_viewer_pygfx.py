@@ -1848,9 +1848,16 @@ class CTViewer(AbstractViewer):
             self._refresh()
 
     def keyPressEvent(self, e):
+        # Qt-level handler: fires when focus is on the viewer or a toolbar
+        # button (letter keys propagate up to the parent), so shortcuts work
+        # even right after clicking Measure/ColorMap — not only when the wgpu
+        # canvas has focus (that path is _on_key).
         if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
+            return
+        if e.key() == Qt.Key.Key_Q:               # Q = show/hide tag overlay
+            self._toggle_tags()
             return
         tool = _TOOL_KEYS.get(e.key())
         if tool:

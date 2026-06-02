@@ -97,30 +97,34 @@ def main() -> int:
     viewer = CTViewer()
     win.setCentralWidget(viewer)
 
-    # Wire the DICOM Tags button like the real app does, so it works here too.
+    # Wire the DICOM Tags button like the real app: the button only EDITS which
+    # tags overlay; the choice is persisted per-modality via core.settings and
+    # restored on the next launch (same mechanism the real app uses).
+    from multi_dicomviewer.core import settings
+    from multi_dicomviewer.core.dicom_tags import default_overlay_keywords
+    from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
+
     def _edit_tags():
-        from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
-        from multi_dicomviewer.core.dicom_tags import (
-            default_overlay_keywords, overlay_lines)
         header = viewer.current_header()
-        print(f"[tags] clicked; header is None? {header is None}", flush=True)
         if header is None:
             return
         seed = list(viewer._tag_keywords) or default_overlay_keywords(header)
         dlg = TagSelectionDialog(header, seed, False, win)
-        ok = dlg.exec()
-        kw = dlg.selected_keywords()
-        print(f"[tags] dialog ok={ok} selected={len(kw)}: {kw[:6]}", flush=True)
-        if ok:
+        if dlg.exec():
+            kw = dlg.selected_keywords()
             viewer.set_tag_keywords(kw)
-            n = len(overlay_lines(viewer._header, viewer._tag_keywords,
-                                  anonymized=viewer._anon))
-            print(f"[tags] after set: _tag_keywords={len(viewer._tag_keywords)}"
-                  f" overlay_lines={n}", flush=True)
+            by_mod = settings.load_tag_keywords_by_modality()
+            by_mod["CT"] = kw
+            settings.save_tag_keywords_by_modality(by_mod)
     viewer.tags_requested.connect(_edit_tags)
 
     win.show()
     viewer.load_series(loaded, "synthetic")
+    # Startup: show saved CT tags, or sensible defaults if none saved yet.
+    saved = settings.load_tag_keywords_by_modality().get("CT", [])
+    header = viewer.current_header()
+    viewer.set_tag_keywords(saved or (default_overlay_keywords(header)
+                                      if header is not None else []))
     print("[harness] loaded. Pane A=axial, B=coronal. Tool=PAGING. "
           "Try W/Z/V/R/G + drag, wheel pages, Reset.", flush=True)
     return app.exec()
