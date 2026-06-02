@@ -109,7 +109,7 @@ _DEFAULT_BANDS = [
     {"rgb": (1.0, 0.0, 0.0), "lo": -1000, "hi": 0,    "on": True},
     {"rgb": (1.0, 1.0, 0.0), "lo": 0,     "hi": 50,   "on": True},
     {"rgb": (0.0, 1.0, 0.0), "lo": 50,    "hi": 250,  "on": True},
-    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": True},
+    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": False},  # blue off by default
     {"rgb": (1.0, 1.0, 1.0), "lo": 350,   "hi": 700,  "on": True},
     {"rgb": (1.0, 0.0, 1.0), "lo": 850,   "hi": 2000, "on": True},
 ]
@@ -381,7 +381,7 @@ class _Overlay(QWidget):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
             p.setPen(QColor(255, 217, 0))
-            fb = QFont("monospace", 11)
+            fb = QFont("monospace", 14)
             fb.setBold(True)
             p.setFont(fb)
             ax, ay = v._world_to_screen(key, *v._anchor(m))
@@ -405,7 +405,7 @@ class _Overlay(QWidget):
         lines = v._metrics.get(key, [])
         if lines:
             p.setPen(QColor(102, 255, 153))
-            p.setFont(QFont("monospace", 8))
+            p.setFont(QFont("monospace", 11))
             p.drawText(QRectF(0, 4, w - 6, h * 0.5),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                        "\n".join(lines))
@@ -414,7 +414,7 @@ class _Overlay(QWidget):
     def _paint_info(self, p, key, w, h):
         v = self._v
         p.setPen(QColor(102, 255, 153))         # green like vtk corner text
-        f = QFont("monospace", 9)
+        f = QFont("monospace", 12)
         p.setFont(f)
         head = overlay_lines(v._header, v._tag_keywords, anonymized=v._anon)
         if head:
@@ -423,20 +423,20 @@ class _Overlay(QWidget):
                        "\n".join(head))
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
-        p.drawText(QRectF(6, h - 22, w - 12, 18),
+        p.drawText(QRectF(6, h - 28, w - 12, 24),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                    f"WW {v._win:.0f}  WL {v._lvl:.0f}")
-        p.drawText(QRectF(6, h - 22, w - 12, 18),
+        p.drawText(QRectF(6, h - 28, w - 12, 24),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    f"{key}  |  {kind}")
         # angio readout (yellow, bottom-centre) — clinical, always shown
         ang = v._angio_angle(key)
         if ang:
             p.setPen(QColor(255, 230, 0))
-            fb = QFont("monospace", 11)
+            fb = QFont("monospace", 15)
             fb.setBold(True)
             p.setFont(fb)
-            p.drawText(QRectF(0, h - 28, w, 22),
+            p.drawText(QRectF(0, h - 36, w, 30),
                        Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
                        ang)
 
@@ -695,6 +695,22 @@ class CTViewer(AbstractViewer):
         c.add_event_handler(lambda ev, k=key: self._on_wheel(k, ev), "wheel")
         c.add_event_handler(lambda ev, k=key: self._on_dblclick(k, ev), "double_click")
         c.add_event_handler(lambda ev, k=key: self._on_resize(k, ev), "resize")
+        c.add_event_handler(lambda ev, k=key: self._on_key(k, ev), "key_down")
+
+    def _on_key(self, key, ev):
+        """Canvas keyboard shortcuts (rendercanvas key_down). The canvas has
+        focus, so Qt's keyPressEvent on the viewer never fires — route here."""
+        k = ev.get("key", "")
+        kl = k.lower() if isinstance(k, str) else k
+        self._set_active(key)
+        if kl == "c":
+            self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
+            self._toggle_color()
+            return
+        tool = {"z": "ZOOM", "v": "MOVE", "s": "SPIN", "g": "PAGING",
+                "w": "WL", "r": "ROTATE", "t": "THICK"}.get(kl)
+        if tool:
+            self._set_tool(tool)
 
     def _on_down(self, key, ev):
         self._set_active(key)
@@ -1054,18 +1070,27 @@ class CTViewer(AbstractViewer):
     def _slab_mip_hu(self, key, iw, ih):
         """(ih,iw) HU array = max over N parallel oblique planes within
         ±thick/2 of the pane plane, sampled across the current viewport.
-        The thin-slice normal direction is the frame normal N."""
+
+        The sample grid is built in SCREEN space and unprojected with the same
+        roll+pan as _disp_to_world, so the slab image rotates with SPIN/ROTATE
+        and stays pixel-aligned with the crosshair (the image is drawn
+        full-rect by the overlay). The slab depth direction is the frame
+        normal N."""
         u, v, n = self._frame[key]
         pc = self._pc[key]
         sx, sy, sz = self._dims
         px, py = self._pan[key]
-        ps = self._ps[key]
         pw = max(1, self.pane[key].canvas.width())
         ph = max(1, self.pane[key].canvas.height())
-        hw, hh = ps * (pw / ph), ps
-        gx = np.linspace(px - hw, px + hw, iw)
-        gy = np.linspace(py + hh, py - hh, ih)   # top row = +v (screen up)
-        WX, WY = np.meshgrid(gx, gy)
+        scale = ph / (2.0 * max(1e-3, self._ps[key]))
+        a = math.radians(self._roll[key])
+        ca, sa = math.cos(a), math.sin(a)
+        SX, SY = np.meshgrid(np.linspace(0.0, pw, iw),
+                             np.linspace(0.0, ph, ih))
+        aa = (SX - pw / 2.0) / scale
+        bb = (ph / 2.0 - SY) / scale
+        WX = px + aa * ca - bb * sa          # screen → output (roll/pan)
+        WY = py + aa * sa + bb * ca
         bx = pc[0] + WX * u[0] + WY * v[0]
         by = pc[1] + WX * u[1] + WY * v[1]
         bz = pc[2] + WX * u[2] + WY * v[2]
