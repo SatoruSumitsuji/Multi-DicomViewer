@@ -421,11 +421,12 @@ class _Overlay(QWidget):
         p.setPen(QColor(102, 255, 153))         # green like vtk corner text
         f = QFont("monospace", 12)
         p.setFont(f)
-        head = overlay_lines(v._header, v._tag_keywords, anonymized=v._anon)
-        if head:
-            p.drawText(QRectF(6, 4, w - 12, h * 0.6),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
-                       "\n".join(head))
+        if v._tags_on:
+            head = overlay_lines(v._header, v._tag_keywords, anonymized=v._anon)
+            if head:
+                p.drawText(QRectF(6, 4, w - 12, h * 0.6),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                           "\n".join(head))
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
         p.drawText(QRectF(6, h - 28, w - 12, 24),
@@ -607,6 +608,7 @@ class CTViewer(AbstractViewer):
         self._header = None
         self._pbasis = np.eye(3)
         self._tag_keywords: list[str] = []
+        self._tags_on = False                # DICOM tag overlay visible
         self._anon = False
         self._tool = "PAGING"
         self._dims = (1.0, 1.0, 1.0)         # sx, sy, sz mm
@@ -711,6 +713,9 @@ class CTViewer(AbstractViewer):
         if kl == "c":
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
+            return
+        if kl == "q":
+            self._toggle_tags()
             return
         tool = {"z": "ZOOM", "v": "MOVE", "s": "SPIN", "g": "PAGING",
                 "w": "WL", "r": "ROTATE", "t": "THICK"}.get(kl)
@@ -843,9 +848,12 @@ class CTViewer(AbstractViewer):
         self._preset.currentTextChanged.connect(self._apply_preset)
         row.addWidget(self._preset)
 
-        tags = QPushButton("DICOM Tags…")
-        tags.clicked.connect(self.tags_requested.emit)
-        row.addWidget(tags)
+        self._tags_btn = QPushButton("DICOM Tags…")
+        self._tags_btn.setCheckable(True)
+        self._tags_btn.setToolTip(
+            "Show/hide the DICOM tag overlay (key Q). First time picks tags.")
+        self._tags_btn.clicked.connect(self._on_tags_btn)
+        row.addWidget(self._tags_btn)
         row.addStretch(1)
         self._set_tool("PAGING")
         return row
@@ -947,7 +955,32 @@ class CTViewer(AbstractViewer):
 
     def set_tag_keywords(self, keywords) -> None:
         self._tag_keywords = list(keywords or [])
+        # Picking tags shows the overlay; keep the toolbar button in sync.
+        self._tags_on = bool(self._tag_keywords)
+        self._tags_btn.setChecked(self._tags_on)
         self._refresh()
+
+    def _on_tags_btn(self):
+        """DICOM Tags button: toggle the tag overlay. First time (no tags
+        chosen yet) opens the picker dialog via tags_requested."""
+        if self._tags_btn.isChecked():
+            if not self._tag_keywords:
+                self.tags_requested.emit()        # modal picker (sets keywords)
+            self._tags_on = bool(self._tag_keywords)
+            self._tags_btn.setChecked(self._tags_on)
+        else:
+            self._tags_on = False
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _toggle_tags(self):
+        """Q key: toggle the DICOM tag overlay visibility."""
+        self._tags_on = not self._tags_on
+        self._tags_btn.blockSignals(True)
+        self._tags_btn.setChecked(self._tags_on)
+        self._tags_btn.blockSignals(False)
+        for k in ("A", "B"):
+            self._overlay[k].update()
 
     def set_anonymized(self, on: bool) -> None:
         self._anon = bool(on)
