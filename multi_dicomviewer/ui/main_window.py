@@ -1135,9 +1135,71 @@ class MainWindow(QMainWindow):
         return str(here.parent / "resources" / rel)
 
     def _open_rupture_predictor(self) -> None:
-        """Open Rupture-Predictor, handing over the active pane's
-        displayed image + its DICOM pixel calibration so the tool can
-        skip the manual CH/CV calibration entirely.
+        """Open the NATIVE Rupture-Predictor on the active pane's
+        displayed image + its DICOM pixel calibration (so the tool can
+        skip the manual CH/CV calibration entirely).
+
+        Replaces the old browser hand-off so the app is self-contained.
+        Set ``MDV_RUPTURE_BROWSER=1`` to fall back to the legacy HTML in
+        an external browser — kept for A/B numeric comparison until the
+        native port is signed off (see :meth:`_open_rupture_predictor_browser`).
+        """
+        if os.environ.get("MDV_RUPTURE_BROWSER"):
+            self._open_rupture_predictor_browser()
+            return
+        from multi_dicomviewer.ui.rupture_predictor_window import (
+            RupturePredictorWindow,
+        )
+        se = (self._series_by_uid.get(self._active.shown_series_uid())
+              if self._active is not None else None)
+        spacing = dicom_io.series_spacing_mm(se) if se is not None else None
+        calib = None
+        if spacing is not None:
+            row_mm, col_mm = spacing
+            if row_mm and row_mm > 0 and col_mm and col_mm > 0:
+                # px/mm = 1 / (mm/px); PixelSpacing is (row, col). No 2×
+                # upscale here — that was only a JPEG data-URL granularity
+                # hack; the native canvas reaches sub-pixel picks via zoom.
+                calib = (1.0 / col_mm, 1.0 / row_mm)   # (hpxmm, vpxmm)
+        v = (self._active.current_viewer()
+             if self._active is not None else None)
+        is_ivus = (v is not None
+                   and getattr(v, "handles_modality", "") == "IVUS")
+        plane = None
+        frame_index = 0
+        if is_ivus:
+            planes = getattr(v, "_planes", []) or []
+            if planes:
+                plane = planes[getattr(v, "_active", 0)]
+                frame_index = int(getattr(v, "_frame", 0))
+        # Hand over the plane + current frame for IVUS (the stepper decodes
+        # frames lazily across the whole pull-back) or the single displayed
+        # QImage for XA. Keep a reference so the window isn't GC'd.
+        if plane is None:
+            qimg = self._active_display_image()
+            if qimg is None:
+                QMessageBox.warning(
+                    self, "Rupture-Predictor",
+                    "アクティブなペインに表示中の画像がありません。")
+                return
+            self._rupture_win = RupturePredictorWindow(
+                qimage=qimg, calib=calib, parent=self)
+        else:
+            self._rupture_win = RupturePredictorWindow(
+                plane=plane, frame_index=frame_index, calib=calib, parent=self)
+        self._rupture_win.showMaximized()
+        self._rupture_win.raise_()
+        parts = ["IVUS frame stepper" if plane is not None
+                 else "displayed image"]
+        if calib is not None:
+            parts.append("DICOM calibration (CH/CV step skipped)")
+        self.statusBar().showMessage(
+            "Rupture-Predictor opened with " + " + ".join(parts) + ".")
+
+    def _open_rupture_predictor_browser(self) -> None:
+        """Legacy browser Rupture-Predictor (HTML hand-off). Retained as a
+        fallback behind ``MDV_RUPTURE_BROWSER`` for A/B comparison against
+        the native port; slated for removal once parity is confirmed.
 
         The hand-off rides in a generated, self-contained session HTML
         (window.MDV_HANDOFF) — a data URL is too big for a query string
