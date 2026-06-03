@@ -48,7 +48,10 @@ from multi_dicomviewer.config import (
     BLOCK_CT_MESSAGE,
 )
 from multi_dicomviewer.core import dicom_io, settings
-from multi_dicomviewer.core.dicom_tags import default_overlay_keywords
+from multi_dicomviewer.core.dicom_tags import (
+    default_overlay_keywords,
+    upgrade_private_literal,
+)
 from multi_dicomviewer.core.study_model import Modality, Series
 from multi_dicomviewer.ui.history_dialog import MeasureHistoryDialog
 from multi_dicomviewer.ui.study_browser import SERIES_MIME, StudyPanel
@@ -625,6 +628,14 @@ class MainWindow(QMainWindow):
         )
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
+        self._bixa_act = QAction("Virtual BiXA…", self)
+        self._bixa_act.setToolTip(
+            "Fuse an LCA cine and an RCA cine shot at the same projection "
+            "into one bilateral-contrast (両側造影) cine "
+            "(available whenever 2+ XA series are loaded)"
+        )
+        self._bixa_act.triggered.connect(self._open_virtual_bixa)
+        tm.addAction(self._bixa_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -639,6 +650,8 @@ class MainWindow(QMainWindow):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
         if hasattr(self, "_coaxial_act"):
             self._coaxial_act.setEnabled(self._any_visible_pane_has_angles())
+        if hasattr(self, "_bixa_act"):
+            self._bixa_act.setEnabled(self._xa_series_count() >= 2)
 
     @staticmethod
     def _viewer_has_positioner_angles(v) -> bool:
@@ -725,6 +738,54 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
+
+    def _xa_series_count(self) -> int:
+        """How many XA series are loaded across all patients/studies —
+        gates the Virtual BiXA tool (needs an LCA + an RCA cine)."""
+        return sum(
+            1
+            for p in self._patients.values()
+            for st in p.studies.values()
+            for se in st.series.values()
+            if se.modality == Modality.XA
+        )
+
+    def _open_virtual_bixa(self) -> None:
+        """Launch the Virtual BiXA window. Pre-fill LCA / RCA from the
+        first two visible panes that show an XA series, in display order."""
+        from multi_dicomviewer.ui.bixa_window import BiXAWindow
+        xa = [
+            se
+            for p in self._patients.values()
+            for st in p.studies.values()
+            for se in st.series.values()
+            if se.modality == Modality.XA
+        ]
+        if len(xa) < 2:
+            QMessageBox.information(
+                self, "Virtual BiXA",
+                "XA series が2本以上必要です。LCA造影とRCA造影を含む"
+                "フォルダを開いてください。",
+            )
+            return
+        # Seed the LCA/RCA slots + their current frames from the panes.
+        preset: list = [None, None]
+        preset_frames: list = [0, 0]
+        slot = 0
+        for pane in self._order:
+            if slot >= 2:
+                break
+            se = self._series_by_uid.get(pane.shown_series_uid())
+            if se is not None and se.modality == Modality.XA:
+                v = pane.current_viewer()
+                preset[slot] = se
+                preset_frames[slot] = int(getattr(v, "_frame", 0))
+                slot += 1
+        self._bixa = BiXAWindow(
+            xa, preset=preset, preset_frames=preset_frames, parent=self
+        )
+        self._bixa.showMaximized()
+        self._bixa.raise_()
 
     def _active_display_image(self):
         """QImage of the frame currently shown in the active pane's
@@ -2016,6 +2077,7 @@ class MainWindow(QMainWindow):
             v = pane.current_viewer()
             if v is not None and hasattr(v, "set_tag_keywords"):
                 v.set_anonymized(self._anon)
+                self._migrate_tag_idents(v)
                 v.set_tag_keywords(self._effective_kw(v))
             if series.modality == Modality.XA:
                 self._cur_xa = series
@@ -2104,6 +2166,7 @@ class MainWindow(QMainWindow):
         pane.set_shown_series(series.series_uid if v is not None else None)
         if v is not None and hasattr(v, "set_tag_keywords"):
             v.set_anonymized(self._anon)
+            self._migrate_tag_idents(v)
             v.set_tag_keywords(self._effective_kw(v))
         if loaded.modality == Modality.XA:
             self._cur_xa = series
@@ -2157,6 +2220,37 @@ class MainWindow(QMainWindow):
         """Classify *viewer* into one of the persisted-list buckets."""
         m = getattr(viewer, "handles_modality", "") or "OTHER"
         return m if m in settings.TAG_MODALITIES else "OTHER"
+
+    def _migrate_tag_idents(self, viewer) -> None:
+        """Self-heal legacy raw private-tag literals in *viewer*'s modality
+        list to the stable private-creator key, resolved against the shown
+        header. A selection saved before the private-creator change thus
+        upgrades automatically just by viewing the series it was made on —
+        no DICOM Tags re-confirm needed. No-op when nothing legacy resolves."""
+        if viewer is None or not hasattr(viewer, "current_header"):
+            return
+        header = viewer.current_header()
+        if header is None:
+            return
+        mod = self._modality_of(viewer)
+        kws = self._tag_keywords_by_modality.get(mod, [])
+        if not kws:
+            return
+        upgraded: list[str] = []
+        seen: set[str] = set()
+        changed = False
+        for k in kws:
+            nk = upgrade_private_literal(header, k)
+            if nk != k:
+                changed = True
+            if nk not in seen:
+                seen.add(nk)
+                upgraded.append(nk)
+        if changed:
+            self._tag_keywords_by_modality[mod] = upgraded
+            settings.save_tag_keywords_by_modality(
+                self._tag_keywords_by_modality
+            )
 
     def _effective_kw(self, viewer=None) -> list:
         """Keywords actually pushed to *viewer*: none while the overlay
