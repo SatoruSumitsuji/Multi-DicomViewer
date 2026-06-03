@@ -100,17 +100,23 @@ class TagSelectionDialog(QDialog):
         self.table.setRowCount(len(rows))
         for r, tr in enumerate(rows):
             # Standard tags identify themselves by their pydicom keyword;
-            # private/unknown tags (no keyword) fall back to the tag-
-            # string literal so they're still selectable and addressable.
-            identifier = tr.keyword or tr.tag
+            # private DATA elements use a stable private-creator key
+            # (tr.ident) so the selection survives the per-file block
+            # reassignment that makes the raw (group,element) literal
+            # unstable across series. Fall back to the literal otherwise.
+            identifier = tr.ident or tr.keyword or tr.tag
             chk = QTableWidgetItem()
             chk.setFlags(
                 Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsEnabled
             )
+            # Also honour a legacy raw-literal selection saved before the
+            # private-creator change, so upgrading re-checks it (and
+            # re-saving migrates it to the stable key).
+            checked = identifier in selected_set or tr.tag in selected_set
             chk.setCheckState(
                 Qt.CheckState.Checked
-                if identifier in selected_set
+                if checked
                 else Qt.CheckState.Unchecked
             )
             chk.setData(_KW_ROLE, identifier)
