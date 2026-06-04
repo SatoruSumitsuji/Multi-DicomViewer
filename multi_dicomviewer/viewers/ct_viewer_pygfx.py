@@ -65,7 +65,11 @@ from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
     dist as _dist,
+    ellipse_axes as _ellipse_axes,
     ellipse_cab as _ellipse_cab,
+    ellipse_drag as _ellipse_drag,
+    ellipse_from_major as _ellipse_from_major,
+    ellipse_outline as _ellipse_outline,
     major_minor as _major_minor,
     point_in_poly as _point_in_poly,
     poly_area as _poly_area,
@@ -405,12 +409,9 @@ class _Overlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             hover = v._meas_hover
             if d["type"] == "ellipse" and hover is not None:
-                p0, p1 = d["pts"][0], hover
-                cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
-                a, b = abs(p1[0] - p0[0]) / 2, abs(p1[1] - p0[1]) / 2
-                p.drawPolyline(poly(
-                    [(cx + a * math.cos(t), cy + b * math.sin(t))
-                     for t in (i * 2 * math.pi / 48 for i in range(49))]))
+                # Major axis = first click → cursor; preview the oblique ellipse.
+                p.drawPolyline(poly(_ellipse_outline(
+                    _ellipse_from_major(d["pts"][0], hover))))
             else:
                 preview = list(d["pts"])
                 if hover is not None and d["type"] != "ellipse":
@@ -1550,9 +1551,7 @@ class CTViewer(AbstractViewer):
         if t == "angle":
             # Vertex = MIDDLE point: endpoint1 → vertex → endpoint2.
             return list(m["pts"][:3])
-        cx, cy, a, b = self._ellipse_cab(m)
-        return [(cx + a * math.cos(th), cy + b * math.sin(th))
-                for th in (i * 2 * math.pi / 48 for i in range(49))]
+        return _ellipse_outline(m["pts"])          # oblique ellipse
 
     def _handles(self, m):
         return list(m["pts"])
@@ -1677,20 +1676,7 @@ class CTViewer(AbstractViewer):
             self._redraw_meas(key)
 
     def _set_ellipse_handle(self, m, vi, w):
-        pts = [list(q) for q in m["pts"]]    # lft,rgt,top,bot
-        if vi == 0:
-            pts[0][0] = w[0]
-        elif vi == 1:
-            pts[1][0] = w[0]
-        elif vi == 2:
-            pts[2][1] = w[1]
-        else:
-            pts[3][1] = w[1]
-        cx = (pts[0][0] + pts[1][0]) / 2.0
-        cy = (pts[2][1] + pts[3][1]) / 2.0
-        pts[0][1] = pts[1][1] = cy
-        pts[2][0] = pts[3][0] = cx
-        m["pts"] = [tuple(q) for q in pts]
+        m["pts"] = _ellipse_drag(m["pts"], vi, w)
 
     def _commit_draft(self):
         d = self._draft
@@ -1699,10 +1685,9 @@ class CTViewer(AbstractViewer):
         if d is None or len(d["pts"]) < 2:
             return
         if d["type"] == "ellipse":
-            p0, p1 = d["pts"][0], d["pts"][1]
-            cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
-            a, b = abs(p1[0] - p0[0]) / 2, abs(p1[1] - p0[1]) / 2
-            pts = [(cx - a, cy), (cx + a, cy), (cx, cy - b), (cx, cy + b)]
+            # The two clicked points are the MAJOR-axis endpoints; the minor
+            # axis starts at half the major and is then dragged to taste.
+            pts = _ellipse_from_major(d["pts"][0], d["pts"][1])
         elif d["type"] == "line":
             pts = d["pts"][:2]
         else:
@@ -1829,9 +1814,9 @@ class CTViewer(AbstractViewer):
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
         if m["type"] == "ellipse":
-            lft, rgt, top, bot = m["pts"]
+            e1, e2, m1, m2 = m["pts"]            # major ends, minor ends
             m["type"] = "polygon"
-            m["pts"] = [lft, top, rgt, bot]
+            m["pts"] = [e1, m1, e2, m2]          # around the ellipse
         if m["type"] == "line":
             m["type"] = "polyline"
             m["pts"] = [m["pts"][0], pt, m["pts"][1]]

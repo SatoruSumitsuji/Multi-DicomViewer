@@ -353,9 +353,7 @@ class ImageCanvas(QWidget):
             # Vertex is the MIDDLE (2nd) point: draw endpoint1 → vertex →
             # endpoint2 in click order so the bend sits at the vertex.
             return list(m["pts"][:3])
-        cx, cy, a, b = G.ellipse_cab(m["pts"])        # ellipse
-        return [(cx + a * math.cos(th), cy + b * math.sin(th))
-                for th in (i * 2 * math.pi / 48 for i in range(49))]
+        return G.ellipse_outline(m["pts"])            # oblique ellipse
 
     def _axis_segs_px(self, m):
         """Major/minor caliper segments in IMAGE-pixel coords, computed
@@ -650,11 +648,11 @@ class ImageCanvas(QWidget):
         pt = self._widget_to_image(QPoint(int(sx), int(sy)))
         if pt is None:
             return
-        # Ellipse first becomes a 4-vertex Polygon (CCW: lft, top, rgt, bot).
+        # Ellipse first becomes a 4-vertex Polygon around its axis endpoints.
         if m["type"] == "ellipse":
-            lft, rgt, top, bot = m["pts"]
+            e1, e2, m1, m2 = m["pts"]            # major ends, minor ends
             m["type"] = "polygon"
-            m["pts"] = [lft, top, rgt, bot]
+            m["pts"] = [e1, m1, e2, m2]          # around the ellipse
         if m["type"] == "line":
             m["type"] = "polyline"
             m["pts"] = [m["pts"][0], pt, m["pts"][1]]
@@ -900,20 +898,9 @@ class ImageCanvas(QWidget):
 
     # ----------------------------------------------------- mutation helpers
     def _set_ellipse_handle(self, m, vi, w):
-        pts = [list(q) for q in m["pts"]]      # lft, rgt, top, bot
-        if vi == 0:
-            pts[0][0] = w[0]
-        elif vi == 1:
-            pts[1][0] = w[0]
-        elif vi == 2:
-            pts[2][1] = w[1]
-        else:
-            pts[3][1] = w[1]
-        cx = (pts[0][0] + pts[1][0]) / 2.0
-        cy = (pts[2][1] + pts[3][1]) / 2.0
-        pts[0][1] = pts[1][1] = cy
-        pts[2][0] = pts[3][0] = cx
-        m["pts"] = [tuple(q) for q in pts]
+        # Oblique ellipse: major endpoints (0,1) resize+rotate, minor
+        # endpoints (2,3) change the perpendicular width.
+        m["pts"] = G.ellipse_drag(m["pts"], vi, w)
 
     def _commit_draft(self):
         d = self._draft
@@ -923,10 +910,8 @@ class ImageCanvas(QWidget):
             self.update()
             return
         if d["type"] == "ellipse":
-            p0, p1 = d["pts"][0], d["pts"][1]
-            cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-            a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-            pts = [(cx-a, cy), (cx+a, cy), (cx, cy-b), (cx, cy+b)]
+            # The two clicked points are the MAJOR-axis endpoints.
+            pts = G.ellipse_from_major(d["pts"][0], d["pts"][1])
         elif d["type"] == "line":
             pts = d["pts"][:2]
         else:
@@ -1080,12 +1065,9 @@ class ImageCanvas(QWidget):
                 preview_pts.append(self._hover)
             wpts = [self._image_to_widget(q) for q in preview_pts]
             if d["type"] == "ellipse" and self._hover is not None:
-                p0, p1 = d["pts"][0], self._hover
-                cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-                a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-                pts48 = [(cx+a*math.cos(t), cy+b*math.sin(t))
-                         for t in (i*2*math.pi/48 for i in range(49))]
-                wpts = [self._image_to_widget(q) for q in pts48]
+                # Major axis = first click → cursor; preview the oblique ellipse.
+                prev = G.ellipse_from_major(d["pts"][0], self._hover)
+                wpts = [self._image_to_widget(q) for q in G.ellipse_outline(prev)]
             for a, b in zip(wpts, wpts[1:]):
                 p.drawLine(a, b)
             p.setBrush(QColor("#f4d03f"))
