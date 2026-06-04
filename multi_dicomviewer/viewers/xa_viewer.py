@@ -50,6 +50,20 @@ _SLIDER_QSS = (
     " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
 )
 
+#: Same look as _SLIDER_QSS but a larger handle (18px vs 16px) so the cine/Play
+#: seek bar stands out from the W/L sliders.
+_SEEK_SLIDER_QSS = (
+    "QSlider::groove:horizontal {"
+    " height:5px; background:#c9c9c9; border-radius:2px; }"
+    "QSlider::sub-page:horizontal {"
+    " background:#2f7fd1; border-radius:2px; }"
+    "QSlider::handle:horizontal {"
+    " width:18px; height:18px; margin:-7px 0; border-radius:9px;"
+    " border:1px solid #9a9a9a;"
+    " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,"
+    " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
+)
+
 
 class _Prefetcher(QThread):
     """Decodes the remaining cine frames off the UI thread."""
@@ -295,12 +309,20 @@ class XAViewer(AbstractViewer):
         self.play_btn = QPushButton("▶ Play")
         self.play_btn.setCheckable(True)
         self.play_btn.toggled.connect(self._toggle_play)
+        # Enlarge the Play button ~1.15× (bold, bigger font) to set the cine
+        # transport apart from the W/L controls.
+        _pf = self.play_btn.font()
+        _pf.setBold(True)
+        _pf.setPointSizeF(_pf.pointSizeF() * 1.15)
+        self.play_btn.setFont(_pf)
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
         # White-circle-with-blue-dot handle + blue track, matching Windows.
-        self.frame_slider.setStyleSheet(_SLIDER_QSS)
+        # The seek bar uses the larger handle to set the cine controls apart
+        # from the W/L sliders.
+        self.frame_slider.setStyleSheet(_SEEK_SLIDER_QSS)
 
         self.frame_lbl = QLabel("0/0")
         self.frame_lbl.setMinimumWidth(70)
