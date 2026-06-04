@@ -503,6 +503,16 @@ class StudyBrowser(QTreeWidget):
             )
             menu.addAction(act_mp4)
             menu.addSeparator()
+        # Close: collapse the series rows so the Study list is easy to scan.
+        # Sits between the Export actions and Delete, fenced by separators.
+        close_act = QAction("Close (close series list)", self)
+        close_act.setToolTip(
+            "Collapse the series under each study so the study list is "
+            "easier to read. Nothing is removed."
+        )
+        close_act.triggered.connect(self._close_series_list)
+        menu.addAction(close_act)
+        menu.addSeparator()
         act = QAction("Delete (remove from list)", self)
         act.setToolTip(
             "Files are not deleted; just removed from the list so they "
@@ -513,6 +523,23 @@ class StudyBrowser(QTreeWidget):
         )
         menu.addAction(act)
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _close_series_list(self) -> None:
+        """Collapse every study node so its series rows hide, leaving a compact
+        patient/study list. Files and the list itself are untouched."""
+        def walk(item) -> None:
+            for i in range(item.childCount()):
+                ch = item.child(i)
+                idk = ch.data(0, _ID_ROLE)
+                if idk and idk[0] == "S":     # study node -> hide its series
+                    ch.setExpanded(False)
+                walk(ch)
+        for i in range(self.topLevelItemCount()):
+            top = self.topLevelItem(i)
+            idk = top.data(0, _ID_ROLE)
+            if idk and idk[0] == "S":
+                top.setExpanded(False)
+            walk(top)
 
     def startDrag(self, _supported) -> None:  # noqa: N802 (Qt override)
         items = self.selectedItems() or (
