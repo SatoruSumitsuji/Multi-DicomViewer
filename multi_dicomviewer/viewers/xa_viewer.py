@@ -284,6 +284,20 @@ class XAViewer(AbstractViewer):
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
+        # Seek handle styled to match the Windows build: a white circle with a
+        # blue dot in the centre (instead of macOS' plain white knob).
+        self.frame_slider.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            " height:6px; background:#5a5a5a; border-radius:3px; }"
+            "QSlider::sub-page:horizontal {"
+            " background:#3a78c2; border-radius:3px; }"
+            "QSlider::handle:horizontal {"
+            " width:16px; height:16px; margin:-6px 0; border-radius:8px;"
+            " border:2px solid #ffffff;"
+            " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5,"
+            " fx:0.5, fy:0.5, stop:0 #2f7fd1, stop:0.5 #2f7fd1,"
+            " stop:0.58 #ffffff, stop:1 #ffffff); }"
+        )
 
         self.frame_lbl = QLabel("0/0")
         self.frame_lbl.setMinimumWidth(70)
