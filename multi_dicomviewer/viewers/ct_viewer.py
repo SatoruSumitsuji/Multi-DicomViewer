@@ -85,6 +85,7 @@ from multi_dicomviewer.core.measure_geom import (
     convex_hull as _convex_hull,
     dist as _dist,
     ellipse_cab as _ellipse_cab_pure,
+    ellipse_drag as _ellipse_drag,
     ellipse_from_major as _ellipse_from_major,
     ellipse_outline as _ellipse_outline,
     major_minor as _major_minor_pure,
@@ -1404,28 +1405,9 @@ class CTViewer(AbstractViewer):
             self._redraw_meas(key)
 
     def _set_ellipse_handle(self, m, vi, w):
-        """Drag one of the four ellipse handles. A MAJOR handle (vi 0/1) keeps
-        the opposite major endpoint fixed, so dragging re-sizes AND rotates the
-        ellipse; a MINOR handle (vi 2/3) keeps the centre + major axis fixed and
-        just sets the minor radius. Minor endpoints always stay perpendicular to
-        the major axis and symmetric about the centre."""
-        maj0, maj1, min0, min1 = (tuple(q) for q in m["pts"])
-        if vi in (0, 1):
-            if vi == 0:
-                maj0 = (w[0], w[1])
-            else:
-                maj1 = (w[0], w[1])
-            b = _dist(min0, min1) / 2.0
-        else:
-            b = None                                  # set below from the drag
-        cx, cy = (maj0[0] + maj1[0]) / 2.0, (maj0[1] + maj1[1]) / 2.0
-        ang = math.atan2(maj1[1] - maj0[1], maj1[0] - maj0[0])
-        px, py = -math.sin(ang), math.cos(ang)        # minor (perpendicular) dir
-        if b is None:
-            b = max(abs((w[0] - cx) * px + (w[1] - cy) * py), 1e-6)
-        min0 = (cx - b * px, cy - b * py)
-        min1 = (cx + b * px, cy + b * py)
-        m["pts"] = [maj0, maj1, min0, min1]
+        # Oblique-ellipse handle drag via the shared pure helper (same logic
+        # used by the XA/IVUS canvas and the pygfx CT viewer).
+        m["pts"] = _ellipse_drag(m["pts"], vi, w)
 
     def _commit_draft(self):
         d = self._draft
