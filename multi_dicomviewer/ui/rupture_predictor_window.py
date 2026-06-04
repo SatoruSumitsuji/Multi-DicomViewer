@@ -798,9 +798,26 @@ class RupturePredictorWindow(QMainWindow):
 
         return panel
 
+    @staticmethod
+    def _ratio_colors(v: float) -> tuple[str, str]:
+        """(text, background) chip colours for a stretch ratio — risk rises
+        with the value: <1.5 blue, 1.5–1.8 yellow, ≥1.8 red."""
+        if v < 1.5:
+            return "#ffffff", "#1565c0"      # blue
+        if v < 1.8:
+            return "#000000", "#f5d100"      # yellow (dark text for contrast)
+        return "#ffffff", "#c62828"          # red
+
     def _update_panel(self, res: rm.BalloonResult) -> None:
-        self._result_label.setText(f"Stretch Ratio: {res.stretch_ratio:.2f}")
-        self._result_label.setStyleSheet("color: #1a7f37;")
+        # Make the number ~2.5× the label font (16 → 40 pt) and colour-code it
+        # so the result reads at a glance from across the room.
+        fg, bg = self._ratio_colors(res.stretch_ratio)
+        self._result_label.setStyleSheet("")
+        self._result_label.setText(
+            "Stretch Ratio: "
+            f"<span style='font-size:40pt; font-weight:bold; color:{fg}; "
+            f"background-color:{bg};'>&nbsp;{res.stretch_ratio:.2f}&nbsp;</span>"
+        )
         if self._calib is not None:
             self._calib_label.setText(
                 f"H: {self._calib.hpxmm:.2f} px/mm   "
