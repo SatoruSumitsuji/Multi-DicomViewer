@@ -350,8 +350,9 @@ class ImageCanvas(QWidget):
         if t == "polygon":
             return G.smooth_closed(m["pts"])
         if t == "angle":
-            a, b, c = m["pts"][:3]
-            return [b, a, c]                          # B → A → C
+            # Vertex is the MIDDLE (2nd) point: draw endpoint1 → vertex →
+            # endpoint2 in click order so the bend sits at the vertex.
+            return list(m["pts"][:3])
         cx, cy, a, b = G.ellipse_cab(m["pts"])        # ellipse
         return [(cx + a * math.cos(th), cy + b * math.sin(th))
                 for th in (i * 2 * math.pi / 48 for i in range(49))]
@@ -402,7 +403,7 @@ class ImageCanvas(QWidget):
             tag = "Polyline (Spline)" if m.get("smooth") else "Polyline"
             return f"#{m['id']} {tag}: {L:.1f} {u}"
         if t == "angle":
-            ang = G.angle_at(pts_mm[0], pts_mm[1], pts_mm[2])
+            ang = G.angle_at(pts_mm[1], pts_mm[0], pts_mm[2])  # vertex = mid
             return f"#{m['id']} Angle: {ang:.1f}°"
         if t == "ellipse":
             cx, cy, a, b = G.ellipse_cab(m["pts"])
@@ -429,7 +430,7 @@ class ImageCanvas(QWidget):
             ys = [q[1] for q in m["pts"]]
             return (sum(xs) / len(xs), sum(ys) / len(ys))
         if m["type"] == "angle":
-            return m["pts"][0]                        # label at vertex A
+            return m["pts"][1]                        # label at vertex (middle)
         return m["pts"][0]
 
     def _shape_center(self, m) -> tuple[float, float]:
@@ -1158,7 +1159,7 @@ class ImageCanvas(QWidget):
         if not self.measures:
             return
         font = QFont()
-        font.setPointSize(9)
+        font.setPointSize(14)        # match the DICOM-tag overlay font size
         p.setFont(font)
         fm = p.fontMetrics()
 

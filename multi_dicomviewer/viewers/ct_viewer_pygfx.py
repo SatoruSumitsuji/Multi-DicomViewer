@@ -396,23 +396,33 @@ class _Overlay(QWidget):
 
         d = v._draft
         if d and d["pane"] == key and d["pts"]:
-            cyan = _hex_to_rgb(None)
-            if d["type"] == "ellipse" and len(d["pts"]) >= 2:
-                p0, p1 = d["pts"][0], d["pts"][1]
+            # Yellow DASHED preview that follows the cursor while points are
+            # being placed (matches the XA/IVUS canvas), incl. the angle tool.
+            pen = QPen(QColor(244, 208, 63), 1.2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            hover = v._meas_hover
+            if d["type"] == "ellipse" and hover is not None:
+                p0, p1 = d["pts"][0], hover
                 cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
                 a, b = abs(p1[0] - p0[0]) / 2, abs(p1[1] - p0[1]) / 2
-                draw_outline([(cx + a * math.cos(t), cy + b * math.sin(t))
-                              for t in (i * 2 * math.pi / 48
-                                        for i in range(49))], cyan)
+                p.drawPolyline(poly(
+                    [(cx + a * math.cos(t), cy + b * math.sin(t))
+                     for t in (i * 2 * math.pi / 48 for i in range(49))]))
             else:
-                draw_outline(list(d["pts"]), cyan)
+                preview = list(d["pts"])
+                if hover is not None and d["type"] != "ellipse":
+                    preview.append(hover)
+                if len(preview) >= 2:
+                    p.drawPolyline(poly(preview))
             dots(list(d["pts"]), QColor(255, 217, 0), 4.0)
 
         # per-measure result strings, stacked top-right
         lines = v._metrics.get(key, [])
         if lines:
             p.setPen(QColor(102, 255, 153))
-            p.setFont(QFont("monospace", 11))
+            p.setFont(QFont("monospace", 14))   # match DICOM-tag font size
             p.drawText(QRectF(0, 4, w - 6, h * 0.5),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                        "\n".join(lines))
@@ -660,6 +670,7 @@ class CTViewer(AbstractViewer):
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
+        self._meas_hover = None              # cursor (output coords) for draft preview
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
         self._loaded_uid = ""
 
@@ -702,6 +713,9 @@ class CTViewer(AbstractViewer):
         for key in ("A", "B"):
             self.pane[key].canvas.setAttribute(
                 Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+            # Mouse tracking so the measure draft preview (dashed line to the
+            # cursor) follows the pointer without a button held.
+            self.pane[key].canvas.setMouseTracking(True)
         # Tool shortcuts as QShortcuts (not keyPressEvent): like the XA/IVUS
         # cine keys, QShortcut accelerators are processed before the input
         # method, so they fire even with a Japanese IME active. Scoped to this
@@ -752,6 +766,10 @@ class CTViewer(AbstractViewer):
         if self._meas_on:
             if self._meas_drag:
                 self._measure_drag(key, x, y)
+            elif self._draft and self._draft["pane"] == key:
+                # Update the dashed draft preview that follows the cursor.
+                self._meas_hover = self._disp_to_world(key, x, y)
+                self._overlay[key].update()
             return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
             return
@@ -1481,6 +1499,7 @@ class CTViewer(AbstractViewer):
         self._measure_bar.setVisible(self._meas_on)
         self._draft = None
         self._edit = None
+        self._meas_hover = None
         if not self._meas_on:
             self._meas_type = None
             for b in self._meas_btns.values():
@@ -1492,14 +1511,16 @@ class CTViewer(AbstractViewer):
     def _set_measure_type(self, key):
         self._meas_type = key
         self._draft = None
+        self._meas_hover = None
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
-            b.setStyleSheet("background:#1f77b4;color:white;" if k == key else "")
+            b.setStyleSheet("background:#1f77b4;color:black;" if k == key else "")
 
     def _measure_clear(self):
         self._measures = {"A": [], "B": []}
         self._draft = None
         self._edit = None
+        self._meas_hover = None
         for k in ("A", "B"):
             self._redraw_meas(k)
 
@@ -1517,8 +1538,8 @@ class CTViewer(AbstractViewer):
         if t == "polygon":
             return _smooth_closed(m["pts"])
         if t == "angle":
-            a, b, c = m["pts"][:3]
-            return [b, a, c]
+            # Vertex = MIDDLE point: endpoint1 → vertex → endpoint2.
+            return list(m["pts"][:3])
         cx, cy, a, b = self._ellipse_cab(m)
         return [(cx + a * math.cos(th), cy + b * math.sin(th))
                 for th in (i * 2 * math.pi / 48 for i in range(49))]
@@ -1534,6 +1555,8 @@ class CTViewer(AbstractViewer):
             xs = [q[0] for q in m["pts"]]
             ys = [q[1] for q in m["pts"]]
             return (sum(xs) / len(xs), sum(ys) / len(ys))
+        if m["type"] == "angle":
+            return m["pts"][1]                        # label at vertex (middle)
         return m["pts"][0]
 
     def _shape_center(self, m):
@@ -1552,7 +1575,7 @@ class CTViewer(AbstractViewer):
             tag = "Polyline (Spline)" if m.get("smooth") else "Polyline"
             return f"#{m['id']} {tag}: {L:.1f} mm"
         if t == "angle":
-            return f"#{m['id']} Angle: {_angle_at(pts[0], pts[1], pts[2]):.1f}°"
+            return f"#{m['id']} Angle: {_angle_at(pts[1], pts[0], pts[2]):.1f}°"
         if t == "ellipse":
             cx, cy, a, b = self._ellipse_cab(m)
             lo, hi = self._hu_stats(key, self._outline(m))
@@ -1662,6 +1685,7 @@ class CTViewer(AbstractViewer):
     def _commit_draft(self):
         d = self._draft
         self._draft = None
+        self._meas_hover = None
         if d is None or len(d["pts"]) < 2:
             return
         if d["type"] == "ellipse":
