@@ -201,26 +201,87 @@ def central_arc_angle(center, p1, p2, p3):
 
 
 def ellipse_cab(pts):
-    """(cx, cy, a, b) for an ellipse stored as [lft, rgt, top, bot]."""
-    lft, rgt, top, bot = pts
-    cx = (lft[0] + rgt[0]) / 2.0
-    cy = (top[1] + bot[1]) / 2.0
-    a = max(abs(rgt[0] - lft[0]) / 2.0, 1e-6)
-    b = max(abs(bot[1] - top[1]) / 2.0, 1e-6)
+    """(cx, cy, a, b) for an OBLIQUE ellipse stored as four points
+    [e1, e2, m1, m2]: e1/e2 are the (long-axis) endpoints and m1/m2 the
+    minor-axis endpoints. a = major semi-axis, b = minor semi-axis. Angle
+    of the major axis is recovered separately via ellipse_axes()."""
+    e1, e2, m1, m2 = pts
+    cx = (e1[0] + e2[0]) / 2.0
+    cy = (e1[1] + e2[1]) / 2.0
+    a = max(math.hypot(e2[0] - e1[0], e2[1] - e1[1]) / 2.0, 1e-6)
+    b = max(math.hypot(m2[0] - m1[0], m2[1] - m1[1]) / 2.0, 1e-6)
     return cx, cy, a, b
+
+
+def ellipse_axes(pts):
+    """Unit major direction (u) and minor direction (v ⟂ u) of an oblique
+    ellipse [e1, e2, m1, m2]."""
+    e1, e2 = pts[0], pts[1]
+    dx, dy = e2[0] - e1[0], e2[1] - e1[1]
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+    return (ux, uy), (-uy, ux)
+
+
+def ellipse_outline(pts, n: int = 48):
+    """n+1 points tracing an oblique ellipse [e1, e2, m1, m2] (closed)."""
+    cx, cy, a, b = ellipse_cab(pts)
+    (ux, uy), (vx, vy) = ellipse_axes(pts)
+    out = []
+    for i in range(n + 1):
+        t = i * 2 * math.pi / n
+        ca, sb = a * math.cos(t), b * math.sin(t)
+        out.append((cx + ca * ux + sb * vx, cy + ca * uy + sb * vy))
+    return out
+
+
+def ellipse_from_major(p0, p1, minor_frac: float = 0.5):
+    """Build an oblique ellipse [e1, e2, m1, m2] from the two MAJOR-axis
+    endpoints; the minor semi-axis defaults to *minor_frac* of the major."""
+    cx, cy = (p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    L = math.hypot(dx, dy) or 1e-6
+    vx, vy = -dy / L, dx / L                       # minor (perpendicular) dir
+    b = max((L / 2.0) * minor_frac, 1e-3)
+    return [tuple(p0), tuple(p1),
+            (cx - b * vx, cy - b * vy), (cx + b * vx, cy + b * vy)]
+
+
+def ellipse_drag(pts, vi, w):
+    """New oblique-ellipse points after dragging handle *vi* to *w*. Major
+    endpoints (0,1) move freely (resize + rotate) keeping the current minor
+    width; minor endpoints (2,3) change only the minor width along the
+    perpendicular through the centre."""
+    e1, e2, m1, m2 = (list(q) for q in pts)
+    if vi == 0:
+        e1 = [w[0], w[1]]
+    elif vi == 1:
+        e2 = [w[0], w[1]]
+    cx, cy = (e1[0] + e2[0]) / 2.0, (e1[1] + e2[1]) / 2.0
+    dx, dy = e2[0] - e1[0], e2[1] - e1[1]
+    L = math.hypot(dx, dy) or 1e-6
+    vx, vy = -dy / L, dx / L                       # minor (perpendicular) dir
+    if vi in (0, 1):
+        b = math.hypot(m2[0] - m1[0], m2[1] - m1[1]) / 2.0   # keep width
+    else:
+        b = max(abs((w[0] - cx) * vx + (w[1] - cy) * vy), 1e-3)
+    m1 = [cx - b * vx, cy - b * vy]
+    m2 = [cx + b * vx, cy + b * vy]
+    return [tuple(e1), tuple(e2), tuple(m1), tuple(m2)]
 
 
 def major_minor(m):
     """Long-axis & short-axis of an ellipse/polygon as drawable 2-D
     segments plus lengths: ((p1,p2),(q1,q2),Dmax,Dmin). Ellipse -> its
-    exact axes. Polygon -> longest chord (長径) + minimum caliper width
-    (短径), measured from the ORIGINAL vertices so the drawn caliper
-    lines match the reported numbers."""
+    exact (possibly rotated) axes. Polygon -> longest chord (長径) +
+    minimum caliper width (短径), measured from the ORIGINAL vertices so
+    the drawn caliper lines match the reported numbers."""
     if m["type"] == "ellipse":
         cx, cy, a, b = ellipse_cab(m["pts"])
-        hx = ((cx - a, cy), (cx + a, cy))
-        vy = ((cx, cy - b), (cx, cy + b))
-        return (hx, vy, 2 * a, 2 * b) if a >= b else (vy, hx, 2 * b, 2 * a)
+        (ux, uy), (vx, vy) = ellipse_axes(m["pts"])
+        maj = ((cx - a * ux, cy - a * uy), (cx + a * ux, cy + a * uy))
+        mnr = ((cx - b * vx, cy - b * vy), (cx + b * vx, cy + b * vy))
+        return (maj, mnr, 2 * a, 2 * b) if a >= b else (mnr, maj, 2 * b, 2 * a)
     hull = convex_hull(list(m["pts"]))
     if len(hull) < 3:
         return None, None, 0.0, 0.0
