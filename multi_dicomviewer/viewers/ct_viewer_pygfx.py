@@ -848,7 +848,7 @@ class CTViewer(AbstractViewer):
         self._cl_btn.clicked.connect(self._toggle_centerline)
         row.addWidget(self._cl_btn)
 
-        row.addWidget(QLabel("Slab(mm):"))
+        row.addWidget(QLabel("Slab:"))
         self._slab_spin = QDoubleSpinBox()
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
@@ -882,7 +882,7 @@ class CTViewer(AbstractViewer):
         reset.clicked.connect(self._reset)
         row.addWidget(reset)
 
-        row.addWidget(QLabel("W/L preset:"))
+        row.addWidget(QLabel("W/L:"))
         self._preset = QComboBox()
         self._preset.addItems(list(CT_WL_PRESETS.keys()))
         self._preset.currentTextChanged.connect(self._apply_preset)
@@ -890,7 +890,6 @@ class CTViewer(AbstractViewer):
 
         hist = QPushButton("Measure History")
         hist.setToolTip("Show this study's measurement history")
-        hist.setMinimumWidth(150)        # don't clip the label
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
 
