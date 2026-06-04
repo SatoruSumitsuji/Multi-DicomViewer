@@ -696,6 +696,14 @@ class CTViewer(AbstractViewer):
         lay.addLayout(imgrow, 1)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Shortcuts must work even with a Japanese (or any) IME active. These
+        # widgets are not text fields, so disable input-method handling — the
+        # IME then never swallows key presses into composition and Z/V/R/S/G/
+        # T/W/C/Q arrive as plain keyPressEvent / canvas key_down events.
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+        for key in ("A", "B"):
+            self.pane[key].canvas.setAttribute(
+                Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         self._update_active_frames()
 
     # ------------------------------------------------------ event wiring
