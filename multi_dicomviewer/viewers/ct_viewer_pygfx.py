@@ -427,7 +427,7 @@ class _Overlay(QWidget):
                                       if v._header is not None else [])
             head = overlay_lines(v._header, kws, anonymized=v._anon)
             if head:
-                p.setFont(QFont("monospace", 15))   # readable, not oversized
+                p.setFont(QFont("monospace", 14))   # readable, not oversized
                 p.drawText(QRectF(6, 4, w - 12, h * 0.7),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                            "\n".join(head))
