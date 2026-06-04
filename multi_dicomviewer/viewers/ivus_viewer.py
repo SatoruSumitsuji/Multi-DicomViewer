@@ -229,7 +229,7 @@ class IVUSViewer(XAViewer):
         )
         self._long_view_btn.clicked.connect(self.toggle_long_axis)
         self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._long_view_btn
+            self._series_nav_row.count() - 3, self._long_view_btn
         )
 
         # Centre-keyframe controls — placed right of Long View so the
@@ -244,7 +244,7 @@ class IVUSViewer(XAViewer):
             lambda: self._jump_to_keyframe(-1)
         )
         self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._prev_key_btn
+            self._series_nav_row.count() - 3, self._prev_key_btn
         )
         self._next_key_btn = QPushButton("Center ▶")
         self._next_key_btn.setToolTip(
@@ -254,7 +254,7 @@ class IVUSViewer(XAViewer):
             lambda: self._jump_to_keyframe(+1)
         )
         self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._next_key_btn
+            self._series_nav_row.count() - 3, self._next_key_btn
         )
         self._clear_centers_btn = QPushButton("Clear Centers")
         self._clear_centers_btn.setToolTip(
@@ -263,7 +263,7 @@ class IVUSViewer(XAViewer):
         )
         self._clear_centers_btn.clicked.connect(self._clear_all_centers)
         self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._clear_centers_btn
+            self._series_nav_row.count() - 3, self._clear_centers_btn
         )
         # Buttons start disabled — they enable once a series is loaded
         # with at least one keyframe (see _refresh_keyframe_markers).

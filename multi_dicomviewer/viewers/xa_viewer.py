@@ -248,6 +248,18 @@ class XAViewer(AbstractViewer):
         # ``insertWidget(count() - 1, ...)`` to land before it.
         self._series_nav_row = row
         row.addStretch(1)
+        # Measure History + DICOM Tags pinned to the FAR RIGHT of the top row,
+        # matching the CT viewer (top-right of the image). NOTE: these two
+        # trailing buttons sit AFTER the stretch, so IVUS inserts its own
+        # toggles before the stretch via insertWidget(count() - 3, ...).
+        hist_btn = QPushButton("Measure History")
+        hist_btn.setToolTip("Show this study's measurement history")
+        hist_btn.clicked.connect(self.history_requested.emit)
+        row.addWidget(hist_btn)
+        tags_btn = QPushButton("DICOM Tags…")
+        tags_btn.setToolTip("Choose DICOM tags to overlay on the image")
+        tags_btn.clicked.connect(self.tags_requested.emit)
+        row.addWidget(tags_btn)
         return row
 
     def _build_plane_bar(self) -> QWidget:
@@ -302,18 +314,9 @@ class XAViewer(AbstractViewer):
         row.addWidget(self.lvl_slider, 1)
 
         # W/L is rarely used for XA/IVUS — let the sliders take only ~half
-        # the stretchable width; the freed space sits before the tools.
+        # the stretchable width. (Measure History / DICOM Tags moved to the
+        # top series-nav row, top-right, to match the CT viewer.)
         row.addStretch(2)
-
-        hist_btn = QPushButton("Measure History")
-        hist_btn.setToolTip("Show this study's measurement history")
-        hist_btn.clicked.connect(self.history_requested.emit)
-        row.addWidget(hist_btn)
-
-        tags_btn = QPushButton("DICOM Tags…")
-        tags_btn.setToolTip("Choose DICOM tags to overlay on the image")
-        tags_btn.clicked.connect(self.tags_requested.emit)
-        row.addWidget(tags_btn)
         return row
 
     def _clear_measurements(self):
