@@ -228,9 +228,7 @@ class IVUSViewer(XAViewer):
             "Show/hide the IVUS long-axis (longitudinal) view — shortcut: V"
         )
         self._long_view_btn.clicked.connect(self.toggle_long_axis)
-        self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._long_view_btn
-        )
+        self._insert_series_nav_widget(self._long_view_btn)
 
         # Centre-keyframe controls — placed right of Long View so the
         # whole "long-axis" cluster reads left-to-right. Prev/Next
@@ -243,9 +241,7 @@ class IVUSViewer(XAViewer):
         self._prev_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(-1)
         )
-        self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._prev_key_btn
-        )
+        self._insert_series_nav_widget(self._prev_key_btn)
         self._next_key_btn = QPushButton("Center ▶")
         self._next_key_btn.setToolTip(
             "Jump to the next frame with a manual rotation centre"
@@ -253,18 +249,14 @@ class IVUSViewer(XAViewer):
         self._next_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(+1)
         )
-        self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._next_key_btn
-        )
+        self._insert_series_nav_widget(self._next_key_btn)
         self._clear_centers_btn = QPushButton("Clear Centers")
         self._clear_centers_btn.setToolTip(
             "Remove every manual rotation centre on the active plane "
             "(same as right-click ▸ Reset all on the marker)"
         )
         self._clear_centers_btn.clicked.connect(self._clear_all_centers)
-        self._series_nav_row.insertWidget(
-            self._series_nav_row.count() - 1, self._clear_centers_btn
-        )
+        self._insert_series_nav_widget(self._clear_centers_btn)
         # Buttons start disabled — they enable once a series is loaded
         # with at least one keyframe (see _refresh_keyframe_markers).
         for b in (self._prev_key_btn, self._next_key_btn,
