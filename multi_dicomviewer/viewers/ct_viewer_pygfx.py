@@ -60,6 +60,7 @@ from rendercanvas.pyqt6 import RenderCanvas
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
+from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
@@ -618,6 +619,10 @@ class _ColorMapDialog(QDialog):
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
     tags_requested = pyqtSignal()
+    #: emitted when the user clicks "Measure History" (shell opens the dialog)
+    history_requested = pyqtSignal()
+    #: emitted on every committed measurement (shell logs it per study)
+    measurement_added = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -882,6 +887,11 @@ class CTViewer(AbstractViewer):
         self._preset.addItems(list(CT_WL_PRESETS.keys()))
         self._preset.currentTextChanged.connect(self._apply_preset)
         row.addWidget(self._preset)
+
+        hist = QPushButton("Measure History")
+        hist.setToolTip("Show this study's measurement history")
+        hist.clicked.connect(self.history_requested.emit)
+        row.addWidget(hist)
 
         tags = QPushButton("DICOM Tags…")
         tags.setToolTip(
@@ -1698,9 +1708,14 @@ class CTViewer(AbstractViewer):
         else:
             pts = list(d["pts"])
         self._meas_seq += 1
-        self._measures[d["pane"]].append(
-            {"id": self._meas_seq, "type": d["type"], "pts": pts})
+        m = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        self._measures[d["pane"]].append(m)
         self._redraw_meas(d["pane"])
+        # Log to the study's measurement history (shell-owned).
+        meas = Measurement(kind=d["type"].capitalize(), points=list(pts),
+                           spacing_mm=None)
+        meas.text = self._metrics_text(d["pane"], m)
+        self.measurement_added.emit(meas)
 
     def _measure_finish_draft(self):
         d = self._draft
