@@ -44,25 +44,22 @@ jobs:
                            -DestinationPath dist/Multi-DicomViewer-windows.zip
 
       # ----- macOS: zip the .app bundle (preserve symlinks/perms with ditto) -----
-      # The Mac build is renamed Multi-DicomViewer-NoCT (no CT viewer —
-      # VTK hangs on macOS).
+      # Full app on macOS too: CT renders via the pygfx (wgpu→Metal) viewer.
       - name: Zip (macOS)
         if: runner.os == 'macOS'
         run: |
           cd dist
           ditto -c -k --sequesterRsrc --keepParent \
-                Multi-DicomViewer-NoCT.app Multi-DicomViewer-NoCT-macos.zip
+                Multi-DicomViewer.app Multi-DicomViewer-macos.zip
 
-      # Artifact name is what GitHub shows in the run's UI; surface the
-      # Mac variant's "-NoCT" suffix here too so the box name matches the
-      # zip inside.
+      # Artifact name is what GitHub shows in the run's UI.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Multi-DicomViewer-${{ runner.os == 'macOS' && 'NoCT-macOS' || runner.os }}
+          name: Multi-DicomViewer-${{ runner.os }}
           path: |
             dist/Multi-DicomViewer-windows.zip
-            dist/Multi-DicomViewer-NoCT-macos.zip
+            dist/Multi-DicomViewer-macos.zip
           if-no-files-found: ignore
 
       # ----- On a v* tag: also attach the zips to a GitHub Release -----
@@ -72,7 +69,7 @@ jobs:
         with:
           files: |
             dist/Multi-DicomViewer-windows.zip
-            dist/Multi-DicomViewer-NoCT-macos.zip
+            dist/Multi-DicomViewer-macos.zip
           draft: false
           prerelease: false
         env:
