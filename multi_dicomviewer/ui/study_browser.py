@@ -503,6 +503,14 @@ class StudyBrowser(QTreeWidget):
             )
             menu.addAction(act_mp4)
             menu.addSeparator()
+        act_close = QAction("Close (close series list)", self)
+        act_close.setToolTip(
+            "Collapse this study's series list so the Study list is "
+            "easier to browse. Nothing is removed."
+        )
+        act_close.triggered.connect(lambda: self._close_series_list(item))
+        menu.addAction(act_close)
+        menu.addSeparator()
         act = QAction("Delete (remove from list)", self)
         act.setToolTip(
             "Files are not deleted; just removed from the list so they "
@@ -513,6 +521,27 @@ class StudyBrowser(QTreeWidget):
         )
         menu.addAction(act)
         menu.exec(self.viewport().mapToGlobal(pos))
+
+    def _close_series_list(self, item: QTreeWidgetItem) -> None:
+        """Collapse the study node whose series list contains *item*,
+        folding the series away so the Study-level list is easy to browse.
+        Right-click on a series (or its study) collapses that study; on a
+        patient, all its studies. Nothing is removed from the list."""
+        if item is None:
+            return
+        data = item.data(0, _ROLE)
+        idk = item.data(0, _ID_ROLE)
+        if isinstance(data, Series):
+            s_node = item.parent()
+            if s_node is not None:
+                s_node.setExpanded(False)
+                self.setCurrentItem(s_node)
+        elif idk and idk[0] == "S":
+            item.setExpanded(False)
+            self.setCurrentItem(item)
+        elif idk and idk[0] == "P":
+            for j in range(item.childCount()):
+                item.child(j).setExpanded(False)
 
     def startDrag(self, _supported) -> None:  # noqa: N802 (Qt override)
         items = self.selectedItems() or (
