@@ -845,12 +845,17 @@ class CTViewer(AbstractViewer):
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
+        # Setting / Reset: a darker-grey, softer-text look so they read as
+        # secondary controls, set apart from the tool buttons.
+        _sr_qss = "QPushButton { background:#6e6e6e; color:#d8d8d8; }"
         setting = QPushButton("Setting")
         setting.setToolTip("HU colour-map settings (band colour, HU range, opacity)")
+        setting.setStyleSheet(_sr_qss)
         setting.clicked.connect(self._open_setting)
         row.addWidget(setting)
 
         reset = QPushButton("Reset")
+        reset.setStyleSheet(_sr_qss)
         reset.clicked.connect(self._reset)
         row.addWidget(reset)
 
