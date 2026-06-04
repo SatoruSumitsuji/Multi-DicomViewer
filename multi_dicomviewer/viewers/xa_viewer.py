@@ -35,6 +35,21 @@ from multi_dicomviewer.core.dicom_tags import overlay_lines
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.viewers.image_canvas import ImageCanvas
 
+#: Slider look matching the Windows build: light-grey groove, blue filled
+#: (sub-page) track, and a handle that is a white circle with a blue dot in
+#: the centre. Applied to the seek bar and the W/L sliders.
+_SLIDER_QSS = (
+    "QSlider::groove:horizontal {"
+    " height:5px; background:#c9c9c9; border-radius:2px; }"
+    "QSlider::sub-page:horizontal {"
+    " background:#2f7fd1; border-radius:2px; }"
+    "QSlider::handle:horizontal {"
+    " width:16px; height:16px; margin:-6px 0; border-radius:8px;"
+    " border:1px solid #9a9a9a;"
+    " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,"
+    " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
+)
+
 
 class _Prefetcher(QThread):
     """Decodes the remaining cine frames off the UI thread."""
@@ -284,20 +299,8 @@ class XAViewer(AbstractViewer):
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
-        # Seek handle styled to match the Windows build: a white circle with a
-        # blue dot in the centre (instead of macOS' plain white knob).
-        self.frame_slider.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            " height:6px; background:#5a5a5a; border-radius:3px; }"
-            "QSlider::sub-page:horizontal {"
-            " background:#3a78c2; border-radius:3px; }"
-            "QSlider::handle:horizontal {"
-            " width:16px; height:16px; margin:-6px 0; border-radius:8px;"
-            " border:2px solid #ffffff;"
-            " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5,"
-            " fx:0.5, fy:0.5, stop:0 #2f7fd1, stop:0.5 #2f7fd1,"
-            " stop:0.58 #ffffff, stop:1 #ffffff); }"
-        )
+        # White-circle-with-blue-dot handle + blue track, matching Windows.
+        self.frame_slider.setStyleSheet(_SLIDER_QSS)
 
         self.frame_lbl = QLabel("0/0")
         self.frame_lbl.setMinimumWidth(70)
@@ -319,11 +322,13 @@ class XAViewer(AbstractViewer):
 
         row.addWidget(QLabel("W"))
         self.win_slider = QSlider(Qt.Orientation.Horizontal)
+        self.win_slider.setStyleSheet(_SLIDER_QSS)
         self.win_slider.valueChanged.connect(self._wl_changed)
         row.addWidget(self.win_slider, 1)
 
         row.addWidget(QLabel("L"))
         self.lvl_slider = QSlider(Qt.Orientation.Horizontal)
+        self.lvl_slider.setStyleSheet(_SLIDER_QSS)
         self.lvl_slider.valueChanged.connect(self._wl_changed)
         row.addWidget(self.lvl_slider, 1)
 
