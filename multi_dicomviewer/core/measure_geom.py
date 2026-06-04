@@ -200,14 +200,55 @@ def central_arc_angle(center, p1, p2, p3):
     return (360 - ccw), t1, t3, False        # arc goes CW
 
 
+def ellipse_params(pts):
+    """(cx, cy, a, b, theta) for a (possibly rotated) ellipse stored as four
+    axis endpoints ``[maj0, maj1, min0, min1]`` — the two major-axis endpoints
+    followed by the two minor-axis endpoints. ``a`` / ``b`` are the semi-major /
+    semi-minor radii and ``theta`` is the major-axis angle (radians). ``a``/``b``
+    come straight from the stored axes, so a minor axis dragged longer than the
+    major one is tolerated; callers wanting max/min use major_minor's Dmax/Dmin.
+    """
+    maj0, maj1, min0, min1 = pts[:4]
+    cx = (maj0[0] + maj1[0]) / 2.0
+    cy = (maj0[1] + maj1[1]) / 2.0
+    a = max(dist(maj0, maj1) / 2.0, 1e-6)
+    b = max(dist(min0, min1) / 2.0, 1e-6)
+    theta = math.atan2(maj1[1] - maj0[1], maj1[0] - maj0[0])
+    return cx, cy, a, b, theta
+
+
 def ellipse_cab(pts):
-    """(cx, cy, a, b) for an ellipse stored as [lft, rgt, top, bot]."""
-    lft, rgt, top, bot = pts
-    cx = (lft[0] + rgt[0]) / 2.0
-    cy = (top[1] + bot[1]) / 2.0
-    a = max(abs(rgt[0] - lft[0]) / 2.0, 1e-6)
-    b = max(abs(bot[1] - top[1]) / 2.0, 1e-6)
+    """(cx, cy, a, b) — centre and semi-axes of a (possibly rotated) ellipse;
+    see ellipse_params. Kept for callers that only need the centre or radii."""
+    cx, cy, a, b, _ = ellipse_params(pts)
     return cx, cy, a, b
+
+
+def ellipse_outline(pts, n: int = 48):
+    """Closed polyline (``n+1`` points, last == first) tracing a rotated
+    ellipse stored as four axis endpoints; see ellipse_params."""
+    cx, cy, a, b, th = ellipse_params(pts)
+    ct, st = math.cos(th), math.sin(th)
+    out = []
+    for i in range(n + 1):
+        t = i * 2 * math.pi / n
+        x, y = a * math.cos(t), b * math.sin(t)
+        out.append((cx + x * ct - y * st, cy + x * st + y * ct))
+    return out
+
+
+def ellipse_from_major(p0, p1, minor_ratio: float = 0.5):
+    """Four axis endpoints ``[maj0, maj1, min0, min1]`` for an ellipse whose
+    MAJOR axis runs ``p0 → p1`` (so an oblique drag yields an oblique ellipse).
+    The minor radius defaults to ``minor_ratio`` × the semi-major length and is
+    meant to be tuned afterwards by dragging the minor handles."""
+    cx, cy = (p0[0] + p1[0]) / 2.0, (p0[1] + p1[1]) / 2.0
+    a = dist(p0, p1) / 2.0
+    b = max(a * minor_ratio, 1e-6)
+    ang = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+    px, py = -math.sin(ang), math.cos(ang)
+    return [tuple(p0), tuple(p1),
+            (cx - b * px, cy - b * py), (cx + b * px, cy + b * py)]
 
 
 def major_minor(m):
@@ -217,10 +258,11 @@ def major_minor(m):
     (短径), measured from the ORIGINAL vertices so the drawn caliper
     lines match the reported numbers."""
     if m["type"] == "ellipse":
-        cx, cy, a, b = ellipse_cab(m["pts"])
-        hx = ((cx - a, cy), (cx + a, cy))
-        vy = ((cx, cy - b), (cx, cy + b))
-        return (hx, vy, 2 * a, 2 * b) if a >= b else (vy, hx, 2 * b, 2 * a)
+        # The stored axis endpoints ARE the caliper segments (rotated).
+        maj0, maj1, min0, min1 = m["pts"][:4]
+        maj, mnr = (maj0, maj1), (min0, min1)
+        da, db = dist(maj0, maj1), dist(min0, min1)
+        return (maj, mnr, da, db) if da >= db else (mnr, maj, db, da)
     hull = convex_hull(list(m["pts"]))
     if len(hull) < 3:
         return None, None, 0.0, 0.0
