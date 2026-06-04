@@ -88,17 +88,19 @@ definition or leave it. Then verify the module imports with no `NameError`:
 python -c "import multi_dicomviewer.viewers.xa_viewer; print('xa OK')"
 ```
 
-### `ui/study_browser.py` — ⭐ ONE DECISION NEEDED
+### `ui/study_browser.py` — ✅ DECIDED: take main's version
 Both sides added the **same menu item** "Close (close series list)" but with
-**different behaviour**:
-- **branch** — `_close_series_list(self)`: collapses **every** study node (global "collapse all").
-- **main** — `_close_series_list(self, item)`: collapses **only the study of the
-  right-clicked item** (series/study → that study; patient → all its studies).
+different behaviour. **User decision (2026-06-05): take main's contextual
+version** — `_close_series_list(self, item)` collapses **only the study of the
+right-clicked item** (series/study → that study; patient → all its studies).
+Discard the branch's global "collapse-all" variant.
 
-Pick ONE — keep both the method body **and** its menu `triggered.connect(...)`
-line consistent (branch: `connect(self._close_series_list)`; main:
-`connect(lambda: self._close_series_list(item))`).
-Recommendation: **main's contextual version** (more precise). **User decides.**
+Resolve by taking main's side for **both** hunks — the method body AND its menu
+line `act_close.triggered.connect(lambda: self._close_series_list(item))`. Since
+main's study_browser change is the chosen one and a superset here:
+```bash
+git checkout --theirs multi_dicomviewer/ui/study_browser.py && git add -- multi_dicomviewer/ui/study_browser.py
+```
 
 ## Post-merge checks (auto-merged files — verify semantics, not text)
 
