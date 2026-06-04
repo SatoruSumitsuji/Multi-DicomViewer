@@ -338,7 +338,8 @@ class ImageCanvas(QWidget):
     def _outline_px(self, m) -> list[tuple[float, float]]:
         """Drawn outline in IMAGE-pixel coords.
         Polygon → smoothed closed; Polyline → optionally smoothed (Spline
-        toggle); Angle → two segments meeting at A (drawn as B-A-C)."""
+        toggle); Angle → two rays meeting at the vertex, clicked as
+        end1 → vertex → end2 and drawn straight through in that order."""
         t = m["type"]
         if t == "line":
             return list(m["pts"][:2])
@@ -350,11 +351,10 @@ class ImageCanvas(QWidget):
         if t == "polygon":
             return G.smooth_closed(m["pts"])
         if t == "angle":
-            a, b, c = m["pts"][:3]
-            return [b, a, c]                          # B → A → C
-        cx, cy, a, b = G.ellipse_cab(m["pts"])        # ellipse
-        return [(cx + a * math.cos(th), cy + b * math.sin(th))
-                for th in (i * 2 * math.pi / 48 for i in range(49))]
+            # Clicked end1 → vertex → end2; draw straight through so the
+            # vertex sits between its two rays.
+            return list(m["pts"][:3])
+        return G.ellipse_outline(m["pts"])            # ellipse (rotated)
 
     def _axis_segs_px(self, m):
         """Major/minor caliper segments in IMAGE-pixel coords, computed
@@ -386,7 +386,7 @@ class ImageCanvas(QWidget):
         """Result text — mm if calibrated, px otherwise. No HU here
         because XA/IVUS pixels aren't Hounsfield units; lengths, area
         and 長径/短径 are the clinically meaningful numbers."""
-        u, sx, sy = self._unit(), *self._mm_scale()
+        u = self._unit()
         pts_mm = [self._to_mm(q) for q in m["pts"]]
         t = m["type"]
         ca = m.get("center_angle")
@@ -402,11 +402,11 @@ class ImageCanvas(QWidget):
             tag = "Polyline (Spline)" if m.get("smooth") else "Polyline"
             return f"#{m['id']} {tag}: {L:.1f} {u}"
         if t == "angle":
-            ang = G.angle_at(pts_mm[0], pts_mm[1], pts_mm[2])
+            # Vertex is the middle (2nd) click; rays go to the 1st & 3rd.
+            ang = G.angle_at(pts_mm[1], pts_mm[0], pts_mm[2])
             return f"#{m['id']} Angle: {ang:.1f}°"
         if t == "ellipse":
-            cx, cy, a, b = G.ellipse_cab(m["pts"])
-            a_mm, b_mm = a * sx, b * sy
+            _, _, a_mm, b_mm, _ = G.ellipse_params(pts_mm)
             return (f"#{m['id']} Ellipse  "
                     f"Area:{math.pi*a_mm*b_mm:.1f}{u}²  "
                     f"Dmax:{2*max(a_mm,b_mm):.1f}  "
@@ -429,7 +429,7 @@ class ImageCanvas(QWidget):
             ys = [q[1] for q in m["pts"]]
             return (sum(xs) / len(xs), sum(ys) / len(ys))
         if m["type"] == "angle":
-            return m["pts"][0]                        # label at vertex A
+            return m["pts"][1]                        # label at the vertex
         return m["pts"][0]
 
     def _shape_center(self, m) -> tuple[float, float]:
@@ -471,10 +471,11 @@ class ImageCanvas(QWidget):
     # ---------------------------------------- area & %PlaqueArea (IVUS)
     def _area(self, m) -> float:
         """Area in mm² (or px² when uncalibrated). 0 for non-area shapes."""
-        sx, sy = self._mm_scale()
         if m["type"] == "ellipse":
-            cx, cy, a, b = G.ellipse_cab(m["pts"])
-            return math.pi * (a * sx) * (b * sy)
+            # Measure the axes in mm-space so an oblique ellipse under
+            # anisotropic spacing still reports the correct area.
+            _, _, a, b, _ = G.ellipse_params([self._to_mm(q) for q in m["pts"]])
+            return math.pi * a * b
         if m["type"] == "polygon":
             pts_mm = [self._to_mm(q) for q in m["pts"]]
             return G.poly_area(pts_mm)
@@ -649,11 +650,12 @@ class ImageCanvas(QWidget):
         pt = self._widget_to_image(QPoint(int(sx), int(sy)))
         if pt is None:
             return
-        # Ellipse first becomes a 4-vertex Polygon (CCW: lft, top, rgt, bot).
+        # Ellipse first becomes a 4-vertex Polygon at the axis endpoints,
+        # in order around the perimeter (maj0 → min0 → maj1 → min1).
         if m["type"] == "ellipse":
-            lft, rgt, top, bot = m["pts"]
+            maj0, maj1, min0, min1 = m["pts"]
             m["type"] = "polygon"
-            m["pts"] = [lft, top, rgt, bot]
+            m["pts"] = [maj0, min0, maj1, min1]
         if m["type"] == "line":
             m["type"] = "polyline"
             m["pts"] = [m["pts"][0], pt, m["pts"][1]]
@@ -899,20 +901,28 @@ class ImageCanvas(QWidget):
 
     # ----------------------------------------------------- mutation helpers
     def _set_ellipse_handle(self, m, vi, w):
-        pts = [list(q) for q in m["pts"]]      # lft, rgt, top, bot
-        if vi == 0:
-            pts[0][0] = w[0]
-        elif vi == 1:
-            pts[1][0] = w[0]
-        elif vi == 2:
-            pts[2][1] = w[1]
+        """Drag one of the four ellipse handles. A MAJOR handle (vi 0/1) keeps
+        the opposite major endpoint fixed, so dragging re-sizes AND rotates the
+        ellipse; a MINOR handle (vi 2/3) keeps the centre + major axis fixed and
+        just sets the minor radius. Minor endpoints always stay perpendicular to
+        the major axis and symmetric about the centre."""
+        maj0, maj1, min0, min1 = (tuple(q) for q in m["pts"])
+        if vi in (0, 1):
+            if vi == 0:
+                maj0 = (w[0], w[1])
+            else:
+                maj1 = (w[0], w[1])
+            b = G.dist(min0, min1) / 2.0
         else:
-            pts[3][1] = w[1]
-        cx = (pts[0][0] + pts[1][0]) / 2.0
-        cy = (pts[2][1] + pts[3][1]) / 2.0
-        pts[0][1] = pts[1][1] = cy
-        pts[2][0] = pts[3][0] = cx
-        m["pts"] = [tuple(q) for q in pts]
+            b = None                                  # set below from the drag
+        cx, cy = (maj0[0] + maj1[0]) / 2.0, (maj0[1] + maj1[1]) / 2.0
+        ang = math.atan2(maj1[1] - maj0[1], maj1[0] - maj0[0])
+        px, py = -math.sin(ang), math.cos(ang)        # minor (perpendicular) dir
+        if b is None:
+            b = max(abs((w[0] - cx) * px + (w[1] - cy) * py), 1e-6)
+        min0 = (cx - b * px, cy - b * py)
+        min1 = (cx + b * px, cy + b * py)
+        m["pts"] = [maj0, maj1, min0, min1]
 
     def _commit_draft(self):
         d = self._draft
@@ -922,10 +932,10 @@ class ImageCanvas(QWidget):
             self.update()
             return
         if d["type"] == "ellipse":
-            p0, p1 = d["pts"][0], d["pts"][1]
-            cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-            a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-            pts = [(cx-a, cy), (cx+a, cy), (cx, cy-b), (cx, cy+b)]
+            # First two clicks are the MAJOR-axis endpoints (an oblique drag
+            # makes an oblique ellipse); the minor radius starts at half the
+            # major and is tuned afterwards via the minor handles.
+            pts = G.ellipse_from_major(d["pts"][0], d["pts"][1])
         elif d["type"] == "line":
             pts = d["pts"][:2]
         else:
@@ -1079,12 +1089,10 @@ class ImageCanvas(QWidget):
                 preview_pts.append(self._hover)
             wpts = [self._image_to_widget(q) for q in preview_pts]
             if d["type"] == "ellipse" and self._hover is not None:
-                p0, p1 = d["pts"][0], self._hover
-                cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-                a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-                pts48 = [(cx+a*math.cos(t), cy+b*math.sin(t))
-                         for t in (i*2*math.pi/48 for i in range(49))]
-                wpts = [self._image_to_widget(q) for q in pts48]
+                # Preview the oblique ellipse whose major axis is the drag.
+                prev = G.ellipse_from_major(d["pts"][0], self._hover)
+                wpts = [self._image_to_widget(q)
+                        for q in G.ellipse_outline(prev)]
             for a, b in zip(wpts, wpts[1:]):
                 p.drawLine(a, b)
             p.setBrush(QColor("#f4d03f"))

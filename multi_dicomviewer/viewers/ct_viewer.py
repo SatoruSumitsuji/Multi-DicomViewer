@@ -78,12 +78,15 @@ from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
     convex_hull as _convex_hull,
     dist as _dist,
     ellipse_cab as _ellipse_cab_pure,
+    ellipse_from_major as _ellipse_from_major,
+    ellipse_outline as _ellipse_outline,
     major_minor as _major_minor_pure,
     min_width as _min_width,
     point_in_poly as _point_in_poly,
@@ -600,6 +603,20 @@ class _Pane:
         ma.GetProperty().SetColor(0.2, 0.9, 1.0)   # cyan fallback
         ma.GetProperty().SetLineWidth(1.5)
         self.ren.AddActor(ma)
+        # In-progress draft outline — drawn DASHED (geometric dashes, the
+        # same technique as the axis / center-angle guides) so a shape
+        # being placed reads as "not yet committed". On commit it moves to
+        # meas_mapper above and re-renders solid.
+        self.meas_draft_mapper = vtkPolyDataMapper()
+        self.meas_draft_mapper.SetInputData(vtkPolyData())
+        self.meas_draft_mapper.ScalarVisibilityOn()
+        self.meas_draft_mapper.SetScalarModeToUseCellData()
+        self.meas_draft_mapper.SetColorModeToDirectScalars()
+        mda = vtkActor()
+        mda.SetMapper(self.meas_draft_mapper)
+        mda.GetProperty().SetColor(0.2, 0.9, 1.0)  # cyan fallback
+        mda.GetProperty().SetLineWidth(1.5)
+        self.ren.AddActor(mda)
         # 長径/短径 (major/minor diameter) guides for ellipse & polygon:
         # thin + faint + dotted, drawn under the outline.
         self.meas_axis_mapper = vtkPolyDataMapper()
@@ -858,6 +875,11 @@ class _ColorMapDialog(QDialog):
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
     tags_requested = pyqtSignal()
+    #: emitted when a measurement is committed — the shell files it under
+    #: the current study so it shows in the shared Measure History.
+    measurement_added = pyqtSignal(object)
+    #: emitted when the user clicks "Measure History"
+    history_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1035,6 +1057,11 @@ class CTViewer(AbstractViewer):
         self._preset.currentTextChanged.connect(self._apply_preset)
         row.addWidget(self._preset)
 
+        hist = QPushButton("Measure History")
+        hist.setToolTip("Show this study's measurement history")
+        hist.clicked.connect(self.history_requested.emit)
+        row.addWidget(hist)
+
         tags = QPushButton("DICOM Tags…")
         tags.clicked.connect(self.tags_requested.emit)
         row.addWidget(tags)
@@ -1154,11 +1181,10 @@ class CTViewer(AbstractViewer):
             # ROI used for area / HU / diameters); no corner overshoot.
             return _smooth_closed(m["pts"])
         if t == "angle":
-            a, b, c = m["pts"][:3]
-            return [b, a, c]                          # B → A → C
-        cx, cy, a, b = self._ellipse_cab(m)        # ellipse
-        return [(cx + a * math.cos(th), cy + b * math.sin(th))
-                for th in (i * 2 * math.pi / 48 for i in range(49))]
+            # Clicked end1 → vertex → end2; draw straight through so the
+            # vertex sits between its two rays.
+            return list(m["pts"][:3])
+        return _ellipse_outline(m["pts"])          # ellipse (rotated)
 
     def _handles(self, m):
         return list(m["pts"])
@@ -1171,6 +1197,8 @@ class CTViewer(AbstractViewer):
             xs = [q[0] for q in m["pts"]]
             ys = [q[1] for q in m["pts"]]
             return (sum(xs) / len(xs), sum(ys) / len(ys))
+        if m["type"] == "angle":
+            return m["pts"][1]                       # label at the vertex
         return m["pts"][0]
 
     def _shape_center(self, m):
@@ -1193,7 +1221,8 @@ class CTViewer(AbstractViewer):
             tag = "Polyline (Spline)" if m.get("smooth") else "Polyline"
             return f"#{m['id']} {tag}: {L:.1f} mm"
         if t == "angle":
-            ang = _angle_at(pts[0], pts[1], pts[2])
+            # Vertex is the middle (2nd) click; rays go to the 1st & 3rd.
+            ang = _angle_at(pts[1], pts[0], pts[2])
             return f"#{m['id']} Angle: {ang:.1f}°"
         if t == "ellipse":
             cx, cy, a, b = self._ellipse_cab(m)
@@ -1262,21 +1291,25 @@ class CTViewer(AbstractViewer):
                     ca_segs.append((centre, q))
                     ca_colors.append(rgb)
                     ca_pts.append(q)
+        # The in-progress draft is drawn DASHED via its own mapper (below)
+        # so it reads as not-yet-committed; on commit it re-renders solid
+        # through the outline path above.
+        draft_segs: list = []
         d = self._draft
         if d and d["pane"] == key and d["pts"]:
             if d["type"] == "ellipse" and len(d["pts"]) >= 2:
-                p0, p1 = d["pts"][0], d["pts"][1]
-                cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-                a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-                polylines.append([
-                    (cx+a*math.cos(t), cy+b*math.sin(t))
-                    for t in (i*2*math.pi/48 for i in range(49))])
+                # Preview the oblique ellipse whose major axis is the drag.
+                dpts = _ellipse_outline(
+                    _ellipse_from_major(d["pts"][0], d["pts"][1]))
             else:
-                polylines.append(list(d["pts"]))
-            outline_colors.append(_hex_to_rgb(None))   # draft = default cyan
+                dpts = list(d["pts"])
+            draft_segs = list(zip(dpts, dpts[1:]))
             handles += list(d["pts"])
         p.meas_mapper.SetInputData(
             _colored_multi_pd(polylines, outline_colors)
+        )
+        p.meas_draft_mapper.SetInputData(
+            _colored_dashed_pd(draft_segs, [_hex_to_rgb(None)] * len(draft_segs))
         )
         p.meas_axis_mapper.SetInputData(
             _colored_dashed_pd(axis_segs, axis_colors)
@@ -1371,20 +1404,28 @@ class CTViewer(AbstractViewer):
             self._redraw_meas(key)
 
     def _set_ellipse_handle(self, m, vi, w):
-        pts = [list(q) for q in m["pts"]]   # lft,rgt,top,bot
-        if vi == 0:
-            pts[0][0] = w[0]
-        elif vi == 1:
-            pts[1][0] = w[0]
-        elif vi == 2:
-            pts[2][1] = w[1]
+        """Drag one of the four ellipse handles. A MAJOR handle (vi 0/1) keeps
+        the opposite major endpoint fixed, so dragging re-sizes AND rotates the
+        ellipse; a MINOR handle (vi 2/3) keeps the centre + major axis fixed and
+        just sets the minor radius. Minor endpoints always stay perpendicular to
+        the major axis and symmetric about the centre."""
+        maj0, maj1, min0, min1 = (tuple(q) for q in m["pts"])
+        if vi in (0, 1):
+            if vi == 0:
+                maj0 = (w[0], w[1])
+            else:
+                maj1 = (w[0], w[1])
+            b = _dist(min0, min1) / 2.0
         else:
-            pts[3][1] = w[1]
-        cx = (pts[0][0] + pts[1][0]) / 2.0
-        cy = (pts[2][1] + pts[3][1]) / 2.0
-        pts[0][1] = pts[1][1] = cy
-        pts[2][0] = pts[3][0] = cx
-        m["pts"] = [tuple(q) for q in pts]
+            b = None                                  # set below from the drag
+        cx, cy = (maj0[0] + maj1[0]) / 2.0, (maj0[1] + maj1[1]) / 2.0
+        ang = math.atan2(maj1[1] - maj0[1], maj1[0] - maj0[0])
+        px, py = -math.sin(ang), math.cos(ang)        # minor (perpendicular) dir
+        if b is None:
+            b = max(abs((w[0] - cx) * px + (w[1] - cy) * py), 1e-6)
+        min0 = (cx - b * px, cy - b * py)
+        min1 = (cx + b * px, cy + b * py)
+        m["pts"] = [maj0, maj1, min0, min1]
 
     def _commit_draft(self):
         d = self._draft
@@ -1392,10 +1433,10 @@ class CTViewer(AbstractViewer):
         if d is None or len(d["pts"]) < 2:
             return
         if d["type"] == "ellipse":
-            p0, p1 = d["pts"][0], d["pts"][1]
-            cx, cy = (p0[0]+p1[0])/2, (p0[1]+p1[1])/2
-            a, b = abs(p1[0]-p0[0])/2, abs(p1[1]-p0[1])/2
-            pts = [(cx-a, cy), (cx+a, cy), (cx, cy-b), (cx, cy+b)]
+            # First two clicks are the MAJOR-axis endpoints (an oblique drag
+            # makes an oblique ellipse); the minor radius starts at half the
+            # major and is tuned afterwards via the minor handles.
+            pts = _ellipse_from_major(d["pts"][0], d["pts"][1])
         elif d["type"] == "line":
             pts = d["pts"][:2]
         else:
@@ -1405,6 +1446,15 @@ class CTViewer(AbstractViewer):
             {"id": self._meas_seq, "type": d["type"], "pts": pts}
         )
         self._redraw_meas(d["pane"])
+        # File it under the current study's shared Measure History. The
+        # pre-formatted metrics string is the label; points/kind travel
+        # along so the entry is self-describing (mm units already baked in).
+        m_dict = self._measures[d["pane"]][-1]
+        self.measurement_added.emit(Measurement(
+            kind=self._JP.get(d["type"], d["type"]),
+            points=[tuple(q) for q in pts],
+            text=self._metrics_text(d["pane"], m_dict),
+        ))
 
     def _measure_finish_draft(self):
         d = self._draft
@@ -1533,9 +1583,11 @@ class CTViewer(AbstractViewer):
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
         if m["type"] == "ellipse":
-            lft, rgt, top, bot = m["pts"]
+            # Ellipse → 4-vertex polygon at the axis endpoints, in order
+            # around the perimeter (maj0 → min0 → maj1 → min1).
+            maj0, maj1, min0, min1 = m["pts"]
             m["type"] = "polygon"
-            m["pts"] = [lft, top, rgt, bot]
+            m["pts"] = [maj0, min0, maj1, min1]
         if m["type"] == "line":
             m["type"] = "polyline"
             m["pts"] = [m["pts"][0], pt, m["pts"][1]]
