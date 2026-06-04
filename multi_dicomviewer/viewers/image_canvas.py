@@ -1139,7 +1139,7 @@ class ImageCanvas(QWidget):
 
     def _paint_overlay(self, p: QPainter):
         font = QFont()
-        font.setPointSize(13)        # match the CT viewer's DICOM-tag font size
+        font.setPointSize(14)        # match the CT viewer's DICOM-tag font size
         p.setFont(font)
         fm = p.fontMetrics()
         pad, lh = 6, fm.height()
