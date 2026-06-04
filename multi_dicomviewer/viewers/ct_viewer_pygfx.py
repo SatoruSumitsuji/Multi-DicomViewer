@@ -890,6 +890,7 @@ class CTViewer(AbstractViewer):
 
         hist = QPushButton("Measure History")
         hist.setToolTip("Show this study's measurement history")
+        hist.setMinimumWidth(150)        # don't clip the label
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
 
