@@ -57,7 +57,7 @@ from rendercanvas.pyqt6 import RenderCanvas
 
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
-from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
@@ -419,14 +419,19 @@ class _Overlay(QWidget):
     def _paint_info(self, p, key, w, h):
         v = self._v
         p.setPen(QColor(102, 255, 153))         # green like vtk corner text
-        f = QFont("monospace", 12)
-        p.setFont(f)
         if v._tags_on:
-            head = overlay_lines(v._header, v._tag_keywords, anonymized=v._anon)
+            # No explicit selection yet → show sensible defaults so first-time
+            # users see tags without opening the dialog. A saved/edited
+            # selection (non-empty) takes over and persists via core.settings.
+            kws = v._tag_keywords or (default_overlay_keywords(v._header)
+                                      if v._header is not None else [])
+            head = overlay_lines(v._header, kws, anonymized=v._anon)
             if head:
-                p.drawText(QRectF(6, 4, w - 12, h * 0.6),
+                p.setFont(QFont("monospace", 18))   # ~1.5× — readable
+                p.drawText(QRectF(6, 4, w - 12, h * 0.7),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                            "\n".join(head))
+        p.setFont(QFont("monospace", 12))       # corner readouts stay compact
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
         p.drawText(QRectF(6, h - 28, w - 12, 24),
