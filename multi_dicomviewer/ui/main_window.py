@@ -637,14 +637,6 @@ class MainWindow(QMainWindow):
         )
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
-        self._bixa_act = QAction("Virtual BiXA…", self)
-        self._bixa_act.setToolTip(
-            "Fuse an LCA cine and an RCA cine shot at the same projection "
-            "into one bilateral-contrast (両側造影) cine "
-            "(available whenever 2+ XA series are loaded)"
-        )
-        self._bixa_act.triggered.connect(self._open_virtual_bixa)
-        tm.addAction(self._bixa_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -659,8 +651,6 @@ class MainWindow(QMainWindow):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
         if hasattr(self, "_coaxial_act"):
             self._coaxial_act.setEnabled(self._any_visible_pane_has_angles())
-        if hasattr(self, "_bixa_act"):
-            self._bixa_act.setEnabled(self._xa_series_count() >= 2)
 
     @staticmethod
     def _viewer_has_positioner_angles(v) -> bool:
@@ -747,54 +737,6 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
-
-    def _xa_series_count(self) -> int:
-        """How many XA series are loaded across all patients/studies —
-        gates the Virtual BiXA tool (needs an LCA + an RCA cine)."""
-        return sum(
-            1
-            for p in self._patients.values()
-            for st in p.studies.values()
-            for se in st.series.values()
-            if se.modality == Modality.XA
-        )
-
-    def _open_virtual_bixa(self) -> None:
-        """Launch the Virtual BiXA window. Pre-fill LCA / RCA from the
-        first two visible panes that show an XA series, in display order."""
-        from multi_dicomviewer.ui.bixa_window import BiXAWindow
-        xa = [
-            se
-            for p in self._patients.values()
-            for st in p.studies.values()
-            for se in st.series.values()
-            if se.modality == Modality.XA
-        ]
-        if len(xa) < 2:
-            QMessageBox.information(
-                self, "Virtual BiXA",
-                "XA series が2本以上必要です。LCA造影とRCA造影を含む"
-                "フォルダを開いてください。",
-            )
-            return
-        # Seed the LCA/RCA slots + their current frames from the panes.
-        preset: list = [None, None]
-        preset_frames: list = [0, 0]
-        slot = 0
-        for pane in self._order:
-            if slot >= 2:
-                break
-            se = self._series_by_uid.get(pane.shown_series_uid())
-            if se is not None and se.modality == Modality.XA:
-                v = pane.current_viewer()
-                preset[slot] = se
-                preset_frames[slot] = int(getattr(v, "_frame", 0))
-                slot += 1
-        self._bixa = BiXAWindow(
-            xa, preset=preset, preset_frames=preset_frames, parent=self
-        )
-        self._bixa.showMaximized()
-        self._bixa.raise_()
 
     def _active_display_image(self):
         """QImage of the frame currently shown in the active pane's
