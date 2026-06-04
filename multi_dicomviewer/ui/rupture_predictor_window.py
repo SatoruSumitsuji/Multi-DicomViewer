@@ -770,11 +770,12 @@ class RupturePredictorWindow(QMainWindow):
         self._info_label.setWordWrap(True)
         lay.addWidget(self._info_label)
 
-        lay.addWidget(QLabel("径ごとの結果"))
+        lay.addWidget(QLabel("径ごとの結果 (直径クリックで反映)"))
         self._results_table = QTableWidget(0, 3)
         self._results_table.setHorizontalHeaderLabels(
             ["直径(mm)", "進展外膜長(mm)", "Stretch Ratio"])
         self._results_table.verticalHeader().setVisible(False)
+        self._results_table.cellClicked.connect(self._on_result_clicked)
         lay.addWidget(self._results_table, 1)
 
         lay.addWidget(QLabel("目標伸展率→必要直径 (クリックで反映)"))
@@ -845,6 +846,16 @@ class RupturePredictorWindow(QMainWindow):
                 item = QTableWidgetItem(text)
                 if highlight:
                     item.setBackground(QColor("#d4edda"))
+                if c == 0:
+                    # Diameter cell: clickable to load that diameter (blue,
+                    # underlined link look); carry the exact value as data.
+                    item.setData(Qt.ItemDataRole.UserRole,
+                                 res.balloon_diameter_mm)
+                    item.setForeground(QColor("#1565c0"))
+                    fnt = item.font()
+                    fnt.setUnderline(True)
+                    item.setFont(fnt)
+                    item.setToolTip("クリックでこの直径を反映")
                 self._results_table.setItem(i, c, item)
 
     def _fill_rate_table(self) -> None:
@@ -865,6 +876,21 @@ class RupturePredictorWindow(QMainWindow):
         d = self._diam_combo.currentData()
         if d:
             self._diam_spin.setValue(float(d))
+
+    def _on_result_clicked(self, row: int, _col: int) -> None:
+        # Clicking any cell in a per-diameter row loads that row's diameter
+        # into the balloon-diameter input; the spin's valueChanged then
+        # recomputes the stretch ratio label and redraws the overlay figure.
+        item = self._results_table.item(row, 0)
+        if item is None:
+            return
+        d = item.data(Qt.ItemDataRole.UserRole)
+        if d is None:
+            try:
+                d = float(item.text())
+            except ValueError:
+                return
+        self._diam_spin.setValue(float(d))
 
     def _on_rate_clicked(self, row: int, _col: int) -> None:
         item = self._rate_table.item(row, 1)
