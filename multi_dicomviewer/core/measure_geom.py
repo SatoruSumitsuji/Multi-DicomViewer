@@ -224,6 +224,18 @@ def ellipse_cab(pts):
     return cx, cy, a, b
 
 
+def ellipse_axes(pts):
+    """Unit major direction (u) and minor direction (v ⟂ u) of an oblique
+    ellipse ``[maj0, maj1, min0, min1]``. Same orientation that
+    ``ellipse_params`` returns as an angle — exposed as direction vectors for
+    callers (e.g. the pygfx CT viewer) that want u/v directly."""
+    e1, e2 = pts[0], pts[1]
+    dx, dy = e2[0] - e1[0], e2[1] - e1[1]
+    L = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / L, dy / L
+    return (ux, uy), (-uy, ux)
+
+
 def ellipse_outline(pts, n: int = 48):
     """Closed polyline (``n+1`` points, last == first) tracing a rotated
     ellipse stored as four axis endpoints; see ellipse_params."""
@@ -249,6 +261,31 @@ def ellipse_from_major(p0, p1, minor_ratio: float = 0.5):
     px, py = -math.sin(ang), math.cos(ang)
     return [tuple(p0), tuple(p1),
             (cx - b * px, cy - b * py), (cx + b * px, cy + b * py)]
+
+
+def ellipse_drag(pts, vi, w):
+    """New oblique-ellipse points ``[maj0, maj1, min0, min1]`` after dragging
+    handle *vi* to world point *w*. Shared by every viewer's
+    ``_set_ellipse_handle`` so XA/IVUS and both CT renderers edit identically:
+    a MAJOR endpoint (vi 0/1) moves freely (resize + rotate) keeping the
+    current minor width; a MINOR endpoint (vi 2/3) changes only the minor width
+    along the perpendicular through the centre."""
+    e1, e2, m1, m2 = (list(q) for q in pts)
+    if vi == 0:
+        e1 = [w[0], w[1]]
+    elif vi == 1:
+        e2 = [w[0], w[1]]
+    cx, cy = (e1[0] + e2[0]) / 2.0, (e1[1] + e2[1]) / 2.0
+    dx, dy = e2[0] - e1[0], e2[1] - e1[1]
+    L = math.hypot(dx, dy) or 1e-6
+    vx, vy = -dy / L, dx / L                       # minor (perpendicular) dir
+    if vi in (0, 1):
+        b = math.hypot(m2[0] - m1[0], m2[1] - m1[1]) / 2.0   # keep width
+    else:
+        b = max(abs((w[0] - cx) * vx + (w[1] - cy) * vy), 1e-3)
+    m1 = [cx - b * vx, cy - b * vy]
+    m2 = [cx + b * vx, cy + b * vy]
+    return [tuple(e1), tuple(e2), tuple(m1), tuple(m2)]
 
 
 def major_minor(m):
