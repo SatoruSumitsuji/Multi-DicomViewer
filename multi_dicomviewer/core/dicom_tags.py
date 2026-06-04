@@ -11,8 +11,11 @@ hides case-identifying fields here exactly as it does elsewhere.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable, Optional
+
+from pydicom.tag import Tag
 
 from .anonymize import mask_text
 
@@ -39,6 +42,13 @@ class TagRow:
     name: str        # human-readable element name
     vr: str
     value: str       # already anonymization-masked, display-ready
+    #: Stable selection identifier used by the overlay/dialog: the pydicom
+    #: keyword for standard tags, a private-creator key
+    #: ``(GGGG,"CREATOR",EE)`` for private DATA elements (so the selection
+    #: survives the per-file block-number reassignment that makes the raw
+    #: (group,element) literal unstable across series), or the raw literal
+    #: as a last resort. Empty only for back-compat default construction.
+    ident: str = ""
 
 
 def _format_value(elem, max_len: int = 160) -> str:
@@ -64,6 +74,70 @@ def _format_value(elem, max_len: int = 160) -> str:
     return text
 
 
+def _private_ident(group: int, creator: str, offset: int) -> str:
+    """Stable identifier for a private DATA element: group + private-creator
+    name + element offset. Independent of the per-file block number."""
+    return f'({group:04X},"{creator}",{offset:02X})'
+
+
+_PRIV_IDENT_RE = re.compile(r'^\(([0-9A-Fa-f]{4}),"(.*)",([0-9A-Fa-f]{2})\)$')
+
+
+def _parse_private_ident(s):
+    """Parse ``(7005,"CREATOR",05)`` → (0x7005, "CREATOR", 0x05), else None."""
+    if not isinstance(s, str):
+        return None
+    m = _PRIV_IDENT_RE.match(s)
+    if m is None:
+        return None
+    return (int(m.group(1), 16), m.group(2), int(m.group(3), 16))
+
+
+def _stable_ident(ds, elem, keyword: str, tag_literal: str) -> str:
+    """The selection identifier for *elem*: keyword if standard, a
+    private-creator key for a private data element whose creator we can
+    resolve, else the raw (group,element) literal."""
+    if keyword:
+        return keyword
+    g = elem.tag.group
+    e = elem.tag.element
+    # Private data elements live in odd groups with a non-zero block byte
+    # (the high byte 0x10-0xFF); the matching private creator string sits
+    # at (group, 0x00bb) where bb is that block byte.
+    if g % 2 == 1 and (e >> 8) >= 0x10:
+        block = e >> 8
+        offset = e & 0xFF
+        creator_tag = Tag(g, block)
+        if creator_tag in ds:
+            cv = ds[creator_tag].value
+            if cv is not None:
+                return _private_ident(g, str(cv).strip(), offset)
+    return tag_literal
+
+
+def upgrade_private_literal(ds, ident: str) -> str:
+    """If *ident* is a raw private ``(group,element)`` literal resolvable in
+    *ds*, return its stable private-creator key; otherwise return *ident*
+    unchanged. Keywords and already-stable keys pass through. Lets a
+    selection saved before the private-creator change self-migrate the
+    moment the originating series is shown — no dialog re-confirm needed."""
+    if not isinstance(ident, str) or _parse_private_ident(ident) is not None:
+        return ident
+    tag = _parse_tag_string(ident)
+    if tag is None:
+        return ident                      # pydicom keyword — leave as-is
+    g, e = tag
+    if g % 2 == 1 and (e >> 8) >= 0x10 and ds is not None:
+        block = e >> 8
+        offset = e & 0xFF
+        creator_tag = Tag(g, block)
+        if creator_tag in ds:
+            cv = ds[creator_tag].value
+            if cv is not None:
+                return _private_ident(g, str(cv).strip(), offset)
+    return ident
+
+
 def iter_tag_rows(ds, anonymized: bool = False) -> list[TagRow]:
     """Every top-level header element as a :class:`TagRow`, in tag order.
 
@@ -81,13 +155,15 @@ def iter_tag_rows(ds, anonymized: bool = False) -> list[TagRow]:
             continue
         name = elem.name or keyword or "Unknown"
         value = mask_text(keyword, _format_value(elem), anonymized)
+        tag_literal = f"({elem.tag.group:04X},{elem.tag.element:04X})"
         rows.append(
             TagRow(
-                tag=f"({elem.tag.group:04X},{elem.tag.element:04X})",
+                tag=tag_literal,
                 keyword=keyword,
                 name=name,
                 vr=str(elem.VR),
                 value=value,
+                ident=_stable_ident(ds, elem, keyword, tag_literal),
             )
         )
     return rows
@@ -147,12 +223,31 @@ def _parse_tag_string(s: str):
         return None
 
 
+def _resolve_private(ds, group: int, creator: str, offset: int):
+    """Resolve a private DATA element by its creator + offset in *ds*,
+    finding whatever block that creator currently occupies. Returns the
+    element or None. This is what makes a private-tag selection survive
+    the per-file block reassignment."""
+    try:
+        block = ds.private_block(group, creator)
+    except (KeyError, ValueError):
+        return None
+    try:
+        return block[offset]
+    except (KeyError, ValueError):
+        return None
+
+
 def _lookup(ds, keyword: str):
     """Header element for *keyword*, or None if absent/empty.
 
-    Accepts either a pydicom keyword (``PatientName``) or a tag-string
-    literal (``(0019,1099)``) so the overlay/filename machinery can
-    address private / unknown tags too."""
+    Accepts a pydicom keyword (``PatientName``), a stable private-creator
+    identifier (``(7005,"CREATOR",05)``) resolved via the creator's current
+    block, or a raw tag-string literal (``(0019,1099)``) — the last kept so
+    selections saved before the private-creator change still load."""
+    priv = _parse_private_ident(keyword)
+    if priv is not None:
+        return _resolve_private(ds, *priv)
     tag = _parse_tag_string(keyword)
     try:
         if tag is not None:

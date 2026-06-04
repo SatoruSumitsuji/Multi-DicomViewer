@@ -503,15 +503,13 @@ class StudyBrowser(QTreeWidget):
             )
             menu.addAction(act_mp4)
             menu.addSeparator()
-        # Close: collapse the series rows so the Study list is easy to scan.
-        # Sits between the Export actions and Delete, fenced by separators.
-        close_act = QAction("Close (close series list)", self)
-        close_act.setToolTip(
-            "Collapse the series under each study so the study list is "
-            "easier to read. Nothing is removed."
+        act_close = QAction("Close (close series list)", self)
+        act_close.setToolTip(
+            "Collapse this study's series list so the Study list is "
+            "easier to browse. Nothing is removed."
         )
-        close_act.triggered.connect(self._close_series_list)
-        menu.addAction(close_act)
+        act_close.triggered.connect(lambda: self._close_series_list(item))
+        menu.addAction(act_close)
         menu.addSeparator()
         act = QAction("Delete (remove from list)", self)
         act.setToolTip(
@@ -524,22 +522,26 @@ class StudyBrowser(QTreeWidget):
         menu.addAction(act)
         menu.exec(self.viewport().mapToGlobal(pos))
 
-    def _close_series_list(self) -> None:
-        """Collapse every study node so its series rows hide, leaving a compact
-        patient/study list. Files and the list itself are untouched."""
-        def walk(item) -> None:
-            for i in range(item.childCount()):
-                ch = item.child(i)
-                idk = ch.data(0, _ID_ROLE)
-                if idk and idk[0] == "S":     # study node -> hide its series
-                    ch.setExpanded(False)
-                walk(ch)
-        for i in range(self.topLevelItemCount()):
-            top = self.topLevelItem(i)
-            idk = top.data(0, _ID_ROLE)
-            if idk and idk[0] == "S":
-                top.setExpanded(False)
-            walk(top)
+    def _close_series_list(self, item: QTreeWidgetItem) -> None:
+        """Collapse the study node whose series list contains *item*,
+        folding the series away so the Study-level list is easy to browse.
+        Right-click on a series (or its study) collapses that study; on a
+        patient, all its studies. Nothing is removed from the list."""
+        if item is None:
+            return
+        data = item.data(0, _ROLE)
+        idk = item.data(0, _ID_ROLE)
+        if isinstance(data, Series):
+            s_node = item.parent()
+            if s_node is not None:
+                s_node.setExpanded(False)
+                self.setCurrentItem(s_node)
+        elif idk and idk[0] == "S":
+            item.setExpanded(False)
+            self.setCurrentItem(item)
+        elif idk and idk[0] == "P":
+            for j in range(item.childCount()):
+                item.child(j).setExpanded(False)
 
     def startDrag(self, _supported) -> None:  # noqa: N802 (Qt override)
         items = self.selectedItems() or (
