@@ -36,7 +36,9 @@ import numpy as np
 import pygfx as gfx
 import pylinalg as la
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import (
+    QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
+)
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -696,14 +698,24 @@ class CTViewer(AbstractViewer):
         lay.addLayout(imgrow, 1)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        # Shortcuts must work even with a Japanese (or any) IME active. These
-        # widgets are not text fields, so disable input-method handling — the
-        # IME then never swallows key presses into composition and Z/V/R/S/G/
-        # T/W/C/Q arrive as plain keyPressEvent / canvas key_down events.
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
         for key in ("A", "B"):
             self.pane[key].canvas.setAttribute(
                 Qt.WidgetAttribute.WA_InputMethodEnabled, False)
+        # Tool shortcuts as QShortcuts (not keyPressEvent): like the XA/IVUS
+        # cine keys, QShortcut accelerators are processed before the input
+        # method, so they fire even with a Japanese IME active. Scoped to this
+        # viewer (WidgetWithChildrenShortcut) so they only act while a CT pane
+        # has focus. Q (tag overlay show/hide) is the shell's app-wide action.
+        for seq, tool in (("Z", "ZOOM"), ("V", "MOVE"), ("R", "ROTATE"),
+                          ("S", "SPIN"), ("G", "PAGING"), ("T", "THICK"),
+                          ("W", "WL")):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda t=tool: self._set_tool(t))
+        sc_c = QShortcut(QKeySequence("C"), self)
+        sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_c.activated.connect(self._key_toggle_color)
         self._update_active_frames()
 
     # ------------------------------------------------------ event wiring
@@ -715,25 +727,6 @@ class CTViewer(AbstractViewer):
         c.add_event_handler(lambda ev, k=key: self._on_wheel(k, ev), "wheel")
         c.add_event_handler(lambda ev, k=key: self._on_dblclick(k, ev), "double_click")
         c.add_event_handler(lambda ev, k=key: self._on_resize(k, ev), "resize")
-        c.add_event_handler(lambda ev, k=key: self._on_key(k, ev), "key_down")
-
-    def _on_key(self, key, ev):
-        """Canvas keyboard shortcuts (rendercanvas key_down). The canvas has
-        focus, so Qt's keyPressEvent on the viewer never fires — route here."""
-        k = ev.get("key", "")
-        kl = k.lower() if isinstance(k, str) else k
-        self._set_active(key)
-        if kl == "c":
-            self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
-            self._toggle_color()
-            return
-        if kl == "q":
-            self._toggle_tags()
-            return
-        tool = {"z": "ZOOM", "v": "MOVE", "s": "SPIN", "g": "PAGING",
-                "w": "WL", "r": "ROTATE", "t": "THICK"}.get(kl)
-        if tool:
-            self._set_tool(tool)
 
     def _on_down(self, key, ev):
         self._set_active(key)
@@ -880,7 +873,7 @@ class CTViewer(AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-            b.setStyleSheet("background:#c0392b;color:white;" if n == name else "")
+            b.setStyleSheet("background:#c0392b;color:black;" if n == name else "")
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
@@ -977,9 +970,11 @@ class CTViewer(AbstractViewer):
         self._tag_keywords = list(keywords or [])
         self._refresh()
 
-    def _toggle_tags(self):
-        """Q key: show/hide the DICOM tag overlay (the only visibility control)."""
-        self._tags_on = not self._tags_on
+    def set_overlay_hidden(self, hidden: bool) -> None:
+        """Show/hide the DICOM tag overlay. Driven by the shell's app-wide
+        'Hide DICOM overlay' action (the Q key), so it works regardless of
+        input-method state. The DICOM Tags button only edits WHICH tags."""
+        self._tags_on = not bool(hidden)
         for k in ("A", "B"):
             self._overlay[k].update()
 
@@ -1885,20 +1880,7 @@ class CTViewer(AbstractViewer):
             self._win, self._lvl = (float(x) for x in CT_WL_PRESETS[name])
             self._refresh()
 
-    def keyPressEvent(self, e):
-        # Qt-level handler: fires when focus is on the viewer or a toolbar
-        # button (letter keys propagate up to the parent), so shortcuts work
-        # even right after clicking Measure/ColorMap — not only when the wgpu
-        # canvas has focus (that path is _on_key).
-        if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
-            self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
-            self._toggle_color()
-            return
-        if e.key() == Qt.Key.Key_Q:               # Q = show/hide tag overlay
-            self._toggle_tags()
-            return
-        tool = _TOOL_KEYS.get(e.key())
-        if tool:
-            self._set_tool(tool)
-        else:
-            super().keyPressEvent(e)
+    def _key_toggle_color(self):
+        """C shortcut → toggle the HU colormap (keep the toolbar button synced)."""
+        self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
+        self._toggle_color()

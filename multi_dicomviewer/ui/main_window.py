@@ -2123,6 +2123,10 @@ class MainWindow(QMainWindow):
         self._overlay_hidden = bool(hidden)
         for v in self._tag_viewers():
             v.set_tag_keywords(self._effective_kw(v))
+            # The pygfx CT viewer shows default tags when none are selected, so
+            # an empty keyword list can't hide it — toggle its overlay directly.
+            if hasattr(v, "set_overlay_hidden"):
+                v.set_overlay_hidden(self._overlay_hidden)
         self.statusBar().showMessage(
             "DICOM overlay: hidden" if hidden else "DICOM overlay: shown"
         )
