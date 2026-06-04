@@ -383,7 +383,7 @@ _DEFAULT_BANDS = [
     {"rgb": (1.0, 0.0, 0.0), "lo": -1000, "hi": 0,    "on": True},
     {"rgb": (1.0, 1.0, 0.0), "lo": 0,     "hi": 50,   "on": True},
     {"rgb": (0.0, 1.0, 0.0), "lo": 50,    "hi": 250,  "on": True},
-    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": True},
+    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": False},
     {"rgb": (1.0, 1.0, 1.0), "lo": 350,   "hi": 700,  "on": True},
     {"rgb": (1.0, 0.0, 1.0), "lo": 850,   "hi": 2000, "on": True},
 ]
@@ -1009,10 +1009,14 @@ class CTViewer(AbstractViewer):
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
+        # Setting / Reset are utility actions (not tools): tint them a light
+        # grey so they read as distinct from the tool / preset buttons.
+        _util_btn_css = "background:#e0e0e0;color:black;"
         setting = QPushButton("Setting")
         setting.setToolTip(
             "HU colour-map settings (band colour, HU range, opacity)"
         )
+        setting.setStyleSheet(_util_btn_css)
         setting.clicked.connect(self._open_setting)
         row.addWidget(setting)
 
@@ -1021,6 +1025,7 @@ class CTViewer(AbstractViewer):
             "1st click: keep W/L, reset the view position / "
             "click again at the initial position: also reset W/L"
         )
+        reset.setStyleSheet(_util_btn_css)
         reset.clicked.connect(self._reset)
         row.addWidget(reset)
 
@@ -1703,6 +1708,16 @@ class CTViewer(AbstractViewer):
         """(U, V, N) world unit vectors for a pane."""
         return self._frame[key]
 
+    def _apex_dir3(self, key):
+        """World-space direction the green ▲ on *key* points (its apex) —
+        i.e. +uv (perpendicular to that pane's crossline) in 3-D. PAGING
+        keys its sign off this so 'up' always slides toward the ▲ apex
+        even after crossline rotations re-sign a pane's normal (which
+        otherwise silently reverses the page direction)."""
+        u, v, _n = self._frame[key]
+        a = math.radians(self._cross_ang[key])
+        return u * (-math.sin(a)) + v * math.cos(a)
+
     def _matrix(self, key) -> vtkMatrix4x4:
         u, v, n = self._axes_for(key)
         o = self._pc[key]                     # output (0,0) maps here
@@ -1977,15 +1992,25 @@ class CTViewer(AbstractViewer):
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
         elif t == "PAGING":
+            # PAGING pages the pane under the cursor itself: the visible
+            # image scrolls through slices. We step C and THIS pane's
+            # reslice origin together along this pane's normal — their
+            # difference is unchanged, so this pane's crosslines stay put
+            # while its image pages. The OTHER pane's image is fixed
+            # (_pc[other] untouched); C's shift lies in the other pane's
+            # plane, so its cross-section line slides there. Sign: dragging
+            # UP moves toward the other pane's green-▲ apex. We derive the
+            # sign from the ACTUAL displayed ▲ (its apex direction in 3-D),
+            # not from the raw normal: a crossline rotation can flip this
+            # pane's normal (N_other = crossdir × N_which), which used to
+            # silently reverse paging while the ▲ kept pointing the same
+            # way. Projecting N onto the other pane's apex keeps "up = apex"
+            # invariant (and is +1 in the initial axial/coronal setup).
             _, _, n = self._axes_for(which)
-            # Mouse-down pages forward (+n) — reversed from the original
-            # mouse-down = -n direction per the user's request, matches
-            # the typical "drag the slice slab in the cursor's direction"
-            # feel of clinical CT viewers.
-            mv = n * dy * min(self._dims)
+            other = "B" if which == "A" else "A"
+            s = 1.0 if float(np.dot(n, self._apex_dir3(other))) >= 0.0 else -1.0
+            mv = n * (-dy) * s * min(self._dims)
             self._center = self._center + mv
-            # Only the paged pane's reslice follows -> it pages; the
-            # OTHER pane's image stays put and its crosshair slides.
             self._pc[which] = self._pc[which] + mv
             self._clamp_center()
         elif t == "THICK":
@@ -2055,10 +2080,17 @@ class CTViewer(AbstractViewer):
     def _wheel(self, which, delta):
         if self._image is None:
             return
+        # Same contract as the PAGING tool: page the wheeled pane itself —
+        # the visible image scrolls through slices. Step C and THIS pane's
+        # reslice origin together along this pane's normal. Wheel-up moves
+        # toward the other pane's ▲ apex (same sign derivation as PAGING so
+        # a crossline-flipped normal can't reverse it).
         _, _, n = self._axes_for(which)
-        mv = n * (1 if delta > 0 else -1) * min(self._dims)
+        other = "B" if which == "A" else "A"
+        s = 1.0 if float(np.dot(n, self._apex_dir3(other))) >= 0.0 else -1.0
+        mv = n * (3 if delta > 0 else -3) * s * min(self._dims)
         self._center = self._center + mv
-        self._pc[which] = self._pc[which] + mv     # page only this pane
+        self._pc[which] = self._pc[which] + mv
         self._clamp_center()
         self._view_initial = False
         self._refresh()
