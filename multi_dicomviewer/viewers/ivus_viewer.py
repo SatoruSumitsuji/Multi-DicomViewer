@@ -222,7 +222,7 @@ class IVUSViewer(XAViewer):
         self._long_view_btn.setMinimumWidth(110)
         self._long_view_btn.setStyleSheet(
             "QPushButton { font-weight: bold; }"
-            "QPushButton:checked { background:#1f77b4; color:white; }"
+            "QPushButton:checked { background:#1f77b4; color:black; }"
         )
         self._long_view_btn.setToolTip(
             "Show/hide the IVUS long-axis (longitudinal) view — shortcut: V"

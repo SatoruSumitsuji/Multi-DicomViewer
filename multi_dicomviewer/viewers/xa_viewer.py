@@ -238,7 +238,7 @@ class XAViewer(AbstractViewer):
         self._meas_btn.setMinimumWidth(110)
         self._meas_btn.setStyleSheet(
             "QPushButton { font-weight: bold; }"
-            "QPushButton:checked { background:#1f77b4; color:white; }"
+            "QPushButton:checked { background:#1f77b4; color:black; }"
         )
         self._meas_btn.setToolTip(
             "Toggle the measure bar (Line / Polyline / Ellipse / Polygon)"
@@ -887,7 +887,7 @@ class XAViewer(AbstractViewer):
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
             b.setStyleSheet(
-                "background:#1f77b4;color:white;" if k == key else ""
+                "background:#1f77b4;color:black;" if k == key else ""
             )
         for c in (self.canvas, self.canvas2):
             c.set_measure_type(key)
@@ -918,7 +918,7 @@ class XAViewer(AbstractViewer):
     def _style_zoom_btns(self):
         for b in (self._zoom_in_btn, self._zoom_out_btn):
             b.setStyleSheet(
-                "background:#1f77b4;color:white;" if b.isChecked() else ""
+                "background:#1f77b4;color:black;" if b.isChecked() else ""
             )
 
     def _reset_zoom(self):
