@@ -49,7 +49,10 @@ from multi_dicomviewer.config import (
     BLOCK_CT_MESSAGE,
 )
 from multi_dicomviewer.core import dicom_io, settings
-from multi_dicomviewer.core.dicom_tags import default_overlay_keywords
+from multi_dicomviewer.core.dicom_tags import (
+    default_overlay_keywords,
+    upgrade_private_literal,
+)
 from multi_dicomviewer.core.study_model import Modality, Series
 from multi_dicomviewer.ui.history_dialog import MeasureHistoryDialog
 from multi_dicomviewer.ui.study_browser import SERIES_MIME, StudyPanel
@@ -634,6 +637,14 @@ class MainWindow(QMainWindow):
         )
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
+        self._bixa_act = QAction("Virtual BiXA…", self)
+        self._bixa_act.setToolTip(
+            "Fuse an LCA cine and an RCA cine shot at the same projection "
+            "into one bilateral-contrast (両側造影) cine "
+            "(available whenever 2+ XA series are loaded)"
+        )
+        self._bixa_act.triggered.connect(self._open_virtual_bixa)
+        tm.addAction(self._bixa_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -648,6 +659,8 @@ class MainWindow(QMainWindow):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
         if hasattr(self, "_coaxial_act"):
             self._coaxial_act.setEnabled(self._any_visible_pane_has_angles())
+        if hasattr(self, "_bixa_act"):
+            self._bixa_act.setEnabled(self._xa_series_count() >= 2)
 
     @staticmethod
     def _viewer_has_positioner_angles(v) -> bool:
@@ -734,6 +747,54 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
+
+    def _xa_series_count(self) -> int:
+        """How many XA series are loaded across all patients/studies —
+        gates the Virtual BiXA tool (needs an LCA + an RCA cine)."""
+        return sum(
+            1
+            for p in self._patients.values()
+            for st in p.studies.values()
+            for se in st.series.values()
+            if se.modality == Modality.XA
+        )
+
+    def _open_virtual_bixa(self) -> None:
+        """Launch the Virtual BiXA window. Pre-fill LCA / RCA from the
+        first two visible panes that show an XA series, in display order."""
+        from multi_dicomviewer.ui.bixa_window import BiXAWindow
+        xa = [
+            se
+            for p in self._patients.values()
+            for st in p.studies.values()
+            for se in st.series.values()
+            if se.modality == Modality.XA
+        ]
+        if len(xa) < 2:
+            QMessageBox.information(
+                self, "Virtual BiXA",
+                "XA series が2本以上必要です。LCA造影とRCA造影を含む"
+                "フォルダを開いてください。",
+            )
+            return
+        # Seed the LCA/RCA slots + their current frames from the panes.
+        preset: list = [None, None]
+        preset_frames: list = [0, 0]
+        slot = 0
+        for pane in self._order:
+            if slot >= 2:
+                break
+            se = self._series_by_uid.get(pane.shown_series_uid())
+            if se is not None and se.modality == Modality.XA:
+                v = pane.current_viewer()
+                preset[slot] = se
+                preset_frames[slot] = int(getattr(v, "_frame", 0))
+                slot += 1
+        self._bixa = BiXAWindow(
+            xa, preset=preset, preset_frames=preset_frames, parent=self
+        )
+        self._bixa.showMaximized()
+        self._bixa.raise_()
 
     def _active_display_image(self):
         """QImage of the frame currently shown in the active pane's
@@ -1144,9 +1205,71 @@ class MainWindow(QMainWindow):
         return str(here.parent / "resources" / rel)
 
     def _open_rupture_predictor(self) -> None:
-        """Open Rupture-Predictor, handing over the active pane's
-        displayed image + its DICOM pixel calibration so the tool can
-        skip the manual CH/CV calibration entirely.
+        """Open the NATIVE Rupture-Predictor on the active pane's
+        displayed image + its DICOM pixel calibration (so the tool can
+        skip the manual CH/CV calibration entirely).
+
+        Replaces the old browser hand-off so the app is self-contained.
+        Set ``MDV_RUPTURE_BROWSER=1`` to fall back to the legacy HTML in
+        an external browser — kept for A/B numeric comparison until the
+        native port is signed off (see :meth:`_open_rupture_predictor_browser`).
+        """
+        if os.environ.get("MDV_RUPTURE_BROWSER"):
+            self._open_rupture_predictor_browser()
+            return
+        from multi_dicomviewer.ui.rupture_predictor_window import (
+            RupturePredictorWindow,
+        )
+        se = (self._series_by_uid.get(self._active.shown_series_uid())
+              if self._active is not None else None)
+        spacing = dicom_io.series_spacing_mm(se) if se is not None else None
+        calib = None
+        if spacing is not None:
+            row_mm, col_mm = spacing
+            if row_mm and row_mm > 0 and col_mm and col_mm > 0:
+                # px/mm = 1 / (mm/px); PixelSpacing is (row, col). No 2×
+                # upscale here — that was only a JPEG data-URL granularity
+                # hack; the native canvas reaches sub-pixel picks via zoom.
+                calib = (1.0 / col_mm, 1.0 / row_mm)   # (hpxmm, vpxmm)
+        v = (self._active.current_viewer()
+             if self._active is not None else None)
+        is_ivus = (v is not None
+                   and getattr(v, "handles_modality", "") == "IVUS")
+        plane = None
+        frame_index = 0
+        if is_ivus:
+            planes = getattr(v, "_planes", []) or []
+            if planes:
+                plane = planes[getattr(v, "_active", 0)]
+                frame_index = int(getattr(v, "_frame", 0))
+        # Hand over the plane + current frame for IVUS (the stepper decodes
+        # frames lazily across the whole pull-back) or the single displayed
+        # QImage for XA. Keep a reference so the window isn't GC'd.
+        if plane is None:
+            qimg = self._active_display_image()
+            if qimg is None:
+                QMessageBox.warning(
+                    self, "Rupture-Predictor",
+                    "アクティブなペインに表示中の画像がありません。")
+                return
+            self._rupture_win = RupturePredictorWindow(
+                qimage=qimg, calib=calib, parent=self)
+        else:
+            self._rupture_win = RupturePredictorWindow(
+                plane=plane, frame_index=frame_index, calib=calib, parent=self)
+        self._rupture_win.showMaximized()
+        self._rupture_win.raise_()
+        parts = ["IVUS frame stepper" if plane is not None
+                 else "displayed image"]
+        if calib is not None:
+            parts.append("DICOM calibration (CH/CV step skipped)")
+        self.statusBar().showMessage(
+            "Rupture-Predictor opened with " + " + ".join(parts) + ".")
+
+    def _open_rupture_predictor_browser(self) -> None:
+        """Legacy browser Rupture-Predictor (HTML hand-off). Retained as a
+        fallback behind ``MDV_RUPTURE_BROWSER`` for A/B comparison against
+        the native port; slated for removal once parity is confirmed.
 
         The hand-off rides in a generated, self-contained session HTML
         (window.MDV_HANDOFF) — a data URL is too big for a query string
@@ -1963,6 +2086,7 @@ class MainWindow(QMainWindow):
             v = pane.current_viewer()
             if v is not None and hasattr(v, "set_tag_keywords"):
                 v.set_anonymized(self._anon)
+                self._migrate_tag_idents(v)
                 v.set_tag_keywords(self._effective_kw(v))
             if series.modality == Modality.XA:
                 self._cur_xa = series
@@ -2051,6 +2175,7 @@ class MainWindow(QMainWindow):
         pane.set_shown_series(series.series_uid if v is not None else None)
         if v is not None and hasattr(v, "set_tag_keywords"):
             v.set_anonymized(self._anon)
+            self._migrate_tag_idents(v)
             v.set_tag_keywords(self._effective_kw(v))
         if loaded.modality == Modality.XA:
             self._cur_xa = series
@@ -2104,6 +2229,37 @@ class MainWindow(QMainWindow):
         """Classify *viewer* into one of the persisted-list buckets."""
         m = getattr(viewer, "handles_modality", "") or "OTHER"
         return m if m in settings.TAG_MODALITIES else "OTHER"
+
+    def _migrate_tag_idents(self, viewer) -> None:
+        """Self-heal legacy raw private-tag literals in *viewer*'s modality
+        list to the stable private-creator key, resolved against the shown
+        header. A selection saved before the private-creator change thus
+        upgrades automatically just by viewing the series it was made on —
+        no DICOM Tags re-confirm needed. No-op when nothing legacy resolves."""
+        if viewer is None or not hasattr(viewer, "current_header"):
+            return
+        header = viewer.current_header()
+        if header is None:
+            return
+        mod = self._modality_of(viewer)
+        kws = self._tag_keywords_by_modality.get(mod, [])
+        if not kws:
+            return
+        upgraded: list[str] = []
+        seen: set[str] = set()
+        changed = False
+        for k in kws:
+            nk = upgrade_private_literal(header, k)
+            if nk != k:
+                changed = True
+            if nk not in seen:
+                seen.add(nk)
+                upgraded.append(nk)
+        if changed:
+            self._tag_keywords_by_modality[mod] = upgraded
+            settings.save_tag_keywords_by_modality(
+                self._tag_keywords_by_modality
+            )
 
     def _effective_kw(self, viewer=None) -> list:
         """Keywords actually pushed to *viewer*: none while the overlay

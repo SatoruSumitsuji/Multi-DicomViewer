@@ -50,20 +50,6 @@ _SLIDER_QSS = (
     " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
 )
 
-#: Same look as _SLIDER_QSS but a larger handle (18px vs 16px) so the cine/Play
-#: seek bar stands out from the W/L sliders.
-_SEEK_SLIDER_QSS = (
-    "QSlider::groove:horizontal {"
-    " height:5px; background:#c9c9c9; border-radius:2px; }"
-    "QSlider::sub-page:horizontal {"
-    " background:#2f7fd1; border-radius:2px; }"
-    "QSlider::handle:horizontal {"
-    " width:18px; height:18px; margin:-7px 0; border-radius:9px;"
-    " border:1px solid #9a9a9a;"
-    " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,"
-    " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
-)
-
 
 class _Prefetcher(QThread):
     """Decodes the remaining cine frames off the UI thread."""
@@ -272,24 +258,33 @@ class XAViewer(AbstractViewer):
         )
         self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
         row.addWidget(self._zoom_out_btn)
-        # Exposed so subclasses (IVUS) can insert their own toggles next
-        # to Measure — the trailing stretch is the last item, so use
-        # ``insertWidget(count() - 1, ...)`` to land before it.
+        # Exposed so subclasses (IVUS) can insert their own toggles into
+        # this toolbar via ``_insert_series_nav_widget`` — they land just
+        # left of the flush-right Measure-History / DICOM-Tags group below.
         self._series_nav_row = row
         row.addStretch(1)
-        # Measure History + DICOM Tags pinned to the FAR RIGHT of the top row,
-        # matching the CT viewer (top-right of the image). NOTE: these two
-        # trailing buttons sit AFTER the stretch, so IVUS inserts its own
-        # toggles before the stretch via insertWidget(count() - 3, ...).
+        # Measure History / DICOM Tags sit flush-right in the top toolbar
+        # so they land at the image's top-right corner — matching the CT
+        # viewer, where the same two actions live in the top toolbar.
         hist_btn = QPushButton("Measure History")
         hist_btn.setToolTip("Show this study's measurement history")
         hist_btn.clicked.connect(self.history_requested.emit)
         row.addWidget(hist_btn)
+        self._series_nav_right_anchor = hist_btn
         tags_btn = QPushButton("DICOM Tags…")
         tags_btn.setToolTip("Choose DICOM tags to overlay on the image")
         tags_btn.clicked.connect(self.tags_requested.emit)
         row.addWidget(tags_btn)
         return row
+
+    def _insert_series_nav_widget(self, widget) -> None:
+        """Insert *widget* into the top series-nav toolbar, just left of
+        the spacer that pushes the flush-right Measure-History / DICOM-Tags
+        group to the corner. Subclasses (IVUS) use this so their toggles
+        stay on the left while those two actions remain top-right."""
+        row = self._series_nav_row
+        anchor = row.indexOf(self._series_nav_right_anchor)
+        row.insertWidget(max(0, anchor - 1), widget)
 
     def _build_plane_bar(self) -> QWidget:
         self.plane_bar = QWidget()
@@ -309,20 +304,36 @@ class XAViewer(AbstractViewer):
         self.play_btn = QPushButton("▶ Play")
         self.play_btn.setCheckable(True)
         self.play_btn.toggled.connect(self._toggle_play)
-        # Enlarge the Play button ~1.15× (bold, bigger font) to set the cine
-        # transport apart from the W/L controls.
+        # Play is the primary transport control, so it stays a touch larger
+        # than the default — ~1.3× the default font (scaling the font grows
+        # the whole button, click area included, and adapts to the
+        # ▶ Play / ⏸ Pause label swap).
         _pf = self.play_btn.font()
-        _pf.setBold(True)
-        _pf.setPointSizeF(_pf.pointSizeF() * 1.15)
-        self.play_btn.setFont(_pf)
+        _ps = _pf.pointSizeF()
+        if _ps > 0:
+            _pf.setPointSizeF(_ps * 1.3)
+            self.play_btn.setFont(_pf)
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
-        # White-circle-with-blue-dot handle + blue track, matching Windows.
-        # The seek bar uses the larger handle to set the cine controls apart
-        # from the W/L sliders.
-        self.frame_slider.setStyleSheet(_SEEK_SLIDER_QSS)
+        # Enlarge just the draggable handle (~1.2×) for an easier grab,
+        # styled like the W/L sliders' native thumb — a white disc with a
+        # blue inner dot (radial gradient) and a thin ring. We reserve
+        # enough widget height so the taller handle is never clipped top /
+        # bottom, while the groove keeps a normal height and the widget
+        # spans the same width, so the click / seek reaction range along
+        # the bar is unchanged.
+        self.frame_slider.setMinimumHeight(24)
+        self.frame_slider.setStyleSheet(
+            "QSlider::groove:horizontal{height:6px;border-radius:3px;"
+            "background:#c4c4c4;}"
+            "QSlider::handle:horizontal{width:18px;height:18px;"
+            "margin:-6px 0;border:1px solid #6a6a6a;border-radius:9px;"
+            "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,"
+            "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.32 #1c6fd0,"
+            "stop:0.40 #ffffff,stop:1 #ffffff);}"
+        )
 
         self.frame_lbl = QLabel("0/0")
         self.frame_lbl.setMinimumWidth(70)
@@ -355,8 +366,9 @@ class XAViewer(AbstractViewer):
         row.addWidget(self.lvl_slider, 1)
 
         # W/L is rarely used for XA/IVUS — let the sliders take only ~half
-        # the stretchable width. (Measure History / DICOM Tags moved to the
-        # top series-nav row, top-right, to match the CT viewer.)
+        # the stretchable width. Measure History / DICOM Tags used to sit
+        # here; they now live flush-right in the top series-nav toolbar
+        # (matching CT), so the freed space just trails off to the right.
         row.addStretch(2)
         return row
 
