@@ -48,3 +48,9 @@ Orthogonal-View.pptx
 
 # Real CT verification data (patient DICOM — never commit)
 CT_Sample/
+
+# Patient sample data (PHI — structure varies per machine; never commit)
+Sample/
+
+# Clip exports (MP4 — may be PHI-derived; never commit)
+*.mp4
