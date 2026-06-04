@@ -1220,7 +1220,10 @@ class CTViewer(AbstractViewer):
             self._lvl = self._lvl - dy * 2.0
         elif t == "PAGING":
             _, _, n = self._axes_for(which)
-            mv = n * dy * min(self._dims)
+            # Mouse UP (dy<0) always moves toward the green ▲ apex of the other
+            # pane's crossline, mouse DOWN toward its base — independent of the
+            # pane's 3-D orientation (see _paging_sign).
+            mv = n * (-dy) * self._paging_sign(which) * min(self._dims)
             # Page only THIS pane (its image scrolls through slices). The
             # OTHER pane's image stays put; its centreline slides to mark the
             # new slice position (only _center moves, not _pc[other]).
@@ -1275,12 +1278,28 @@ class CTViewer(AbstractViewer):
         if self._vol is None:
             return
         _, _, n = self._axes_for(which)
-        mv = n * (1 if delta > 0 else -1) * min(self._dims)
+        # Wheel up = toward the ▲ apex (same convention as drag-paging).
+        d = 1.0 if delta > 0 else -1.0
+        mv = n * d * self._paging_sign(which) * min(self._dims)
         self._center = self._center + mv
         self._pc[which] = self._pc[which] + mv     # page only this pane
         self._clamp_center()
         self._view_initial = False
         self._refresh()
+
+    def _paging_sign(self, which):
+        """+1/-1 so that moving _center by +n advances the OTHER pane's
+        crossline toward its green ▲ apex. The apex points +uv (perpendicular
+        to that pane's horizontal crossline); we project this pane's normal n
+        onto that apex direction so the up/down feel stays constant at any
+        oblique orientation."""
+        n = self._frame[which][2]
+        other = "B" if which == "A" else "A"
+        u_o, v_o, _n_o = self._frame[other]
+        a = math.radians(self._cross_ang[other])
+        apex = u_o * (-math.sin(a)) + v_o * math.cos(a)   # +uv of the other pane
+        proj = float(np.dot(n, apex))
+        return 1.0 if proj >= 0 else -1.0
 
     def _clamp_center(self):
         b = self._bounds
