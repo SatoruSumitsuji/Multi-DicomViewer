@@ -588,6 +588,22 @@ _FAST_TS = {
 }
 
 
+# Transfer syntaxes whose decoder performs the colour-space transform ITSELF,
+# so pixel_array() already returns RGB even though the file's
+# PhotometricInterpretation still advertises the stored YBR space. Converting
+# YBR->RGB again double-applies the transform and turns black (0,0,0) into
+# green (0,135,0) — the classic "green ultrasound" bug. (JPEG baseline/extended
+# apply the JFIF/APP14 YCbCr<->RGB transform; JPEG 2000 reverses its ICT/RCT
+# multi-component transform on decode.) For everything else (uncompressed, RLE,
+# lossless JPEG, JPEG-LS) the YBR is preserved and DOES need converting.
+_DECODES_TO_RGB = frozenset({
+    "1.2.840.10008.1.2.4.50",   # JPEG Baseline (Process 1)
+    "1.2.840.10008.1.2.4.51",   # JPEG Extended (Process 2 & 4)
+    "1.2.840.10008.1.2.4.90",   # JPEG 2000 Lossless (RCT)
+    "1.2.840.10008.1.2.4.91",   # JPEG 2000 (ICT)
+})
+
+
 def _imagecodecs():
     global _IMAGECODECS
     if _IMAGECODECS is None:
@@ -721,10 +737,18 @@ def _decode_frame(ds, index: int) -> np.ndarray:
     if pi == "PALETTE COLOR":
         rgb = np.asarray(apply_color_lut(arr, ds))
     elif pi.startswith("YBR"):
-        try:
-            rgb = np.asarray(convert_color_space(arr, pi, "RGB"))
-        except Exception:
+        ts = str(getattr(getattr(ds, "file_meta", None),
+                         "TransferSyntaxUID", ""))
+        if ts in _DECODES_TO_RGB:
+            # The JPEG/JPEG2000 decoder already returned RGB; the YBR tag
+            # describes the STORED space, not the decoded array. Converting
+            # again double-applies YBR->RGB and greens the image.
             rgb = arr
+        else:
+            try:
+                rgb = np.asarray(convert_color_space(arr, pi, "RGB"))
+            except Exception:
+                rgb = arr
     else:  # RGB
         rgb = arr
     if rgb.ndim == 2:                       # safety: not actually color
