@@ -32,6 +32,9 @@ from multi_dicomviewer.core.dicom_io import (
     prefetch_planes,
 )
 from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.ui.tag_font import (
+    TAG_FONT_PT_DEFAULT, build_tag_font_control,
+)
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.viewers.image_canvas import ImageCanvas
 
@@ -104,6 +107,10 @@ class XAViewer(AbstractViewer):
 
     #: emitted when the user clicks "DICOM Tags…" (shell opens the picker)
     tags_requested = pyqtSignal()
+
+    #: emitted when the tag-text-size slider moves (shell broadcasts the new
+    #: pt to every viewer so the overlay size stays uniform across modalities)
+    overlay_font_changed = pyqtSignal(int)
 
     #: emitted on every completed measurement (shell logs it per study)
     measurement_added = pyqtSignal(object)
@@ -271,11 +278,27 @@ class XAViewer(AbstractViewer):
         hist_btn.clicked.connect(self.history_requested.emit)
         row.addWidget(hist_btn)
         self._series_nav_right_anchor = hist_btn
-        tags_btn = QPushButton("DICOM Tags…")
-        tags_btn.setToolTip("Choose DICOM tags to overlay on the image")
+        # "DICOM Tags…" button with the tag-text-size slider stacked ABOVE it
+        # (wide enough to operate; the size is shared across all modalities).
+        tags_box, self._tag_font_slider, tags_btn = build_tag_font_control(
+            TAG_FONT_PT_DEFAULT
+        )
         tags_btn.clicked.connect(self.tags_requested.emit)
-        row.addWidget(tags_btn)
+        self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
+        row.addWidget(tags_box)
         return row
+
+    def set_overlay_font_pt(self, pt: int) -> None:
+        """Apply the shared DICOM-tag text size (pt) to both canvases and sync
+        the slider. Called by the shell so every viewer stays in step."""
+        pt = int(pt)
+        sl = getattr(self, "_tag_font_slider", None)
+        if sl is not None and sl.value() != pt:
+            sl.blockSignals(True)
+            sl.setValue(pt)
+            sl.blockSignals(False)
+        for c in (self.canvas, self.canvas2):
+            c.set_overlay_font_pt(pt)
 
     def _insert_series_nav_widget(self, widget) -> None:
         """Insert *widget* into the top series-nav toolbar, just left of

@@ -60,6 +60,9 @@ from rendercanvas.pyqt6 import RenderCanvas
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
+from multi_dicomviewer.ui.tag_font import (
+    TAG_FONT_PT_DEFAULT, build_tag_font_control,
+)
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
@@ -393,7 +396,7 @@ class _Overlay(QWidget):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
             p.setPen(QColor(255, 217, 0))
-            fb = QFont("monospace", 14)
+            fb = QFont("monospace", v._overlay_font_pt)
             fb.setBold(True)
             p.setFont(fb)
             ax, ay = v._world_to_screen(key, *v._anchor(m))
@@ -424,7 +427,7 @@ class _Overlay(QWidget):
         lines = v._metrics.get(key, [])
         if lines:
             p.setPen(QColor(102, 255, 153))
-            p.setFont(QFont("monospace", 14))   # match DICOM-tag font size
+            p.setFont(QFont("monospace", v._overlay_font_pt))
             p.drawText(QRectF(0, 4, w - 6, h * 0.5),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
                        "\n".join(lines))
@@ -441,7 +444,7 @@ class _Overlay(QWidget):
                                       if v._header is not None else [])
             head = overlay_lines(v._header, kws, anonymized=v._anon)
             if head:
-                p.setFont(QFont("monospace", 14))   # readable, not oversized
+                p.setFont(QFont("monospace", v._overlay_font_pt))
                 p.drawText(QRectF(6, 4, w - 12, h * 0.7),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                            "\n".join(head))
@@ -620,6 +623,8 @@ class _ColorMapDialog(QDialog):
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
     tags_requested = pyqtSignal()
+    #: emitted when the tag-text-size slider moves (shell broadcasts the pt)
+    overlay_font_changed = pyqtSignal(int)
     #: emitted when the user clicks "Measure History" (shell opens the dialog)
     history_requested = pyqtSignal()
     #: emitted on every committed measurement (shell logs it per study)
@@ -678,6 +683,9 @@ class CTViewer(AbstractViewer):
         self._meas_drag = False              # canvas is dragging a handle
         self._meas_hover = None              # cursor (output coords) for draft preview
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
+        #: On-image DICOM-tag / readout text size (pt), shared across modalities
+        #: via the shell. Read by the pane overlays' paint.
+        self._overlay_font_pt = TAG_FONT_PT_DEFAULT
         # Interactive level-of-detail: during a drag / wheel-page the expensive
         # CPU slab-MIP is skipped (panes show the cheap GPU thin slice) so
         # paging stays smooth on low-memory Macs. This one-shot timer fires a
@@ -903,11 +911,15 @@ class CTViewer(AbstractViewer):
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
 
-        tags = QPushButton("DICOM Tags…")
+        # "DICOM Tags…" with the tag-text-size slider stacked above it.
+        tags_box, self._tag_font_slider, tags = build_tag_font_control(
+            TAG_FONT_PT_DEFAULT
+        )
         tags.setToolTip(
             "Choose which DICOM tags overlay the image (key Q shows/hides)")
         tags.clicked.connect(self.tags_requested.emit)
-        row.addWidget(tags)
+        self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
+        row.addWidget(tags_box)
         row.addStretch(1)
         self._set_tool("PAGING")
         return row
@@ -1217,6 +1229,19 @@ class CTViewer(AbstractViewer):
         self._ps[key] = max(1e-3, max(hv, hu * ph / pw))
         self._pan[key] = np.zeros(2)
         self._config_cam(key)
+
+    def set_overlay_font_pt(self, pt: int) -> None:
+        """Apply the shared DICOM-tag / readout text size (pt), sync the slider
+        and repaint the overlays. Called by the shell."""
+        pt = int(pt)
+        self._overlay_font_pt = pt
+        sl = getattr(self, "_tag_font_slider", None)
+        if sl is not None and sl.value() != pt:
+            sl.blockSignals(True)
+            sl.setValue(pt)
+            sl.blockSignals(False)
+        for k in ("A", "B"):
+            self._overlay[k].update()
 
     def _refresh(self, reset_cam=False, lod=False):
         # lod=True is an INTERACTIVE refresh (drag / wheel-page): the expensive

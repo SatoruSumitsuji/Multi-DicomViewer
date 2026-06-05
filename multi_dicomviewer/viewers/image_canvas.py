@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import QMenu, QWidget
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
 from multi_dicomviewer.core.measurements import Measurement
+from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT
 
 
 def to_qimage(frame8: np.ndarray) -> QImage:
@@ -88,6 +89,10 @@ class ImageCanvas(QWidget):
         self._img_size = (0, 0)            # (w, h) in image px
         self.spacing_mm = None             # (row, col) mm/px, or None
         self.overlay_lines: list[str] = []  # DICOM-tag text, top-left
+        #: On-image text size (pt) for the DICOM-tag overlay AND the
+        #: measurement readout — kept equal so the two match. Driven by the
+        #: shared 'tag text size' slider via set_overlay_font_pt().
+        self._overlay_font_pt = TAG_FONT_PT_DEFAULT
 
         # Measurement state — same model as the CT viewer.
         self.meas_type: str = ""           # "" | line | polyline | ellipse | polygon
@@ -1128,9 +1133,16 @@ class ImageCanvas(QWidget):
         p.setPen(QColor(255, 200, 80))
         p.drawText(box.x() + pad, box.y() + pad + fm.ascent(), text)
 
+    def set_overlay_font_pt(self, pt: int) -> None:
+        """Set the on-image DICOM-tag / readout text size (pt) and repaint."""
+        pt = int(pt)
+        if pt != self._overlay_font_pt:
+            self._overlay_font_pt = pt
+            self.update()
+
     def _paint_overlay(self, p: QPainter):
         font = QFont()
-        font.setPointSize(14)        # match the CT viewer's DICOM-tag font size
+        font.setPointSize(self._overlay_font_pt)
         p.setFont(font)
         fm = p.fontMetrics()
         pad, lh = 6, fm.height()
@@ -1149,7 +1161,7 @@ class ImageCanvas(QWidget):
         if not self.measures:
             return
         font = QFont()
-        font.setPointSize(14)        # match the DICOM-tag overlay font size
+        font.setPointSize(self._overlay_font_pt)
         p.setFont(font)
         fm = p.fontMetrics()
 

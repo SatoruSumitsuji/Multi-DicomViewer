@@ -57,6 +57,7 @@ from multi_dicomviewer.core.study_model import Modality, Series
 from multi_dicomviewer.ui.history_dialog import MeasureHistoryDialog
 from multi_dicomviewer.ui.study_browser import SERIES_MIME, StudyPanel
 from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
+from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT
 from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
 from multi_dicomviewer.viewers.xa_viewer import XAViewer
 
@@ -505,6 +506,8 @@ class MainWindow(QMainWindow):
         # Defaults to "Bi" (the natural full display); the buttons
         # appear unselected/white when no visible viewer responds to it.
         self._biside = "Bi"
+        #: Shared DICOM-tag overlay text size (pt) for every viewer/modality.
+        self._tag_font_pt = TAG_FONT_PT_DEFAULT
         self._panes: list[ViewerPane] = []
         for i in range(_MAX_PANES):
             pane = ViewerPane(i)
@@ -2164,6 +2167,21 @@ class MainWindow(QMainWindow):
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))
+        # DICOM-tag overlay text size: one slider per viewer, all kept in sync.
+        if hasattr(viewer, "overlay_font_changed"):
+            viewer.overlay_font_changed.connect(self._set_tag_font_pt)
+        if hasattr(viewer, "set_overlay_font_pt"):
+            viewer.set_overlay_font_pt(self._tag_font_pt)
+
+    def _set_tag_font_pt(self, pt: int) -> None:
+        """Broadcast the DICOM-tag overlay text size to every viewer in every
+        pane so the size stays uniform across modalities."""
+        pt = int(pt)
+        self._tag_font_pt = pt
+        for pane in self._panes:
+            for v in pane.all_viewers():
+                if hasattr(v, "set_overlay_font_pt"):
+                    v.set_overlay_font_pt(pt)
 
     # ------------------------------------------- anonymize / DICOM-tag overlay
     @staticmethod
