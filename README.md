@@ -76,3 +76,19 @@ CT orthogonal MPR.
 Natural extensions (not built): curved MPR / centerline for coronaries, volume
 rendering, QCA stenosis %, measurement persistence per study, compressed-syntax
 coverage beyond the bundled `pylibjpeg` codecs.
+
+## License
+
+Copyright (C) 2025–2026 Satoru Sumitsuji.
+
+Multi-DICOMviewer is free software, licensed under the **GNU General Public
+License v3.0** — see [`LICENSE`](LICENSE). This choice is required because the
+app links **PyQt6**, which is GPL-licensed. You may use, study, share, and
+modify it under the GPL's terms; the complete corresponding source is this
+repository.
+
+Bundled third-party components and their licenses are listed in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
+> **Not a medical device.** Research / educational use only; not for clinical
+> diagnosis (see the notice at the top of this file).
