@@ -35,7 +35,7 @@ import math
 import numpy as np
 import pygfx as gfx
 import pylinalg as la
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
 )
@@ -678,6 +678,15 @@ class CTViewer(AbstractViewer):
         self._meas_drag = False              # canvas is dragging a handle
         self._meas_hover = None              # cursor (output coords) for draft preview
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
+        # Interactive level-of-detail: during a drag / wheel-page the expensive
+        # CPU slab-MIP is skipped (panes show the cheap GPU thin slice) so
+        # paging stays smooth on low-memory Macs. This one-shot timer fires a
+        # short time after the last interactive refresh and rebuilds the full-
+        # quality slab MIP.
+        self._lod_timer = QTimer(self)
+        self._lod_timer.setSingleShot(True)
+        self._lod_timer.setInterval(160)
+        self._lod_timer.timeout.connect(lambda: self._refresh(lod=False))
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -1209,7 +1218,11 @@ class CTViewer(AbstractViewer):
         self._pan[key] = np.zeros(2)
         self._config_cam(key)
 
-    def _refresh(self, reset_cam=False):
+    def _refresh(self, reset_cam=False, lod=False):
+        # lod=True is an INTERACTIVE refresh (drag / wheel-page): the expensive
+        # CPU slab-MIP is skipped — panes show the cheap GPU thin slice — so
+        # paging stays smooth on low-memory Macs. The debounce timer then
+        # rebuilds full-quality slab MIP once the interaction settles.
         if self._vol is None:
             return
         for key in ("A", "B"):
@@ -1236,7 +1249,9 @@ class CTViewer(AbstractViewer):
             # Slab-MIP (THICK): clipping planes can't bound a GPU MIP slab
             # (de-risk spike), so when thick>0 we hide the GPU slice and paint
             # a CPU max-over-N-oblique-planes image in the overlay instead.
-            if self._thick[key] > 0:
+            # During an interactive (lod) refresh we skip that CPU work and show
+            # the GPU thin slice; full slab MIP returns when the drag settles.
+            if self._thick[key] > 0 and not lod:
                 p.mesh.visible = False
                 self._mip_img[key] = self._build_slab_qimage(key)
             else:
@@ -1244,6 +1259,12 @@ class CTViewer(AbstractViewer):
                 self._mip_img[key] = None
             p.render()
             self._overlay[key].update()
+        # (Re)arm the high-quality rebuild on interactive refreshes; a full
+        # refresh has already painted the slab MIP, so cancel any pending one.
+        if lod and any(self._thick[k] > 0 for k in ("A", "B")):
+            self._lod_timer.start()
+        else:
+            self._lod_timer.stop()
 
     # ----------------------------------------------------------- tools
     def _drag(self, which, dx, dy, shift=False, sx=None, sy=None):
@@ -1309,7 +1330,9 @@ class CTViewer(AbstractViewer):
                         dphi = (dphi + 180.0) % 360.0 - 180.0
                         self._spin_prev = phi
                         self._roll[which] += _SPIN_SIGN * dphi
-        self._refresh()
+        # Skip the costly slab MIP mid-drag for smoothness — except THICK,
+        # where the user is adjusting the slab and must see it update live.
+        self._refresh(lod=(t != "THICK"))
 
     def _wheel(self, which, delta):
         if self._vol is None:
@@ -1322,7 +1345,7 @@ class CTViewer(AbstractViewer):
         self._pc[which] = self._pc[which] + mv     # page only this pane
         self._clamp_center()
         self._view_initial = False
-        self._refresh()
+        self._refresh(lod=True)            # smooth wheel-paging (slab MIP defers)
 
     def _paging_sign(self, which):
         """+1/-1 so that moving _center by +n advances the OTHER pane's
