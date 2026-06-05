@@ -171,12 +171,18 @@ def scan_folder(
 
 
 def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
-    """Some vendors (notably Philips Allura/Azurion) store every XA cine
-    of a study under a single SeriesInstanceUID and only distinguish
-    them via InstanceNumber. Other DICOM viewers show one row per
-    instance — so do we, by splitting any XA series with ≥ 3 files into
-    one per file. Single (1 file) and biplane (2 files) series are
-    left intact.
+    """Some vendors (notably Philips Allura/Azurion) store every cine of a
+    study under a single SeriesInstanceUID and only distinguish them via
+    InstanceNumber — and ultrasound routinely packs ALL its clips (often
+    dozens) into one US series the same way. Other DICOM viewers show one row
+    per instance, so do we, by splitting such series into one row per file.
+
+    Threshold differs by modality: XA keeps 1-file (single) and 2-file
+    (biplane) series intact and only splits ≥ 3 files (packed); US / OTHER /
+    IVUS have no biplane concept (each file is an independent cine), so they
+    split as soon as there are ≥ 2 files. Without this, load_xa would treat
+    the N files as N "planes" of one acquisition — the viewer then shows only
+    one and sticks on "Buffering…".
 
     Each split row gets the file's own ``InstanceNumber`` promoted to
     ``Series.number`` (so the tree column shows distinct numbers) and
@@ -189,7 +195,14 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
         for study in patient.studies.values():
             new_series: dict[str, Series] = {}
             for uid, se in study.series.items():
-                if se.modality != Modality.XA or len(se.files) < 3:
+                # XA: 2 files = biplane (keep), ≥3 = packed (split). US/OTHER/
+                # IVUS have no biplane concept, so split at ≥2 files. CT and
+                # anything else are left intact.
+                _splittable = se.modality in (
+                    Modality.XA, Modality.IVUS, Modality.OTHER
+                )
+                _min_files = 3 if se.modality == Modality.XA else 2
+                if not _splittable or len(se.files) < _min_files:
                     new_series[uid] = se
                     continue
                 # Read each packed file's header to split into per-file
