@@ -14,10 +14,22 @@ from PyInstaller.utils.hooks import (
 )
 import sys
 
-# --- VTK: ships many vtkmodules.* C extensions and shader data files ---
-vtk_datas = collect_data_files("vtkmodules")
-vtk_binaries = collect_dynamic_libs("vtkmodules")
-vtk_hidden = collect_submodules("vtkmodules")
+# --- CT render backend differs per OS: VTK on Windows/Linux, pygfx + wgpu
+#     (Metal) on macOS. Collect whichever is actually installed for THIS
+#     build so the packaged app can import its CTViewer. wgpu/pygfx ship
+#     native libs + shader (.wgsl) data that PyInstaller won't auto-detect,
+#     so collect_all() is required. ---
+if sys.platform == "darwin":
+    ct_datas, ct_binaries, ct_hidden = [], [], []
+    for _pkg in ("pygfx", "wgpu", "rendercanvas"):
+        _d, _b, _h = collect_all(_pkg)
+        ct_datas += _d
+        ct_binaries += _b
+        ct_hidden += _h
+else:
+    ct_datas = collect_data_files("vtkmodules")
+    ct_binaries = collect_dynamic_libs("vtkmodules")
+    ct_hidden = collect_submodules("vtkmodules")
 
 # --- pylibjpeg: entry-point plugin discovery ---
 plj_datas, plj_binaries, plj_hidden = collect_all("pylibjpeg")
@@ -36,7 +48,7 @@ iio_datas, iio_binaries, iio_hidden = collect_all("imageio")
 iiof_datas, iiof_binaries, iiof_hidden = collect_all("imageio_ffmpeg")
 
 datas = (
-    vtk_datas + plj_datas + pllj_datas + plop_datas + ic_datas + pyd_datas
+    ct_datas + plj_datas + pllj_datas + plop_datas + ic_datas + pyd_datas
     + iio_datas + iiof_datas
     # Resources shipped with the app — the DICOM-aware Rupture-Predictor
     # HTML is launched from Tools and must be present in the bundle.
@@ -47,11 +59,11 @@ datas = (
     )]
 )
 binaries = (
-    vtk_binaries + plj_binaries + pllj_binaries + plop_binaries
+    ct_binaries + plj_binaries + pllj_binaries + plop_binaries
     + ic_binaries + pyd_binaries + iio_binaries + iiof_binaries
 )
 hiddenimports = (
-    vtk_hidden
+    ct_hidden
     + plj_hidden
     + pllj_hidden
     + plop_hidden
