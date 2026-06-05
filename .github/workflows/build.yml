@@ -31,11 +31,22 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
+      - name: Install pip + PyInstaller
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
           python -m pip install pyinstaller
+
+      # The CT viewer's render backend differs per OS: VTK on Windows
+      # (requirements.txt), pygfx/wgpu on macOS (requirements-mac.txt).
+      # Installing the wrong set leaves the packaged app unable to import
+      # its CTViewer ("CT viewer unavailable").
+      - name: Install runtime deps (Windows — VTK CT)
+        if: runner.os == 'Windows'
+        run: python -m pip install -r requirements.txt
+
+      - name: Install runtime deps (macOS — pygfx/wgpu CT)
+        if: runner.os == 'macOS'
+        run: python -m pip install -r requirements-mac.txt
 
       - name: Build with PyInstaller
         run: pyinstaller --noconfirm --clean Multi-DicomViewer.spec
