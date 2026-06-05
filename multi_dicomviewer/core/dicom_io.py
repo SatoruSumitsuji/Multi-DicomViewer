@@ -616,6 +616,13 @@ _DECODES_TO_RGB = frozenset({
     "1.2.840.10008.1.2.4.91",   # JPEG 2000 (ICT)
 })
 
+#: Fast-path self-check tolerance (max |Δ| vs the reference decoder) for COLOUR
+#: lossy JPEG. Two valid JPEG decoders round YCbCr->RGB + 4:2:2 chroma
+#: upsampling differently, so colour differs more than grayscale's ≤1 LSB — yet
+#: a genuinely wrong decode (channel swap / wrong colour space) still differs by
+#: ~255 and is caught. User-approved for the ~13× colour-cine decode speed-up.
+_COLOR_FAST_TOL = 32
+
 
 def _imagecodecs():
     global _IMAGECODECS
@@ -629,16 +636,19 @@ def _imagecodecs():
 
 
 def _fast_raw_frame(ds, index: int):
-    """imagecodecs (libjpeg-turbo / SIMD) decode of ONE grayscale
-    encapsulated frame — several times faster than pydicom's reference
-    handler. Returns the ndarray, or None meaning 'use pydicom'.
+    """imagecodecs (libjpeg-turbo / SIMD) decode of ONE grayscale OR colour
+    encapsulated frame — several times faster than pydicom's reference handler
+    (~13× on colour JPEG ultrasound cines). Returns the ndarray, or None
+    meaning 'use pydicom'.
 
-    Safety: the first decoded frame of each dataset is self-checked against
-    the reference decoder (exact for lossless transfer syntaxes, ≤1 LSB for
-    lossy DCT JPEG). Any mismatch, unsupported syntax, colour data, or error
-    permanently disables the fast path for that dataset, so a wrong pixel is
-    never shown. Calls are serialised per plane (plane._lock), so the
-    per-dataset flag writes are race-free.
+    Safety: the first decoded frame of each dataset is self-checked against the
+    reference decoder (exact for lossless transfer syntaxes, ≤1 LSB for lossy
+    grayscale DCT JPEG, ≤_COLOR_FAST_TOL for lossy colour where two valid
+    decoders round YCbCr->RGB / chroma upsampling differently). Any mismatch
+    beyond tolerance, unsupported syntax, or error permanently disables the
+    fast path for that dataset, so a wrong pixel is never shown. Calls are
+    serialised per plane (plane._lock), so the per-dataset flag writes are
+    race-free.
     """
     if getattr(ds, "_mdv_nofast", False):
         return None
@@ -651,9 +661,7 @@ def _fast_raw_frame(ds, index: int):
         if fn is None:
             ts = str(getattr(ds.file_meta, "TransferSyntaxUID", ""))
             spec = _FAST_TS.get(ts)
-            if spec is None or int(
-                getattr(ds, "SamplesPerPixel", 1) or 1
-            ) != 1:
+            if spec is None:
                 ds._mdv_nofast = True
                 return None
             fn = getattr(ic, spec[0], None)
@@ -661,7 +669,13 @@ def _fast_raw_frame(ds, index: int):
                 ds._mdv_nofast = True
                 return None
             ds._mdv_fast_fn = fn
-            ds._mdv_fast_tol = spec[1]
+            # Colour lossy JPEG (e.g. YBR_FULL_422 ultrasound) decodes ~13×
+            # faster here too; allow the larger colour decoder variation (vs
+            # the ≤1 LSB grayscale bound) while still catching a wrong decode.
+            tol = spec[1]
+            if int(getattr(ds, "SamplesPerPixel", 1) or 1) >= 3 and tol > 0:
+                tol = _COLOR_FAST_TOL
+            ds._mdv_fast_tol = tol
         nf = int(_to_float(getattr(ds, "NumberOfFrames", 1), 1)) or 1
         fb = get_frame(ds.PixelData, index, number_of_frames=nf)
         arr = np.squeeze(np.asarray(fn(fb)))
