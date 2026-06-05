@@ -79,6 +79,9 @@ from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
 from multi_dicomviewer.core.measurements import Measurement
+from multi_dicomviewer.ui.tag_font import (
+    TAG_FONT_PT_DEFAULT, build_tag_font_control,
+)
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
@@ -676,7 +679,7 @@ class _Pane:
         self.meas_labels = []                 # number billboards
 
         self.info = vtkCornerAnnotation()
-        self.info.SetMaximumFontSize(13)
+        self.info.SetMaximumFontSize(TAG_FONT_PT_DEFAULT)
         self.info.GetTextProperty().SetColor(0.4, 1.0, 0.6)
         self.ren.AddViewProp(self.info)
 
@@ -876,6 +879,9 @@ class _ColorMapDialog(QDialog):
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
     tags_requested = pyqtSignal()
+    #: emitted when the tag-text-size slider moves (shell broadcasts the pt to
+    #: every viewer so the overlay size matches across modalities)
+    overlay_font_changed = pyqtSignal(int)
     #: emitted when a measurement is committed — the shell files it under
     #: the current study so it shows in the shared Measure History.
     measurement_added = pyqtSignal(object)
@@ -1063,12 +1069,29 @@ class CTViewer(AbstractViewer):
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
 
-        tags = QPushButton("DICOM Tags…")
+        # "DICOM Tags…" with the tag-text-size slider stacked above it.
+        tags_box, self._tag_font_slider, tags = build_tag_font_control(
+            TAG_FONT_PT_DEFAULT
+        )
         tags.clicked.connect(self.tags_requested.emit)
-        row.addWidget(tags)
+        self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
+        row.addWidget(tags_box)
         row.addStretch(1)
         self._set_tool("PAGING")
         return row
+
+    def set_overlay_font_pt(self, pt: int) -> None:
+        """Apply the shared DICOM-tag text size (pt) to every pane's corner
+        annotation and sync the slider. Called by the shell."""
+        pt = int(pt)
+        sl = getattr(self, "_tag_font_slider", None)
+        if sl is not None and sl.value() != pt:
+            sl.blockSignals(True)
+            sl.setValue(pt)
+            sl.blockSignals(False)
+        for p in self.pane.values():
+            p.info.SetMaximumFontSize(pt)
+            p.render()
 
     def _set_tool(self, name):
         self._tool = name
