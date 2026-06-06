@@ -25,6 +25,7 @@ HU pseudo-colour LUT; Reset restores the default window/level.
 from __future__ import annotations
 
 import math
+import os
 
 import numpy as np
 from PyQt6.QtCore import QPoint as QtPoint, Qt, pyqtSignal
@@ -80,8 +81,38 @@ from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.ui.tag_font import (
-    TAG_FONT_PT_DEFAULT, build_tag_font_control,
+    TAG_FONT_FILE, TAG_FONT_PT_DEFAULT, VTK_FONT_FILE, build_tag_font_control,
 )
+
+
+#: vtkCornerAnnotation sizes its font in pixels (smaller than the Qt point
+#: sizes the other viewers draw) and auto-scales to the viewport, so the CT tag
+#: text looked smaller. Convert pt -> px (~96 dpi) and pin min=max so CT matches
+#: the other modalities' size and stays fixed regardless of window size.
+_VTK_TAG_FONT_SCALE = 4 / 3
+
+#: vtkCornerAnnotation packs lines tighter than the Qt-drawn overlays in the
+#: other viewers; loosen the line spacing so the CT tag block matches their
+#: roominess (the CT lines looked cramped / squeezed together).
+_VTK_TAG_LINE_SPACING = 1.5525
+#: vtkCornerAnnotation renders NOTHING when its minimum font size is larger than
+#: what fits the corner, so keep the minimum low and only drive the MAXIMUM with
+#: the slider — the text then scales down to fit instead of vanishing.
+_VTK_MIN_FONT = 4
+
+
+def _vtk_font_px(pt) -> int:
+    return max(1, round(int(pt) * _VTK_TAG_FONT_SCALE))
+
+
+def _set_vtk_tag_font(tp) -> None:
+    """Point a vtkTextProperty at the shared overlay font file (Meiryo) when
+    present, so CT tags use the same Japanese-capable typeface as the other
+    viewers. The caller sets Arial first as the fallback — Yu Gothic's .ttc
+    renders blank in VTK's FreeType, but Meiryo's loads fine."""
+    if os.path.exists(TAG_FONT_FILE):
+        tp.SetFontFamily(VTK_FONT_FILE)
+        tp.SetFontFile(TAG_FONT_FILE)
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
     central_arc_angle as _central_arc_angle,
@@ -679,8 +710,13 @@ class _Pane:
         self.meas_labels = []                 # number billboards
 
         self.info = vtkCornerAnnotation()
-        self.info.SetMaximumFontSize(TAG_FONT_PT_DEFAULT)
-        self.info.GetTextProperty().SetColor(0.4, 1.0, 0.6)
+        self.info.SetMaximumFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        self.info.SetMinimumFontSize(_VTK_MIN_FONT)
+        _tp = self.info.GetTextProperty()
+        _tp.SetColor(1.0, 1.0, 1.0)                  # white, like the others
+        _tp.SetFontFamilyToArial()                   # restored (see _vtk_tag_font)
+        _set_vtk_tag_font(_tp)                        # Yu Gothic via file if VTK can
+        _tp.SetLineSpacing(_VTK_TAG_LINE_SPACING)    # loosen cramped CT lines
         self.ren.AddViewProp(self.info)
 
         # SSMview-style angio-angle readout: yellow, image bottom-centre.
@@ -1089,8 +1125,9 @@ class CTViewer(AbstractViewer):
             sl.blockSignals(True)
             sl.setValue(pt)
             sl.blockSignals(False)
+        vf = _vtk_font_px(pt)
         for p in self.pane.values():
-            p.info.SetMaximumFontSize(pt)
+            p.info.SetMaximumFontSize(vf)   # min stays low so text never vanishes
             p.render()
 
     def _set_tool(self, name):
