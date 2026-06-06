@@ -133,7 +133,7 @@ if sys.platform == "darwin":
         bundle_identifier="org.research.multi-dicomviewer",
         info_plist={
             "NSHighResolutionCapable": "True",
-            "CFBundleShortVersionString": "0.1.3",
-            "CFBundleVersion": "0.1.3",
+            "CFBundleShortVersionString": "0.1.4",
+            "CFBundleVersion": "0.1.4",
         },
     )
