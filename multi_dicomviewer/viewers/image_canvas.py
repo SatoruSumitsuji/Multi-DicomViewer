@@ -1147,8 +1147,9 @@ class ImageCanvas(QWidget):
         fm = p.fontMetrics()
         # Line pitch tuned (×1.0125) to match the CT viewer's spacing on
         # Windows (Meiryo). macOS falls back to Hiragino, whose metrics pack
-        # the lines tighter, so give it 1.25× more room there (per Mac feedback).
-        _pitch = 1.0125 * 1.25 if sys.platform == "darwin" else 1.0125
+        # the lines tighter, so give it more room there. Widened per Mac
+        # feedback: ×1.25, then a further ×1.1 (cumulative ≈ ×1.392).
+        _pitch = 1.0125 * 1.25 * 1.1 if sys.platform == "darwin" else 1.0125
         pad, lh = 6, round(fm.height() * _pitch)
         text_w = max(fm.horizontalAdvance(s) for s in self.overlay_lines)
         box = QRect(
