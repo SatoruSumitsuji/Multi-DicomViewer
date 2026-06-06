@@ -13,6 +13,7 @@ is calibrated (``spacing_mm`` set), in pixels otherwise.
 from __future__ import annotations
 
 import math
+import sys
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, pyqtSignal
@@ -1144,8 +1145,11 @@ class ImageCanvas(QWidget):
         font = overlay_qfont(self._overlay_font_pt)
         p.setFont(font)
         fm = p.fontMetrics()
-        # Line pitch tuned (×1.0125) to match the CT viewer's spacing.
-        pad, lh = 6, round(fm.height() * 1.0125)
+        # Line pitch tuned (×1.0125) to match the CT viewer's spacing on
+        # Windows (Meiryo). macOS falls back to Hiragino, whose metrics pack
+        # the lines tighter, so give it 1.25× more room there (per Mac feedback).
+        _pitch = 1.0125 * 1.25 if sys.platform == "darwin" else 1.0125
+        pad, lh = 6, round(fm.height() * _pitch)
         text_w = max(fm.horizontalAdvance(s) for s in self.overlay_lines)
         box = QRect(
             6, 6, text_w + 2 * pad, lh * len(self.overlay_lines) + 2 * pad
