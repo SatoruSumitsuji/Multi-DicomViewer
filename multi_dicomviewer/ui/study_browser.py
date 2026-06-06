@@ -94,15 +94,15 @@ def _thumb_label(se: Series, use_instance: bool) -> str:
     else:
         n = ""
     desc = f" — {se.description}" if se.description else ""
-    label = f"{n}{se.kind}{desc}  [{len(se.files)} img]"
+    label = f"{n}{se.kind}{desc}  [{se.image_count} img]"
     return label.replace("  ", "\n", 1)
 
 
 def _series_sort_key(mode: str):
     if mode == "acq":  # Date/Time (empty sorts last; number breaks ties)
         return lambda s: (s.acq_time == "", s.acq_time, s.number or 0)
-    if mode == "images":  # number of images
-        return lambda s: (len(s.files), s.number or 0)
+    if mode == "images":  # number of images (summed frames, matches display)
+        return lambda s: (s.image_count, s.number or 0)
     if mode == "instance":  # DICOM InstanceNumber (None sorts last)
         return lambda s: (s.instance_number is None, s.instance_number or 0)
     return lambda s: (s.number is None, s.number or 0)  # Series Number
@@ -332,7 +332,7 @@ class StudyBrowser(QTreeWidget):
                     no,
                     ino,
                     series.kind,
-                    f"{len(series.files)} img",
+                    f"{series.image_count} img",
                     series.description or "",
                     " ; ".join(series.files),
                 ])
