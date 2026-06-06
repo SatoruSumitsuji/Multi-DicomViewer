@@ -55,16 +55,27 @@ class Series:
     #: multi-frame single-file series this is the file's InstanceNumber;
     #: for packed-XA split rows it equals the row's own file InstanceNumber.
     instance_number: Optional[int] = None
+    #: Total images/frames in the series = sum of NumberOfFrames across its
+    #: files, so a single-file multi-frame cine (NM/US/XA) reports e.g. 72 not
+    #: 1. 0 until scan_folder fills it in; image_count falls back to the file
+    #: count meanwhile.
+    n_images: int = 0
 
     @property
     def kind(self) -> str:
         return self.dicom_modality or self.modality.value
 
     @property
+    def image_count(self) -> int:
+        """Tree 'N img' count — the summed frame count, falling back to the
+        file count when not yet computed."""
+        return self.n_images or len(self.files)
+
+    @property
     def label(self) -> str:
         n = f"#{self.number} " if self.number is not None else ""
         desc = f" — {self.description}" if self.description else ""
-        return f"{n}{self.kind}{desc}  [{len(self.files)} img]"
+        return f"{n}{self.kind}{desc}  [{self.image_count} img]"
 
 
 @dataclass

@@ -98,6 +98,7 @@ def scan_folder(
     files are read (total known up-front from a fast directory walk).
     """
     patients: dict[str, Patient] = {}
+    frames_by_path: dict[str, int] = {}   # NumberOfFrames per file, for counts
 
     all_files = [
         os.path.join(dp, fn)
@@ -164,9 +165,21 @@ def scan_folder(
                 )
                 study.series[se_uid] = series
             series.files.append(path)
+            frames_by_path[path] = int(
+                _to_float(getattr(ds, "NumberOfFrames", 1), 1) or 1
+            )
 
     _split_packed_xa_series(patients)
     _merge_cross_uid_biplane(patients)
+    # Tree "N img" = total frames, so a single-file multi-frame series (NM/US/XA
+    # cine) reports its frame count instead of "1 img". Done after split/merge
+    # so each restructured series sums the frames of the files it ended up with;
+    # the per-file frame counts were captured during the scan above (no extra
+    # header reads).
+    for patient in patients.values():
+        for study in patient.studies.values():
+            for se in study.series.values():
+                se.n_images = sum(frames_by_path.get(f, 1) for f in se.files)
     return patients
 
 

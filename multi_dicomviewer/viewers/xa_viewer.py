@@ -550,6 +550,13 @@ class XAViewer(AbstractViewer):
         self.frame_slider.setMaximum(n - 1)
         self.frame_slider.setValue(self._frame)
         self.frame_slider.blockSignals(False)
+        # A single-image series (seek bar 1/1) can't play — grey out Play and
+        # stop any running playback; multi-frame cines re-enable it. Modality-
+        # agnostic: every cine (XA/IVUS/US/NM/…) loads through here.
+        single = n <= 1
+        if single and self.play_btn.isChecked():
+            self.play_btn.setChecked(False)
+        self.play_btn.setEnabled(not single)
         self.fps_spin.setValue(self._fps)
 
         for c in (self.canvas, self.canvas2):
