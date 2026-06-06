@@ -61,7 +61,7 @@ from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
 from multi_dicomviewer.ui.tag_font import (
-    TAG_FONT_PT_DEFAULT, build_tag_font_control,
+    TAG_FONT_PT_DEFAULT, build_tag_font_control, overlay_qfont,
 )
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.core.measure_geom import (
@@ -435,7 +435,7 @@ class _Overlay(QWidget):
     # -- corner info text + angio readout ----------------------------------
     def _paint_info(self, p, key, w, h):
         v = self._v
-        p.setPen(QColor(102, 255, 153))         # green like vtk corner text
+        p.setPen(QColor(255, 255, 255))         # white DICOM-tag / readout text
         if v._tags_on:
             # No explicit selection yet → show sensible defaults so first-time
             # users see tags without opening the dialog. A saved/edited
@@ -444,7 +444,7 @@ class _Overlay(QWidget):
                                       if v._header is not None else [])
             head = overlay_lines(v._header, kws, anonymized=v._anon)
             if head:
-                p.setFont(QFont("monospace", v._overlay_font_pt))
+                p.setFont(overlay_qfont(v._overlay_font_pt))
                 p.drawText(QRectF(6, 4, w - 12, h * 0.7),
                            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
                            "\n".join(head))

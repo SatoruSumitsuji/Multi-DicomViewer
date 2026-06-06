@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import QMenu, QWidget
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
 from multi_dicomviewer.core.measurements import Measurement
-from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT
+from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT, overlay_qfont
 
 
 def to_qimage(frame8: np.ndarray) -> QImage:
@@ -1141,17 +1141,17 @@ class ImageCanvas(QWidget):
             self.update()
 
     def _paint_overlay(self, p: QPainter):
-        font = QFont()
-        font.setPointSize(self._overlay_font_pt)
+        font = overlay_qfont(self._overlay_font_pt)
         p.setFont(font)
         fm = p.fontMetrics()
-        pad, lh = 6, fm.height()
+        # Line pitch tuned (×1.0125) to match the CT viewer's spacing.
+        pad, lh = 6, round(fm.height() * 1.0125)
         text_w = max(fm.horizontalAdvance(s) for s in self.overlay_lines)
         box = QRect(
             6, 6, text_w + 2 * pad, lh * len(self.overlay_lines) + 2 * pad
         )
         p.fillRect(box, QColor(0, 0, 0, 140))
-        p.setPen(QColor("#e8e8e8"))
+        p.setPen(QColor("#ffffff"))
         y = box.y() + pad + fm.ascent()
         for line in self.overlay_lines:
             p.drawText(box.x() + pad, y, line)
