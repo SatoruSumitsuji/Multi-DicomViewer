@@ -18,6 +18,7 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QDialog,
     QDialogButtonBox,
@@ -27,6 +28,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QVBoxLayout,
@@ -76,8 +78,13 @@ DEFAULT_FIELDS = (
 class ExportSettings:
     """Result of the dialog, consumed by core.export."""
     fields: tuple[str, ...]   # ordered subset of FIELD_KEYS
-    bitrate_mbps: int = 10    # MP4 only
+    bitrate_mbps: int = 10    # MP4 only (used when crf is None)
     fps: float = 30.0         # MP4 only
+    #: MP4 only. When set, encode at constant quality (x264 -crf) instead
+    #: of a target bitrate — far smaller files at equal visual quality on
+    #: content with large flat/black areas (IVUS composites). None → use
+    #: bitrate_mbps. Lower = higher quality / bigger file.
+    crf: Optional[int] = None
 
 
 #: Preset frame-rate buttons shown next to the FPS spinbox.
@@ -96,6 +103,8 @@ class ExportDialog(QDialog):
                  title_override: Optional[str] = None,
                  dicom_tags: Optional[list] = None,
                  initial_fields: Optional[list] = None,
+                 default_bitrate: Optional[int] = None,
+                 default_crf: int = 20,
                  parent=None):
         """``dicom_tags`` is an optional list of ``(identifier, label)``
         tuples — typically the modality's tag-overlay selection — that
@@ -181,16 +190,55 @@ class ExportDialog(QDialog):
         if mode == "mp4":
             mp4_box = QGroupBox("MP4 encoding")
             form = QFormLayout(mp4_box)
+
+            # Quality (CRF) vs target Bitrate. CRF is the default: constant
+            # visual quality, and far smaller files than a fixed bitrate on
+            # content with big flat/black areas (IVUS composites).
+            self._mode_crf = QRadioButton("Quality (CRF)")
+            self._mode_br = QRadioButton("Bitrate (Mbps)")
+            self._mode_crf.setChecked(True)
+            self._enc_group = QButtonGroup(self)
+            self._enc_group.addButton(self._mode_crf)
+            self._enc_group.addButton(self._mode_br)
+            mode_row = QWidget()
+            mode_lay = QHBoxLayout(mode_row)
+            mode_lay.setContentsMargins(0, 0, 0, 0)
+            mode_lay.addWidget(self._mode_crf)
+            mode_lay.addWidget(self._mode_br)
+            mode_lay.addStretch(1)
+            form.addRow("Encode:", mode_row)
+
+            self._crf = QSpinBox()
+            self._crf.setRange(10, 30)
+            self._crf.setValue(int(default_crf))
+            self._crf.setToolTip(
+                "Constant Rate Factor (x264). Lower = higher quality / "
+                "larger file. 10–12 ≈ near-lossless (speckle preserved), "
+                "18 visually lossless, 23 standard, 26+ compact. "
+                "Each −6 ≈ double the file size."
+            )
+            form.addRow("CRF:", self._crf)
+
             self._bitrate = QSpinBox()
-            self._bitrate.setRange(1, 10)
-            self._bitrate.setValue(10)
+            self._bitrate.setRange(1, 100)
+            self._bitrate.setValue(
+                int(default_bitrate) if default_bitrate else 10
+            )
             self._bitrate.setSuffix(" Mbps")
             self._bitrate.setToolTip(
-                "Target H.264 bitrate. 10 Mbps ≈ near-lossless for typical "
-                "512×512 XA cine; 4 Mbps still clinical-grade; 1 Mbps "
-                "is the smallest the dialog accepts."
+                "Target H.264 bitrate (used only in Bitrate mode). "
+                "Speckle-heavy IVUS / multi-pane composites need 30–40 Mbps "
+                "@ 15 fps to match the on-screen view. Up to 100 Mbps."
             )
             form.addRow("Bitrate:", self._bitrate)
+
+            def _sync_enc_mode():
+                crf_on = self._mode_crf.isChecked()
+                self._crf.setEnabled(crf_on)
+                self._bitrate.setEnabled(not crf_on)
+
+            self._mode_crf.toggled.connect(lambda _c: _sync_enc_mode())
+            _sync_enc_mode()
             self._fps = QDoubleSpinBox()
             self._fps.setRange(1.0, 60.0)
             self._fps.setDecimals(1)
@@ -243,9 +291,12 @@ class ExportDialog(QDialog):
             if k in self._checks and self._checks[k].isChecked()
         )
         if self._mode == "mp4":
+            crf = (int(self._crf.value())
+                   if self._mode_crf.isChecked() else None)
             return ExportSettings(
                 fields=chosen,
                 bitrate_mbps=int(self._bitrate.value()),
                 fps=float(self._fps.value()),
+                crf=crf,
             )
         return ExportSettings(fields=chosen)
