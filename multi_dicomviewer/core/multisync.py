@@ -60,7 +60,12 @@ def map_frame(sync_points, master, slot, fm,
 def map_rotation(sync_points, master, slot, fm):
     """Interpolated rotation (deg) for *slot* at master frame *fm*.
     Uses sync points that have the master frame set; constant-clamped
-    before the first / after the last point."""
+    before the first / after the last point.
+
+    Between two points the rotation is interpolated along the SHORTEST
+    angular path: the delta is wrapped to (-180, 180] so e.g. 350° → 10°
+    sweeps +20° forward, not -340° backward (the "spins almost all the
+    way round to line up" artefact the user saw)."""
     pts = []
     for p in sync_points:
         a = p["frames"][master]
@@ -77,7 +82,8 @@ def map_rotation(sync_points, master, slot, fm):
         (a0, r0), (a1, r1) = pts[i], pts[i + 1]
         if a0 <= fm <= a1:
             t = (fm - a0) / (a1 - a0) if a1 != a0 else 0.0
-            return r0 + t * (r1 - r0)
+            delta = ((r1 - r0 + 180.0) % 360.0) - 180.0
+            return r0 + t * delta
     return pts[-1][1]
 
 

@@ -14,8 +14,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QPainter
+from PyQt6.QtCore import QPoint, QRect, QRectF, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -129,6 +129,67 @@ def _to_u8(arr: np.ndarray) -> np.ndarray:
     if hi > 0:
         a = a / hi * 255.0
     return np.clip(a, 0, 255).astype(np.uint8)
+
+
+class _SliderMarks(QWidget):
+    """Thin strip drawn directly above a QSlider that paints a small
+    down-triangle (▽) at each marked frame, horizontally aligned with the
+    slider's handle position for that value. Used to flag, on every slot's
+    seek bar, the frames pinned by sync points."""
+
+    def __init__(self, slider: QSlider, parent=None):
+        super().__init__(parent)
+        self._slider = slider
+        self._marks: list[int] = []
+        self.setFixedHeight(9)
+
+    def set_marks(self, marks) -> None:
+        new = sorted({int(m) for m in marks})
+        if new == self._marks:
+            return
+        self._marks = new
+        self.update()
+
+    def paintEvent(self, _e):
+        if not self._marks:
+            return
+        from PyQt6.QtWidgets import QStyle, QStyleOptionSlider
+        from PyQt6.QtGui import QPolygon
+
+        sl = self._slider
+        mn, mx = sl.minimum(), sl.maximum()
+        if mx <= mn:
+            return
+        opt = QStyleOptionSlider()
+        sl.initStyleOption(opt)
+        style = sl.style()
+        groove = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderGroove, sl,
+        )
+        handle = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderHandle, sl,
+        )
+        span = groove.width() - handle.width()
+        # The marks strip and its slider share the same x / width (stacked
+        # in one column), so the slider's groove x maps directly onto this
+        # widget's coordinates.
+        base = groove.x() + handle.width() / 2.0
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor("#ffd000"))
+        p.setPen(Qt.PenStyle.NoPen)
+        h = self.height()
+        for m in self._marks:
+            pos = QStyle.sliderPositionFromValue(mn, mx, int(m), span)
+            cx = base + pos
+            tri = QPolygon([
+                QPoint(int(round(cx - 4)), 0),
+                QPoint(int(round(cx + 4)), 0),
+                QPoint(int(round(cx)), h - 1),
+            ])
+            p.drawPolygon(tri)
 
 
 class _SyncCanvas(QWidget):
@@ -261,9 +322,19 @@ class _Slot:
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setEnabled(False)
         self.slider.valueChanged.connect(self._on_slider)
+        # Down-triangle markers sit in their own thin strip stacked
+        # directly above the slider so they line up with the handle's
+        # travel; the strip + slider together take the row's stretch and
+        # the frame label sits beside them.
+        self.marks = _SliderMarks(self.slider)
+        slider_col = QVBoxLayout()
+        slider_col.setContentsMargins(0, 0, 0, 0)
+        slider_col.setSpacing(0)
+        slider_col.addWidget(self.marks)
+        slider_col.addWidget(self.slider)
         self.lbl = QLabel("—")
         self.lbl.setMinimumWidth(86)
-        srow.addWidget(self.slider, 1)
+        srow.addLayout(slider_col, 1)
         srow.addWidget(self.lbl)
         col.addLayout(srow)
 
@@ -291,10 +362,15 @@ class _Slot:
         self._tint(False)
 
     def _tint(self, is_master: bool) -> None:
-        c = _SLOT_COLORS[self.index]
+        # Same 3px width whether master or not, so switching the master
+        # never reflows the image / slider (the old 1px → 3px swap made
+        # the non-master tiles visibly shrink). The master frame is always
+        # the same cyan whichever slot it is (not the slot's own colour),
+        # and non-master frames are a near-white light grey. The per-slot
+        # _SLOT_COLORS are still used for the sync-point row labels.
         self.frame.setStyleSheet(
             "QFrame { border:%s; }" %
-            (f"3px solid {c}" if is_master else "1px solid #444")
+            ("3px solid #33e6ff" if is_master else "3px solid #dcdcdc")
         )
 
     # ---- loading ----
@@ -397,10 +473,20 @@ class MultiSyncWindow(QMainWindow):
         self.resize(1180, 880)
 
         self._series = list(ivus_series)
-        #: each sync point: {"frames":[f|None]*4, "rots":[deg]*4}
+        #: each sync point: {"frames":[f|None]*4, "rots":[deg]*4}.
+        #: A None frame on a *loaded* slot is shown as a grey provisional
+        #: value computed from the slot's other sync points; Edit + ○
+        #: commits it (and the others) to a real value (black).
         self.sync_points: list[dict] = []
         self._master = 0
         self._sync_on = True
+        #: Sync row the user last acted on (Jump / Edit / ○) — its row is
+        #: tinted so it's clear which point is being worked on.
+        self._active_point: int | None = None
+        #: Sync point currently in Edit mode, or None. Informational only
+        #: (drives the status hint / highlight) — it does NOT change how
+        #: scrubbing behaves; that depends solely on the Sync ON/OFF state.
+        self._editing: int | None = None
         # Live link with the main window's panes (per slot, parallel to
         # self.slots). Each entry is the source viewer object or None.
         # While linked, slot frame changes drive the pane and vice versa;
@@ -505,11 +591,15 @@ class MultiSyncWindow(QMainWindow):
         if self._master >= count:
             self._set_master(0)
             self.slots[0].master_radio.setChecked(True)
+        # Showing / hiding slots changes which pull-backs feed the synced
+        # span, so recompute the global timeline.
+        self._refresh_global_seek()
 
     # ============================================== sync toggle
     def _on_sync_toggle(self, on: bool) -> None:
         self._sync_on = on
         self._sync_btn.setText("🔗 Sync ON" if on else "🔗 Sync OFF")
+        self._refresh_global_seek()
         if on:
             self._drive_followers()
 
@@ -537,6 +627,10 @@ class MultiSyncWindow(QMainWindow):
         add = _tinted("+ Add Sync Point", "#d4efdf")    # light green
         add.clicked.connect(self._add_sync_point)
         top.addWidget(add)
+        srt = _tinted("Sort Sync…", "#e8daef")           # light purple
+        srt.setToolTip("Sync点をフレームの小さい順に並べ替え")
+        srt.clicked.connect(self._sort_sync)
+        top.addWidget(srt)
         save = _tinted("Save Sync…", "#fcf3cf")          # light yellow
         save.clicked.connect(self._save_sync)
         top.addWidget(save)
@@ -551,6 +645,35 @@ class MultiSyncWindow(QMainWindow):
         self._sync_status.setStyleSheet("color:#c0392b; font-weight:bold;")
         top.addWidget(self._sync_status, 1)
         outer.addLayout(top)
+
+        # Global synced timeline, full width of the Sync Points box.
+        # It runs over *virtual master frames* spanning the union of every
+        # loaded slot mapped into master-frame coordinates, so scrubbing it
+        # shows the synchronised result from the most distal frame of any
+        # pull-back to the most proximal — not just the master's own range.
+        # Out-of-master-range positions freeze the master at its first /
+        # last frame while the followers keep moving (and vice versa).
+        grow = QHBoxLayout()
+        gcap = QLabel("Synced:")
+        gcap.setStyleSheet("font-weight:bold;")
+        grow.addWidget(gcap)
+        self._global_slider = QSlider(Qt.Orientation.Horizontal)
+        self._global_slider.setEnabled(False)
+        self._global_slider.setToolTip(
+            "Synchronised timeline across every pull-back "
+            "(most distal → most proximal frame)"
+        )
+        self._global_slider.valueChanged.connect(self._on_global_seek)
+        self._global_lbl = QLabel("—")
+        self._global_lbl.setMinimumWidth(110)
+        grow.addWidget(self._global_slider, 1)
+        grow.addWidget(self._global_lbl)
+        outer.addLayout(grow)
+        # Current virtual-frame span [lo, hi] the global slider covers, and
+        # a guard so global-driven slot moves don't echo back as a scrub.
+        self._global_lo = 0
+        self._global_hi = 0
+        self._global_echo = False
 
         # Wrapping list: sync rows pack left-to-right and flow onto
         # additional lines as the window widens / shrinks, so as many
@@ -576,7 +699,10 @@ class MultiSyncWindow(QMainWindow):
         frames: list = [None] * _N_SLOTS
         rots: list = [0.0] * _N_SLOTS
         loaded = []
-        for i in range(self._layout_count):
+        # Capture EVERY loaded slot, not just the ones the current layout
+        # happens to show — otherwise a 1×2 layout over 3–4 loaded runs
+        # would silently create partial (None) sync points.
+        for i in range(_N_SLOTS):
             sl = self.slots[i]
             if sl.plane is not None:
                 frames[i] = sl.cur
@@ -610,15 +736,188 @@ class MultiSyncWindow(QMainWindow):
             )
         )
 
+    def _sort_sync(self) -> None:
+        """Reorder the sync points by frame, smallest → largest. Sorted on
+        the master's frame (None → first set frame); since a consistent
+        set is monotonic across every slot, this orders them by every
+        slot's frame at once. Renumbers Sync-1, Sync-2, …"""
+        if len(self.sync_points) < 2:
+            return
+
+        def _key(sp):
+            f = sp["frames"][self._master]
+            if f is None:
+                f = next((x for x in sp["frames"] if x is not None), 0)
+            return f
+
+        self.sync_points.sort(key=_key)
+        # Indices changed, so any selection / edit target is stale.
+        self._active_point = None
+        self._editing = None
+        self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
+        self._sync_status.setText("Sync点をフレーム順に並べ替えました。")
+        self._rebuild_sync_editor()
+
     def _rebuild_sync_editor(self) -> None:
         while self._sync_rows.count():
             it = self._sync_rows.takeAt(0)
             w = it.widget()
             if w is not None:
                 w.deleteLater()
+        self._sync_row_frames = []
         for pi, sp in enumerate(self.sync_points):
-            self._sync_rows.addWidget(self._sync_row(pi, sp))
+            row = self._sync_row(pi, sp)
+            self._sync_row_frames.append(row)
+            self._sync_rows.addWidget(row)
         self._refresh_sync_marks()
+        self._refresh_slot_marks()
+        self._refresh_global_seek()
+
+    def _apply_row_highlight(self) -> None:
+        """Tint only the active row (Edit/Jump selection) light red; the
+        rest stay default. Done without rebuilding so it is safe to call
+        on every scrub / Synced-bar move without disturbing the global
+        slider's value."""
+        for pi, row in enumerate(getattr(self, "_sync_row_frames", [])):
+            row.setStyleSheet(
+                "QFrame { background:#f7d4d4; }"
+                if pi == self._active_point else ""
+            )
+
+    def _active_matches(self) -> bool:
+        """True iff every loaded slot's current frame equals the active
+        sync point's committed frame for that slot (provisional / unset
+        slots are ignored)."""
+        pi = self._active_point
+        if pi is None or not (0 <= pi < len(self.sync_points)):
+            return False
+        sp = self.sync_points[pi]
+        for slot in range(_N_SLOTS):
+            sl = self.slots[slot]
+            f = sp["frames"][slot]
+            if sl.plane is None or f is None:
+                continue
+            if sl.cur != f:
+                return False
+        return True
+
+    def _update_active_highlight(self) -> None:
+        """Drop the red selection the moment any image / the Synced bar
+        moves even one frame off the selected sync point."""
+        if self._active_point is not None and not self._active_matches():
+            self._active_point = None
+            self._apply_row_highlight()
+
+    def _refresh_slot_marks(self) -> None:
+        """Update each slot's down-triangle (▽) markers to the frames that
+        slot is pinned at by the current sync points."""
+        for sl in self.slots:
+            if sl.plane is None:
+                sl.marks.set_marks([])
+                continue
+            marks = [sp["frames"][sl.index] for sp in self.sync_points
+                     if sp["frames"][sl.index] is not None]
+            sl.marks.set_marks(marks)
+
+    # ============================================== global synced timeline
+    def _virtual_range(self) -> tuple[int, int] | None:
+        """[lo, hi] in master-frame coordinates spanning every loaded
+        slot — the master's own [0, total-1] plus wherever the sync
+        mapping places each follower's first / last frame. Returns None
+        when the master has no pull-back loaded."""
+        m = self.slots[self._master]
+        if m.plane is None or m.total < 1:
+            return None
+        v_min = 0.0
+        v_max = float(m.total - 1)
+        # Every loaded slot feeds the synced span (the global bar drives
+        # them all), not just the ones the current layout shows.
+        for k in range(_N_SLOTS):
+            sl = self.slots[k]
+            if sl is m or sl.plane is None or sl.total < 1:
+                continue
+            v_first = multisync.map_frame(
+                self.sync_points, sl.index, self._master, 0,
+                sl.fps, m.fps,
+            )
+            v_last = multisync.map_frame(
+                self.sync_points, sl.index, self._master, sl.total - 1,
+                sl.fps, m.fps,
+            )
+            v_min = min(v_min, v_first, v_last)
+            v_max = max(v_max, v_first, v_last)
+        return int(math.floor(v_min)), int(math.ceil(v_max))
+
+    def _refresh_global_seek(self) -> None:
+        rng = self._virtual_range()
+        if rng is None:
+            self._global_lo = self._global_hi = 0
+            self._global_slider.blockSignals(True)
+            self._global_slider.setRange(0, 0)
+            self._global_slider.setEnabled(False)
+            self._global_slider.blockSignals(False)
+            self._global_lbl.setText("—")
+            return
+        lo, hi = rng
+        self._global_lo, self._global_hi = lo, hi
+        cur = self.slots[self._master].cur
+        self._global_slider.blockSignals(True)
+        self._global_slider.setRange(lo, hi)
+        self._global_slider.setValue(max(lo, min(cur, hi)))
+        # The Synced bar is the synchronised-view control in its own right
+        # and always drives every image together — independent of the
+        # Sync ON/OFF toggle (which only governs the Master button / per-
+        # slot sliders). So it is enabled whenever the span is non-empty.
+        self._global_slider.setEnabled(hi > lo)
+        self._global_slider.blockSignals(False)
+        self._update_global_lbl(self._global_slider.value())
+
+    def _update_global_lbl(self, fm: int) -> None:
+        span = self._global_hi - self._global_lo + 1
+        if span <= 0:
+            self._global_lbl.setText("—")
+            return
+        self._global_lbl.setText(f"{fm - self._global_lo + 1} / {span}")
+
+    def _set_global_value(self, fm: int) -> None:
+        """Move the global slider to virtual frame *fm* without re-driving
+        the slots (used to keep it in step with a master scrub)."""
+        fm = max(self._global_lo, min(int(fm), self._global_hi))
+        self._global_slider.blockSignals(True)
+        self._global_slider.setValue(fm)
+        self._global_slider.blockSignals(False)
+        self._update_global_lbl(fm)
+
+    def _on_global_seek(self, value: int) -> None:
+        self._drive_to_virtual(int(value))
+
+    def _drive_to_virtual(self, fm: int) -> None:
+        """Drive the master (clamped) and every follower from virtual
+        master frame *fm*, allowing the extended pre/post range where one
+        video keeps playing while the other is frozen at an end frame."""
+        m = self.slots[self._master]
+        if m.plane is None:
+            return
+        self._global_echo = True
+        try:
+            m.show_frame(max(0, min(fm, m.total - 1)), m.rotation)
+            for sl in self.slots:
+                if sl is m or sl.plane is None:
+                    continue
+                fb = multisync.map_frame(
+                    self.sync_points, self._master, sl.index, fm,
+                    m.fps, sl.fps,
+                )
+                rot = multisync.map_rotation(
+                    self.sync_points, self._master, sl.index, fm
+                )
+                sl.show_frame(
+                    max(0, min(int(round(fb)), sl.total - 1)), rot
+                )
+        finally:
+            self._global_echo = False
+        self._update_global_lbl(fm)
+        self._update_active_highlight()
 
     def _refresh_sync_marks(self) -> None:
         """Re-evaluate the yellow image-area border for every slot —
@@ -633,84 +932,208 @@ class MultiSyncWindow(QMainWindow):
             )
             sl.canvas.set_at_sync(matched)
 
+    # ---- provisional (grey) values for unset cells ----
+    def _provisional(self, pi: int, slot: int):
+        """Computed (frame, rotation) for a *loaded* slot whose frame is
+        None at sync point *pi*, derived from that slot's OTHER sync points
+        via the same mapping engine. The reference run is the master (or,
+        if the master has no frame at this point, the first slot that
+        does). Returns None when nothing usable can anchor the estimate."""
+        sl = self.slots[slot]
+        if sl.plane is None:
+            return None
+        sp = self.sync_points[pi]
+        ref = self._master
+        if sp["frames"][ref] is None:
+            ref = next(
+                (j for j in range(_N_SLOTS)
+                 if j != slot and sp["frames"][j] is not None
+                 and self.slots[j].plane is not None),
+                None,
+            )
+        if ref is None or sp["frames"][ref] is None:
+            return None
+        ref_frame = sp["frames"][ref]
+        fb = multisync.map_frame(
+            self.sync_points, ref, slot, ref_frame,
+            self.slots[ref].fps, sl.fps,
+        )
+        rot = multisync.map_rotation(self.sync_points, ref, slot, ref_frame)
+        return max(0, min(int(round(fb)), sl.total - 1)), rot
+
     def _sync_row(self, pi: int, sp: dict) -> QWidget:
         # Wrapped by _FlowLayout, so the row needs to report its
         # natural width — NO addStretch at the end (that would make
         # each row claim full available width and force one-per-line).
         row = QFrame()
         row.setFrameShape(QFrame.Shape.StyledPanel)
+        # Tint the row the user is currently working on (Jump / Edit / ○).
+        if pi == self._active_point:
+            row.setStyleSheet("QFrame { background:#f7d4d4; }")
         h = QHBoxLayout(row)
         h.setContentsMargins(4, 2, 4, 2)
         h.setSpacing(3)
+        # Sync-N label styled as a light-blue chip (boxed like the
+        # buttons). Same blue for every point.
         lbl = QLabel(f"Sync-{pi + 1}")
-        lbl.setStyleSheet("font-weight:bold;")
+        lbl.setStyleSheet(
+            "QLabel { background:#d6eaf8; border:1px solid #8aa9c0;"
+            " border-radius:4px; padding:2px 6px;"
+            " font-weight:bold; color:#1c1c1c; }"
+        )
         h.addWidget(lbl)
-        for slot in range(self._layout_count):
+        # Each S-cell is a boxed chip on a white background; only the text
+        # colour conveys committed (black) vs provisional (grey) vs unset.
+        cell_box = (
+            " background:#ffffff; border:1px solid #c0c0c0;"
+            " border-radius:3px; padding:1px 5px;"
+        )
+        for slot in range(_N_SLOTS):
+            if self.slots[slot].plane is None:
+                # Run not loaded in this slot — nothing to pin.
+                if slot >= self._layout_count:
+                    continue
+                cell = QLabel(f"S{slot + 1}: —")
+                cell.setStyleSheet("QLabel { color:#999999;" + cell_box + "}")
+                h.addWidget(cell)
+                continue
             f = sp["frames"][slot]
-            r = sp["rots"][slot] or 0.0
             if f is not None:
-                # Frame + rotation; A0 when the slot wasn't rotated.
-                text = f"S{slot + 1}: F{f + 1} A{int(round(r))}"
+                # Committed: black + bold.
+                r = sp["rots"][slot] or 0.0
+                cell = QLabel(f"S{slot + 1}: F{f + 1} A{int(round(r))}")
+                cell.setStyleSheet(
+                    "QLabel { color:#000000; font-weight:bold;"
+                    + cell_box + "}"
+                )
             else:
-                text = f"S{slot + 1}: —"
-            btn = QPushButton(text)
-            btn.setStyleSheet(
-                f"color:{_SLOT_COLORS[slot]};"
-                + ("font-weight:bold;" if f is not None else "")
-            )
-            btn.setToolTip(
-                "Set this slot's frame + rotation to its current view"
-            )
-            btn.clicked.connect(
-                lambda _c, p=pi, s=slot: self._set_point_slot(p, s)
-            )
-            h.addWidget(btn)
+                # Provisional: grey computed estimate (or — if no anchor).
+                prov = self._provisional(pi, slot)
+                if prov is None:
+                    cell = QLabel(f"S{slot + 1}: —")
+                    cell.setStyleSheet(
+                        "QLabel { color:#999999;" + cell_box + "}"
+                    )
+                else:
+                    pf, pr = prov
+                    cell = QLabel(f"S{slot + 1}: F{pf + 1} A{int(round(pr))}")
+                    cell.setStyleSheet(
+                        "QLabel { color:#8a8a8a;" + cell_box + "}"
+                    )
+                    cell.setToolTip("仮の計算値 — Edit→○ で確定")
+            h.addWidget(cell)
+        # Tighter horizontal padding so Jump / Edit aren't so wide
+        # (roughly half the default side spacing).
+        nav_css = "QPushButton { padding:3px 8px; }"
         jump = QPushButton("Jump")
+        jump.setStyleSheet(nav_css)
+        jump.setToolTip("全画像をこのSync点へ移動")
         jump.clicked.connect(lambda _c, p=pi: self._jump_to_point(p))
         h.addWidget(jump)
+        edit = QPushButton("Edit")
+        edit.setStyleSheet(nav_css)
+        edit.setToolTip("このSync点へ移動して微調整 → ○ で確定")
+        edit.clicked.connect(lambda _c, p=pi: self._edit_point(p))
+        h.addWidget(edit)
+        ok = QPushButton("○")
+        ok.setFixedWidth(28)
+        ok.setToolTip("各画像の現在フレームをこのSync点として確定（全セル黒）")
+        ok.clicked.connect(lambda _c, p=pi: self._confirm_point(p))
+        h.addWidget(ok)
         dele = QPushButton("✕")
         dele.setFixedWidth(28)
         dele.clicked.connect(lambda _c, p=pi: self._del_point(p))
         h.addWidget(dele)
         return row
 
-    def _set_point_slot(self, pi: int, slot: int) -> None:
-        sl = self.slots[slot]
-        if sl.plane is None:
-            self._sync_status.setText(
-                f"Slot {slot + 1} has no IVUS loaded."
-            )
-            return
-        value = sl.cur
-        if multisync.would_conflict(
-            self.sync_points, self._master, _N_SLOTS, pi, slot, value
-        ):
-            self._sync_status.setText(
-                f"矛盾しています — Slot {slot + 1} のフレーム "
-                f"{value + 1} は他のSync点と前後関係が逆転します。"
-            )
-            return
-        self._sync_status.setText("")
-        self.sync_points[pi]["frames"][slot] = value
-        self.sync_points[pi]["rots"][slot] = sl.rotation
-        self._rebuild_sync_editor()
-        if self._sync_on:
-            self._drive_followers()
-
     def _del_point(self, pi: int) -> None:
         if 0 <= pi < len(self.sync_points):
             del self.sync_points[pi]
+            if self._editing == pi:
+                self._editing = None
+            self._active_point = None
             self._sync_status.setText("")
             self._rebuild_sync_editor()
             if self._sync_on:
                 self._drive_followers()
 
-    def _jump_to_point(self, pi: int) -> None:
+    def _goto_point(self, pi: int) -> None:
+        """Move every loaded slot to this sync point — to its committed
+        frame, or to the grey provisional estimate when not yet set."""
         sp = self.sync_points[pi]
-        for slot in range(self._layout_count):
+        for slot in range(_N_SLOTS):
+            sl = self.slots[slot]
+            if sl.plane is None:
+                continue
             f = sp["frames"][slot]
-            if f is not None and self.slots[slot].plane is not None:
-                self.slots[slot].show_frame(f, sp["rots"][slot])
+            if f is not None:
+                sl.show_frame(f, sp["rots"][slot])
+            else:
+                prov = self._provisional(pi, slot)
+                if prov is not None:
+                    sl.show_frame(prov[0], prov[1])
+
+    def _jump_to_point(self, pi: int) -> None:
+        # Jump = view only: not an edit, so leave edit mode.
+        self._editing = None
+        self._active_point = pi
+        self._goto_point(pi)
+        self._rebuild_sync_editor()
+
+    def _edit_point(self, pi: int) -> None:
+        # Edit = jump there and flag the point as being edited (highlight +
+        # status hint). To adjust images independently, turn Sync OFF; with
+        # Sync ON the master scrub keeps driving the followers as usual.
+        self._editing = pi
+        self._active_point = pi
+        self._goto_point(pi)
+        self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
+        self._sync_status.setText(
+            f"Sync-{pi + 1} 編集中 — 各画像を微調整（独立調整は Sync OFF）"
+            "して ○ で確定。"
+        )
+        self._rebuild_sync_editor()
+
+    def _confirm_point(self, pi: int) -> None:
+        """Capture every loaded slot's current frame + rotation as this
+        sync point (committing any grey provisional cells), rejected if it
+        would fold the mapping back on itself."""
+        frames = list(self.sync_points[pi]["frames"])
+        rots = list(self.sync_points[pi]["rots"])
+        loaded = []
+        for slot in range(_N_SLOTS):
+            sl = self.slots[slot]
+            if sl.plane is not None:
+                frames[slot] = sl.cur
+                rots[slot] = sl.rotation
+                loaded.append(slot)
+        if len(loaded) < 2:
+            self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
+            self._sync_status.setText(
+                "確定には2つ以上のスロットにIVUSが必要です。"
+            )
+            return
+        cand = [
+            {"frames": list(p["frames"]), "rots": list(p["rots"])}
+            for p in self.sync_points
+        ]
+        cand[pi] = {"frames": frames, "rots": rots}
+        if multisync.has_conflict(cand, self._master, _N_SLOTS):
+            self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
+            self._sync_status.setText(
+                "矛盾しています — 現在の各フレームは他のSync点と前後関係が"
+                "逆転します。フレームを調整してください。"
+            )
+            return
+        self.sync_points[pi]["frames"] = frames
+        self.sync_points[pi]["rots"] = rots
+        self._editing = None
+        self._active_point = pi
+        self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
+        self._sync_status.setText(f"Sync-{pi + 1} 確定。")
+        self._rebuild_sync_editor()
+        if self._sync_on:
+            self._drive_followers()
 
     # ============================================== slot events
     def _slot_series_changed(self, sl: _Slot) -> None:
@@ -720,12 +1143,23 @@ class MultiSyncWindow(QMainWindow):
         if self._link_viewers[sl.index] is not None:
             self._disconnect_link_for(sl.index)
         sl.load(sl.combo.currentData())
+        # A new (or cleared) pull-back changes the slider range and the
+        # synced span, so refresh this slot's ▽ marks and the global bar.
+        self._refresh_slot_marks()
+        self._refresh_global_seek()
 
     def _set_master(self, idx: int) -> None:
+        # Changing the master only changes which run is the reference /
+        # driver — it must NOT move any image. (It used to call
+        # _drive_followers(), which re-mapped every follower onto the new
+        # master's current frame and nudged carefully-positioned images
+        # out from under the user mid-setup / mid-Edit.) Re-mapping happens
+        # on the next master scrub, as usual.
         self._master = idx
         self._refresh_master_tint()
-        if self._sync_on:
-            self._drive_followers()
+        # Provisional (grey) estimates are computed relative to the master,
+        # so re-render the rows (and the global span) when it changes.
+        self._rebuild_sync_editor()
 
     def _refresh_master_tint(self) -> None:
         for s in self.slots:
@@ -736,10 +1170,14 @@ class MultiSyncWindow(QMainWindow):
         if sl.plane is None:
             return
         sl.show_frame(value)
-        # Scrubbing the master drives the followers (sync ON); scrubbing
-        # a follower only moves that slot (needed to set sync points).
+        # Behaviour depends ONLY on the Sync toggle (not on whether a point
+        # is being edited): Sync ON → the master drives every follower;
+        # Sync OFF → the master loses its role and each image (master
+        # included) moves on its own. Scrubbing a follower always moves
+        # just that slot, which is how a point is fine-tuned under Sync OFF.
         if idx == self._master and self._sync_on:
             self._drive_followers()
+        self._update_active_highlight()
 
     def _drive_followers(self) -> None:
         """Map the master's current frame onto every other loaded slot."""
@@ -758,6 +1196,10 @@ class MultiSyncWindow(QMainWindow):
                 self.sync_points, self._master, sl.index, fm
             )
             sl.show_frame(int(round(fb)), rot)
+        # Mirror the master's frame onto the global synced slider, unless
+        # the global slider is itself the driver (then it owns its value).
+        if not self._global_echo:
+            self._set_global_value(fm)
 
     # ============================================== sync file I/O
     def _save_sync(self) -> None:
@@ -846,64 +1288,58 @@ class MultiSyncWindow(QMainWindow):
             self._drive_followers()
 
     # ============================================== MP4 export
-    def _render_cell(self, slot: _Slot, frame_idx: int,
-                     rotation: float, size: int):
-        """One slot rendered as an (size, size, 3) RGB uint8 array,
-        fitted + rotated — the per-slot tile of the MP4 composite. RGB
-        (not BGR) so it can be fed straight to imageio's libx264 writer.
-        Fitting is done with numpy slicing so OpenCV isn't a dependency."""
-        cell = np.zeros((size, size, 3), np.uint8)
-        if slot.plane is None:
-            return cell
-        arr = _to_u8(slot.plane.frame(
-            max(0, min(frame_idx, slot.total - 1))
-        ))
-        if arr.ndim == 2:
-            arr = np.repeat(arr[:, :, None], 3, axis=2)
-        elif arr.shape[2] != 3:
-            arr = arr[..., :3]
-        h, w = arr.shape[:2]
-        sc = min(size / w, size / h)
-        dw, dh = max(1, int(w * sc)), max(1, int(h * sc))
-        # Nearest-neighbour downscale: 480×480 cell vs ~512–1024 source is
-        # close enough to a 1:1 mapping that an exact resampler isn't
-        # worth a heavy dependency. (For sharper output, sample on a
-        # regular grid.)
-        ys = (np.linspace(0, h - 1, dh)).astype(np.int32)
-        xs = (np.linspace(0, w - 1, dw)).astype(np.int32)
-        small = arr[ys[:, None], xs[None, :]]
-        ox, oy = (size - dw) // 2, (size - dh) // 2
-        cell[oy:oy + dh, ox:ox + dw] = small
-        if abs(rotation) > 1e-3:
-            # +rotation matches QPainter.rotate's clockwise-in-screen
-            # convention used by the live _SyncCanvas paintEvent. The
-            # old "-rotation" was the wrong sign and produced a tile
-            # rotated the opposite direction from the live view, which
-            # is what showed up as the export's follower being 90° off.
-            cell = self._rotate_rgb(cell, rotation)
-        return cell
-
     @staticmethod
-    def _rotate_rgb(img: np.ndarray, deg: float) -> np.ndarray:
-        """Affine rotate (H, W, 3) uint8 around the centre by *deg*. Uses
-        nearest-neighbour sampling via numpy; output is the same shape as
-        the input (black where pixels rotate off the canvas)."""
-        h, w = img.shape[:2]
-        cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
-        a = math.radians(deg)
-        ca, sa = math.cos(a), math.sin(a)
-        # Inverse-map each output pixel back to a source pixel.
-        yy, xx = np.indices((h, w), dtype=np.float32)
-        dx, dy = xx - cx, yy - cy
-        sx = ca * dx + sa * dy + cx
-        sy = -sa * dx + ca * dy + cy
-        sxi = np.rint(sx).astype(np.int32)
-        syi = np.rint(sy).astype(np.int32)
-        ok = (sxi >= 0) & (sxi < w) & (syi >= 0) & (syi < h)
-        out = np.zeros_like(img)
-        out[ok] = img[np.clip(syi, 0, h - 1),
-                      np.clip(sxi, 0, w - 1)][ok]
-        return out
+    def _qimage_to_rgb(img: QImage) -> np.ndarray:
+        """QImage → owned, contiguous (H, W, 3) uint8 RGB for the MP4
+        writer, honouring the row stride (RGB888 rows are 4-byte aligned).
+
+        The returned array MUST be a real copy, not a view: np.frombuffer
+        aliases the QImage's pixel buffer, and once this local QImage is
+        garbage-collected that memory is freed. Returning a view left the
+        encoder reading freed memory — intermittently corrupting frames or
+        breaking the ffmpeg pipe with '[Errno 22] Invalid argument'."""
+        img = img.convertToFormat(QImage.Format.Format_RGB888)
+        w, h = img.width(), img.height()
+        bpl = img.bytesPerLine()
+        ptr = img.constBits()
+        ptr.setsize(h * bpl)
+        arr = np.frombuffer(ptr, np.uint8).reshape(h, bpl)
+        return np.array(arr[:, :w * 3].reshape(h, w, 3))   # copy, not view
+
+    def _compose_frame_qt(self, states: list, W: int, H: int,
+                          cell: int, cols: int) -> np.ndarray:
+        """Render one composite frame with QPainter — the SAME optimised
+        smooth scale + rotate the live _SyncCanvas uses — so the export
+        pixel-matches the on-screen view and is ~50× faster than the old
+        numpy bilinear path. *states* is a list of (slot_index, _Slot,
+        frame_idx, rotation_deg) for the loaded slots."""
+        img = QImage(W, H, QImage.Format.Format_RGB888)
+        img.fill(QColor("#000000"))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        try:
+            for (k, sl, fb, rot) in states:
+                frame = sl.plane.frame(max(0, min(fb, sl.total - 1)))
+                if frame is None:
+                    continue
+                qimg = to_qimage(_to_u8(frame))
+                w, h = qimg.width(), qimg.height()
+                if w <= 0 or h <= 0:
+                    continue
+                r, c = divmod(k, cols)
+                tx, ty = c * cell, r * cell
+                scale = min(cell / w, cell / h)
+                dw, dh = w * scale, h * scale
+                p.save()
+                p.setClipRect(tx, ty, cell, cell)
+                p.translate(tx + cell / 2.0, ty + cell / 2.0)
+                p.rotate(rot)
+                p.translate(-dw / 2.0, -dh / 2.0)
+                p.drawImage(QRectF(0.0, 0.0, dw, dh), qimg)
+                p.restore()
+        finally:
+            p.end()
+        return self._qimage_to_rgb(img)
 
     def _export_mp4(self) -> None:
         m = self.slots[self._master]
@@ -917,11 +1353,14 @@ class MultiSyncWindow(QMainWindow):
         # uses, with the per-file-name checkboxes hidden (the user already
         # picks the path in the Save dialog).
         from multi_dicomviewer.ui.export_dialog import ExportDialog
-        # Always offer 30 fps as the default — the user's source IVUS
-        # cine rate is available as a preset button if they want it.
+        # Defaults tuned for IVUS review composites: CRF 10 (near-lossless,
+        # speckle preserved) at 15 fps. 40 Mbps is the fallback only if the
+        # user switches to Bitrate mode. All overridable in the dialog.
         dlg_cfg = ExportDialog(
             "mp4", 1,
-            default_fps=None,
+            default_fps=15.0,
+            default_bitrate=40,
+            default_crf=10,
             show_filename_fields=False,
             title_override="Export composite MP4",
             parent=self,
@@ -944,7 +1383,20 @@ class MultiSyncWindow(QMainWindow):
         # instead of collapsing to 1×N.
         cols = 2
         rows = (self._layout_count + cols - 1) // cols
-        cell = 480
+        # Render each tile at (close to) the native source resolution so no
+        # detail is thrown away the way the old fixed 480 px tile did —
+        # clamped to [480, 1024] to keep the file / encode time bounded and
+        # forced even for yuv420p.
+        src_max = 0
+        for k in range(self._layout_count):
+            sl = self.slots[k]
+            if sl.plane is None or sl.total < 1:
+                continue
+            fr = sl.plane.frame(max(0, min(sl.cur, sl.total - 1)))
+            if fr is not None:
+                src_max = max(src_max, fr.shape[0], fr.shape[1])
+        cell = max(480, min(src_max or 480, 1024))
+        cell -= cell % 2
         W, H = cell * cols, cell * rows
 
         # Synced range: span from the earliest virtual master frame at
@@ -982,73 +1434,86 @@ class MultiSyncWindow(QMainWindow):
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(0)
 
-        frames_rgb: list[np.ndarray] = []
-        for i, fm in enumerate(range(fm_start, fm_end + 1)):
-            if dlg.wasCanceled():
-                break
-            canvas = np.zeros((H, W, 3), np.uint8)
-            for k in range(self._layout_count):
-                sl = self.slots[k]
-                if sl.plane is None:
-                    continue
-                if sl is m:
-                    # Master plays through its own timeline; clamping
-                    # holds the first / last frame as a still while a
-                    # follower is in its extended pre/post range. The
-                    # master's rotation is whatever the user has dragged
-                    # it to in the live view (constant across all fm —
-                    # live also keeps master rotation constant during
-                    # scrubbing).
-                    fb = max(0, min(fm, m.total - 1))
-                    rot = m.rotation
-                else:
-                    # Sync-map the follower; clamping holds its first /
-                    # last frame as a still when the master is the one
-                    # that's still playing past this follower's range.
-                    fb_float = multisync.map_frame(
-                        self.sync_points, self._master, sl.index, fm,
-                        m.fps, sl.fps,
-                    )
-                    fb = max(0, min(int(round(fb_float)), sl.total - 1))
-                    # Per-fm follower rotation = the same map_rotation
-                    # the live _drive_followers() applies on each master
-                    # scrub. This matches the live PLAYBACK animation
-                    # (rotation interpolated through sync points). If
-                    # sync points captured no rotation, fall back to the
-                    # slot's current drag rotation so a user who only
-                    # dragged (no rotation captured in sync points) still
-                    # gets their orientation in the export.
-                    rot = multisync.map_rotation(
-                        self.sync_points, self._master, sl.index, fm
-                    )
-                    if abs(rot) < 1e-3 and abs(sl.rotation) > 1e-3:
-                        rot = sl.rotation
-                tile = self._render_cell(sl, fb, rot, cell)
-                r, c = divmod(k, cols)
-                canvas[r * cell:(r + 1) * cell,
-                       c * cell:(c + 1) * cell] = tile
-            frames_rgb.append(canvas)
-            if i % 8 == 0:
-                dlg.setValue(i)
-                QApplication.processEvents()
+        # Stream each composite frame straight into the encoder instead of
+        # buffering them all (a 4-up 1024² × ~1400-frame export would be
+        # >4 GB in RAM). The encoder also writes via an ASCII temp file so
+        # non-ASCII output paths (Japanese folders) work.
+        from multi_dicomviewer.core import export as exporter
+        try:
+            stream = exporter.open_mp4_stream(
+                path, fps=cfg.fps,
+                bitrate_mbps=cfg.bitrate_mbps, crf=cfg.crf,
+            )
+        except Exception as e:
+            dlg.close()
+            QMessageBox.critical(self, "Export MP4", f"Encoding failed:\n{e}")
+            return
+
+        written = 0
+        cancelled = False
+        try:
+            for i, fm in enumerate(range(fm_start, fm_end + 1)):
+                if dlg.wasCanceled():
+                    cancelled = True
+                    break
+                states: list = []
+                for k in range(self._layout_count):
+                    sl = self.slots[k]
+                    if sl.plane is None:
+                        continue
+                    if sl is m:
+                        # Master plays through its own timeline; clamping
+                        # holds the first / last frame as a still while a
+                        # follower is in its extended pre/post range. The
+                        # master's rotation is whatever the user dragged it
+                        # to in the live view (constant across all fm).
+                        fb = max(0, min(fm, m.total - 1))
+                        rot = m.rotation
+                    else:
+                        # Sync-map the follower; clamping holds its first /
+                        # last frame as a still when the master is the one
+                        # still playing past this follower's range.
+                        fb_float = multisync.map_frame(
+                            self.sync_points, self._master, sl.index, fm,
+                            m.fps, sl.fps,
+                        )
+                        fb = max(0, min(int(round(fb_float)), sl.total - 1))
+                        # Per-fm follower rotation = the same map_rotation
+                        # the live _drive_followers() applies; fall back to
+                        # the slot's drag rotation when sync points captured
+                        # none so the export still keeps its orientation.
+                        rot = multisync.map_rotation(
+                            self.sync_points, self._master, sl.index, fm
+                        )
+                        if abs(rot) < 1e-3 and abs(sl.rotation) > 1e-3:
+                            rot = sl.rotation
+                    states.append((k, sl, fb, rot))
+                stream.add(self._compose_frame_qt(states, W, H, cell, cols))
+                written += 1
+                if i % 8 == 0:
+                    dlg.setValue(i)
+                    QApplication.processEvents()
+        except Exception as e:
+            stream.abort()
+            dlg.close()
+            QMessageBox.critical(self, "Export MP4", f"Encoding failed:\n{e}")
+            return
         dlg.close()
 
-        if not frames_rgb:
+        if cancelled or written == 0:
+            stream.abort()
             return
         try:
-            from multi_dicomviewer.core import export as exporter
-            exporter.write_mp4(
-                path, frames_rgb,
-                fps=cfg.fps,
-                bitrate_mbps=cfg.bitrate_mbps,
-            )
+            stream.close()
         except Exception as e:
             QMessageBox.critical(self, "Export MP4", f"Encoding failed:\n{e}")
             return
+        qual = f"CRF {cfg.crf}" if cfg.crf is not None \
+            else f"{cfg.bitrate_mbps} Mbps"
         QMessageBox.information(
             self, "Export MP4",
-            f"Saved {len(frames_rgb)} frames @ {cfg.fps:.1f} fps, "
-            f"{cfg.bitrate_mbps} Mbps:\n{path}"
+            f"Saved {written} frames @ {cfg.fps:.1f} fps, "
+            f"{qual}:\n{path}"
         )
 
     # ============================================== live link with panes
@@ -1095,6 +1560,7 @@ class MultiSyncWindow(QMainWindow):
         # like a user scrub on the master would.
         if slot_index == self._master and self._sync_on:
             self._drive_followers()
+        self._update_active_highlight()
 
     def _slot_to_pane(self, slot_index: int, idx: int) -> None:
         """Slot changed frame → push it onto the linked pane's viewer.

@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import tempfile
 from typing import Callable, Iterable, Optional
 
 import numpy as np
@@ -295,35 +296,115 @@ def _pad_to_even(rgb: np.ndarray) -> np.ndarray:
     return np.pad(rgb, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
 
 
+def _make_writer(path: str, fps: float, bitrate_mbps: int,
+                 crf: Optional[int]):
+    """imageio-ffmpeg writer; libx264 + yuv420p so QuickTime / Windows
+    Media Player / browsers all play it.
+
+    Two quality modes:
+      * crf is None → explicit target bitrate ('Mbps' means Mbps).
+      * crf set → x264 constant-quality (-crf). The encoder spends bits
+        only where needed, so flat/black areas (IVUS composites) cost
+        almost nothing and files are far smaller at equal visual quality.
+    """
+    import imageio.v2 as imageio   # lazy: avoids cost when user never exports
+
+    kwargs = dict(
+        fps=float(fps),
+        codec="libx264",
+        pixelformat="yuv420p",
+        macro_block_size=1,           # we already pad to even ourselves
+        quality=None,                 # don't let imageio add its own -qscale
+        ffmpeg_log_level="error",
+    )
+    if crf is not None:
+        kwargs["output_params"] = [
+            "-crf", str(int(crf)), "-preset", "medium"
+        ]
+    else:
+        kwargs["bitrate"] = f"{int(bitrate_mbps)}M"
+    return imageio.get_writer(path, **kwargs)
+
+
+def _move_over(src: str, dst: str) -> None:
+    """Move *src* → *dst*, overwriting. Python's file ops handle Unicode
+    destinations fine even when the bundled ffmpeg can't write there."""
+    os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+    try:
+        os.replace(src, dst)               # atomic on the same filesystem
+    except OSError:
+        if os.path.exists(dst):
+            os.remove(dst)
+        shutil.move(src, dst)
+
+
+class _Mp4Stream:
+    """Streaming MP4 encoder: frames are piped to ffmpeg one at a time so
+    memory stays flat (a 4-up 1024² composite × ~1400 frames would be
+    >4 GB if buffered). When the destination path isn't pure ASCII the
+    bundled Windows ffmpeg can't open it (fails with '[Errno 22] Invalid
+    argument'), so we encode to an ASCII temp file and move it into place
+    on close()."""
+
+    def __init__(self, path: str, fps: float, bitrate_mbps: int,
+                 crf: Optional[int]):
+        self._final = path
+        self._tmp: Optional[str] = None
+        out = path
+        if not path.isascii():
+            fd, self._tmp = tempfile.mkstemp(suffix=".mp4")
+            os.close(fd)
+            out = self._tmp
+        self._writer = _make_writer(out, fps, bitrate_mbps, crf)
+
+    def add(self, frame: np.ndarray) -> None:
+        self._writer.append_data(_pad_to_even(frame))
+
+    def close(self) -> None:
+        self._writer.close()
+        if self._tmp:
+            _move_over(self._tmp, self._final)
+
+    def abort(self) -> None:
+        try:
+            self._writer.close()
+        except Exception:
+            pass
+        if self._tmp and os.path.exists(self._tmp):
+            try:
+                os.remove(self._tmp)
+            except OSError:
+                pass
+
+
+def open_mp4_stream(path: str, fps: float, bitrate_mbps: int,
+                    crf: Optional[int] = None) -> _Mp4Stream:
+    """Open a streaming MP4 encoder. Call ``.add(frame_rgb)`` per frame,
+    then ``.close()`` (or ``.abort()`` on cancel). Bounds memory and works
+    with non-ASCII output paths — used by the MultiSync composite export."""
+    return _Mp4Stream(path, fps, bitrate_mbps, crf)
+
+
 def write_mp4(path: str, frames: list[np.ndarray],
-              fps: float, bitrate_mbps: int) -> None:
-    """Public alias for callers (e.g. the MultiSync composite export) that
-    already have rendered RGB frames and just want the same encoder."""
-    _write_mp4(path, frames, fps, bitrate_mbps)
+              fps: float, bitrate_mbps: int,
+              crf: Optional[int] = None) -> None:
+    """Public alias for callers that already have all rendered RGB frames.
+    When *crf* is given, encode at constant quality instead of a fixed
+    bitrate."""
+    _write_mp4(path, frames, fps, bitrate_mbps, crf)
 
 
 def _write_mp4(path: str, frames: list[np.ndarray],
-               fps: float, bitrate_mbps: int) -> None:
-    """imageio-ffmpeg writer; libx264 + yuv420p so QuickTime / Windows
-    Media Player / browsers all play it. Bitrate is set explicitly so
-    'Mbps' in the dialog actually means Mbps."""
-    import imageio.v2 as imageio   # lazy: avoids cost when user never exports
-
-    writer = imageio.get_writer(
-        path,
-        fps=float(fps),
-        codec="libx264",
-        bitrate=f"{int(bitrate_mbps)}M",
-        pixelformat="yuv420p",
-        macro_block_size=1,           # we already pad to even ourselves
-        quality=None,                 # disable VBR so bitrate is respected
-        ffmpeg_log_level="error",
-    )
+               fps: float, bitrate_mbps: int,
+               crf: Optional[int] = None) -> None:
+    stream = open_mp4_stream(path, fps, bitrate_mbps, crf)
     try:
         for f in frames:
-            writer.append_data(_pad_to_even(f))
-    finally:
-        writer.close()
+            stream.add(f)
+    except BaseException:
+        stream.abort()
+        raise
+    stream.close()
 
 
 def _render_xa_series(series: Series) -> tuple[list[np.ndarray], float]:
@@ -384,10 +465,12 @@ def export_mp4(series_list: list[Series],
                fields: Iterable[str],
                bitrate_mbps: int,
                fps_override: Optional[float],
+               crf: Optional[int] = None,
                progress: ProgressCB = None) -> list[str]:
     """Write one .mp4 per series into *out_dir*. Returns the list of
     files written. ``fps_override`` (from the dialog) wins over the
-    source cine rate when non-None."""
+    source cine rate when non-None. When ``crf`` is set, encode at
+    constant quality instead of the target bitrate."""
     fields = tuple(fields)
     written: list[str] = []
     n = len(series_list)
@@ -423,11 +506,11 @@ def export_mp4(series_list: list[Series],
         target = _unique_path(os.path.join(out_dir, base + ".mp4"))
 
         if progress:
+            qual = f"CRF {crf}" if crf is not None else f"{bitrate_mbps} Mbps"
             progress(si, n,
                      f"Encoding [{si + 1}/{n}] {os.path.basename(target)} "
-                     f"({len(frames)} frames @ {fps:.1f} fps, "
-                     f"{bitrate_mbps} Mbps)")
-        _write_mp4(target, frames, fps, bitrate_mbps)
+                     f"({len(frames)} frames @ {fps:.1f} fps, {qual})")
+        _write_mp4(target, frames, fps, bitrate_mbps, crf)
         written.append(target)
     if progress:
         progress(n, n, "Done")

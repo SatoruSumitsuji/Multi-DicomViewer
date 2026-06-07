@@ -1940,6 +1940,7 @@ class MainWindow(QMainWindow):
                     series_list, out_dir, cfg.fields,
                     bitrate_mbps=cfg.bitrate_mbps,
                     fps_override=cfg.fps,
+                    crf=cfg.crf,
                     progress=_cb,
                 )
         except RuntimeError as e:
