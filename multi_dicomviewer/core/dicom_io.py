@@ -880,7 +880,7 @@ def load_xa(
 
     n_files = max(1, len(series.files))
     if progress is not None:
-        progress("Reading cine file…", 0, n_files * 2)
+        progress("Reading DICOM file…", 0, n_files * 2)
 
     for idx, path in enumerate(series.files):
         if progress is not None:
