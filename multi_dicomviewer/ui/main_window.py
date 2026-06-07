@@ -2068,9 +2068,9 @@ class MainWindow(QMainWindow):
         # user previously had no way to tell the UI from a freeze.
         is_ct = series.modality == Modality.CT
         title = ("Loading CT" if is_ct
-                 else f"Loading {series.kind or 'cine'}")
+                 else f"Loading {series.kind or 'DICOM'}")
         initial_msg = ("Reading CT slices…" if is_ct
-                       else "Reading cine file…")
+                       else "Reading DICOM file…")
         dlg = QProgressDialog(initial_msg, None, 0, 0, self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
