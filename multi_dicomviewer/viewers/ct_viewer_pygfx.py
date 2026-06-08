@@ -389,6 +389,7 @@ class _Overlay(QWidget):
         e = v._edit
         edit_mi = e["mi"] if (e and e["key"] == key) else -1
         edit_vi = e["vi"] if (e and e["key"] == key) else -1
+        edit_ca = bool(e.get("ca")) if (e and e["key"] == key) else False
 
         for mi, m in enumerate(v._measures[key]):
             rgb = _hex_to_rgb(m.get("color"))
@@ -403,11 +404,18 @@ class _Overlay(QWidget):
                 centre = v._shape_center(m)
                 for q in ca["pts"]:
                     draw_dashed((centre, q), rgb)
-                dots(ca["pts"], QColor(255, 140, 0), 5.0)   # orange picks
+                # Orange marker picks; the one being dragged turns green (like a
+                # polygon vertex).
+                ca_edit = edit_ca and mi == edit_mi and 0 <= edit_vi < len(ca["pts"])
+                ca_idle = [q for ci, q in enumerate(ca["pts"])
+                           if not (ca_edit and ci == edit_vi)]
+                dots(ca_idle, QColor(255, 140, 0), 5.0)
+                if ca_edit:
+                    dots([ca["pts"][edit_vi]], QColor(59, 219, 90), 7.0)
             idle = [q for vi, q in enumerate(v._handles(m))
-                    if not (mi == edit_mi and vi == edit_vi)]
+                    if not (mi == edit_mi and not edit_ca and vi == edit_vi)]
             dots(idle, QColor(255, 217, 0), 4.0)            # yellow handles
-            if mi == edit_mi and 0 <= edit_vi < len(m["pts"]):
+            if mi == edit_mi and not edit_ca and 0 <= edit_vi < len(m["pts"]):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
             p.setPen(QColor(255, 217, 0))
@@ -1786,6 +1794,19 @@ class CTViewer(AbstractViewer):
                     return mi, vi
         return None
 
+    def _pick_center_angle(self, which, sx, sy):
+        """Pick a finalized Center-Angle marker point (the orange dots) so it
+        can be dragged like a polygon vertex. Returns (mi, ci) or None."""
+        for mi in range(len(self._measures[which]) - 1, -1, -1):
+            ca = self._measures[which][mi].get("center_angle")
+            if not ca or not ca.get("pts"):
+                continue
+            for ci, q in enumerate(ca["pts"]):
+                qx, qy = self._world_to_screen(which, q[0], q[1])
+                if math.hypot(qx - sx, qy - sy) < 12.0:
+                    return mi, ci
+        return None
+
     def _pick_measure(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
         tol = max(3.0, 0.02 * self._half)
@@ -1811,6 +1832,13 @@ class CTViewer(AbstractViewer):
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             self._redraw_geom(which)
             return True
+        # A Center-Angle marker point can be dragged just like a polygon vertex.
+        ca_hit = self._pick_center_angle(which, sx, sy)
+        if ca_hit is not None:
+            self._edit = {"key": which, "mi": ca_hit[0], "vi": ca_hit[1],
+                          "ca": True}
+            self._redraw_geom(which)
+            return True
         if not self._meas_type:
             return False
         w = self._disp_to_world(which, sx, sy)
@@ -1833,11 +1861,26 @@ class CTViewer(AbstractViewer):
             return
         w = self._disp_to_world(e["key"], sx, sy)
         m = self._measures[e["key"]][e["mi"]]
-        if m["type"] == "ellipse":
+        if e.get("ca"):
+            self._set_center_angle_point(m, e["vi"], w)
+        elif m["type"] == "ellipse":
             self._set_ellipse_handle(m, e["vi"], w)
         else:
             m["pts"][e["vi"]] = w
         self._redraw_geom(e["key"])
+
+    def _set_center_angle_point(self, m, ci, w):
+        """Move one Center-Angle marker point and recompute the angle from the
+        shape centre, mirroring how polygon-vertex drags update live."""
+        ca = m.get("center_angle")
+        if not ca or "pts" not in ca or not (0 <= ci < len(ca["pts"])):
+            return
+        pts = list(ca["pts"])
+        pts[ci] = w
+        centre = self._shape_center(m)
+        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[1], pts[2])
+        m["center_angle"] = {"pts": pts, "angle": span,
+                             "t1": t1, "t3": t3, "ccw": ccw}
 
     def _measure_release(self):
         if self._edit:
