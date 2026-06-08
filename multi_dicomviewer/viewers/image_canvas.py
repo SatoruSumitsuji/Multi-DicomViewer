@@ -531,6 +531,24 @@ class ImageCanvas(QWidget):
                 self._plaque_selected = self._plaque_selected[-2:]
 
     # ----------------------------------------------- right-click menus
+    def _ca_hit(self, sx, sy):
+        """mi of a measure whose Center-Angle marker point OR spoke line is
+        under the widget point (sx,sy), else None — for 'Delete Center Angle'."""
+        for mi in range(len(self.measures) - 1, -1, -1):
+            ca = self.measures[mi].get("center_angle")
+            if not ca or not ca.get("pts"):
+                continue
+            for q in ca["pts"]:
+                wq = self._image_to_widget(q)
+                if (wq.x() - sx) ** 2 + (wq.y() - sy) ** 2 <= 144.0:   # ≤12px
+                    return mi
+            wc = self._image_to_widget(self._shape_center(self.measures[mi]))
+            for q in ca["pts"]:
+                wq = self._image_to_widget(q)
+                if G.seg_dist(sx, sy, (wc.x(), wc.y()), (wq.x(), wq.y())) < 6.0:
+                    return mi
+        return None
+
     def _handle_menu(self, hit, sx, sy):
         mi, vi = hit
         m = self.measures[mi]
@@ -760,6 +778,18 @@ class ImageCanvas(QWidget):
                     and len(self._draft["pts"]) >= 2:
                 self._commit_draft()
                 return
+            # Right-click ON a Center-Angle marker or spoke deletes JUST the
+            # Center Angle (the shape stays) — checked before the handle/outline
+            # menus, matching the CT viewers.
+            ca_mi = self._ca_hit(sx, sy)
+            if ca_mi is not None:
+                menu = QMenu(self)
+                del_ca = menu.addAction("Delete Center Angle")
+                chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
+                if chosen is del_ca:
+                    self.measures[ca_mi].pop("center_angle", None)
+                    self.update()
+                return
             # Handle has priority over outline (more specific target).
             hit = self._pick_handle(sx, sy)
             if hit is not None:
@@ -967,17 +997,15 @@ class ImageCanvas(QWidget):
         # stale rect can't linger for the next drag hit-test.
         self._label_rects = {}
 
-        # Major/minor axes (drawn UNDER outlines): thick dotted, in each
-        # measure's own colour (alpha-modulated so the outline still
-        # dominates).
+        # Major/minor axes (drawn UNDER outlines): thick dotted, in the
+        # polygon-vertex colour (yellow) so the long/short-diameter lines read
+        # as part of the shape — matching the CT viewers.
         for m in self.measures:
             try:
                 segs = self._axis_segs_px(m)
             except Exception:
                 continue
-            base = QColor(m.get("color", DEFAULT_MEAS_COLOR))
-            base.setAlpha(170)
-            axis_pen = QPen(base, 2, Qt.PenStyle.DashLine)
+            axis_pen = QPen(QColor(255, 217, 0, 170), 2, Qt.PenStyle.DashLine)
             for seg in segs:
                 if seg is None:
                     continue
@@ -1006,8 +1034,9 @@ class ImageCanvas(QWidget):
                 continue
             centre = self._shape_center(m)
             wc = self._image_to_widget(centre)
-            col = QColor(m.get("color", DEFAULT_MEAS_COLOR))
-            spoke = QColor(col); spoke.setAlpha(200)
+            # Spokes in the CA-marker colour (orange) so the spokes + markers
+            # read as one deletable unit — matching the CT viewers.
+            spoke = QColor(255, 140, 0, 200)
             p.setPen(QPen(spoke, 1.2, Qt.PenStyle.DashLine))
             for q in ca["pts"]:
                 wq = self._image_to_widget(q)

@@ -1135,18 +1135,19 @@ class CTViewer(AbstractViewer):
         self._preset.currentTextChanged.connect(self._apply_preset)
         row.addWidget(self._preset)
 
-        hist = QPushButton("Measure History")
-        hist.setToolTip("Show this study's measurement history")
-        hist.clicked.connect(self.history_requested.emit)
-        row.addWidget(hist)
-
-        # "DICOM Tags…" with the tag-text-size slider stacked above it.
+        # DICOM Tags on the LEFT of the pair (always visible); Measure History
+        # — less critical — to its right. Tag-text-size slider stacked above.
         tags_box, self._tag_font_slider, tags = build_tag_font_control(
             TAG_FONT_PT_DEFAULT
         )
         tags.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
+
+        hist = QPushButton("Measure History")
+        hist.setToolTip("Show this study's measurement history")
+        hist.clicked.connect(self.history_requested.emit)
+        row.addWidget(hist)
         row.addStretch(1)
         self._set_tool("PAGING")
         return row
