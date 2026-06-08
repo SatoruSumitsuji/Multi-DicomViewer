@@ -82,6 +82,7 @@ from multi_dicomviewer.core.dicom_tags import overlay_lines
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.ui.tag_font import (
     TAG_FONT_FILE, TAG_FONT_PT_DEFAULT, VTK_FONT_FILE, build_tag_font_control,
+    wrap_lines_to_chars,
 )
 
 
@@ -929,6 +930,10 @@ class CTViewer(AbstractViewer):
         super().__init__(parent)
         self._image = None
         self._header = None
+        self._overlay_font_pt = TAG_FONT_PT_DEFAULT
+        #: last-computed (unwrapped) result strings per pane, so a font-size
+        #: change can re-wrap them without recomputing the costly HU stats.
+        self._metric_lines = {"A": [], "B": []}
         self._pbasis = np.eye(3)             # voxel->patient LPS (set on load)
         self._tag_keywords: list[str] = []
         self._anon = False
@@ -1121,14 +1126,22 @@ class CTViewer(AbstractViewer):
         """Apply the shared DICOM-tag text size (pt) to every pane's corner
         annotation and sync the slider. Called by the shell."""
         pt = int(pt)
+        self._overlay_font_pt = pt
         sl = getattr(self, "_tag_font_slider", None)
         if sl is not None and sl.value() != pt:
             sl.blockSignals(True)
             sl.setValue(pt)
             sl.blockSignals(False)
         vf = _vtk_font_px(pt)
-        for p in self.pane.values():
+        for key, p in self.pane.items():
             p.info.SetMaximumFontSize(vf)   # min stays low so text never vanishes
+            # Re-wrap the tag + result blocks to the new font width. Tags are
+            # cheap to rebuild; results re-wrap the stored (unwrapped) lines so
+            # we don't recompute HU stats on every slider tick.
+            if self._header is not None:
+                self._update_info(key, False)
+                p.info.SetText(3, "\n".join(wrap_lines_to_chars(
+                    self._metric_lines.get(key, []), self._wrap_budget(key))))
             p.render()
 
     def _set_tool(self, name):
@@ -1343,16 +1356,20 @@ class CTViewer(AbstractViewer):
             labels.append((str(m["id"]), self._anchor(m)))
             if m["type"] in ("ellipse", "polygon"):
                 maj, mnr, _, _ = self._major_minor(m)
+                # Long/short-diameter lines wear the polygon-vertex colour
+                # (yellow) so they read as part of the shape.
                 if maj is not None:
-                    axis_segs.append(maj); axis_colors.append(rgb)
+                    axis_segs.append(maj); axis_colors.append((255, 217, 0))
                 if mnr is not None:
-                    axis_segs.append(mnr); axis_colors.append(rgb)
+                    axis_segs.append(mnr); axis_colors.append((255, 217, 0))
             ca = m.get("center_angle")
             if ca and ca.get("pts"):
                 centre = self._shape_center(m)
                 for ci, q in enumerate(ca["pts"]):
                     ca_segs.append((centre, q))
-                    ca_colors.append(rgb)
+                    # Center-Angle spokes wear the CA-marker colour (orange) so
+                    # the spokes + markers read as one deletable unit.
+                    ca_colors.append((255, 140, 0))
                     # The marker being dragged turns green (like a vertex);
                     # the rest stay orange.
                     if mi == edit_mi and edit_ca and ci == edit_vi:
@@ -1395,8 +1412,21 @@ class CTViewer(AbstractViewer):
         self._redraw_geom(key)
         p = self.pane[key]
         lines = [self._metrics_text(key, m) for m in self._measures[key]]
-        p.info.SetText(3, "\n".join(lines))
+        self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
+        # Confine the result block to ~40% width (right corner) by word-wrapping
+        # — vtkCornerAnnotation has no width-constrained wrapping, so a long line
+        # would otherwise reach across and overlap the left-corner tags.
+        p.info.SetText(3, "\n".join(
+            wrap_lines_to_chars(lines, self._wrap_budget(key))))
         p.render()
+
+    def _wrap_budget(self, key) -> int:
+        """Characters that fit ~40% of the pane width at the current tag font —
+        the wrap width for both the tag block (left) and result block (right)."""
+        px = max(1, self.pane[key].canvas.width())
+        fpx = max(1, _vtk_font_px(
+            getattr(self, "_overlay_font_pt", TAG_FONT_PT_DEFAULT)))
+        return max(10, int(0.40 * px / (fpx * 0.55)))
 
     # ---- picking ----
     def _pick_handle(self, which, sx, sy):
@@ -1581,6 +1611,19 @@ class CTViewer(AbstractViewer):
                 and self._draft["type"] in ("polyline", "polygon"):
             self._measure_finish_draft()
             return
+        # Right-click ON a Center-Angle marker or spoke deletes JUST the Center
+        # Angle (the polygon/ellipse stays). Checked before the vertex/outline
+        # menus since the markers sit on the outline.
+        ca_mi = self._ca_hit(which, sx, sy)
+        if ca_mi is not None:
+            menu = QMenu(self)
+            del_ca = menu.addAction("Delete Center Angle")
+            chosen = menu.exec(
+                self.pane[which].canvas.mapToGlobal(QtPoint(int(sx), int(sy))))
+            if chosen is del_ca:
+                self._measures[which][ca_mi].pop("center_angle", None)
+                self._redraw_meas(which)
+            return
         # Handle is more specific than outline — try it first.
         hit = self._pick_handle(which, sx, sy)
         if hit is not None:
@@ -1590,6 +1633,25 @@ class CTViewer(AbstractViewer):
         if mi is None:
             return
         self._outline_right(which, mi, sx, sy)
+
+    def _ca_hit(self, which, sx, sy):
+        """mi of a measure whose Center-Angle marker point OR spoke line is
+        under the screen point (sx,sy), else None — for 'Delete Center Angle'."""
+        hit = self._pick_center_angle(which, sx, sy)
+        if hit is not None:
+            return hit[0]
+        wx, wy = self._disp_to_world(which, sx, sy)
+        tol = max(3.0, 0.02 * self._half)
+        for mi in range(len(self._measures[which]) - 1, -1, -1):
+            m = self._measures[which][mi]
+            ca = m.get("center_angle")
+            if not ca or not ca.get("pts"):
+                continue
+            centre = self._shape_center(m)
+            for q in ca["pts"]:
+                if _seg_dist(wx, wy, centre, q) < tol:
+                    return mi
+        return None
 
     def _handle_right(self, which, hit, sx, sy):
         """Right-click on a measure handle: 'Delete point' + 'Delete
@@ -2067,6 +2129,9 @@ class CTViewer(AbstractViewer):
         head = overlay_lines(
             self._header, self._tag_keywords, anonymized=self._anon
         )
+        # Confine the tag block to ~40% width (left corner) by word-wrapping, so
+        # a larger font can't run it into the right-corner measure results.
+        head = wrap_lines_to_chars(head, self._wrap_budget(key))
         slab = self._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
         p.info.SetText(2, "\n".join(head))          # top-left

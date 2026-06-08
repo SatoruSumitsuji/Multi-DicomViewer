@@ -73,6 +73,40 @@ def overlay_qfont(pt, bold: bool = False) -> QFont:
     return f
 
 
+def wrap_lines_to_chars(lines, max_chars: int):
+    """Word-wrap each string in *lines* to at most *max_chars* characters.
+
+    Breaks on spaces; hard-splits any single token longer than the budget.
+    The Qt viewers let QPainter wrap to a pixel rect, but VTK's
+    vtkCornerAnnotation has no width-constrained wrapping, so the VTK CT viewer
+    pre-wraps its tag block (left) and result block (right) with this to keep
+    each inside ~40% of the pane and stop the two from overlapping mid-image."""
+    max_chars = max(1, int(max_chars))
+    out: list[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            out.append(line)
+            continue
+        cur = ""
+        for word in line.split(" "):
+            while len(word) > max_chars:        # hard-split an over-long token
+                if cur:
+                    out.append(cur)
+                    cur = ""
+                out.append(word[:max_chars])
+                word = word[max_chars:]
+            if not cur:
+                cur = word
+            elif len(cur) + 1 + len(word) <= max_chars:
+                cur += " " + word
+            else:
+                out.append(cur)
+                cur = word
+        if cur:
+            out.append(cur)
+    return out
+
+
 def build_tag_font_control(pt: int = TAG_FONT_PT_DEFAULT):
     """Build the stacked [size-slider / "DICOM Tags…" button] widget.
 
