@@ -371,14 +371,14 @@ class _Overlay(QWidget):
         def poly(pts):
             return QPolygonF([S(q) for q in pts])
 
-        def draw_outline(pts, rgb, width=1.5):
+        def draw_outline(pts, rgb, width=1.8):    # 1.5 ×1.2 — readability
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(QColor(*rgb), width))
             if len(pts) >= 2:
                 p.drawPolyline(poly(pts))
 
         def draw_dashed(seg, rgb):
-            pen = QPen(QColor(*rgb), 2.2)
+            pen = QPen(QColor(*rgb), 2.64)         # 2.2 ×1.2 — readability
             pen.setStyle(Qt.PenStyle.DotLine)
             p.setPen(pen)
             p.drawLine(S(seg[0]), S(seg[1]))
@@ -413,7 +413,7 @@ class _Overlay(QWidget):
                     arc = _arc_through(v._outline(m), ca["pts"][0],
                                        ca["pts"][1], ca["pts"][2])
                     if len(arc) >= 2:
-                        p.setPen(QPen(QColor(255, 140, 0), 2.4))
+                        p.setPen(QPen(QColor(255, 140, 0), 2.88))  # 2.4 ×1.2
                         p.setBrush(Qt.BrushStyle.NoBrush)
                         p.drawPolyline(poly(arc))
                 for ci, q in enumerate(ca["pts"]):
