@@ -40,6 +40,7 @@ from PyQt6.QtGui import (
     QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
 )
 from PyQt6.QtWidgets import (
+    QApplication,
     QColorDialog,
     QComboBox,
     QDialog,
@@ -710,6 +711,19 @@ class CTViewer(AbstractViewer):
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(160)
         self._lod_timer.timeout.connect(self._lod_settle)
+        #: True while a coarse interactive slab is showing and a full-quality
+        #: rebuild is owed. The debounce timer is unreliable when the Qt loop
+        #: goes fully idle after a wheel/trackpad page (rendercanvas ondemand:
+        #: the timeout slot can wait for the next input event), which left the
+        #: coarse image lingering. So the real backstop is _on_about_to_block,
+        #: fired by Qt right before the loop blocks — guaranteed regardless of
+        #: input device. This flag coordinates the timer / pointer-up / idle
+        #: paths so the full rebuild runs exactly once.
+        self._lod_pending = False
+        disp = QApplication.instance().eventDispatcher() if \
+            QApplication.instance() is not None else None
+        if disp is not None:
+            disp.aboutToBlock.connect(self._on_about_to_block)
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -827,12 +841,10 @@ class CTViewer(AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
-        # If an interactive (coarse) slab refresh is pending its quality upgrade,
-        # do it NOW on release rather than waiting for the debounce timer. The
-        # timer is active exactly while an upgrade is owed, so this guarantees
-        # the coarse slab never lingers after a drag ends (the timer still
-        # covers wheel-paging, which has no pointer-up). Snappier crisp-up too.
-        if self._lod_timer.isActive():
+        # If an interactive (coarse) slab refresh is owed a quality upgrade, do
+        # it NOW on release for the snappiest crisp-up (the idle backstop and
+        # debounce timer would otherwise get it a moment later).
+        if self._lod_pending:
             self._lod_settle()
 
     def _on_dblclick(self, key, ev):
@@ -1314,19 +1326,31 @@ class CTViewer(AbstractViewer):
         # (Re)arm the high-quality rebuild on interactive refreshes; a full
         # refresh has already painted the slab MIP, so cancel any pending one.
         if lod and any(self._thick[k] > 0 for k in ("A", "B")):
+            self._lod_pending = True
             self._lod_timer.start()
         else:
+            self._lod_pending = False
             self._lod_timer.stop()
+
+    def _on_about_to_block(self):
+        """Qt fires this right before the event loop blocks (goes idle). If an
+        interactive coarse slab is owed a full-quality rebuild, do it now — this
+        is the reliable backstop the debounce timer can't be (see _lod_pending):
+        during fast scrolling the loop never blocks so the coarse LOD stays;
+        the instant the user stops, the loop is about to idle and we crisp up."""
+        if self._lod_pending and self._vol is not None:
+            self._lod_settle()
 
     def _lod_settle(self):
         """Rebuild the slab at full quality and force a SYNCHRONOUS repaint.
-        Fired by the debounce timer (and on pointer-up). After a wheel-page the
-        Qt loop sits idle — no pointer-up to pump it — so the full-quality slab
-        gets built but a plain update() leaves it unpainted until the next input
-        event (the user sees the coarse image linger, then snap sharp when the
-        mouse moves). repaint() flushes it immediately, independent of the loop."""
+        Runs at most once per interaction (guarded by _lod_pending), whichever
+        path gets there first: idle (_on_about_to_block), pointer-up, or the
+        debounce timer. repaint() flushes immediately so the crisp image shows
+        without waiting for the next input event to pump the loop."""
+        if not self._lod_pending:
+            return
         self._lod_timer.stop()
-        self._refresh(lod=False)
+        self._refresh(lod=False)        # clears _lod_pending (non-lod branch)
         for k in ("A", "B"):
             self._overlay[k].repaint()
 
