@@ -26,6 +26,7 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
+from multi_dicomviewer.core.image_export import export_image_as, safe_basename
 from multi_dicomviewer.viewers.long_axis_canvas import (
     LongAxisCanvas, build_long_axis,
 )
@@ -209,6 +210,7 @@ class IVUSViewer(XAViewer):
 
         self.long_axis.rotated.connect(self._on_la_rotated)
         self.long_axis.frame_picked.connect(self._on_la_frame_picked)
+        self.long_axis.export_requested.connect(self._on_export_long_axis)
         # Hook the cross-section canvases for the rotation-centre marker.
         for c in (self.canvas, self.canvas2):
             c.ivus_center_changed.connect(self._on_center_dragged)
@@ -448,6 +450,12 @@ class IVUSViewer(XAViewer):
 
     def _on_la_frame_picked(self, idx: int) -> None:
         self.frame_slider.setValue(int(idx))   # triggers _seek
+
+    def _on_export_long_axis(self, fmt_key) -> None:
+        """Right-click export on the long-axis strip → save it (WYSIWYG,
+        with the frame cursor + keyframe markers) in the chosen format."""
+        export_image_as(self, self.long_axis.grab(), fmt_key,
+                        safe_basename(self._export_basename(), "longaxis"))
 
     # ----------------------------- mouse callbacks (cross-section canvas)
     def _on_center_dragged(self, cx: float, cy: float) -> None:

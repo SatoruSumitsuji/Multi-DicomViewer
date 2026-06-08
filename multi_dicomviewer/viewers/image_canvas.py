@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
+from multi_dicomviewer.core.image_export import pick_export_format
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT, overlay_qfont
 
@@ -76,6 +77,12 @@ class ImageCanvas(QWidget):
     #: frame's rotation centre back to the image centre; "all" → every
     #: frame's rotation centre back to the image centre.
     ivus_center_reset = pyqtSignal(str)
+    #: Right-click on empty image area while NO measure tool is active →
+    #: request a still-image export. Carries the chosen format key
+    #: ('png'/'jpeg'/'tiff'); the viewer captures this canvas and saves it
+    #: (it has the patient/series/frame context for the default filename).
+    #: self.sender() identifies which canvas fired.
+    export_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -552,6 +559,18 @@ class ImageCanvas(QWidget):
                     return mi
         return None
 
+    def _export_menu(self, sx, sy):
+        """Right-click on empty image area (no active tool): pick a format,
+        then let the viewer (which holds the patient/series/frame context)
+        capture + save in response to export_requested."""
+        if self._qimg is None:
+            return
+        key = pick_export_format(
+            self, self.mapToGlobal(QPoint(int(sx), int(sy)))
+        )
+        if key:
+            self.export_requested.emit(key)
+
     def _handle_menu(self, hit, sx, sy):
         mi, vi = hit
         m = self.measures[mi]
@@ -845,6 +864,11 @@ class ImageCanvas(QWidget):
                 return
             mi = self._pick_measure(sx, sy)
             if mi is None:
+                # Empty area + no active measure tool → offer still export.
+                # (In measure mode an empty right-click stays a no-op so it
+                # can't interrupt drawing.)
+                if not self.meas_type:
+                    self._export_menu(sx, sy)
                 return
             self._outline_menu(mi, sx, sy)
             return
@@ -1049,6 +1073,13 @@ class ImageCanvas(QWidget):
         if self._qimg is None:
             return
         r = self._draw_rect()
+        # Smooth (bilinear) upscaling — without this hint Qt uses fast
+        # nearest-neighbour, which makes burned-in annotations (the "Frame N"
+        # text, crosshairs) blocky/jagged when the 512² IVUS/XA frame is
+        # scaled up to fill the canvas, while the noisy echo texture hides the
+        # artefact. The echo DATA is bit-identical either way (≤1 LSB); this is
+        # purely how the already-decoded frame is resampled to the widget.
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(r, self._qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Rebuilt as labels are drawn below; clear so a deleted measure's

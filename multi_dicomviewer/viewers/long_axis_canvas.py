@@ -37,6 +37,8 @@ from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygon
 from PyQt6.QtWidgets import QWidget
 
+from multi_dicomviewer.core.image_export import pick_export_format
+
 
 def build_long_axis(
     frames: Sequence[np.ndarray],
@@ -99,6 +101,9 @@ class LongAxisCanvas(QWidget):
     #: horizontal scrollbar so ``anchor_content_x`` (in source-pixel
     #: coords, i.e. frame index in the long axis) stays under the drag.
     h_zoom_changed = pyqtSignal(float, float)
+    #: Right-click export: carries the chosen format key ('png'/'jpeg'/
+    #: 'tiff'); the host (IVUSViewer) captures this canvas and saves it.
+    export_requested = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -236,6 +241,14 @@ class LongAxisCanvas(QWidget):
 
     # ----------------------------------------------------- mouse
     def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.RightButton:
+            # No measure tool on the long-axis strip, so right-click always
+            # offers a still export (when an image is loaded).
+            if self._qimg is not None:
+                key = pick_export_format(self, e.globalPosition().toPoint())
+                if key:
+                    self.export_requested.emit(key)
+            return
         if e.button() == Qt.MouseButton.LeftButton:
             self._press_pos = e.position().toPoint()
             self._press_global = e.globalPosition().toPoint()

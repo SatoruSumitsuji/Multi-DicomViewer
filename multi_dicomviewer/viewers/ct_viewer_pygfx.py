@@ -63,6 +63,9 @@ from rendercanvas.pyqt6 import RenderCanvas
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
+from multi_dicomviewer.core.image_export import (
+    export_image_as, pick_export_format, safe_basename,
+)
 from multi_dicomviewer.ui.tag_font import (
     TAG_FONT_PT_DEFAULT, build_tag_font_control, overlay_qfont,
 )
@@ -849,14 +852,11 @@ class CTViewer(AbstractViewer):
             started = self._measure_left(key, x, y)
             self._meas_drag = bool(started)
             return
-        # Right-click (not measuring): force the slab to full quality. Manual
-        # escape hatch for the rare case the coarse interactive LOD lingers
-        # after wheel/trackpad paging (the idle Qt loop can fail to run the
-        # auto crisp-up until the next input — see _lod_settle). Right-click is
-        # otherwise unused here; on the Windows VTK viewer it does nothing, so
-        # no behaviour or layout diverges between platforms.
+        # Right-click (not measuring): offer a still-image export of this
+        # pane. Mirrors the Windows VTK viewer's right-click export so the two
+        # platforms behave identically.
         if self._drag_btn == 2:
-            self._force_crisp()
+            self._export_pane(key, x, y)
             return
         # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool.
         self._cross_grab = (self._drag_btn == 1
@@ -920,6 +920,68 @@ class CTViewer(AbstractViewer):
             self._mip_img[key] = self._build_slab_qimage(key)
         self.pane[key].render()
         self._overlay[key].update()
+
+    # -- still-image export -------------------------------------------
+    def _export_pane(self, key, x, y):
+        """Right-click export on a CT pane (no active measure tool): save
+        what's on that pane — GPU slice (or slab-MIP) plus the crosshair,
+        measurements and tag/result text from the overlay — in the chosen
+        format. (*key* here is the pane id; *fmt* is the format choice.)"""
+        if self._header is None:        # nothing loaded → no export offered
+            return
+        # Capture at full quality, not the coarse interactive LOD that wheel/
+        # trackpad paging can leave behind.
+        self._force_crisp()
+        canvas = self.pane[key].canvas
+        fmt = pick_export_format(self, canvas.mapToGlobal(QPoint(int(x), int(y))))
+        if not fmt:
+            return
+        img = self._grab_pane_qimage(key)
+        if img is not None:
+            export_image_as(self, img, fmt, self._export_basename(key))
+
+    def _grab_pane_qimage(self, key):
+        """Composite the pane's GPU render (read back from wgpu) with the
+        QPainter overlay into one RGB QImage. Returns None on failure."""
+        pane = self.pane[key]
+        pane.render()                   # synchronous force_draw before readback
+        try:
+            rgba = pane.renderer.snapshot()      # (H, W, 4), physical pixels
+        except Exception:
+            return None
+        if rgba is None or rgba.size == 0:
+            return None
+        if rgba.dtype != np.uint8:      # HDR blender returns float (0..1)
+            rgba = np.clip(np.asarray(rgba, np.float32) * 255.0, 0, 255) \
+                .astype(np.uint8)
+        rgba = np.ascontiguousarray(rgba[..., :4])
+        h, w = rgba.shape[:2]
+        base = QImage(rgba.data, w, h, 4 * w,
+                      QImage.Format.Format_RGBA8888).copy()
+        # Paint the transparent overlay (crosshair / measures / slab-MIP / info)
+        # on top, scaled from its logical size to the snapshot's physical size
+        # so HiDPI (Retina) exports line up.
+        ov = self._overlay.get(key)
+        if ov is not None and ov.width() > 0 and ov.height() > 0:
+            p = QPainter(base)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            p.scale(w / ov.width(), h / ov.height())
+            ov.render(p, QPoint(0, 0))
+            p.end()
+        return base
+
+    def _export_basename(self, key="") -> str:
+        """Suggested filename stem from the loaded CT series + pane."""
+        h = self._header
+        parts: list[object] = []
+        if h is not None:
+            parts.append(getattr(h, "PatientID", "") or "")
+            parts.append(getattr(h, "Modality", "") or "")
+            parts.append(getattr(h, "StudyDate", "")
+                         or getattr(h, "AcquisitionDate", "") or "")
+        if key:
+            parts.append(f"pane{key}")
+        return safe_basename(*parts)
 
     # -- Bi / Lt / Rt --------------------------------------------------
     @property
