@@ -824,6 +824,14 @@ class CTViewer(AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
+        # If an interactive (coarse) slab refresh is pending its quality upgrade,
+        # do it NOW on release rather than waiting for the debounce timer. The
+        # timer is active exactly while an upgrade is owed, so this guarantees
+        # the coarse slab never lingers after a drag ends (the timer still
+        # covers wheel-paging, which has no pointer-up). Snappier crisp-up too.
+        if self._lod_timer.isActive():
+            self._lod_timer.stop()
+            self._refresh(lod=False)
 
     def _on_dblclick(self, key, ev):
         if self._meas_on:
