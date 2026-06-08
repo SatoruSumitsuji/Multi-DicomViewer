@@ -739,6 +739,35 @@ class _Pane:
         # CenterLine overlay toggle — it's clinical info, not clutter.
         self.ren.AddViewProp(self.angle)
 
+        # DICOM tags (top-left) and measure results (top-right) render as their
+        # OWN fixed-size text actors, NOT vtkCornerAnnotation corners. The
+        # annotation auto-fits its font to the viewport, which made the tag-size
+        # slider ineffective and let long lines sprawl across the image. These
+        # honour the slider's exact pixel size; the viewer word-wraps their text
+        # to ~40% of the pane width so left tags and right results never collide.
+        def _mk_overlay_text(justify_right):
+            a = vtkTextActor()
+            a.SetTextScaleModeToNone()              # fixed font size, no auto-fit
+            tp = a.GetTextProperty()
+            tp.SetColor(1.0, 1.0, 1.0)
+            tp.SetFontFamilyToArial()
+            _set_vtk_tag_font(tp)                   # Meiryo via file when present
+            tp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+            tp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+            tp.SetVerticalJustificationToTop()
+            tp.SetJustificationToRight() if justify_right \
+                else tp.SetJustificationToLeft()
+            a.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            a.GetPositionCoordinate().SetValue(0.988 if justify_right else 0.012,
+                                               0.985)
+            a.SetInput("")
+            return a
+
+        self.tagact = _mk_overlay_text(False)       # top-left
+        self.resultact = _mk_overlay_text(True)     # top-right
+        self.ren.AddViewProp(self.tagact)
+        self.ren.AddViewProp(self.resultact)
+
         self.canvas.GetRenderWindow().AddRenderer(self.ren)
 
     def set_overlay_visible(self, on: bool) -> None:
@@ -1134,13 +1163,16 @@ class CTViewer(AbstractViewer):
             sl.blockSignals(False)
         vf = _vtk_font_px(pt)
         for key, p in self.pane.items():
-            p.info.SetMaximumFontSize(vf)   # min stays low so text never vanishes
-            # Re-wrap the tag + result blocks to the new font width. Tags are
-            # cheap to rebuild; results re-wrap the stored (unwrapped) lines so
-            # we don't recompute HU stats on every slider tick.
+            p.info.SetMaximumFontSize(vf)   # bottom WW/WL & key|kind readouts
+            # Tags + results are fixed-size actors: set their EXACT pixel size
+            # (no auto-fit), then re-wrap to the new 40% budget. Tags are cheap
+            # to rebuild; results re-wrap the stored (unwrapped) lines so we
+            # don't recompute HU stats on every slider tick.
+            p.tagact.GetTextProperty().SetFontSize(vf)
+            p.resultact.GetTextProperty().SetFontSize(vf)
             if self._header is not None:
                 self._update_info(key, False)
-                p.info.SetText(3, "\n".join(wrap_lines_to_chars(
+                p.resultact.SetInput("\n".join(wrap_lines_to_chars(
                     self._metric_lines.get(key, []), self._wrap_budget(key))))
             p.render()
 
@@ -1413,20 +1445,20 @@ class CTViewer(AbstractViewer):
         p = self.pane[key]
         lines = [self._metrics_text(key, m) for m in self._measures[key]]
         self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
-        # Confine the result block to ~40% width (right corner) by word-wrapping
-        # — vtkCornerAnnotation has no width-constrained wrapping, so a long line
-        # would otherwise reach across and overlap the left-corner tags.
-        p.info.SetText(3, "\n".join(
+        # Confine the result block to ~40% width (right) by word-wrapping it to
+        # the fixed-size result actor (which honours the exact slider font).
+        p.resultact.SetInput("\n".join(
             wrap_lines_to_chars(lines, self._wrap_budget(key))))
         p.render()
 
     def _wrap_budget(self, key) -> int:
-        """Characters that fit ~40% of the pane width at the current tag font —
-        the wrap width for both the tag block (left) and result block (right)."""
+        """Characters that fit within ~40% of the pane width at the current
+        (fixed) overlay font — the wrap width for both the tag block (left) and
+        result block (right). 0.6 char-width keeps the block strictly ≤40%."""
         px = max(1, self.pane[key].canvas.width())
         fpx = max(1, _vtk_font_px(
             getattr(self, "_overlay_font_pt", TAG_FONT_PT_DEFAULT)))
-        return max(10, int(0.40 * px / (fpx * 0.55)))
+        return max(8, int(0.40 * px / (fpx * 0.6)))
 
     # ---- picking ----
     def _pick_handle(self, which, sx, sy):
@@ -1891,7 +1923,8 @@ class CTViewer(AbstractViewer):
             self.pane[key].reslice.SetInputData(_placeholder_image())
             self.pane[key].info.SetText(0, "")
             self.pane[key].info.SetText(1, "")
-            self.pane[key].info.SetText(2, "")
+            self.pane[key].tagact.SetInput("")
+            self.pane[key].resultact.SetInput("")
             self.pane[key].angle.SetInput("")
             self.pane[key].render()
 
@@ -2134,7 +2167,7 @@ class CTViewer(AbstractViewer):
         head = wrap_lines_to_chars(head, self._wrap_budget(key))
         slab = self._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
-        p.info.SetText(2, "\n".join(head))          # top-left
+        p.tagact.SetInput("\n".join(head))          # top-left (fixed-size actor)
         p.info.SetText(
             0, f"WW {self._win:.0f}  WL {self._lvl:.0f}"
         )                                           # bottom-left
