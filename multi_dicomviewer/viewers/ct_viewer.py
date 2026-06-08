@@ -641,6 +641,10 @@ class _Pane:
         ma.SetMapper(self.meas_mapper)
         ma.GetProperty().SetColor(0.2, 0.9, 1.0)   # cyan fallback
         ma.GetProperty().SetLineWidth(1.8)         # 1.5 ×1.2 — readability
+        # GL line width is clamped to 1px on many GPUs, so widths above only
+        # show when lines are rendered as tubes.
+        if hasattr(ma.GetProperty(), "SetRenderLinesAsTubes"):
+            ma.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(ma)
         # In-progress draft outline — drawn DASHED (geometric dashes, the
         # same technique as the axis / center-angle guides) so a shape
@@ -668,6 +672,8 @@ class _Pane:
         mxa.GetProperty().SetColor(0.2, 0.9, 1.0)  # cyan fallback
         mxa.GetProperty().SetLineWidth(2.64)        # 2.2 ×1.2 — readability
         mxa.GetProperty().SetOpacity(0.65)
+        if hasattr(mxa.GetProperty(), "SetRenderLinesAsTubes"):
+            mxa.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(mxa)
         # Center-Angle spokes (dashed lines from shape centre to each
         # picked perimeter point) + the picked dots themselves.
@@ -678,9 +684,28 @@ class _Pane:
         self.meas_ca_mapper.SetColorModeToDirectScalars()
         mca = vtkActor()
         mca.SetMapper(self.meas_ca_mapper)
-        mca.GetProperty().SetLineWidth(1.44)        # 1.2 ×1.2 — readability
+        # Match the diameter/spoke weight used on Mac (2.64); CA spokes were
+        # anomalously thin (1.2) before.
+        mca.GetProperty().SetLineWidth(2.64)
         mca.GetProperty().SetOpacity(0.8)
+        if hasattr(mca.GetProperty(), "SetRenderLinesAsTubes"):
+            mca.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(mca)
+        # Center-Angle arc: the perimeter span p1→p3 (through p2), drawn SOLID
+        # in orange and thicker than the outline so it stands out (parity with
+        # the Mac viewer); its own actor so it isn't tied to the outline width.
+        self.meas_arc_mapper = vtkPolyDataMapper()
+        self.meas_arc_mapper.SetInputData(vtkPolyData())
+        self.meas_arc_mapper.ScalarVisibilityOn()
+        self.meas_arc_mapper.SetScalarModeToUseCellData()
+        self.meas_arc_mapper.SetColorModeToDirectScalars()
+        mar = vtkActor()
+        mar.SetMapper(self.meas_arc_mapper)
+        mar.GetProperty().SetColor(1.0, 0.55, 0.0)
+        mar.GetProperty().SetLineWidth(2.88)
+        if hasattr(mar.GetProperty(), "SetRenderLinesAsTubes"):
+            mar.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(mar)
         self.meas_ca_pts_mapper = vtkPolyDataMapper()
         self.meas_ca_pts_mapper.SetInputData(vtkPolyData())
         mcap = vtkActor()
@@ -1378,6 +1403,7 @@ class CTViewer(AbstractViewer):
         ca_segs: list = []           # center-angle spokes
         ca_colors: list[tuple[int, int, int]] = []
         ca_pts: list = []            # picked perimeter dots
+        arc_lines: list = []         # center-angle arc (solid, own actor)
         # The one vertex currently being dragged lives in *edit_pts*
         # (drawn green by a second points mapper); the rest stay yellow.
         edit_pts = []
@@ -1397,8 +1423,7 @@ class CTViewer(AbstractViewer):
                 arc = _arc_through(self._outline(m), ca0["pts"][0],
                                    ca0["pts"][1], ca0["pts"][2])
                 if len(arc) >= 2:
-                    polylines.append(arc)
-                    outline_colors.append((255, 140, 0))
+                    arc_lines.append(arc)
             for vi, q in enumerate(self._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     edit_pts.append(q)
@@ -1454,6 +1479,9 @@ class CTViewer(AbstractViewer):
         )
         p.meas_ca_mapper.SetInputData(
             _colored_dashed_pd(ca_segs, ca_colors)
+        )
+        p.meas_arc_mapper.SetInputData(
+            _colored_multi_pd(arc_lines, [(255, 140, 0)] * len(arc_lines))
         )
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
