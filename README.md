@@ -57,6 +57,31 @@ python run.py sample_data
 
 Or launch with no argument and use **File ▸ Open DICOM folder…**.
 
+## macOS build — first launch
+
+The prebuilt macOS app (`Multi-DicomViewer.app`, shipped in
+`Multi-DicomViewer-macos.zip`) is **not code-signed**, so macOS Gatekeeper
+blocks it the first time. Clear the quarantine flag once and it launches
+normally afterwards.
+
+1. **Unzip** the download to get `Multi-DicomViewer.app`, and move it into your
+   **Applications** folder.
+2. Open the **Terminal** app, then **copy & paste this single line** and press
+   Return:
+
+   ```bash
+   { find /Applications ~/Applications ~/Downloads -maxdepth 2 -name "Multi-DicomViewer.app" -print; mdfind -name "Multi-DicomViewer.app"; } | sort -u | while read -r p; do xattr -dr com.apple.quarantine "$p"; done
+   ```
+
+   You don't need to `cd` anywhere — it searches by name, so your current
+   directory doesn't matter, and it's safe to run even if more than one copy
+   exists (e.g. both `/Applications` and `~/Applications`).
+3. Open the app normally (double-click, or from Launchpad).
+
+What the command does: `find` checks the usual spots, `mdfind` uses Spotlight as
+a disk-wide fallback, `sort -u` de-duplicates, and `xattr -dr
+com.apple.quarantine` removes the Gatekeeper flag from every copy found.
+
 ## Using it
 
 - The browser groups files into Patient ▸ Study ▸ Series. Patients that have
