@@ -814,6 +814,15 @@ class CTViewer(AbstractViewer):
             started = self._measure_left(key, x, y)
             self._meas_drag = bool(started)
             return
+        # Right-click (not measuring): force the slab to full quality. Manual
+        # escape hatch for the rare case the coarse interactive LOD lingers
+        # after wheel/trackpad paging (the idle Qt loop can fail to run the
+        # auto crisp-up until the next input — see _lod_settle). Right-click is
+        # otherwise unused here; on the Windows VTK viewer it does nothing, so
+        # no behaviour or layout diverges between platforms.
+        if self._drag_btn == 2:
+            self._force_crisp()
+            return
         # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool.
         self._cross_grab = (self._drag_btn == 1
                             and self._cross_press(key, x, y))
@@ -1388,6 +1397,18 @@ class CTViewer(AbstractViewer):
             return
         self._cancel_lod()
         self._refresh(lod=False)        # clears _lod_pending (non-lod branch)
+        for k in ("A", "B"):
+            self._overlay[k].repaint()
+
+    def _force_crisp(self):
+        """Unconditionally rebuild the slab at full quality and repaint now.
+        Bound to right-click (Mac only) as a manual override when the coarse
+        interactive LOD lingers; safe no-op feel on a thin (non-slab) view."""
+        if self._vol is None:
+            return
+        self._cancel_lod()
+        self._lod_pending = False
+        self._refresh(lod=False)
         for k in ("A", "B"):
             self._overlay[k].repaint()
 
