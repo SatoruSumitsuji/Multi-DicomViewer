@@ -439,8 +439,11 @@ class ImageCanvas(QWidget):
         return m["pts"][0]
 
     def _shape_center(self, m) -> tuple[float, float]:
-        """Geometric centre of an Ellipse/Polygon — used as the apex of
-        Center Angle annotations."""
+        """Centre of an Ellipse/Polygon — the apex of Center Angle annotations.
+        Polygon uses the AREA centroid (physical centre of the region), not the
+        vertex mean (which skews toward clustered vertices)."""
+        if m["type"] == "polygon":
+            return G.polygon_centroid(m["pts"])
         return self._anchor(m)
 
     # ----------------------------------------------------- label position

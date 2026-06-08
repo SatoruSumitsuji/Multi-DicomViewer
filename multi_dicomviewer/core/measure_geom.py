@@ -69,6 +69,28 @@ def poly_area(pts) -> float:
     return abs(s) / 2.0
 
 
+def polygon_centroid(pts):
+    """Area (shoelace) centroid of polygon *pts* — the physical centre of the
+    enclosed region, used as the apex of a Center Angle. Falls back to the
+    vertex mean for a degenerate (near-zero-area) polygon."""
+    n = len(pts)
+    if n == 0:
+        return (0.0, 0.0)
+    if n < 3:
+        return (sum(q[0] for q in pts) / n, sum(q[1] for q in pts) / n)
+    a2 = cx = cy = 0.0
+    for i in range(n):
+        x0, y0 = pts[i]
+        x1, y1 = pts[(i + 1) % n]
+        cross = x0 * y1 - x1 * y0
+        a2 += cross
+        cx += (x0 + x1) * cross
+        cy += (y0 + y1) * cross
+    if abs(a2) < 1e-9:                            # degenerate → vertex mean
+        return (sum(q[0] for q in pts) / n, sum(q[1] for q in pts) / n)
+    return (cx / (3.0 * a2), cy / (3.0 * a2))
+
+
 def point_in_poly(x, y, poly) -> bool:
     """Ray-cast point-in-polygon (poly may repeat its first vertex)."""
     n = len(poly)

@@ -128,6 +128,7 @@ from multi_dicomviewer.core.measure_geom import (
     min_width as _min_width,
     point_in_poly as _point_in_poly,
     poly_area as _poly_area,
+    polygon_centroid as _polygon_centroid,
     project_to_polyline as _project_to_polyline,
     seg_dist as _seg_dist,
     smooth_closed as _smooth_closed,
@@ -1313,6 +1314,10 @@ class CTViewer(AbstractViewer):
         return m["pts"][0]
 
     def _shape_center(self, m):
+        # Center-Angle apex = the physical (area) centroid of the region, not
+        # the vertex mean (which skews toward clustered vertices).
+        if m["type"] == "polygon":
+            return _polygon_centroid(m["pts"])
         return self._anchor(m)
 
     def _major_minor(self, m):
