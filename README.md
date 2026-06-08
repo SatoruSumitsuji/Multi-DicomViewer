@@ -93,6 +93,12 @@ com.apple.quarantine` removes the Gatekeeper flag from every copy found.
 - **CT pane:** axial/coronal/sagittal MPR, per-plane slice sliders, shared HU
   window/level with coronary/mediastinum/lung/bone presets.
 
+> **macOS only — right-click to sharpen a Slab view.** With a Slab (thick) MPR,
+> the image is rendered at reduced quality *while* you pan/rotate/wheel-page and
+> snaps back to full quality when you stop, so paging stays smooth on low-memory
+> Macs. If a coarse image ever lingers after you stop, **right-click the image**
+> to force it back to full quality immediately. (No effect on the Windows build.)
+
 ## Scope / next steps
 
 Implemented: DICOM I/O, study browser, linked layout, XA cine + measurement,
