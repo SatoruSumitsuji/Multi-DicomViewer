@@ -706,6 +706,14 @@ class _Pane:
         if hasattr(mar.GetProperty(), "SetRenderLinesAsTubes"):
             mar.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(mar)
+        # VTK line width is in render-window PHYSICAL pixels, and this canvas
+        # sizes its render window by devicePixelRatio — so on a scaled Windows
+        # display the lines render thinner than the equivalent Qt-drawn IVUS
+        # lines. Re-apply these base widths × DPR every redraw (see _redraw_geom)
+        # so CT matches. (base, actor) pairs:
+        self._meas_line_actors = [
+            (1.8, ma), (2.64, mxa), (2.64, mca), (2.88, mar),
+        ]
         self.meas_ca_pts_mapper = vtkPolyDataMapper()
         self.meas_ca_pts_mapper.SetInputData(vtkPolyData())
         mcap = vtkActor()
@@ -1396,6 +1404,11 @@ class CTViewer(AbstractViewer):
 
     def _redraw_geom(self, key):
         p = self.pane[key]
+        # Scale the measurement line widths by the render-window DPR so they
+        # render at the intended on-screen thickness on scaled displays.
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        for base_w, act in p._meas_line_actors:
+            act.GetProperty().SetLineWidth(base_w * dpr)
         polylines, handles, labels = [], [], []
         outline_colors: list[tuple[int, int, int]] = []
         axis_segs: list = []
