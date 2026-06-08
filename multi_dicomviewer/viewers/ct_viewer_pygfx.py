@@ -31,11 +31,13 @@ slab-MIP arrive in later phases.
 from __future__ import annotations
 
 import math
+import threading
+import time
 
 import numpy as np
 import pygfx as gfx
 import pylinalg as la
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
 )
@@ -642,6 +644,11 @@ class CTViewer(AbstractViewer):
     history_requested = pyqtSignal()
     #: emitted on every committed measurement (shell logs it per study)
     measurement_added = pyqtSignal(object)
+    #: fired from a background debounce thread to wake the GUI thread and crisp
+    #: up the slab LOD. A cross-thread queued signal posts an event that wakes a
+    #: fully-idle Qt loop — which same-thread QTimer/aboutToBlock can't do
+    #: reliably under rendercanvas ondemand (see _arm_lod / _lod_settle).
+    _lod_wake = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -700,26 +707,24 @@ class CTViewer(AbstractViewer):
         #: via the shell. Read by the pane overlays' paint.
         self._overlay_font_pt = TAG_FONT_PT_DEFAULT
         # Interactive level-of-detail: during a drag / wheel-page the slab-MIP
-        # is built coarse (then full quality once the interaction settles) so
-        # paging stays smooth on low-memory Macs. This one-shot timer fires a
-        # short time after the last interactive refresh and rebuilds full
-        # quality via _lod_settle (which also forces a synchronous repaint —
-        # after a wheel-page the event loop sits idle with no pointer-up to
-        # pump it, so a plain update() would leave the rebuilt slab unpainted
-        # until the next input event).
-        self._lod_timer = QTimer(self)
-        self._lod_timer.setSingleShot(True)
-        self._lod_timer.setInterval(160)
-        self._lod_timer.timeout.connect(self._lod_settle)
-        #: True while a coarse interactive slab is showing and a full-quality
-        #: rebuild is owed. The debounce timer is unreliable when the Qt loop
-        #: goes fully idle after a wheel/trackpad page (rendercanvas ondemand:
-        #: the timeout slot can wait for the next input event), which left the
-        #: coarse image lingering. So the real backstop is _on_about_to_block,
-        #: fired by Qt right before the loop blocks — guaranteed regardless of
-        #: input device. This flag coordinates the timer / pointer-up / idle
-        #: paths so the full rebuild runs exactly once.
+        # is built coarse, then rebuilt full quality once the interaction
+        # settles, so paging stays smooth on low-memory Macs.
+        #
+        # Crisping up reliably is the hard part. After a wheel/trackpad page the
+        # Qt loop goes FULLY idle (no pointer-up to pump it) and, under
+        # rendercanvas's ondemand canvas, a same-thread QTimer timeout (and even
+        # aboutToBlock) is not serviced until the next OS input arrives — so the
+        # coarse slab lingered until the user happened to move the mouse. The
+        # robust fix is to wake the idle loop from ANOTHER thread: a background
+        # debounce (threading.Timer) emits _lod_wake, whose cross-thread queued
+        # delivery posts an event that interrupts the OS-level wait. Three paths
+        # reach the rebuild — pointer-up (immediate), aboutToBlock (idle, when
+        # it does fire), and the thread wake (guaranteed) — all coordinated by
+        # _lod_pending so _lod_settle runs exactly once per interaction.
         self._lod_pending = False
+        self._lod_due = None             # monotonic deadline for the rebuild
+        self._lod_thread = None          # single reusable debounce worker
+        self._lod_wake.connect(self._lod_settle)
         disp = QApplication.instance().eventDispatcher() if \
             QApplication.instance() is not None else None
         if disp is not None:
@@ -1036,6 +1041,8 @@ class CTViewer(AbstractViewer):
         self._refresh(reset_cam=True)
 
     def clear(self) -> None:
+        self._cancel_lod()
+        self._lod_pending = False
         self._vol = None
         self._header = None
         self._measures = {"A": [], "B": []}
@@ -1327,29 +1334,59 @@ class CTViewer(AbstractViewer):
         # refresh has already painted the slab MIP, so cancel any pending one.
         if lod and any(self._thick[k] > 0 for k in ("A", "B")):
             self._lod_pending = True
-            self._lod_timer.start()
+            self._arm_lod()
         else:
             self._lod_pending = False
-            self._lod_timer.stop()
+            self._cancel_lod()
+
+    def _arm_lod(self):
+        """(Re)arm the background debounce: push the rebuild deadline ~160ms out
+        and make sure the worker is running. The worker emits _lod_wake once the
+        deadline passes; the signal's cross-thread delivery wakes the idle GUI
+        loop so _lod_settle runs even when no further input arrives (the
+        wheel/trackpad lingering bug). One reusable worker that polls the
+        deadline — not a new thread per mouse-move — keeps drag churn-free."""
+        self._lod_due = time.monotonic() + 0.16
+        t = self._lod_thread
+        if t is None or not t.is_alive():
+            t = threading.Thread(target=self._lod_worker, daemon=True)
+            self._lod_thread = t
+            t.start()
+
+    def _cancel_lod(self):
+        # Drop the deadline; the worker re-checks it (and _lod_pending, which the
+        # caller has cleared) before firing and exits on its own.
+        self._lod_due = None
+
+    def _lod_worker(self):
+        while True:
+            due = self._lod_due
+            if due is None or not self._lod_pending:
+                return
+            now = time.monotonic()
+            if now >= due:
+                if self._lod_pending:
+                    self._lod_wake.emit()
+                return
+            time.sleep(min(0.04, due - now))
 
     def _on_about_to_block(self):
         """Qt fires this right before the event loop blocks (goes idle). If an
-        interactive coarse slab is owed a full-quality rebuild, do it now — this
-        is the reliable backstop the debounce timer can't be (see _lod_pending):
-        during fast scrolling the loop never blocks so the coarse LOD stays;
-        the instant the user stops, the loop is about to idle and we crisp up."""
+        interactive coarse slab is owed a full-quality rebuild, do it now so the
+        crisp-up is instant when it fires; the background thread wake is the
+        guaranteed backstop for when it (or the loop) stays parked."""
         if self._lod_pending and self._vol is not None:
             self._lod_settle()
 
     def _lod_settle(self):
         """Rebuild the slab at full quality and force a SYNCHRONOUS repaint.
         Runs at most once per interaction (guarded by _lod_pending), whichever
-        path gets there first: idle (_on_about_to_block), pointer-up, or the
-        debounce timer. repaint() flushes immediately so the crisp image shows
-        without waiting for the next input event to pump the loop."""
+        path gets there first: pointer-up, aboutToBlock (idle), or the
+        background thread wake. repaint() flushes immediately so the crisp image
+        shows without waiting for the next input event to pump the loop."""
         if not self._lod_pending:
             return
-        self._lod_timer.stop()
+        self._cancel_lod()
         self._refresh(lod=False)        # clears _lod_pending (non-lod branch)
         for k in ("A", "B"):
             self._overlay[k].repaint()
