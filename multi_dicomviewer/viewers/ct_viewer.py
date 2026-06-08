@@ -711,8 +711,10 @@ class _Pane:
         # display the lines render thinner than the equivalent Qt-drawn IVUS
         # lines. Re-apply these base widths × DPR every redraw (see _redraw_geom)
         # so CT matches. (base, actor) pairs:
+        # Base widths ×1.2 again (VTK still read a touch thinner than the Qt
+        # viewers after DPR scaling): 1.8→2.16, 2.64→3.168, 2.88→3.456.
         self._meas_line_actors = [
-            (1.8, ma), (2.64, mxa), (2.64, mca), (2.88, mar),
+            (2.16, ma), (3.168, mxa), (3.168, mca), (3.456, mar),
         ]
         self.meas_ca_pts_mapper = vtkPolyDataMapper()
         self.meas_ca_pts_mapper.SetInputData(vtkPolyData())
