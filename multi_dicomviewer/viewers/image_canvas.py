@@ -1063,7 +1063,7 @@ class ImageCanvas(QWidget):
                 segs = self._axis_segs_px(m)
             except Exception:
                 continue
-            axis_pen = QPen(QColor(255, 217, 0, 170), 2, Qt.PenStyle.DashLine)
+            axis_pen = QPen(QColor(255, 217, 0, 170), 2.4, Qt.PenStyle.DashLine)
             for seg in segs:
                 if seg is None:
                     continue
@@ -1079,7 +1079,7 @@ class ImageCanvas(QWidget):
             except Exception:
                 continue
             col = QColor(m.get("color", DEFAULT_MEAS_COLOR))
-            p.setPen(QPen(col, 1.6))
+            p.setPen(QPen(col, 1.92))    # 1.6 ×1.2 — readability
             wpts = [self._image_to_widget(q) for q in outline]
             for a, b in zip(wpts, wpts[1:]):
                 p.drawLine(a, b)
@@ -1095,7 +1095,7 @@ class ImageCanvas(QWidget):
             # Spokes in the CA-marker colour (orange) so the spokes + markers
             # read as one deletable unit — matching the CT viewers.
             spoke = QColor(255, 140, 0, 200)
-            p.setPen(QPen(spoke, 1.2, Qt.PenStyle.DashLine))
+            p.setPen(QPen(spoke, 1.44, Qt.PenStyle.DashLine))   # 1.2 ×1.2
             for ci, q in enumerate(ca["pts"]):
                 # The 2nd point only picks which way the angle is measured, so
                 # it gets no spoke — only the 1st and 3rd (the angle's arms).
@@ -1109,7 +1109,7 @@ class ImageCanvas(QWidget):
                 arc = G.arc_through(self._outline_px(m), ca["pts"][0],
                                     ca["pts"][1], ca["pts"][2])
                 if len(arc) >= 2:
-                    p.setPen(QPen(QColor(255, 140, 0), 2.4))
+                    p.setPen(QPen(QColor(255, 140, 0), 2.88))   # 2.4 ×1.2
                     warc = [self._image_to_widget(q) for q in arc]
                     for a, b in zip(warc, warc[1:]):
                         p.drawLine(a, b)

@@ -640,7 +640,7 @@ class _Pane:
         ma = vtkActor()
         ma.SetMapper(self.meas_mapper)
         ma.GetProperty().SetColor(0.2, 0.9, 1.0)   # cyan fallback
-        ma.GetProperty().SetLineWidth(1.5)
+        ma.GetProperty().SetLineWidth(1.8)         # 1.5 ×1.2 — readability
         self.ren.AddActor(ma)
         # In-progress draft outline — drawn DASHED (geometric dashes, the
         # same technique as the axis / center-angle guides) so a shape
@@ -666,7 +666,7 @@ class _Pane:
         mxa = vtkActor()
         mxa.SetMapper(self.meas_axis_mapper)
         mxa.GetProperty().SetColor(0.2, 0.9, 1.0)  # cyan fallback
-        mxa.GetProperty().SetLineWidth(2.2)
+        mxa.GetProperty().SetLineWidth(2.64)        # 2.2 ×1.2 — readability
         mxa.GetProperty().SetOpacity(0.65)
         self.ren.AddActor(mxa)
         # Center-Angle spokes (dashed lines from shape centre to each
@@ -678,7 +678,7 @@ class _Pane:
         self.meas_ca_mapper.SetColorModeToDirectScalars()
         mca = vtkActor()
         mca.SetMapper(self.meas_ca_mapper)
-        mca.GetProperty().SetLineWidth(1.2)
+        mca.GetProperty().SetLineWidth(1.44)        # 1.2 ×1.2 — readability
         mca.GetProperty().SetOpacity(0.8)
         self.ren.AddActor(mca)
         self.meas_ca_pts_mapper = vtkPolyDataMapper()
