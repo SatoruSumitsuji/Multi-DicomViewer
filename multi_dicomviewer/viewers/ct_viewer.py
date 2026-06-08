@@ -1399,10 +1399,12 @@ class CTViewer(AbstractViewer):
             if ca and ca.get("pts"):
                 centre = self._shape_center(m)
                 for ci, q in enumerate(ca["pts"]):
-                    ca_segs.append((centre, q))
-                    # Center-Angle spokes wear the CA-marker colour (orange) so
-                    # the spokes + markers read as one deletable unit.
-                    ca_colors.append((255, 140, 0))
+                    # The 2nd point only picks which way the angle is measured,
+                    # so it gets no spoke; spokes (orange = marker colour) go to
+                    # the 1st and 3rd points (the angle's two arms).
+                    if ci != 1:
+                        ca_segs.append((centre, q))
+                        ca_colors.append((255, 140, 0))
                     # The marker being dragged turns green (like a vertex);
                     # the rest stay orange.
                     if mi == edit_mi and edit_ca and ci == edit_vi:
