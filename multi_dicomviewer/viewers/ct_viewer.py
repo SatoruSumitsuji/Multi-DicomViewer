@@ -1483,9 +1483,24 @@ class CTViewer(AbstractViewer):
             self._set_center_angle_point(m, e["vi"], w)
         elif m["type"] == "ellipse":
             self._set_ellipse_handle(m, e["vi"], w)
+            self._resnap_center_angle(m)
         else:
             m["pts"][e["vi"]] = w
+            self._resnap_center_angle(m)
         self._redraw_geom(e["key"])
+
+    def _resnap_center_angle(self, m):
+        """After the shape itself changes (a vertex / ellipse-handle drag),
+        pull each Center-Angle marker back onto the new outline and recompute
+        the angle, so a finalized Center Angle tracks the reshaped polygon."""
+        ca = m.get("center_angle")
+        if not ca or len(ca.get("pts", [])) < 3:
+            return
+        pts = [self._snap_ca(m, q) for q in ca["pts"]]
+        centre = self._shape_center(m)
+        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[1], pts[2])
+        m["center_angle"] = {"pts": pts, "angle": span,
+                             "t1": t1, "t3": t3, "ccw": ccw}
 
     def _snap_ca(self, m, w):
         """Constrain a Center-Angle marker to the measure's drawn outline, so
@@ -1694,6 +1709,7 @@ class CTViewer(AbstractViewer):
                 best_d, best_i = d, i
         pts.insert(best_i + 1, pt)
         m["pts"] = pts
+        self._resnap_center_angle(m)
 
     def _delete_point(self, which, mi, vi):
         m = self._measures[which][mi]
@@ -1706,6 +1722,7 @@ class CTViewer(AbstractViewer):
         if len(pts) == 2:
             m["type"] = "line"
         m["pts"] = pts
+        self._resnap_center_angle(m)
 
     # ----- measurement geometry / sampling -----
     def _ellipse_params(self, p0, p1):
