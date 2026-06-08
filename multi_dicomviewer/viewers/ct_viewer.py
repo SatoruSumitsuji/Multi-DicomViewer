@@ -116,6 +116,7 @@ def _set_vtk_tag_font(tp) -> None:
         tp.SetFontFile(TAG_FONT_FILE)
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
+    arc_through as _arc_through,
     central_arc_angle as _central_arc_angle,
     convex_hull as _convex_hull,
     dist as _dist,
@@ -745,11 +746,11 @@ class _Pane:
         # slider ineffective and let long lines sprawl across the image. These
         # honour the slider's exact pixel size; the viewer word-wraps their text
         # to ~40% of the pane width so left tags and right results never collide.
-        def _mk_overlay_text(justify_right):
+        def _mk_overlay_text(justify_right, rgb):
             a = vtkTextActor()
             a.SetTextScaleModeToNone()              # fixed font size, no auto-fit
             tp = a.GetTextProperty()
-            tp.SetColor(1.0, 1.0, 1.0)
+            tp.SetColor(*rgb)
             tp.SetFontFamilyToArial()
             _set_vtk_tag_font(tp)                   # Meiryo via file when present
             tp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
@@ -763,8 +764,10 @@ class _Pane:
             a.SetInput("")
             return a
 
-        self.tagact = _mk_overlay_text(False)       # top-left
-        self.resultact = _mk_overlay_text(True)     # top-right
+        # Tags white; results yellow (255,217,0) to match the other modalities
+        # and to read apart from the white DICOM tags.
+        self.tagact = _mk_overlay_text(False, (1.0, 1.0, 1.0))       # top-left
+        self.resultact = _mk_overlay_text(True, (1.0, 0.851, 0.0))   # top-right
         self.ren.AddViewProp(self.tagact)
         self.ren.AddViewProp(self.resultact)
 
@@ -1381,6 +1384,16 @@ class CTViewer(AbstractViewer):
             rgb = _hex_to_rgb(m.get("color"))
             polylines.append(self._outline(m))
             outline_colors.append(rgb)
+            # Solid orange arc on the outline from p1→p3 through p2 — shows which
+            # part of the perimeter a finalized central angle spans (drawn over
+            # the outline via the same solid-line mapper).
+            ca0 = m.get("center_angle")
+            if ca0 and "angle" in ca0 and len(ca0.get("pts", [])) >= 3:
+                arc = _arc_through(self._outline(m), ca0["pts"][0],
+                                   ca0["pts"][1], ca0["pts"][2])
+                if len(arc) >= 2:
+                    polylines.append(arc)
+                    outline_colors.append((255, 140, 0))
             for vi, q in enumerate(self._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     edit_pts.append(q)
