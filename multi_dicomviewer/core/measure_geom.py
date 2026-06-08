@@ -328,7 +328,15 @@ def major_minor(m):
         maj, mnr = (maj0, maj1), (min0, min1)
         da, db = dist(maj0, maj1), dist(min0, min1)
         return (maj, mnr, da, db) if da >= db else (mnr, maj, db, da)
-    hull = convex_hull(list(m["pts"]))
+    # Measure on the SMOOTHED outline that is actually drawn (smooth_closed),
+    # not the raw vertices: a smoothed/concave polygon departs from its raw
+    # convex hull, so caliper endpoints taken off the raw hull floated off the
+    # drawn curve (most visible on the short axis). Hull of the dense outline
+    # hugs the curve, so both diameters' endpoints land on the line.
+    outline = smooth_closed(list(m["pts"]))
+    if len(outline) >= 2 and outline[-1] == outline[0]:
+        outline = outline[:-1]
+    hull = convex_hull(outline)
     if len(hull) < 3:
         return None, None, 0.0, 0.0
     best = (-1.0, hull[0], hull[0])

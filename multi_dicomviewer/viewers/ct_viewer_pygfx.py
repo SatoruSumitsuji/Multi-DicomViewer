@@ -405,9 +405,12 @@ class _Overlay(QWidget):
             ca = m.get("center_angle")
             if ca and ca.get("pts"):
                 centre = v._shape_center(m)
-                for q in ca["pts"]:
-                    # Center-Angle spokes wear the CA-marker colour (orange) so
-                    # the spokes + markers read as one deletable unit.
+                for ci, q in enumerate(ca["pts"]):
+                    # The 2nd point only picks which way the angle is measured,
+                    # so it gets no spoke. Spokes (orange, = marker colour) go to
+                    # the 1st and 3rd points — the angle's two arms.
+                    if ci == 1:
+                        continue
                     draw_dashed((centre, q), (255, 140, 0))
                 # Orange marker picks; the one being dragged turns green (like a
                 # polygon vertex).

@@ -655,7 +655,7 @@ class ImageCanvas(QWidget):
             return
         m = self.measures[mi]
         ca = m.setdefault("center_angle", {"pts": []})
-        ca["pts"].append(pt)
+        ca["pts"].append(self._snap_ca(m, pt))      # constrain to the outline
         if len(ca["pts"]) >= 3:
             centre = self._shape_center(m)
             p1, p2, p3 = ca["pts"][:3]
@@ -665,6 +665,49 @@ class ImageCanvas(QWidget):
                 "t1": t1, "t3": t3, "ccw": ccw,
             }
             self._center_angle_target = -1
+
+    def _snap_ca(self, m, pt):
+        """Constrain a Center-Angle marker to the measure's drawn outline, so
+        the points always sit ON the polygon/ellipse line (matching CT)."""
+        return G.project_to_polyline(pt, self._outline_px(m))
+
+    def _pick_center_angle(self, sx, sy):
+        """Pick a finalized Center-Angle marker point so it can be dragged like
+        a polygon vertex. Returns (mi, ci) or None."""
+        for mi in range(len(self.measures) - 1, -1, -1):
+            ca = self.measures[mi].get("center_angle")
+            if not ca or not ca.get("pts"):
+                continue
+            for ci, q in enumerate(ca["pts"]):
+                wq = self._image_to_widget(q)
+                if (wq.x() - sx) ** 2 + (wq.y() - sy) ** 2 <= 144.0:   # ≤12px
+                    return mi, ci
+        return None
+
+    def _set_center_angle_point(self, m, ci, w):
+        """Move one CA marker (snapped to the outline) and recompute the angle
+        from the shape centre, mirroring the CT viewers' live update."""
+        ca = m.get("center_angle")
+        if not ca or "pts" not in ca or not (0 <= ci < len(ca["pts"])):
+            return
+        pts = list(ca["pts"])
+        pts[ci] = self._snap_ca(m, w)
+        centre = self._shape_center(m)
+        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[1], pts[2])
+        m["center_angle"] = {"pts": pts, "angle": span,
+                             "t1": t1, "t3": t3, "ccw": ccw}
+
+    def _resnap_center_angle(self, m):
+        """After the shape changes (vertex/handle drag, add/delete point), pull
+        each CA marker back onto the new outline and recompute the angle."""
+        ca = m.get("center_angle")
+        if not ca or len(ca.get("pts", [])) < 3:
+            return
+        pts = [self._snap_ca(m, q) for q in ca["pts"]]
+        centre = self._shape_center(m)
+        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[1], pts[2])
+        m["center_angle"] = {"pts": pts, "angle": span,
+                             "t1": t1, "t3": t3, "ccw": ccw}
 
     # ----------------------------------------------- point add/delete
     def _add_point_at(self, mi: int, sx: float, sy: float) -> None:
@@ -697,6 +740,7 @@ class ImageCanvas(QWidget):
                 best_d, best_i = d, i
         pts.insert(best_i + 1, pt)
         m["pts"] = pts
+        self._resnap_center_angle(m)
 
     def _delete_point(self, mi: int, vi: int) -> None:
         """Remove one vertex from a Polyline/Polygon. Going from 3→2
@@ -712,6 +756,7 @@ class ImageCanvas(QWidget):
         if len(pts) == 2:
             m["type"] = "line"
         m["pts"] = pts
+        self._resnap_center_angle(m)
 
     def _pick_measure(self, sx, sy):
         """Index of the measure whose outline is closest to (sx, sy)
@@ -820,6 +865,12 @@ class ImageCanvas(QWidget):
             self._edit = {"mi": hit[0], "vi": hit[1]}
             self.update()                       # turn the handle green now
             return
+        # A Center-Angle marker drags like a polygon vertex (snapped to outline).
+        ca_hit = self._pick_center_angle(sx, sy)
+        if ca_hit is not None:
+            self._edit = {"mi": ca_hit[0], "vi": ca_hit[1], "ca": True}
+            self.update()
+            return
 
         # Label drag — pull an id/vessel label off an overlapping neighbour.
         # After handles (more specific) but before drawing, and works with no
@@ -883,10 +934,14 @@ class ImageCanvas(QWidget):
                 return
             m = self.measures[self._edit["mi"]]
             vi = self._edit["vi"]
-            if m["type"] == "ellipse":
+            if self._edit.get("ca"):
+                self._set_center_angle_point(m, vi, pt)
+            elif m["type"] == "ellipse":
                 self._set_ellipse_handle(m, vi, pt)
+                self._resnap_center_angle(m)
             else:
                 m["pts"][vi] = pt
+                self._resnap_center_angle(m)    # CA follows the reshaped polygon
             self.update()
             return
         if self._draft is not None:
@@ -1028,7 +1083,7 @@ class ImageCanvas(QWidget):
 
         # Center-Angle annotations (3 spokes from shape centre + small
         # dots on the picked perimeter points).
-        for m in self.measures:
+        for mi, m in enumerate(self.measures):
             ca = m.get("center_angle")
             if not ca or "pts" not in ca:
                 continue
@@ -1038,14 +1093,27 @@ class ImageCanvas(QWidget):
             # read as one deletable unit — matching the CT viewers.
             spoke = QColor(255, 140, 0, 200)
             p.setPen(QPen(spoke, 1.2, Qt.PenStyle.DashLine))
-            for q in ca["pts"]:
+            for ci, q in enumerate(ca["pts"]):
+                # The 2nd point only picks which way the angle is measured, so
+                # it gets no spoke — only the 1st and 3rd (the angle's arms).
+                if ci == 1:
+                    continue
                 wq = self._image_to_widget(q)
                 p.drawLine(wc, wq)
-            p.setPen(QPen(QColor(255, 140, 0), 1.0))
-            p.setBrush(QColor(255, 140, 0))
-            for q in ca["pts"]:
+            # Orange markers; the one being dragged turns green (like a vertex).
+            ca_edit_vi = (self._edit["vi"] if (
+                self._edit is not None and self._edit.get("ca")
+                and self._edit["mi"] == mi) else -1)
+            for ci, q in enumerate(ca["pts"]):
                 wq = self._image_to_widget(q)
-                p.drawEllipse(wq, 4, 4)
+                if ci == ca_edit_vi:
+                    p.setPen(QPen(QColor(60, 220, 90), 1.0))
+                    p.setBrush(QColor(60, 220, 90))
+                    p.drawEllipse(wq, 6, 6)
+                else:
+                    p.setPen(QPen(QColor(255, 140, 0), 1.0))
+                    p.setBrush(QColor(255, 140, 0))
+                    p.drawEllipse(wq, 4, 4)
             p.setBrush(Qt.BrushStyle.NoBrush)
             if "angle" in ca:
                 p.setPen(QColor(255, 140, 0))
@@ -1054,8 +1122,11 @@ class ImageCanvas(QWidget):
         # Vertex handles + running-number labels.
         # The single handle currently being dragged turns green and
         # 1.5× larger so the edit state is unmistakable.
-        edit_mi = self._edit["mi"] if self._edit is not None else -1
-        edit_vi = self._edit["vi"] if self._edit is not None else -1
+        edit_ca = bool(self._edit.get("ca")) if self._edit is not None else False
+        edit_mi = self._edit["mi"] if (self._edit is not None
+                                       and not edit_ca) else -1
+        edit_vi = self._edit["vi"] if (self._edit is not None
+                                       and not edit_ca) else -1
         yellow = QColor(255, 217, 0)
         green = QColor(60, 220, 90)
         font = QFont()
