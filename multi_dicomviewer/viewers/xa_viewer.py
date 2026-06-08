@@ -32,6 +32,7 @@ from multi_dicomviewer.core.dicom_io import (
     prefetch_planes,
 )
 from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.core.image_export import export_image_as, safe_basename
 from multi_dicomviewer.ui.tag_font import (
     TAG_FONT_PT_DEFAULT, build_tag_font_control,
 )
@@ -203,10 +204,35 @@ class XAViewer(AbstractViewer):
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
+        self.canvas.export_requested.connect(self._on_export_image)
+        self.canvas2.export_requested.connect(self._on_export_image)
 
     def _on_measurement(self, m):
         self.readout.setText(f"{m.kind}: {m.label()}")
         self.measurement_added.emit(m)
+
+    def _on_export_image(self, fmt_key):
+        """Right-click export on a canvas (no active measure tool): save
+        exactly what's on that canvas — image + measurement overlays +
+        burned-in/tag text — in the chosen format."""
+        canvas = self.sender()
+        if not isinstance(canvas, ImageCanvas):
+            canvas = self.canvas
+        # grab() captures the painted widget verbatim (WYSIWYG), at the
+        # display's devicePixelRatio so Retina exports stay full-res.
+        export_image_as(self, canvas.grab(), fmt_key, self._export_basename())
+
+    def _export_basename(self) -> str:
+        """Suggested filename stem from the loaded series + current frame."""
+        h = self._header
+        parts: list[object] = []
+        if h is not None:
+            parts.append(getattr(h, "PatientID", "") or "")
+            parts.append(getattr(h, "Modality", "") or "")
+            parts.append(getattr(h, "AcquisitionDate", "")
+                         or getattr(h, "StudyDate", "") or "")
+        parts.append(f"frame{self._frame + 1}")
+        return safe_basename(*parts)
 
     # ----------------------------------------------------------- UI builders
     def _build_series_nav(self):

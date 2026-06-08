@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
 )
 
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
-from vtkmodules.util.numpy_support import numpy_to_vtk
+from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 from vtkmodules.vtkCommonCore import (
     VTK_FLOAT, vtkLookupTable, vtkPoints, vtkUnsignedCharArray,
 )
@@ -69,6 +69,7 @@ from vtkmodules.vtkRenderingCore import (
     vtkRenderer,
     vtkRenderWindow,
     vtkTextActor,
+    vtkWindowToImageFilter,
 )
 
 # Rendering / interaction implementations VTK loads lazily.
@@ -79,6 +80,9 @@ from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
+from multi_dicomviewer.core.image_export import (
+    export_image_as, pick_export_format, safe_basename,
+)
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.ui.tag_font import (
     TAG_FONT_FILE, TAG_FONT_PT_DEFAULT, VTK_FONT_FILE, build_tag_font_control,
@@ -478,6 +482,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
+        # Right-click with NO measure tool active → still-image export of
+        # this pane (in measure mode the right button edits measurements).
+        if not self._owner._meas_on \
+                and e.button() == Qt.MouseButton.RightButton:
+            self._owner._export_pane(
+                self._which, e.position().x(), e.position().y()
+            )
+            return
         if self._owner._meas_on:
             self._cross = False
             if e.button() == Qt.MouseButton.RightButton:
@@ -1748,6 +1760,56 @@ class CTViewer(AbstractViewer):
                 if _seg_dist(wx, wy, centre, q) < tol:
                     return mi
         return None
+
+    def _export_pane(self, which, sx, sy):
+        """Right-click export on a CT pane (no active measure tool): capture
+        the pane's VTK render window verbatim — slice, measurements,
+        crosshair and tag/result text are all VTK actors, so one grab gets
+        the whole WYSIWYG view — and save in the chosen format."""
+        if self._header is None:        # nothing loaded → no export offered
+            return
+        canvas = self.pane[which].canvas
+        key = pick_export_format(
+            self, canvas.mapToGlobal(QtPoint(int(sx), int(sy)))
+        )
+        if not key:
+            return
+        img = self._grab_pane_qimage(which)
+        if img is not None:
+            export_image_as(self, img, key, self._export_basename(which))
+
+    def _grab_pane_qimage(self, which):
+        """VTK render window of pane *which* → RGB QImage, or None."""
+        from multi_dicomviewer.viewers.image_canvas import to_qimage
+        rw = self.pane[which].canvas.GetRenderWindow()
+        rw.Render()
+        w2i = vtkWindowToImageFilter()
+        w2i.SetInput(rw)
+        w2i.SetInputBufferTypeToRGB()
+        w2i.ReadFrontBufferOff()        # read the buffer we just rendered
+        w2i.Update()
+        vimg = w2i.GetOutput()
+        cols, rows, _ = vimg.GetDimensions()
+        scalars = vimg.GetPointData().GetScalars()
+        if scalars is None or cols == 0 or rows == 0:
+            return None
+        arr = vtk_to_numpy(scalars).reshape(rows, cols, -1)
+        # VTK's image origin is bottom-left; flip to top-left for QImage.
+        arr = np.ascontiguousarray(arr[::-1, :, :3])
+        return to_qimage(arr)
+
+    def _export_basename(self, which="") -> str:
+        """Suggested filename stem from the loaded CT series + pane."""
+        h = self._header
+        parts: list[object] = []
+        if h is not None:
+            parts.append(getattr(h, "PatientID", "") or "")
+            parts.append(getattr(h, "Modality", "") or "")
+            parts.append(getattr(h, "StudyDate", "")
+                         or getattr(h, "AcquisitionDate", "") or "")
+        if which:
+            parts.append(f"pane{which}")
+        return safe_basename(*parts)
 
     def _handle_right(self, which, hit, sx, sy):
         """Right-click on a measure handle: 'Delete point' + 'Delete
