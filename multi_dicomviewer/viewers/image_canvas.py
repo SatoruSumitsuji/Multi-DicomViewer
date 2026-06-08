@@ -1141,6 +1141,38 @@ class ImageCanvas(QWidget):
             self._overlay_font_pt = pt
             self.update()
 
+    @staticmethod
+    def _wrap_px(lines, fm, max_px):
+        """Word-wrap each string in *lines* so no line exceeds *max_px* pixels
+        at the metrics *fm*; hard-splits any single token that alone overflows.
+        Pixel-accurate (QFontMetrics), so the tag block (left 40%) and result
+        block (right 40%) stay inside their share and never overlap."""
+        out: list[str] = []
+        for line in lines:
+            cur = ""
+            for word in line.split(" "):
+                while fm.horizontalAdvance(word) > max_px:   # over-long token
+                    lo, hi = 1, len(word)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if fm.horizontalAdvance(word[:mid]) <= max_px:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    if cur:
+                        out.append(cur)
+                        cur = ""
+                    out.append(word[:lo])
+                    word = word[lo:]
+                trial = word if not cur else cur + " " + word
+                if not cur or fm.horizontalAdvance(trial) <= max_px:
+                    cur = trial
+                else:
+                    out.append(cur)
+                    cur = word
+            out.append(cur)
+        return out
+
     def _paint_overlay(self, p: QPainter):
         font = overlay_qfont(self._overlay_font_pt)
         p.setFont(font)
@@ -1151,14 +1183,16 @@ class ImageCanvas(QWidget):
         # feedback: ×1.25, then a further ×1.1 (cumulative ≈ ×1.392).
         _pitch = 1.0125 * 1.25 * 1.1 if sys.platform == "darwin" else 1.0125
         pad, lh = 6, round(fm.height() * _pitch)
-        text_w = max(fm.horizontalAdvance(s) for s in self.overlay_lines)
-        box = QRect(
-            6, 6, text_w + 2 * pad, lh * len(self.overlay_lines) + 2 * pad
-        )
+        # Confine tags to the left ~40% and word-wrap, so a larger font can't
+        # run them into the right-side results.
+        max_px = max(20, int(self.width() * 0.40) - 2 * pad)
+        lines = self._wrap_px(self.overlay_lines, fm, max_px)
+        text_w = max(fm.horizontalAdvance(s) for s in lines)
+        box = QRect(6, 6, text_w + 2 * pad, lh * len(lines) + 2 * pad)
         p.fillRect(box, QColor(0, 0, 0, 140))
         p.setPen(QColor("#ffffff"))
         y = box.y() + pad + fm.ascent()
-        for line in self.overlay_lines:
+        for line in lines:
             p.drawText(box.x() + pad, y, line)
             y += lh
 
@@ -1201,6 +1235,10 @@ class ImageCanvas(QWidget):
                 )
 
         pad, lh = 6, fm.height()
+        # Confine results to the right ~40% and word-wrap, so a larger font
+        # can't run them into the left-side DICOM tags.
+        max_px = max(20, int(self.width() * 0.40) - 2 * pad)
+        lines = self._wrap_px(lines, fm, max_px)
         text_w = max(fm.horizontalAdvance(s) for s in lines)
         box = QRect(
             self.width() - text_w - 2 * pad - 6, 6,
