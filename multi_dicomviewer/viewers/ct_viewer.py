@@ -126,6 +126,7 @@ from multi_dicomviewer.core.measure_geom import (
     min_width as _min_width,
     point_in_poly as _point_in_poly,
     poly_area as _poly_area,
+    project_to_polyline as _project_to_polyline,
     seg_dist as _seg_dist,
     smooth_closed as _smooth_closed,
     smooth_open as _smooth_open,
@@ -1486,14 +1487,20 @@ class CTViewer(AbstractViewer):
             m["pts"][e["vi"]] = w
         self._redraw_geom(e["key"])
 
+    def _snap_ca(self, m, w):
+        """Constrain a Center-Angle marker to the measure's drawn outline, so
+        the three points always sit ON the polygon/ellipse line."""
+        return _project_to_polyline(w, self._outline(m))
+
     def _set_center_angle_point(self, m, ci, w):
-        """Move one Center-Angle marker point and recompute the angle from the
-        shape centre, mirroring how polygon-vertex drags update live."""
+        """Move one Center-Angle marker point (snapped to the outline) and
+        recompute the angle from the shape centre, mirroring how polygon-vertex
+        drags update live."""
         ca = m.get("center_angle")
         if not ca or "pts" not in ca or not (0 <= ci < len(ca["pts"])):
             return
         pts = list(ca["pts"])
-        pts[ci] = w
+        pts[ci] = self._snap_ca(m, w)
         centre = self._shape_center(m)
         span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[1], pts[2])
         m["center_angle"] = {"pts": pts, "angle": span,
@@ -1649,7 +1656,7 @@ class CTViewer(AbstractViewer):
             return
         m = self._measures[which][mi]
         ca = m.setdefault("center_angle", {"pts": []})
-        ca["pts"].append(w)
+        ca["pts"].append(self._snap_ca(m, w))   # constrain to the outline
         if len(ca["pts"]) >= 3:
             centre = self._shape_center(m)
             p1, p2, p3 = ca["pts"][:3]

@@ -30,6 +30,34 @@ def seg_dist(px, py, a, b) -> float:
     return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
 
 
+def closest_point_on_segment(px, py, a, b):
+    """Nearest point on segment a-b to (px,py), returned as (x,y)."""
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return (ax, ay)
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L2))
+    return (ax + t * dx, ay + t * dy)
+
+
+def project_to_polyline(p, pts):
+    """Nearest point on polyline *pts* (list of (x,y)) to point *p*=(x,y).
+    Constrains a marker to a measure's drawn outline. Returns (x,y); falls
+    back to *p* when *pts* has fewer than two points."""
+    px, py = float(p[0]), float(p[1])
+    if not pts or len(pts) < 2:
+        return (px, py)
+    best, bestd = None, float("inf")
+    for i in range(len(pts) - 1):
+        c = closest_point_on_segment(px, py, pts[i], pts[i + 1])
+        d = (c[0] - px) ** 2 + (c[1] - py) ** 2
+        if d < bestd:
+            bestd, best = d, c
+    return best
+
+
 def poly_area(pts) -> float:
     """Shoelace area of a simple polygon (caller scales to mm²)."""
     s = 0.0
