@@ -212,6 +212,50 @@ def angle_at(a, b, c) -> float:
     return math.degrees(math.acos(max(-1.0, min(1.0, cos))))
 
 
+def arc_through(outline, p1, p2, p3):
+    """Sub-path of the CLOSED polyline *outline* running from p1 to p3 the way
+    that passes through p2 — i.e. the very arc whose central angle a Center
+    Angle measures. Returns a point list incl. the p1/p3 endpoints. The three
+    points are assumed to lie on (or near) the outline (CA markers are snapped
+    to it); each is located by nearest projection onto the outline."""
+    pts = [(float(q[0]), float(q[1])) for q in outline]
+    if len(pts) >= 2 and pts[0] == pts[-1]:
+        pts = pts[:-1]
+    n = len(pts)
+    if n < 3:
+        return [tuple(p1), tuple(p3)]
+
+    def pos(q):                                   # float position in [0, n)
+        best_d, best = float("inf"), 0.0
+        for i in range(n):
+            ax, ay = pts[i]
+            bx, by = pts[(i + 1) % n]
+            ux, uy = bx - ax, by - ay
+            L2 = ux * ux + uy * uy
+            u = 0.0 if L2 < 1e-12 else max(0.0, min(
+                1.0, ((q[0] - ax) * ux + (q[1] - ay) * uy) / L2))
+            cx, cy = ax + u * ux, ay + u * uy
+            d = (q[0] - cx) ** 2 + (q[1] - cy) ** 2
+            if d < best_d:
+                best_d, best = d, i + u
+        return best
+
+    s1, s2, s3 = pos(p1), pos(p2), pos(p3)
+
+    def walk(sa, sb):                             # outline vertices in (sa, sb)
+        end = sa + (sb - sa) % n
+        cur, out, guard = math.floor(sa) + 1, [], 0
+        while cur < end - 1e-9 and guard <= n:
+            out.append(pts[cur % n])
+            cur += 1
+            guard += 1
+        return out
+
+    if (s2 - s1) % n <= (s3 - s1) % n:            # forward arc contains p2
+        return [tuple(p1)] + walk(s1, s3) + [tuple(p3)]
+    return [tuple(p1)] + list(reversed(walk(s3, s1))) + [tuple(p3)]
+
+
 def central_arc_angle(center, p1, p2, p3):
     """Central angle (deg, 0..360) of the arc from p1 → p3 *passing
     through* p2, measured at *center*. Returns (span, theta1, theta3,

@@ -1100,6 +1100,16 @@ class ImageCanvas(QWidget):
                     continue
                 wq = self._image_to_widget(q)
                 p.drawLine(wc, wq)
+            # Solid orange arc on the outline from p1→p3 through p2 — shows which
+            # part of the perimeter the central angle spans.
+            if "angle" in ca and len(ca["pts"]) >= 3:
+                arc = G.arc_through(self._outline_px(m), ca["pts"][0],
+                                    ca["pts"][1], ca["pts"][2])
+                if len(arc) >= 2:
+                    p.setPen(QPen(QColor(255, 140, 0), 2.4))
+                    warc = [self._image_to_widget(q) for q in arc]
+                    for a, b in zip(warc, warc[1:]):
+                        p.drawLine(a, b)
             # Orange markers; the one being dragged turns green (like a vertex).
             ca_edit_vi = (self._edit["vi"] if (
                 self._edit is not None and self._edit.get("ca")

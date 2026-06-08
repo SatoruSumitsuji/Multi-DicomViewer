@@ -69,6 +69,7 @@ from multi_dicomviewer.ui.tag_font import (
 from multi_dicomviewer.core.measurements import Measurement
 from multi_dicomviewer.core.measure_geom import (
     angle_at as _angle_at,
+    arc_through as _arc_through,
     central_arc_angle as _central_arc_angle,
     dist as _dist,
     ellipse_axes as _ellipse_axes,
@@ -405,6 +406,15 @@ class _Overlay(QWidget):
             ca = m.get("center_angle")
             if ca and ca.get("pts"):
                 centre = v._shape_center(m)
+                # Solid orange arc on the outline from p1→p3 through p2 — shows
+                # exactly which part of the perimeter the central angle spans.
+                if "angle" in ca and len(ca["pts"]) >= 3:
+                    arc = _arc_through(v._outline(m), ca["pts"][0],
+                                       ca["pts"][1], ca["pts"][2])
+                    if len(arc) >= 2:
+                        p.setPen(QPen(QColor(255, 140, 0), 2.4))
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                        p.drawPolyline(poly(arc))
                 for ci, q in enumerate(ca["pts"]):
                     # The 2nd point only picks which way the angle is measured,
                     # so it gets no spoke. Spokes (orange, = marker colour) go to
@@ -458,7 +468,7 @@ class _Overlay(QWidget):
         # word-wrapped so growing the font can't make them overlap the tags.
         lines = v._metrics.get(key, [])
         if lines:
-            p.setPen(QColor(102, 255, 153))
+            p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
             p.setFont(QFont("monospace", v._overlay_font_pt))
             rx = w * 0.60
             flags = (int(Qt.AlignmentFlag.AlignRight)
