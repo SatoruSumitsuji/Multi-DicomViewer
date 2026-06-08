@@ -698,15 +698,18 @@ class CTViewer(AbstractViewer):
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
         self._overlay_font_pt = TAG_FONT_PT_DEFAULT
-        # Interactive level-of-detail: during a drag / wheel-page the expensive
-        # CPU slab-MIP is skipped (panes show the cheap GPU thin slice) so
+        # Interactive level-of-detail: during a drag / wheel-page the slab-MIP
+        # is built coarse (then full quality once the interaction settles) so
         # paging stays smooth on low-memory Macs. This one-shot timer fires a
-        # short time after the last interactive refresh and rebuilds the full-
-        # quality slab MIP.
+        # short time after the last interactive refresh and rebuilds full
+        # quality via _lod_settle (which also forces a synchronous repaint —
+        # after a wheel-page the event loop sits idle with no pointer-up to
+        # pump it, so a plain update() would leave the rebuilt slab unpainted
+        # until the next input event).
         self._lod_timer = QTimer(self)
         self._lod_timer.setSingleShot(True)
         self._lod_timer.setInterval(160)
-        self._lod_timer.timeout.connect(lambda: self._refresh(lod=False))
+        self._lod_timer.timeout.connect(self._lod_settle)
         self._loaded_uid = ""
 
         # drag state (rendercanvas pointer events)
@@ -830,8 +833,7 @@ class CTViewer(AbstractViewer):
         # the coarse slab never lingers after a drag ends (the timer still
         # covers wheel-paging, which has no pointer-up). Snappier crisp-up too.
         if self._lod_timer.isActive():
-            self._lod_timer.stop()
-            self._refresh(lod=False)
+            self._lod_settle()
 
     def _on_dblclick(self, key, ev):
         if self._meas_on:
@@ -1315,6 +1317,18 @@ class CTViewer(AbstractViewer):
             self._lod_timer.start()
         else:
             self._lod_timer.stop()
+
+    def _lod_settle(self):
+        """Rebuild the slab at full quality and force a SYNCHRONOUS repaint.
+        Fired by the debounce timer (and on pointer-up). After a wheel-page the
+        Qt loop sits idle — no pointer-up to pump it — so the full-quality slab
+        gets built but a plain update() leaves it unpainted until the next input
+        event (the user sees the coarse image linger, then snap sharp when the
+        mouse moves). repaint() flushes it immediately, independent of the loop."""
+        self._lod_timer.stop()
+        self._refresh(lod=False)
+        for k in ("A", "B"):
+            self._overlay[k].repaint()
 
     # ----------------------------------------------------------- tools
     def _drag(self, which, dx, dy, shift=False, sx=None, sy=None):
