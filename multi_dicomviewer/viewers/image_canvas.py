@@ -1095,7 +1095,9 @@ class ImageCanvas(QWidget):
             # Spokes in the CA-marker colour (orange) so the spokes + markers
             # read as one deletable unit — matching the CT viewers.
             spoke = QColor(255, 140, 0, 200)
-            p.setPen(QPen(spoke, 1.44, Qt.PenStyle.DashLine))   # 1.2 ×1.2
+            # CA spokes were anomalously thin (1.2); bump to the diameter-line
+            # weight (2.4) so they're as visible as the rest of the measurement.
+            p.setPen(QPen(spoke, 2.4, Qt.PenStyle.DashLine))
             for ci, q in enumerate(ca["pts"]):
                 # The 2nd point only picks which way the angle is measured, so
                 # it gets no spoke — only the 1st and 3rd (the angle's arms).
