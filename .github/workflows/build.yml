@@ -1,7 +1,7 @@
 name: Build distributables
 
 # Trigger options:
-#   - Push a tag like `v0.1.0` to build BOTH platforms and attach to a Release
+#   - Push a tag like `v1.0.0` to build BOTH platforms and attach to a Release
 #   - Run manually from the Actions tab (Run workflow) for either platform
 #   - On every push to main: just build and upload as artifacts (no Release)
 on:
