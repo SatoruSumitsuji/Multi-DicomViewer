@@ -338,9 +338,11 @@ def major_minor(m):
             if d > best[0]:
                 best = (d, hull[i], hull[j])
     dmax, p1, p2 = best
-    cx = sum(q[0] for q in hull) / len(hull)
-    cy = sum(q[1] for q in hull) / len(hull)
-    bw, bn = float("inf"), (0.0, 1.0)
+    # Minimum caliper width via rotating-calipers over the hull edges. Track the
+    # winning edge's base point + normal so the SHORT-axis segment can be drawn
+    # as the real caliper (far vertex → its foot on the opposite supporting
+    # edge) rather than floating around the centroid.
+    bw, bn, bbase = float("inf"), (0.0, 1.0), hull[0]
     for i in range(len(hull)):
         ax, ay = hull[i]
         bx, by = hull[(i + 1) % len(hull)]
@@ -352,10 +354,15 @@ def major_minor(m):
         ds = [(qx - ax) * nx + (qy - ay) * ny for qx, qy in hull]
         w = max(ds) - min(ds)
         if w < bw:
-            bw, bn = w, (nx, ny)
+            bw, bn, bbase = w, (nx, ny), (ax, ay)
     if dmax < 1e-9 or bw == float("inf"):
         return None, None, 0.0, 0.0
     nx, ny = bn
-    q1 = (cx - nx * bw / 2.0, cy - ny * bw / 2.0)
-    q2 = (cx + nx * bw / 2.0, cy + ny * bw / 2.0)
-    return (p1, p2), (q1, q2), dmax, bw
+    bax, bay = bbase
+    proj = [((qx - bax) * nx + (qy - bay) * ny, (qx, qy)) for qx, qy in hull]
+    d_far, vfar = max(proj, key=lambda t: t[0])     # farthest vertex (on edge)
+    d_base = min(proj, key=lambda t: t[0])[0]        # supporting (min) side
+    width = d_far - d_base
+    foot = (vfar[0] - nx * width, vfar[1] - ny * width)  # foot on the far line
+    # Both endpoints lie on the polygon boundary; the segment length == bw.
+    return (p1, p2), (vfar, foot), dmax, bw

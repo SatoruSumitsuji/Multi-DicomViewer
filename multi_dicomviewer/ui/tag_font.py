@@ -124,7 +124,7 @@ def build_tag_font_control(pt: int = TAG_FONT_PT_DEFAULT):
     slider.setFixedWidth(_SLIDER_W)
     slider.setToolTip("DICOM tag text size")
 
-    button = QPushButton("DICOM Tags…")
+    button = QPushButton("DICOM Tags")
     button.setToolTip("Choose DICOM tags to overlay on the image")
 
     col.addWidget(slider)

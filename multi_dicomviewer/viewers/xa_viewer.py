@@ -270,22 +270,22 @@ class XAViewer(AbstractViewer):
         # left of the flush-right Measure-History / DICOM-Tags group below.
         self._series_nav_row = row
         row.addStretch(1)
-        # Measure History / DICOM Tags sit flush-right in the top toolbar
-        # so they land at the image's top-right corner — matching the CT
-        # viewer, where the same two actions live in the top toolbar.
-        hist_btn = QPushButton("Measure History")
-        hist_btn.setToolTip("Show this study's measurement history")
-        hist_btn.clicked.connect(self.history_requested.emit)
-        row.addWidget(hist_btn)
-        self._series_nav_right_anchor = hist_btn
-        # "DICOM Tags…" button with the tag-text-size slider stacked ABOVE it
-        # (wide enough to operate; the size is shared across all modalities).
+        # DICOM Tags / Measure History sit flush-right in the top toolbar so
+        # they land at the image's top-right corner — matching the CT viewer.
+        # DICOM Tags is on the LEFT of the pair (always visible / more useful);
+        # Measure History — less critical — sits to its right. The tag-text-size
+        # slider is stacked ABOVE the Tags button (shared across modalities).
         tags_box, self._tag_font_slider, tags_btn = build_tag_font_control(
             TAG_FONT_PT_DEFAULT
         )
         tags_btn.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
+        self._series_nav_right_anchor = tags_box   # left edge of the pair
+        hist_btn = QPushButton("Measure History")
+        hist_btn.setToolTip("Show this study's measurement history")
+        hist_btn.clicked.connect(self.history_requested.emit)
+        row.addWidget(hist_btn)
         return row
 
     def set_overlay_font_pt(self, pt: int) -> None:
