@@ -85,6 +85,18 @@ from multi_dicomviewer.ui.viewer_base import AbstractViewer
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
 _SPIN_SIGN = 1.0
 
+# Slab-MIP level-of-detail. The slab MIP is a CPU max-over-N-oblique-planes
+# image (see _slab_mip_hu); its cost scales with sample columns² × plane count.
+# At rest we build it full quality; DURING an interactive drag/page we build a
+# COARSER one — fewer sample columns and fewer MIP planes — so the THICK image
+# KEEPS its slab look (instead of dropping to the thin GPU slice) while staying
+# smooth on low-memory Macs. The debounce timer rebuilds full quality on settle.
+# Tune these if motion is still heavy (lower) or too soft (raise) on the Mac.
+_SLAB_IW_FULL = 480     # slab-MIP sample columns at rest
+_SLAB_IW_LOD = 200      # ...during an interactive drag/page (coarse but smooth)
+_SLAB_PLANES_FULL = 64  # MIP plane cap at rest
+_SLAB_PLANES_LOD = 8    # ...during an interactive drag/page
+
 _TOOLS = ("ZOOM", "MOVE", "ROTATE", "SPIN", "PAGING", "THICK", "WL")
 _TOOL_KEYS = {
     Qt.Key.Key_Z: "ZOOM", Qt.Key.Key_V: "MOVE", Qt.Key.Key_S: "SPIN",
@@ -1156,7 +1168,7 @@ class CTViewer(AbstractViewer):
         return self._world_to_screen(key, ccx, ccy)
 
     # ----------------------------------------------------- slab-MIP (CPU)
-    def _slab_mip_hu(self, key, iw, ih):
+    def _slab_mip_hu(self, key, iw, ih, max_planes=_SLAB_PLANES_FULL):
         """(ih,iw) HU array = max over N parallel oblique planes within
         ±thick/2 of the pane plane, sampled across the current viewport.
 
@@ -1185,7 +1197,7 @@ class CTViewer(AbstractViewer):
         bz = pc[2] + WX * u[2] + WY * v[2]
         th = self._thick[key]
         step = max(1e-3, min(self._dims))
-        nplanes = int(max(1, min(64, round(th / step))))
+        nplanes = int(max(1, min(max_planes, round(th / step))))
         offs = (np.linspace(-th / 2.0, th / 2.0, nplanes)
                 if nplanes > 1 else np.array([0.0]))
         mip = np.full((ih, iw), -np.inf, np.float32)
@@ -1195,15 +1207,18 @@ class CTViewer(AbstractViewer):
             mip = np.maximum(mip, hu.astype(np.float32))
         return mip
 
-    def _build_slab_qimage(self, key):
+    def _build_slab_qimage(self, key, lod=False):
         """Render the slab MIP for a pane to a viewport-filling RGB QImage
-        (W/L or HU colormap applied CPU-side)."""
+        (W/L or HU colormap applied CPU-side). *lod*=True builds a coarser
+        image (fewer columns + MIP planes) for smooth interactive drag/page."""
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
-        iw = min(pw, 480)
+        iw = min(pw, _SLAB_IW_LOD if lod else _SLAB_IW_FULL)
         ih = max(1, int(round(iw * ph / pw)))
-        mip = self._slab_mip_hu(key, iw, ih)
+        mip = self._slab_mip_hu(
+            key, iw, ih,
+            max_planes=_SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL)
         if self._color:
             lut = _band_lut_array(self._bands, self._opacity,
                                   self._win, self._lvl)        # (512,4)
@@ -1244,10 +1259,11 @@ class CTViewer(AbstractViewer):
             self._overlay[k].update()
 
     def _refresh(self, reset_cam=False, lod=False):
-        # lod=True is an INTERACTIVE refresh (drag / wheel-page): the expensive
-        # CPU slab-MIP is skipped — panes show the cheap GPU thin slice — so
-        # paging stays smooth on low-memory Macs. The debounce timer then
-        # rebuilds full-quality slab MIP once the interaction settles.
+        # lod=True is an INTERACTIVE refresh (drag / wheel-page): the CPU slab-
+        # MIP is built at REDUCED quality (coarse columns + fewer planes) rather
+        # than skipped, so the THICK image keeps its slab look while staying
+        # smooth on low-memory Macs. The debounce timer then rebuilds it at full
+        # quality once the interaction settles.
         if self._vol is None:
             return
         for key in ("A", "B"):
@@ -1274,11 +1290,12 @@ class CTViewer(AbstractViewer):
             # Slab-MIP (THICK): clipping planes can't bound a GPU MIP slab
             # (de-risk spike), so when thick>0 we hide the GPU slice and paint
             # a CPU max-over-N-oblique-planes image in the overlay instead.
-            # During an interactive (lod) refresh we skip that CPU work and show
-            # the GPU thin slice; full slab MIP returns when the drag settles.
-            if self._thick[key] > 0 and not lod:
+            # During an interactive (lod) refresh we still paint the slab, just
+            # at reduced quality, so the thickness never disappears mid-drag;
+            # full quality returns when the drag settles (debounce timer).
+            if self._thick[key] > 0:
                 p.mesh.visible = False
-                self._mip_img[key] = self._build_slab_qimage(key)
+                self._mip_img[key] = self._build_slab_qimage(key, lod=lod)
             else:
                 p.mesh.visible = True
                 self._mip_img[key] = None
@@ -1355,9 +1372,10 @@ class CTViewer(AbstractViewer):
                         dphi = (dphi + 180.0) % 360.0 - 180.0
                         self._spin_prev = phi
                         self._roll[which] += _SPIN_SIGN * dphi
-        # Skip the costly slab MIP mid-drag for smoothness — except THICK,
-        # where the user is adjusting the slab and must see it update live.
-        self._refresh(lod=(t != "THICK"))
+        # Build a reduced-quality slab MIP mid-drag for smoothness (the thick
+        # image keeps its look; full quality returns when the drag settles).
+        # THICK included: the coarse slab still updates live as it's adjusted.
+        self._refresh(lod=True)
 
     def _wheel(self, which, delta):
         if self._vol is None:
@@ -1440,7 +1458,7 @@ class CTViewer(AbstractViewer):
             self._clamp_center()
             self._pc[other] = self._center.copy()
             self._view_initial = False
-            self._refresh()
+            self._refresh(lod=True)            # coarse slab while dragging
             return
         # ROTATE: crosshair follows the cursor; other pane re-derived.
         ccx, ccy = self._cc(which)
@@ -1458,7 +1476,7 @@ class CTViewer(AbstractViewer):
         self._cross_ang[other] = 0.0
         self._pc[other] = self._center.copy()
         self._view_initial = False
-        self._refresh()
+        self._refresh(lod=True)                # coarse slab while dragging
 
     def _recenter(self, which, sx, sy):
         """Double-click: clicked point becomes the CrossLine centre AND the
