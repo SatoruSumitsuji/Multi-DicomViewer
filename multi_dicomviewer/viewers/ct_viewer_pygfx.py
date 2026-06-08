@@ -399,12 +399,16 @@ class _Overlay(QWidget):
                 maj, mnr, _, _ = _major_minor(m)
                 for seg in (maj, mnr):
                     if seg is not None:
-                        draw_dashed(seg, rgb)
+                        # Long/short-diameter lines wear the polygon-vertex
+                        # colour (yellow) so they read as part of the shape.
+                        draw_dashed(seg, (255, 217, 0))
             ca = m.get("center_angle")
             if ca and ca.get("pts"):
                 centre = v._shape_center(m)
                 for q in ca["pts"]:
-                    draw_dashed((centre, q), rgb)
+                    # Center-Angle spokes wear the CA-marker colour (orange) so
+                    # the spokes + markers read as one deletable unit.
+                    draw_dashed((centre, q), (255, 140, 0))
                 # Orange marker picks; the one being dragged turns green (like a
                 # polygon vertex).
                 ca_edit = edit_ca and mi == edit_mi and 0 <= edit_vi < len(ca["pts"])
@@ -447,13 +451,17 @@ class _Overlay(QWidget):
                     p.drawPolyline(poly(preview))
             dots(list(d["pts"]), QColor(255, 217, 0), 4.0)
 
-        # per-measure result strings, stacked top-right
+        # per-measure result strings, top-right, confined to the right 40% and
+        # word-wrapped so growing the font can't make them overlap the tags.
         lines = v._metrics.get(key, [])
         if lines:
             p.setPen(QColor(102, 255, 153))
             p.setFont(QFont("monospace", v._overlay_font_pt))
-            p.drawText(QRectF(0, 4, w - 6, h * 0.5),
-                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop,
+            rx = w * 0.60
+            flags = (int(Qt.AlignmentFlag.AlignRight)
+                     | int(Qt.AlignmentFlag.AlignTop)
+                     | int(Qt.TextFlag.TextWordWrap))
+            p.drawText(QRectF(rx, 4, w - rx - 6, h - 40), flags,
                        "\n".join(lines))
 
     # -- corner info text + angio readout ----------------------------------
@@ -469,8 +477,12 @@ class _Overlay(QWidget):
             head = overlay_lines(v._header, kws, anonymized=v._anon)
             if head:
                 p.setFont(overlay_qfont(v._overlay_font_pt))
-                p.drawText(QRectF(6, 4, w - 12, h * 0.7),
-                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
+                # Confine tags to the left 40% and word-wrap, so a larger font
+                # never runs them into the right-side measure results.
+                flags = (int(Qt.AlignmentFlag.AlignLeft)
+                         | int(Qt.AlignmentFlag.AlignTop)
+                         | int(Qt.TextFlag.TextWordWrap))
+                p.drawText(QRectF(6, 4, w * 0.40 - 6, h - 40), flags,
                            "\n".join(head))
         p.setFont(QFont("monospace", 12))       # corner readouts stay compact
         slab = v._thick[key]
@@ -1975,6 +1987,19 @@ class CTViewer(AbstractViewer):
                 and self._draft["type"] in ("polyline", "polygon"):
             self._measure_finish_draft()
             return
+        # Right-click ON a Center-Angle marker or spoke deletes JUST the Center
+        # Angle (the polygon/ellipse stays). Checked before the vertex/outline
+        # menus since the markers sit on the outline.
+        ca_mi = self._ca_hit(which, sx, sy)
+        if ca_mi is not None:
+            menu = QMenu(self)
+            del_ca = menu.addAction("Delete Center Angle")
+            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+                QPoint(int(sx), int(sy))))
+            if chosen is del_ca:
+                self._measures[which][ca_mi].pop("center_angle", None)
+                self._redraw_meas(which)
+            return
         hit = self._pick_handle(which, sx, sy)
         if hit is not None:
             self._handle_right(which, hit, sx, sy)
@@ -1983,6 +2008,25 @@ class CTViewer(AbstractViewer):
         if mi is None:
             return
         self._outline_right(which, mi, sx, sy)
+
+    def _ca_hit(self, which, sx, sy):
+        """mi of a measure whose Center-Angle marker point OR spoke line is
+        under the screen point (sx,sy), else None — for 'Delete Center Angle'."""
+        hit = self._pick_center_angle(which, sx, sy)
+        if hit is not None:
+            return hit[0]
+        wx, wy = self._disp_to_world(which, sx, sy)
+        tol = max(3.0, 0.02 * self._half)
+        for mi in range(len(self._measures[which]) - 1, -1, -1):
+            m = self._measures[which][mi]
+            ca = m.get("center_angle")
+            if not ca or not ca.get("pts"):
+                continue
+            centre = self._shape_center(m)
+            for q in ca["pts"]:
+                if _seg_dist(wx, wy, centre, q) < tol:
+                    return mi
+        return None
 
     def _handle_right(self, which, hit, sx, sy):
         mi, vi = hit
