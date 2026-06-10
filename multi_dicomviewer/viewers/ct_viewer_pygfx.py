@@ -37,7 +37,7 @@ import time
 import numpy as np
 import pygfx as gfx
 import pylinalg as la
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
 )
@@ -772,6 +772,19 @@ class CTViewer(AbstractViewer):
         # drag state (rendercanvas pointer events)
         self._drag_btn = None
         self._last = (0.0, 0.0)
+        # Right-click single-vs-double discrimination. A single right-click
+        # exports a still image; a right DOUBLE-click forces the full-quality
+        # ("high-res") slab rebuild. The export menu is modal and would
+        # swallow the second click, so the single-click export is deferred by
+        # one double-click interval and a second right-press within that
+        # window cancels it and crisps instead. We detect the double ourselves
+        # (consecutive right-downs) rather than rely on the canvas' own
+        # double_click event, which is not guaranteed for the right button.
+        self._pending_rclick = None          # (key, x, y) awaiting the timer
+        self._last_rdown_t = None            # monotonic time of last right-down
+        self._rclick_timer = QTimer(self)
+        self._rclick_timer.setSingleShot(True)
+        self._rclick_timer.timeout.connect(self._rclick_timeout)
         self._cross_grab = False             # current drag is a crosshair grab
         self._cross_mode = "rotate"          # "rotate" | "move"
         self._cross_axis = None              # locked move axis (2-D unit)
@@ -852,11 +865,28 @@ class CTViewer(AbstractViewer):
             started = self._measure_left(key, x, y)
             self._meas_drag = bool(started)
             return
-        # Right-click (not measuring): offer a still-image export of this
-        # pane. Mirrors the Windows VTK viewer's right-click export so the two
-        # platforms behave identically.
+        # Right-click (not measuring): a single click exports a still image;
+        # a double click forces the full-quality ("high-res") rebuild. Defer
+        # the export by one double-click interval so a second right-press can
+        # preempt it (the export menu is modal and would block the second
+        # click otherwise).
         if self._drag_btn == 2:
-            self._export_pane(key, x, y)
+            try:
+                dbl_ms = max(150, int(QApplication.doubleClickInterval()))
+            except Exception:
+                dbl_ms = 400
+            now = time.monotonic()
+            if (self._last_rdown_t is not None
+                    and (now - self._last_rdown_t) * 1000.0 <= dbl_ms):
+                # Second right-click within the window → high-res rebuild.
+                self._rclick_timer.stop()
+                self._pending_rclick = None
+                self._last_rdown_t = None
+                self._force_crisp()
+                return
+            self._last_rdown_t = now
+            self._pending_rclick = (key, x, y)
+            self._rclick_timer.start(dbl_ms)
             return
         # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool.
         self._cross_grab = (self._drag_btn == 1
@@ -897,6 +927,10 @@ class CTViewer(AbstractViewer):
             self._lod_settle()
 
     def _on_dblclick(self, key, ev):
+        # Right double-click is the high-res ("force crisp") gesture, detected
+        # from consecutive right-downs in _on_down — never recenter on it.
+        if ev.get("button") == 2:
+            return
         if self._meas_on:
             self._measure_finish_draft()
             return
@@ -922,6 +956,15 @@ class CTViewer(AbstractViewer):
         self._overlay[key].update()
 
     # -- still-image export -------------------------------------------
+    def _rclick_timeout(self):
+        """No second right-click arrived within the double-click window, so
+        the pending right-click was a single click → run the still-image
+        export."""
+        pend, self._pending_rclick = self._pending_rclick, None
+        self._last_rdown_t = None
+        if pend is not None:
+            self._export_pane(*pend)
+
     def _export_pane(self, key, x, y):
         """Right-click export on a CT pane (no active measure tool): save
         what's on that pane — GPU slice (or slab-MIP) plus the crosshair,
