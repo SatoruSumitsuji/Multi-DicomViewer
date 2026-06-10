@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Multi-DICOMviewer 使い方説明書</title>
+<style>
+@page { size: A4; margin: 18mm 15mm; }
+* { box-sizing: border-box; }
+body {
+  font-family: "Yu Gothic", "Meiryo", "Hiragino Kaku Gothic ProN",
+               "Noto Sans CJK JP", sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a;
+  max-width: 860px; margin: 0 auto; padding: 24px;
+}
+h1 { font-size: 20pt; border-bottom: 3px solid #1f6feb; padding-bottom: 6px;
+     margin: 0 0 14px; }
+h2 { font-size: 15pt; border-bottom: 1px solid #c9c9c9; padding-bottom: 4px;
+     margin: 22px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 16px 0 8px; page-break-after: avoid; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0 6px 0; padding-left: 1.6em; }
+li { margin: 3px 0; }
+code { font-family: "Consolas", "Yu Gothic", monospace;
+       background: #f0f2f4; padding: 1px 4px; border-radius: 3px;
+       font-size: 9.5pt; }
+pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+      padding: 10px 12px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; padding: 0; font-size: 9pt; line-height: 1.45; }
+blockquote { border-left: 4px solid #e3a008; background: #fff8e6;
+             margin: 10px 0; padding: 8px 14px; color: #5a4a1a;
+             page-break-inside: avoid; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0;
+        page-break-inside: avoid; font-size: 10pt; }
+th, td { border: 1px solid #c9c9c9; padding: 5px 9px; text-align: left;
+         vertical-align: top; }
+th { background: #eef3fb; }
+tr:nth-child(even) td { background: #fafbfc; }
+a { color: #0b56c4; text-decoration: none; }
+hr { border: none; border-top: 1px solid #d0d7de; margin: 18px 0; }
+h2 { string-set: none; }
+</style>
+</head>
+<body>
+<h1 id="multi-dicomviewer-使い方説明書">Multi-DICOMviewer 使い方説明書</h1>
+<p>研究・教育用のマルチモダリティ DICOM ビューアです。<strong>XA アンギオ（心臓カテーテルのシネ）</strong>、</p>
+<p><strong>心臓 CT（CCTA）</strong>、<strong>IVUS</strong>、その他（US/NM/OCT/OFDI 等）の DICOM を表示・計測・書き出しできます。</p>
+<blockquote>⚠️ <strong>本ソフトは医療機器ではありません。</strong> 研究・教育目的のみで、臨床診断には使用しないでください。</blockquote>
+<p>対応バージョン: 1.2.0 時点の機能で記載しています。</p>
+<hr>
+<h2 id="目次">目次</h2>
+<ol>
+<li><a href="#1-起動方法">起動方法</a></li>
+<li><a href="#2-画面構成">画面構成</a></li>
+<li><a href="#3-データの読み込み">データの読み込み</a></li>
+<li><a href="#4-スタディブラウザ">スタディブラウザ</a></li>
+<li><a href="#5-画面レイアウト">画面レイアウト</a></li>
+<li><a href="#6-アンギオ--ivus-ビューワ">アンギオ / IVUS ビューワ</a></li>
+<li><a href="#7-ct-ビューワ">CT ビューワ</a></li>
+<li><a href="#8-ツールメニュー解析機能">ツールメニュー（解析機能）</a></li>
+<li><a href="#9-書き出しエクスポート">書き出し（エクスポート）</a></li>
+<li><a href="#10-キーボードショートカット早見表">キーボードショートカット早見表</a></li>
+<li><a href="#11-トラブルシューティング">トラブルシューティング</a></li>
+</ol>
+<hr>
+<h2 id="1-起動方法">1. 起動方法</h2>
+<h3 id="windows">Windows</h3>
+<p>配布zip（<code>Multi-DicomViewer-windows.zip</code>）を展開し、<code>Multi-DicomViewer.exe</code> をダブルクリックします。</p>
+<h3 id="macos">macOS</h3>
+<p>配布zip（<code>Multi-DicomViewer-macos.zip</code>）を展開し、<code>Multi-DicomViewer.app</code> を「アプリケーション」へ移動します。</p>
+<p><strong>初回のみ</strong>、アプリは未署名のため Gatekeeper にブロックされます。ターミナルで次の1行をコピー＆ペーストして実行してから起動してください（ドラッグ&amp;ドロップ不可、コピペで実行）:</p>
+<pre><code>{ find /Applications ~/Applications ~/Downloads -maxdepth 2 -name &quot;Multi-DicomViewer.app&quot; -print; mdfind -name &quot;Multi-DicomViewer.app&quot;; } | sort -u | while read -r p; do xattr -dr com.apple.quarantine &quot;$p&quot;; done</code></pre>
+<p>以降は通常どおりダブルクリックで起動します。</p>
+<hr>
+<h2 id="2-画面構成">2. 画面構成</h2>
+<pre><code>┌──────────────┬──────────────────────────────────────┐
+│              │  メニューバー（File / View / Tools）     │
+│  スタディ      │  レイアウトボタン・Bi/Lt/Rt ボタン        │
+│  ブラウザ      ├──────────────────────────────────────┤
+│  （左ドック）   │                                      │
+│              │      ビューワペイン（1〜4面）            │
+│  Tree /      │   CTは左、XA/IVUSは右に置くと比較しやすい  │
+│  Thumbnails  │                                      │
+└──────────────┴──────────────────────────────────────┘
+                    最下部：ステータスバー</code></pre>
+<ul>
+<li><strong>左のスタディブラウザ</strong>: 患者 ▸ スタディ ▸ シリーズの一覧。</li>
+<li><strong>右のビューワペイン</strong>: シリーズを表示。レイアウトで1〜4面に分割可能。</li>
+<li>同じ患者の <strong>CT と XA を左右に並べて対比</strong> できるのが本アプリの特徴です。</li>
+</ul>
+<hr>
+<h2 id="3-データの読み込み">3. データの読み込み</h2>
+<ul>
+<li><strong>メニュー: File ▸ Open DICOM folder…</strong>（<code>Ctrl+O</code>）でフォルダを選択。サブフォルダも再帰的にスキャンします。</li>
+<li>フォルダを <strong>ビューワ領域へドラッグ&amp;ドロップ</strong> しても読み込めます。</li>
+<li>起動時にフォルダパスを引数で渡すこともできます（コマンドライン起動時）。</li>
+<li><strong>File ▸ Clear viewers</strong>: 表示中のビューワをクリア。</li>
+</ul>
+<p>読み込み後、ブラウザに 患者 ▸ スタディ ▸ シリーズ がツリー表示されます。</p>
+<hr>
+<h2 id="4-スタディブラウザ">4. スタディブラウザ</h2>
+<h3 id="表示の切り替え">表示の切り替え</h3>
+<ul>
+<li><strong>📋 Tree</strong>: 患者/スタディ/シリーズのツリー表示（日時・シリーズ番号・種別・画像数・説明・ファイルパス）。</li>
+<li><strong>🖼 Thumbnails</strong>: 選択中スタディのシリーズをサムネイル表示。右下のスライダーでサムネイルサイズを変更。</li>
+<li>Tree と Thumbnails は選択が連動します。</li>
+</ul>
+<h3 id="マーク表示">マーク・表示</h3>
+<ul>
+<li>患者名の横の <strong><code>⚹ CT+XA</code></strong>: その患者が CT と XA の両方を持つ目印。</li>
+<li>スタディは <strong>モダリティ種別ごとに別ノード</strong>で表示されます（同じ検査日でも XA と OT は別行）。</li>
+<li>列ヘッダ（Date/Time・Series No・Instance No・Images）クリックで、<strong>選択中スタディのみ</strong>並べ替え。</li>
+</ul>
+<h3 id="ボタン">ボタン</h3>
+<ul>
+<li><strong>Anonymous</strong>: 患者名・ID・日付など個人情報を画面上で伏せ字表示（ファイルは変更されません。メニュー <code>View ▸ Anonymize</code> / <code>Ctrl+Shift+A</code> と同じ）。</li>
+<li><strong>DICOM Info</strong>: 画像上の DICOM タグ文字オーバーレイの表示/非表示。</li>
+</ul>
+<h3 id="操作">操作</h3>
+<ul>
+<li>シリーズをクリック → アクティブなペインに表示。</li>
+<li>スタディ行をクリック → そのスタディで<strong>最後に見ていたシリーズ</strong>を再表示（無ければ先頭）。</li>
+<li>シリーズを <strong>ペインへドラッグ&amp;ドロップ</strong> → そのペインに表示。</li>
+<li><strong>右クリックメニュー</strong>:</li>
+<li><strong>Export (DICOM)</strong>: 元の .dcm を無劣化コピー。</li>
+<li><strong>Export (MP4)</strong>: シネを MP4 に書き出し（ビットレート/FPS 指定可）。</li>
+<li><strong>Close</strong>: シリーズ一覧を畳む。</li>
+<li><strong>Delete (remove from list)</strong>: 一覧から除外（ファイルは削除されません）。</li>
+<li><code>Ctrl</code>/<code>Shift</code>+クリックで複数選択 → まとめて書き出し/削除。</li>
+</ul>
+<hr>
+<h2 id="5-画面レイアウト">5. 画面レイアウト</h2>
+<p>上部のレイアウトボタンでペイン数を切り替えます:</p>
+<table><thead><tr>
+<th>ボタン</th>
+<th>構成</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>1×1</strong></td>
+<td>1面（全画面）</td>
+</tr>
+<tr>
+<td><strong>1×2</strong></td>
+<td>横2面</td>
+</tr>
+<tr>
+<td><strong>2×1</strong></td>
+<td>縦2面（各行フル幅）</td>
+</tr>
+<tr>
+<td><strong>2×2</strong></td>
+<td>4面</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>Bi / Lt / Rt ボタン</strong>: バイプレーン XA や2面 CT の表示切替。</li>
+<li><strong>Bi</strong>: 両方表示（1×1・2×1 ではバイプレーンを Front+Lateral 並べて表示）</li>
+<li><strong>Lt</strong>: 左（プレーン0）のみ</li>
+<li><strong>Rt</strong>: 右（プレーン1）のみ</li>
+<li>ペインのタイトル部を <strong>ドラッグして他ペインと位置入れ替え</strong> が可能です。</li>
+</ul>
+<hr>
+<h2 id="6-アンギオ--ivus-ビューワ">6. アンギオ / IVUS ビューワ</h2>
+<p>XA（アンギオ・シネ）と IVUS は共通の操作系です。</p>
+<h3 id="6-1-シリーズ送り上段ツールバー">6-1. シリーズ送り（上段ツールバー）</h3>
+<ul>
+<li><strong>⏮ First / ◀ Prev (A) / Next (F) ▶ / Last ⏭</strong>: 同一モダリティ内のシリーズ移動。</li>
+</ul>
+<h3 id="6-2-再生トランスポート">6-2. 再生（トランスポート）</h3>
+<ul>
+<li><strong>▶ Play / ⏸ Pause</strong>: シネ再生・一時停止。</li>
+<li><strong>シークバー</strong>: フレーム位置の移動。つまみは「白丸＋大きい青ドット」。</li>
+<li><strong>fps</strong>: 再生速度（フレーム/秒）。</li>
+<li><strong>XXX/XXX（フレーム数表示）</strong>: 現在/総フレーム。<strong>クリックで再生範囲を全域にリセット</strong>。</li>
+</ul>
+<h4 id="再生範囲開始点終了点">再生範囲（開始点・終了点）</h4>
+<ul>
+<li>シークバーの<strong>上</strong>に、青い<strong>下向き三角マーカー2つ</strong>（開始点・終了点）があります。</li>
+<li>ドラッグで範囲を指定すると:</li>
+<li><strong>再生</strong>・<strong>シーク（つまみ移動）</strong>がその範囲内に制限されます。</li>
+<li><strong>MP4 書き出し</strong>がその範囲のみになります（<strong>DICOM 書き出しは仕様上つねに全フレーム</strong>）。</li>
+<li><strong>フレーム数表示をクリック</strong>すると範囲が全域に戻ります。</li>
+</ul>
+<h3 id="6-3-ウィンドウレベルwl">6-3. ウィンドウ/レベル（W/L）</h3>
+<ul>
+<li>下段の <strong>W</strong>（幅）・<strong>L</strong>（レベル）スライダーで濃淡を調整。つまみは「白丸＋小さい青ドット」。</li>
+<li>カラー画像（RGB シネ）では W/L は無効です。</li>
+</ul>
+<h3 id="6-4-心電図ecg表示--w-キー">6-4. 心電図（ECG）表示 — <code>W</code> キー</h3>
+<ul>
+<li><code>W</code> キーで、画像の下に <strong>心電図波形ストリップ</strong>を表示/非表示。</li>
+<li>DICOM の Waveform Sequence または レガシー Curve Data から波形を読み取り、<strong>再生フレームに同期した黄色いカーソル</strong>が動きます。</li>
+<li>波形を含まないシリーズでは表示されず、「心電図データはありません」と通知します。</li>
+</ul>
+<h3 id="6-5-計測ツール">6-5. 計測ツール</h3>
+<ul>
+<li><strong>📏 Measure</strong> をオンにすると計測バーが出ます: <strong>Line（距離）/ Polyline / Ellipse / Polygon / Angle（角度）/ Clear</strong>。</li>
+<li>左クリックで点追加、Polyline/Polygon は<strong>右クリックで確定</strong>。</li>
+<li><code>ImagerPixelSpacing</code> を持つシネは <strong>mm 表示</strong>、無ければ <strong>ピクセル表示</strong>。</li>
+<li><strong>Measure History</strong>: そのスタディの計測履歴を表示。</li>
+</ul>
+<h3 id="6-6-拡大ズーム">6-6. 拡大（ズーム）</h3>
+<ul>
+<li><strong>🔍+ / 🔍−</strong>: クリックした点を中心に拡大/縮小（×1.1 / ×0.9）。<strong>🔍1</strong> で元に戻す。</li>
+<li>キー: <code>Z</code>（拡大）/ <code>Shift+Z</code>（縮小）。</li>
+</ul>
+<h3 id="6-7-dicom-タグ表示">6-7. DICOM タグ表示</h3>
+<ul>
+<li><strong>DICOM Tags…</strong>: 画像に重ねる DICOM タグ項目を選択。上のスライダーで文字サイズ調整（全ビューワ共通）。</li>
+<li><code>Q</code> キーでオーバーレイの表示/非表示。</li>
+</ul>
+<h3 id="6-8-ivus-長軸ロングアクシス-v-キー">6-8. IVUS 長軸（ロングアクシス）— <code>V</code> キー</h3>
+<ul>
+<li><code>V</code> キー、または <strong>Long View</strong> ボタンで、断面像の下に<strong>長軸（縦切り）画像</strong>を表示。</li>
+<li><strong>通常の横方向ドラッグ</strong>で長軸画像の<strong>幅のみ</strong>を拡大/縮小（高さは枠に自動フィット）。</li>
+<li><strong>Shift+縦方向ドラッグ</strong>で回転（カテーテル軸まわり）。</li>
+<li>断面像上の<strong>回転中心マーカー</strong>をドラッグして、各フレームの中心を指定（キーフレーム）。</li>
+<li><strong>◀ Center / Center ▶</strong>: 中心を設定したフレーム間をジャンプ。</li>
+<li><strong>Clear Centers</strong>: その面の手動中心をすべて消去。</li>
+<li>長軸画像も右クリックで静止画書き出し可能。</li>
+</ul>
+<h3 id="6-9-静止画書き出し">6-9. 静止画書き出し</h3>
+<ul>
+<li>画像上で<strong>右クリック</strong> → PNG / JPEG / TIFF で保存（計測線やタグ文字も含めた表示のまま＝WYSIWYG）。</li>
+</ul>
+<hr>
+<h2 id="7-ct-ビューワ">7. CT ビューワ</h2>
+<p>CT は直交/斜め MPR（多断面再構成）で表示します（Windows は VTK、macOS は pygfx/Metal）。</p>
+<h3 id="7-1-表示">7-1. 表示</h3>
+<ul>
+<li>軸位・冠状・矢状などの <strong>2面 MPR</strong>＋クロスヘア連動。</li>
+<li>各面のスライススライダーでスライス送り。</li>
+<li>画像を<strong>ダブルクリック</strong>でその位置に再センタリング。</li>
+</ul>
+<h3 id="7-2-ツールツールバー-or-ショートカット">7-2. ツール（ツールバー or ショートカット）</h3>
+<p>マウス操作のモードを切り替えます:</p>
+<table><thead><tr>
+<th>キー</th>
+<th>ツール</th>
+<th>機能</th>
+</tr></thead><tbody>
+<tr>
+<td><code>Z</code></td>
+<td>ZOOM</td>
+<td>拡大縮小</td>
+</tr>
+<tr>
+<td><code>V</code></td>
+<td>MOVE</td>
+<td>移動（パン）/ クロスヘア移動</td>
+</tr>
+<tr>
+<td><code>R</code></td>
+<td>ROTATE</td>
+<td>斜め断面の回転</td>
+</tr>
+<tr>
+<td><code>S</code></td>
+<td>SPIN</td>
+<td>面内回転</td>
+</tr>
+<tr>
+<td><code>G</code></td>
+<td>PAGING</td>
+<td>スライス送り</td>
+</tr>
+<tr>
+<td><code>T</code></td>
+<td>THICK</td>
+<td>スラブ厚（厚み付き MIP）の変更</td>
+</tr>
+<tr>
+<td><code>W</code></td>
+<td>WL</td>
+<td>ウィンドウ/レベル調整</td>
+</tr>
+<tr>
+<td><code>C</code></td>
+<td>（色）</td>
+<td>HU カラーマップの ON/OFF</td>
+</tr>
+</tbody></table>
+<ul>
+<li><strong>HU プリセット</strong>: 冠動脈 / 縦隔 / 肺 / 骨 などのウィンドウ/レベルを切り替え可能。</li>
+<li><strong>計測</strong>: Line / Polyline / Ellipse / Polygon / Angle（XA/IVUS と共通の計測モデル、Measure History に記録）。</li>
+<li><code>Q</code> キーで DICOM タグオーバーレイの表示/非表示。</li>
+</ul>
+<h3 id="7-3-macos-固有--スラブ表示の高解像度化">7-3. macOS 固有 — スラブ表示の高解像度化</h3>
+<ul>
+<li>スラブ（厚み付き）MPR は、操作中（ドラッグ/回転/ホイール送り）は<strong>低品質</strong>で滑らかに描画し、止めると自動で高品質に戻ります。</li>
+<li>もし粗いままの場合:</li>
+<li><strong>右クリックのシングル</strong> = 静止画書き出し</li>
+<li><strong>右クリックのダブル</strong> = 高解像度（フル品質）に再構築</li>
+<li>（Windows 版はつねにフル品質のため、この区別はありません）</li>
+</ul>
+<hr>
+<h2 id="8-ツールメニュー解析機能">8. ツールメニュー（解析機能）</h2>
+<p>メニュー <strong>Tools</strong> から各解析を開きます。</p>
+<ul>
+<li><strong>MultiSync IVUS viewer…</strong>: 複数ペインの IVUS を<strong>同期シークバー</strong>で並べて再生・比較。同期ポイント設定、高品質 MP4 書き出しに対応（1×2 / 2×1 / 2×2 レイアウトで利用可）。</li>
+<li><strong>Rupture-Predictor…</strong>: 伸展比（stretch-ratio）ベースの解析ツール（ネイティブ版）。</li>
+<li><strong>Orthogonal-View…</strong>: アクティブな XA 画像でベクトルを指定すると、それに<strong>直交する視野の C アーム角度</strong>（LAO/RAO・CRA/CAU）を算出（C アーム角度を持つ XA 表示時に利用可）。</li>
+<li><strong>Coaxial Eval…</strong>: 2つ以上のアンギオ視野で同じ血管上にラベル付きの線（GC / proxLAD など）を引き、<strong>3次元の GC–血管角度</strong>を算出（C アーム角度を持つ XA 表示時に利用可）。</li>
+</ul>
+<hr>
+<h2 id="9-書き出しエクスポート">9. 書き出し（エクスポート）</h2>
+<table><thead><tr>
+<th>種類</th>
+<th>操作</th>
+<th>内容</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>DICOM</strong></td>
+<td>ブラウザで右クリック ▸ Export (DICOM)</td>
+<td>元 .dcm を無劣化コピー。ファイル名は選んだフィールドから生成。<strong>つねに全フレーム</strong>。</td>
+</tr>
+<tr>
+<td><strong>MP4</strong></td>
+<td>ブラウザで右クリック ▸ Export (MP4)</td>
+<td>シネを MP4 に。ビットレート/FPS 指定可。<strong>再生範囲マーカーで絞った範囲のみ</strong>書き出し。</td>
+</tr>
+<tr>
+<td><strong>静止画</strong></td>
+<td>画像上で右クリック ▸ 形式選択</td>
+<td>PNG / JPEG / TIFF。表示そのまま（計測・タグ込み）。</td>
+</tr>
+</tbody></table>
+<ul>
+<li>DICOM タグオーバーレイの設定は <strong>View ▸ Export/Import DICOM tag overlay settings…</strong> で保存・読み込みできます。</li>
+</ul>
+<hr>
+<h2 id="10-キーボードショートカット早見表">10. キーボードショートカット早見表</h2>
+<h3 id="共通--メニュー">共通 / メニュー</h3>
+<table><thead><tr>
+<th>キー</th>
+<th>機能</th>
+</tr></thead><tbody>
+<tr>
+<td><code>Ctrl+O</code></td>
+<td>DICOM フォルダを開く</td>
+</tr>
+<tr>
+<td><code>Ctrl+Q</code></td>
+<td>終了</td>
+</tr>
+<tr>
+<td><code>Ctrl+Shift+A</code></td>
+<td>匿名化 ON/OFF</td>
+</tr>
+<tr>
+<td><code>Q</code>（または <code>Ctrl+H</code>）</td>
+<td>DICOM タグオーバーレイ表示/非表示</td>
+</tr>
+</tbody></table>
+<h3 id="アンギオ--ivusシネ表示中">アンギオ / IVUS（シネ表示中）</h3>
+<table><thead><tr>
+<th>キー</th>
+<th>機能</th>
+</tr></thead><tbody>
+<tr>
+<td><code>F</code> / <code>A</code></td>
+<td>次 / 前のシリーズ</td>
+</tr>
+<tr>
+<td><code>Home</code> / <code>End</code></td>
+<td>最初 / 最後のシリーズ</td>
+</tr>
+<tr>
+<td><code>T</code> または <code>R</code></td>
+<td>1コマ進む</td>
+</tr>
+<tr>
+<td><code>E</code></td>
+<td>1コマ戻る</td>
+</tr>
+<tr>
+<td><code>D</code></td>
+<td>再生 / 2倍速トグル（停止中は1倍速で再生開始）</td>
+</tr>
+<tr>
+<td><code>S</code></td>
+<td>停止</td>
+</tr>
+<tr>
+<td><code>W</code></td>
+<td>心電図ストリップ 表示/非表示</td>
+</tr>
+<tr>
+<td><code>V</code></td>
+<td>IVUS 長軸 表示/非表示（IVUS のみ）</td>
+</tr>
+<tr>
+<td><code>Z</code> / <code>Shift+Z</code></td>
+<td>拡大 / 縮小</td>
+</tr>
+</tbody></table>
+<h3 id="ctct-ペインにフォーカス時">CT（CT ペインにフォーカス時）</h3>
+<table><thead><tr>
+<th>キー</th>
+<th>ツール</th>
+</tr></thead><tbody>
+<tr>
+<td><code>Z</code> ZOOM / <code>V</code> MOVE / <code>R</code> ROTATE / <code>S</code> SPIN</td>
+<td>マウス操作モード</td>
+</tr>
+<tr>
+<td><code>G</code> PAGING / <code>T</code> THICK / <code>W</code> WL / <code>C</code> 色</td>
+<td>スライス送り/スラブ厚/WL/カラー</td>
+</tr>
+</tbody></table>
+<blockquote>日本語 IME がオンでもショートカットは効きます（QShortcut で実装）。</blockquote>
+<hr>
+<h2 id="11-トラブルシューティング">11. トラブルシューティング</h2>
+<h3 id="windows-展開後に-exe-が消える--起動できない">Windows: 展開後に exe が消える / 起動できない</h3>
+<ul>
+<li>ウイルス対策ソフト（Windows Defender や <strong>ウイルスバスター</strong>等）が、署名のない実行ファイルを<strong>誤検知して隔離</strong>することがあります。アプリ自体は無害です。</li>
+<li><strong>対処</strong>: ウイルス対策ソフトの<strong>例外（除外）設定</strong>にアプリのフォルダ（<code>Multi-DicomViewer</code> フォルダ）を追加し、<strong>zip を展開し直して</strong>ください。</li>
+<li>恒久対策として、各社への<strong>誤検知の再評価依頼</strong>（無料）も可能です。</li>
+</ul>
+<h3 id="macos-壊れている開発元を確認できないで開けない">macOS: 「壊れている/開発元を確認できない」で開けない</h3>
+<ul>
+<li>上記 <a href="#1-起動方法">1. 起動方法</a> の <strong>xattr コマンド</strong>を1回実行してください。</li>
+</ul>
+<h3 id="ct-が表示されない">CT が表示されない</h3>
+<ul>
+<li>CT 描画には依存ライブラリ（Windows: VTK / macOS: pygfx）が必要です。配布ビルドには同梱済みです。CT ペインにエラーが出る場合はその内容を確認してください。</li>
+</ul>
+<hr>
+<h2 id="ライセンス注意">ライセンス・注意</h2>
+<ul>
+<li>本ソフトは <strong>GNU General Public License v3.0</strong> で提供されます（PyQt6 が GPL のため）。</li>
+<li><strong>医療機器ではありません。</strong> 研究・教育用途のみ。臨床診断には使用しないでください。</li>
+<li>同梱コンポーネントのライセンスは <code>THIRD-PARTY-NOTICES.md</code> を参照してください。</li>
+</ul>
+<hr>
+<p>各バージョンの変更点は <a href="../CHANGELOG.md">CHANGELOG.md</a> を参照してください。</p>
+</body>
+</html>
