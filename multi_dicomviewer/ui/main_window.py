@@ -446,10 +446,14 @@ class MainWindow(QMainWindow):
         # (First / Prev / Next / Last) resumes from where the user left
         # it after switching panes/modalities.
         self._last_by_modality: dict[str, Series] = {}
-        # Last opened series per study, so clicking a Study row (not a
-        # specific series) restores the LAST series the user was on in
-        # that study instead of always jumping back to series #1.
-        self._last_by_study: dict[str, Series] = {}
+        # Last opened series per study NODE, so clicking a Study row (not a
+        # specific series) restores the LAST series the user was on in that
+        # study instead of always jumping back to series #1. Keyed by
+        # (study_uid, kind) — NOT study_uid alone — because one study_uid
+        # can appear as two nodes (e.g. XA + OT acquired the same date);
+        # keying by uid only let an XA-node click resume the sibling OT
+        # series (the "clicking XA jumps to OT" bug).
+        self._last_by_study: dict[tuple[str, str], Series] = {}
         self._anon = False                  # Anonymize toggle (display only)
         # DICOM tags overlaid on images — restored from the previous run
         # and remembered per modality so XA / IVUS / CT each keep their
@@ -470,6 +474,11 @@ class MainWindow(QMainWindow):
         self._study_by_series_uid: dict[str, str] = {}
         self._cur_study_uid: str | None = None
         self._hist_dialog: MeasureHistoryDialog | None = None
+        # Per-series MP4 export range [start, end] (0-based frame indices),
+        # reported by a cine viewer's Play-range markers. A series only
+        # appears here while its range is narrower than the full clip; a
+        # full range is removed so the export defaults to every frame.
+        self._mp4_ranges: dict[str, tuple[int, int]] = {}
 
         # --- study browser dock ---
         self.browser = StudyPanel()
@@ -1936,11 +1945,17 @@ class MainWindow(QMainWindow):
                     series_list, out_dir, cfg.fields, progress=_cb
                 )
             else:
+                # Per-series Play range (from the seek-bar markers), aligned
+                # with series_list; None = export every frame.
+                frame_ranges = [
+                    self._mp4_ranges.get(s.series_uid) for s in series_list
+                ]
                 written = exporter.export_mp4(
                     series_list, out_dir, cfg.fields,
                     bitrate_mbps=cfg.bitrate_mbps,
                     fps_override=cfg.fps,
                     crf=cfg.crf,
+                    frame_ranges=frame_ranges,
                     progress=_cb,
                 )
         except RuntimeError as e:
@@ -1987,18 +2002,23 @@ class MainWindow(QMainWindow):
         """Click / keyboard nav in the browser → load into the active pane."""
         self._open_series(series, self._active)
 
-    def _on_study_clicked(self, study_uid: str) -> None:
+    def _on_study_clicked(self, study_uid: str, kind: str) -> None:
         """Row click on a Study header in the browser tree: resume the
-        last-viewed series of that study (so XA/IVUS don't reset to
-        series #1 after the user moves to another study and back)."""
-        last = self._last_by_study.get(study_uid)
+        last-viewed series of THAT study node (so XA/IVUS don't reset to
+        series #1 after the user moves to another study and back).
+
+        Scoped to (study_uid, kind): a study_uid shared by two nodes (XA +
+        OT on the same date) resolves to the clicked node's own kind, never
+        the sibling's — otherwise clicking the XA node jumped to OT."""
+        last = self._last_by_study.get((study_uid, kind))
         if last is not None and last.series_uid in self._series_by_uid:
             self.browser.select_series(last)
             return
-        # Never visited this study yet → fall back to its first series
-        # in the browser's display order.
+        # Never visited this study node yet → fall back to its first series
+        # in the browser's display order, restricted to the clicked kind.
         for se in self.browser.ordered_series():
-            if self._study_by_series_uid.get(se.series_uid) == study_uid:
+            if (self._study_by_series_uid.get(se.series_uid) == study_uid
+                    and se.kind == kind):
                 self.browser.select_series(se)
                 return
 
@@ -2046,7 +2066,7 @@ class MainWindow(QMainWindow):
             self._last_by_modality[series.kind] = series
             study_uid = self._study_by_series_uid.get(series.series_uid, "")
             if study_uid:
-                self._last_by_study[study_uid] = series
+                self._last_by_study[(study_uid, series.kind)] = series
             self._sync_xa_shortcuts()
             self.statusBar().showMessage(f"Resumed {series.label}")
             return
@@ -2137,7 +2157,7 @@ class MainWindow(QMainWindow):
         self._last_by_modality[series.kind] = series
         study_uid_log = self._study_by_series_uid.get(series.series_uid, "")
         if study_uid_log:
-            self._last_by_study[study_uid_log] = series
+            self._last_by_study[(study_uid_log, series.kind)] = series
         self._sync_xa_shortcuts()  # XA keys only when active pane is XA
         # Keep an open history window pointed at the now-current study.
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
@@ -2168,11 +2188,27 @@ class MainWindow(QMainWindow):
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))
+        # Play-range markers → remember each series' MP4 export range.
+        if hasattr(viewer, "play_range_changed"):
+            viewer.play_range_changed.connect(self._on_play_range_changed)
         # DICOM-tag overlay text size: one slider per viewer, all kept in sync.
         if hasattr(viewer, "overlay_font_changed"):
             viewer.overlay_font_changed.connect(self._set_tag_font_pt)
         if hasattr(viewer, "set_overlay_font_pt"):
             viewer.set_overlay_font_pt(self._tag_font_pt)
+
+    def _on_play_range_changed(
+        self, uid: str, start: int, end: int, total: int
+    ) -> None:
+        """A cine viewer's Play-range markers moved (or a series loaded).
+        Remember the range for the MP4 export, dropping it when it spans the
+        whole clip so the default stays "export every frame"."""
+        if not uid:
+            return
+        if start <= 0 and end >= total - 1:
+            self._mp4_ranges.pop(uid, None)
+        else:
+            self._mp4_ranges[uid] = (int(start), int(end))
 
     def _set_tag_font_pt(self, pt: int) -> None:
         """Broadcast the DICOM-tag overlay text size to every viewer in every

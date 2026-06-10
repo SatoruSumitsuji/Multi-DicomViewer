@@ -161,10 +161,14 @@ def _group_header(patient: Patient, study, kind: str, anon: bool) -> str:
 
 class StudyBrowser(QTreeWidget):
     series_chosen = pyqtSignal(object)  # emits Series
-    study_clicked = pyqtSignal(str)     # emits study_uid (row click on a
-                                        # Study header — shell resolves
-                                        # to the LAST-viewed series of
-                                        # that study, not always #1)
+    study_clicked = pyqtSignal(str, str)  # emits (study_uid, kind) — row
+                                        # click on a Study header. The kind
+                                        # MUST travel with the uid: one
+                                        # study_uid can have two nodes (e.g.
+                                        # XA + OT on the same date), and the
+                                        # shell resolves to the LAST-viewed
+                                        # series of THAT node, not series #1
+                                        # and not the sibling kind's node.
     #: (kind, key, label) — kind is "patient"|"study"|"series";
     #: key is PatientID / StudyInstanceUID / SeriesInstanceUID.
     delete_requested = pyqtSignal(str, str, str)
@@ -437,8 +441,8 @@ class StudyBrowser(QTreeWidget):
         # to the first series in browser order if nothing is remembered.
         idk = item.data(0, _ID_ROLE)
         if idk and idk[0] == "S" and item.childCount() > 0:
-            study_uid = idk[1]
-            self.study_clicked.emit(study_uid)
+            study_uid, kind = idk[1], idk[2]
+            self.study_clicked.emit(study_uid, kind)
 
     def _selected_series(self) -> list[Series]:
         """All Series across the current multi-selection, deduped by UID,
@@ -727,7 +731,7 @@ class StudyPanel(QWidget):
     parts of StudyBrowser the shell uses."""
 
     series_chosen = pyqtSignal(object)
-    study_clicked = pyqtSignal(str)          # study row click (study_uid)
+    study_clicked = pyqtSignal(str, str)     # study row click (uid, kind)
     anonymize_toggled = pyqtSignal(bool)     # the "Anonymous" button
     dicom_info_toggled = pyqtSignal(bool)    # "DICOM Info" (True = show)
     delete_requested = pyqtSignal(str, str, str)  # (kind, key, label)
