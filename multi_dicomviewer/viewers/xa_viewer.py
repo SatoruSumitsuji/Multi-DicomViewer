@@ -12,7 +12,8 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPen, QPolygon, QPolygonF
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -21,11 +22,14 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPushButton,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
     QVBoxLayout,
     QWidget,
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.core.ecg import ECGTrace, read_ecg
 from multi_dicomviewer.core.dicom_io import (
     LoadedSeries,
     XAPlane,
@@ -39,9 +43,16 @@ from multi_dicomviewer.ui.tag_font import (
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.viewers.image_canvas import ImageCanvas
 
+#: Inner-blue-dot blue used on the seek-bar handle (the "中青○" mark). The
+#: Play range start/end triangle markers reuse this exact hue so they read
+#: as the same control family.
+_SEEK_DOT_BLUE = "#1c6fd0"
+
 #: Slider look matching the Windows build: light-grey groove, blue filled
 #: (sub-page) track, and a handle that is a white circle with a blue dot in
-#: the centre. Applied to the seek bar and the W/L sliders.
+#: the centre. Applied to the W/L sliders. The inner blue dot here is the
+#: SMALL one (radius ratio 0.32) — swapped with the seek bar's, which now
+#: carries the LARGE inner dot. Handle pixel size is unchanged (16 px).
 _SLIDER_QSS = (
     "QSlider::groove:horizontal {"
     " height:5px; background:#c9c9c9; border-radius:2px; }"
@@ -51,8 +62,224 @@ _SLIDER_QSS = (
     " width:16px; height:16px; margin:-6px 0; border-radius:8px;"
     " border:1px solid #9a9a9a;"
     " background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,"
-    " stop:0 #2f7fd1, stop:0.55 #2f7fd1, stop:0.6 #ffffff, stop:1 #ffffff); }"
+    " stop:0 #2f7fd1, stop:0.32 #2f7fd1, stop:0.40 #ffffff, stop:1 #ffffff); }"
 )
+
+
+class _RangeMarks(QWidget):
+    """Interactive strip drawn directly above the cine seek bar carrying two
+    draggable down-triangle (▽) markers: the Play range START and END.
+
+    Both triangles are painted in the seek handle's inner-blue
+    (:data:`_SEEK_DOT_BLUE`) so they read as part of the same control. The
+    strip shares the slider's x / width (they are stacked in one column),
+    so the slider's groove geometry maps directly onto this widget's
+    coordinates — the same trick MultiSync's mark strip uses.
+
+    Dragging a marker bounds where Play loops and how far the handle can be
+    scrubbed; the MP4 export honours the same [start, end] range. The DICOM
+    export is unaffected (always full series, by design)."""
+
+    range_changed = pyqtSignal(int, int)   # (start, end), 0-based frame idx
+
+    _TRI_HW = 6        # triangle half-width, px
+
+    def __init__(self, slider: QSlider, parent=None):
+        super().__init__(parent)
+        self._slider = slider
+        self._start = 0
+        self._end = 0
+        self._drag: str | None = None      # "start" | "end" | None
+        self.setFixedHeight(11)
+        self.setMouseTracking(True)
+
+    def set_bounds(self, start: int, end: int) -> None:
+        self._start, self._end = int(start), int(end)
+        self.update()
+
+    # -- value <-> pixel mapping (mirrors the slider's own geometry) ----
+    def _span_base(self) -> tuple[int, float]:
+        sl = self._slider
+        opt = QStyleOptionSlider()
+        sl.initStyleOption(opt)
+        style = sl.style()
+        groove = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderGroove, sl,
+        )
+        handle = style.subControlRect(
+            QStyle.ComplexControl.CC_Slider, opt,
+            QStyle.SubControl.SC_SliderHandle, sl,
+        )
+        span = groove.width() - handle.width()
+        base = groove.x() + handle.width() / 2.0
+        return span, base
+
+    def _value_x(self, value: int) -> float:
+        sl = self._slider
+        span, base = self._span_base()
+        pos = QStyle.sliderPositionFromValue(
+            sl.minimum(), sl.maximum(), int(value), span
+        )
+        return base + pos
+
+    def _x_value(self, x: float) -> int:
+        sl = self._slider
+        span, base = self._span_base()
+        return QStyle.sliderValueFromPosition(
+            sl.minimum(), sl.maximum(), int(round(x - base)), span
+        )
+
+    def paintEvent(self, _e) -> None:
+        sl = self._slider
+        if sl.maximum() <= sl.minimum():
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(_SEEK_DOT_BLUE))
+        h = self.height()
+        w = self._TRI_HW
+        for val in (self._start, self._end):
+            cx = self._value_x(val)
+            p.drawPolygon(QPolygon([
+                QPoint(int(round(cx - w)), 0),
+                QPoint(int(round(cx + w)), 0),
+                QPoint(int(round(cx)), h - 1),
+            ]))
+
+    def resizeEvent(self, _e) -> None:
+        self.update()
+
+    def mousePressEvent(self, e) -> None:
+        sl = self._slider
+        if sl.maximum() <= sl.minimum():
+            return
+        x = e.position().x()
+        ds = abs(x - self._value_x(self._start))
+        de = abs(x - self._value_x(self._end))
+        # Grab the nearer triangle. When both ends sit on the same frame
+        # (a fresh full range collapses start==end only for 1-frame cines,
+        # which hide the strip) bias to whichever side the press is toward.
+        if ds <= de:
+            self._drag = "start"
+        else:
+            self._drag = "end"
+        self._apply_drag(x)
+
+    def mouseMoveEvent(self, e) -> None:
+        if self._drag is not None:
+            self._apply_drag(e.position().x())
+
+    def mouseReleaseEvent(self, _e) -> None:
+        self._drag = None
+
+    def _apply_drag(self, x: float) -> None:
+        sl = self._slider
+        v = max(sl.minimum(), min(self._x_value(x), sl.maximum()))
+        if self._drag == "start":
+            self._start = min(v, self._end)     # start never passes end
+        else:
+            self._end = max(v, self._start)     # end never passes start
+        self.update()
+        self.range_changed.emit(self._start, self._end)
+
+
+class _EcgStrip(QWidget):
+    """A physiological ECG strip drawn below the angio image.
+
+    Shows the whole embedded ECG trace (read from the DICOM Waveform
+    Sequence or legacy Curve Data) as a green polyline, with a yellow
+    cursor that tracks the cine frame. The cursor position is given as a
+    0–1 fraction by the viewer, which knows the frame↔time mapping; the
+    strip itself just draws. Hidden until the user presses W on a series
+    that actually carries an ECG."""
+
+    _PAD = 5
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(78)
+        self._label = ""
+        self._cursor = 0.0           # 0..1 across the trace
+        self._xs: np.ndarray | None = None   # 0..1 sample x positions
+        self._ys: np.ndarray | None = None   # 0..1 amplitude (1 = peak)
+
+    def set_trace(self, trace: ECGTrace | None) -> None:
+        """Cache a down-sampled, amplitude-normalised polyline for *trace*
+        (None blanks the strip)."""
+        self._xs = self._ys = None
+        self._label = ""
+        if trace is not None and trace.n >= 2:
+            s = np.asarray(trace.samples, dtype=np.float32)
+            lo = float(np.nanmin(s))
+            hi = float(np.nanmax(s))
+            rng = (hi - lo) if hi > lo else 1.0
+            yn = (s - lo) / rng                       # 0..1, 1 = peak
+            n = yn.shape[0]
+            cap = 3000                                # plenty for any width
+            if n > cap:
+                idx = np.linspace(0, n - 1, cap).astype(np.int64)
+                self._xs = (idx / (n - 1)).astype(np.float32)
+                self._ys = yn[idx]
+            else:
+                self._xs = np.linspace(0.0, 1.0, n, dtype=np.float32)
+                self._ys = yn
+            self._label = trace.label or "ECG"
+        self.update()
+
+    def set_cursor_fraction(self, f: float) -> None:
+        f = max(0.0, min(float(f), 1.0))
+        if f != self._cursor:
+            self._cursor = f
+            self.update()
+
+    def paintEvent(self, _e) -> None:
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#0e1216"))
+        w, h = self.width(), self.height()
+        if self._xs is None or self._ys is None:
+            p.setPen(QColor("#888"))
+            p.drawText(
+                self.rect(), Qt.AlignmentFlag.AlignCenter,
+                "ECG: no waveform in this series"
+            )
+            return
+        pad = self._PAD
+        top, bot = pad, h - pad
+        span = max(1, bot - top)
+        # Baseline (mid-line).
+        p.setPen(QPen(QColor(70, 110, 85), 1, Qt.PenStyle.DashLine))
+        p.drawLine(0, h // 2, w, h // 2)
+        # Waveform polyline.
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor("#36e07a"), 1.3))
+        xw = max(1, w - 1)
+        poly = QPolygonF([
+            QPointF(float(x) * xw, bot - float(y) * span)
+            for x, y in zip(self._xs, self._ys)
+        ])
+        p.drawPolyline(poly)
+        # Frame cursor.
+        cx = int(round(self._cursor * xw))
+        p.setPen(QPen(QColor(255, 210, 0, 230), 2))
+        p.drawLine(cx, 0, cx, h)
+        # Caption.
+        p.setPen(QColor("#cfe8ff"))
+        p.drawText(6, 15, f"ECG · {self._label}")
+
+
+class _ClickLabel(QLabel):
+    """A QLabel that emits ``clicked`` on a left mouse press. Used for the
+    "frame/total" readout so a single click on it resets the Play range to
+    the full clip."""
+
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
 
 
 class _Prefetcher(QThread):
@@ -125,6 +352,11 @@ class XAViewer(AbstractViewer):
     #: MultiSync drove the change itself.
     frame_changed = pyqtSignal(int)
 
+    #: emitted when the Play range markers move (or on series load), so the
+    #: shell can remember per-series [start, end] for the MP4 export.
+    #: (series_uid, start, end, total_frames) — all 0-based frame indices.
+    play_range_changed = pyqtSignal(str, int, int, int)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._planes: list[XAPlane] = []
@@ -134,6 +366,12 @@ class XAViewer(AbstractViewer):
         #: series and back resumes at the LAST frame the user saw
         #: ("本当に最後に見ていた画像").
         self._frame_by_series: dict[str, int] = {}
+        #: per-series Play range [start, end] (0-based frame indices). Bounds
+        #: cine looping + handle scrubbing and drives the MP4 export range.
+        #: Defaults to the full series; remembered across series switches.
+        self._range_by_series: dict[str, tuple[int, int]] = {}
+        self._range_start = 0
+        self._range_end = 0
         self._active = 0          # plane shown in single layout
         self._want_dual = False   # set by the shell (XA-only + biplane)
         self._window = 1.0
@@ -174,8 +412,14 @@ class XAViewer(AbstractViewer):
         self._fps = DEFAULT_CINE_FPS
         # Cine speed multiplier toggled by D (1.0 = 1×, 2.0 = 2×).
         self._play_speed: float = 1.0
-        # ECG waveform strip visible? (W key — reader not yet implemented.)
+        # ECG strip (W key): the trace read from this series' DICOM, the
+        # per-frame time step used to drive the cursor, and visibility.
         self._ecg_visible: bool = False
+        self._ecg_trace: ECGTrace | None = None
+        self._ecg_available: bool = False
+        self._ecg_frame_time_ms: float = 0.0
+        self._ecg_strip = _EcgStrip()
+        self._ecg_strip.setVisible(False)
 
         img_row = QHBoxLayout()
         img_row.setContentsMargins(0, 0, 0, 0)
@@ -197,6 +441,9 @@ class XAViewer(AbstractViewer):
         layout.addWidget(self._measure_bar)
         layout.addWidget(self.title_label)
         layout.addWidget(self._canvas_area, 1)
+        # ECG strip sits directly under the angio image (hidden until W
+        # toggles it on, and only on series that carry an ECG waveform).
+        layout.addWidget(self._ecg_strip)
         layout.addWidget(self._build_plane_bar())
         layout.addLayout(self._build_transport())
         layout.addLayout(self._build_image_controls())
@@ -374,18 +621,42 @@ class XAViewer(AbstractViewer):
         # spans the same width, so the click / seek reaction range along
         # the bar is unchanged.
         self.frame_slider.setMinimumHeight(24)
+        # Seek-bar handle now carries the LARGE inner blue dot (radius ratio
+        # 0.55) — swapped with the W/L sliders, which took the small one.
+        # The 18 px handle pixel size is unchanged; only the inner-dot
+        # proportion (the "mark") moved here.
         self.frame_slider.setStyleSheet(
             "QSlider::groove:horizontal{height:6px;border-radius:3px;"
             "background:#c4c4c4;}"
             "QSlider::handle:horizontal{width:18px;height:18px;"
             "margin:-6px 0;border:1px solid #6a6a6a;border-radius:9px;"
             "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,"
-            "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.32 #1c6fd0,"
-            "stop:0.40 #ffffff,stop:1 #ffffff);}"
+            "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.55 #1c6fd0,"
+            "stop:0.60 #ffffff,stop:1 #ffffff);}"
         )
 
-        self.frame_lbl = QLabel("0/0")
+        # Draggable Play-range start/end triangles, painted on a thin strip
+        # directly above the seek bar and sharing its x / width so they line
+        # up with the slider positions.
+        self._range_marks = _RangeMarks(self.frame_slider)
+        self._range_marks.range_changed.connect(self._on_range_marks_changed)
+        self._range_marks.setVisible(False)   # shown once a cine loads
+        seek_col = QVBoxLayout()
+        seek_col.setContentsMargins(0, 0, 0, 0)
+        seek_col.setSpacing(0)
+        seek_col.addWidget(self._range_marks)
+        seek_col.addWidget(self.frame_slider)
+
+        # Clicking the "frame/total" readout resets the Play range to the
+        # full clip (one-click "select all"). Hand cursor + tooltip hint it.
+        self.frame_lbl = _ClickLabel("0/0")
         self.frame_lbl.setMinimumWidth(70)
+        self.frame_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.frame_lbl.setToolTip(
+            "クリックで再生範囲を全範囲に戻す "
+            "(click to reset the Play range to the whole clip)"
+        )
+        self.frame_lbl.clicked.connect(self._reset_play_range)
 
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(1.0, 60.0)
@@ -394,7 +665,7 @@ class XAViewer(AbstractViewer):
         self.fps_spin.valueChanged.connect(self._set_fps)
 
         row.addWidget(self.play_btn)
-        row.addWidget(self.frame_slider, 1)
+        row.addLayout(seek_col, 1)
         row.addWidget(self.frame_lbl)
         row.addWidget(self.fps_spin)
         return row
@@ -531,6 +802,9 @@ class XAViewer(AbstractViewer):
         # return to it picks up at that frame, not frame 0.
         if self._loaded_uid and self._planes:
             self._frame_by_series[self._loaded_uid] = self._frame
+            self._range_by_series[self._loaded_uid] = (
+                self._range_start, self._range_end
+            )
         self._loaded_uid = new_uid
         self._stop_prefetch()
         self._buffer_timer.stop()
@@ -585,6 +859,17 @@ class XAViewer(AbstractViewer):
         self.play_btn.setEnabled(not single)
         self.fps_spin.setValue(self._fps)
 
+        # Restore (or default-to-full) this series' Play range and sync the
+        # marker strip. Single-frame series have no range to set — hide the
+        # strip. Tell the shell either way so its MP4-range map is current.
+        lo, hi = self._range_by_series.get(new_uid, (0, n - 1))
+        lo = max(0, min(int(lo), n - 1))
+        hi = max(lo, min(int(hi), n - 1))
+        self._range_start, self._range_end = lo, hi
+        self._range_marks.set_bounds(lo, hi)
+        self._range_marks.setVisible(not single)
+        self.play_range_changed.emit(new_uid, lo, hi, n)
+
         for c in (self.canvas, self.canvas2):
             c.set_spacing(loaded.spacing_mm)
             c.clear_measurements()
@@ -604,6 +889,8 @@ class XAViewer(AbstractViewer):
         self._rebuild_plane_buttons()
         self._relayout()
         self._refresh_overlay()
+        # Read this series' ECG (if any) and prime the strip — hidden until W.
+        self._read_ecg_for_series()
 
         # Warm the rest of the cine in the background for smooth playback;
         # any frame reached before that is decoded on demand by .frame().
@@ -621,6 +908,14 @@ class XAViewer(AbstractViewer):
         self._header = None
         self._loaded_uid = ""
         self._frame_by_series.clear()
+        self._range_by_series.clear()
+        self._range_start = self._range_end = 0
+        self._range_marks.setVisible(False)
+        self._ecg_trace = None
+        self._ecg_available = False
+        self._ecg_visible = False
+        self._ecg_strip.set_trace(None)
+        self._ecg_strip.setVisible(False)
         self.canvas2.hide()
         self.plane_bar.hide()
         self.title_label.setText("—")
@@ -674,7 +969,11 @@ class XAViewer(AbstractViewer):
         n = max(p.volume.shape[0] for p in self._planes)
         if n < 1:
             return
-        self._frame = max(0, min(self._frame + int(delta), n - 1))
+        # Nudge stays inside the Play range, matching the scrub clamp.
+        self._frame = max(
+            self._range_start,
+            min(self._frame + int(delta), self._range_end),
+        )
         self.frame_slider.blockSignals(True)
         self.frame_slider.setValue(self._frame)
         self.frame_slider.blockSignals(False)
@@ -700,14 +999,82 @@ class XAViewer(AbstractViewer):
             self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
 
     def toggle_ecg(self) -> None:
-        """W: ECG waveform strip toggle. The reader/widget are not yet
-        wired in this build — flip the intent flag and tell the user."""
-        self._ecg_visible = not getattr(self, "_ecg_visible", False)
+        """W: show / hide the ECG strip. Only series that actually carry a
+        waveform can show it — on the rest the toggle just reports that no
+        ECG is present and leaves the strip hidden."""
+        if not self._ecg_available:
+            self._ecg_visible = False
+            self._ecg_strip.setVisible(False)
+            self.readout.setText(
+                "このシリーズに心電図データはありません "
+                "(no ECG waveform in this series)."
+            )
+            return
+        self._ecg_visible = not self._ecg_visible
+        self._ecg_strip.setVisible(self._ecg_visible)
+        if self._ecg_visible:
+            self._ecg_strip.set_cursor_fraction(self._ecg_fraction(self._frame))
+        lab = self._ecg_trace.label if self._ecg_trace else "ECG"
         self.readout.setText(
-            "ECG strip: ON (waveform display coming in a later build)"
-            if self._ecg_visible
-            else "ECG strip: OFF"
+            f"ECG: ON · {lab}" if self._ecg_visible else "ECG: OFF"
         )
+
+    def _frame_time_ms(self, ds) -> float:
+        """Per-frame duration (ms) for mapping a frame onto the ECG time
+        axis: the DICOM FrameTime when present, else 1000 / cine-fps."""
+        if ds is not None:
+            ft = getattr(ds, "FrameTime", None)
+            try:
+                if ft is not None:
+                    v = float(ft)
+                    if v > 0:
+                        return v
+            except (TypeError, ValueError):
+                pass
+        fps = float(self._fps or 0.0)
+        return 1000.0 / fps if fps > 0 else 0.0
+
+    def _ecg_fraction(self, frame: int) -> float:
+        """Cursor position (0..1) along the ECG for cine *frame*.
+
+        When the ECG sampling rate and the cine frame time are both known,
+        map by absolute acquisition time (frame i → i·FrameTime → t/duration)
+        so the cursor lands on the physiologically correct sample. Otherwise
+        (legacy curves with no stated rate) fall back to a proportional map
+        that stretches the trace across the whole cine."""
+        n = max((p.volume.shape[0] for p in self._planes), default=1)
+        if n <= 1:
+            return 0.0
+        t = self._ecg_trace
+        if (t is not None and t.fs > 0 and self._ecg_frame_time_ms > 0
+                and t.duration_s > 0):
+            sec = frame * self._ecg_frame_time_ms / 1000.0
+            return max(0.0, min(sec / t.duration_s, 1.0))
+        return frame / (n - 1)
+
+    def _read_ecg_for_series(self) -> None:
+        """Read this series' ECG (Waveform Sequence or legacy Curve Data)
+        from the metadata header and prime the strip. Resets visibility so
+        a new series starts with the strip hidden until the user presses W."""
+        self._ecg_trace = None
+        self._ecg_available = False
+        ds = self._header
+        if ds is None and self._planes:
+            ds = getattr(self._planes[0], "_ds", None)
+        self._ecg_frame_time_ms = self._frame_time_ms(ds)
+        trace = None
+        try:
+            trace = read_ecg(ds)
+        except Exception:
+            trace = None
+        if trace is not None and trace.n >= 2:
+            self._ecg_trace = trace
+            self._ecg_available = True
+            self._ecg_strip.set_trace(trace)
+        else:
+            self._ecg_strip.set_trace(None)
+        self._ecg_visible = False
+        self._ecg_strip.setVisible(False)
 
     def _effective_fps(self) -> float:
         return float(self._fps) * float(getattr(self, "_play_speed", 1.0))
@@ -796,12 +1163,17 @@ class XAViewer(AbstractViewer):
             )
         n = max(p.volume.shape[0] for p in self._planes)
         self.frame_lbl.setText(f"{self._frame + 1}/{n}")
+        # Keep the ECG cursor in step with the displayed frame.
+        if self._ecg_visible and self._ecg_trace is not None:
+            self._ecg_strip.set_cursor_fraction(self._ecg_fraction(self._frame))
 
     def _next_frame(self):
         if not self._planes:
             return
-        n = max(p.volume.shape[0] for p in self._planes)
-        nxt = (self._frame + 1) % n
+        # Loop within the Play range [start, end] instead of the whole
+        # series, so playback stays inside the user-set window.
+        lo, hi = self._range_start, self._range_end
+        nxt = lo if self._frame >= hi else self._frame + 1
         if self._dual:
             shown = self._planes
         else:
@@ -812,7 +1184,7 @@ class XAViewer(AbstractViewer):
         # keeps firing and re-checks). The paced prefetch warms far faster
         # than any cine fps, so this only briefly holds at the very start
         # and never stutters; once warm it plays straight from cache.
-        if nxt != 0 and not all(p.is_ready(nxt) for p in shown):
+        if nxt != lo and not all(p.is_ready(nxt) for p in shown):
             return
         self._frame = nxt
         self.frame_slider.blockSignals(True)
@@ -848,6 +1220,13 @@ class XAViewer(AbstractViewer):
             return
         self.play_btn.setText("⏸ Pause" if on else "▶ Play")
         if on:
+            # Snap into the Play range before looping so a handle parked
+            # outside [start, end] doesn't crawl up to it one frame at a time.
+            if self._frame < self._range_start or self._frame > self._range_end:
+                self.frame_slider.setValue(
+                    max(self._range_start,
+                        min(self._frame, self._range_end))
+                )
             if self._buffered_enough():
                 self._start_cine()
             else:
@@ -874,10 +1253,52 @@ class XAViewer(AbstractViewer):
         self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
 
     def _seek(self, value: int):
+        # Keep the handle inside the Play range — dragging past either
+        # marker sticks at it ("シークバーの移動範囲も開始点と終了点の範囲に").
+        clamped = max(self._range_start, min(int(value), self._range_end))
+        if clamped != value:
+            self.frame_slider.blockSignals(True)
+            self.frame_slider.setValue(clamped)
+            self.frame_slider.blockSignals(False)
+            value = clamped
         self._frame = value
         self._render()
         if not self._suspend_frame_signal:
             self.frame_changed.emit(self._frame)
+
+    def _reset_play_range(self) -> None:
+        """One-click reset of the Play range back to the whole clip — fired
+        by clicking the 'frame/total' readout. No-op for single-frame
+        series (which have no range)."""
+        n = max((p.volume.shape[0] for p in self._planes), default=0)
+        if n <= 1:
+            return
+        lo, hi = 0, n - 1
+        if (self._range_start, self._range_end) == (lo, hi):
+            return                              # already full — nothing to do
+        self._range_start, self._range_end = lo, hi
+        if self._loaded_uid:
+            self._range_by_series[self._loaded_uid] = (lo, hi)
+        self._range_marks.set_bounds(lo, hi)
+        self.play_range_changed.emit(self._loaded_uid, lo, hi, n)
+        self.readout.setText(f"Play range reset: all {n} frames")
+
+    def _on_range_marks_changed(self, start: int, end: int) -> None:
+        """A Play-range triangle was dragged. Store the new bounds, pull the
+        current frame back inside them if it fell out, and tell the shell so
+        the MP4 export range stays in step."""
+        self._range_start, self._range_end = int(start), int(end)
+        if self._loaded_uid:
+            self._range_by_series[self._loaded_uid] = (start, end)
+        if self._frame < start or self._frame > end:
+            # setValue → _seek re-clamps and re-renders.
+            self.frame_slider.setValue(max(start, min(self._frame, end)))
+        n = max((p.volume.shape[0] for p in self._planes), default=0)
+        self.play_range_changed.emit(self._loaded_uid, start, end, n)
+        self.readout.setText(
+            f"Play range: frames {start + 1}–{end + 1} "
+            f"({end - start + 1} of {n})"
+        )
 
     def goto_frame(self, idx: int) -> None:
         """External entry point (used by MultiSync) to move to a frame

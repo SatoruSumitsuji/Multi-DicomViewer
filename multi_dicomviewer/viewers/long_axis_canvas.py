@@ -13,14 +13,10 @@ The widget:
 * draws a yellow vertical line at the current frame index;
 * draws a horizontal yellow line where the rotation axis projects (the
   middle row by construction — every centre lies on that line);
+* **plain horizontal drag** stretches / compresses the strip's WIDTH only
+  (each frame column gets wider or narrower). The height is NOT scaled —
+  it always fills the display frame, so no vertical scrollbar appears;
 * **Shift + vertical drag** rotates the cut around the catheter axis;
-* **Shift + horizontal drag** zooms the strip (both dimensions scale
-  together so the initial aspect ratio is preserved through zoom);
-* a plain drag (no Shift) is absorbed — it does NOT zoom or rotate.
-  This is deliberate: an unmodified drag used to dispatch zoom-vs-
-  rotate by which axis dominated, which felt unstable (a tiny jitter
-  during a click could send the view spinning). Requiring Shift makes
-  the gesture explicit and stable;
 * a left click WITHOUT drag jumps to the clicked frame.
 
 The actual long-axis pixel array is built by ``build_long_axis`` —
@@ -174,14 +170,12 @@ class LongAxisCanvas(QWidget):
         return max(60, int(round(natural * self._h_zoom)))
 
     def preferred_height_for_viewport_height(self, h: int) -> int:
-        """Canvas height for viewport height *h*. At zoom = 1 the
-        canvas exactly fits the viewport vertically (the original
-        behaviour); zooming in scales the height by ``_h_zoom`` so the
-        long-axis strip enlarges as a whole. The host scroll area
-        shows a vertical scrollbar when the canvas grows past the
-        viewport, and pivots so the rotation-axis row stays centred."""
-        h = max(60, int(h))
-        return max(60, int(round(h * self._h_zoom)))
+        """Canvas height for viewport height *h*. The long-axis strip's
+        height ALWAYS fills the display frame — the drag-zoom stretches
+        only the width (``preferred_width_for_height``), never the
+        height — so this just returns the viewport height and no vertical
+        scrollbar ever appears."""
+        return max(60, int(h))
 
     def source_width(self) -> int:
         """Width of the underlying long-axis image in source pixels
@@ -288,21 +282,16 @@ class LongAxisCanvas(QWidget):
         d_y = p_global.y() - self._last_global.y()
         self._last_global = p_global
         self._dragged = True
-        # Zoom and rotate are EXPLICIT Shift+drag gestures. Plain drag
-        # is absorbed (no action) so cursor jitter or accidental drag
-        # can't spin the view; the user has to deliberately press
-        # Shift to engage either gesture.
-        if not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-            return
-        if abs(total_dy) >= abs(total_dx):
+        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
             # Shift + vertical drag → rotate around the catheter axis.
             # 1 px of y-drag = ~0.25° (full sweep ≈ 150° per ~600 px).
             self.rotated.emit(math.radians(0.25 * d_y))
         else:
-            # Shift + horizontal drag → zoom (both canvas dimensions
-            # scale together so the initial aspect ratio survives).
+            # Plain horizontal drag → stretch / compress the WIDTH only
+            # (the height always fills the display frame). Vertical
+            # movement is ignored so the gesture is purely a width zoom.
             # Exponential mapping: 100 px right ≈ 1.65×, 100 px left
-            # ≈ 0.61×. Anchor stays under the cursor through resize.
+            # ≈ 0.61×. The press-time frame stays under the cursor.
             factor = math.exp(0.005 * d_x)
             self.h_zoom_changed.emit(factor, self._press_anchor_content_x)
 

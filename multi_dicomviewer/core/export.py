@@ -460,17 +460,40 @@ def render_series_for_mp4(series: Series
     return _render_xa_series(series)
 
 
+def _clip_to_range(frames: list[np.ndarray],
+                   rng: Optional[tuple[int, int]]) -> list[np.ndarray]:
+    """Slice *frames* to the inclusive [start, end] Play range (0-based).
+    None, or a range covering the whole clip, returns *frames* unchanged.
+    Bounds are clamped defensively so a stale range can never raise."""
+    if not rng or not frames:
+        return frames
+    start, end = int(rng[0]), int(rng[1])
+    last = len(frames) - 1
+    start = max(0, min(start, last))
+    end = max(start, min(end, last))
+    if start == 0 and end == last:
+        return frames
+    return frames[start:end + 1]
+
+
 def export_mp4(series_list: list[Series],
                out_dir: str,
                fields: Iterable[str],
                bitrate_mbps: int,
                fps_override: Optional[float],
                crf: Optional[int] = None,
+               frame_ranges: Optional[
+                   list[Optional[tuple[int, int]]]] = None,
                progress: ProgressCB = None) -> list[str]:
     """Write one .mp4 per series into *out_dir*. Returns the list of
     files written. ``fps_override`` (from the dialog) wins over the
     source cine rate when non-None. When ``crf`` is set, encode at
-    constant quality instead of the target bitrate."""
+    constant quality instead of the target bitrate.
+
+    ``frame_ranges``, when given, is a per-series list aligned with
+    ``series_list``: each entry is an inclusive ``(start, end)`` 0-based
+    frame range set on the viewer's Play seek bar, or ``None`` to export
+    every frame. CT (slice scroll) is never range-clipped."""
     fields = tuple(fields)
     written: list[str] = []
     n = len(series_list)
@@ -490,6 +513,13 @@ def export_mp4(series_list: list[Series],
             continue
         if not frames:
             continue
+        # Honour the Play-range markers (cine modalities only — CT is a
+        # slice scroll, not a timed cine, so it always exports in full).
+        if frame_ranges is not None and series.modality != Modality.CT:
+            rng = frame_ranges[si] if si < len(frame_ranges) else None
+            frames = _clip_to_range(frames, rng)
+            if not frames:
+                continue
         fps = float(fps_override) if fps_override and fps_override > 0 \
             else (src_fps or 15.0)
 
