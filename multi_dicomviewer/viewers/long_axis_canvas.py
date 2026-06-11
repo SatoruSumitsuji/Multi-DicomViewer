@@ -16,7 +16,9 @@ The widget:
 * **plain horizontal drag** stretches / compresses the strip's WIDTH only
   (each frame column gets wider or narrower). The height is NOT scaled —
   it always fills the display frame, so no vertical scrollbar appears;
-* **Shift + vertical drag** rotates the cut around the catheter axis;
+* **plain vertical drag** rotates the cut around the catheter axis (no
+  modifier key). The owning axis is locked on the first move, so a drag is
+  purely rotate OR purely width-zoom, never both;
 * a left click WITHOUT drag jumps to the clicked frame.
 
 The actual long-axis pixel array is built by ``build_long_axis`` —
@@ -42,6 +44,7 @@ def build_long_axis(
     angle_rad: float,
     lateral_samples: int,
     apply_u8: callable,
+    step: float = 1.0,
 ) -> np.ndarray:
     """Render one (lateral_samples, n_frames) uint8 image.
 
@@ -52,6 +55,11 @@ def build_long_axis(
     dtype the frames have) to uint8 for display — typically a closure
     around the viewer's W/L LUT so the strip honours the user's
     current window/level instantly. Out-of-image samples are 0.
+
+    *step* is the spacing (in source pixels) between the lateral samples.
+    Default 1.0 samples every pixel across the cut. A larger step covers the
+    SAME physical extent with fewer samples (``lateral_samples``) — used for
+    a coarse, fast low-LOD preview that still spans the full vessel depth.
     """
     n = len(frames)
     out = np.zeros((lateral_samples, n), dtype=np.uint8)
@@ -59,7 +67,7 @@ def build_long_axis(
         return out
     half = (lateral_samples - 1) / 2.0
     ux, uy = math.cos(angle_rad), math.sin(angle_rad)
-    r = np.arange(lateral_samples, dtype=np.float32) - half
+    r = (np.arange(lateral_samples, dtype=np.float32) - half) * float(step)
     dxs = r * ux
     dys = r * uy
     for i in range(n):
@@ -86,6 +94,10 @@ class LongAxisCanvas(QWidget):
     jump on a simple click."""
 
     rotated = pyqtSignal(float)        # incremental ΔΘ in radians
+    #: emitted on mouse-release after a rotation drag, so the host can
+    #: rebuild the strip at full resolution (rotation drags preview at a
+    #: reduced LOD for speed).
+    rotation_finished = pyqtSignal()
     frame_picked = pyqtSignal(int)     # frame index (0-based)
     #: Emitted whenever a new long-axis image is pushed in; the host
     #: scroll area listens so it can re-size the canvas to keep the
@@ -123,6 +135,10 @@ class LongAxisCanvas(QWidget):
         self._press_pos: Optional[QPoint] = None
         self._dragged = False
         self._press_was_left = False
+        #: Which axis "owns" the current drag, locked on first move past the
+        #: dead-band: "rot" (vertical → rotate) or "zoom" (horizontal →
+        #: width stretch). None between drags.
+        self._drag_axis: Optional[str] = None
         #: Horizontal stretch factor — multiplied into the natural
         #: aspect-preserving width. >1 makes each frame column wider
         #: (zooms in); <1 narrower. Reset to 1.0 on a new series load.
@@ -254,6 +270,7 @@ class LongAxisCanvas(QWidget):
                 float(self._press_pos.x())
             )
             self._dragged = False
+            self._drag_axis = None
             self._press_was_left = True
 
     def _canvas_x_to_content_x(self, canvas_x: float) -> float:
@@ -282,16 +299,20 @@ class LongAxisCanvas(QWidget):
         d_y = p_global.y() - self._last_global.y()
         self._last_global = p_global
         self._dragged = True
-        if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-            # Shift + vertical drag → rotate around the catheter axis.
+        # Lock the gesture to one axis on the first move past the dead-band so
+        # it doesn't flip between rotate/zoom mid-drag. Vertical-dominant →
+        # rotate; horizontal-dominant → width stretch. No modifier needed.
+        if self._drag_axis is None:
+            self._drag_axis = "rot" if abs(total_dy) >= abs(total_dx) else "zoom"
+        if self._drag_axis == "rot":
+            # Plain vertical drag → rotate around the catheter axis.
             # 1 px of y-drag = ~0.25° (full sweep ≈ 150° per ~600 px).
             self.rotated.emit(math.radians(0.25 * d_y))
         else:
             # Plain horizontal drag → stretch / compress the WIDTH only
-            # (the height always fills the display frame). Vertical
-            # movement is ignored so the gesture is purely a width zoom.
-            # Exponential mapping: 100 px right ≈ 1.65×, 100 px left
-            # ≈ 0.61×. The press-time frame stays under the cursor.
+            # (the height always fills the display frame). Exponential
+            # mapping: 100 px right ≈ 1.65×, 100 px left ≈ 0.61×. The
+            # press-time frame stays under the cursor.
             factor = math.exp(0.005 * d_x)
             self.h_zoom_changed.emit(factor, self._press_anchor_content_x)
 
@@ -303,11 +324,17 @@ class LongAxisCanvas(QWidget):
             self.frame_picked.emit(
                 self._x_to_frame(e.position().toPoint().x())
             )
+        elif (e.button() == Qt.MouseButton.LeftButton
+                and self._drag_axis == "rot" and self._dragged):
+            # End of a rotation drag → ask the host to rebuild at full res
+            # (the drag itself previewed at a reduced LOD).
+            self.rotation_finished.emit()
         self._press_pos = None
         self._press_global = None
         self._last_global = None
         self._press_was_left = False
         self._dragged = False
+        self._drag_axis = None
 
     # ----------------------------------------------------- paint
     def paintEvent(self, _e):

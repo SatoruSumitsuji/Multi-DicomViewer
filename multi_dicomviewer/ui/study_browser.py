@@ -53,6 +53,60 @@ _THUMB_GEN_PX = 280
 SERIES_MIME = "application/x-mdv-series-uid"
 
 
+class FitButton(QPushButton):
+    """A push button that stays readable when the toolbar is dragged narrow.
+
+    When the full label fits, it is shown in full (centred, as normal) and
+    the tooltip falls back to the optional help text. When the label is too
+    wide, it is elided from the right — so the *start* of the label is always
+    legible — and the tooltip exposes the complete text. Eliding (rather than
+    setting ``text-align: left`` via a stylesheet) is used deliberately: a
+    stylesheet would override the native checked/pressed appearance these
+    buttons rely on, whereas re-eliding the text leaves the look untouched.
+    """
+
+    def __init__(self, text: str, parent: QWidget | None = None) -> None:
+        super().__init__(text, parent)
+        self._full_text = text
+        self._help_tip = ""
+
+    def setHelpToolTip(self, tip: str) -> None:
+        """Tooltip shown when the label fits (and appended after the full
+        label when it is elided)."""
+        self._help_tip = tip
+        self._relayout_text()
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt override)
+        self._full_text = text
+        super().setText(text)
+        self._relayout_text()
+
+    def resizeEvent(self, e) -> None:  # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        self._relayout_text()
+
+    def _relayout_text(self) -> None:
+        fm = self.fontMetrics()
+        # leave room for the button's frame/padding on both sides
+        avail = self.width() - 14
+        if avail <= 0:
+            return
+        if fm.horizontalAdvance(self._full_text) <= avail:
+            if super().text() != self._full_text:
+                super().setText(self._full_text)
+            super().setToolTip(self._help_tip)
+        else:
+            elided = fm.elidedText(
+                self._full_text, Qt.TextElideMode.ElideRight, avail
+            )
+            if super().text() != elided:
+                super().setText(elided)
+            tip = self._full_text
+            if self._help_tip:
+                tip = f"{self._full_text}\n\n{self._help_tip}"
+            super().setToolTip(tip)
+
+
 def _start_series_drag(source: QWidget, series: Series) -> None:
     """Begin dragging *series* out of the info panel onto a viewer pane."""
     md = QMimeData()
@@ -506,6 +560,16 @@ class StudyBrowser(QTreeWidget):
                 lambda: self.export_requested.emit("mp4", list(sel_series))
             )
             menu.addAction(act_mp4)
+            act_csv = QAction(f"Export (CSV){suffix}", self)
+            act_csv.setToolTip(
+                "Write the DICOM-Tag-overlay tags shown for each series to "
+                "a .csv (Tag Name, Tag Number, Value); one file per series. "
+                "Full values — not truncated."
+            )
+            act_csv.triggered.connect(
+                lambda: self.export_requested.emit("csv", list(sel_series))
+            )
+            menu.addAction(act_csv)
             menu.addSeparator()
         act_close = QAction("Close (close series list)", self)
         act_close.setToolTip(
@@ -700,6 +764,16 @@ class _ThumbList(QListWidget):
             lambda: self.export_requested.emit("mp4", list(sel))
         )
         menu.addAction(act_mp4)
+        act_csv = QAction(f"Export (CSV){suffix}", self)
+        act_csv.setToolTip(
+            "Write the DICOM-Tag-overlay tags shown for each series to a "
+            ".csv (Tag Name, Tag Number, Value); one file per series. "
+            "Full values — not truncated."
+        )
+        act_csv.triggered.connect(
+            lambda: self.export_requested.emit("csv", list(sel))
+        )
+        menu.addAction(act_csv)
         menu.addSeparator()
         # The Tree's Delete sends ONE row at a time (kind, key, label);
         # keep the same contract here. Multi-select delete just emits
@@ -735,7 +809,7 @@ class StudyPanel(QWidget):
     anonymize_toggled = pyqtSignal(bool)     # the "Anonymous" button
     dicom_info_toggled = pyqtSignal(bool)    # "DICOM Info" (True = show)
     delete_requested = pyqtSignal(str, str, str)  # (kind, key, label)
-    export_requested = pyqtSignal(str, list)     # ("dicom"|"mp4", [Series])
+    export_requested = pyqtSignal(str, list)  # ("dicom"|"mp4"|"csv", [Series])
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -828,26 +902,26 @@ class StudyPanel(QWidget):
         self._stack.addWidget(self.tree)
         self._stack.addWidget(self.thumbs)
 
-        self.btn_info = QPushButton("📋 Tree")
-        self.btn_thumb = QPushButton("🖼 Thumbnails")
+        self.btn_info = FitButton("📋 Tree")
+        self.btn_thumb = FitButton("🖼 Thumbnails")
         for b in (self.btn_info, self.btn_thumb):
             b.setCheckable(True)
         self.btn_info.setChecked(True)
         self.btn_info.clicked.connect(lambda: self._show(0))
         self.btn_thumb.clicked.connect(lambda: self._show(1))
 
-        self.btn_anon = QPushButton("Anonymous")
+        self.btn_anon = FitButton("Anonymous")
         self.btn_anon.setCheckable(True)
-        self.btn_anon.setToolTip(
+        self.btn_anon.setHelpToolTip(
             "Mask patient/case info on all on-screen displays "
             "(files unchanged)"
         )
         self.btn_anon.toggled.connect(self.anonymize_toggled)
 
-        self.btn_dicom = QPushButton("DICOM Info")
+        self.btn_dicom = FitButton("DICOM Info")
         self.btn_dicom.setCheckable(True)
         self.btn_dicom.setChecked(True)        # overlay shown by default
-        self.btn_dicom.setToolTip(
+        self.btn_dicom.setHelpToolTip(
             "Show/hide the DICOM tag text drawn on the image"
         )
         self.btn_dicom.toggled.connect(self.dicom_info_toggled)

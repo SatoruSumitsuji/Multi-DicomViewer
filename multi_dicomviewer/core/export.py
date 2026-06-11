@@ -43,6 +43,12 @@ ProgressCB = Optional[Callable[[int, int, str], None]]
 # --------------------------------------------------------------- filename
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
+#: Max chars for a single DICOM-tag value used as a filename component, and
+#: for the whole joined filename — keeps output paths valid even when a tag
+#: holds a huge value.
+_MAX_FIELD_LEN = 64
+_MAX_NAME_LEN = 120
+
 
 def _safe_name(s: str) -> str:
     """Strip characters Windows refuses in filenames; collapse whitespace
@@ -148,13 +154,19 @@ def _dicom_tag_value(ds: pydicom.Dataset, identifier: str) -> str:
     elem = _lookup(ds, identifier)
     if elem is None:
         return ""
+    val = elem.value
+    # A tag holding a huge value (e.g. text stuffed into an OB element) must
+    # never become a megabyte-long filename component — slice the raw value
+    # before stringifying so we don't even build the giant string.
+    if isinstance(val, (bytes, bytearray, memoryview)):
+        val = bytes(val[:128])
     try:
-        text = str(elem.value).strip()
+        text = str(val).strip()
     except Exception:
         return ""
     if not text:
         return ""
-    return _safe_name(text)
+    return _safe_name(text[:_MAX_FIELD_LEN])
 
 
 def build_filename(fields: Iterable[str],
@@ -173,7 +185,10 @@ def build_filename(fields: Iterable[str],
         for k in fields
     ]
     name = "_".join(p for p in parts if p)
-    return _safe_name(name) or "export"
+    # Cap the whole name so the output path stays within filesystem limits
+    # (Windows component limit is 255; keep well under, leaving room for the
+    # extension and any " (2)" dedup suffix).
+    return _safe_name(name)[:_MAX_NAME_LEN] or "export"
 
 
 def build_series_folder(fields: Iterable[str],
@@ -256,6 +271,138 @@ def export_dicom(series_list: list[Series],
                          f"{os.path.basename(path)}")
     if progress:
         progress(total_files, total_files, "Done")
+    return written
+
+
+# --------------------------------------------------------------- CSV
+def _decode_binary_text(raw: bytes) -> Optional[str]:
+    """Best-effort text from a binary (OB/UN/…) value. Returns the full
+    decoded string when the bytes are predominantly printable text — e.g. an
+    XML/JSON report or other text payload stuffed into an OB element — or
+    None when they look like genuine binary (image/waveform) that should
+    stay summarised.
+
+    Tries UTF-8, then CP932 (Shift-JIS, common in Japanese DICOM), then
+    Latin-1 as a never-fails 1:1 byte fallback. A trailing NUL (DICOM
+    even-length padding) is dropped."""
+    if not raw:
+        return ""
+    raw = raw.rstrip(b"\x00")           # drop DICOM even-length NUL padding
+    if not raw:
+        return ""
+    text = None
+    for enc in ("utf-8", "cp932", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:                    # latin-1 never raises → unreachable
+        return None
+    # Reject mostly-unprintable payloads (real binary, not text-in-OB).
+    printable = sum(1 for c in text if c.isprintable() or c in "\r\n\t")
+    if printable / len(text) < 0.85:
+        return None
+    return text
+
+
+def _csv_value(elem, ident: str, anonymized: bool) -> str:
+    """FULL display string for *elem*'s value for a CSV cell — unlike the
+    overlay/table formatters, this never truncates and never collapses
+    whitespace, so very large text elements land intact (csv quoting keeps
+    embedded newlines/commas safe). Binary VRs (OB/UN/…) that actually hold
+    text are decoded and written in full; genuinely binary ones (and
+    sequences) fall back to a short descriptor. PHI is masked to match the
+    on-screen Anonymize state."""
+    from .anonymize import mask_text
+    from .dicom_tags import _BINARY_VRS
+
+    vr = str(elem.VR)
+    if vr == "SQ":
+        try:
+            return f"<sequence: {len(elem.value)} item(s)>"
+        except TypeError:
+            return "<sequence>"
+    if vr in _BINARY_VRS:
+        raw = elem.value
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            decoded = _decode_binary_text(bytes(raw))
+            if decoded is not None:
+                return mask_text(ident, decoded, anonymized)
+            return f"<binary: {len(raw)} bytes>"
+        # Non-bytes binary value (rare) — fall through to the str() path.
+    try:
+        text = str(elem.value)
+    except Exception:
+        return "<unreadable>"
+    return mask_text(ident, text, anonymized)
+
+
+def export_csv(series_list: list[Series],
+               out_dir: str,
+               fields: Iterable[str],
+               tag_identifiers: list[list[str]],
+               anonymized: bool = False,
+               progress: ProgressCB = None) -> list[str]:
+    """Write one .csv per series into *out_dir*, listing the DICOM-tag-overlay
+    tags currently shown for that series as ``Tag Name, Tag Number, Value``.
+
+    ``tag_identifiers`` is a per-series list aligned with ``series_list`` —
+    each entry holds the overlay tag identifiers (pydicom keywords, private
+    keys, or ``(group,element)`` literals) chosen for that series' modality.
+    Only tags actually present in the header are written (matching what the
+    overlay shows). Values are written in FULL (no truncation). Filenames are
+    built from the same checked *fields* as the other exporters and deduped.
+    Returns the list of files written."""
+    import csv as _csv
+    from .dicom_tags import _lookup
+
+    fields = tuple(fields)
+    written: list[str] = []
+    n = len(series_list)
+    if progress:
+        progress(0, n, "Preparing…")
+
+    for si, series in enumerate(series_list):
+        if progress:
+            progress(si, n,
+                     f"Writing CSV [{si + 1}/{n}] {series.kind} "
+                     f"#{series.number or '?'}")
+        if not series.files:
+            continue
+        try:
+            ds = pydicom.dcmread(
+                series.files[0], stop_before_pixels=True, force=True
+            )
+        except Exception:
+            ds = pydicom.Dataset()
+
+        idents = tag_identifiers[si] if si < len(tag_identifiers) else []
+        rows: list[tuple[str, str, str]] = []
+        for ident in idents:
+            elem = _lookup(ds, ident)
+            if elem is None:                     # not displayed → skip
+                continue
+            name = elem.name or ident
+            number = f"({elem.tag.group:04X},{elem.tag.element:04X})"
+            rows.append((name, number, _csv_value(elem, ident, anonymized)))
+
+        base = build_filename(fields, series, ds)
+        target = _unique_path(os.path.join(out_dir, base + ".csv"))
+        try:
+            # utf-8-sig so Excel on Windows reads Japanese tag values
+            # correctly; newline="" per the csv module's contract.
+            with open(target, "w", encoding="utf-8-sig", newline="") as fh:
+                w = _csv.writer(fh)
+                w.writerow(["Tag Name", "Tag Number", "Value"])
+                w.writerows(rows)
+        except Exception as e:
+            if progress:
+                progress(si, n, f"Failed: {os.path.basename(target)} ({e})")
+            continue
+        written.append(target)
+    if progress:
+        progress(n, n, "Done")
     return written
 
 

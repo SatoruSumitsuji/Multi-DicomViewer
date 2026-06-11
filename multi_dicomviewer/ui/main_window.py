@@ -55,7 +55,11 @@ from multi_dicomviewer.core.dicom_tags import (
 )
 from multi_dicomviewer.core.study_model import Modality, Series
 from multi_dicomviewer.ui.history_dialog import MeasureHistoryDialog
-from multi_dicomviewer.ui.study_browser import SERIES_MIME, StudyPanel
+from multi_dicomviewer.ui.study_browser import (
+    SERIES_MIME,
+    FitButton,
+    StudyPanel,
+)
 from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
 from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT
 from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
@@ -109,10 +113,6 @@ _LAYOUTS = {
 }
 #: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
 _MULTI_PANE = ("1x2", "2x1", "2x2")
-#: Layouts where a single pane is wide enough to show a biplane XA as
-#: Front+Lateral side by side (1×1 = whole screen; 2×1 = full-width rows).
-#: 1×2 / 2×2 panes are half-width, so biplane there stays single-plane.
-_DUAL_LAYOUTS = ("1x1", "2x1")
 _MAX_PANES = 4
 
 #: drag payload (source pane index) for swapping pane positions
@@ -334,11 +334,6 @@ class ViewerPane(QFrame):
     def all_viewers(self) -> list:
         return [v for v in self._viewers.values() if v is not None]
 
-    def set_xa_biplane(self, side_by_side: bool) -> None:
-        v = self._viewers.get(Modality.XA)
-        if v is not None and hasattr(v, "set_biplane_layout"):
-            v.set_biplane_layout(side_by_side)
-
     def reset(self) -> None:
         for v in self.all_viewers():
             v.clear()
@@ -511,10 +506,8 @@ class MainWindow(QMainWindow):
 
         # --- configurable viewer grid ---
         self._layout_key = "1x1"
-        # Bi / Lt / Rt switch for biplane XA + dual-pane CT viewers.
-        # Defaults to "Bi" (the natural full display); the buttons
-        # appear unselected/white when no visible viewer responds to it.
-        self._biside = "Bi"
+        # Bi / Lt / Rt is per-pane now (each viewer stores its own plane
+        # choice); the toolbar buttons mirror whichever pane is active.
         #: Shared DICOM-tag overlay text size (pt) for every viewer/modality.
         self._tag_font_pt = TAG_FONT_PT_DEFAULT
         self._panes: list[ViewerPane] = []
@@ -933,18 +926,16 @@ class MainWindow(QMainWindow):
 
     def _ortho_panels_from_xa_viewer(self, v, pane_label: str = "") -> list:
         """Build OrthogonalView panel specs for an XA viewer's currently-
-        shown plane(s). In 1×1 with biplane, both planes (Front+Lateral)
-        are exported. In 1×2 / 2×2 the viewer is forced single-plane, so
-        only the active plane is exported."""
+        shown plane(s). A pane on "Bi" exports both planes (Front+Lateral);
+        a pane on Lt/Rt exports just that single active plane — regardless
+        of the grid layout, since Bi/Lt/Rt is now per-pane."""
         planes = getattr(v, "_planes", []) or []
         if not planes:
             return []
-        # Mirror the viewer's own canvas usage: dual canvas in biplane
-        # side-by-side (the 1×1 case the shell enables), single canvas
-        # otherwise.
+        # Mirror the viewer's own canvas usage: both planes only when the
+        # second canvas is actually shown (this pane is on "Bi").
         is_dual = (
-            self._layout_key in _DUAL_LAYOUTS
-            and len(planes) >= 2
+            len(planes) >= 2
             and getattr(v, "canvas2", None) is not None
             and not getattr(v, "canvas2").isHidden()
         )
@@ -1367,8 +1358,8 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 3, 6, 3)
 
-        self._info_btn = QPushButton("◀ Info shown")
-        self._info_btn.setToolTip(
+        self._info_btn = FitButton("◀ Info shown")
+        self._info_btn.setHelpToolTip(
             "Show/hide the left Info window (study tree)"
         )
         self._info_btn.clicked.connect(self._toggle_info)
@@ -1385,34 +1376,15 @@ class MainWindow(QMainWindow):
             ("2×1", "2x1"),
             ("2×2", "2x2"),
         ):
-            btn = QPushButton(label)
+            btn = FitButton(label)
             btn.setCheckable(True)
             btn.setChecked(key == self._layout_key)
             btn.clicked.connect(lambda _c, k=key: self._apply_layout(k))
             self._layout_group.addButton(btn)
             row.addWidget(btn)
 
-        # Bi / Lt / Rt — switch biplane XA or dual-pane CT between
-        # both panes (Bi), left only (Lt), and right only (Rt). The
-        # buttons are managed manually (not in a QButtonGroup) so that
-        # when no visible viewer responds to them all three can show
-        # the same "unselected/white" state.
-        row.addSpacing(12)
-        self._biside_btns: dict[str, QPushButton] = {}
-        for key, tip in (
-            ("Bi", "Show both planes/panes (biplane XA in 1×1, "
-                    "CT dual MPR)"),
-            ("Lt", "Show only the left plane/pane"),
-            ("Rt", "Show only the right plane/pane"),
-        ):
-            btn = QPushButton(key)
-            btn.setCheckable(True)
-            btn.setAutoExclusive(False)
-            btn.setToolTip(tip)
-            btn.clicked.connect(lambda _c, k=key: self._on_biside_click(k))
-            row.addWidget(btn)
-            self._biside_btns[key] = btn
-
+        # Bi/Lt/Rt lives inside each viewer's own "Plane:" bar now (per-pane),
+        # so there is no global plane switch in this top bar anymore.
         row.addStretch(1)
         return bar
 
@@ -1420,39 +1392,6 @@ class MainWindow(QMainWindow):
         vis = not self._studies_dock.isVisible()
         self._studies_dock.setVisible(vis)
         self._info_btn.setText("◀ Info shown" if vis else "Info hidden ▶")
-
-    # -------------------------------------------------- Bi / Lt / Rt
-    def _on_biside_click(self, key: str) -> None:
-        self._biside = key
-        self._apply_biside_to_panes()
-        self._refresh_biside_buttons()
-
-    def _apply_biside_to_panes(self) -> None:
-        """Push the current Bi/Lt/Rt choice onto every visible pane's
-        viewer that knows what to do with it (biplane XA, CT)."""
-        allow_dual = self._layout_key in _DUAL_LAYOUTS
-        for pane in self._panes:
-            if not pane.isVisible():
-                continue
-            v = pane.current_viewer()
-            if v is not None and hasattr(v, "set_side"):
-                v.set_side(self._biside, allow_dual)
-
-    def _refresh_biside_buttons(self) -> None:
-        """Mark the active button blue only when the active pane's
-        viewer actually responds to the switch — single-plane XA / IVUS
-        / OTHER panes get all-white buttons."""
-        applicable = self._biside_applies()
-        for key, btn in self._biside_btns.items():
-            btn.setChecked(applicable and key == self._biside)
-
-    def _biside_applies(self) -> bool:
-        """True iff the active pane has a viewer that uses Bi/Lt/Rt."""
-        if self._active is None:
-            return False
-        v = self._active.current_viewer()
-        return bool(v is not None
-                    and getattr(v, "supports_side", False))
 
     def _apply_layout(self, key: str) -> None:
         self._layout_key = key
@@ -1495,15 +1434,9 @@ class MainWindow(QMainWindow):
             self._set_active_pane(self._order[0])
         else:
             self._set_active_pane(self._active)
-        # Front+lateral side by side when a pane is full-width (1×1, or a
-        # 2×1 row). Half-width panes (1×2 / 2×2) stay single-plane.
-        for pane in self._panes:
-            pane.set_xa_biplane(key in _DUAL_LAYOUTS)
-        # Re-apply the user's Bi/Lt/Rt choice now that allow_dual may
-        # have changed; refresh the buttons to reflect whether the new
-        # active pane is biplane XA / CT or not.
-        self._apply_biside_to_panes()
-        self._refresh_biside_buttons()
+        # Bi/Lt/Rt is per-pane (each viewer's own "Plane:" bar), so a grid
+        # change never overrides any pane's plane choice — a pane left on
+        # "Bi" keeps showing both planes here too (just smaller).
         self._sync_layout_gate()      # MultiSync menu = only in 1×2 / 2×2
 
     def _swap_panes(self, src_index: int, dest_index: int) -> None:
@@ -1521,10 +1454,6 @@ class MainWindow(QMainWindow):
         for p in self._panes:
             p.set_active(p is pane and p.isVisible())
         self._sync_xa_shortcuts()
-        # Bi/Lt/Rt button visual state tracks the active pane's viewer
-        # (white when single-plane XA / IVUS, otherwise reflect _biside).
-        if hasattr(self, "_biside_btns"):
-            self._refresh_biside_buttons()
 
     # --------------------------------------------------- series navigation
     def _build_shortcuts(self) -> None:
@@ -1852,12 +1781,25 @@ class MainWindow(QMainWindow):
             out.append((ident, label))
         return out
 
+    def _on_csv_export_from_viewer(self, uid: str) -> None:
+        """Image right-click ▸ "Export CSV (DICOM tags)" → run the same
+        series-CSV export as the Studies-list right-click, for the series the
+        viewer is showing."""
+        series = self._series_by_uid.get(uid) if uid else None
+        if series is None:
+            self.statusBar().showMessage(
+                "CSV export: could not identify the displayed series."
+            )
+            return
+        self._on_export_requested("csv", [series])
+
     def _on_export_requested(self, fmt: str, series_list: list) -> None:
-        """Right-click ▸ Export (DICOM)/Export (MP4): show the filename-
+        """Right-click ▸ Export (DICOM)/(MP4)/(CSV): show the filename-
         fields dialog, ask for an output folder, run the export with a
         live progress bar. Runs on the UI thread (simpler; MP4 of a few
-        hundred frames is still seconds, not minutes)."""
-        if not series_list or fmt not in ("dicom", "mp4"):
+        hundred frames is still seconds, not minutes). CSV writes one
+        file per series listing the displayed DICOM-tag-overlay tags."""
+        if not series_list or fmt not in ("dicom", "mp4", "csv"):
             return
         from multi_dicomviewer.core import export as exporter
         from multi_dicomviewer.ui.export_dialog import (
@@ -1904,7 +1846,10 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
-        if not cfg.fields:
+        # CSV content is the displayed tags regardless of filename fields, so
+        # an empty selection only means a fallback ("export") filename — never
+        # a reason to cancel. DICOM/MP4 still need at least one field.
+        if not cfg.fields and fmt != "csv":
             self.statusBar().showMessage(
                 "Export cancelled — no filename fields were ticked."
             )
@@ -1916,7 +1861,11 @@ class MainWindow(QMainWindow):
         if not out_dir:
             return
 
-        title = "Exporting DICOM…" if fmt == "dicom" else "Exporting MP4…"
+        title = {
+            "dicom": "Exporting DICOM…",
+            "mp4": "Exporting MP4…",
+            "csv": "Exporting CSV…",
+        }[fmt]
         prog = QProgressDialog(title, "Cancel", 0, 1, self)
         prog.setWindowModality(Qt.WindowModality.ApplicationModal)
         prog.setMinimumDuration(0)
@@ -1935,14 +1884,32 @@ class MainWindow(QMainWindow):
             if total and prog.maximum() != total:
                 prog.setMaximum(total)
             prog.setValue(done)
-            if msg and prog.labelText() != msg:
-                prog.setLabelText(msg)
+            # Defensive: never let a long message (e.g. an error echoing a
+            # huge filename) blow the dialog's width up — Qt sizes it to the
+            # label and a megabyte-long line crashes the backing store.
+            if msg:
+                msg = msg if len(msg) <= 200 else msg[:200] + "…"
+                if prog.labelText() != msg:
+                    prog.setLabelText(msg)
             QApplication.processEvents()
 
         try:
             if fmt == "dicom":
                 written = exporter.export_dicom(
                     series_list, out_dir, cfg.fields, progress=_cb
+                )
+            elif fmt == "csv":
+                # Each series' CSV lists the overlay tags chosen for ITS own
+                # modality (the selection differs per modality), matching the
+                # tags actually shown on that series.
+                per_series_idents = [
+                    list(self._tag_keywords_by_modality.get(
+                        self._series_modality_key(s), []))
+                    for s in series_list
+                ]
+                written = exporter.export_csv(
+                    series_list, out_dir, cfg.fields, per_series_idents,
+                    anonymized=self._anon, progress=_cb,
                 )
             else:
                 # Per-series Play range (from the seek-bar markers), aligned
@@ -2056,11 +2023,8 @@ class MainWindow(QMainWindow):
                 v.set_tag_keywords(self._effective_kw(v))
             if series.modality == Modality.XA:
                 self._cur_xa = series
-                pane.set_xa_biplane(self._layout_key in _DUAL_LAYOUTS)
-            # Apply current Bi/Lt/Rt + refresh button state for the
-            # newly resumed viewer.
-            self._apply_biside_to_panes()
-            self._refresh_biside_buttons()
+            # Resumed viewer keeps the Plane (Bi/Lt/Rt) side it was left on
+            # (stored in the viewer's own "Plane:" bar) — nothing to do here.
             # Key by raw DICOM Modality (series.kind) so NM/OCT/etc.
             # in the OTHER bucket each get their own resume slot.
             self._last_by_modality[series.kind] = series
@@ -2145,10 +2109,9 @@ class MainWindow(QMainWindow):
             v.set_tag_keywords(self._effective_kw(v))
         if loaded.modality == Modality.XA:
             self._cur_xa = series
-            pane.set_xa_biplane(self._layout_key in _DUAL_LAYOUTS)
-        # Newly loaded viewer must reflect the current Bi/Lt/Rt choice.
-        self._apply_biside_to_panes()
-        self._refresh_biside_buttons()
+        # The viewer itself defaults a freshly loaded biplane/dual series to
+        # "Bi" (both planes) in its own "Plane:" bar; the user switches THIS
+        # pane to Lt/Rt independently afterwards.
         # Remember the last series per modality and per study so the
         # cine viewers' First/Prev/Next/Last nav and the Study-row
         # click both resume from here after the user moves away and
@@ -2185,6 +2148,10 @@ class MainWindow(QMainWindow):
             viewer.tags_requested.connect(
                 lambda vv=viewer: self._open_tag_dialog(vv)
             )
+        # Right-click ▸ "Export CSV (DICOM tags)" on the image → reuse the
+        # same series-CSV export the Studies-list right-click uses.
+        if hasattr(viewer, "csv_export_requested"):
+            viewer.csv_export_requested.connect(self._on_csv_export_from_viewer)
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))

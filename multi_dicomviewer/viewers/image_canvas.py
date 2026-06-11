@@ -680,10 +680,13 @@ class ImageCanvas(QWidget):
         ca["pts"].append(self._snap_ca(m, pt))      # constrain to the outline
         if len(ca["pts"]) >= 3:
             centre = self._shape_center(m)
-            p1, p2, p3 = ca["pts"][:3]
-            span, t1, t3, ccw = G.central_arc_angle(centre, p1, p2, p3)
+            # Click order is [endpoint, other endpoint, arc selector] — matching
+            # Rupture-Predictor. The geometry helper wants (p1, through, p3), so
+            # the selector (pts[2]) is passed as the middle "through" point.
+            e1, e2, sel = ca["pts"][:3]
+            span, t1, t3, ccw = G.central_arc_angle(centre, e1, sel, e2)
             m["center_angle"] = {
-                "pts": [p1, p2, p3], "angle": span,
+                "pts": [e1, e2, sel], "angle": span,
                 "t1": t1, "t3": t3, "ccw": ccw,
             }
             self._center_angle_target = -1
@@ -715,7 +718,9 @@ class ImageCanvas(QWidget):
         pts = list(ca["pts"])
         pts[ci] = self._snap_ca(m, w)
         centre = self._shape_center(m)
-        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[1], pts[2])
+        # pts == [endpoint, other endpoint, arc selector]; selector is the
+        # "through" point for the geometry helper (see _center_angle_add).
+        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[2], pts[1])
         m["center_angle"] = {"pts": pts, "angle": span,
                              "t1": t1, "t3": t3, "ccw": ccw}
 
@@ -727,7 +732,9 @@ class ImageCanvas(QWidget):
             return
         pts = [self._snap_ca(m, q) for q in ca["pts"]]
         centre = self._shape_center(m)
-        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[1], pts[2])
+        # pts == [endpoint, other endpoint, arc selector]; selector is the
+        # "through" point for the geometry helper (see _center_angle_add).
+        span, t1, t3, ccw = G.central_arc_angle(centre, pts[0], pts[2], pts[1])
         m["center_angle"] = {"pts": pts, "angle": span,
                              "t1": t1, "t3": t3, "ccw": ccw}
 
@@ -1130,17 +1137,18 @@ class ImageCanvas(QWidget):
             # weight (2.4) so they're as visible as the rest of the measurement.
             p.setPen(QPen(spoke, 2.4, Qt.PenStyle.DashLine))
             for ci, q in enumerate(ca["pts"]):
-                # The 2nd point only picks which way the angle is measured, so
-                # it gets no spoke — only the 1st and 3rd (the angle's arms).
-                if ci == 1:
+                # pts == [endpoint, other endpoint, arc selector]. The 3rd point
+                # only picks which arc is measured, so it gets no spoke — only
+                # the two endpoints (ci 0 and 1) form the angle's arms.
+                if ci == 2:
                     continue
                 wq = self._image_to_widget(q)
                 p.drawLine(wc, wq)
-            # Solid orange arc on the outline from p1→p3 through p2 — shows which
-            # part of the perimeter the central angle spans.
+            # Solid orange arc on the outline between the two endpoints, passing
+            # through the selector — only shown once all 3 points are placed.
             if "angle" in ca and len(ca["pts"]) >= 3:
                 arc = G.arc_through(self._outline_px(m), ca["pts"][0],
-                                    ca["pts"][1], ca["pts"][2])
+                                    ca["pts"][2], ca["pts"][1])
                 if len(arc) >= 2:
                     p.setPen(QPen(QColor(255, 140, 0), 2.88))   # 2.4 ×1.2
                     warc = [self._image_to_widget(q) for q in arc]
@@ -1203,15 +1211,17 @@ class ImageCanvas(QWidget):
             )
             p.drawText(tl, tag)
 
-        # Center-Angle pick-mode hint.
+        # Center-Angle pick-mode hint — order matches Rupture-Predictor:
+        # endpoint, other endpoint, then a point on the arc to measure.
         if self._center_angle_target >= 0:
             picked = len(self.measures[self._center_angle_target]
                          .get("center_angle", {}).get("pts", []))
-            self._paint_hint(
-                p,
-                f"Center Angle: click {3 - picked} more point(s) "
-                "on the perimeter",
-            )
+            step = (
+                "click the 1st endpoint on the perimeter",
+                "click the 2nd endpoint on the perimeter",
+                "click a point on the arc you want to measure",
+            )[min(picked, 2)]
+            self._paint_hint(p, f"Center Angle: {step}")
 
         # Draft preview (yellow dashed).
         if self._draft and self._draft["pts"]:
