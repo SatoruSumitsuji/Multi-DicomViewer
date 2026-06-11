@@ -17,7 +17,7 @@ from typing import Iterable, Optional
 
 from pydicom.tag import Tag
 
-from .anonymize import mask_text
+from .anonymize import mask_value
 
 # Bulk pixel/overlay payloads — never useful as text, sometimes huge.
 _SKIP_KEYWORDS = frozenset(
@@ -154,7 +154,7 @@ def iter_tag_rows(ds, anonymized: bool = False) -> list[TagRow]:
         if keyword in _SKIP_KEYWORDS:
             continue
         name = elem.name or keyword or "Unknown"
-        value = mask_text(keyword, _format_value(elem), anonymized)
+        value = mask_value(elem, _format_value(elem), anonymized)
         tag_literal = f"({elem.tag.group:04X},{elem.tag.element:04X})"
         rows.append(
             TagRow(
@@ -204,7 +204,7 @@ def overlay_lines(
         if elem is None:
             continue
         name = elem.name or kw
-        value = mask_text(kw, _overlay_value(kw, elem, 64), anonymized)
+        value = mask_value(elem, _overlay_value(kw, elem, 64), anonymized)
         lines.append(f"{name}: {value}")
     return lines
 

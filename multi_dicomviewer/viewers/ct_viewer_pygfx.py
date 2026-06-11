@@ -982,14 +982,15 @@ class CTViewer(AbstractViewer):
         # trackpad paging can leave behind.
         self._force_crisp()
         canvas = self.pane[key].canvas
-        # CT offers DICOM + CSV but NOT MP4 (a slice scroll isn't a cine).
+        # CT offers DICOM + Anon DICOM + CSV but NOT MP4 (slice scroll, not
+        # a cine).
         fmt = pick_export_format(
             self, canvas.mapToGlobal(QPoint(int(x), int(y))),
-            include_dicom=True, include_mp4=False,
+            include_dicom=True, include_mp4=False, include_anon=True,
         )
         if not fmt:
             return
-        if fmt in ("dicom", "csv"):
+        if fmt in ("dicom", "csv", "anon-dicom"):
             # One volume — A/B panes are reformats of the same series.
             self.plane_export_requested.emit(
                 fmt, getattr(self, "_loaded_uid", ""), ""

@@ -48,7 +48,7 @@ from multi_dicomviewer.config import (
     BLOCK_CT,
     BLOCK_CT_MESSAGE,
 )
-from multi_dicomviewer.core import dicom_io, settings
+from multi_dicomviewer.core import anonymize, dicom_io, settings
 from multi_dicomviewer.core.dicom_tags import (
     default_overlay_keywords,
     upgrade_private_literal,
@@ -462,6 +462,16 @@ class MainWindow(QMainWindow):
         self._export_fields_by_modality: dict[str, list[str]] = (
             settings.load_export_fields_by_modality()
         )
+        # Anonymization profile (which tags the Anonymize toggle / Export
+        # (Anon DICOM) blank). Load the saved one, else the built-in default,
+        # and push it into the anonymize module so display + export agree.
+        _anon_saved = settings.load_anon_profile()
+        if _anon_saved is not None:
+            self._anon_tags, self._anon_emptify_private = _anon_saved
+        else:
+            self._anon_tags = list(anonymize.DEFAULT_ANON_TAGS)
+            self._anon_emptify_private = anonymize.DEFAULT_EMPTIFY_PRIVATE
+        anonymize.set_anon_profile(self._anon_tags, self._anon_emptify_private)
         self._overlay_hidden = False        # hide the on-image tag text
         # Measurement log, keyed by StudyInstanceUID, kept until the app
         # exits (survives folder reloads / series switches).
@@ -545,6 +555,10 @@ class MainWindow(QMainWindow):
         )
 
         self.browser.anonymize_toggled.connect(self._set_anonymized)
+        self.browser.anon_settings_requested.connect(self._open_anon_settings)
+        self.browser.fit_dock_width_requested.connect(
+            self._fit_studies_dock_width
+        )
         self.browser.dicom_info_toggled.connect(self._on_dicom_info_btn)
 
         self._build_menu()
@@ -1618,14 +1632,29 @@ class MainWindow(QMainWindow):
             idx = lst.index(cur)
         except ValueError:
             idx = -1
-        target = {
-            "first": 0,
-            "last": len(lst) - 1,
-            "prev": max(0, idx - 1) if idx >= 0 else 0,
-            "next": min(len(lst) - 1, idx + 1) if idx >= 0 else 0,
-        }[where]
+        # Skip hidden series: First/Last land on the nearest VISIBLE series;
+        # Prev/Next step to the nearest visible one in that direction.
+        visible = [s for s in lst if not getattr(s, "hidden", False)]
+        if not visible:
+            return                                   # nothing visible to show
+        if where == "first":
+            tgt = visible[0]
+        elif where == "last":
+            tgt = visible[-1]
+        elif where == "next":
+            tgt = visible[-1]
+            for i in range(idx + 1, len(lst)):
+                if not getattr(lst[i], "hidden", False):
+                    tgt = lst[i]
+                    break
+        else:  # prev
+            tgt = visible[0]
+            for i in range(idx - 1, -1, -1):
+                if not getattr(lst[i], "hidden", False):
+                    tgt = lst[i]
+                    break
         self._set_active_pane(xp)
-        self.browser.select_series(lst[target])
+        self.browser.select_series(tgt)
 
     # ------------------------------------------------------------- data load
     def _choose_folder(self) -> None:
@@ -1831,7 +1860,9 @@ class MainWindow(QMainWindow):
         live progress bar. Runs on the UI thread (simpler; MP4 of a few
         hundred frames is still seconds, not minutes). CSV writes one
         file per series listing the displayed DICOM-tag-overlay tags."""
-        if not series_list or fmt not in ("dicom", "mp4", "csv"):
+        if not series_list or fmt not in (
+            "dicom", "mp4", "csv", "anon-dicom"
+        ):
             return
         from multi_dicomviewer.core import export as exporter
         from multi_dicomviewer.ui.export_dialog import (
@@ -1897,6 +1928,7 @@ class MainWindow(QMainWindow):
             "dicom": "Exporting DICOM…",
             "mp4": "Exporting MP4…",
             "csv": "Exporting CSV…",
+            "anon-dicom": "Exporting Anon DICOM…",
         }[fmt]
         prog = QProgressDialog(title, "Cancel", 0, 1, self)
         prog.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -1928,6 +1960,12 @@ class MainWindow(QMainWindow):
         try:
             if fmt == "dicom":
                 written = exporter.export_dicom(
+                    series_list, out_dir, cfg.fields, progress=_cb
+                )
+            elif fmt == "anon-dicom":
+                # De-identified copy using the active anonymization profile
+                # (same tags the Anonymize toggle blanks on screen).
+                written = exporter.export_anon_dicom(
                     series_list, out_dir, cfg.fields, progress=_cb
                 )
             elif fmt == "csv":
@@ -1970,8 +2008,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Export failed", str(e))
             return
         prog.close()
+        unit = "folder" if fmt in ("dicom", "anon-dicom") else "file"
         self.statusBar().showMessage(
-            f"Exported {len(written)} {'folder' if fmt == 'dicom' else 'file'}"
+            f"Exported {len(written)} {unit}"
             f"{'s' if len(written) != 1 else ''} to {out_dir}"
         )
 
@@ -2010,14 +2049,16 @@ class MainWindow(QMainWindow):
         OT on the same date) resolves to the clicked node's own kind, never
         the sibling's — otherwise clicking the XA node jumped to OT."""
         last = self._last_by_study.get((study_uid, kind))
-        if last is not None and last.series_uid in self._series_by_uid:
+        if (last is not None and last.series_uid in self._series_by_uid
+                and not getattr(last, "hidden", False)):
             self.browser.select_series(last)
             return
-        # Never visited this study node yet → fall back to its first series
-        # in the browser's display order, restricted to the clicked kind.
+        # Never visited (or last-viewed is now hidden) → fall back to the
+        # first VISIBLE series of this study node, in display order.
         for se in self.browser.ordered_series():
             if (self._study_by_series_uid.get(se.series_uid) == study_uid
-                    and se.kind == kind):
+                    and se.kind == kind
+                    and not getattr(se, "hidden", False)):
                 self.browser.select_series(se)
                 return
 
@@ -2322,6 +2363,42 @@ class MainWindow(QMainWindow):
             if on
             else "Anonymize: OFF"
         )
+
+    def _open_anon_settings(self) -> None:
+        """Right-click on the Anonymous button → choose which tags the
+        Anonymize toggle AND Export (Anon DICOM) blank. Saves the profile and
+        redraws overlays so a change takes effect immediately."""
+        from multi_dicomviewer.ui.anon_dialog import AnonSettingsDialog
+        dlg = AnonSettingsDialog(
+            self._anon_tags, self._anon_emptify_private, self
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        tags, emptify_private = dlg.result_profile()
+        self._anon_tags = tags
+        self._anon_emptify_private = emptify_private
+        anonymize.set_anon_profile(tags, emptify_private)
+        settings.save_anon_profile(tags, emptify_private)
+        # Redraw overlays so the new masking shows at once (when anon is on).
+        for v in self._tag_viewers():
+            if hasattr(v, "set_tag_keywords"):
+                v.set_tag_keywords(self._effective_kw(v))
+        self.statusBar().showMessage(
+            f"Anonymize settings updated: {len(tags)} tag(s)"
+            + (" + private" if emptify_private else "")
+        )
+
+    def _fit_studies_dock_width(self, width: int) -> None:
+        """Thumbnail "Fit: min × 10 across" → widen the Studies dock toward
+        *width* px (capped so the viewers keep room). Best-effort: the grid
+        wraps to whatever actually fits."""
+        dock = self._studies_dock
+        if not dock.isVisible():
+            dock.setVisible(True)
+            self._info_btn.setText("◀ Info shown")
+        cap = max(300, self.width() - 360)   # leave ≥360px for the panes
+        w = max(200, min(int(width), cap))
+        self.resizeDocks([dock], [w], Qt.Orientation.Horizontal)
 
     def _open_tag_dialog(self, viewer) -> None:
         header = (

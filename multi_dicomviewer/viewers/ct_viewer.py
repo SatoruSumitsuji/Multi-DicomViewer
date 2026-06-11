@@ -1815,14 +1815,15 @@ class CTViewer(AbstractViewer):
         if self._header is None:        # nothing loaded → no export offered
             return
         canvas = self.pane[which].canvas
-        # CT offers DICOM + CSV but NOT MP4 (a slice scroll isn't a cine).
+        # CT offers DICOM + Anon DICOM + CSV but NOT MP4 (a slice scroll
+        # isn't a cine).
         key = pick_export_format(
             self, canvas.mapToGlobal(QtPoint(int(sx), int(sy))),
-            include_dicom=True, include_mp4=False,
+            include_dicom=True, include_mp4=False, include_anon=True,
         )
         if not key:
             return
-        if key in ("dicom", "csv"):
+        if key in ("dicom", "csv", "anon-dicom"):
             # One volume — A/B panes are reformats of the same series, so
             # always the whole series (plane_path="").
             self.plane_export_requested.emit(

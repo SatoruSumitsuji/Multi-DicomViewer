@@ -68,18 +68,22 @@ def pick_export_format(
     global_point: QPoint,
     include_dicom: bool = False,
     include_mp4: bool = False,
+    include_anon: bool = False,
 ) -> Optional[str]:
     """Show the right-click export menu at *global_point*; return the chosen
     format key, or None if dismissed.
 
-    Order: PNG, JPEG, TIFF, [DICOM], [MP4], CSV. PNG/JPEG/TIFF save the
-    clicked canvas. DICOM (lossless original copy), MP4 (rendered cine) and
-    CSV (DICOM-tag dump) are series/plane exports the host routes through the
-    shell. DICOM/MP4 are only listed when the caller opts in — CT has no MP4,
-    and the IVUS long-axis strip offers neither (still + CSV only)."""
+    Order: PNG, JPEG, TIFF, [DICOM], [Anon DICOM], [MP4], CSV. PNG/JPEG/TIFF
+    save the clicked canvas. DICOM (lossless original copy), Anon DICOM
+    (de-identified copy), MP4 (rendered cine) and CSV (DICOM-tag dump) are
+    series/plane exports the host routes through the shell. They are only
+    listed when the caller opts in — CT has no MP4, and the IVUS long-axis
+    strip offers neither DICOM/Anon/MP4 (still + CSV only)."""
     items = list(_STILL_FORMATS)
     if include_dicom:
         items.append(("Export DICOM (lossless)", "dicom"))
+    if include_anon:
+        items.append(("Export (Anon DICOM)", "anon-dicom"))
     if include_mp4:
         items.append(("Export MP4", "mp4"))
     items.append(("Export CSV (DICOM tags)", "csv"))
