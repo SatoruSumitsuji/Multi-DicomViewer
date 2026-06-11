@@ -60,6 +60,11 @@ class Series:
     #: 1. 0 until scan_folder fills it in; image_count falls back to the file
     #: count meanwhile.
     n_images: int = 0
+    #: Session view-state: a "hidden" series is greyed in the browser, not
+    #: loaded on left-click, and skipped by First/Prev/Next/Last navigation
+    #: (PowerPoint "hide slide" style). Not persisted — a folder reload
+    #: clears it. Survives in-session repopulates (same Series object reused).
+    hidden: bool = False
 
     @property
     def kind(self) -> str:

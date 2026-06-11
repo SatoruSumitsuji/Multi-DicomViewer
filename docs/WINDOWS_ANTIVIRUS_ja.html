@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Multi-DICOMviewer — Windows ウイルス対策ソフト対処</title>
+<style>
+@page { size: A4; margin: 18mm 15mm; }
+* { box-sizing: border-box; }
+body {
+  font-family: "Yu Gothic", "Meiryo", "Hiragino Kaku Gothic ProN",
+               "Noto Sans CJK JP", sans-serif;
+  font-size: 10.5pt; line-height: 1.7; color: #1a1a1a;
+  max-width: 860px; margin: 0 auto; padding: 24px;
+}
+h1 { font-size: 20pt; border-bottom: 3px solid #1f6feb; padding-bottom: 6px;
+     margin: 0 0 14px; }
+h2 { font-size: 15pt; border-bottom: 1px solid #c9c9c9; padding-bottom: 4px;
+     margin: 22px 0 10px; page-break-after: avoid; }
+h3 { font-size: 12.5pt; margin: 16px 0 8px; page-break-after: avoid; }
+p { margin: 6px 0; }
+ul, ol { margin: 6px 0 6px 0; padding-left: 1.6em; }
+li { margin: 3px 0; }
+code { font-family: "Consolas", "Yu Gothic", monospace;
+       background: #f0f2f4; padding: 1px 4px; border-radius: 3px;
+       font-size: 9.5pt; }
+pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+      padding: 10px 12px; overflow-x: auto; page-break-inside: avoid; }
+pre code { background: none; padding: 0; font-size: 9pt; line-height: 1.45; }
+blockquote { border-left: 4px solid #e3a008; background: #fff8e6;
+             margin: 10px 0; padding: 8px 14px; color: #5a4a1a;
+             page-break-inside: avoid; }
+table { border-collapse: collapse; width: 100%; margin: 10px 0;
+        page-break-inside: avoid; font-size: 10pt; }
+th, td { border: 1px solid #c9c9c9; padding: 5px 9px; text-align: left;
+         vertical-align: top; }
+th { background: #eef3fb; }
+tr:nth-child(even) td { background: #fafbfc; }
+a { color: #0b56c4; text-decoration: none; }
+hr { border: none; border-top: 1px solid #d0d7de; margin: 18px 0; }
+h2 { string-set: none; }
+</style>
+</head>
+<body>
+<h1 id="windows-でウイルス対策ソフトに止められたときの対処">Windows でウイルス対策ソフトに止められたときの対処</h1>
+<p>Multi-DICOMviewer（Windows版）を入れる・開くときに、ウイルス対策ソフトが</p>
+<p>警告を出したり、ファイルを消してしまうことがあります。</p>
+<p><strong>まず安心してください。アプリは安全です。</strong> これは「<strong>誤検知（ごけんち）</strong>」</p>
+<p>といって、ソフトが念のため過剰に反応しているだけです。</p>
+<blockquote>なぜ起きるの？<br>このアプリには、メーカーが付ける「<strong>電子署名</strong>（＝身分証のようなもの）」が<br>まだ付いていません。署名のないアプリは、ウイルス対策ソフトが「念のため」<br>警告することがあります。中身は問題ありません。</blockquote>
+<p>下の3つのうち、<strong>あなたの画面に出ているもの</strong>を探して、その手順どおりに</p>
+<p>進めてください。</p>
+<hr>
+<h2 id="パターン①　ダウンロードした-zip-が開けない展開できない">パターン①　ダウンロードした ZIP が開けない／展開できない</h2>
+<p>ダウンロードしたファイル（<code>Multi-DicomViewer-windows.zip</code>）を展開する前に、</p>
+<p><strong>「ブロックの解除」</strong>をすると、うまくいくことが多いです。</p>
+<ol>
+<li>ダウンロードした <strong>ZIP ファイルを右クリック</strong>します。</li>
+<li>メニューの一番下の <strong>「プロパティ」</strong> をクリックします。</li>
+<li>開いた小窓の下のほうに</li>
+</ol>
+<p>   <strong>「セキュリティ：このファイルは…ブロックされています」</strong> という文があれば、</p>
+<p>   その右の <strong>「許可する」</strong> にチェックを入れます。</p>
+<ul>
+<li>※この文が無ければ、そのまま 4 に進んでOKです。</li>
+</ul>
+<ol>
+<li><strong>「OK」</strong> を押します。</li>
+<li>そのあとで、ZIP を<strong>展開（解凍）</strong>します。</li>
+</ol>
+<p>   （ZIP を右クリック →「すべて展開」）</p>
+<blockquote>ポイント：すでに展開したものがある場合は、いったん削除してから、<br>上のやり方で「ブロックの解除」をした ZIP を展開し直すのが確実です。</blockquote>
+<hr>
+<h2 id="パターン②　起動時に青い画面でwindows-によって-pc-が保護されました">パターン②　起動時に青い画面で「Windows によって PC が保護されました」</h2>
+<p>これは Windows の標準機能（SmartScreen）の警告です。</p>
+<ol>
+<li>青い画面の中の <strong>「詳細情報」</strong> という小さな文字をクリックします。</li>
+<li>すると下に <strong>「実行」</strong> ボタンが出てくるので、それをクリックします。</li>
+</ol>
+<p>これでアプリが起動します。次回からは出なくなります。</p>
+<hr>
+<h2 id="パターン③　ファイルが消えたウイルスを検出しましたと出た">パターン③　ファイルが消えた／「ウイルスを検出しました」と出た</h2>
+<p>ウイルス対策ソフトがアプリのファイルを<strong>隔離（かくり）</strong>した状態です。</p>
+<p>アプリのフォルダを「<strong>例外（除外）</strong>」に登録して、復元します。</p>
+<h3 id="windows-標準windows-セキュリティ--defenderの場合">Windows 標準（Windows セキュリティ / Defender）の場合</h3>
+<ol>
+<li>画面左下の <strong>スタート</strong>（旗のマーク）を押し、<strong>「セキュリティ」</strong> と入力 →</li>
+</ol>
+<p>   <strong>「Windows セキュリティ」</strong> を開きます。</p>
+<ol>
+<li><strong>「ウイルスと脅威の防止」</strong> をクリックします。</li>
+<li><strong>「設定の管理」</strong> をクリックします。</li>
+<li>下のほうの <strong>「除外の追加または削除」</strong> をクリックします。</li>
+<li><strong>「除外の追加」→「フォルダー」</strong> を選び、</li>
+</ol>
+<p>   展開した <strong>「Multi-DicomViewer」フォルダ</strong>を指定します。</p>
+<ol>
+<li>もしファイルが消えていたら、同じ「ウイルスと脅威の防止」の画面で</li>
+</ol>
+<p>   <strong>「保護の履歴」</strong> を開き、Multi-DicomViewer の項目を選んで</p>
+<p>   <strong>「許可」</strong> で元に戻します。</p>
+<ol>
+<li>必要なら、もう一度 ZIP を展開し直してください。</li>
+</ol>
+<h3 id="ウイルスバスター等他社のソフトの場合">ウイルスバスター等、他社のソフトの場合</h3>
+<p>考え方は同じです。そのソフトの設定の中にある</p>
+<p><strong>「例外設定」「除外リスト」「信頼するプログラム」</strong> などに、</p>
+<p><strong>「Multi-DicomViewer」フォルダ</strong>を追加してください。</p>
+<p>（メニュー名はソフトによって少し違います）</p>
+<hr>
+<h2 id="大事なコツ">大事なコツ</h2>
+<ul>
+<li>アプリは <strong>フォルダごと</strong>（中身を全部まとめて）扱ってください。</li>
+</ul>
+<p>  中の <code>Multi-DicomViewer.exe</code> だけを取り出さないでください。</p>
+<ul>
+<li><strong>ZIP の中から直接起動しない</strong>でください。必ず<strong>展開してから</strong>開きます。</li>
+</ul>
+<hr>
+<h2 id="それでも開けないときは">それでも開けないときは</h2>
+<p>無理をせず、<strong>このアプリを渡してくれた人（配布元）に連絡</strong>してください。</p>
+<p>お使いのウイルス対策ソフトの名前（例：「ウイルスバスター」「ノートン」など）を</p>
+<p>伝えていただけると、そのソフトに合わせた手順をご案内できます。</p>
+<hr>
+<p>*補足：このアプリは医療機器ではなく、研究・教育用です。*</p>
+</body>
+</html>

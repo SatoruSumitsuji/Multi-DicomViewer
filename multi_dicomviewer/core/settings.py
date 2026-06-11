@@ -16,6 +16,7 @@ from pathlib import Path
 SETTINGS_DIR = Path.home() / ".multi-dicomviewer"
 TAG_CONDITIONS_PATH = SETTINGS_DIR / "tag_conditions.json"
 EXPORT_FIELDS_PATH = SETTINGS_DIR / "export_fields.json"
+ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
 _SCHEMA_VERSION = 2
 
 #: Modalities that get their own persisted tag list. Anything else
@@ -166,6 +167,36 @@ def save_export_fields_by_modality(by_mod: dict) -> None:
             },
         }
         EXPORT_FIELDS_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------- anonymization profile
+def load_anon_profile():
+    """Return ``(tags, emptify_private)`` where *tags* is a list of
+    ``(group, element)`` int pairs, or ``None`` when no profile is saved yet
+    (caller then uses the built-in default)."""
+    try:
+        data = json.loads(ANON_PROFILE_PATH.read_text(encoding="utf-8"))
+        tags = [(int(g), int(e)) for g, e in data.get("tags", [])]
+        return tags, bool(data.get("emptify_private", True))
+    except Exception:
+        return None
+
+
+def save_anon_profile(tags, emptify_private: bool) -> None:
+    """Best-effort persist of the anonymization profile."""
+    try:
+        ANON_PROFILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "tags": [[int(g), int(e)] for g, e in tags],
+            "emptify_private": bool(emptify_private),
+        }
+        ANON_PROFILE_PATH.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )

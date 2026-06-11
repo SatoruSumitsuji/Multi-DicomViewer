@@ -274,6 +274,67 @@ def export_dicom(series_list: list[Series],
     return written
 
 
+# ----------------------------------------------------------- Anon DICOM
+def export_anon_dicom(series_list: list[Series],
+                      out_dir: str,
+                      fields: Iterable[str],
+                      progress: ProgressCB = None) -> list[str]:
+    """Like :func:`export_dicom`, but writes a DE-IDENTIFIED copy of each
+    file: the active anonymization profile (see
+    :func:`core.anonymize.deidentify_dataset`) emptifies the configured tags'
+    values and every private element's value. Pixels, UIDs and the transfer
+    syntax are preserved, so the output still decodes/displays.
+
+    One subfolder per series; per-file names from the checked *fields*.
+    Returns the list of folders written."""
+    from .anonymize import deidentify_dataset
+
+    fields = tuple(fields)
+    written: list[str] = []
+    total_files = sum(len(s.files) for s in series_list)
+    done = 0
+    if progress:
+        progress(0, total_files, "Preparing…")
+
+    for si, series in enumerate(series_list):
+        if not series.files:
+            continue
+        try:
+            first_ds = pydicom.dcmread(
+                series.files[0], stop_before_pixels=True, force=True
+            )
+        except Exception:
+            first_ds = pydicom.Dataset()
+        folder = build_series_folder(fields, series, first_ds) or (
+            f"series_{si + 1}"
+        )
+        # Suffix so an anonymized export never overwrites a plain DICOM export
+        # sitting in the same chosen folder.
+        sub = _unique_path(os.path.join(out_dir, folder + "_anon"))
+        os.makedirs(sub, exist_ok=True)
+        written.append(sub)
+
+        for path in series.files:
+            try:
+                ds = pydicom.dcmread(path, force=True)   # full read (pixels)
+                deidentify_dataset(ds)
+                base = build_filename(fields, series, ds)
+                target = _unique_path(os.path.join(sub, base + ".dcm"))
+                ds.save_as(target, enforce_file_format=True)
+            except Exception as e:
+                if progress:
+                    progress(done, total_files,
+                             f"Failed: {os.path.basename(path)} ({e})")
+            done += 1
+            if progress and (done % 4 == 0 or done == total_files):
+                progress(done, total_files,
+                         f"Anonymizing [{si + 1}/{len(series_list)}] "
+                         f"{os.path.basename(path)}")
+    if progress:
+        progress(total_files, total_files, "Done")
+    return written
+
+
 # --------------------------------------------------------------- CSV
 def _decode_binary_text(raw: bytes) -> Optional[str]:
     """Best-effort text from a binary (OB/UN/…) value. Returns the full
@@ -314,7 +375,7 @@ def _csv_value(elem, ident: str, anonymized: bool) -> str:
     text are decoded and written in full; genuinely binary ones (and
     sequences) fall back to a short descriptor. PHI is masked to match the
     on-screen Anonymize state."""
-    from .anonymize import mask_text
+    from .anonymize import mask_value
     from .dicom_tags import _BINARY_VRS
 
     vr = str(elem.VR)
@@ -328,14 +389,14 @@ def _csv_value(elem, ident: str, anonymized: bool) -> str:
         if isinstance(raw, (bytes, bytearray, memoryview)):
             decoded = _decode_binary_text(bytes(raw))
             if decoded is not None:
-                return mask_text(ident, decoded, anonymized)
+                return mask_value(elem, decoded, anonymized)
             return f"<binary: {len(raw)} bytes>"
         # Non-bytes binary value (rare) — fall through to the str() path.
     try:
         text = str(elem.value)
     except Exception:
         return "<unreadable>"
-    return mask_text(ident, text, anonymized)
+    return mask_value(elem, text, anonymized)
 
 
 def export_csv(series_list: list[Series],

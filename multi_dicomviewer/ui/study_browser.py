@@ -9,6 +9,7 @@ import numpy as np
 from PyQt6.QtCore import QMimeData, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QBrush,
     QColor,
     QDrag,
     QFont,
@@ -45,7 +46,7 @@ _ID_ROLE = Qt.ItemDataRole.UserRole + 1
 
 #: thumbnail size-slider bounds; previews are decoded at _THUMB_GEN_PX so
 #: the grid stays sharp anywhere in this range.
-_THUMB_MIN_PX = 80
+_THUMB_MIN_PX = 60   # was 80; ~75% so more thumbnails fit for gap-scanning
 _THUMB_MAX_PX = 280
 _THUMB_GEN_PX = 280
 
@@ -108,7 +109,11 @@ class FitButton(QPushButton):
 
 
 def _start_series_drag(source: QWidget, series: Series) -> None:
-    """Begin dragging *series* out of the info panel onto a viewer pane."""
+    """Begin dragging *series* out of the info panel onto a viewer pane.
+    Hidden series are not draggable (kept consistent with the left-click /
+    navigation skip — a hidden series is never shown)."""
+    if getattr(series, "hidden", False):
+        return
     md = QMimeData()
     md.setData(SERIES_MIME, series.series_uid.encode("utf-8"))
     md.setText(series.label)
@@ -230,6 +235,14 @@ class StudyBrowser(QTreeWidget):
     #: the export dialog (filename fields, MP4 bitrate/fps), asks for
     #: an output folder, and runs the export off the UI thread.
     export_requested = pyqtSignal(str, list)
+    #: "Hide" → grey + skip these series ([Series]).
+    hide_requested = pyqtSignal(list)
+    #: "UnHide / Show (show all)" → un-hide every hidden series in a study
+    #: node (study_uid, kind).
+    unhide_study_requested = pyqtSignal(str, str)
+    #: "Select (UnHidden Only)" → remove every HIDDEN series in a study node
+    #: from the list (study_uid, kind).
+    select_unhidden_requested = pyqtSignal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -399,6 +412,47 @@ class StudyBrowser(QTreeWidget):
                 self._ordered.append(series)
                 self._items[id(series)] = se_item
             s_item.setExpanded(prev.get(sk, False))
+        self._apply_hidden_style()      # grey any series marked hidden
+
+    def _apply_hidden_style(self) -> None:
+        """Grey every hidden series row (and restore normal colour for the
+        rest). Re-applied after each populate so the state survives the
+        anonymize-toggle / re-sort repopulates."""
+        grey = QColor("#888")
+        cols = self.columnCount()
+        for s in self._ordered:
+            it = self._items.get(id(s))
+            if it is None:
+                continue
+            brush = QBrush(grey) if getattr(s, "hidden", False) else QBrush()
+            for c in range(cols):
+                it.setForeground(c, brush)
+
+    def series_in_study(self, study_uid: str, kind: str) -> list[Series]:
+        """All series under the (study_uid, kind) node, in display order."""
+        out: list[Series] = []
+        for s in self._ordered:
+            it = self._items.get(id(s))
+            par = it.parent() if it is not None else None
+            idk = par.data(0, _ID_ROLE) if par is not None else None
+            if idk and idk[0] == "S" and idk[1] == study_uid and idk[2] == kind:
+                out.append(s)
+        return out
+
+    def set_series_hidden(self, series_list, hidden: bool) -> None:
+        """Mark *series_list* hidden / shown and re-grey the tree."""
+        for s in series_list:
+            s.hidden = bool(hidden)
+        self._apply_hidden_style()
+
+    def _study_key_of_series(self, series) -> tuple | None:
+        """(study_uid, kind) of the node *series* lives under, or None."""
+        it = self._items.get(id(series))
+        par = it.parent() if it is not None else None
+        idk = par.data(0, _ID_ROLE) if par is not None else None
+        if idk and idk[0] == "S":
+            return (idk[1], idk[2])
+        return None
 
     def ordered_series(self, modality: str | None = None) -> list[Series]:
         """All series in tree-display order. ``modality`` filters by the
@@ -487,6 +541,8 @@ class StudyBrowser(QTreeWidget):
     def _on_activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
         data = item.data(0, _ROLE)
         if isinstance(data, Series):
+            if getattr(data, "hidden", False):
+                return            # hidden series: left-click does not load
             self.series_chosen.emit(data)
             return
         # Clicking a Study row: tell the shell which study was picked
@@ -551,6 +607,17 @@ class StudyBrowser(QTreeWidget):
                 lambda: self.export_requested.emit("dicom", list(sel_series))
             )
             menu.addAction(act_dcm)
+            act_anon = QAction(f"Export (Anon DICOM){suffix}", self)
+            act_anon.setToolTip(
+                "Like Export (DICOM) but de-identified: the configured tags' "
+                "values and all private tags are emptied (right-click the "
+                "Anonymous button to choose). Pixels/UIDs kept."
+            )
+            act_anon.triggered.connect(
+                lambda: self.export_requested.emit(
+                    "anon-dicom", list(sel_series))
+            )
+            menu.addAction(act_anon)
             act_mp4 = QAction(f"Export (MP4){suffix}", self)
             act_mp4.setToolTip(
                 "Render each selected series to an .mp4 in a chosen "
@@ -570,24 +637,75 @@ class StudyBrowser(QTreeWidget):
                 lambda: self.export_requested.emit("csv", list(sel_series))
             )
             menu.addAction(act_csv)
+            # Hide / UnHide — between the Export group and Close.
             menu.addSeparator()
-        act_close = QAction("Close (close series list)", self)
-        act_close.setToolTip(
-            "Collapse this study's series list so the Study list is "
-            "easier to browse. Nothing is removed."
-        )
-        act_close.triggered.connect(lambda: self._close_series_list(item))
-        menu.addAction(act_close)
+            act_hide = QAction(f"Hide (hide this series){suffix}", self)
+            act_hide.setToolTip(
+                "Grey out and skip this series — kept in the list, but "
+                "left-click and First/Prev/Next/Last ignore it."
+            )
+            act_hide.triggered.connect(
+                lambda: self.hide_requested.emit(list(sel_series))
+            )
+            menu.addAction(act_hide)
+            st = self._study_key_of_series(sel_series[0])
+            act_unhide = QAction("UnHide (show all series)", self)
+            act_unhide.setToolTip("Un-hide every hidden series in this study.")
+            if st is not None:
+                act_unhide.triggered.connect(
+                    lambda: self.unhide_study_requested.emit(st[0], st[1])
+                )
+            menu.addAction(act_unhide)
         menu.addSeparator()
-        act = QAction("Delete (remove from list)", self)
-        act.setToolTip(
-            "Files are not deleted; just removed from the list so they "
-            "can no longer be viewed."
-        )
-        act.triggered.connect(
-            lambda: self.delete_requested.emit(kind, key, label)
-        )
-        menu.addAction(act)
+        if kind == "study":
+            su, sk_ = idk[1], idk[2]
+            act_select = QAction("Select (UnHidden Only)", self)
+            act_select.setToolTip(
+                "Remove every HIDDEN (greyed) series in this study from the "
+                "list. Files are not deleted; reload the folder to restore."
+            )
+            act_select.triggered.connect(
+                lambda: self.select_unhidden_requested.emit(su, sk_)
+            )
+            menu.addAction(act_select)
+            act_close = QAction("Close (close list)", self)
+            act_close.setToolTip(
+                "Collapse this study's series list. Nothing is removed."
+            )
+            act_close.triggered.connect(lambda: self._close_series_list(item))
+            menu.addAction(act_close)
+            act_show = QAction("Show (show all)", self)
+            act_show.setToolTip("Un-hide every hidden series in this study.")
+            act_show.triggered.connect(
+                lambda: self.unhide_study_requested.emit(su, sk_)
+            )
+            menu.addAction(act_show)
+            act_del = QAction("Delete (remove)", self)
+            act_del.setToolTip(
+                "Files are not deleted; just removed from the list."
+            )
+            act_del.triggered.connect(
+                lambda: self.delete_requested.emit(kind, key, label)
+            )
+            menu.addAction(act_del)
+        else:
+            act_close = QAction("Close (close series list)", self)
+            act_close.setToolTip(
+                "Collapse this study's series list so the Study list is "
+                "easier to browse. Nothing is removed."
+            )
+            act_close.triggered.connect(lambda: self._close_series_list(item))
+            menu.addAction(act_close)
+            menu.addSeparator()
+            act = QAction("Delete (remove from list)", self)
+            act.setToolTip(
+                "Files are not deleted; just removed from the list so they "
+                "can no longer be viewed."
+            )
+            act.triggered.connect(
+                lambda: self.delete_requested.emit(kind, key, label)
+            )
+            menu.addAction(act)
         menu.exec(self.viewport().mapToGlobal(pos))
 
     def _close_series_list(self, item: QTreeWidgetItem) -> None:
@@ -662,6 +780,10 @@ class _ThumbList(QListWidget):
     export_requested = pyqtSignal(str, list)
     #: (kind, key, label) — same shape the Tree's signal uses.
     delete_requested = pyqtSignal(str, str, str)
+    #: "Hide" the given series ([Series]).
+    hide_requested = pyqtSignal(list)
+    #: "UnHide (show all series)" — un-hide all in the current study.
+    unhide_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -727,76 +849,95 @@ class _ThumbList(QListWidget):
 
     def _context_menu(self, pos) -> None:
         item = self.itemAt(pos)
-        if item is None:
-            return
-        se = item.data(_ROLE)
-        if not isinstance(se, Series):
-            # Header row → nothing to do.
-            return
-        # Mirror the Tree's behaviour: a right-click on an unselected
-        # thumbnail picks JUST that one so the action targets the row
-        # the user just pointed at (Windows-Explorer style).
-        if not item.isSelected():
-            self.clearSelection()
-            item.setSelected(True)
-            self.setCurrentItem(item)
-        sel = self._selected_series() or [se]
-
+        se = item.data(_ROLE) if item is not None else None
+        on_series = isinstance(se, Series)
         menu = QMenu(self)
-        n = len(sel)
-        suffix = f" ({n} series)" if n > 1 else ""
-        act_dcm = QAction(f"Export (DICOM){suffix}", self)
-        act_dcm.setToolTip(
-            "Copy the original .dcm files to a chosen folder; one "
-            "subfolder per series; per-file names from the checked "
-            "filename fields. Lossless — no re-encode."
-        )
-        act_dcm.triggered.connect(
-            lambda: self.export_requested.emit("dicom", list(sel))
-        )
-        menu.addAction(act_dcm)
-        act_mp4 = QAction(f"Export (MP4){suffix}", self)
-        act_mp4.setToolTip(
-            "Render each selected series to an .mp4 in a chosen "
-            "folder. Bitrate (Mbps) and FPS configurable."
-        )
-        act_mp4.triggered.connect(
-            lambda: self.export_requested.emit("mp4", list(sel))
-        )
-        menu.addAction(act_mp4)
-        act_csv = QAction(f"Export (CSV){suffix}", self)
-        act_csv.setToolTip(
-            "Write the DICOM-Tag-overlay tags shown for each series to a "
-            ".csv (Tag Name, Tag Number, Value); one file per series. "
-            "Full values — not truncated."
-        )
-        act_csv.triggered.connect(
-            lambda: self.export_requested.emit("csv", list(sel))
-        )
-        menu.addAction(act_csv)
-        menu.addSeparator()
-        # The Tree's Delete sends ONE row at a time (kind, key, label);
-        # keep the same contract here. Multi-select delete just emits
-        # one signal per selected series so the shell's existing handler
-        # cleans them up the same way Tree-Delete does today.
-        if n == 1:
-            label = "Delete (remove from list)"
+
+        if on_series:
+            # Mirror the Tree's behaviour: a right-click on an unselected
+            # thumbnail picks JUST that one so the action targets the row
+            # the user just pointed at (Windows-Explorer style).
+            if not item.isSelected():
+                self.clearSelection()
+                item.setSelected(True)
+                self.setCurrentItem(item)
+            sel = self._selected_series() or [se]
+            n = len(sel)
+            suffix = f" ({n} series)" if n > 1 else ""
+            act_dcm = QAction(f"Export (DICOM){suffix}", self)
+            act_dcm.setToolTip(
+                "Copy the original .dcm files to a chosen folder; one "
+                "subfolder per series; per-file names from the checked "
+                "filename fields. Lossless — no re-encode."
+            )
+            act_dcm.triggered.connect(
+                lambda: self.export_requested.emit("dicom", list(sel))
+            )
+            menu.addAction(act_dcm)
+            act_anon = QAction(f"Export (Anon DICOM){suffix}", self)
+            act_anon.setToolTip(
+                "Like Export (DICOM) but de-identified: the configured tags' "
+                "values and all private tags are emptied (right-click the "
+                "Anonymous button to choose). Pixels/UIDs kept."
+            )
+            act_anon.triggered.connect(
+                lambda: self.export_requested.emit("anon-dicom", list(sel))
+            )
+            menu.addAction(act_anon)
+            act_mp4 = QAction(f"Export (MP4){suffix}", self)
+            act_mp4.setToolTip(
+                "Render each selected series to an .mp4 in a chosen "
+                "folder. Bitrate (Mbps) and FPS configurable."
+            )
+            act_mp4.triggered.connect(
+                lambda: self.export_requested.emit("mp4", list(sel))
+            )
+            menu.addAction(act_mp4)
+            act_csv = QAction(f"Export (CSV){suffix}", self)
+            act_csv.setToolTip(
+                "Write the DICOM-Tag-overlay tags shown for each series to a "
+                ".csv (Tag Name, Tag Number, Value); one file per series. "
+                "Full values — not truncated."
+            )
+            act_csv.triggered.connect(
+                lambda: self.export_requested.emit("csv", list(sel))
+            )
+            menu.addAction(act_csv)
+            # Hide / UnHide.
+            menu.addSeparator()
+            act_hide = QAction(f"Hide (hide this series){suffix}", self)
+            act_hide.setToolTip(
+                "Grey out and skip this series (left-click and "
+                "First/Prev/Next/Last ignore it)."
+            )
+            act_hide.triggered.connect(
+                lambda: self.hide_requested.emit(list(sel))
+            )
+            menu.addAction(act_hide)
+            act_unhide = QAction("UnHide (show all series)", self)
+            act_unhide.setToolTip("Un-hide every hidden series in this study.")
+            act_unhide.triggered.connect(lambda: self.unhide_requested.emit())
+            menu.addAction(act_unhide)
+            # Delete (one signal per series — same contract as the Tree).
+            menu.addSeparator()
+            label = ("Delete (remove from list)" if n == 1
+                     else f"Delete {n} series (remove from list)")
+            act_del = QAction(label, self)
+            act_del.setToolTip(
+                "Files are not deleted; just removed from the list so they "
+                "can no longer be viewed."
+            )
+
+            def _emit_deletes(targets: list[Series]) -> None:
+                for s in targets:
+                    self.delete_requested.emit(
+                        "series", s.series_uid, s.label
+                    )
+
+            act_del.triggered.connect(lambda: _emit_deletes(list(sel)))
+            menu.addAction(act_del)
         else:
-            label = f"Delete {n} series (remove from list)"
-        act_del = QAction(label, self)
-        act_del.setToolTip(
-            "Files are not deleted; just removed from the list so they "
-            "can no longer be viewed."
-        )
-
-        def _emit_deletes(targets: list[Series]) -> None:
-            for s in targets:
-                self.delete_requested.emit(
-                    "series", s.series_uid, s.label
-                )
-
-        act_del.triggered.connect(lambda: _emit_deletes(list(sel)))
-        menu.addAction(act_del)
+            return            # header / empty area → no menu
         menu.exec(self.viewport().mapToGlobal(pos))
 
 
@@ -807,9 +948,15 @@ class StudyPanel(QWidget):
     series_chosen = pyqtSignal(object)
     study_clicked = pyqtSignal(str, str)     # study row click (uid, kind)
     anonymize_toggled = pyqtSignal(bool)     # the "Anonymous" button
+    #: right-click on the Anonymous button → open the anonymize-settings dialog
+    anon_settings_requested = pyqtSignal()
     dicom_info_toggled = pyqtSignal(bool)    # "DICOM Info" (True = show)
     delete_requested = pyqtSignal(str, str, str)  # (kind, key, label)
-    export_requested = pyqtSignal(str, list)  # ("dicom"|"mp4"|"csv", [Series])
+    #: ("dicom"|"mp4"|"csv"|"anon-dicom", [Series])
+    export_requested = pyqtSignal(str, list)
+    #: "Fit: min × 10 across" → ask the shell to widen the Studies dock to
+    #: roughly this pixel width (the dock is shell-owned).
+    fit_dock_width_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -832,6 +979,9 @@ class StudyPanel(QWidget):
         self.tree.study_clicked.connect(self.study_clicked)
         self.tree.delete_requested.connect(self.delete_requested)
         self.tree.export_requested.connect(self.export_requested)
+        self.tree.hide_requested.connect(self._on_hide_series)
+        self.tree.unhide_study_requested.connect(self._on_unhide_study)
+        self.tree.select_unhidden_requested.connect(self._on_select_unhidden)
         # Re-sort the thumbnail grid whenever the tree's header sort
         # changes (keep the two views in lock-step).
         self.tree.header().sortIndicatorChanged.connect(
@@ -879,6 +1029,8 @@ class StudyPanel(QWidget):
         # from-list are reachable from either view.
         self.thumbs.export_requested.connect(self.export_requested)
         self.thumbs.delete_requested.connect(self.delete_requested)
+        self.thumbs.hide_requested.connect(self._on_hide_series)
+        self.thumbs.unhide_requested.connect(self._on_unhide_current_study)
         #: (header_item, patient, study, kind) — for anonymize relabel
         self._thumb_headers: list[tuple] = []
         #: series-order list of thumbnail items, aligned with the worker
@@ -909,14 +1061,37 @@ class StudyPanel(QWidget):
         self.btn_info.setChecked(True)
         self.btn_info.clicked.connect(lambda: self._show(0))
         self.btn_thumb.clicked.connect(lambda: self._show(1))
+        # Right-click the Thumbnail button → "min size × 10 across" layout
+        # (re-applicable any time; the first switch to thumbnails does it
+        # automatically too).
+        self.btn_thumb.setToolTip(
+            "Left-click: thumbnail view (starts at min size × 10 across).\n"
+            "Right-click: re-apply the min size × 10 across layout."
+        )
+        self.btn_thumb.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.btn_thumb.customContextMenuRequested.connect(
+            lambda _p: self._fit_thumbs_10across()
+        )
+        #: first switch to the thumbnail view auto-fits min × 10 across
+        self._thumb_fit_done = False
 
         self.btn_anon = FitButton("Anonymous")
         self.btn_anon.setCheckable(True)
         self.btn_anon.setHelpToolTip(
-            "Mask patient/case info on all on-screen displays "
-            "(files unchanged)"
+            "Left-click: mask patient/case info on all on-screen displays "
+            "(files unchanged).\nRight-click: choose which tags to "
+            "anonymize (also used by Export (Anon DICOM))."
         )
         self.btn_anon.toggled.connect(self.anonymize_toggled)
+        # Right-click opens the anonymize-settings dialog (which tags to blank).
+        self.btn_anon.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.btn_anon.customContextMenuRequested.connect(
+            lambda _p: self.anon_settings_requested.emit()
+        )
 
         self.btn_dicom = FitButton("DICOM Info")
         self.btn_dicom.setCheckable(True)
@@ -1021,10 +1196,61 @@ class StudyPanel(QWidget):
             self._item_by_series[id(se)] = it
         self.thumbs.setIconSize(QSize(px, px))
         self.thumbs._fit_headers()
+        self._apply_thumb_hidden_style()
         if self._series_by_row:
             self._worker = _ThumbWorker(self._series_by_row, self)
             self._worker.ready.connect(self._set_thumb)
             self._worker.start()
+
+    def _apply_thumb_hidden_style(self) -> None:
+        """Grey hidden series in the thumbnail grid (mirrors the tree)."""
+        grey = QColor("#888")
+        for se in self._series_by_row:
+            it = self._item_by_series.get(id(se))
+            if it is not None:
+                it.setForeground(
+                    QBrush(grey) if getattr(se, "hidden", False)
+                    else QBrush()
+                )
+
+    # ------------------------------------------------- hide / show series
+    def _on_hide_series(self, series_list) -> None:
+        self.tree.set_series_hidden(series_list, True)
+        self._apply_thumb_hidden_style()
+
+    def _on_unhide_study(self, study_uid: str, kind: str) -> None:
+        series = self.tree.series_in_study(study_uid, kind)
+        self.tree.set_series_hidden(series, False)
+        self._apply_thumb_hidden_style()
+
+    def _on_select_unhidden(self, study_uid: str, kind: str) -> None:
+        """Remove every HIDDEN series in the study from the list (the shell's
+        delete machinery; files are kept)."""
+        for se in self.tree.series_in_study(study_uid, kind):
+            if getattr(se, "hidden", False):
+                self.delete_requested.emit("series", se.series_uid, se.label)
+
+    def _on_unhide_current_study(self) -> None:
+        """Thumbnail "UnHide" — un-hide all in the study currently shown."""
+        key = self._cur_study_key
+        if key is not None:
+            self._on_unhide_study(key[0], key[1])
+
+    def _apply_thumb_fit(self) -> None:
+        """Set the thumbnail size to minimum and ask the shell to widen the
+        Studies dock so ~10 fit across. No view switch here, so it is safe to
+        call from _show without recursion."""
+        self.thumb_size.setValue(_THUMB_MIN_PX)    # triggers _set_thumb_size
+        # Column ≈ icon edge + item padding + grid spacing; pad for the
+        # vertical scrollbar and the panel/dock frame so 10 really fit.
+        col = _THUMB_MIN_PX + 20
+        self.fit_dock_width_requested.emit(10 * col + 36)
+
+    def _fit_thumbs_10across(self) -> None:
+        """Thumbnail-button right-click: switch to the thumbnail view and
+        apply the min × 10-across layout (gap-scanning)."""
+        self._show(1)                              # ensure thumbnail view
+        self._apply_thumb_fit()
 
     def _set_thumb_size(self, px: int) -> None:
         """Live-rescale the thumbnail grid from the size slider."""
@@ -1143,6 +1369,11 @@ class StudyPanel(QWidget):
         self._stack.setCurrentIndex(idx)
         self.btn_info.setChecked(idx == 0)
         self.btn_thumb.setChecked(idx == 1)
+        # First time we ever show the thumbnail view: start at min × 10 across
+        # (the user's "scan for missing series" default).
+        if idx == 1 and not self._thumb_fit_done:
+            self._thumb_fit_done = True
+            self._apply_thumb_fit()
 
     def _resort_thumbs(self) -> None:
         """Rebuild tree + thumbnails after a header-sort change and keep
@@ -1156,7 +1387,7 @@ class StudyPanel(QWidget):
 
     def _thumb_clicked(self, item: QListWidgetItem) -> None:
         se = item.data(_ROLE)
-        if isinstance(se, Series):
+        if isinstance(se, Series) and not getattr(se, "hidden", False):
             self.series_chosen.emit(se)
 
     def _set_thumb(self, row: int, arr: np.ndarray) -> None:

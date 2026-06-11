@@ -569,7 +569,7 @@ class ImageCanvas(QWidget):
         # offers DICOM + MP4 in addition to the still formats + CSV.
         key = pick_export_format(
             self, self.mapToGlobal(QPoint(int(sx), int(sy))),
-            include_dicom=True, include_mp4=True,
+            include_dicom=True, include_mp4=True, include_anon=True,
         )
         if key:
             self.export_requested.emit(key)

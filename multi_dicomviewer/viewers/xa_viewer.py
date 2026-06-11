@@ -472,7 +472,7 @@ class XAViewer(AbstractViewer):
         canvas = self.sender()
         if not isinstance(canvas, ImageCanvas):
             canvas = self.canvas
-        if fmt_key in ("dicom", "mp4", "csv"):
+        if fmt_key in ("dicom", "mp4", "csv", "anon-dicom"):
             self.plane_export_requested.emit(
                 fmt_key, getattr(self, "_loaded_uid", ""),
                 self._clicked_plane_path(canvas),
