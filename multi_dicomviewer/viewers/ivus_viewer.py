@@ -501,11 +501,14 @@ class IVUSViewer(XAViewer):
         self.frame_slider.setValue(int(idx))   # triggers _seek
 
     def _on_export_long_axis(self, fmt_key) -> None:
-        """Right-click export on the long-axis strip → save it (WYSIWYG,
-        with the frame cursor + keyframe markers) in the chosen format. The
-        "csv" entry instead asks the shell for the DICOM-tag CSV export."""
+        """Right-click export on the long-axis strip. Still image (PNG/JPEG/
+        TIFF) saves the strip; CSV exports the IVUS series' DICOM tags. The
+        long-axis offers no DICOM/MP4 (a reconstructed strip isn't a DICOM
+        cine — that would only confuse)."""
         if fmt_key == "csv":
-            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+            self.plane_export_requested.emit(
+                "csv", getattr(self, "_loaded_uid", ""), ""
+            )
             return
         export_image_as(self, self.long_axis.grab(), fmt_key,
                         safe_basename(self._export_basename(), "longaxis"))

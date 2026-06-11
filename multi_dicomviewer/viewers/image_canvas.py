@@ -565,8 +565,11 @@ class ImageCanvas(QWidget):
         capture + save in response to export_requested."""
         if self._qimg is None:
             return
+        # The cross-section canvas (XA / IVUS) is a real DICOM cine, so it
+        # offers DICOM + MP4 in addition to the still formats + CSV.
         key = pick_export_format(
-            self, self.mapToGlobal(QPoint(int(sx), int(sy)))
+            self, self.mapToGlobal(QPoint(int(sx), int(sy))),
+            include_dicom=True, include_mp4=True,
         )
         if key:
             self.export_requested.emit(key)

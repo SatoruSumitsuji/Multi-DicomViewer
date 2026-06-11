@@ -1702,15 +1702,38 @@ class MainWindow(QMainWindow):
             "⚹ marks patients with both CT and XA. "
             "Drag & drop a series onto a pane to display."
         )
-        # Auto-open the first series of the just-loaded folder into the
-        # active pane (in the browser's display order).
+        # Auto-open a series from the just-loaded folder into the active pane.
+        # When the folder has CT, prefer the "main" CT series (see
+        # _initial_ct_target); otherwise fall back to the first series in the
+        # browser's display order.
         ordered = self.browser.ordered_series()
-        target = next(
-            (se for se in ordered if se.series_uid in new_uids),
-            ordered[0] if ordered else None,
-        )
+        new_series = [se for se in ordered if se.series_uid in new_uids]
+        target = self._initial_ct_target(new_series)
+        if target is None:
+            target = next(
+                (se for se in ordered if se.series_uid in new_uids),
+                ordered[0] if ordered else None,
+            )
         if target is not None:
             self.browser.select_series(target)
+
+    @staticmethod
+    def _initial_ct_target(candidates: list) -> "Series | None":
+        """Which CT series to auto-open from *candidates*.
+
+        Among CT series with ≥ 200 images (a full recon, not a scout/preview),
+        pick the LARGEST series number. If none reach 200 images, pick the
+        SMALLEST series number instead. Returns None when there are no CT
+        series, so the caller keeps its non-CT default."""
+        ct = [se for se in candidates if se.modality == Modality.CT]
+        if not ct:
+            return None
+        big = [se for se in ct if se.image_count >= 200]
+        if big:
+            return max(big, key=lambda se: (se.number
+                                            if se.number is not None else -1))
+        return min(ct, key=lambda se: (se.number
+                                       if se.number is not None else 1 << 30))
 
     def _reindex_series_maps(self) -> int:
         """Rebuild the uid lookup tables from the current patient tree.
@@ -1781,17 +1804,26 @@ class MainWindow(QMainWindow):
             out.append((ident, label))
         return out
 
-    def _on_csv_export_from_viewer(self, uid: str) -> None:
-        """Image right-click ▸ "Export CSV (DICOM tags)" → run the same
-        series-CSV export as the Studies-list right-click, for the series the
-        viewer is showing."""
+    def _on_plane_export(self, fmt: str, uid: str, plane_path: str) -> None:
+        """Image right-click ▸ Export DICOM / MP4 / CSV → run the same export
+        as the Studies-list right-click, but scoped to the RIGHT-CLICKED
+        image. *plane_path* (when non-empty) is the clicked biplane plane's
+        own .dcm file: we build a single-file synthetic Series so the export
+        targets just that plane (lossless DICOM copy, that plane's cine /
+        tags). Empty *plane_path* exports the whole series (single-plane XA,
+        IVUS, CT)."""
         series = self._series_by_uid.get(uid) if uid else None
         if series is None:
             self.statusBar().showMessage(
-                "CSV export: could not identify the displayed series."
+                "Export: could not identify the displayed series."
             )
             return
-        self._on_export_requested("csv", [series])
+        if plane_path:
+            import dataclasses
+            target = dataclasses.replace(series, files=[plane_path])
+        else:
+            target = series
+        self._on_export_requested(fmt, [target])
 
     def _on_export_requested(self, fmt: str, series_list: list) -> None:
         """Right-click ▸ Export (DICOM)/(MP4)/(CSV): show the filename-
@@ -2148,10 +2180,11 @@ class MainWindow(QMainWindow):
             viewer.tags_requested.connect(
                 lambda vv=viewer: self._open_tag_dialog(vv)
             )
-        # Right-click ▸ "Export CSV (DICOM tags)" on the image → reuse the
-        # same series-CSV export the Studies-list right-click uses.
-        if hasattr(viewer, "csv_export_requested"):
-            viewer.csv_export_requested.connect(self._on_csv_export_from_viewer)
+        # Right-click ▸ Export DICOM/MP4/CSV on the image → reuse the same
+        # series export the Studies-list right-click uses, scoped to the
+        # clicked plane.
+        if hasattr(viewer, "plane_export_requested"):
+            viewer.plane_export_requested.connect(self._on_plane_export)
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))

@@ -1005,9 +1005,10 @@ class CTViewer(AbstractViewer):
     measurement_added = pyqtSignal(object)
     #: emitted when the user clicks "Measure History"
     history_requested = pyqtSignal()
-    #: right-click ▸ "Export CSV (DICOM tags)" → shell runs the DICOM-tag CSV
-    #: export for the shown series (by uid).
-    csv_export_requested = pyqtSignal(str)
+    #: image right-click ▸ Export DICOM / CSV → shell runs that export for the
+    #: shown CT series. Args: (fmt, series_uid, plane_path); CT always passes
+    #: plane_path="" (one volume — A/B panes are reformats of the same data).
+    plane_export_requested = pyqtSignal(str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1814,13 +1815,19 @@ class CTViewer(AbstractViewer):
         if self._header is None:        # nothing loaded → no export offered
             return
         canvas = self.pane[which].canvas
+        # CT offers DICOM + CSV but NOT MP4 (a slice scroll isn't a cine).
         key = pick_export_format(
-            self, canvas.mapToGlobal(QtPoint(int(sx), int(sy)))
+            self, canvas.mapToGlobal(QtPoint(int(sx), int(sy))),
+            include_dicom=True, include_mp4=False,
         )
         if not key:
             return
-        if key == "csv":
-            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+        if key in ("dicom", "csv"):
+            # One volume — A/B panes are reformats of the same series, so
+            # always the whole series (plane_path="").
+            self.plane_export_requested.emit(
+                key, getattr(self, "_loaded_uid", ""), ""
+            )
             return
         img = self._grab_pane_qimage(which)
         if img is not None:

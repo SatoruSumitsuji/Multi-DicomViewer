@@ -370,31 +370,40 @@ def export_csv(series_list: list[Series],
                      f"#{series.number or '?'}")
         if not series.files:
             continue
-        try:
-            ds = pydicom.dcmread(
-                series.files[0], stop_before_pixels=True, force=True
-            )
-        except Exception:
-            ds = pydicom.Dataset()
+
+        # One value column per plane: a biplane XA series (2 files) yields
+        # Lt + Rt, anything else (single XA / IVUS / CT / a single-plane
+        # synthetic series from the image right-click) yields one "Value".
+        planes = _csv_plane_datasets(series)          # [(label, ds), ...]
+        col_labels = [lab for lab, _ in planes]
 
         idents = tag_identifiers[si] if si < len(tag_identifiers) else []
-        rows: list[tuple[str, str, str]] = []
+        rows: list[list[str]] = []
         for ident in idents:
-            elem = _lookup(ds, ident)
-            if elem is None:                     # not displayed → skip
+            name = number = None
+            values: list[str] = []
+            for _lab, ds in planes:
+                elem = _lookup(ds, ident)
+                if elem is not None and name is None:
+                    name = elem.name or ident
+                    number = (f"({elem.tag.group:04X},"
+                              f"{elem.tag.element:04X})")
+                values.append(
+                    _csv_value(elem, ident, anonymized)
+                    if elem is not None else ""
+                )
+            if name is None:                          # absent in every plane
                 continue
-            name = elem.name or ident
-            number = f"({elem.tag.group:04X},{elem.tag.element:04X})"
-            rows.append((name, number, _csv_value(elem, ident, anonymized)))
+            rows.append([name, number] + values)
 
-        base = build_filename(fields, series, ds)
+        base = build_filename(fields, series, planes[0][1])
         target = _unique_path(os.path.join(out_dir, base + ".csv"))
         try:
             # utf-8-sig so Excel on Windows reads Japanese tag values
             # correctly; newline="" per the csv module's contract.
             with open(target, "w", encoding="utf-8-sig", newline="") as fh:
                 w = _csv.writer(fh)
-                w.writerow(["Tag Name", "Tag Number", "Value"])
+                w.writerow(["Tag Name", "Tag Number"] + col_labels)
                 w.writerows(rows)
         except Exception as e:
             if progress:
@@ -404,6 +413,35 @@ def export_csv(series_list: list[Series],
     if progress:
         progress(n, n, "Done")
     return written
+
+
+def _csv_plane_datasets(series: Series):
+    """Datasets to write as CSV value columns for *series*.
+
+    A biplane XA series (exactly 2 files) → ``[("Lt", ds), ("Rt", ds)]``,
+    ordered by ``|PositionerPrimaryAngle|`` exactly as ``load_xa`` does
+    (frontal/near-AP plane = Lt, the steep plane = Rt) so the columns match
+    the on-screen left/right. Everything else (single-plane XA, IVUS, CT, or
+    a single-file synthetic series from the image right-click) → a single
+    ``[("Value", ds)]``. Unreadable files fall back to an empty Dataset."""
+    from .study_model import Modality
+
+    def _read(path):
+        try:
+            return pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        except Exception:
+            return pydicom.Dataset()
+
+    files = series.files or []
+    if series.modality == Modality.XA and len(files) == 2:
+        scored = []
+        for i, p in enumerate(files):
+            ds = _read(p)
+            pa = _to_float(getattr(ds, "PositionerPrimaryAngle", None), None)
+            scored.append((abs(pa) if pa is not None else float(i), ds))
+        scored.sort(key=lambda t: t[0])
+        return [("Lt", scored[0][1]), ("Rt", scored[1][1])]
+    return [("Value", _read(files[0]) if files else pydicom.Dataset())]
 
 
 # --------------------------------------------------------------- MP4
