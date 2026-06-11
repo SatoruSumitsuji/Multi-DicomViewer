@@ -410,20 +410,22 @@ class _Overlay(QWidget):
             ca = m.get("center_angle")
             if ca and ca.get("pts"):
                 centre = v._shape_center(m)
-                # Solid orange arc on the outline from p1→p3 through p2 — shows
-                # exactly which part of the perimeter the central angle spans.
+                # Solid orange arc on the outline between the two endpoints,
+                # passing through the selector — only shown once all 3 points
+                # are placed.
                 if "angle" in ca and len(ca["pts"]) >= 3:
                     arc = _arc_through(v._outline(m), ca["pts"][0],
-                                       ca["pts"][1], ca["pts"][2])
+                                       ca["pts"][2], ca["pts"][1])
                     if len(arc) >= 2:
                         p.setPen(QPen(QColor(255, 140, 0), 2.88))  # 2.4 ×1.2
                         p.setBrush(Qt.BrushStyle.NoBrush)
                         p.drawPolyline(poly(arc))
                 for ci, q in enumerate(ca["pts"]):
-                    # The 2nd point only picks which way the angle is measured,
-                    # so it gets no spoke. Spokes (orange, = marker colour) go to
-                    # the 1st and 3rd points — the angle's two arms.
-                    if ci == 1:
+                    # pts == [endpoint, other endpoint, arc selector]. The 3rd
+                    # point only picks which arc is measured, so it gets no
+                    # spoke. Spokes (orange, = marker colour) go to the two
+                    # endpoints (ci 0 and 1) — the angle's two arms.
+                    if ci == 2:
                         continue
                     draw_dashed((centre, q), (255, 140, 0))
                 # Orange marker picks; the one being dragged turns green (like a
@@ -680,6 +682,9 @@ class CTViewer(AbstractViewer):
     overlay_font_changed = pyqtSignal(int)
     #: emitted when the user clicks "Measure History" (shell opens the dialog)
     history_requested = pyqtSignal()
+    #: right-click ▸ "Export CSV (DICOM tags)" → shell runs the DICOM-tag CSV
+    #: export for the shown series (by uid).
+    csv_export_requested = pyqtSignal(str)
     #: emitted on every committed measurement (shell logs it per study)
     measurement_added = pyqtSignal(object)
     #: fired from a background debounce thread to wake the GUI thread and crisp
@@ -979,6 +984,9 @@ class CTViewer(AbstractViewer):
         fmt = pick_export_format(self, canvas.mapToGlobal(QPoint(int(x), int(y))))
         if not fmt:
             return
+        if fmt == "csv":
+            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+            return
         img = self._grab_pane_qimage(key)
         if img is not None:
             export_image_as(self, img, fmt, self._export_basename(key))
@@ -1034,11 +1042,48 @@ class CTViewer(AbstractViewer):
     def set_side(self, side: str, allow_dual: bool = True) -> None:
         self._frames["A"].setVisible(side != "Rt")
         self._frames["B"].setVisible(side != "Lt")
+        self._refresh_side_buttons()
+
+    def _refresh_side_buttons(self) -> None:
+        """Check the Plane button (Bi/Lt/Rt) matching the current state."""
+        btns = getattr(self, "_side_btns", None)
+        if not btns:
+            return
+        side = self.current_side()
+        for key, b in btns.items():
+            b.setChecked(side == key)
+
+    def current_side(self) -> str:
+        """Current Bi/Lt/Rt state (derived from pane visibility) so the
+        shell's toolbar buttons can mirror THIS pane's choice."""
+        a = self._frames["A"].isVisible()
+        b = self._frames["B"].isVisible()
+        if a and b:
+            return "Bi"
+        return "Lt" if a else "Rt"
 
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         row = QHBoxLayout()
         row.setContentsMargins(4, 2, 4, 2)
+
+        # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
+        row.addWidget(QLabel("Plane:"))
+        self._side_btns: dict[str, QPushButton] = {}
+        for key, tip in (
+            ("Bi", "Show both MPR panes"),
+            ("Lt", "Show only the left MPR pane"),
+            ("Rt", "Show only the right MPR pane"),
+        ):
+            b = QPushButton(key)
+            b.setCheckable(True)
+            b.setChecked(key == "Bi")        # both panes shown by default
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _c, k=key: self.set_side(k, True))
+            self._side_btns[key] = b
+            row.addWidget(b)
+        row.addSpacing(8)
+
         self._tool_btns = {}
         for name in _TOOLS:
             b = QPushButton(name)
@@ -2038,7 +2083,9 @@ class CTViewer(AbstractViewer):
             return
         pts = [self._snap_ca(m, q) for q in ca["pts"]]
         centre = self._shape_center(m)
-        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[1], pts[2])
+        # pts == [endpoint, other endpoint, arc selector]; selector is the
+        # "through" point for the geometry helper (see _center_angle_add).
+        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[2], pts[1])
         m["center_angle"] = {"pts": pts, "angle": span,
                              "t1": t1, "t3": t3, "ccw": ccw}
 
@@ -2057,7 +2104,9 @@ class CTViewer(AbstractViewer):
         pts = list(ca["pts"])
         pts[ci] = self._snap_ca(m, w)
         centre = self._shape_center(m)
-        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[1], pts[2])
+        # pts == [endpoint, other endpoint, arc selector]; selector is the
+        # "through" point for the geometry helper (see _center_angle_add).
+        span, t1, t3, ccw = _central_arc_angle(centre, pts[0], pts[2], pts[1])
         m["center_angle"] = {"pts": pts, "angle": span,
                              "t1": t1, "t3": t3, "ccw": ccw}
 
@@ -2226,9 +2275,12 @@ class CTViewer(AbstractViewer):
         ca["pts"].append(self._snap_ca(m, w))   # constrain to the outline
         if len(ca["pts"]) >= 3:
             centre = self._shape_center(m)
-            p1, p2, p3 = ca["pts"][:3]
-            span, t1, t3, ccw = _central_arc_angle(centre, p1, p2, p3)
-            m["center_angle"] = {"pts": [p1, p2, p3], "angle": span,
+            # Click order is [endpoint, other endpoint, arc selector] — matching
+            # Rupture-Predictor. The geometry helper wants (p1, through, p3), so
+            # the selector (pts[2]) is passed as the middle "through" point.
+            e1, e2, sel = ca["pts"][:3]
+            span, t1, t3, ccw = _central_arc_angle(centre, e1, sel, e2)
+            m["center_angle"] = {"pts": [e1, e2, sel], "angle": span,
                                  "t1": t1, "t3": t3, "ccw": ccw}
             self._center_angle_target = None
         self._redraw_meas(which)

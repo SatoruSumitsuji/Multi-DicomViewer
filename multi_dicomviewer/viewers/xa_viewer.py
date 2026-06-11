@@ -1,11 +1,8 @@
 """XA angiography viewer: multiframe cine + window/level + calibrated tools.
 
-Handles single-plane and biplane acquisitions. The shell decides the
-biplane layout via set_biplane_layout():
-
-  * side-by-side  -> Front and Lateral shown together (used in "XA only")
-  * stacked/single -> one plane at a time with Front/Lateral buttons
-                      (used whenever CT shares the screen, or for mono cine)
+Handles single-plane and biplane acquisitions. Biplane series carry an
+in-pane "Plane:" bar (Bi / Lt / Rt) so each pane independently shows both
+planes side by side (Bi) or a single plane (Lt = plane 0, Rt = plane 1).
 """
 from __future__ import annotations
 
@@ -357,6 +354,10 @@ class XAViewer(AbstractViewer):
     #: (series_uid, start, end, total_frames) — all 0-based frame indices.
     play_range_changed = pyqtSignal(str, int, int, int)
 
+    #: right-click ▸ "Export CSV (DICOM tags)" on the image — asks the shell
+    #: to run the DICOM-tag CSV export for the shown series (by uid).
+    csv_export_requested = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._planes: list[XAPlane] = []
@@ -461,7 +462,11 @@ class XAViewer(AbstractViewer):
     def _on_export_image(self, fmt_key):
         """Right-click export on a canvas (no active measure tool): save
         exactly what's on that canvas — image + measurement overlays +
-        burned-in/tag text — in the chosen format."""
+        burned-in/tag text — in the chosen format. The "csv" entry instead
+        asks the shell to export the series' DICOM tags as CSV."""
+        if fmt_key == "csv":
+            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+            return
         canvas = self.sender()
         if not isinstance(canvas, ImageCanvas):
             canvas = self.canvas
@@ -583,14 +588,24 @@ class XAViewer(AbstractViewer):
         row.insertWidget(max(0, anchor - 1), widget)
 
     def _build_plane_bar(self) -> QWidget:
+        """In-pane Plane switch: Bi (both planes), Lt (left/plane 0), Rt
+        (right/plane 1). Positional labels — not Front/Lateral — so they
+        stay unambiguous regardless of how the planes map to the canvases.
+        Shown only for biplane series; hidden for single-plane cine."""
         self.plane_bar = QWidget()
         row = QHBoxLayout(self.plane_bar)
         row.setContentsMargins(2, 0, 2, 0)
         row.addWidget(QLabel("Plane:"))
         self._plane_group = QButtonGroup(self)
         self._plane_group.setExclusive(True)
-        self._plane_group.idClicked.connect(self._plane_chosen)
-        self._plane_row = row
+        self._side_btns: dict[str, QPushButton] = {}
+        for key in ("Bi", "Lt", "Rt"):
+            btn = QPushButton(key)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _c, k=key: self.set_side(k, True))
+            self._plane_group.addButton(btn)
+            self._side_btns[key] = btn
+            row.addWidget(btn)
         row.addStretch(1)
         self.plane_bar.hide()
         return self.plane_bar
@@ -715,13 +730,6 @@ class XAViewer(AbstractViewer):
         """Effective side-by-side layout (only possible when biplane)."""
         return self._want_dual and self._is_biplane
 
-    def set_biplane_layout(self, side_by_side: bool) -> None:
-        """Called by the shell. side_by_side is honoured only for biplane
-        series; single-plane cine always stays single."""
-        self._want_dual = side_by_side
-        if self._planes:
-            self._relayout()
-
     # -- Bi / Lt / Rt --------------------------------------------------
     @property
     def supports_side(self) -> bool:
@@ -729,53 +737,51 @@ class XAViewer(AbstractViewer):
         return self._is_biplane
 
     def set_side(self, side: str, allow_dual: bool = True) -> None:
-        """Bi/Lt/Rt switch driven by the layout-bar buttons.
+        """In-pane Plane switch (Bi/Lt/Rt):
 
-        * ``Bi`` — side-by-side when ``allow_dual`` is True (which the
-          shell sets to ``layout_key == "1x1"``); otherwise stay on
-          whichever single plane was last active.
-        * ``Lt`` — force single-pane mode showing plane 0.
-        * ``Rt`` — force single-pane mode showing plane 1.
+        * ``Bi`` — both planes side by side (``allow_dual`` is accepted for
+          API parity but ignored: "Bi" always means both, even when small).
+        * ``Lt`` — single plane 0.
+        * ``Rt`` — single plane 1.
 
         Single-plane series ignore this (nothing to switch)."""
         if not self._is_biplane:
             return
         if side == "Bi":
-            self._want_dual = bool(allow_dual)
+            self._want_dual = True
         elif side == "Lt":
             self._want_dual = False
             self._active = 0
         elif side == "Rt":
             self._want_dual = False
             self._active = 1
-        self._rebuild_plane_buttons()
         self._relayout()
 
-    def _rebuild_plane_buttons(self) -> None:
-        for b in list(self._plane_group.buttons()):
-            self._plane_group.removeButton(b)
-            b.setParent(None)
-            b.deleteLater()
-        # rebuild in front of the trailing stretch
-        for i, plane in enumerate(self._planes):
-            btn = QPushButton(plane.name)
-            btn.setCheckable(True)
-            btn.setChecked(i == self._active)
-            self._plane_group.addButton(btn, i)
-            self._plane_row.insertWidget(self._plane_row.count() - 1, btn)
+    def current_side(self) -> str | None:
+        """Current Bi/Lt/Rt state. None when not biplane (nothing to
+        switch)."""
+        if not self._is_biplane:
+            return None
+        if self._dual:
+            return "Bi"
+        return "Lt" if self._active == 0 else "Rt"
 
-    def _plane_chosen(self, idx: int) -> None:
-        self._active = idx
-        self._render()
+    def _refresh_side_buttons(self) -> None:
+        """Check the Bi/Lt/Rt button matching the current side."""
+        side = self.current_side()
+        for key, btn in self._side_btns.items():
+            btn.setChecked(side == key)
 
     def _relayout(self) -> None:
-        """Apply the current layout decision to the widgets."""
-        if self._dual:
-            self.canvas2.show()
-            self.plane_bar.hide()
-        else:
-            self.canvas2.hide()
-            self.plane_bar.setVisible(self._is_biplane)
+        """Apply the current layout decision to the widgets. The Plane bar
+        stays visible for any biplane series (so Bi↔Lt↔Rt is always one
+        click away); only the second canvas toggles with Bi/single."""
+        self.canvas2.setVisible(self._dual)
+        self.plane_bar.setVisible(self._is_biplane)
+        self._refresh_side_buttons()
+        # The active plane may have changed (Lt↔Rt), so the DICOM-tag overlay
+        # must follow it.
+        self._refresh_overlay()
         self._render()
 
     # ------------------------------------------------- AbstractViewer impl.
@@ -814,6 +820,9 @@ class XAViewer(AbstractViewer):
         # we know its length); fresh series default to 0.
         self._frame = self._frame_by_series.get(new_uid, 0)
         self._active = 0
+        # A freshly loaded biplane series defaults to "Bi" (both planes);
+        # single-plane series ignore this (_dual gates on _is_biplane).
+        self._want_dual = True
         self._window = loaded.window or 1.0
         self._level = loaded.level or 0.0
         self._fps = loaded.cine_fps or DEFAULT_CINE_FPS
@@ -886,7 +895,6 @@ class XAViewer(AbstractViewer):
             f"|   {tone}   |   {cal}"
         )
 
-        self._rebuild_plane_buttons()
         self._relayout()
         self._refresh_overlay()
         # Read this series' ECG (if any) and prime the strip — hidden until W.
@@ -938,13 +946,21 @@ class XAViewer(AbstractViewer):
         self._refresh_overlay()
 
     def _refresh_overlay(self) -> None:
-        # Biplane: each pane shows ITS OWN plane's DICOM tags (Frontal's
-        # were previously shown on the Lateral pane too because the
-        # overlay was computed from self._header alone). Each XAPlane
-        # keeps its own ``_ds``, so per-canvas overlays are exact.
+        # Map each canvas to the plane it is ACTUALLY showing so the DICOM-tag
+        # overlay matches the image. In Bi mode canvas→plane 0, canvas2→plane
+        # 1; in single (Lt/Rt) mode the visible canvas shows self._active, so
+        # Rt must read plane 1's header (not plane 0's). Each XAPlane keeps
+        # its own ``_ds``.
+        if self._dual:
+            plane_for = {0: 0, 1: 1}
+        else:
+            active = (min(self._active, len(self._planes) - 1)
+                      if self._planes else 0)
+            plane_for = {0: active}
         for ci, c in enumerate((self.canvas, self.canvas2)):
-            if ci < len(self._planes):
-                ds = self._planes[ci]._ds
+            pi = plane_for.get(ci)
+            if pi is not None and pi < len(self._planes):
+                ds = self._planes[pi]._ds
             else:
                 ds = self._header
             c.set_overlay(

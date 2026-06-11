@@ -113,13 +113,15 @@ class ExportDialog(QDialog):
         (``(0019,1099)``). ``initial_fields`` overrides the per-key
         default-checked state (used for per-modality memory)."""
         super().__init__(parent)
-        if mode not in ("dicom", "mp4"):
+        if mode not in ("dicom", "mp4", "csv"):
             raise ValueError(f"unknown export mode: {mode!r}")
         self._mode = mode
 
-        title = title_override or (
-            "Export DICOM" if mode == "dicom" else "Export MP4"
-        )
+        title = title_override or {
+            "dicom": "Export DICOM",
+            "mp4": "Export MP4",
+            "csv": "Export CSV",
+        }.get(mode, "Export")
         plural = "" if n_series == 1 else f" ({n_series} series)"
         self.setWindowTitle(title + plural)
         self.setMinimumWidth(420)

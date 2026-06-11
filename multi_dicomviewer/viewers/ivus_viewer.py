@@ -171,6 +171,11 @@ class IVUSViewer(XAViewer):
         #: Built lazily — kept so frame changes only update the cursor,
         #: not the full strip.
         self._la_img: np.ndarray | None = None
+        #: Decoded frames cached for the duration of a rotation drag (the
+        #: angle changes per move, the frames don't), so each preview only
+        #: re-composites instead of re-decoding. Set on the drag's first
+        #: build, cleared by the full-resolution rebuild on release.
+        self._la_drag_frames: list | None = None
 
         self.long_axis = LongAxisCanvas()
         # Long-axis lives inside a horizontally-scrollable area so its
@@ -209,6 +214,7 @@ class IVUSViewer(XAViewer):
         layout.insertWidget(idx, self._la_splitter, 1)
 
         self.long_axis.rotated.connect(self._on_la_rotated)
+        self.long_axis.rotation_finished.connect(self._on_la_rotation_finished)
         self.long_axis.frame_picked.connect(self._on_la_frame_picked)
         self.long_axis.export_requested.connect(self._on_export_long_axis)
         # Hook the cross-section canvases for the rotation-centre marker.
@@ -374,7 +380,12 @@ class IVUSViewer(XAViewer):
                 progress(i + 1, n)
         return out
 
-    def _rebuild_long_axis(self) -> None:
+    #: Resolution divisor for the live-rotation preview (both axes), so the
+    #: composite is ~LOD² cheaper while a drag is in progress. The full-res
+    #: strip is rebuilt on mouse release.
+    _LA_DRAFT_LOD = 3
+
+    def _rebuild_long_axis(self, draft: bool = False) -> None:
         if not (self._la_visible and self._planes and self._la_centers):
             return
         pi = self._active_plane_idx()
@@ -401,12 +412,18 @@ class IVUSViewer(XAViewer):
 
         center_pairs = [(float(c[0]), float(c[1])) for c in centers]
 
-        # A progress dialog covers the two slow phases: forcing every
-        # frame to decode (mostly cache hits if the prefetch finished;
-        # several seconds on a fresh pull-back), then compositing the
-        # long-axis strip. minimumDuration=400 ms keeps W/L tweaks and
-        # rotation drags (which re-build from already-cached frames in
-        # well under that) from flashing a dialog on every nudge.
+        # Fast path: live rotation preview. The frames were decoded on the
+        # drag's first build and cached, so we only re-composite (at reduced
+        # LOD) — no decode, no dialog.
+        if draft and self._la_drag_frames is not None:
+            self._set_la_image(self._la_drag_frames, center_pairs, lateral,
+                               to_u8, draft=True)
+            return
+
+        # Slow path: force every frame to decode (mostly cache hits once the
+        # prefetch finished; several seconds on a fresh pull-back), then
+        # composite. minimumDuration=400 ms keeps W/L tweaks and the first
+        # rotation build (cache hits, well under that) from flashing a dialog.
         n = plane.total_frames
         dlg = QProgressDialog(
             "Decoding frames for long-axis view…",
@@ -431,29 +448,65 @@ class IVUSViewer(XAViewer):
 
         try:
             frames = self._frames_for_long_axis(plane, progress=_cb)
+            # Cache for the rest of a rotation drag; a full rebuild drops it.
+            self._la_drag_frames = frames if draft else None
             dlg.setLabelText("Compositing long-axis image…")
             dlg.setMaximum(0)            # 0,0 -> indeterminate busy bar
             dlg.setValue(0)
             QApplication.processEvents()
-            self._la_img = build_long_axis(
-                frames, center_pairs, self._la_angle, lateral, to_u8
-            )
-            self.long_axis.set_image(self._la_img)
-            self.long_axis.set_current_frame(self._frame)
+            self._set_la_image(frames, center_pairs, lateral, to_u8,
+                               draft=draft)
         finally:
             dlg.close()
+
+    def _set_la_image(self, frames, center_pairs, lateral, to_u8,
+                      draft: bool) -> None:
+        """Composite *frames* into the long-axis strip and push it to the
+        canvas. In *draft* mode both axes are sampled at 1/LOD and the
+        result is nearest-upscaled back to the full (lateral, n_frames) size
+        — so the displayed columns / aspect ratio / frame cursor are
+        unchanged (no layout jump), only the detail is coarser."""
+        if draft:
+            k = self._LA_DRAFT_LOD
+            lat_small = max(48, -(-lateral // k))          # ceil
+            # step=k so the coarse samples still span the FULL vessel depth
+            # (same physical extent as the full strip), then upscale the rows
+            # back to `lateral` — otherwise the preview would sample only the
+            # central 1/k and look vertically zoomed-in.
+            small = build_long_axis(
+                frames[::k], center_pairs[::k], self._la_angle,
+                lat_small, to_u8, step=k,
+            )
+            up = np.repeat(np.repeat(small, k, axis=0), k, axis=1)
+            img = np.ascontiguousarray(up[:lateral, :len(frames)])
+        else:
+            img = build_long_axis(
+                frames, center_pairs, self._la_angle, lateral, to_u8
+            )
+        self._la_img = img
+        self.long_axis.set_image(img)
+        self.long_axis.set_current_frame(self._frame)
 
     # ----------------------------- mouse callbacks (long-axis canvas)
     def _on_la_rotated(self, dtheta: float) -> None:
         self._la_angle = (self._la_angle + float(dtheta)) % (2 * math.pi)
-        self._rebuild_long_axis()
+        # Live preview at reduced LOD; full-res rebuild fires on release.
+        self._rebuild_long_axis(draft=True)
+
+    def _on_la_rotation_finished(self) -> None:
+        # Drag ended → crisp full-resolution strip.
+        self._rebuild_long_axis(draft=False)
 
     def _on_la_frame_picked(self, idx: int) -> None:
         self.frame_slider.setValue(int(idx))   # triggers _seek
 
     def _on_export_long_axis(self, fmt_key) -> None:
         """Right-click export on the long-axis strip → save it (WYSIWYG,
-        with the frame cursor + keyframe markers) in the chosen format."""
+        with the frame cursor + keyframe markers) in the chosen format. The
+        "csv" entry instead asks the shell for the DICOM-tag CSV export."""
+        if fmt_key == "csv":
+            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+            return
         export_image_as(self, self.long_axis.grab(), fmt_key,
                         safe_basename(self._export_basename(), "longaxis"))
 

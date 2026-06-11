@@ -34,11 +34,15 @@ _JPEG_QUALITY = 95
 
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
-#: Ordered right-click menu items: (menu label, format key).
+#: Ordered right-click menu items: (menu label, format key). "csv" is not a
+#: still-image format — the viewer intercepts it and asks the shell to run
+#: the DICOM-tag CSV export for the shown series (same as the Studies-list
+#: right-click). It is listed here so the choice sits with the other exports.
 MENU_FORMATS = [
     ("Export PNG (lossless)", "png"),
     ("Export JPEG (95%)", "jpeg"),
     ("Export TIFF (lossless)", "tiff"),
+    ("Export CSV (DICOM tags)", "csv"),
 ]
 
 # key -> (Qt format, default extension, save-quality, accepted extensions,
