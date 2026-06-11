@@ -354,9 +354,11 @@ class XAViewer(AbstractViewer):
     #: (series_uid, start, end, total_frames) — all 0-based frame indices.
     play_range_changed = pyqtSignal(str, int, int, int)
 
-    #: right-click ▸ "Export CSV (DICOM tags)" on the image — asks the shell
-    #: to run the DICOM-tag CSV export for the shown series (by uid).
-    csv_export_requested = pyqtSignal(str)
+    #: image right-click ▸ Export DICOM / MP4 / CSV — asks the shell to run
+    #: that export scoped to the clicked image. Args: (fmt, series_uid,
+    #: plane_path). plane_path is the clicked biplane plane's own .dcm file
+    #: ("" = whole series, e.g. single-plane / IVUS).
+    plane_export_requested = pyqtSignal(str, str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -460,19 +462,41 @@ class XAViewer(AbstractViewer):
         self.measurement_added.emit(m)
 
     def _on_export_image(self, fmt_key):
-        """Right-click export on a canvas (no active measure tool): save
-        exactly what's on that canvas — image + measurement overlays +
-        burned-in/tag text — in the chosen format. The "csv" entry instead
-        asks the shell to export the series' DICOM tags as CSV."""
-        if fmt_key == "csv":
-            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
-            return
+        """Right-click export on a canvas (no active measure tool).
+
+        PNG/JPEG/TIFF save exactly what's on the clicked canvas (WYSIWYG).
+        DICOM/MP4/CSV are routed to the shell scoped to the RIGHT-CLICKED
+        plane: for a biplane series we pass that plane's own .dcm file so
+        only that side is exported; single-plane / IVUS export the whole
+        series."""
         canvas = self.sender()
         if not isinstance(canvas, ImageCanvas):
             canvas = self.canvas
+        if fmt_key in ("dicom", "mp4", "csv"):
+            self.plane_export_requested.emit(
+                fmt_key, getattr(self, "_loaded_uid", ""),
+                self._clicked_plane_path(canvas),
+            )
+            return
         # grab() captures the painted widget verbatim (WYSIWYG), at the
         # display's devicePixelRatio so Retina exports stay full-res.
         export_image_as(self, canvas.grab(), fmt_key, self._export_basename())
+
+    def _clicked_plane_path(self, canvas) -> str:
+        """The .dcm file backing the right-clicked canvas, but only for a
+        biplane series (so the export targets just that plane). Returns ""
+        for single-plane series — the shell then exports the whole series."""
+        if not self._is_biplane:
+            return ""
+        # canvas2 always shows plane 1 (Rt); canvas shows plane 0 in Bi mode
+        # or the active plane in single (Lt/Rt) mode.
+        if canvas is self.canvas2:
+            pidx = 1
+        else:
+            pidx = 0 if self._dual else self._active
+        if 0 <= pidx < len(self._planes):
+            return getattr(self._planes[pidx], "path", "") or ""
+        return ""
 
     def _export_basename(self) -> str:
         """Suggested filename stem from the loaded series + current frame."""

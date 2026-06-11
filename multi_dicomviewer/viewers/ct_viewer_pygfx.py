@@ -682,9 +682,10 @@ class CTViewer(AbstractViewer):
     overlay_font_changed = pyqtSignal(int)
     #: emitted when the user clicks "Measure History" (shell opens the dialog)
     history_requested = pyqtSignal()
-    #: right-click ▸ "Export CSV (DICOM tags)" → shell runs the DICOM-tag CSV
-    #: export for the shown series (by uid).
-    csv_export_requested = pyqtSignal(str)
+    #: image right-click ▸ Export DICOM / CSV → shell runs that export for the
+    #: shown CT series. Args: (fmt, series_uid, plane_path); CT always passes
+    #: plane_path="" (one volume — A/B panes are reformats of the same data).
+    plane_export_requested = pyqtSignal(str, str, str)
     #: emitted on every committed measurement (shell logs it per study)
     measurement_added = pyqtSignal(object)
     #: fired from a background debounce thread to wake the GUI thread and crisp
@@ -981,11 +982,18 @@ class CTViewer(AbstractViewer):
         # trackpad paging can leave behind.
         self._force_crisp()
         canvas = self.pane[key].canvas
-        fmt = pick_export_format(self, canvas.mapToGlobal(QPoint(int(x), int(y))))
+        # CT offers DICOM + CSV but NOT MP4 (a slice scroll isn't a cine).
+        fmt = pick_export_format(
+            self, canvas.mapToGlobal(QPoint(int(x), int(y))),
+            include_dicom=True, include_mp4=False,
+        )
         if not fmt:
             return
-        if fmt == "csv":
-            self.csv_export_requested.emit(getattr(self, "_loaded_uid", ""))
+        if fmt in ("dicom", "csv"):
+            # One volume — A/B panes are reformats of the same series.
+            self.plane_export_requested.emit(
+                fmt, getattr(self, "_loaded_uid", ""), ""
+            )
             return
         img = self._grab_pane_qimage(key)
         if img is not None:

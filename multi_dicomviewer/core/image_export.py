@@ -34,15 +34,11 @@ _JPEG_QUALITY = 95
 
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')
 
-#: Ordered right-click menu items: (menu label, format key). "csv" is not a
-#: still-image format — the viewer intercepts it and asks the shell to run
-#: the DICOM-tag CSV export for the shown series (same as the Studies-list
-#: right-click). It is listed here so the choice sits with the other exports.
-MENU_FORMATS = [
+#: Still-image formats, always offered (these save the clicked canvas).
+_STILL_FORMATS = [
     ("Export PNG (lossless)", "png"),
     ("Export JPEG (95%)", "jpeg"),
     ("Export TIFF (lossless)", "tiff"),
-    ("Export CSV (DICOM tags)", "csv"),
 ]
 
 # key -> (Qt format, default extension, save-quality, accepted extensions,
@@ -68,12 +64,27 @@ def safe_basename(*parts: object) -> str:
 
 
 def pick_export_format(
-    parent: Optional[QWidget], global_point: QPoint
+    parent: Optional[QWidget],
+    global_point: QPoint,
+    include_dicom: bool = False,
+    include_mp4: bool = False,
 ) -> Optional[str]:
-    """Show the explicit 3-format export menu at *global_point*; return the
-    chosen format key ('png' / 'jpeg' / 'tiff'), or None if dismissed."""
+    """Show the right-click export menu at *global_point*; return the chosen
+    format key, or None if dismissed.
+
+    Order: PNG, JPEG, TIFF, [DICOM], [MP4], CSV. PNG/JPEG/TIFF save the
+    clicked canvas. DICOM (lossless original copy), MP4 (rendered cine) and
+    CSV (DICOM-tag dump) are series/plane exports the host routes through the
+    shell. DICOM/MP4 are only listed when the caller opts in — CT has no MP4,
+    and the IVUS long-axis strip offers neither (still + CSV only)."""
+    items = list(_STILL_FORMATS)
+    if include_dicom:
+        items.append(("Export DICOM (lossless)", "dicom"))
+    if include_mp4:
+        items.append(("Export MP4", "mp4"))
+    items.append(("Export CSV (DICOM tags)", "csv"))
     menu = QMenu(parent)
-    acts = [(menu.addAction(label), key) for label, key in MENU_FORMATS]
+    acts = [(menu.addAction(label), key) for label, key in items]
     chosen = menu.exec(global_point)
     for act, key in acts:
         if act is chosen:
