@@ -567,6 +567,23 @@ class XAViewer(AbstractViewer):
         )
         self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
         row.addWidget(self._zoom_out_btn)
+
+        # 2-D image transforms (rotate 90° / flip), right of the zoom buttons.
+        # Useful mainly for static Secondary-Capture (SC) images. "Mirror" ==
+        # Flip-H (a left-right mirror), so it is not a separate button.
+        self._orient_btns = []
+        for label, kind, tip in (
+            ("Rt90°", "rt90", "Rotate the image 90° clockwise"),
+            ("Lt90°", "lt90", "Rotate the image 90° counter-clockwise"),
+            ("Flip-H", "fliph", "Flip horizontally (left-right mirror)"),
+            ("Flip-V", "flipv", "Flip vertically (top-bottom)"),
+        ):
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _c, k=kind: self._image_transform(k))
+            self._orient_btns.append(b)
+            row.addWidget(b)
+
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
         # left of the flush-right Measure-History / DICOM-Tags group below.
@@ -735,6 +752,13 @@ class XAViewer(AbstractViewer):
         for c in (self.canvas, self.canvas2):
             c.clear_measurements()
 
+    # -------------------------------------------- 2-D image transforms (SC)
+    def _image_transform(self, kind: str) -> None:
+        """Rotate 90° / flip the shown image(s). Applied to both canvases so a
+        biplane pair stays consistent; for single-plane SC only canvas matters."""
+        for c in (self.canvas, self.canvas2):
+            c.apply_orient(kind)
+
     # ----------------------------------------------- zoom (Z / Shift+Z)
     def zoom_in(self) -> None:
         for c in (self.canvas, self.canvas2):
@@ -827,6 +851,10 @@ class XAViewer(AbstractViewer):
         if (self._planes and new_uid
                 and getattr(self, "_loaded_uid", "") == new_uid):
             return
+        # A genuinely new series starts in its native orientation (clear any
+        # Rt90/flip left over from the previously shown image).
+        for c in (self.canvas, self.canvas2):
+            c.reset_orient()
         # Switching to a DIFFERENT series within the same viewer: save
         # the frame we were on for the outgoing series so a later
         # return to it picks up at that frame, not frame 0.

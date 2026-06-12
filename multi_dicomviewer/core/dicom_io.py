@@ -97,14 +97,38 @@ def scan_folder(
     *progress*, if given, is called as progress(done, total) while the
     files are read (total known up-front from a fast directory walk).
     """
-    patients: dict[str, Patient] = {}
-    frames_by_path: dict[str, int] = {}   # NumberOfFrames per file, for counts
-
     all_files = [
         os.path.join(dp, fn)
         for dp, _d, files in os.walk(root)
         for fn in files
     ]
+    return _build_tree(all_files, progress)
+
+
+def index_files(
+    paths: list[str], progress: Optional[Callable[[int, int], None]] = None
+) -> dict[str, Patient]:
+    """Build a Patient/Study/Series tree from EXACTLY the given files.
+
+    Unlike :func:`scan_folder`, a file's parent directory is NOT expanded —
+    only the listed files are indexed. Used when the user drags individual
+    DICOM file(s) onto the app (vs dropping a folder, which loads everything
+    in it). Directories in *paths* are ignored (a folder drop takes the
+    scan_folder path instead).
+    """
+    all_files = [p for p in paths if os.path.isfile(p)]
+    return _build_tree(all_files, progress)
+
+
+def _build_tree(
+    all_files: list[str],
+    progress: Optional[Callable[[int, int], None]] = None,
+) -> dict[str, Patient]:
+    """Read *all_files* and assemble the Patient/Study/Series tree. Shared by
+    scan_folder (recursive walk) and index_files (explicit file list)."""
+    patients: dict[str, Patient] = {}
+    frames_by_path: dict[str, int] = {}   # NumberOfFrames per file, for counts
+
     total = len(all_files)
     if progress is not None:
         progress(0, total)

@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 from PyQt6.QtCore import QPoint as QtPoint, Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -139,8 +139,21 @@ from multi_dicomviewer.core.measure_geom import (
     smooth_open as _smooth_open,
 )
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
+from multi_dicomviewer.ui.study_browser import FitButton
 
 _TOOLS = ("ZOOM", "MOVE", "ROTATE", "SPIN", "PAGING", "THICK", "WL")
+#: Button captions carry the keyboard shortcut so it's discoverable on-screen.
+_TOOL_LABELS = {
+    "ZOOM": "Zoom (Z)", "MOVE": "Move (V)", "ROTATE": "Rotate (R)",
+    "SPIN": "Spin (S)", "PAGING": "Paging (G)", "THICK": "Thick (T)",
+    "WL": "WL (W)",
+}
+#: Tools that only make sense in 3-D MPR mode — disabled in 2-D (single-slice)
+#: mode, where the pane shows native acquisition slices.
+_MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
+#: Series with this many slices or fewer default to 2-D (single-slice) display;
+#: more than this defaults to 3-D MPR reconstruction.
+_MODE_2D_MAX = 200
 _TOOL_KEYS = {
     Qt.Key.Key_Z: "ZOOM", Qt.Key.Key_V: "MOVE", Qt.Key.Key_S: "SPIN",
     Qt.Key.Key_G: "PAGING", Qt.Key.Key_W: "WL", Qt.Key.Key_R: "ROTATE",
@@ -1022,6 +1035,13 @@ class CTViewer(AbstractViewer):
         self._tag_keywords: list[str] = []
         self._anon = False
         self._tool = "PAGING"
+        self._mode = "3D"                    # "3D" MPR | "2D" native slices
+        self._slice2d = 0                    # current slice index in 2-D mode
+        self._page_accum = 0.0               # 2-D drag-paging pixel accumulator
+        self._side = "Bi"                    # last 3-D Plane choice (Bi/Lt/Rt)
+        # 2-D display in-plane axes (output right = U, up = V); rotated/flipped
+        # by the Rt90/Lt90/Flip buttons. N stays +z (the paging axis).
+        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
         self._dims = (1.0, 1.0, 1.0)        # sx, sy, sz mm
         self._bounds = (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
         self._center = np.zeros(3)           # C: CrossLine 3-D point
@@ -1092,7 +1112,7 @@ class CTViewer(AbstractViewer):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
-        lay.addLayout(self._build_toolbar())
+        lay.addWidget(self._build_toolbar())
         self._measure_bar = self._build_measure_bar()
         self._measure_bar.setVisible(False)
         lay.addWidget(self._measure_bar)
@@ -1101,6 +1121,19 @@ class CTViewer(AbstractViewer):
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # Arrow keys drive the active tool. Register them as QShortcuts scoped
+        # to this viewer (WidgetWithChildrenShortcut) rather than handling them
+        # in keyPressEvent: a focused child (the Slab spin-box, W/L combo or the
+        # tag-size slider) would otherwise swallow the arrows for its own value
+        # stepping, making the tool-arrow operation fire only sometimes (the
+        # "unstable / changes the tag size instead of rotating" bug). A shortcut
+        # is processed before the focused child sees the key, so arrows always
+        # drive the tool regardless of which control last had focus.
+        for seq, direction in (("Up", "up"), ("Down", "down"),
+                               ("Left", "left"), ("Right", "right")):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda d=direction: self._key_arrow(d))
         self._update_active_frames()
 
     # -- Bi / Lt / Rt --------------------------------------------------
@@ -1115,6 +1148,7 @@ class CTViewer(AbstractViewer):
         ``allow_dual`` is accepted for API parity with the XA viewer
         but ignored here — CT has its own A/B pane pair independent of
         the shell's grid layout."""
+        self._side = side
         self._frames["A"].setVisible(side != "Rt")
         self._frames["B"].setVisible(side != "Lt")
         self._refresh_side_buttons()
@@ -1139,8 +1173,16 @@ class CTViewer(AbstractViewer):
 
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
+        # Two rows so the (now longer, shortcut-labelled) controls don't grow
+        # the strip too wide: row 1 = view/plane/measure controls, row 2 = the
+        # interaction tools (each captioned with its keyboard shortcut).
+        col = QVBoxLayout()
+        col.setContentsMargins(4, 2, 4, 2)
+        col.setSpacing(2)
         row = QHBoxLayout()
-        row.setContentsMargins(4, 2, 4, 2)
+        row.setContentsMargins(0, 0, 0, 0)
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
         row.addWidget(QLabel("Plane:"))
@@ -1150,30 +1192,63 @@ class CTViewer(AbstractViewer):
             ("Lt", "Show only the left MPR pane"),
             ("Rt", "Show only the right MPR pane"),
         ):
-            b = QPushButton(key)
+            b = FitButton(key)
             b.setCheckable(True)
             b.setChecked(key == "Bi")        # both panes shown by default
-            b.setToolTip(tip)
+            b.setHelpToolTip(tip)
             b.clicked.connect(lambda _c, k=key: self.set_side(k, True))
             self._side_btns[key] = b
             row.addWidget(b)
         row.addSpacing(8)
 
-        self._tool_btns = {}
-        for name in _TOOLS:
-            b = QPushButton(name)
+        # 3-D MPR vs 2-D (native single-slice) display. Default is chosen per
+        # series on load (≥201 slices → 3D, else 2D); see load_series. Tinted a
+        # dark (goldenrod) yellow so the 3D/2D pair reads apart from the grey
+        # Plane (Bi/Lt/Rt) buttons; the active mode is the brighter shade.
+        _mode_css = (
+            "QPushButton { background:white; color:black; }"
+            "QPushButton:checked { background:#edc63a; color:black; }"
+        )
+        self._mode_btns: dict[str, QPushButton] = {}
+        for key, tip in (
+            ("3D", "3-D MPR reconstruction (dual oblique reslice)"),
+            ("2D", "Show native acquisition slices one at a time (paging)"),
+        ):
+            b = FitButton(key)
             b.setCheckable(True)
-            b.clicked.connect(lambda _c, n=name: self._set_tool(n))
-            self._tool_btns[name] = b
+            b.setChecked(key == "3D")
+            b.setHelpToolTip(tip)
+            b.setStyleSheet(_mode_css)
+            b.clicked.connect(lambda _c, k=key: self._set_mode(k))
+            self._mode_btns[key] = b
             row.addWidget(b)
+        row.addSpacing(8)
 
-        self._cl_btn = QPushButton("CenterLine")
-        self._cl_btn.setCheckable(True)
-        self._cl_btn.setChecked(True)
-        self._cl_btn.setToolTip("Show/hide crosshair & slab lines")
-        self._cl_btn.clicked.connect(self._toggle_centerline)
-        row.addWidget(self._cl_btn)
-        self._style_cl()
+        # Setting / Reset are utility actions (not tools): tint them a light
+        # grey so they read as distinct from the tool / preset buttons.
+        _util_btn_css = "background:#e0e0e0;color:black;"
+
+        reset = FitButton("Reset")
+        reset.setHelpToolTip(
+            "1st click: keep W/L, reset the view position / "
+            "click again at the initial position: also reset W/L"
+        )
+        reset.setStyleSheet(_util_btn_css)
+        reset.clicked.connect(self._reset)
+        row.addWidget(reset)
+
+        self._cmap_btn = FitButton("ColorMap")
+        self._cmap_btn.setCheckable(True)
+        self._cmap_btn.clicked.connect(self._toggle_color)
+        row.addWidget(self._cmap_btn)
+
+        self._meas_btn = FitButton("📏 Measure")
+        self._meas_btn.setCheckable(True)
+        self._meas_btn.setHelpToolTip(
+            "Measure on the image (Line / Polyline / Ellipse / Polygon)"
+        )
+        self._meas_btn.clicked.connect(self._toggle_measure)
+        row.addWidget(self._meas_btn)
 
         row.addWidget(QLabel("Slab(mm):"))
         self._slab_spin = QDoubleSpinBox()
@@ -1186,49 +1261,31 @@ class CTViewer(AbstractViewer):
         self._slab_spin.valueChanged.connect(self._set_slab)
         row.addWidget(self._slab_spin)
 
-        # Order: Measure → ColorMap → Setting (Setting is the ColorMap's
-        # config dialog, so it sits next to ColorMap on the right).
-        self._meas_btn = QPushButton("📏 Measure")
-        self._meas_btn.setCheckable(True)
-        self._meas_btn.setToolTip(
-            "Measure on the image (Line / Polyline / Ellipse / Polygon)"
-        )
-        self._meas_btn.clicked.connect(self._toggle_measure)
-        row.addWidget(self._meas_btn)
+        self._cl_btn = FitButton("CenterLine")
+        self._cl_btn.setCheckable(True)
+        self._cl_btn.setChecked(True)
+        self._cl_btn.setHelpToolTip("Show/hide crosshair & slab lines")
+        self._cl_btn.clicked.connect(self._toggle_centerline)
+        row.addWidget(self._cl_btn)
+        self._style_cl()
 
-        self._cmap_btn = QPushButton("ColorMap")
-        self._cmap_btn.setCheckable(True)
-        self._cmap_btn.clicked.connect(self._toggle_color)
-        row.addWidget(self._cmap_btn)
-
-        # Setting / Reset are utility actions (not tools): tint them a light
-        # grey so they read as distinct from the tool / preset buttons.
-        _util_btn_css = "background:#e0e0e0;color:black;"
-        setting = QPushButton("Setting")
-        setting.setToolTip(
+        setting = FitButton("Setting")
+        setting.setHelpToolTip(
             "HU colour-map settings (band colour, HU range, opacity)"
         )
         setting.setStyleSheet(_util_btn_css)
         setting.clicked.connect(self._open_setting)
         row.addWidget(setting)
 
-        reset = QPushButton("Reset")
-        reset.setToolTip(
-            "1st click: keep W/L, reset the view position / "
-            "click again at the initial position: also reset W/L"
-        )
-        reset.setStyleSheet(_util_btn_css)
-        reset.clicked.connect(self._reset)
-        row.addWidget(reset)
-
-        row.addWidget(QLabel("W/L preset:"))
+        row.addWidget(QLabel("W/L:"))
         self._preset = QComboBox()
         self._preset.addItems(list(CT_WL_PRESETS.keys()))
         self._preset.currentTextChanged.connect(self._apply_preset)
         row.addWidget(self._preset)
 
         # DICOM Tags on the LEFT of the pair (always visible); Measure History
-        # — less critical — to its right. Tag-text-size slider stacked above.
+        # — less critical — to its right. Tag-text-size slider stacked above
+        # (kept a 2-row control, matching the two-row toolbar height).
         tags_box, self._tag_font_slider, tags = build_tag_font_control(
             TAG_FONT_PT_DEFAULT
         )
@@ -1236,13 +1293,63 @@ class CTViewer(AbstractViewer):
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
 
-        hist = QPushButton("Measure History")
-        hist.setToolTip("Show this study's measurement history")
+        hist = FitButton("Measure History")
+        hist.setHelpToolTip("Show this study's measurement history")
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
         row.addStretch(1)
+
+        # Row 2: the interaction tools, each captioned with its shortcut key.
+        # Arrow keys ↑↓←→ drive the active tool (see _key_arrow).
+        self._tool_btns = {}
+        for name in _TOOLS:
+            b = FitButton(_TOOL_LABELS[name])
+            b.setCheckable(True)
+            b.clicked.connect(lambda _c, n=name: self._set_tool(n))
+            self._tool_btns[name] = b
+            row2.addWidget(b)
+
+        # 2-D image transforms (rotate 90° / flip), right of the tools (whose
+        # last entry is WL). Only meaningful for the single native slice in 2-D
+        # mode, so they are disabled (greyed) in 3-D. "Mirror" == Flip-H (a
+        # left-right mirror), so it is not a separate button. Kept on this
+        # second row so they stay visible on a narrow pane (row 1 overflows).
+        row2.addSpacing(12)
+        self._t2d_btns = []
+        for label, kind, tip in (
+            ("Rt90°", "rt90", "Rotate the image 90° clockwise"),
+            ("Lt90°", "lt90", "Rotate the image 90° counter-clockwise"),
+            ("Flip-H", "fliph", "Flip horizontally (left-right mirror)"),
+            ("Flip-V", "flipv", "Flip vertically (top-bottom)"),
+        ):
+            b = FitButton(label)
+            b.setHelpToolTip(tip)
+            b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
+            self._t2d_btns.append(b)
+            row2.addWidget(b)
+        row2.addStretch(1)
+
+        col.addLayout(row)
+        col.addLayout(row2)
         self._set_tool("PAGING")
-        return row
+
+        # Host the two rows in a horizontal scroll area and give every button a
+        # SMALL minimum width (a floor, not its full natural width) so that on a
+        # narrow / low-res monitor the labels first elide from the right —
+        # keeping the START of each caption readable, full text in the tooltip
+        # (FitButton) — and only fall back to scrolling when even that won't fit.
+        bar = QWidget()
+        bar.setLayout(col)
+        for b in bar.findChildren(QPushButton):
+            b.setMinimumWidth(min(b.sizeHint().width(), 56))
+        scroll = QScrollArea()
+        scroll.setWidget(bar)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setFixedHeight(bar.sizeHint().height() + 14)
+        return scroll
 
     def set_overlay_font_pt(self, pt: int) -> None:
         """Apply the shared DICOM-tag text size (pt) to every pane's corner
@@ -1270,6 +1377,10 @@ class CTViewer(AbstractViewer):
             p.render()
 
     def _set_tool(self, name):
+        # MPR-only tools are unavailable in 2-D native-slice mode (their
+        # keyboard shortcuts are otherwise still live).
+        if getattr(self, "_mode", "3D") == "2D" and name in _MPR_ONLY_TOOLS:
+            return
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
@@ -1304,12 +1415,14 @@ class CTViewer(AbstractViewer):
             ("Ellipse", "ellipse"), ("Polygon", "polygon"),
             ("Angle", "angle"),
         ):
-            b = QPushButton(label)
+            b = FitButton(label)
+            b.setMinimumWidth(min(b.sizeHint().width(), 56))
             b.setCheckable(True)
             b.clicked.connect(lambda _c, k=key: self._set_measure_type(k))
             self._meas_btns[key] = b
             row.addWidget(b)
-        clr = QPushButton("Clear")
+        clr = FitButton("Clear")
+        clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
         row.addWidget(QLabel(
@@ -2077,6 +2190,8 @@ class CTViewer(AbstractViewer):
         self._win = self._win0 = float(loaded.window or 800.0)
         self._lvl = self._lvl0 = float(loaded.level or 200.0)
         self._thick = {"A": 0.0, "B": 5.0}
+        # Reset any 2-D rotate/flip to the native orientation for the new series.
+        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
 
         b = self._bounds
         self._center = np.array(
@@ -2099,7 +2214,10 @@ class CTViewer(AbstractViewer):
             p = self.pane[key]
             p.reslice.SetInputData(self._image)
             p.colors.SetLookupTable(self._lut())
-        self._refresh(reset_cam=True)
+        # Default 3-D MPR for thin-slice volumes (≥201 slices), 2-D native
+        # paging for ordinary (≤200-slice) series. _set_mode also fits & draws.
+        nz = self._image.GetDimensions()[2]
+        self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
     def clear(self) -> None:
         self._image = None
@@ -2415,6 +2533,169 @@ class CTViewer(AbstractViewer):
         self._view_initial = False
         self._refresh()
 
+    # ------------------------------------------------------- 3D / 2D mode
+    def _set_mode(self, mode, reset_cam=False):
+        """Switch between 3-D MPR (dual oblique reslice) and 2-D native-slice
+        display. In 2-D only pane A is shown, locked to the acquisition
+        (axial) plane, paging through native slices; the MPR-only tools and
+        controls are disabled. Default mode is chosen per series on load."""
+        if mode not in ("3D", "2D") or self._image is None:
+            return
+        self._mode = mode
+        for k, b in self._mode_btns.items():
+            b.setChecked(k == mode)
+        is2d = (mode == "2D")
+        # Disable the MPR-only tools/controls in 2-D.
+        for name in _MPR_ONLY_TOOLS:
+            self._tool_btns[name].setEnabled(not is2d)
+        self._slab_spin.setEnabled(not is2d)
+        self._cl_btn.setEnabled(not is2d)
+        for b in self._side_btns.values():
+            b.setEnabled(not is2d)
+        # The 2-D image transforms only apply to the native slice (2-D mode).
+        for b in self._t2d_btns:
+            b.setEnabled(is2d)
+        if is2d:
+            if self._tool in _MPR_ONLY_TOOLS:
+                self._set_tool("PAGING")
+            self._active_pane = "A"
+            self._frames["A"].setVisible(True)
+            self._frames["B"].setVisible(False)
+            self._update_active_frames()
+            self._init_frames()                      # lock to native axial
+            self._apply_2d_axes()                    # re-apply rotate/flip state
+            self._thick = {"A": 0.0, "B": 0.0}
+            # Snap the reslice plane onto the nearest native slice so no z
+            # interpolation occurs (the image is the acquired slice as-is).
+            nz = self._image.GetDimensions()[2]
+            sz = self._dims[2]
+            k = int(round(self._center[2] / sz)) if sz > 1e-6 else 0
+            self._slice2d = min(max(k, 0), max(0, nz - 1))
+            z = self._slice2d * sz if sz > 1e-6 else 0.0
+            self._center[2] = z
+            self._pc = {"A": self._center.copy(), "B": self._center.copy()}
+            self.pane["A"].set_overlay_visible(False)  # no crosshair in 2-D
+        else:
+            self._frames["A"].setVisible(self._side != "Rt")
+            self._frames["B"].setVisible(self._side != "Lt")
+            self._thick = {"A": 0.0, "B": 5.0}
+            for k in ("A", "B"):
+                self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self._refresh_side_buttons()
+        self._sync_slab_spin()
+        self._refresh(reset_cam=reset_cam or is2d)
+
+    def _page2d(self, step):
+        """Page by *step* native slices in 2-D mode (integer slice index)."""
+        if self._image is None:
+            return
+        nz = self._image.GetDimensions()[2]
+        sz = self._dims[2]
+        self._slice2d = int(min(max(self._slice2d + step, 0), max(0, nz - 1)))
+        z = self._slice2d * sz if sz > 1e-6 else 0.0
+        self._center[2] = z
+        self._pc["A"][2] = z
+        self._clamp_center()
+        self._view_initial = False
+        self._refresh()
+
+    # ------------------------------------------------- 2-D image transforms
+    def _apply_2d_axes(self):
+        """Set pane A's in-plane display axes (U, V) from the 2-D rotate/flip
+        state, keeping the slice normal at +z. A flip makes (U, V, +z) a
+        reflection — vtkImageReslice mirrors the output accordingly."""
+        u, v = self._axes2d
+        ez = np.array([0.0, 0.0, 1.0])
+        self._frame["A"] = (np.asarray(u, float).copy(),
+                            np.asarray(v, float).copy(), ez)
+
+    def _2d_transform(self, kind):
+        """Rotate the 2-D image 90° (rt90/lt90) or flip it (fliph/flipv).
+        Applied incrementally to the current display axes (composable)."""
+        if self._mode != "2D" or self._image is None:
+            return
+        u, v = self._axes2d
+        if kind == "rt90":          # 90° clockwise
+            self._axes2d = (v.copy(), (-u).copy())
+        elif kind == "lt90":        # 90° counter-clockwise
+            self._axes2d = ((-v).copy(), u.copy())
+        elif kind == "fliph":       # left-right mirror (== "Mirror")
+            self._axes2d = ((-u).copy(), v.copy())
+        elif kind == "flipv":       # top-bottom flip
+            self._axes2d = (u.copy(), (-v).copy())
+        else:
+            return
+        self._apply_2d_axes()
+        self._view_initial = False
+        self._refresh(reset_cam=True)   # refit (a 90° turn swaps the aspect)
+
+    def _page_step(self, step):
+        """One paging notch (keyboard / arrow): a native slice in 2-D, a
+        wheel-equivalent step in 3-D."""
+        if self._mode == "2D":
+            self._page2d(step)
+        else:
+            self._wheel(self._active_pane, step)
+
+    def _key_arrow(self, direction):
+        """Drive the currently-selected tool from an arrow key. Mapping:
+        Zoom/Paging/Thick = ↑/↓ only; Move = ↑↓←→; Rotate = ↑↓←→ (orthogonal,
+        about the centreline, no diagonal); Spin = →/↓ CW, ←/↑ CCW; WL = same
+        as the mouse drag (←/→ window, ↑/↓ level)."""
+        if self._image is None:
+            return
+        k = self._active_pane
+        t = self._tool
+        S = 12.0
+        if t == "PAGING":
+            # Paging is up/down only (left/right do nothing).
+            if direction == "up":
+                self._page_step(1)
+            elif direction == "down":
+                self._page_step(-1)
+            return
+        if t == "ZOOM":
+            # Up = zoom OUT (shrink), Down = zoom IN (enlarge) — same as the
+            # mouse drag (arrow up mirrors a mouse-up = negative dy).
+            if direction == "up":
+                self._drag(k, 0, -S)
+            elif direction == "down":
+                self._drag(k, 0, S)
+            return
+        if t == "THICK":
+            if self._mode == "2D":
+                return
+            if direction == "up":
+                self._drag(k, 0, -S)       # (dx-dy)*0.3 → thicker
+            elif direction == "down":
+                self._drag(k, 0, S)
+            return
+        if t == "MOVE":
+            d = {"up": (0, -S), "down": (0, S),
+                 "left": (-S, 0), "right": (S, 0)}[direction]
+            self._drag(k, d[0], d[1])
+            return
+        if t == "WL":
+            d = {"left": (-S, 0), "right": (S, 0),
+                 "up": (0, -S), "down": (0, S)}[direction]
+            self._drag(k, d[0], d[1])
+            return
+        if t == "ROTATE":
+            if self._mode == "2D":
+                return
+            # one axis at a time → no diagonal tilt
+            d = {"up": (0, -S), "down": (0, S),
+                 "left": (-S, 0), "right": (S, 0)}[direction]
+            self._drag(k, d[0], d[1])
+            return
+        if t == "SPIN":
+            if self._mode == "2D":
+                return
+            sign = 1.0 if direction in ("right", "down") else -1.0
+            self.pane[k].ren.GetActiveCamera().Roll(_SPIN_SIGN * sign * 5.0)
+            self._refresh()
+            return
+
     def _center_camera(self, key):
         """Put world (0,0) (the crosshair/center) at the pane middle,
         keeping the current zoom."""
@@ -2434,6 +2715,17 @@ class CTViewer(AbstractViewer):
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
         elif t == "PAGING":
+            if self._mode == "2D":
+                # 2-D: page integer native slices, ~6 px of drag per slice.
+                self._page_accum -= dy
+                ppx = 6.0
+                while self._page_accum >= ppx:
+                    self._page_accum -= ppx
+                    self._page2d(1)
+                while self._page_accum <= -ppx:
+                    self._page_accum += ppx
+                    self._page2d(-1)
+                return
             # PAGING pages the pane under the cursor itself: the visible
             # image scrolls through slices. We step C and THIS pane's
             # reslice origin together along this pane's normal — their
@@ -2462,12 +2754,21 @@ class CTViewer(AbstractViewer):
             if which == self._active_pane:
                 self._sync_slab_spin()
         elif t == "ROTATE":
-            # 3-D tilt of THIS pane's plane about its own axes; the
-            # other pane is left unchanged. (Direction reversed.)
+            # 3-D tilt of THIS pane's plane about its own axes.
             u, v, n = self._frame[which]
             u = _rotate(_rotate(u, v, -dx * 0.5), u, -dy * 0.5)
             v = _rotate(_rotate(v, v, -dx * 0.5), u, -dy * 0.5)
             self._frame[which] = self._ortho(u, v)
+            # Linked: re-derive the OTHER pane as the orthogonal section that
+            # shares this pane's horizontal axis and contains its normal, so the
+            # two panes stay coupled (mouse AND arrow-key rotate). Matches the
+            # pygfx/Mac viewer.
+            uw, _vw, nw = self._frame[which]
+            other = "B" if which == "A" else "A"
+            self._frame[other] = self._ortho(uw, nw)
+            self._cross_ang[which] = 0.0
+            self._cross_ang[other] = 0.0
+            self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         elif t == "SPIN":
             # SSMview SPIN = "whole-screen rotation": roll the camera so
             # image AND crosshair/▲/slab rotate together (relationship
@@ -2497,6 +2798,8 @@ class CTViewer(AbstractViewer):
                         )
         elif t == "ZOOM":
             # Shift = zoom BOTH panes together, else just this one.
+            # Drag (and arrow) UP = zoom OUT (shrink), DOWN = zoom IN (enlarge):
+            # dy<0 (up) → factor>1 → larger ParallelScale → wider view = shrink.
             factor = 1.0 - dy * 0.005
             keys = ("A", "B") if shift else (which,)
             for k in keys:
@@ -2521,6 +2824,9 @@ class CTViewer(AbstractViewer):
 
     def _wheel(self, which, delta):
         if self._image is None:
+            return
+        if self._mode == "2D":
+            self._page2d(1 if delta > 0 else -1)
             return
         # Same contract as the PAGING tool: page the wheeled pane itself —
         # the visible image scrolls through slices. Step C and THIS pane's
@@ -2686,9 +2992,14 @@ class CTViewer(AbstractViewer):
             self._pc = {"A": self._center.copy(), "B": self._center.copy()}
             self._init_frames()
             self._thick = {"A": 0.0, "B": 5.0}
+            # Restore the native 2-D orientation (clear any rotate/flip).
+            self._axes2d = (np.array([1.0, 0.0, 0.0]),
+                            np.array([0.0, 1.0, 0.0]))
             self._sync_slab_spin()
             self._view_initial = True
-            self._refresh(reset_cam=True)
+            # Re-apply the current mode (re-locks 2-D / restores dual MPR) and
+            # refits the camera.
+            self._set_mode(self._mode, reset_cam=True)
         else:
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
@@ -2699,6 +3010,9 @@ class CTViewer(AbstractViewer):
             self._refresh()
 
     def keyPressEvent(self, e):
+        # Arrow keys are handled by QShortcuts (see __init__) so a focused
+        # spin-box / combo / slider can't swallow them; only letter tool keys
+        # and C (ColorMap) are handled here.
         if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
