@@ -2101,6 +2101,23 @@ class CTViewer(AbstractViewer):
             p.colors.SetLookupTable(self._lut())
         self._refresh(reset_cam=True)
 
+        # TEMP diagnostic (set MDV_CT_DIAG=1): print the loaded volume geometry
+        # so the Win(VTK)/Mac(pygfx) pane-B aspect mismatch can be pinned to the
+        # data (slice count / z-spacing) vs the renderer. Remove once resolved.
+        import os
+        import sys
+        if os.environ.get("MDV_CT_DIAG"):
+            hu_b, hv_b = self._content_half_on_plane("B")
+            nz = vol.shape[0]
+            print(
+                f"[CT-DIAG vtk] {title!r} vol(z,y,x)={vol.shape} "
+                f"dims(x,y,z)mm=({self._dims[0]:.3f},{self._dims[1]:.3f},"
+                f"{self._dims[2]:.3f}) z_extent={(nz - 1) * self._dims[2]:.1f}mm "
+                f"paneB hu={hu_b:.1f} hv={hv_b:.1f} "
+                f"{'fills-width' if hu_b > hv_b else 'BLACK-MARGINS(tall)'}",
+                file=sys.stderr,
+            )
+
     def clear(self) -> None:
         self._image = None
         self._header = None
