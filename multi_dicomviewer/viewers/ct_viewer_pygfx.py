@@ -1454,11 +1454,24 @@ class CTViewer(AbstractViewer):
         nplanes = int(max(1, min(max_planes, round(th / step))))
         offs = (np.linspace(-th / 2.0, th / 2.0, nplanes)
                 if nplanes > 1 else np.array([0.0]))
+        nz, ny, nx = self._vol.shape
         mip = np.full((ih, iw), -np.inf, np.float32)
         for t in offs:
-            hu = _trilinear_sample(self._vol, (bx + t * n[0]) / sx,
-                                   (by + t * n[1]) / sy, (bz + t * n[2]) / sz)
-            mip = np.maximum(mip, hu.astype(np.float32))
+            vx = (bx + t * n[0]) / sx
+            vy = (by + t * n[1]) / sy
+            vz = (bz + t * n[2]) / sz
+            hu = _trilinear_sample(self._vol, vx, vy, vz).astype(np.float32)
+            # _trilinear_sample clamps each coord to the border, so a sample
+            # past the volume (e.g. above the z-extent in a sagittal slab)
+            # would otherwise read the edge axial slice's body tissue and, under
+            # MAX projection, smear it across the background as bright vertical
+            # streaks — the Mac "washed-out / milky" slab-MIP bug. Force
+            # out-of-volume samples to air so they never win the max (VTK's
+            # reslice bounds the slab the same way on the Windows backend).
+            oob = ((vx < 0) | (vx > nx - 1) | (vy < 0) | (vy > ny - 1)
+                   | (vz < 0) | (vz > nz - 1))
+            np.putmask(hu, oob, _HU_LO)
+            mip = np.maximum(mip, hu)
         return mip
 
     def _build_slab_qimage(self, key, lod=False):
