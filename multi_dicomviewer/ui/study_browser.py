@@ -110,10 +110,10 @@ class FitButton(QPushButton):
 
 def _start_series_drag(source: QWidget, series: Series) -> None:
     """Begin dragging *series* out of the info panel onto a viewer pane.
-    Hidden series are not draggable (kept consistent with the left-click /
-    navigation skip — a hidden series is never shown)."""
-    if getattr(series, "hidden", False):
-        return
+    A hidden (greyed) series can still be dragged: like a direct mouse
+    click, a drag is an explicit request to view it. Only the on-image
+    First/Prev/Next/Last buttons and the keyboard shortcuts skip hidden
+    series."""
     md = QMimeData()
     md.setData(SERIES_MIME, series.series_uid.encode("utf-8"))
     md.setText(series.label)
@@ -237,12 +237,19 @@ class StudyBrowser(QTreeWidget):
     export_requested = pyqtSignal(str, list)
     #: "Hide" → grey + skip these series ([Series]).
     hide_requested = pyqtSignal(list)
-    #: "UnHide / Show (show all)" → un-hide every hidden series in a study
-    #: node (study_uid, kind).
+    #: Study "UnHide (unhide and show all)" → un-hide every hidden series in
+    #: a study node (study_uid, kind).
     unhide_study_requested = pyqtSignal(str, str)
-    #: "Select (UnHidden Only)" → remove every HIDDEN series in a study node
-    #: from the list (study_uid, kind).
-    select_unhidden_requested = pyqtSignal(str, str)
+    #: Series "UnHide (show this series)" → un-hide just the given series
+    #: ([Series]).
+    unhide_series_requested = pyqtSignal(list)
+
+    #: Selected-row highlight: bright blue for a normal series (stays
+    #: bright even when the tree loses focus — Qt would otherwise dim it
+    #: to a hard-to-read pale grey), grey for a hidden series so the row
+    #: still reads as "greyed/skip" while selected.
+    _SEL_BG_NORMAL = "#1f6feb"
+    _SEL_BG_HIDDEN = "#a8a8a8"
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -295,7 +302,15 @@ class StudyBrowser(QTreeWidget):
         )
         self.customContextMenuRequested.connect(self._context_menu)
         self.itemActivated.connect(self._on_activated)
-        self.itemClicked.connect(self._on_activated)
+        self.itemClicked.connect(self._on_clicked)
+        # The selected-row highlight follows the current series' hidden
+        # state: blue for a normal series, grey for a hidden one (so a
+        # hidden row still reads as "greyed" even while selected, instead
+        # of the strong blue swamping the grey text).
+        self.currentItemChanged.connect(
+            lambda *_: self._refresh_selection_color()
+        )
+        self._refresh_selection_color()
         self._ordered: list[Series] = []
         self._items: dict[int, QTreeWidgetItem] = {}
         #: (study_uid, kind) -> study QTreeWidgetItem
@@ -427,6 +442,25 @@ class StudyBrowser(QTreeWidget):
             brush = QBrush(grey) if getattr(s, "hidden", False) else QBrush()
             for c in range(cols):
                 it.setForeground(c, brush)
+        # The current row may have just changed hidden state (Hide/UnHide).
+        self._refresh_selection_color()
+
+    def _refresh_selection_color(self) -> None:
+        """Set the selected-row highlight colour from the current item:
+        grey when it is a hidden series, blue otherwise. Clicking an
+        un-hidden series gives a blue background, a hidden series a grey
+        one; the moment a selected series is Hidden, its highlight flips
+        to grey so the greyed text is no longer swamped by the blue."""
+        it = self.currentItem()
+        data = it.data(0, _ROLE) if it is not None else None
+        hidden = isinstance(data, Series) and getattr(data, "hidden", False)
+        bg = self._SEL_BG_HIDDEN if hidden else self._SEL_BG_NORMAL
+        self.setStyleSheet(
+            "QTreeWidget::item:selected,"
+            " QTreeWidget::item:selected:!active {"
+            f"   background:{bg}; color:white;"
+            " }"
+        )
 
     def series_in_study(self, study_uid: str, kind: str) -> list[Series]:
         """All series under the (study_uid, kind) node, in display order."""
@@ -445,14 +479,32 @@ class StudyBrowser(QTreeWidget):
             s.hidden = bool(hidden)
         self._apply_hidden_style()
 
-    def _study_key_of_series(self, series) -> tuple | None:
-        """(study_uid, kind) of the node *series* lives under, or None."""
-        it = self._items.get(id(series))
-        par = it.parent() if it is not None else None
-        idk = par.data(0, _ID_ROLE) if par is not None else None
-        if idk and idk[0] == "S":
-            return (idk[1], idk[2])
-        return None
+    def _set_study_rows_visible(
+        self, study_uid: str, kind: str, *, unhidden_only: bool
+    ) -> None:
+        """Show / fold series ROWS under a study node. With *unhidden_only*,
+        hidden (greyed) series rows are folded out and only the un-hidden
+        ones remain visible; otherwise every series row is shown. This only
+        changes which rows appear in the tree — it does NOT touch the
+        series' hide/unhide flag, and resets to "show all" on the next
+        repopulate (anonymize toggle / re-sort)."""
+        s_item = self._study_items.get((study_uid, kind))
+        if s_item is None:
+            return
+        for se in self.series_in_study(study_uid, kind):
+            it = self._items.get(id(se))
+            if it is None:
+                continue
+            it.setHidden(unhidden_only and getattr(se, "hidden", False))
+        s_item.setExpanded(True)
+        self.setCurrentItem(s_item)
+
+    def _unhide_study_show_all(self, study_uid: str, kind: str) -> None:
+        """Study "UnHide": clear every hidden flag in the node (routed
+        through the panel so the thumbnail grid re-greys too), then show
+        every series row and expand the node."""
+        self.unhide_study_requested.emit(study_uid, kind)
+        self._set_study_rows_visible(study_uid, kind, unhidden_only=False)
 
     def ordered_series(self, modality: str | None = None) -> list[Series]:
         """All series in tree-display order. ``modality`` filters by the
@@ -538,13 +590,30 @@ class StudyBrowser(QTreeWidget):
         finally:
             self.blockSignals(False)
 
+    def _on_clicked(self, item: QTreeWidgetItem, _col: int = 0) -> None:
+        """Mouse click in the tree. A hidden (greyed) series IS loaded on a
+        direct mouse click — a one-off view: once shown, Play and the cine
+        seek-bar work on it normally. The on-image First/Prev/Next/Last
+        buttons and the keyboard shortcuts still skip it, and keyboard
+        activation (Enter, via :meth:`_on_activated`) skips it too."""
+        data = item.data(0, _ROLE)
+        if isinstance(data, Series):
+            self.series_chosen.emit(data)
+            return
+        self._emit_study_click(item)
+
     def _on_activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
+        """Keyboard activation (Enter). Hidden series are skipped here — only
+        a direct mouse click (see :meth:`_on_clicked`) loads a hidden one."""
         data = item.data(0, _ROLE)
         if isinstance(data, Series):
             if getattr(data, "hidden", False):
-                return            # hidden series: left-click does not load
+                return            # hidden series: keyboard does not load
             self.series_chosen.emit(data)
             return
+        self._emit_study_click(item)
+
+    def _emit_study_click(self, item: QTreeWidgetItem) -> None:
         # Clicking a Study row: tell the shell which study was picked
         # (by uid) so it can resume the LAST-viewed series of that study
         # instead of always jumping to series #1. The shell falls back
@@ -641,48 +710,71 @@ class StudyBrowser(QTreeWidget):
             menu.addSeparator()
             act_hide = QAction(f"Hide (hide this series){suffix}", self)
             act_hide.setToolTip(
-                "Grey out and skip this series — kept in the list, but "
-                "left-click and First/Prev/Next/Last ignore it."
+                "Grey out this series — kept in the list. First/Prev/Next/"
+                "Last and the keyboard shortcuts skip it; a direct mouse "
+                "click still shows it (Play / seek then work normally)."
             )
             act_hide.triggered.connect(
                 lambda: self.hide_requested.emit(list(sel_series))
             )
             menu.addAction(act_hide)
-            st = self._study_key_of_series(sel_series[0])
-            act_unhide = QAction("UnHide (show all series)", self)
-            act_unhide.setToolTip("Un-hide every hidden series in this study.")
-            if st is not None:
-                act_unhide.triggered.connect(
-                    lambda: self.unhide_study_requested.emit(st[0], st[1])
-                )
+            act_unhide = QAction(f"UnHide (show this series){suffix}", self)
+            act_unhide.setToolTip(
+                "Un-hide just the selected series (the rest of the study "
+                "keeps its current hide/unhide state)."
+            )
+            act_unhide.triggered.connect(
+                lambda: self.unhide_series_requested.emit(list(sel_series))
+            )
             menu.addAction(act_unhide)
         menu.addSeparator()
         if kind == "study":
             su, sk_ = idk[1], idk[2]
-            act_select = QAction("Select (UnHidden Only)", self)
+            # Select — show only the un-hidden series rows. Hidden (greyed)
+            # series are folded out of the list; their hide state is kept.
+            act_select = QAction("Select (show unhide only)", self)
             act_select.setToolTip(
-                "Remove every HIDDEN (greyed) series in this study from the "
-                "list. Files are not deleted; reload the folder to restore."
+                "Show only the un-hidden series in this study; hidden "
+                "(greyed) series rows are folded out of the list. Nothing "
+                "is removed or un-hidden."
             )
             act_select.triggered.connect(
-                lambda: self.select_unhidden_requested.emit(su, sk_)
+                lambda: self._set_study_rows_visible(su, sk_, unhidden_only=True)
             )
             menu.addAction(act_select)
+            # Show — show every series row, keeping each series' hide state.
+            act_show = QAction("Show (show all with hide/unhide)", self)
+            act_show.setToolTip(
+                "Show every series in this study, keeping each series' "
+                "current hide/unhide (greyed) state."
+            )
+            act_show.triggered.connect(
+                lambda: self._set_study_rows_visible(
+                    su, sk_, unhidden_only=False)
+            )
+            menu.addAction(act_show)
+            # UnHide — clear every hidden flag and show all series.
+            act_unhide = QAction("UnHide (unhide and show all)", self)
+            act_unhide.setToolTip(
+                "Un-hide every hidden series in this study and show them all."
+            )
+            act_unhide.triggered.connect(
+                lambda: self._unhide_study_show_all(su, sk_)
+            )
+            menu.addAction(act_unhide)
+            # Close — collapse the series list (hide/unhide state kept).
             act_close = QAction("Close (close list)", self)
             act_close.setToolTip(
-                "Collapse this study's series list. Nothing is removed."
+                "Collapse this study's series list. Hide/unhide state is "
+                "kept; nothing is removed."
             )
             act_close.triggered.connect(lambda: self._close_series_list(item))
             menu.addAction(act_close)
-            act_show = QAction("Show (show all)", self)
-            act_show.setToolTip("Un-hide every hidden series in this study.")
-            act_show.triggered.connect(
-                lambda: self.unhide_study_requested.emit(su, sk_)
-            )
-            menu.addAction(act_show)
+            # Delete — remove the whole study node from the list.
             act_del = QAction("Delete (remove)", self)
             act_del.setToolTip(
-                "Files are not deleted; just removed from the list."
+                "Remove this study (all its series) from the list. Files "
+                "are not deleted; reload the folder to restore."
             )
             act_del.triggered.connect(
                 lambda: self.delete_requested.emit(kind, key, label)
@@ -782,8 +874,8 @@ class _ThumbList(QListWidget):
     delete_requested = pyqtSignal(str, str, str)
     #: "Hide" the given series ([Series]).
     hide_requested = pyqtSignal(list)
-    #: "UnHide (show all series)" — un-hide all in the current study.
-    unhide_requested = pyqtSignal()
+    #: "UnHide (show this series)" — un-hide just the given series ([Series]).
+    unhide_requested = pyqtSignal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -907,16 +999,22 @@ class _ThumbList(QListWidget):
             menu.addSeparator()
             act_hide = QAction(f"Hide (hide this series){suffix}", self)
             act_hide.setToolTip(
-                "Grey out and skip this series (left-click and "
-                "First/Prev/Next/Last ignore it)."
+                "Grey out this series — First/Prev/Next/Last and the "
+                "keyboard shortcuts skip it; a direct mouse click still "
+                "shows it (Play / seek then work normally)."
             )
             act_hide.triggered.connect(
                 lambda: self.hide_requested.emit(list(sel))
             )
             menu.addAction(act_hide)
-            act_unhide = QAction("UnHide (show all series)", self)
-            act_unhide.setToolTip("Un-hide every hidden series in this study.")
-            act_unhide.triggered.connect(lambda: self.unhide_requested.emit())
+            act_unhide = QAction(f"UnHide (show this series){suffix}", self)
+            act_unhide.setToolTip(
+                "Un-hide just the selected series (the rest of the study "
+                "keeps its current hide/unhide state)."
+            )
+            act_unhide.triggered.connect(
+                lambda: self.unhide_requested.emit(list(sel))
+            )
             menu.addAction(act_unhide)
             # Delete (one signal per series — same contract as the Tree).
             menu.addSeparator()
@@ -966,22 +1064,16 @@ class StudyPanel(QWidget):
         self._patients_cache: dict[str, Patient] = {}
 
         self.tree = StudyBrowser()
-        # Keep the selected series obvious: a bright blue highlight that
-        # stays bright even when the tree loses focus (Qt would otherwise
-        # dim it to a hard-to-see pale grey — the user's complaint).
-        self.tree.setStyleSheet(
-            "QTreeWidget::item:selected,"
-            " QTreeWidget::item:selected:!active {"
-            "   background:#1f6feb; color:white;"
-            " }"
-        )
+        # The selected-row highlight is managed by StudyBrowser itself
+        # (blue for a normal series, grey for a hidden one) — see
+        # StudyBrowser._refresh_selection_color.
         self.tree.series_chosen.connect(self.series_chosen)
         self.tree.study_clicked.connect(self.study_clicked)
         self.tree.delete_requested.connect(self.delete_requested)
         self.tree.export_requested.connect(self.export_requested)
         self.tree.hide_requested.connect(self._on_hide_series)
         self.tree.unhide_study_requested.connect(self._on_unhide_study)
-        self.tree.select_unhidden_requested.connect(self._on_select_unhidden)
+        self.tree.unhide_series_requested.connect(self._on_unhide_series)
         # Re-sort the thumbnail grid whenever the tree's header sort
         # changes (keep the two views in lock-step).
         self.tree.header().sortIndicatorChanged.connect(
@@ -1030,7 +1122,7 @@ class StudyPanel(QWidget):
         self.thumbs.export_requested.connect(self.export_requested)
         self.thumbs.delete_requested.connect(self.delete_requested)
         self.thumbs.hide_requested.connect(self._on_hide_series)
-        self.thumbs.unhide_requested.connect(self._on_unhide_current_study)
+        self.thumbs.unhide_requested.connect(self._on_unhide_series)
         #: (header_item, patient, study, kind) — for anonymize relabel
         self._thumb_headers: list[tuple] = []
         #: series-order list of thumbnail items, aligned with the worker
@@ -1223,18 +1315,11 @@ class StudyPanel(QWidget):
         self.tree.set_series_hidden(series, False)
         self._apply_thumb_hidden_style()
 
-    def _on_select_unhidden(self, study_uid: str, kind: str) -> None:
-        """Remove every HIDDEN series in the study from the list (the shell's
-        delete machinery; files are kept)."""
-        for se in self.tree.series_in_study(study_uid, kind):
-            if getattr(se, "hidden", False):
-                self.delete_requested.emit("series", se.series_uid, se.label)
-
-    def _on_unhide_current_study(self) -> None:
-        """Thumbnail "UnHide" — un-hide all in the study currently shown."""
-        key = self._cur_study_key
-        if key is not None:
-            self._on_unhide_study(key[0], key[1])
+    def _on_unhide_series(self, series_list) -> None:
+        """UnHide just the given series (Tree or Thumbnail "UnHide (show
+        this series)")."""
+        self.tree.set_series_hidden(series_list, False)
+        self._apply_thumb_hidden_style()
 
     def _apply_thumb_fit(self) -> None:
         """Set the thumbnail size to minimum and ask the shell to widen the
@@ -1386,8 +1471,11 @@ class StudyPanel(QWidget):
             self.tree.select_study_key(cur)
 
     def _thumb_clicked(self, item: QListWidgetItem) -> None:
+        # A hidden (greyed) series IS loaded on a direct mouse click — a
+        # one-off view; Play / seek then work on it. Only the on-image
+        # nav buttons and keyboard shortcuts skip hidden series.
         se = item.data(_ROLE)
-        if isinstance(se, Series) and not getattr(se, "hidden", False):
+        if isinstance(se, Series):
             self.series_chosen.emit(se)
 
     def _set_thumb(self, row: int, arr: np.ndarray) -> None:
