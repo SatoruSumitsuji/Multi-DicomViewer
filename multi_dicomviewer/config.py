@@ -5,7 +5,7 @@ import sys  # noqa: F401  (kept for platform-specific config if needed)
 # macOS now renders CT via the pygfx (wgpu→Metal) viewer, so the Mac build
 # ships full CT again — same app name and no CT block on every platform.
 APP_NAME = "Multi-DICOMviewer"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.5.0"
 
 # CT loads on all platforms now (Windows/Linux: VTK; macOS: pygfx). Kept as a
 # constant so the UI gate below stays in place should a build ever need it.
