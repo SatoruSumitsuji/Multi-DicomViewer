@@ -20,6 +20,7 @@ import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication,
+    QHBoxLayout,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -222,9 +223,16 @@ class IVUSViewer(XAViewer):
             c.ivus_center_changed.connect(self._on_center_dragged)
             c.ivus_center_reset.connect(self._on_center_reset)
 
-        # "Long View" toggle button, placed next to Measure in the
-        # series-nav row (CT-style placement). Mirrors the V shortcut
-        # so the check state always matches _la_visible.
+        # The inherited (XA) series-nav row already runs Series…Flip-H/Flip-V
+        # and would overflow with the IVUS controls added on the end. So the
+        # IVUS-specific cluster (Long View + the centre-keyframe buttons) goes
+        # on a SECOND toolbar row, inserted right below the first one, so the
+        # two rows never overlap on a narrow IVUS pane.
+        ivus_row = QHBoxLayout()
+        ivus_row.setContentsMargins(4, 0, 4, 0)
+
+        # "Long View" toggle. Mirrors the V shortcut so the check state always
+        # matches _la_visible.
         self._long_view_btn = QPushButton("Long View")
         self._long_view_btn.setCheckable(True)
         self._long_view_btn.setMinimumWidth(110)
@@ -236,12 +244,11 @@ class IVUSViewer(XAViewer):
             "Show/hide the IVUS long-axis (longitudinal) view — shortcut: V"
         )
         self._long_view_btn.clicked.connect(self.toggle_long_axis)
-        self._insert_series_nav_widget(self._long_view_btn)
+        ivus_row.addWidget(self._long_view_btn)
 
-        # Centre-keyframe controls — placed right of Long View so the
-        # whole "long-axis" cluster reads left-to-right. Prev/Next
-        # cycle through the keyed frames on the active plane (wraps
-        # around); Clear removes every manual centre on that plane.
+        # Centre-keyframe controls — right of Long View so the whole "long-axis"
+        # cluster reads left-to-right. Prev/Next cycle through the keyed frames
+        # on the active plane (wraps); Clear removes every manual centre.
         self._prev_key_btn = QPushButton("◀ Center")
         self._prev_key_btn.setToolTip(
             "Jump to the previous frame with a manual rotation centre"
@@ -249,7 +256,7 @@ class IVUSViewer(XAViewer):
         self._prev_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(-1)
         )
-        self._insert_series_nav_widget(self._prev_key_btn)
+        ivus_row.addWidget(self._prev_key_btn)
         self._next_key_btn = QPushButton("Center ▶")
         self._next_key_btn.setToolTip(
             "Jump to the next frame with a manual rotation centre"
@@ -257,14 +264,18 @@ class IVUSViewer(XAViewer):
         self._next_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(+1)
         )
-        self._insert_series_nav_widget(self._next_key_btn)
+        ivus_row.addWidget(self._next_key_btn)
         self._clear_centers_btn = QPushButton("Clear Centers")
         self._clear_centers_btn.setToolTip(
             "Remove every manual rotation centre on the active plane "
             "(same as right-click ▸ Reset all on the marker)"
         )
         self._clear_centers_btn.clicked.connect(self._clear_all_centers)
-        self._insert_series_nav_widget(self._clear_centers_btn)
+        ivus_row.addWidget(self._clear_centers_btn)
+        ivus_row.addStretch(1)
+        # Insert as the second item of the viewer's main column (index 1),
+        # directly under the inherited series-nav row (index 0).
+        self.layout().insertLayout(1, ivus_row)
         # Buttons start disabled — they enable once a series is loaded
         # with at least one keyframe (see _refresh_keyframe_markers).
         for b in (self._prev_key_btn, self._next_key_btn,

@@ -161,12 +161,61 @@ class ImageCanvas(QWidget):
         # sets this whenever the active frame or the keyframe set
         # changes.
         self.ivus_center_keyed: bool = False
+        # 2-D display orientation (Rt90 / Lt90 / Flip), used mainly for static
+        # Secondary-Capture (SC) images. Stored as a dihedral element: an
+        # optional horizontal flip (_t_flip) followed by _t_rot ×90° clockwise.
+        # Applied to every frame in set_frame so cine frames stay consistent.
+        self._t_rot: int = 0
+        self._t_flip: bool = False
+        self._raw_frame8: np.ndarray | None = None
 
     # ---------------------------------------------------------------- public
     def set_frame(self, frame8: np.ndarray) -> None:
-        self._qimg = to_qimage(frame8)
-        self._img_size = (frame8.shape[1], frame8.shape[0])
+        self._raw_frame8 = frame8
+        f = self._oriented(frame8)
+        self._qimg = to_qimage(f)
+        self._img_size = (f.shape[1], f.shape[0])
         self.update()
+
+    def _oriented(self, frame8: np.ndarray) -> np.ndarray:
+        """Apply the current Rt90/flip orientation to *frame8* (flip first,
+        then rotate clockwise). Returns a contiguous array for to_qimage."""
+        f = frame8
+        if self._t_flip:
+            f = np.fliplr(f)
+        r = self._t_rot % 4
+        if r:
+            f = np.rot90(f, -r)            # -r → r×90° clockwise
+        return np.ascontiguousarray(f)
+
+    def apply_orient(self, kind: str) -> None:
+        """Rotate 90° (rt90/lt90) or flip (fliph/flipv) the displayed image,
+        composing with the current orientation (so each acts on what is shown).
+        Clears measurements since the displayed pixel grid changes."""
+        if kind == "rt90":
+            self._t_rot = (self._t_rot + 1) % 4
+        elif kind == "lt90":
+            self._t_rot = (self._t_rot - 1) % 4
+        elif kind == "fliph":            # M ∘ (R^r M^f) = R^-r M^(f+1)
+            self._t_rot = (-self._t_rot) % 4
+            self._t_flip = not self._t_flip
+        elif kind == "flipv":            # (R^2 M) ∘ (R^r M^f) = R^(2-r) M^(f+1)
+            self._t_rot = (2 - self._t_rot) % 4
+            self._t_flip = not self._t_flip
+        else:
+            return
+        self.clear_measurements()
+        self._zoom = 1.0
+        self._pan = [0.0, 0.0]
+        if self._raw_frame8 is not None:
+            self.set_frame(self._raw_frame8)
+
+    def reset_orient(self) -> None:
+        """Restore the native (un-rotated, un-flipped) orientation."""
+        self._t_rot = 0
+        self._t_flip = False
+        if self._raw_frame8 is not None:
+            self.set_frame(self._raw_frame8)
 
     def set_spacing(self, spacing_mm) -> None:
         self.spacing_mm = spacing_mm

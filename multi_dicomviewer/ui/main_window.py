@@ -182,6 +182,7 @@ class ViewerPane(QFrame):
     activated = pyqtSignal(object)            # this pane was clicked/used
     series_dropped = pyqtSignal(object, str)  # (pane, series_uid)
     folder_dropped = pyqtSignal(str)          # a DICOM folder was dropped
+    files_dropped = pyqtSignal(list)          # individual DICOM file(s) dropped
     viewer_ready = pyqtSignal(object)         # a viewer was just created
     pane_move_requested = pyqtSignal(int, int)  # (src index, dest index)
 
@@ -377,15 +378,20 @@ class ViewerPane(QFrame):
             self.activated.emit(self)
             self.series_dropped.emit(self, uid)
             return True
-        for url in md.urls():  # a DICOM folder/file dropped onto the pane
-            path = url.toLocalFile()
-            if not path:
-                continue
-            target = path if os.path.isdir(path) else os.path.dirname(path)
-            # Make this the active pane first so the folder's first
-            # series auto-opens here, not in some other pane.
+        # DICOM folder(s)/file(s) dropped onto the pane. A FOLDER drop loads
+        # the whole folder; a FILE drop loads ONLY the dropped file(s) — not
+        # the rest of their containing folder.
+        paths = [u.toLocalFile() for u in md.urls()]
+        paths = [p for p in paths if p]
+        if paths:
+            # Make this the active pane first so the first series auto-opens
+            # here, not in some other pane.
             self.activated.emit(self)
-            self.folder_dropped.emit(target)
+            dirs = [p for p in paths if os.path.isdir(p)]
+            if dirs:
+                self.folder_dropped.emit(dirs[0])
+            else:
+                self.files_dropped.emit(paths)
             return True
         return False
 
@@ -526,6 +532,7 @@ class MainWindow(QMainWindow):
             pane.activated.connect(self._set_active_pane)
             pane.series_dropped.connect(self._on_series_dropped)
             pane.folder_dropped.connect(self._load_folder)
+            pane.files_dropped.connect(self._load_files)
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
             self._panes.append(pane)
@@ -1668,29 +1675,46 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if not path:
-                continue
-            if os.path.isdir(path):
-                target = path
-            elif os.path.isfile(path):
-                target = os.path.dirname(path)  # dropped a DICOM file
-            else:
-                continue
-            event.acceptProposedAction()
-            self._load_folder(target)
+        # A FOLDER drop loads the whole folder; a FILE drop loads ONLY the
+        # dropped file(s) — not the rest of their containing folder.
+        paths = [u.toLocalFile() for u in event.mimeData().urls()]
+        paths = [p for p in paths if p]
+        if not paths:
             return
+        dirs = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if os.path.isfile(p)]
+        if dirs:
+            event.acceptProposedAction()
+            self._load_folder(dirs[0])
+        elif files:
+            event.acceptProposedAction()
+            self._load_files(files)
 
     def _load_folder(self, folder: str) -> None:
-        self.statusBar().showMessage(f"Scanning {folder} …")
+        self._load_index(
+            f"Scanning {folder} …",
+            lambda prog: dicom_io.scan_folder(folder, prog),
+        )
+
+    def _load_files(self, paths: list[str]) -> None:
+        n = len(paths)
+        self._load_index(
+            f"Loading {n} file(s) …",
+            lambda prog: dicom_io.index_files(paths, prog),
+        )
+
+    def _load_index(self, status_msg: str, scan_fn) -> None:
+        """Run *scan_fn(progress)* under a modal progress dialog, then merge
+        the resulting patients into the tree and auto-open a series. Shared by
+        folder drops (scan_folder) and file drops (index_files)."""
+        self.statusBar().showMessage(status_msg)
         # Bring the app to the front (drop often comes from Explorer).
         if self.isMinimized():
             self.showNormal()
         self.raise_()
         self.activateWindow()
 
-        dlg = QProgressDialog("Loading DICOM folder…", None, 0, 0, self)
+        dlg = QProgressDialog("Loading DICOM…", None, 0, 0, self)
         dlg.setWindowTitle("Scanning")
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(300)   # don't flash for tiny folders
@@ -1704,7 +1728,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            new_patients = dicom_io.scan_folder(folder, _progress)
+            new_patients = scan_fn(_progress)
         except Exception as exc:
             dlg.close()
             QMessageBox.critical(self, "Scan failed", str(exc))
