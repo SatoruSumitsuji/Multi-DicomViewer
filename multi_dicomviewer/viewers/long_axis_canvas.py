@@ -62,7 +62,14 @@ def build_long_axis(
     a coarse, fast low-LOD preview that still spans the full vessel depth.
     """
     n = len(frames)
-    out = np.zeros((lateral_samples, n), dtype=np.uint8)
+    # Colour strip when the frames are RGB — the cut-line colour is sampled
+    # as-is (so a colour IVUS, e.g. a NIRS chemogram, keeps its colour in the
+    # long axis); plain (lateral, n) grayscale otherwise.
+    is_color = any(f is not None and f.ndim == 3 for f in frames)
+    out = np.zeros(
+        (lateral_samples, n, 3) if is_color else (lateral_samples, n),
+        dtype=np.uint8,
+    )
     if n == 0:
         return out
     half = (lateral_samples - 1) / 2.0
@@ -74,17 +81,26 @@ def build_long_axis(
         f = frames[i]
         if f is None:
             continue
-        if f.ndim == 3:                          # color → luminance
-            f = f.mean(axis=2)
         h, w = f.shape[:2]
         cx, cy = centers[i]
         xs = np.rint(cx + dxs).astype(np.int32)
         ys = np.rint(cy + dys).astype(np.int32)
         mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
-        col = np.zeros(lateral_samples, dtype=f.dtype)
-        if mask.any():
-            col[mask] = f[ys[mask], xs[mask]]
-        out[:, i] = apply_u8(col)
+        if is_color:
+            # Sample RGB. A stray grayscale frame in a colour strip is
+            # broadcast to all three channels so the assignment still fits.
+            col = np.zeros((lateral_samples, 3), dtype=f.dtype)
+            if mask.any():
+                if f.ndim == 3:
+                    col[mask] = f[ys[mask], xs[mask], :3]
+                else:
+                    col[mask] = f[ys[mask], xs[mask]][:, None]
+            out[:, i] = apply_u8(col)
+        else:
+            col = np.zeros(lateral_samples, dtype=f.dtype)
+            if mask.any():
+                col[mask] = f[ys[mask], xs[mask]]
+            out[:, i] = apply_u8(col)
     return out
 
 
@@ -151,15 +167,26 @@ class LongAxisCanvas(QWidget):
 
     # ----------------------------------------------------------- public
     def set_image(self, arr: np.ndarray) -> None:
-        """Set the long-axis image (H_lat, N_frames) uint8. Repaints."""
+        """Set the long-axis image and repaint. Accepts (H_lat, N_frames)
+        uint8 grayscale, or (H_lat, N_frames, 3) uint8 RGB for a colour
+        IVUS strip (the cut-line colour sampled as-is)."""
         arr = np.ascontiguousarray(arr)
-        if arr.ndim != 2 or arr.dtype != np.uint8:
+        if arr.dtype != np.uint8:
             return
-        h, w = arr.shape
-        self._n_frames = w
-        self._qimg = QImage(
-            arr.data, w, h, w, QImage.Format.Format_Grayscale8
-        ).copy()
+        if arr.ndim == 2:
+            h, w = arr.shape
+            self._n_frames = w
+            self._qimg = QImage(
+                arr.data, w, h, w, QImage.Format.Format_Grayscale8
+            ).copy()
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            h, w = arr.shape[:2]
+            self._n_frames = w
+            self._qimg = QImage(
+                arr.data, w, h, 3 * w, QImage.Format.Format_RGB888
+            ).copy()
+        else:
+            return
         self.image_changed.emit()
         self.update()
 
