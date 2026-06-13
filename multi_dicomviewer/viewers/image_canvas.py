@@ -168,6 +168,12 @@ class ImageCanvas(QWidget):
         self._t_rot: int = 0
         self._t_flip: bool = False
         self._raw_frame8: np.ndarray | None = None
+        # When True, scale the frame with fast nearest-neighbour instead of
+        # bilinear in paintEvent. The viewer turns this on during cine playback
+        # / seek-drag (where smoothing every frame costs real time on a high-DPI
+        # display — the Mac "playback not as smooth as Windows" report) and off
+        # when paused so a still frame is still crisply upscaled.
+        self._fast_scale: bool = False
 
     # ---------------------------------------------------------------- public
     def set_frame(self, frame8: np.ndarray) -> None:
@@ -176,6 +182,15 @@ class ImageCanvas(QWidget):
         self._qimg = to_qimage(f)
         self._img_size = (f.shape[1], f.shape[0])
         self.update()
+
+    def set_fast_scaling(self, on: bool) -> None:
+        """Toggle fast (nearest) vs smooth (bilinear) frame upscaling. Set on
+        during cine playback / seek-drag, off when paused. Only repaints when
+        the flag actually changes (so it's free to call every frame)."""
+        on = bool(on)
+        if on != self._fast_scale:
+            self._fast_scale = on
+            self.update()
 
     def _oriented(self, frame8: np.ndarray) -> np.ndarray:
         """Apply the current Rt90/flip orientation to *frame8* (flip first,
@@ -1138,7 +1153,11 @@ class ImageCanvas(QWidget):
         # scaled up to fill the canvas, while the noisy echo texture hides the
         # artefact. The echo DATA is bit-identical either way (≤1 LSB); this is
         # purely how the already-decoded frame is resampled to the widget.
-        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        # During playback/seek the viewer sets _fast_scale so the per-frame
+        # bilinear cost (heavy on a high-DPI Mac) doesn't stutter the cine; a
+        # paused/still frame keeps the smooth upscale.
+        if not self._fast_scale:
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(r, self._qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Rebuilt as labels are drawn below; clear so a deleted measure's

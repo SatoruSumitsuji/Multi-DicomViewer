@@ -676,6 +676,12 @@ class XAViewer(AbstractViewer):
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
+        # True while the user is dragging the seek handle — render with fast
+        # (nearest) upscaling during the drag so scrubbing a long pull-back is
+        # smooth, then settle to crisp bilinear on release.
+        self._seeking = False
+        self.frame_slider.sliderPressed.connect(self._on_seek_begin)
+        self.frame_slider.sliderReleased.connect(self._on_seek_end)
         # Enlarge just the draggable handle (~1.2×) for an easier grab,
         # styled like the W/L sliders' native thumb — a white disc with a
         # blue inner dot (radial gradient) and a thin ring. We reserve
@@ -1226,6 +1232,13 @@ class XAViewer(AbstractViewer):
     def _render(self):
         if not self._planes:
             return
+        # Nearest-neighbour upscaling while the cine timer runs (smoothing every
+        # frame is a real per-frame cost on a high-DPI display); crisp bilinear
+        # when paused. set_fast_scaling only repaints on an actual change, so
+        # this is free to call each frame.
+        fast = self._timer.isActive() or self._seeking
+        self.canvas.set_fast_scaling(fast)
+        self.canvas2.set_fast_scaling(fast)
         if self._dual:
             self.canvas.set_frame(self._frame_of(self._planes[0]))
             self.canvas2.set_frame(self._frame_of(self._planes[1]))
@@ -1327,6 +1340,17 @@ class XAViewer(AbstractViewer):
     def _start_cine(self):
         self._render()                          # also restores the label
         self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
+
+    def _on_seek_begin(self) -> None:
+        """Seek handle pressed — switch the cross-section to fast upscaling so
+        scrubbing a long pull-back stays smooth (see _render)."""
+        self._seeking = True
+
+    def _on_seek_end(self) -> None:
+        """Seek handle released — back to crisp bilinear and repaint the
+        settled frame."""
+        self._seeking = False
+        self._render()
 
     def _seek(self, value: int):
         # Keep the handle inside the Play range — dragging past either
