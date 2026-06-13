@@ -535,10 +535,17 @@ class XAPlane:
     """
 
     def __init__(self, name: str, path: str, ds, total_frames: int,
-                 volume: np.ndarray, is_color: bool = False):
+                 volume: np.ndarray, is_color: bool = False,
+                 frame_files: Optional[list[str]] = None):
         self.name = name
         self.path = path
         self._ds = ds                 # shared by UI seek + background prefetch
+        #: For a multi-FILE stack (Secondary Capture: one DICOM file per frame)
+        #: this is the per-frame file list — frame i is decoded from
+        #: frame_files[i] lazily/in the background, so the first image shows
+        #: immediately instead of waiting for the whole stack. None for a normal
+        #: single-dataset multi-frame cine (decoded from _ds).
+        self.frame_files = frame_files
         #: serialises decodes off the one shared dataset so a (rare) manual
         #: seek on the UI thread and the prefetch thread never decode from
         #: it concurrently. Lets the prefetch reuse the dataset load_xa
@@ -560,7 +567,7 @@ class XAPlane:
         if not self._ready[i]:
             with self._lock:
                 if not self._ready[i]:          # prefetch may have won the race
-                    self.volume[i] = _decode_frame(self._ds, i)
+                    self.volume[i] = _plane_decode(self, i)
                     self._ready[i] = True
         return self.volume[i]
 
@@ -875,6 +882,42 @@ def _decode_frame(ds, index: int) -> np.ndarray:
     return np.ascontiguousarray(_to_u8(rgb))
 
 
+def _fit_frame(fr: np.ndarray, target: tuple) -> np.ndarray:
+    """Crop/pad *fr* to *target* (the volume's per-frame shape) — defensive for
+    a multi-file stack whose pages aren't all the same size."""
+    target = tuple(int(t) for t in target)
+    if fr.shape == target:
+        return fr
+    out = np.zeros(target, dtype=fr.dtype)
+    sl = tuple(slice(0, min(a, b)) for a, b in zip(fr.shape, target))
+    out[sl] = fr[sl]
+    return out
+
+
+def _plane_decode(plane: "XAPlane", i: int) -> np.ndarray:
+    """Decode frame *i* of a plane. For a normal cine (frame_files is None) this
+    is the single-dataset path. For a multi-FILE Secondary-Capture stack it
+    reads frame i's own file and matches the volume's colour/grayscale format
+    (so the whole stack doesn't have to be decoded up-front)."""
+    ff = getattr(plane, "frame_files", None)
+    if ff is None:
+        return _decode_frame(plane._ds, i)
+    ds = pydicom.dcmread(ff[i], force=True)
+    fr = _decode_frame(ds, 0)
+    if plane.volume.ndim == 4:                 # (N,H,W,3) colour volume
+        if fr.ndim == 2:
+            g = np.clip(fr, 0, 255).astype(np.uint8)
+            fr = np.repeat(g[..., None], 3, axis=2)
+        else:
+            fr = np.ascontiguousarray(fr[..., :3]).astype(np.uint8)
+    else:                                      # (N,H,W) grayscale volume
+        if fr.ndim == 3:
+            fr = (0.299 * fr[..., 0] + 0.587 * fr[..., 1]
+                  + 0.114 * fr[..., 2])
+        fr = np.asarray(fr, np.float32)
+    return _fit_frame(fr, plane.volume.shape[1:])
+
+
 def prefetch_planes(
     planes: list["XAPlane"],
     should_stop: Callable[[], bool],
@@ -923,7 +966,7 @@ def prefetch_planes(
             with plane._lock:
                 if plane._ready[i]:             # UI seek decoded it first
                     continue
-                plane.volume[i] = _decode_frame(plane._ds, i)
+                plane.volume[i] = _plane_decode(plane, i)
                 plane._ready[i] = True
             # sleep(0) still yields the GIL briefly (responsive stop,
             # warm rate ~= raw decode speed); 4 ms hands the cine timer
@@ -1282,64 +1325,67 @@ def load_secondary_capture(
     Returns ``modality=OTHER`` so the shell routes it to the XA/image viewer,
     while the Study tree still groups it under CT (the Series keeps its CT
     modality, so it isn't re-grouped or split per-file)."""
-    files = list(series.files)
-    n = max(1, len(files))
-    decoded: list[tuple[float, np.ndarray]] = []
-    ds0 = None
-    for idx, path in enumerate(files):
-        if progress is not None and (idx % 4 == 0 or idx + 1 == n):
-            progress(f"Reading image {idx + 1}/{n}…", idx + 1, n)
-        try:
-            ds = pydicom.dcmread(path, force=True)
-            fr = _decode_frame(ds, 0)   # (H,W) float gray | (H,W,3) uint8 RGB
-        except Exception:
-            continue
-        if ds0 is None:
-            ds0 = ds
-        ino = _to_float(getattr(ds, "InstanceNumber", None))
-        decoded.append((ino if ino is not None else float(idx), fr))
-    if not decoded or ds0 is None:
-        raise ValueError("Secondary-Capture series has no decodable image")
-    decoded.sort(key=lambda t: t[0])           # page/frame order
-    imgs = [fr for _, fr in decoded]
-    # Defensive: keep only the dominant 2-D shape (mixed-size report pages).
-    counts: dict[tuple, int] = {}
-    for im in imgs:
-        counts[im.shape[:2]] = counts.get(im.shape[:2], 0) + 1
-    dom = max(counts.items(), key=lambda kv: kv[1])[0]
-    imgs = [im for im in imgs if im.shape[:2] == dom]
+    # Order pages by InstanceNumber (header-only reads — no pixel decode, so
+    # this stays fast even for a big stack).
+    order: list[tuple[float, str]] = []
+    for idx, path in enumerate(series.files):
+        ds = _read_header(path)
+        ino = (_to_float(getattr(ds, "InstanceNumber", None))
+               if ds is not None else None)
+        order.append((ino if ino is not None else float(idx), path))
+    order.sort(key=lambda t: t[0])
+    sorted_files = [p for _, p in order]
+    n = max(1, len(sorted_files))
 
-    # GENUINE colour (e.g. Fujifilm Synapse 3-D VR) is kept in colour. BROKEN
-    # pseudo-colour (e.g. GE "electronic film" — PI=RGB with degenerate chroma
-    # that every decoder renders green/magenta) falls back to ITU-601 grayscale,
-    # which is what those actually are (a grayscale CT film). _is_broken_pseudo_
-    # color decides from a representative frame's border (background) saturation.
-    color = any(im.ndim == 3 for im in imgs)
+    # Decode ONLY frame 0 so the first image appears immediately; the remaining
+    # pages decode lazily on access / in the XA viewer's background prefetch
+    # (XAPlane.frame_files → _plane_decode). This is the big win for a 40+ page
+    # 1024² colour 3-D-VR stack that used to block on decoding every page.
+    if progress is not None:
+        progress("Reading first image…", 0, n)
+    ds0 = None
+    f0 = None
+    start = 0
+    for k, path in enumerate(sorted_files):
+        try:
+            ds0 = pydicom.dcmread(path, force=True)
+            f0 = _decode_frame(ds0, 0)   # (H,W) float gray | (H,W,3) uint8 RGB
+            start = k
+            break
+        except Exception:
+            ds0 = None
+    if ds0 is None or f0 is None:
+        raise ValueError("Secondary-Capture series has no decodable image")
+    sorted_files = sorted_files[start:]        # drop any unreadable leading pages
+
+    # GENUINE colour (e.g. Fujifilm Synapse 3-D VR) is kept in colour; BROKEN
+    # pseudo-colour (GE "electronic film" — PI=RGB with degenerate chroma that
+    # every decoder renders green/magenta) falls back to ITU-601 grayscale (what
+    # it actually is). Decided from frame 0's border (background) saturation.
+    color = (f0.ndim == 3) and not _is_broken_pseudo_color(f0)
     if color:
-        ref = next(im for im in imgs if im.ndim == 3)
-        color = not _is_broken_pseudo_color(ref)
-    if color:
-        def _rgb(im):
-            if im.ndim == 2:                   # a mono page in a colour series
-                g = np.clip(im, 0, 255).astype(np.uint8)
-                return np.repeat(g[..., None], 3, axis=2)
-            return np.ascontiguousarray(im[..., :3]).astype(np.uint8)
-        vol = np.stack([_rgb(im) for im in imgs], axis=0)   # (F,H,W,3) uint8
+        if f0.ndim == 2:
+            g = np.clip(f0, 0, 255).astype(np.uint8)
+            frame0 = np.repeat(g[..., None], 3, axis=2)
+        else:
+            frame0 = np.ascontiguousarray(f0[..., :3]).astype(np.uint8)
         window = level = None
     else:
-        def _gray(im):
-            if im.ndim == 3:
-                im = (0.299 * im[..., 0] + 0.587 * im[..., 1]
-                      + 0.114 * im[..., 2])
-            return np.asarray(im, np.float32)
-        vol = np.stack([_gray(im) for im in imgs], axis=0)  # (F,H,W) float32
-        lo, hi = float(np.nanmin(vol)), float(np.nanmax(vol))
-        window = max(hi - lo, 1.0)
+        if f0.ndim == 3:
+            f0 = (0.299 * f0[..., 0] + 0.587 * f0[..., 1]
+                  + 0.114 * f0[..., 2])
+        frame0 = np.asarray(f0, np.float32)
+        lo, hi = float(np.nanmin(frame0)), float(np.nanmax(frame0))
+        window = max(hi - lo, 1.0)            # W/L from frame 0 (good enough)
         level = (hi + lo) / 2.0
 
+    nframes = len(sorted_files)
+    vol = np.zeros((nframes,) + frame0.shape, dtype=frame0.dtype)
+    vol[0] = frame0
     plane = XAPlane(series.description or "Secondary Capture",
-                    files[0], ds0, vol.shape[0], vol, is_color=color)
-    plane._ready[:] = True   # whole stack is decoded → no lazy/prefetch decode
+                    sorted_files[0], ds0, nframes, vol,
+                    is_color=color, frame_files=sorted_files)
+    # only frame 0 is decoded; the rest fill in via _plane_decode (lazy/prefetch)
     return LoadedSeries(
         modality=Modality.OTHER,
         volume=vol,
@@ -1349,7 +1395,7 @@ def load_secondary_capture(
         level=level,
         xa_planes=[plane],
         is_color=color,
-        header=_read_header(files[0]),
+        header=_read_header(sorted_files[0]),
         series_uid=series.series_uid,
     )
 
