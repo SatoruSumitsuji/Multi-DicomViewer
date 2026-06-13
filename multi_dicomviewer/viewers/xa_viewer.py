@@ -236,10 +236,13 @@ class _EcgStrip(QWidget):
         p.fillRect(self.rect(), QColor("#0e1216"))
         w, h = self.width(), self.height()
         if self._xs is None or self._ys is None:
+            # No waveform in this series — keep the (ON) strip visible with a
+            # clear "No ECG" so the user knows the toggle is still on.
+            p.setPen(QColor("#cfe8ff"))
+            p.drawText(6, 15, "ECG")
             p.setPen(QColor("#888"))
             p.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter,
-                "ECG: no waveform in this series"
+                self.rect(), Qt.AlignmentFlag.AlignCenter, "No ECG"
             )
             return
         pad = self._PAD
@@ -417,6 +420,10 @@ class XAViewer(AbstractViewer):
         self._play_speed: float = 1.0
         # ECG strip (W key): the trace read from this series' DICOM, the
         # per-frame time step used to drive the cursor, and visibility.
+        #: User's ON/OFF choice — PERSISTS across series (Next/Prev) until the
+        #: user toggles it. When ON, the strip stays shown on every series; a
+        #: series without an ECG shows "No ECG" rather than hiding the strip.
+        self._ecg_on: bool = False
         self._ecg_visible: bool = False
         self._ecg_trace: ECGTrace | None = None
         self._ecg_available: bool = False
@@ -1067,25 +1074,17 @@ class XAViewer(AbstractViewer):
             self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
 
     def toggle_ecg(self) -> None:
-        """W: show / hide the ECG strip. Only series that actually carry a
-        waveform can show it — on the rest the toggle just reports that no
-        ECG is present and leaves the strip hidden."""
-        if not self._ecg_available:
-            self._ecg_visible = False
-            self._ecg_strip.setVisible(False)
-            self.readout.setText(
-                "このシリーズに心電図データはありません "
-                "(no ECG waveform in this series)."
-            )
-            return
-        self._ecg_visible = not self._ecg_visible
-        self._ecg_strip.setVisible(self._ecg_visible)
-        if self._ecg_visible:
-            self._ecg_strip.set_cursor_fraction(self._ecg_fraction(self._frame))
-        lab = self._ecg_trace.label if self._ecg_trace else "ECG"
-        self.readout.setText(
-            f"ECG: ON · {lab}" if self._ecg_visible else "ECG: OFF"
-        )
+        """W: turn the ECG strip ON/OFF. The choice PERSISTS across series
+        (Next/Prev) until toggled again. When ON the strip stays visible on
+        every series — showing that series' ECG, or 'No ECG' if it has none."""
+        self._ecg_on = not self._ecg_on
+        self._apply_ecg_visibility()
+        if self._ecg_on:
+            lab = (self._ecg_trace.label if (self._ecg_available
+                                             and self._ecg_trace) else "No ECG")
+            self.readout.setText(f"ECG: ON · {lab}")
+        else:
+            self.readout.setText("ECG: OFF")
 
     def _frame_time_ms(self, ds) -> float:
         """Per-frame duration (ms) for mapping a frame onto the ECG time
@@ -1122,8 +1121,10 @@ class XAViewer(AbstractViewer):
 
     def _read_ecg_for_series(self) -> None:
         """Read this series' ECG (Waveform Sequence or legacy Curve Data)
-        from the metadata header and prime the strip. Resets visibility so
-        a new series starts with the strip hidden until the user presses W."""
+        from the metadata header and prime the strip, then RE-APPLY the user's
+        persistent ON/OFF choice — so navigating Next/Prev keeps the strip on
+        (showing this series' ECG, or 'No ECG' if it has none) instead of
+        resetting it off each time."""
         self._ecg_trace = None
         self._ecg_available = False
         ds = self._header
@@ -1140,9 +1141,16 @@ class XAViewer(AbstractViewer):
             self._ecg_available = True
             self._ecg_strip.set_trace(trace)
         else:
-            self._ecg_strip.set_trace(None)
-        self._ecg_visible = False
-        self._ecg_strip.setVisible(False)
+            self._ecg_strip.set_trace(None)      # strip paints "No ECG"
+        self._apply_ecg_visibility()
+
+    def _apply_ecg_visibility(self) -> None:
+        """Show/hide the ECG strip per the persistent ON/OFF choice. When ON the
+        strip is always shown (it renders the trace, or 'No ECG' if absent)."""
+        self._ecg_visible = self._ecg_on
+        self._ecg_strip.setVisible(self._ecg_on)
+        if self._ecg_on and self._ecg_available and self._ecg_trace is not None:
+            self._ecg_strip.set_cursor_fraction(self._ecg_fraction(self._frame))
 
     def _effective_fps(self) -> float:
         return float(self._fps) * float(getattr(self, "_play_speed", 1.0))
