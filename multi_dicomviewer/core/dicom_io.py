@@ -65,6 +65,40 @@ def _to_float(value, default=None):
         return default
 
 
+def _first_num(value, default=None):
+    """First numeric value of a DICOM element that may be single OR multi-
+    valued (WindowCenter/WindowWidth are often a MultiValue like [40, 400])."""
+    if value is None:
+        return default
+    if not isinstance(value, (str, bytes)) and hasattr(value, "__iter__"):
+        try:
+            value = next(iter(value))
+        except StopIteration:
+            return default
+    return _to_float(value, default)
+
+
+#: SOP Class UID prefix shared by all Secondary Capture variants (single- and
+#: multi-frame, grayscale and colour). GE et al. store dose-report sheets,
+#: "electronic film" screen captures and 3-D render snapshots as Secondary
+#: Capture but tag them Modality=CT, so they would otherwise land in the CT
+#: viewer. They are NOT Hounsfield data (and are often RGB), so load_series
+#: routes them to the image viewer with auto W/L + colour (see
+#: load_secondary_capture); load_ct keeps a defensive auto-window fallback too.
+_SECONDARY_CAPTURE_PREFIX = "1.2.840.10008.5.1.4.1.1.7"
+
+
+def _series_is_secondary_capture(series) -> bool:
+    """True if *series*'s first instance is a Secondary Capture object (read
+    from the header only — cheap)."""
+    files = getattr(series, "files", None) or []
+    if not files:
+        return False
+    ds = _read_header(files[0])
+    return ds is not None and str(
+        getattr(ds, "SOPClassUID", "")).startswith(_SECONDARY_CAPTURE_PREFIX)
+
+
 def _to_gray2d(arr: np.ndarray) -> np.ndarray:
     """Reduce a decoded frame to a 2-D grayscale array. RGB/RGBA screen
     captures (e.g. an XA radiation-dose summary page) collapse to
@@ -989,7 +1023,11 @@ def load_xa(
 def thumbnail(series: Series, max_px: int = 144) -> np.ndarray:
     """Small uint8 preview of *series* (one frame / mid slice). Returns a
     2-D grayscale array, or (H, W, 3) uint8 for color series."""
-    if series.modality == Modality.CT:
+    # Secondary Capture (reports / film / snapshots) take the auto-window path
+    # below, not the HU window — they are not Hounsfield data — and their
+    # PI=RGB pseudo-colour is degenerate, so they're shown as grayscale.
+    is_sc = _series_is_secondary_capture(series)
+    if series.modality == Modality.CT and not is_sc:
         files = sorted(series.files)
         ds = pydicom.dcmread(files[len(files) // 2], force=True)
         px = _to_gray2d(ds.pixel_array).astype(np.float32)
@@ -1000,11 +1038,15 @@ def thumbnail(series: Series, max_px: int = 144) -> np.ndarray:
     else:
         ds = pydicom.dcmread(series.files[0], force=True)
         px = _decode_frame(ds, 0)
-        if px.ndim == 3:  # color: downsample as-is, no window/level
-            step = max(1, -(-max(px.shape[:2]) // max_px))
-            return np.ascontiguousarray(
-                px[::step, ::step, :3].astype(np.uint8)
-            )
+        if px.ndim == 3:
+            if is_sc:   # broken pseudo-RGB → ITU-601 luminance (grayscale)
+                px = (0.299 * px[..., 0] + 0.587 * px[..., 1]
+                      + 0.114 * px[..., 2]).astype(np.float32)
+            else:       # genuine colour (XA / IVUS): downsample as-is
+                step = max(1, -(-max(px.shape[:2]) // max_px))
+                return np.ascontiguousarray(
+                    px[::step, ::step, :3].astype(np.uint8)
+                )
         px = px.astype(np.float32)
         lo, hi = float(px.min()), float(px.max())
 
@@ -1120,10 +1162,23 @@ def load_ct(
     slice_mm = None
     if len(zvals) >= 2:
         diffs = np.diff(np.sort(np.asarray(zvals, dtype=np.float64)))
-        diffs = diffs[diffs > 1e-6]
+        # Ignore sub-micron gaps: floating-point noise in the z positions of a
+        # NON-spatial stack (e.g. 20 reformat/MIP frames stored at one location)
+        # would otherwise yield a microscopic spacing (~1e-5 mm), collapsing the
+        # volume to near-zero depth — its slices then can't be paged/resliced
+        # (they read as air = black). No real CT slice spacing is < 1 micron.
+        diffs = diffs[diffs > 1e-3]
         if diffs.size:
             slice_mm = float(np.median(diffs))
-    if not slice_mm:
+        else:
+            # ≥2 frames but all at (nearly) the same position — a NON-spatial
+            # stack (rotation/MIP frames stored at one location). There is no
+            # real inter-frame spacing; use a small compact value so they page
+            # like a stack. (SliceThickness here is the slab thickness, often
+            # tens of mm, which would inflate the pseudo-volume and break the
+            # reslice FOV — see #305-type series.)
+            slice_mm = 1.0
+    if not slice_mm:                     # a single slice
         slice_mm = _to_float(
             getattr(first, "SliceThickness", None), 1.0
         ) or 1.0
@@ -1157,16 +1212,110 @@ def load_ct(
                     sdir = np.cross(rx, cy)
                 pbasis = np.column_stack([rx, cy, sdir])
 
+    # Default W/L. True CT keeps the coronary/angio default (800/200); a
+    # Secondary-Capture series (dose report, electronic film, 3-D snapshot —
+    # tagged Modality=CT but NOT Hounsfield data) is instead windowed from its
+    # OWN embedded Window Center/Width, or, lacking that, from the actual value
+    # range — so it shows up by default instead of being blacked out by the HU
+    # window. WC/WW are in the rescaled output domain, matching `vol`.
+    window, level = 800.0, 200.0
+    if str(getattr(first, "SOPClassUID", "")).startswith(
+            _SECONDARY_CAPTURE_PREFIX):
+        wc = _first_num(getattr(first, "WindowCenter", None))
+        ww = _first_num(getattr(first, "WindowWidth", None))
+        if wc is not None and ww is not None and ww > 0:
+            level, window = float(wc), float(ww)
+        else:
+            lo, hi = float(np.nanmin(vol)), float(np.nanmax(vol))
+            window = max(hi - lo, 1.0)
+            level = (hi + lo) / 2.0
+
     return LoadedSeries(
         modality=Modality.CT,
         volume=vol,
         spacing_mm=spacing,
         cine_fps=None,
-        window=800.0,   # coronary/angio default
-        level=200.0,
+        window=window,
+        level=level,
         slice_mm=slice_mm,
         header=_read_header(getattr(first, "filename", "") or ""),
         patient_basis=pbasis,
+        series_uid=series.series_uid,
+    )
+
+
+def load_secondary_capture(
+    series: Series,
+    progress: Optional[Callable[[str, int, int], None]] = None,
+) -> LoadedSeries:
+    """Load a Secondary-Capture series (dose report, "electronic film" screen
+    capture, 3-D render snapshot — tagged Modality=CT but NOT Hounsfield data)
+    as an image stack for the generic image viewer:
+
+    * colour is preserved (RGB stays RGB — the CT MPR viewer is grayscale-only),
+    * the pages/frames scroll like a cine,
+    * the window is auto-fit (embedded Window Center/Width, else value range) so
+      a CT preset can't black it out.
+
+    Returns ``modality=OTHER`` so the shell routes it to the XA/image viewer,
+    while the Study tree still groups it under CT (the Series keeps its CT
+    modality, so it isn't re-grouped or split per-file)."""
+    files = list(series.files)
+    n = max(1, len(files))
+    decoded: list[tuple[float, np.ndarray]] = []
+    ds0 = None
+    for idx, path in enumerate(files):
+        if progress is not None and (idx % 4 == 0 or idx + 1 == n):
+            progress(f"Reading image {idx + 1}/{n}…", idx + 1, n)
+        try:
+            ds = pydicom.dcmread(path, force=True)
+            fr = _decode_frame(ds, 0)   # (H,W) float gray | (H,W,3) uint8 RGB
+        except Exception:
+            continue
+        if ds0 is None:
+            ds0 = ds
+        ino = _to_float(getattr(ds, "InstanceNumber", None))
+        decoded.append((ino if ino is not None else float(idx), fr))
+    if not decoded or ds0 is None:
+        raise ValueError("Secondary-Capture series has no decodable image")
+    decoded.sort(key=lambda t: t[0])           # page/frame order
+    imgs = [fr for _, fr in decoded]
+    # Defensive: keep only the dominant 2-D shape (mixed-size report pages).
+    counts: dict[tuple, int] = {}
+    for im in imgs:
+        counts[im.shape[:2]] = counts.get(im.shape[:2], 0) + 1
+    dom = max(counts.items(), key=lambda kv: kv[1])[0]
+    imgs = [im for im in imgs if im.shape[:2] == dom]
+
+    # Grayscale, NOT colour. These "electronic film" / render-snapshot pages
+    # are routinely stored as PI=RGB but with degenerate chroma (GE et al.) —
+    # every decoder (pydicom, pylibjpeg, …) renders them green/magenta. The
+    # real content is a grayscale CT film, so take the ITU-601 luminance
+    # (vendor-independent) and window it from the value range.
+    def _gray(im):
+        if im.ndim == 3:
+            im = (0.299 * im[..., 0] + 0.587 * im[..., 1]
+                  + 0.114 * im[..., 2])
+        return np.asarray(im, np.float32)
+    vol = np.stack([_gray(im) for im in imgs], axis=0)      # (F,H,W) float32
+    lo, hi = float(np.nanmin(vol)), float(np.nanmax(vol))
+    window = max(hi - lo, 1.0)
+    level = (hi + lo) / 2.0
+    color = False
+
+    plane = XAPlane(series.description or "Secondary Capture",
+                    files[0], ds0, vol.shape[0], vol, is_color=color)
+    plane._ready[:] = True   # whole stack is decoded → no lazy/prefetch decode
+    return LoadedSeries(
+        modality=Modality.OTHER,
+        volume=vol,
+        spacing_mm=_imager_spacing(ds0),
+        cine_fps=_cine_fps(ds0),
+        window=window,
+        level=level,
+        xa_planes=[plane],
+        is_color=color,
+        header=_read_header(files[0]),
         series_uid=series.series_uid,
     )
 
@@ -1176,5 +1325,10 @@ def load_series(
     progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> LoadedSeries:
     if series.modality == Modality.CT:
+        # Secondary Capture (reports / electronic film / 3-D snapshots) are
+        # tagged CT but are not HU data — show them in the image viewer with
+        # colour + auto window instead of the grayscale CT MPR.
+        if _series_is_secondary_capture(series):
+            return load_secondary_capture(series, progress)
         return load_ct(series, progress)
     return load_xa(series, progress)

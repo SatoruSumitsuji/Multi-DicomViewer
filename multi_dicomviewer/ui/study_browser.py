@@ -272,6 +272,11 @@ class StudyBrowser(QTreeWidget):
         # so it needs to be wide enough not to crowd "Series No".
         for col, w in enumerate((210, 90, 70, 70, 80, 240, 600)):
             self.setColumnWidth(col, w)
+        # "Type" (col 3 = series.kind) is hidden: it's redundant with the
+        # modality kind already shown on each Study group row, and not useful
+        # per-series in the list. Column data is still populated (kept simple),
+        # just not displayed.
+        self.setColumnHidden(3, True)
         # Click Date/Time / Series No / Instance No / Images headers to
         # sort (a ▲/▼ indicator shows the active column). Type /
         # Description / File Path are not sortable. We rebuild the

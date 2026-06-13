@@ -899,6 +899,14 @@ class CTViewer(AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
+        # Shift + right-click (single two-finger tap + Shift) = full-quality
+        # ("high-res") rebuild. A single gesture so trackpad users don't need
+        # the hard-to-do right-DOUBLE-click (which is kept). It only re-renders,
+        # so it's safe in any tool/measure mode; check it before everything else.
+        if (self._drag_btn == 2
+                and "Shift" in (ev.get("modifiers") or ())):
+            self._force_crisp()
+            return
         if self._meas_on:
             self._cross_grab = False
             if self._drag_btn == 2:           # right-click: measure menu
