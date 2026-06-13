@@ -32,7 +32,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygon
+from PyQt6.QtGui import (
+    QColor, QImage, QPainter, QPen, QPixmap, QPolygon,
+)
 from PyQt6.QtWidgets import QWidget
 
 from multi_dicomviewer.core.image_export import pick_export_format
@@ -140,6 +142,14 @@ class LongAxisCanvas(QWidget):
         self.setPalette(pal)
 
         self._qimg: Optional[QImage] = None
+        #: Cached down-scaled pixmap of the strip at the current widget size.
+        #: A long pull-back's strip QImage is thousands of columns wide; re-
+        #: scaling it on every frame-cursor move (set_current_frame → update)
+        #: stutters/freezes seek + playback on slower GPUs (Mac). We scale
+        #: ONCE per (image, size) and just blit this pixmap on cursor moves;
+        #: only the thin cursor/axis overlay is redrawn each frame.
+        self._scaled_pix: Optional[QPixmap] = None
+        self._scaled_key: Optional[tuple] = None
         self._n_frames = 0
         self._cur_frame = 0
         #: Frame indices at which the user has set a manual rotation
@@ -187,11 +197,15 @@ class LongAxisCanvas(QWidget):
             ).copy()
         else:
             return
+        self._scaled_pix = None          # new image → rescale on next paint
+        self._scaled_key = None
         self.image_changed.emit()
         self.update()
 
     def clear(self) -> None:
         self._qimg = None
+        self._scaled_pix = None
+        self._scaled_key = None
         self._n_frames = 0
         self._cur_frame = 0
         self._keyframes = []
@@ -254,6 +268,27 @@ class LongAxisCanvas(QWidget):
         if clean != self._keyframes:
             self._keyframes = clean
             self.update()
+
+    def _ensure_scaled(self, w: int, h: int) -> None:
+        """(Re)build the cached down-scaled strip pixmap for widget size
+        (w, h). No-op when the image and size are unchanged — so the frequent
+        frame-cursor repaints just blit this pixmap instead of re-scaling a
+        multi-thousand-column QImage every time. FastTransformation matches
+        the previous drawImage (nearest) scaling, so the look is identical."""
+        if self._qimg is None or w <= 0 or h <= 0:
+            self._scaled_pix = None
+            self._scaled_key = None
+            return
+        key = (self._qimg.cacheKey(), int(w), int(h))
+        if self._scaled_pix is not None and self._scaled_key == key:
+            return
+        scaled = self._qimg.scaled(
+            int(w), int(h),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self._scaled_pix = QPixmap.fromImage(scaled)
+        self._scaled_key = key
 
     # ----------------------------------------------------- coord transforms
     def _draw_rect(self) -> QRect:
@@ -376,7 +411,9 @@ class LongAxisCanvas(QWidget):
             )
             return
         r = self._draw_rect()
-        p.drawImage(r, self._qimg)
+        self._ensure_scaled(r.width(), r.height())
+        if self._scaled_pix is not None:
+            p.drawPixmap(r.x(), r.y(), self._scaled_pix)
         # Horizontal axis (where all rotation centres project — by
         # construction the strip's vertical mid-row).
         p.setPen(QPen(QColor(255, 220, 80, 110), 1, Qt.PenStyle.DashLine))
