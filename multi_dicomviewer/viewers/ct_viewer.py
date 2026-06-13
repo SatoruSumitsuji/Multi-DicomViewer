@@ -154,13 +154,16 @@ _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
-#: Bigger groove + round handle (~1.65× the default ~16px) for the 2-D frame
-#: scrubber, so it's easy to see and grab.
+#: 2-D frame scrubber handle: a 20 px white disc with a blue inner dot (radial
+#: gradient), matching the cine viewer's seek-bar thumb. The negative handle
+#: margin makes it overflow the 6 px groove, so the slider reserves extra height
+#: (setMinimumHeight in _build_seek_bar) to keep the disc from clipping top/bottom.
 _SEEK_SLIDER_QSS = (
-    "QSlider::groove:horizontal { height:6px; background:#777;"
-    " border-radius:3px; }"
-    "QSlider::handle:horizontal { width:26px; height:26px; margin:-10px 0;"
-    " border-radius:13px; background:#e8e8e8; border:1px solid #444; }"
+    "QSlider::groove:horizontal{height:6px;border-radius:3px;background:#c4c4c4;}"
+    "QSlider::handle:horizontal{width:20px;height:20px;margin:-7px 0;"
+    "border:1px solid #6a6a6a;border-radius:10px;"
+    "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
+    "stop:0 #1c6fd0,stop:0.55 #1c6fd0,stop:0.60 #ffffff,stop:1 #ffffff);}"
 )
 _TOOL_KEYS = {
     Qt.Key.Key_Z: "ZOOM", Qt.Key.Key_V: "MOVE", Qt.Key.Key_S: "SPIN",
@@ -2620,10 +2623,10 @@ class CTViewer(AbstractViewer):
         row = QHBoxLayout(self._seek_wrap)
         row.setContentsMargins(8, 2, 8, 2)
 
-        def _big(lbl):                          # 2× label so it stands out
+        def _big(lbl):                          # ~1.55× label (readable, compact)
             f = lbl.font()
             ps = f.pointSizeF()
-            f.setPointSizeF((ps if ps > 0 else 9.0) * 2.0)
+            f.setPointSizeF((ps if ps > 0 else 9.0) * 1.55)
             f.setBold(True)
             lbl.setFont(f)
             return lbl
@@ -2632,7 +2635,8 @@ class CTViewer(AbstractViewer):
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setMinimum(0)
         self._seek_slider.setMaximum(0)
-        self._seek_slider.setStyleSheet(_SEEK_SLIDER_QSS)   # ~1.65× handle
+        self._seek_slider.setMinimumHeight(26)   # room for the 20px disc handle
+        self._seek_slider.setStyleSheet(_SEEK_SLIDER_QSS)
         self._seek_slider.valueChanged.connect(self._on_seek)
         row.addWidget(self._seek_slider, 1)
         self._seek_lbl = _big(QLabel("1 / 1"))
