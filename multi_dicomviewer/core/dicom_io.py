@@ -99,6 +99,26 @@ def _series_is_secondary_capture(series) -> bool:
         getattr(ds, "SOPClassUID", "")).startswith(_SECONDARY_CAPTURE_PREFIX)
 
 
+def _is_broken_pseudo_color(rgb: np.ndarray) -> bool:
+    """True if an RGB frame is a BROKEN pseudo-colour capture: some vendors
+    (e.g. GE) store YBR / degenerate chroma under PI=RGB, so every decoder
+    renders the image with a saturated green/magenta cast — those should be
+    shown as grayscale. A GENUINE colour render (e.g. Fujifilm Synapse 3-D VR)
+    has a near-neutral background, so it stays in colour.
+
+    Discriminator: the border ring is almost always background. A real render's
+    border is black/neutral (low saturation); a broken capture's border is
+    highly saturated (the green cast). Colour-agnostic (catches green & magenta)."""
+    if rgb.ndim != 3 or rgb.shape[-1] < 3:
+        return False
+    a = rgb[..., :3].astype(np.float32)
+    border = np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]], axis=0)
+    mx = border.max(1)
+    mn = border.min(1)
+    sat = np.where(mx > 1.0, (mx - mn) / np.maximum(mx, 1.0), 0.0)
+    return float(np.median(sat)) > 0.4
+
+
 def _to_gray2d(arr: np.ndarray) -> np.ndarray:
     """Reduce a decoded frame to a 2-D grayscale array. RGB/RGBA screen
     captures (e.g. an XA radiation-dose summary page) collapse to
@@ -1039,10 +1059,12 @@ def thumbnail(series: Series, max_px: int = 144) -> np.ndarray:
         ds = pydicom.dcmread(series.files[0], force=True)
         px = _decode_frame(ds, 0)
         if px.ndim == 3:
-            if is_sc:   # broken pseudo-RGB → ITU-601 luminance (grayscale)
+            # Genuine colour (XA / IVUS, or a real colour SC render) stays
+            # colour; a BROKEN pseudo-RGB SC capture → ITU-601 luminance.
+            if is_sc and _is_broken_pseudo_color(px):
                 px = (0.299 * px[..., 0] + 0.587 * px[..., 1]
                       + 0.114 * px[..., 2]).astype(np.float32)
-            else:       # genuine colour (XA / IVUS): downsample as-is
+            else:       # downsample as-is
                 step = max(1, -(-max(px.shape[:2]) // max_px))
                 return np.ascontiguousarray(
                     px[::step, ::step, :3].astype(np.uint8)
@@ -1287,21 +1309,33 @@ def load_secondary_capture(
     dom = max(counts.items(), key=lambda kv: kv[1])[0]
     imgs = [im for im in imgs if im.shape[:2] == dom]
 
-    # Grayscale, NOT colour. These "electronic film" / render-snapshot pages
-    # are routinely stored as PI=RGB but with degenerate chroma (GE et al.) —
-    # every decoder (pydicom, pylibjpeg, …) renders them green/magenta. The
-    # real content is a grayscale CT film, so take the ITU-601 luminance
-    # (vendor-independent) and window it from the value range.
-    def _gray(im):
-        if im.ndim == 3:
-            im = (0.299 * im[..., 0] + 0.587 * im[..., 1]
-                  + 0.114 * im[..., 2])
-        return np.asarray(im, np.float32)
-    vol = np.stack([_gray(im) for im in imgs], axis=0)      # (F,H,W) float32
-    lo, hi = float(np.nanmin(vol)), float(np.nanmax(vol))
-    window = max(hi - lo, 1.0)
-    level = (hi + lo) / 2.0
-    color = False
+    # GENUINE colour (e.g. Fujifilm Synapse 3-D VR) is kept in colour. BROKEN
+    # pseudo-colour (e.g. GE "electronic film" — PI=RGB with degenerate chroma
+    # that every decoder renders green/magenta) falls back to ITU-601 grayscale,
+    # which is what those actually are (a grayscale CT film). _is_broken_pseudo_
+    # color decides from a representative frame's border (background) saturation.
+    color = any(im.ndim == 3 for im in imgs)
+    if color:
+        ref = next(im for im in imgs if im.ndim == 3)
+        color = not _is_broken_pseudo_color(ref)
+    if color:
+        def _rgb(im):
+            if im.ndim == 2:                   # a mono page in a colour series
+                g = np.clip(im, 0, 255).astype(np.uint8)
+                return np.repeat(g[..., None], 3, axis=2)
+            return np.ascontiguousarray(im[..., :3]).astype(np.uint8)
+        vol = np.stack([_rgb(im) for im in imgs], axis=0)   # (F,H,W,3) uint8
+        window = level = None
+    else:
+        def _gray(im):
+            if im.ndim == 3:
+                im = (0.299 * im[..., 0] + 0.587 * im[..., 1]
+                      + 0.114 * im[..., 2])
+            return np.asarray(im, np.float32)
+        vol = np.stack([_gray(im) for im in imgs], axis=0)  # (F,H,W) float32
+        lo, hi = float(np.nanmin(vol)), float(np.nanmax(vol))
+        window = max(hi - lo, 1.0)
+        level = (hi + lo) / 2.0
 
     plane = XAPlane(series.description or "Secondary Capture",
                     files[0], ds0, vol.shape[0], vol, is_color=color)
