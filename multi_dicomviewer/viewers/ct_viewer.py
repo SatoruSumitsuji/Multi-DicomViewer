@@ -154,6 +154,14 @@ _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
+#: Bigger groove + round handle (~1.65× the default ~16px) for the 2-D frame
+#: scrubber, so it's easy to see and grab.
+_SEEK_SLIDER_QSS = (
+    "QSlider::groove:horizontal { height:6px; background:#777;"
+    " border-radius:3px; }"
+    "QSlider::handle:horizontal { width:26px; height:26px; margin:-10px 0;"
+    " border-radius:13px; background:#e8e8e8; border:1px solid #444; }"
+)
 _TOOL_KEYS = {
     Qt.Key.Key_Z: "ZOOM", Qt.Key.Key_V: "MOVE", Qt.Key.Key_S: "SPIN",
     Qt.Key.Key_G: "PAGING", Qt.Key.Key_W: "WL", Qt.Key.Key_R: "ROTATE",
@@ -2610,15 +2618,25 @@ class CTViewer(AbstractViewer):
         discrete frames) and for single-frame series."""
         self._seek_wrap = QWidget()
         row = QHBoxLayout(self._seek_wrap)
-        row.setContentsMargins(8, 0, 8, 2)
-        row.addWidget(QLabel("Frame:"))
+        row.setContentsMargins(8, 2, 8, 2)
+
+        def _big(lbl):                          # 2× label so it stands out
+            f = lbl.font()
+            ps = f.pointSizeF()
+            f.setPointSizeF((ps if ps > 0 else 9.0) * 2.0)
+            f.setBold(True)
+            lbl.setFont(f)
+            return lbl
+
+        row.addWidget(_big(QLabel("Frame:")))
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setMinimum(0)
         self._seek_slider.setMaximum(0)
+        self._seek_slider.setStyleSheet(_SEEK_SLIDER_QSS)   # ~1.65× handle
         self._seek_slider.valueChanged.connect(self._on_seek)
         row.addWidget(self._seek_slider, 1)
-        self._seek_lbl = QLabel("1 / 1")
-        self._seek_lbl.setMinimumWidth(64)
+        self._seek_lbl = _big(QLabel("1 / 1"))
+        self._seek_lbl.setMinimumWidth(96)
         row.addWidget(self._seek_lbl)
         self._seek_wrap.setVisible(False)
         return self._seek_wrap
