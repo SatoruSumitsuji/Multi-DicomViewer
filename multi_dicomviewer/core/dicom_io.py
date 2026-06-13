@@ -536,10 +536,16 @@ class XAPlane:
 
     def __init__(self, name: str, path: str, ds, total_frames: int,
                  volume: np.ndarray, is_color: bool = False,
-                 frame_files: Optional[list[str]] = None):
+                 frame_files: Optional[list[str]] = None,
+                 force_color: bool = False):
         self.name = name
         self.path = path
         self._ds = ds                 # shared by UI seek + background prefetch
+        #: When True, decode this plane in colour even if the default
+        #: decision (e.g. Modality=IVUS) would force grayscale. Toggled by
+        #: the IVUS viewer's manual "colour display" button via
+        #: :func:`apply_color_mode_to_planes`. Read by :func:`_plane_decode`.
+        self.force_color = force_color
         #: For a multi-FILE stack (Secondary Capture: one DICOM file per frame)
         #: this is the per-frame file list — frame i is decoded from
         #: frame_files[i] lazily/in the background, so the first image shows
@@ -666,6 +672,17 @@ _COLOR_PI = {
 }
 
 
+def _is_color_capable(ds) -> bool:
+    """Header-only: COULD this dataset carry genuine colour? True when it is
+    stored multi-sample (SamplesPerPixel>=3) or with a colour Photometric-
+    Interpretation. Unlike :func:`_is_color_ds` this does NOT force IVUS to
+    grayscale — it answers "is there any colour to recover if the user asks
+    for it?", which gates the IVUS viewer's manual colour toggle."""
+    if int(getattr(ds, "SamplesPerPixel", 1) or 1) >= 3:
+        return True
+    return str(getattr(ds, "PhotometricInterpretation", "")) in _COLOR_PI
+
+
 def _is_color_ds(ds) -> bool:
     # IVUS is fundamentally a grayscale modality. Some scanners export
     # it as YBR_FULL_422 / SamplesPerPixel=3 for JPEG-baseline storage
@@ -673,11 +690,12 @@ def _is_color_ds(ds) -> bool:
     # channel carries the real signal. Treating those as colour gives
     # the image a faint tint, which the user sees as a bug. So: force
     # IVUS to the grayscale path regardless of PhotometricInterpretation.
+    # The IVUS viewer can override this per-series via a manual "colour
+    # display" toggle (force_color → apply_color_mode_to_planes) for the
+    # rare genuinely-colour IVUS (e.g. NIRS chemogram, VH tissue maps).
     if str(getattr(ds, "Modality", "")).upper() == "IVUS":
         return False
-    if int(getattr(ds, "SamplesPerPixel", 1) or 1) >= 3:
-        return True
-    return str(getattr(ds, "PhotometricInterpretation", "")) in _COLOR_PI
+    return _is_color_capable(ds)
 
 
 _IMAGECODECS = None  # module: lazy-imported once; False if unavailable
@@ -841,12 +859,19 @@ def _to_u8(arr: np.ndarray) -> np.ndarray:
     return np.clip(a, 0, 255).astype(np.uint8)
 
 
-def _decode_frame(ds, index: int) -> np.ndarray:
+def _decode_frame(ds, index: int, force_color: bool = False) -> np.ndarray:
     """One frame ready for display: grayscale -> 2-D float (window/level
     applied later by the viewer); color -> (H, W, 3) uint8 RGB, already
-    in display color space (YBR converted, palette LUT applied)."""
+    in display color space (YBR converted, palette LUT applied).
+
+    *force_color* overrides the default grayscale decision for a colour-
+    capable dataset (used by the IVUS viewer's manual colour toggle, which
+    recovers the rare genuinely-colour IVUS that :func:`_is_color_ds`
+    otherwise forces to grayscale). It has no effect on a dataset that is
+    not colour-capable — that still decodes to 2-D grayscale."""
     arr = _raw_frame(ds, index)
-    if not _is_color_ds(ds):
+    color = _is_color_ds(ds) or (force_color and _is_color_capable(ds))
+    if not color:
         # IVUS encoded as YBR has the luminance in channel 0; pull THAT
         # rather than averaging Y+Cb+Cr (which would mix in the
         # near-neutral chroma and produce a faint tint after windowing).
@@ -899,11 +924,12 @@ def _plane_decode(plane: "XAPlane", i: int) -> np.ndarray:
     is the single-dataset path. For a multi-FILE Secondary-Capture stack it
     reads frame i's own file and matches the volume's colour/grayscale format
     (so the whole stack doesn't have to be decoded up-front)."""
+    fc = bool(getattr(plane, "force_color", False))
     ff = getattr(plane, "frame_files", None)
     if ff is None:
-        return _decode_frame(plane._ds, i)
+        return _decode_frame(plane._ds, i, force_color=fc)
     ds = pydicom.dcmread(ff[i], force=True)
-    fr = _decode_frame(ds, 0)
+    fr = _decode_frame(ds, 0, force_color=fc)
     if plane.volume.ndim == 4:                 # (N,H,W,3) colour volume
         if fr.ndim == 2:
             g = np.clip(fr, 0, 255).astype(np.uint8)
@@ -916,6 +942,52 @@ def _plane_decode(plane: "XAPlane", i: int) -> np.ndarray:
                   + 0.114 * fr[..., 2])
         fr = np.asarray(fr, np.float32)
     return _fit_frame(fr, plane.volume.shape[1:])
+
+
+def apply_color_mode_to_planes(planes: list["XAPlane"], color: bool) -> bool:
+    """Re-decode every plane in *planes* into grayscale or colour and reshape
+    its volume so the lazy frame decode / background prefetch fill in the same
+    format. This is how the IVUS viewer's manual "colour display" toggle
+    overrides the default decision (IVUS always grayscale).
+
+    Frame 0 is decoded eagerly to learn the new shape; the rest reset to
+    not-ready so they decode on demand / via prefetch in the new mode. The
+    caller MUST stop any running prefetch BEFORE calling this (the volume
+    arrays are replaced, so a concurrent prefetch write would target a stale
+    buffer) and restart it afterwards.
+
+    Returns the ACHIEVED colour flag: False when no plane could produce colour
+    (not colour-capable, or frame 0 still decodes to 2-D even when forced) — the
+    caller should then leave the toggle off and tell the user there is no colour
+    to show. True when at least one plane became colour."""
+    achieved = False
+    for plane in planes:
+        plane.force_color = bool(color)
+        # Decode frame 0 in the requested mode to learn its new shape/dtype.
+        # force_color is read inside _plane_decode, so this honours the toggle.
+        f0 = _plane_decode(plane, 0)
+        is_col = f0.ndim == 3
+        if is_col:
+            f0 = np.ascontiguousarray(f0[..., :3]).astype(np.uint8)
+            dt = np.uint8
+        elif np.issubdtype(f0.dtype, np.floating):
+            f0 = np.asarray(f0, np.float32)
+            dt = np.float32
+        else:
+            dt = f0.dtype
+        # Swap the volume/_ready arrays under the plane lock so a (mis-stopped)
+        # background prefetch can't write a frame into the half-replaced state.
+        # The caller is still expected to stop the prefetch first; this is
+        # defence-in-depth against the 80 ms-wait race.
+        with plane._lock:
+            plane.volume = np.zeros(
+                (plane.total_frames,) + f0.shape, dtype=dt)
+            plane.volume[0] = f0
+            plane.is_color = is_col
+            plane._ready = np.zeros(plane.total_frames, dtype=bool)
+            plane._ready[0] = True
+        achieved = achieved or is_col
+    return achieved
 
 
 def prefetch_planes(

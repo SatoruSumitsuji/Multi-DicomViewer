@@ -17,6 +17,7 @@ SETTINGS_DIR = Path.home() / ".multi-dicomviewer"
 TAG_CONDITIONS_PATH = SETTINGS_DIR / "tag_conditions.json"
 EXPORT_FIELDS_PATH = SETTINGS_DIR / "export_fields.json"
 ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
+IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
 _SCHEMA_VERSION = 2
 
 #: Modalities that get their own persisted tag list. Anything else
@@ -168,6 +169,57 @@ def save_export_fields_by_modality(by_mod: dict) -> None:
         }
         EXPORT_FIELDS_PATH.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+# ----------------------------------------------------- IVUS colour display
+# IVUS is decoded grayscale by default (see core.dicom_io._is_color_ds); the
+# rare genuinely-colour IVUS (NIRS chemogram, VH tissue map) is opted into
+# per-series by the user via the viewer's "colour display" toggle. We remember
+# that choice keyed by SeriesInstanceUID so re-opening the same series restores
+# colour automatically. Grayscale (the default) is NOT stored — absence means
+# grayscale — so the file only ever lists series the user explicitly coloured.
+def load_ivus_color(series_uid: str) -> bool:
+    """True if the user previously chose colour display for this IVUS series.
+    Best-effort; defaults to False (grayscale) when unset or unreadable."""
+    if not series_uid:
+        return False
+    try:
+        data = json.loads(IVUS_COLOR_PATH.read_text(encoding="utf-8"))
+        series = data.get("series") if isinstance(data, dict) else None
+        return bool(isinstance(series, dict) and series.get(series_uid, False))
+    except (OSError, ValueError):
+        return False
+
+
+def save_ivus_color(series_uid: str, color: bool) -> None:
+    """Best-effort persist of the IVUS colour-display choice for one series.
+    A failed write must not break the session. Turning colour OFF removes the
+    entry (grayscale is the unstored default)."""
+    if not series_uid:
+        return
+    try:
+        try:
+            data = json.loads(IVUS_COLOR_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        series = data.get("series")
+        if not isinstance(series, dict):
+            series = {}
+        if color:
+            series[series_uid] = True
+        else:
+            series.pop(series_uid, None)
+        data["series"] = series
+        data["version"] = 1
+        IVUS_COLOR_PATH.parent.mkdir(parents=True, exist_ok=True)
+        IVUS_COLOR_PATH.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except OSError:
