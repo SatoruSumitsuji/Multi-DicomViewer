@@ -1117,6 +1117,7 @@ class CTViewer(AbstractViewer):
         self._measure_bar.setVisible(False)
         lay.addWidget(self._measure_bar)
         lay.addLayout(imgrow, 1)
+        lay.addWidget(self._build_seek_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -2584,6 +2585,7 @@ class CTViewer(AbstractViewer):
             self._refresh_side_buttons()
         self._sync_slab_spin()
         self._refresh(reset_cam=reset_cam or is2d)
+        self._sync_seek()
 
     def _page2d(self, step):
         """Page by *step* native slices in 2-D mode (integer slice index)."""
@@ -2598,6 +2600,56 @@ class CTViewer(AbstractViewer):
         self._clamp_center()
         self._view_initial = False
         self._refresh()
+        self._sync_seek()
+
+    # ------------------------------------------------------ 2-D frame seek bar
+    def _build_seek_bar(self) -> QWidget:
+        """A bottom scrubber for 2-D mode: shows N/total and lets the user drag
+        through the native slices (so a multi-frame series doesn't look like a
+        single image). Hidden in 3-D MPR (paging there is continuous, not
+        discrete frames) and for single-frame series."""
+        self._seek_wrap = QWidget()
+        row = QHBoxLayout(self._seek_wrap)
+        row.setContentsMargins(8, 0, 8, 2)
+        row.addWidget(QLabel("Frame:"))
+        self._seek_slider = QSlider(Qt.Orientation.Horizontal)
+        self._seek_slider.setMinimum(0)
+        self._seek_slider.setMaximum(0)
+        self._seek_slider.valueChanged.connect(self._on_seek)
+        row.addWidget(self._seek_slider, 1)
+        self._seek_lbl = QLabel("1 / 1")
+        self._seek_lbl.setMinimumWidth(64)
+        row.addWidget(self._seek_lbl)
+        self._seek_wrap.setVisible(False)
+        return self._seek_wrap
+
+    def _on_seek(self, val):
+        """Scrubber moved → jump to that native slice (2-D mode)."""
+        if self._mode != "2D" or self._image is None:
+            return
+        nz = self._image.GetDimensions()[2]
+        sz = self._dims[2]
+        self._slice2d = int(min(max(int(val), 0), max(0, nz - 1)))
+        z = self._slice2d * sz if sz > 1e-6 else 0.0
+        self._center[2] = z
+        self._pc["A"][2] = z
+        self._clamp_center()
+        self._view_initial = False
+        self._refresh()
+        self._seek_lbl.setText(f"{self._slice2d + 1} / {nz}")
+
+    def _sync_seek(self):
+        """Show/refresh the scrubber to match the current mode and slice."""
+        nz = self._image.GetDimensions()[2] if self._image is not None else 1
+        show = (self._mode == "2D" and nz > 1)
+        self._seek_wrap.setVisible(show)
+        if not show:
+            return
+        self._seek_slider.blockSignals(True)
+        self._seek_slider.setMaximum(nz - 1)
+        self._seek_slider.setValue(self._slice2d)
+        self._seek_slider.blockSignals(False)
+        self._seek_lbl.setText(f"{self._slice2d + 1} / {nz}")
 
     # ------------------------------------------------- 2-D image transforms
     def _apply_2d_axes(self):
