@@ -87,7 +87,14 @@ class ImageCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(80, 80)
-        self.setMouseTracking(True)
+        # Mouse tracking (move events with NO button held) is only needed for
+        # the live hover preview while DRAWING a measurement. Leaving it on
+        # floods the UI thread with move events whenever the cursor crosses the
+        # image — on macOS that starves the cine timer, so just moving the
+        # mouse briefly stalls playback. Enabled on demand in set_measure_type
+        # (button-held drags — pan, handle edit, IVUS centre — still deliver
+        # move events without it). Default off.
+        self.setMouseTracking(False)
         # Qt fires contextMenuEvent on right-click under the default
         # policy, which on some Windows + OpenGL combinations races our
         # right-click-to-close-polygon handler. Force the right button to
@@ -321,6 +328,10 @@ class ImageCanvas(QWidget):
         self._draft = None
         self._edit = None
         self._hover = None
+        # Hover preview (and thus move-event tracking) is only needed while a
+        # drawing tool is active; off otherwise so idle/playback mouse motion
+        # doesn't flood the event loop (see __init__).
+        self.setMouseTracking(bool(self.meas_type))
         self.setCursor(
             Qt.CursorShape.CrossCursor if self.meas_type
             else Qt.CursorShape.ArrowCursor

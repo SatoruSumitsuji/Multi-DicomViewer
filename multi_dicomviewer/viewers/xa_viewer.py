@@ -393,6 +393,10 @@ class XAViewer(AbstractViewer):
         # driver) is pushing a frame in, so the resulting _frame change
         # does NOT echo back via frame_changed.
         self._suspend_frame_signal = False
+        #: True while a coalesced seek render is queued (see _seek): a long
+        #: pull-back's slider fires many valueChanged per mouse move; we render
+        #: once per event-loop pass instead of per step so the handle keeps up.
+        self._seek_render_pending = False
 
         self.canvas = ImageCanvas()    # primary / Front
         self.canvas2 = ImageCanvas()   # Lateral, only in side-by-side
@@ -1347,10 +1351,13 @@ class XAViewer(AbstractViewer):
         self._seeking = True
 
     def _on_seek_end(self) -> None:
-        """Seek handle released — back to crisp bilinear and repaint the
-        settled frame."""
+        """Seek handle released — settle the final frame at crisp bilinear,
+        cancelling any pending coalesced render."""
         self._seeking = False
+        self._seek_render_pending = False
         self._render()
+        if not self._suspend_frame_signal:
+            self.frame_changed.emit(self._frame)
 
     def _seek(self, value: int):
         # Keep the handle inside the Play range — dragging past either
@@ -1362,6 +1369,22 @@ class XAViewer(AbstractViewer):
             self.frame_slider.blockSignals(False)
             value = clamped
         self._frame = value
+        # Coalesce: a 4000+-frame slider fires many valueChanged per mouse
+        # move; rendering each one can't keep up and the handle lags the
+        # cursor. Update the model now but render once on the next event-loop
+        # pass, collapsing a burst of steps into a single paint of the latest
+        # frame. The slider widget itself repaints immediately, so the handle
+        # tracks the mouse while the image catches up a tick later.
+        if not self._seek_render_pending:
+            self._seek_render_pending = True
+            QTimer.singleShot(0, self._flush_seek_render)
+
+    def _flush_seek_render(self) -> None:
+        """Render the latest sought frame (deferred from _seek). A no-op if a
+        release already settled it (pending cleared in _on_seek_end)."""
+        if not self._seek_render_pending:
+            return
+        self._seek_render_pending = False
         self._render()
         if not self._suspend_frame_signal:
             self.frame_changed.emit(self._frame)
