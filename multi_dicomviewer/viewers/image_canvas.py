@@ -83,10 +83,22 @@ class ImageCanvas(QWidget):
     #: (it has the patient/series/frame context for the default filename).
     #: self.sender() identifies which canvas fired.
     export_requested = pyqtSignal(str)
+    #: Arrow key pressed while THIS canvas has keyboard focus (click-to-focus).
+    #: Carries "up"/"down"/"left"/"right"; the cine viewer maps up/down to
+    #: Prev/Next series and left/right to prev/next frame. Because it only fires
+    #: when the image itself is focused, clicking into a spin-box / slider hands
+    #: arrow control back to that control, and the Tree / CT panes keep their own
+    #: arrow behaviour when THEY are focused.
+    arrow_pressed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(80, 80)
+        # Click-to-focus so a click on the image makes it the keyboard target:
+        # arrow keys then drive cine nav (see keyPressEvent / arrow_pressed).
+        # Clicking a spin-box / slider moves focus there and hands the arrows
+        # back to that control.
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         # Mouse tracking (move events with NO button held) is only needed for
         # the live hover preview while DRAWING a measurement. Leaving it on
         # floods the UI thread with move events whenever the cursor crosses the
@@ -881,7 +893,27 @@ class ImageCanvas(QWidget):
         return bi
 
     # ----------------------------------------------------- mouse
+    def keyPressEvent(self, e):
+        """Arrow keys drive cine navigation when the image is the focused
+        widget. Up/Down → Prev/Next series, Left/Right → prev/next frame (via
+        arrow_pressed → the viewer). Anything else bubbles up unchanged."""
+        direction = {
+            Qt.Key.Key_Up: "up",
+            Qt.Key.Key_Down: "down",
+            Qt.Key.Key_Left: "left",
+            Qt.Key.Key_Right: "right",
+        }.get(e.key())
+        if direction is not None:
+            self.arrow_pressed.emit(direction)
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
     def mousePressEvent(self, e):
+        # Take keyboard focus on click so arrow keys drive cine nav (this
+        # override doesn't call the base mousePressEvent, which is what would
+        # normally focus a ClickFocus widget, so do it explicitly).
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
         pos = e.position()
         sx, sy = pos.x(), pos.y()
         # Middle-button drag pans the (zoomed) image — independent of the
