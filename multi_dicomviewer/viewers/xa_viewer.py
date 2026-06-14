@@ -81,6 +81,18 @@ class _RangeMarks(QWidget):
     range_changed = pyqtSignal(int, int)   # (start, end), 0-based frame idx
 
     _TRI_HW = 6        # triangle half-width, px
+    _TRI_H = 11        # triangle height, px (drawn bottom-anchored on the strip)
+    #: Extra clickable height ABOVE the triangle (toward the image). Keeps the
+    #: triangle's bottom edge (apex) as the LOWEST grab point so the strip never
+    #: reaches down onto the seek handle's blue dot, while giving a little more
+    #: room to grab from the image side ("上は画像の下境界まで").
+    _GRAB_TOP_PAD = 5
+    #: Horizontal grab radius around a triangle's centre: the triangle itself
+    #: (±_TRI_HW) plus one triangle-WIDTH (2·_TRI_HW) of margin on each side, so
+    #: only a click on/near a triangle grabs it. Clicking elsewhere on the strip
+    #: (e.g. over the seek handle's column) no longer snatches the nearest
+    #: triangle — that wide reach was the "反応範囲が大きすぎ" complaint.
+    _GRAB_HX = 3 * _TRI_HW
 
     def __init__(self, slider: QSlider, parent=None):
         super().__init__(parent)
@@ -88,7 +100,8 @@ class _RangeMarks(QWidget):
         self._start = 0
         self._end = 0
         self._drag: str | None = None      # "start" | "end" | None
-        self.setFixedHeight(11)
+        # Strip = triangle height + a little top grab room (toward the image).
+        self.setFixedHeight(self._TRI_H + self._GRAB_TOP_PAD)
         self.setMouseTracking(True)
 
     def set_bounds(self, start: int, end: int) -> None:
@@ -138,11 +151,12 @@ class _RangeMarks(QWidget):
         p.setBrush(QColor(_SEEK_DOT_BLUE))
         h = self.height()
         w = self._TRI_HW
+        base_y = h - self._TRI_H        # bottom-anchored: apex sits at h-1
         for val in (self._start, self._end):
             cx = self._value_x(val)
             p.drawPolygon(QPolygon([
-                QPoint(int(round(cx - w)), 0),
-                QPoint(int(round(cx + w)), 0),
+                QPoint(int(round(cx - w)), base_y),
+                QPoint(int(round(cx + w)), base_y),
                 QPoint(int(round(cx)), h - 1),
             ]))
 
@@ -156,6 +170,11 @@ class _RangeMarks(QWidget):
         x = e.position().x()
         ds = abs(x - self._value_x(self._start))
         de = abs(x - self._value_x(self._end))
+        # Only grab when the press is within a triangle's horizontal reach
+        # (_GRAB_HX). A click elsewhere on the strip does nothing, so it can no
+        # longer drag a far triangle or fight the seek handle below.
+        if min(ds, de) > self._GRAB_HX:
+            return
         # Grab the nearer triangle. When both ends sit on the same frame
         # (a fresh full range collapses start==end only for 1-frame cines,
         # which hide the strip) bias to whichever side the press is toward.
@@ -475,6 +494,22 @@ class XAViewer(AbstractViewer):
         self.canvas2.measurement_done.connect(self._on_measurement)
         self.canvas.export_requested.connect(self._on_export_image)
         self.canvas2.export_requested.connect(self._on_export_image)
+        self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
+        self.canvas2.arrow_pressed.connect(self._on_canvas_arrow)
+
+    def _on_canvas_arrow(self, direction: str) -> None:
+        """Arrow key on a focused cine image: Up/Down step Prev/Next series,
+        Left/Right step one frame back/forward. Left/Right are a no-op on a
+        single-frame image (step_frame clamps), matching 'no seek bar → no
+        left/right' from the spec; Up/Down always navigate series."""
+        if direction == "up":
+            self.series_nav.emit("prev")
+        elif direction == "down":
+            self.series_nav.emit("next")
+        elif direction == "left":
+            self.step_frame(-1)
+        elif direction == "right":
+            self.step_frame(+1)
 
     def _on_measurement(self, m):
         self.readout.setText(f"{m.kind}: {m.label()}")
