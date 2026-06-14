@@ -32,7 +32,9 @@ from typing import Optional, Sequence
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPolygon
+from PyQt6.QtGui import (
+    QColor, QImage, QPainter, QPen, QPixmap, QPolygon,
+)
 from PyQt6.QtWidgets import QWidget
 
 from multi_dicomviewer.core.image_export import pick_export_format
@@ -62,7 +64,14 @@ def build_long_axis(
     a coarse, fast low-LOD preview that still spans the full vessel depth.
     """
     n = len(frames)
-    out = np.zeros((lateral_samples, n), dtype=np.uint8)
+    # Colour strip when the frames are RGB — the cut-line colour is sampled
+    # as-is (so a colour IVUS, e.g. a NIRS chemogram, keeps its colour in the
+    # long axis); plain (lateral, n) grayscale otherwise.
+    is_color = any(f is not None and f.ndim == 3 for f in frames)
+    out = np.zeros(
+        (lateral_samples, n, 3) if is_color else (lateral_samples, n),
+        dtype=np.uint8,
+    )
     if n == 0:
         return out
     half = (lateral_samples - 1) / 2.0
@@ -74,17 +83,26 @@ def build_long_axis(
         f = frames[i]
         if f is None:
             continue
-        if f.ndim == 3:                          # color → luminance
-            f = f.mean(axis=2)
         h, w = f.shape[:2]
         cx, cy = centers[i]
         xs = np.rint(cx + dxs).astype(np.int32)
         ys = np.rint(cy + dys).astype(np.int32)
         mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
-        col = np.zeros(lateral_samples, dtype=f.dtype)
-        if mask.any():
-            col[mask] = f[ys[mask], xs[mask]]
-        out[:, i] = apply_u8(col)
+        if is_color:
+            # Sample RGB. A stray grayscale frame in a colour strip is
+            # broadcast to all three channels so the assignment still fits.
+            col = np.zeros((lateral_samples, 3), dtype=f.dtype)
+            if mask.any():
+                if f.ndim == 3:
+                    col[mask] = f[ys[mask], xs[mask], :3]
+                else:
+                    col[mask] = f[ys[mask], xs[mask]][:, None]
+            out[:, i] = apply_u8(col)
+        else:
+            col = np.zeros(lateral_samples, dtype=f.dtype)
+            if mask.any():
+                col[mask] = f[ys[mask], xs[mask]]
+            out[:, i] = apply_u8(col)
     return out
 
 
@@ -124,6 +142,14 @@ class LongAxisCanvas(QWidget):
         self.setPalette(pal)
 
         self._qimg: Optional[QImage] = None
+        #: Cached down-scaled pixmap of the strip at the current widget size.
+        #: A long pull-back's strip QImage is thousands of columns wide; re-
+        #: scaling it on every frame-cursor move (set_current_frame → update)
+        #: stutters/freezes seek + playback on slower GPUs (Mac). We scale
+        #: ONCE per (image, size) and just blit this pixmap on cursor moves;
+        #: only the thin cursor/axis overlay is redrawn each frame.
+        self._scaled_pix: Optional[QPixmap] = None
+        self._scaled_key: Optional[tuple] = None
         self._n_frames = 0
         self._cur_frame = 0
         #: Frame indices at which the user has set a manual rotation
@@ -151,20 +177,35 @@ class LongAxisCanvas(QWidget):
 
     # ----------------------------------------------------------- public
     def set_image(self, arr: np.ndarray) -> None:
-        """Set the long-axis image (H_lat, N_frames) uint8. Repaints."""
+        """Set the long-axis image and repaint. Accepts (H_lat, N_frames)
+        uint8 grayscale, or (H_lat, N_frames, 3) uint8 RGB for a colour
+        IVUS strip (the cut-line colour sampled as-is)."""
         arr = np.ascontiguousarray(arr)
-        if arr.ndim != 2 or arr.dtype != np.uint8:
+        if arr.dtype != np.uint8:
             return
-        h, w = arr.shape
-        self._n_frames = w
-        self._qimg = QImage(
-            arr.data, w, h, w, QImage.Format.Format_Grayscale8
-        ).copy()
+        if arr.ndim == 2:
+            h, w = arr.shape
+            self._n_frames = w
+            self._qimg = QImage(
+                arr.data, w, h, w, QImage.Format.Format_Grayscale8
+            ).copy()
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            h, w = arr.shape[:2]
+            self._n_frames = w
+            self._qimg = QImage(
+                arr.data, w, h, 3 * w, QImage.Format.Format_RGB888
+            ).copy()
+        else:
+            return
+        self._scaled_pix = None          # new image → rescale on next paint
+        self._scaled_key = None
         self.image_changed.emit()
         self.update()
 
     def clear(self) -> None:
         self._qimg = None
+        self._scaled_pix = None
+        self._scaled_key = None
         self._n_frames = 0
         self._cur_frame = 0
         self._keyframes = []
@@ -227,6 +268,27 @@ class LongAxisCanvas(QWidget):
         if clean != self._keyframes:
             self._keyframes = clean
             self.update()
+
+    def _ensure_scaled(self, w: int, h: int) -> None:
+        """(Re)build the cached down-scaled strip pixmap for widget size
+        (w, h). No-op when the image and size are unchanged — so the frequent
+        frame-cursor repaints just blit this pixmap instead of re-scaling a
+        multi-thousand-column QImage every time. FastTransformation matches
+        the previous drawImage (nearest) scaling, so the look is identical."""
+        if self._qimg is None or w <= 0 or h <= 0:
+            self._scaled_pix = None
+            self._scaled_key = None
+            return
+        key = (self._qimg.cacheKey(), int(w), int(h))
+        if self._scaled_pix is not None and self._scaled_key == key:
+            return
+        scaled = self._qimg.scaled(
+            int(w), int(h),
+            Qt.AspectRatioMode.IgnoreAspectRatio,
+            Qt.TransformationMode.FastTransformation,
+        )
+        self._scaled_pix = QPixmap.fromImage(scaled)
+        self._scaled_key = key
 
     # ----------------------------------------------------- coord transforms
     def _draw_rect(self) -> QRect:
@@ -349,7 +411,9 @@ class LongAxisCanvas(QWidget):
             )
             return
         r = self._draw_rect()
-        p.drawImage(r, self._qimg)
+        self._ensure_scaled(r.width(), r.height())
+        if self._scaled_pix is not None:
+            p.drawPixmap(r.x(), r.y(), self._scaled_pix)
         # Horizontal axis (where all rotation centres project — by
         # construction the strip's vertical mid-row).
         p.setPen(QPen(QColor(255, 220, 80, 110), 1, Qt.PenStyle.DashLine))
