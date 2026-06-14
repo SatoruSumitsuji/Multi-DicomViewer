@@ -27,12 +27,14 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 
+from multi_dicomviewer.core.dicom_io import apply_color_mode_to_planes
 from multi_dicomviewer.core.image_export import export_image_as, safe_basename
+from multi_dicomviewer.core.settings import load_ivus_color, save_ivus_color
 from multi_dicomviewer.viewers.long_axis_canvas import (
     LongAxisCanvas, build_long_axis,
 )
 from multi_dicomviewer.viewers.xa_viewer import (
-    XAViewer, apply_window,
+    XAViewer, _Prefetcher, apply_window,
 )
 
 
@@ -273,6 +275,26 @@ class IVUSViewer(XAViewer):
         self._clear_centers_btn.clicked.connect(self._clear_all_centers)
         ivus_row.addWidget(self._clear_centers_btn)
         ivus_row.addStretch(1)
+
+        # "カラー表示" toggle — IVUS decodes grayscale by default (the chroma
+        # of a YBR-stored grayscale IVUS is just compression noise, and showing
+        # it tints the image). The rare genuinely-colour IVUS (NIRS chemogram,
+        # VH tissue map) is opted into per-series here: click to recover colour,
+        # click again to return to grayscale. Shown on every IVUS for a
+        # consistent toolbar; on a truly monochrome series the click is a no-op
+        # and reports "no colour" (see _on_color_toggle). The choice persists
+        # per SeriesInstanceUID (core.settings.save_ivus_color).
+        self._color_btn = QPushButton("カラー表示")
+        self._color_btn.setCheckable(True)
+        self._color_btn.setToolTip(
+            "IVUS をカラー表示に切り替える(NIRS ケモグラム等の色情報を復元)。\n"
+            "通常の IVUS はグレイのまま。もう一度押すとグレイに戻ります。"
+        )
+        self._color_btn.setStyleSheet(
+            "QPushButton:checked { background:#c0392b; color:white; }"
+        )
+        self._color_btn.clicked.connect(self._on_color_toggle)
+        ivus_row.addWidget(self._color_btn)
         # Insert as the second item of the viewer's main column (index 1),
         # directly under the inherited series-nav row (index 0).
         self.layout().insertLayout(1, ivus_row)
@@ -326,6 +348,8 @@ class IVUSViewer(XAViewer):
         # "horizontal" and the previous zoom is unlikely to fit.
         self._la_angle = 0.0
         self._la_img = None
+        # New series → drop the long-axis rotation-drag frame cache.
+        self._la_drag_frames = None
         self.long_axis.reset_h_zoom()
         # New series → no keyframes yet; clear markers & disable jump
         # buttons until the user keys at least one centre.
@@ -333,6 +357,116 @@ class IVUSViewer(XAViewer):
         if self._la_visible:
             self._refresh_center_marker()
             self._rebuild_long_axis()
+        # Restore this series' remembered colour choice (default grayscale).
+        self._sync_color_toggle()
+
+    # ======================================================= colour display
+    def _sync_color_toggle(self) -> None:
+        """Set the カラー表示 button to this series' remembered choice and
+        apply it. super().load_series has just (re)built every plane in the
+        default grayscale mode, so we only need to flip to colour when the
+        user previously chose it for this SeriesInstanceUID."""
+        uid = getattr(self, "_loaded_uid", "")
+        want = load_ivus_color(uid) if uid else False
+        achieved = self._set_color_mode(True) if want else False
+        self._color_btn.blockSignals(True)
+        self._color_btn.setChecked(bool(achieved))
+        self._color_btn.blockSignals(False)
+
+    def _on_color_toggle(self) -> None:
+        """カラー表示 button click. Switch the whole series between grayscale
+        and colour, persist the choice, and — if the user asked for colour on
+        a series that has none — revert and say so."""
+        want = self._color_btn.isChecked()
+        achieved = self._set_color_mode(want)
+        if want and not achieved:
+            self._color_btn.blockSignals(True)
+            self._color_btn.setChecked(False)
+            self._color_btn.blockSignals(False)
+            self.readout.setText(
+                "このIVUSにカラー情報はありません(グレイ表示のまま)。"
+            )
+            return
+        uid = getattr(self, "_loaded_uid", "")
+        if uid:
+            save_ivus_color(uid, achieved)
+        self.readout.setText(
+            "カラー表示に切り替えました。" if achieved
+            else "グレイスケール表示に戻しました。"
+        )
+
+    def _set_color_mode(self, color: bool) -> bool:
+        """Re-decode every plane grayscale↔colour and refresh the viewer to
+        match. Returns the achieved colour flag (False if no colour exists to
+        show). Stops cine + prefetch first because the volume arrays are
+        replaced, then restarts the prefetch in the new mode."""
+        if not self._planes:
+            return False
+        self.stop()
+        # FULLY stop the prefetch before apply_color_mode_to_planes swaps each
+        # plane's volume/_ready arrays. The shared _stop_prefetch only waits
+        # 80 ms; a slow colour decode still in flight would then keep writing
+        # plane.volume[i] while the array is replaced underneath it — a shape
+        # race (gray 2-D frame into a colour 3-D slot) that throws in the
+        # prefetch thread, which PyQt6 turns into a hard abort. Wait unbounded
+        # so no decode is mid-flight during the swap.
+        if self._prefetch is not None:
+            self._prefetch.stop()
+            self._prefetch.wait()
+            self._prefetch = None
+        achieved = apply_color_mode_to_planes(self._planes, color)
+        self._is_color = achieved
+        # The planes were re-decoded in the new mode — drop the long-axis
+        # rotation-drag frame cache so it rebuilds against the new pixels.
+        self._la_drag_frames = None
+
+        # Mirror load_series' W/L-slider handling for the new mode: colour has
+        # no window/level, grayscale re-derives the span from frame 0.
+        for s in (self.win_slider, self.lvl_slider):
+            s.blockSignals(True)
+        if achieved:
+            self.win_slider.setEnabled(False)
+            self.lvl_slider.setEnabled(False)
+        else:
+            self.win_slider.setEnabled(True)
+            self.lvl_slider.setEnabled(True)
+            stacked = np.concatenate(
+                [p.volume[0].ravel() for p in self._planes]
+            )
+            vmin, vmax = float(stacked.min()), float(stacked.max())
+            span = max(vmax - vmin, 1.0)
+            self._window, self._level = span, (vmax + vmin) / 2.0
+            self.win_slider.setRange(1, int(span * 2))
+            self.win_slider.setValue(int(self._window))
+            self.lvl_slider.setRange(int(vmin - span), int(vmax + span))
+            self.lvl_slider.setValue(int(self._level))
+        for s in (self.win_slider, self.lvl_slider):
+            s.blockSignals(False)
+        self._refresh_wl_lut()
+
+        # Reflect the new tone in the title bar (… | color | … vs grayscale).
+        self._update_color_title()
+
+        # Warm the rest of the cine in the new mode, then repaint.
+        self._prefetch = _Prefetcher(
+            self._planes, lambda: self._timer.isActive(), self
+        )
+        self._prefetch.start()
+        self._render()
+        if self._la_visible:
+            self._rebuild_long_axis()
+        return achieved
+
+    def _update_color_title(self) -> None:
+        """Swap the grayscale/color token in the (already-built) title bar so
+        it tracks a runtime colour toggle without rebuilding the whole string."""
+        t = self.title_label.text()
+        new_tone = "color" if self._is_color else "grayscale"
+        for old in ("grayscale", "color"):
+            marker = f"|   {old}   |"
+            if marker in t:
+                self.title_label.setText(t.replace(marker, f"|   {new_tone}   |"))
+                return
 
     def _render(self):
         super()._render()
@@ -399,6 +533,19 @@ class IVUSViewer(XAViewer):
     def _rebuild_long_axis(self, draft: bool = False) -> None:
         if not (self._la_visible and self._planes and self._la_centers):
             return
+        # Re-entrancy guard: the slow path pumps the event loop
+        # (processEvents) while decoding, which can deliver an event that
+        # re-triggers a rebuild — re-entering with a half-built strip /
+        # dialog. Coalesce to the in-flight build instead.
+        if getattr(self, "_la_building", False):
+            return
+        self._la_building = True
+        try:
+            self._rebuild_long_axis_impl(draft)
+        finally:
+            self._la_building = False
+
+    def _rebuild_long_axis_impl(self, draft: bool = False) -> None:
         pi = self._active_plane_idx()
         plane = self._planes[pi]
         centers = self._la_centers[pi]
@@ -460,6 +607,7 @@ class IVUSViewer(XAViewer):
         try:
             frames = self._frames_for_long_axis(plane, progress=_cb)
             # Cache for the rest of a rotation drag; a full rebuild drops it.
+            # (Grayscale only — colour takes the persistent-luma branch above.)
             self._la_drag_frames = frames if draft else None
             dlg.setLabelText("Compositing long-axis image…")
             dlg.setMaximum(0)            # 0,0 -> indeterminate busy bar

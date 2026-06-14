@@ -7,6 +7,7 @@ planes side by side (Bi) or a single plane (Lt = plane 0, Rt = plane 1).
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, Qt, QThread, QTimer, pyqtSignal
@@ -393,6 +394,17 @@ class XAViewer(AbstractViewer):
         # driver) is pushing a frame in, so the resulting _frame change
         # does NOT echo back via frame_changed.
         self._suspend_frame_signal = False
+        #: Wall-clock cine baseline: the perf_counter time and frame index when
+        #: the cine timer was last (re)started. _next_frame advances to the
+        #: frame real time says we should be on (not strictly +1/tick), so a
+        #: late timer tick — macOS starves timers while the mouse moves —
+        #: catches up instead of slowing/stalling the cine.
+        self._cine_t0 = 0.0
+        self._cine_f0 = 0
+        #: True while a coalesced seek render is queued (see _seek): a long
+        #: pull-back's slider fires many valueChanged per mouse move; we render
+        #: once per event-loop pass instead of per step so the handle keeps up.
+        self._seek_render_pending = False
 
         self.canvas = ImageCanvas()    # primary / Front
         self.canvas2 = ImageCanvas()   # Lateral, only in side-by-side
@@ -676,6 +688,12 @@ class XAViewer(AbstractViewer):
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
+        # True while the user is dragging the seek handle — render with fast
+        # (nearest) upscaling during the drag so scrubbing a long pull-back is
+        # smooth, then settle to crisp bilinear on release.
+        self._seeking = False
+        self.frame_slider.sliderPressed.connect(self._on_seek_begin)
+        self.frame_slider.sliderReleased.connect(self._on_seek_end)
         # Enlarge just the draggable handle (~1.2×) for an easier grab,
         # styled like the W/L sliders' native thumb — a white disc with a
         # blue inner dot (radial gradient) and a thin ring. We reserve
@@ -1071,7 +1089,7 @@ class XAViewer(AbstractViewer):
         self._apply_play_interval()
         # Live-update the timer if it is currently active.
         if self._timer.isActive():
-            self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
+            self._start_cine_timer()
 
     def toggle_ecg(self) -> None:
         """W: turn the ECG strip ON/OFF. The choice PERSISTS across series
@@ -1226,6 +1244,13 @@ class XAViewer(AbstractViewer):
     def _render(self):
         if not self._planes:
             return
+        # Nearest-neighbour upscaling while the cine timer runs (smoothing every
+        # frame is a real per-frame cost on a high-DPI display); crisp bilinear
+        # when paused. set_fast_scaling only repaints on an actual change, so
+        # this is free to call each frame.
+        fast = self._timer.isActive() or self._seeking
+        self.canvas.set_fast_scaling(fast)
+        self.canvas2.set_fast_scaling(fast)
         if self._dual:
             self.canvas.set_frame(self._frame_of(self._planes[0]))
             self.canvas2.set_frame(self._frame_of(self._planes[1]))
@@ -1249,18 +1274,31 @@ class XAViewer(AbstractViewer):
         # Loop within the Play range [start, end] instead of the whole
         # series, so playback stays inside the user-set window.
         lo, hi = self._range_start, self._range_end
-        nxt = lo if self._frame >= hi else self._frame + 1
+        span = hi - lo + 1
+        if span <= 1:
+            return
+        # Wall-clock target: advance to the frame real time says we should be
+        # on, given the tempo set when the timer (re)started. A timer tick that
+        # arrives late — macOS starves timers while the mouse is moving — then
+        # jumps to the right position instead of the cine slowing to a crawl /
+        # stalling. On Windows (precise, on-time ticks) this resolves to the
+        # usual +1 per tick, so behaviour there is unchanged.
+        fps = max(self._effective_fps(), 1e-3)
+        elapsed = int((time.perf_counter() - self._cine_t0) * fps)
+        nxt = lo + (self._cine_f0 - lo + max(0, elapsed)) % span
+        if nxt == self._frame:
+            return                      # not yet time for a new frame
         if self._dual:
             shown = self._planes
         else:
             self._active = min(self._active, len(self._planes) - 1)
             shown = [self._planes[self._active]]
         # Don't decode on the UI thread mid-cine: if the prefetch hasn't
-        # warmed the next frame yet, hold on the current one (the timer
-        # keeps firing and re-checks). The paced prefetch warms far faster
-        # than any cine fps, so this only briefly holds at the very start
-        # and never stutters; once warm it plays straight from cache.
-        if nxt != lo and not all(p.is_ready(nxt) for p in shown):
+        # warmed the target frame yet, hold (the timer keeps firing and
+        # re-checks). The paced prefetch warms far faster than any cine fps,
+        # so this only briefly holds at the very start; once warm it plays
+        # straight from cache.
+        if not all(p.is_ready(nxt) for p in shown):
             return
         self._frame = nxt
         self.frame_slider.blockSignals(True)
@@ -1326,7 +1364,30 @@ class XAViewer(AbstractViewer):
 
     def _start_cine(self):
         self._render()                          # also restores the label
+        self._start_cine_timer()
+
+    def _start_cine_timer(self) -> None:
+        """(Re)start the cine timer AND reset the wall-clock baseline to the
+        current frame/time. Call this anywhere the timer (re)starts (play,
+        speed change, fps change) so _next_frame's catch-up maths reference the
+        new tempo from 'now', not a stale origin."""
+        self._cine_t0 = time.perf_counter()
+        self._cine_f0 = self._frame
         self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
+
+    def _on_seek_begin(self) -> None:
+        """Seek handle pressed — switch the cross-section to fast upscaling so
+        scrubbing a long pull-back stays smooth (see _render)."""
+        self._seeking = True
+
+    def _on_seek_end(self) -> None:
+        """Seek handle released — settle the final frame at crisp bilinear,
+        cancelling any pending coalesced render."""
+        self._seeking = False
+        self._seek_render_pending = False
+        self._render()
+        if not self._suspend_frame_signal:
+            self.frame_changed.emit(self._frame)
 
     def _seek(self, value: int):
         # Keep the handle inside the Play range — dragging past either
@@ -1338,6 +1399,28 @@ class XAViewer(AbstractViewer):
             self.frame_slider.blockSignals(False)
             value = clamped
         self._frame = value
+        # If the user seeks WHILE playing, re-base the wall-clock so the cine
+        # continues from the new position instead of _next_frame snapping back
+        # to where the old baseline says it should be.
+        if self._timer.isActive():
+            self._cine_t0 = time.perf_counter()
+            self._cine_f0 = self._frame
+        # Coalesce: a 4000+-frame slider fires many valueChanged per mouse
+        # move; rendering each one can't keep up and the handle lags the
+        # cursor. Update the model now but render once on the next event-loop
+        # pass, collapsing a burst of steps into a single paint of the latest
+        # frame. The slider widget itself repaints immediately, so the handle
+        # tracks the mouse while the image catches up a tick later.
+        if not self._seek_render_pending:
+            self._seek_render_pending = True
+            QTimer.singleShot(0, self._flush_seek_render)
+
+    def _flush_seek_render(self) -> None:
+        """Render the latest sought frame (deferred from _seek). A no-op if a
+        release already settled it (pending cleared in _on_seek_end)."""
+        if not self._seek_render_pending:
+            return
+        self._seek_render_pending = False
         self._render()
         if not self._suspend_frame_signal:
             self.frame_changed.emit(self._frame)
@@ -1399,7 +1482,7 @@ class XAViewer(AbstractViewer):
     def _set_fps(self, fps: float):
         self._fps = fps
         if self._timer.isActive():
-            self._timer.start(int(1000.0 / max(self._effective_fps(), 1e-3)))
+            self._start_cine_timer()
 
     def _wl_changed(self):
         self._window = float(self.win_slider.value())
