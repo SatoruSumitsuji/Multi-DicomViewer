@@ -86,6 +86,10 @@ class ImageCanvas(QWidget):
     #: rebuild the strip at full resolution (the drag previews at draft LOD).
     ivus_angle_changed = pyqtSignal(float)
     ivus_angle_finished = pyqtSignal()
+    #: Right-click ▸ Change W/L on the image → the host (XA/IVUS viewer)
+    #: opens its small Window/Level popup. The canvas doesn't own the W/L
+    #: state, so it just forwards the request.
+    wl_change_requested = pyqtSignal()
     #: Right-click on empty image area while NO measure tool is active →
     #: request a still-image export. Carries the chosen format key
     #: ('png'/'jpeg'/'tiff'); the viewer captures this canvas and saves it
@@ -729,8 +733,11 @@ class ImageCanvas(QWidget):
         key = pick_export_format(
             self, self.mapToGlobal(QPoint(int(sx), int(sy))),
             include_dicom=True, include_mp4=True, include_anon=True,
+            include_wl=True,
         )
-        if key:
+        if key == "wl":
+            self.wl_change_requested.emit()
+        elif key:
             self.export_requested.emit(key)
 
     def _handle_menu(self, hit, sx, sy):
