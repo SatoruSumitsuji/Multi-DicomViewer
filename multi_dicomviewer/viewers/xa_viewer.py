@@ -15,7 +15,9 @@ from PyQt6.QtGui import QColor, QPainter, QPen, QPolygon, QPolygonF
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -402,6 +404,9 @@ class XAViewer(AbstractViewer):
         self._want_dual = False   # set by the shell (XA-only + biplane)
         self._window = 1.0
         self._level = 0.5
+        # Load-time W/L baseline — what "Reset" in the W/L popup restores.
+        self._window_init = 1.0
+        self._level_init = 0.5
         self._is_color = False
         self._wl_lut = None          # (uint8 lut, offset) or None
         self._wl_off = 0
@@ -487,11 +492,17 @@ class XAViewer(AbstractViewer):
         layout.addWidget(self._ecg_strip)
         layout.addWidget(self._build_plane_bar())
         layout.addLayout(self._build_transport())
-        layout.addLayout(self._build_image_controls())
+        # W/L is rarely used on XA/IVUS and ate a permanent toolbar row, so it
+        # now lives in a small popup opened from the image right-click ▸
+        # Change W/L (built here so the sliders exist before load_series).
+        self._build_wl_dialog()
         layout.addWidget(self.readout)
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
+        # Right-click ▸ Change W/L on either canvas opens the W/L popup.
+        self.canvas.wl_change_requested.connect(self.show_wl_dialog)
+        self.canvas2.wl_change_requested.connect(self.show_wl_dialog)
         self.canvas.export_requested.connect(self._on_export_image)
         self.canvas2.export_requested.connect(self._on_export_image)
         self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
@@ -786,27 +797,75 @@ class XAViewer(AbstractViewer):
         row.addWidget(self.fps_spin)
         return row
 
-    def _build_image_controls(self):
-        row = QHBoxLayout()
+    def _build_wl_dialog(self) -> None:
+        """Create the small, non-modal Window/Level popup. The sliders are
+        the same objects the rest of the viewer drives (load_series ranges,
+        the IVUS colour toggle …); only their home changed — from a permanent
+        toolbar row to this popup, opened from the image right-click ▸ Change
+        W/L. A numeric label beside each slider shows the current value."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Window / Level")
+        dlg.setWindowFlag(Qt.WindowType.Tool, True)
+        grid = QGridLayout(dlg)
+        grid.setContentsMargins(10, 10, 10, 10)
+        grid.setHorizontalSpacing(8)
 
-        row.addWidget(QLabel("W"))
+        grid.addWidget(QLabel("W"), 0, 0)
         self.win_slider = QSlider(Qt.Orientation.Horizontal)
         self.win_slider.setStyleSheet(_SLIDER_QSS)
+        self.win_slider.setMinimumWidth(240)
         self.win_slider.valueChanged.connect(self._wl_changed)
-        row.addWidget(self.win_slider, 1)
+        grid.addWidget(self.win_slider, 0, 1)
+        self._win_val_lbl = QLabel("—")
+        self._win_val_lbl.setMinimumWidth(52)
+        grid.addWidget(self._win_val_lbl, 0, 2)
 
-        row.addWidget(QLabel("L"))
+        grid.addWidget(QLabel("L"), 1, 0)
         self.lvl_slider = QSlider(Qt.Orientation.Horizontal)
         self.lvl_slider.setStyleSheet(_SLIDER_QSS)
+        self.lvl_slider.setMinimumWidth(240)
         self.lvl_slider.valueChanged.connect(self._wl_changed)
-        row.addWidget(self.lvl_slider, 1)
+        grid.addWidget(self.lvl_slider, 1, 1)
+        self._lvl_val_lbl = QLabel("—")
+        self._lvl_val_lbl.setMinimumWidth(52)
+        grid.addWidget(self._lvl_val_lbl, 1, 2)
 
-        # W/L is rarely used for XA/IVUS — let the sliders take only ~half
-        # the stretchable width. Measure History / DICOM Tags used to sit
-        # here; they now live flush-right in the top series-nav toolbar
-        # (matching CT), so the freed space just trails off to the right.
-        row.addStretch(2)
-        return row
+        reset_btn = QPushButton("Reset")
+        reset_btn.setToolTip("W/L を読み込み時の初期設定に戻す")
+        reset_btn.clicked.connect(self._reset_wl)
+        grid.addWidget(
+            reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
+        )
+
+        self._wl_dialog = dlg
+
+    def _reset_wl(self) -> None:
+        """Restore W/L to this series' load-time baseline (popup ▸ Reset)."""
+        if not self.win_slider.isEnabled():
+            return
+        # setValue fires _wl_changed (which re-renders + refreshes labels);
+        # if a value is already at the baseline its signal won't fire, but the
+        # state is then already correct, so an explicit label refresh covers it.
+        self.win_slider.setValue(int(self._window_init))
+        self.lvl_slider.setValue(int(self._level_init))
+        self._update_wl_labels()
+
+    def show_wl_dialog(self) -> None:
+        """Open the Window/Level popup (image right-click ▸ Change W/L).
+        No-op while W/L is disabled (e.g. a colour series has no W/L)."""
+        if not self.win_slider.isEnabled():
+            self.readout.setText("このシリーズに W/L 調整はありません。")
+            return
+        self._update_wl_labels()
+        self._wl_dialog.show()
+        self._wl_dialog.raise_()
+        self._wl_dialog.activateWindow()
+
+    def _update_wl_labels(self) -> None:
+        """Refresh the popup's numeric W/L readout from the current state."""
+        if hasattr(self, "_win_val_lbl"):
+            self._win_val_lbl.setText(f"{int(self._window)}")
+            self._lvl_val_lbl.setText(f"{int(self._level)}")
 
     def _clear_measurements(self):
         for c in (self.canvas, self.canvas2):
@@ -937,6 +996,9 @@ class XAViewer(AbstractViewer):
         self._want_dual = True
         self._window = loaded.window or 1.0
         self._level = loaded.level or 0.0
+        # Remember this load's W/L so the popup's Reset can restore it.
+        self._window_init = self._window
+        self._level_init = self._level
         self._fps = loaded.cine_fps or DEFAULT_CINE_FPS
         self._is_color = bool(loaded.is_color)
 
@@ -1522,6 +1584,7 @@ class XAViewer(AbstractViewer):
     def _wl_changed(self):
         self._window = float(self.win_slider.value())
         self._level = float(self.lvl_slider.value())
+        self._update_wl_labels()
         self._refresh_wl_lut()
         self._render()
 

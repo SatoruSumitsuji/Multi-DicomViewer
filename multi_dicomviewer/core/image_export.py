@@ -69,6 +69,7 @@ def pick_export_format(
     include_dicom: bool = False,
     include_mp4: bool = False,
     include_anon: bool = False,
+    include_wl: bool = False,
 ) -> Optional[str]:
     """Show the right-click export menu at *global_point*; return the chosen
     format key, or None if dismissed.
@@ -78,7 +79,11 @@ def pick_export_format(
     (de-identified copy), MP4 (rendered cine) and CSV (DICOM-tag dump) are
     series/plane exports the host routes through the shell. They are only
     listed when the caller opts in — CT has no MP4, and the IVUS long-axis
-    strip offers neither DICOM/Anon/MP4 (still + CSV only)."""
+    strip offers neither DICOM/Anon/MP4 (still + CSV only).
+
+    When *include_wl* is set, a separator and a "Change W/L…" item are added
+    below the export list; choosing it returns the key ``"wl"`` so the host
+    can open its Window/Level popup."""
     items = list(_STILL_FORMATS)
     if include_dicom:
         items.append(("Export DICOM (lossless)", "dicom"))
@@ -89,6 +94,9 @@ def pick_export_format(
     items.append(("Export CSV (DICOM tags)", "csv"))
     menu = QMenu(parent)
     acts = [(menu.addAction(label), key) for label, key in items]
+    if include_wl:
+        menu.addSeparator()
+        acts.append((menu.addAction("Change W/L…"), "wl"))
     chosen = menu.exec(global_point)
     for act, key in acts:
         if act is chosen:

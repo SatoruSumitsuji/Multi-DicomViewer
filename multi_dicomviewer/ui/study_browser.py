@@ -541,6 +541,27 @@ class StudyBrowser(QTreeWidget):
         if it is not None:
             self.setCurrentItem(it)
 
+    def reselect_series_after_sort(self, series: Series) -> None:
+        """Re-highlight *series* after a re-sort repopulate, keeping the
+        study list OPEN and the row in view. Used so a header-sort doesn't
+        drop the user's series selection onto the parent Study node (which
+        looked like the list collapsing). setCurrentItem fires the panel's
+        selection handler — which fixes the thumbnail grid — but NOT
+        series_chosen (that only fires on a real click), so no reload."""
+        item = self._items.get(id(series))
+        if item is None:
+            return
+        study_item = item.parent()
+        patient_item = (
+            study_item.parent() if study_item is not None else None
+        )
+        if patient_item is not None:
+            patient_item.setExpanded(True)
+        if study_item is not None:
+            study_item.setExpanded(True)        # keep the series list open
+        self.setCurrentItem(item)
+        self.scrollToItem(item)
+
     def select_series(self, series: Series) -> None:
         item = self._items.get(id(series))
         if item is not None:
@@ -1466,13 +1487,18 @@ class StudyPanel(QWidget):
             self._apply_thumb_fit()
 
     def _resort_thumbs(self) -> None:
-        """Rebuild tree + thumbnails after a header-sort change and keep
-        the same Study selected (sort targets the selected Study only)."""
+        """Rebuild tree + thumbnails after a header-sort change and keep the
+        user's selection: a selected SERIES stays selected (list open, row in
+        view) instead of collapsing onto its Study node; otherwise the Study
+        node itself is re-selected. Sort targets the selected Study only."""
         if not self._patients_cache:
             return
-        cur = self.tree.current_study_key()   # before the rebuild
+        series = self._current_tree_series()   # selected series (if any)
+        cur = self.tree.current_study_key()    # its study (fallback)
         self.populate(self._patients_cache)
-        if cur is not None:
+        if series is not None:
+            self.tree.reselect_series_after_sort(series)
+        elif cur is not None:
             self.tree.select_study_key(cur)
 
     def _thumb_clicked(self, item: QListWidgetItem) -> None:

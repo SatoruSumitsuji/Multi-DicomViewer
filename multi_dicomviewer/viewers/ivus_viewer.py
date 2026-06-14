@@ -442,6 +442,8 @@ class IVUSViewer(XAViewer):
             vmin, vmax = float(stacked.min()), float(stacked.max())
             span = max(vmax - vmin, 1.0)
             self._window, self._level = span, (vmax + vmin) / 2.0
+            # New grayscale baseline → make it the W/L-popup Reset target too.
+            self._window_init, self._level_init = self._window, self._level
             self.win_slider.setRange(1, int(span * 2))
             self.win_slider.setValue(int(self._window))
             self.lvl_slider.setRange(int(vmin - span), int(vmax + span))
