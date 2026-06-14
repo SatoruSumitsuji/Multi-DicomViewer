@@ -17,7 +17,9 @@ import sys
 
 import numpy as np
 from PyQt6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap
+from PyQt6.QtGui import (
+    QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygon,
+)
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.core import measure_geom as G
@@ -77,6 +79,13 @@ class ImageCanvas(QWidget):
     #: frame's rotation centre back to the image centre; "all" → every
     #: frame's rotation centre back to the image centre.
     ivus_center_reset = pyqtSignal(str)
+    #: IVUS long-axis: user dragged the yellow cut line on the cross-section
+    #: to re-angle the long-axis plane. Emits the NEW absolute angle
+    #: (radians, image coords); the end dragged toward becomes the strip's
+    #: bottom. ``ivus_angle_finished`` fires on release so the host can
+    #: rebuild the strip at full resolution (the drag previews at draft LOD).
+    ivus_angle_changed = pyqtSignal(float)
+    ivus_angle_finished = pyqtSignal()
     #: Right-click on empty image area while NO measure tool is active →
     #: request a still-image export. Carries the chosen format key
     #: ('png'/'jpeg'/'tiff'); the viewer captures this canvas and saves it
@@ -174,12 +183,21 @@ class ImageCanvas(QWidget):
         self.ivus_show_center: bool = False
         self.ivus_center_image: tuple[float, float] | None = None
         self._ivus_dragging_center: bool = False
+        #: True while the user is dragging the yellow cut line to re-angle
+        #: the long-axis plane (set in mousePressEvent on a cut-line hit).
+        self._ivus_dragging_angle: bool = False
         # True iff the CURRENT frame's rotation centre was explicitly
         # pinned by the user (= keyframe). Drives the marker colour:
         # red = pinned/fixed, blue = interpolated/movable. IVUSViewer
         # sets this whenever the active frame or the keyframe set
         # changes.
         self.ivus_center_keyed: bool = False
+        # Current long-axis cut angle (radians, image coords) pushed in by
+        # IVUSViewer. Used to draw the MPR-style cut line + projection-
+        # direction triangles through the rotation centre: the strip's TOP
+        # is 90° counter-clockwise from the triangle direction, its BOTTOM
+        # 90° clockwise (visual sense, y-down).
+        self.ivus_la_angle: float = 0.0
         # 2-D display orientation (Rt90 / Lt90 / Flip), used mainly for static
         # Secondary-Capture (SC) images. Stored as a dihedral element: an
         # optional horizontal flip (_t_flip) followed by _t_rot ×90° clockwise.
@@ -411,13 +429,67 @@ class ImageCanvas(QWidget):
             return None
         return self._image_to_widget(self.ivus_center_image)
 
-    def _hit_ivus_center(self, sx: float, sy: float) -> bool:
-        """True when (sx, sy) widget coords are within the marker grab
-        radius (~10 px)."""
+    def _hit_ivus_center(self, sx: float, sy: float,
+                         radius: float = 12.0) -> bool:
+        """True when (sx, sy) widget coords are within *radius* px of the
+        centre marker. Default ~12 px for the left-drag grab; the right-
+        click menu uses a wider 18 px band."""
         wp = self._ivus_center_widget()
         if wp is None:
             return False
-        return math.hypot(sx - wp.x(), sy - wp.y()) <= 12.0
+        return math.hypot(sx - wp.x(), sy - wp.y()) <= radius
+
+    def _ivus_cutline_widget_pts(self):
+        """(wt, wb) widget-pixel endpoints of the long-axis cut line, or
+        None when the guide isn't shown. Mirrors the geometry drawn in
+        ``_paint_ivus_long_axis``."""
+        if (not self.ivus_show_center
+                or self.ivus_center_image is None
+                or self._img_size == (0, 0)):
+            return None
+        cx_i, cy_i = self.ivus_center_image
+        a = float(self.ivus_la_angle)
+        w_img, h_img = self._img_size
+        half = math.hypot(w_img, h_img) / 2.0
+        ux, uy = math.cos(a), math.sin(a)
+        wt = self._image_to_widget_f((cx_i - half * ux, cy_i - half * uy))
+        wb = self._image_to_widget_f((cx_i + half * ux, cy_i + half * uy))
+        return wt, wb
+
+    def _hit_ivus_cutline(self, sx: float, sy: float) -> bool:
+        """True when (sx, sy) is within ~15 px of the cut line segment
+        (a wide grab band — 2.5× the original 6 px — so the thin dashed
+        line is easy to catch). The rotation-centre grab region is checked
+        first by the caller, so the unstable near-centre part never wins."""
+        pts = self._ivus_cutline_widget_pts()
+        if pts is None:
+            return False
+        (x1, y1), (x2, y2) = pts
+        dx, dy = x2 - x1, y2 - y1
+        l2 = dx * dx + dy * dy
+        if l2 < 1e-6:
+            return False
+        t = max(0.0, min(1.0, ((sx - x1) * dx + (sy - y1) * dy) / l2))
+        px, py = x1 + t * dx, y1 + t * dy
+        return math.hypot(sx - px, sy - py) <= 15.0
+
+    def _set_cutline_from_widget(self, sx: float, sy: float) -> None:
+        """Re-angle the long-axis plane so the cut line points from the
+        rotation centre toward the cursor (image coords). Repaints
+        immediately and emits ``ivus_angle_changed`` so the viewer
+        rebuilds the strip; the end dragged toward becomes the strip's
+        bottom (sample direction = +angle)."""
+        if self.ivus_center_image is None:
+            return
+        ix, iy = self._widget_to_image_f(sx, sy)
+        cx_i, cy_i = self.ivus_center_image
+        dx, dy = ix - cx_i, iy - cy_i
+        if math.hypot(dx, dy) < 1e-3:
+            return
+        a = math.atan2(dy, dx) % (2 * math.pi)
+        self.ivus_la_angle = a
+        self.update()
+        self.ivus_angle_changed.emit(a)
 
     # ----------------------------------------------------- mm helpers
     def _mm_scale(self) -> tuple[float, float]:
@@ -941,13 +1013,29 @@ class ImageCanvas(QWidget):
         # everything else when the feature is on AND the click landed
         # near the marker. Left = start dragging it; right = Reset
         # frame / Reset All menu.
-        if self.ivus_show_center and self._hit_ivus_center(sx, sy):
-            if e.button() == Qt.MouseButton.LeftButton:
+        if self.ivus_show_center:
+            # Left-drag grabs the centre marker (any frame) to move it.
+            if (e.button() == Qt.MouseButton.LeftButton
+                    and self._hit_ivus_center(sx, sy)):
                 self._ivus_dragging_center = True
                 return
-            if e.button() == Qt.MouseButton.RightButton:
+            # Right-click offers the Remove menu ONLY on a moved (red/keyed)
+            # centre, within an 18 px band. A blue (interpolated) centre has
+            # no menu — the click falls through to normal handling.
+            if (e.button() == Qt.MouseButton.RightButton
+                    and self.ivus_center_keyed
+                    and self._hit_ivus_center(sx, sy, 18.0)):
                 self._ivus_center_menu(sx, sy)
                 return
+        # Grab the yellow cut line (away from the centre) to re-angle the
+        # long-axis plane — same priority as the centre marker so it wins
+        # over starting a measurement on the line.
+        if (self.ivus_show_center
+                and e.button() == Qt.MouseButton.LeftButton
+                and self._hit_ivus_cutline(sx, sy)):
+            self._ivus_dragging_angle = True
+            self._set_cutline_from_widget(sx, sy)
+            return
         if e.button() == Qt.MouseButton.RightButton:
             # Cancel an in-progress Center-Angle pick on right-click.
             if self._center_angle_target >= 0:
@@ -1062,6 +1150,9 @@ class ImageCanvas(QWidget):
                 self.ivus_center_changed.emit(cx, cy)
                 self.update()
             return
+        if self._ivus_dragging_angle:
+            self._set_cutline_from_widget(sx, sy)
+            return
         if self._drag_label >= 0:
             # Store the new top-left in IMAGE coords so it tracks the image
             # through zoom/pan. Unbounded map so the label can be parked in
@@ -1104,6 +1195,10 @@ class ImageCanvas(QWidget):
         if self._ivus_dragging_center:
             self._ivus_dragging_center = False
             return
+        if self._ivus_dragging_angle:
+            self._ivus_dragging_angle = False
+            self.ivus_angle_finished.emit()
+            return
         if self._drag_label >= 0:
             self._drag_label = -1
             self.setCursor(
@@ -1117,14 +1212,17 @@ class ImageCanvas(QWidget):
             self.update()
 
     def _ivus_center_menu(self, sx: float, sy: float) -> None:
-        """Reset frame / Reset All — right-click on the IVUS rotation-
-        centre marker. The actual reset is performed by the viewer
-        (single source of truth for the per-frame centres array)."""
+        """Remove this point / Remove all points — right-click on a moved
+        (red/keyed) IVUS centre marker. "this point" discards just this
+        frame's manual centre (it reverts to the value interpolated from the
+        other manual centres); "all points" discards every manual centre.
+        The actual edit is performed by the viewer (single source of truth
+        for the per-frame centres array)."""
         menu = QMenu(self)
-        a_frame = menu.addAction("Reset frame (this frame ➔ image centre)")
-        a_all = menu.addAction("Reset All (every frame ➔ image centre)")
+        a_one = menu.addAction("Remove this point")
+        a_all = menu.addAction("Remove all points")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
-        if chosen is a_frame:
+        if chosen is a_one:
             self.ivus_center_reset.emit("frame")
         elif chosen is a_all:
             self.ivus_center_reset.emit("all")
@@ -1367,29 +1465,95 @@ class ImageCanvas(QWidget):
         if self.overlay_lines:
             self._paint_overlay(p)
 
-        # IVUS long-axis rotation-centre marker. Drawn last so it sits
-        # on top of overlays. Colour conveys the centre's "state" so
-        # the user can tell at a glance whether this frame is a key:
-        #   red  = pinned by the user on this exact frame (keyed)
-        #   blue = interpolated from neighbouring keys (movable: drag
-        #          to pin a new key here, or use the menu to reset)
-        # Crosshair-on-filled-dot is preserved for visibility on
-        # grayscale IVUS without dominating the cross-section.
+        # IVUS long-axis guide (cut line + projection triangles + rotation-
+        # centre marker). Drawn last so it sits on top of overlays.
         if (self.ivus_show_center
                 and self.ivus_center_image is not None
                 and self._img_size != (0, 0)):
-            wp = self._image_to_widget(self.ivus_center_image)
-            if self.ivus_center_keyed:
-                fill = QColor(230, 30, 30, 230)     # red — fixed
-            else:
-                fill = QColor(50, 140, 255, 230)    # blue — movable
-            p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            p.setPen(QPen(QColor(0, 0, 0, 180), 3))
-            p.setBrush(fill)
-            p.drawEllipse(wp, 6, 6)
-            p.setPen(QPen(QColor(255, 255, 255), 1))
-            p.drawLine(wp.x() - 10, wp.y(), wp.x() + 10, wp.y())
-            p.drawLine(wp.x(), wp.y() - 10, wp.x(), wp.y() + 10)
+            self._paint_ivus_long_axis(p)
+
+    def _paint_ivus_long_axis(self, p: QPainter) -> None:
+        """Draw the IVUS long-axis guide on the cross-section, MPR-style:
+
+        * a dashed yellow *cut line* through the rotation centre at the
+          current long-axis angle — the diameter that becomes the strip;
+        * two cyan *projection-direction triangles* on the cut line,
+          pointing the way the long-axis is "viewed from". By construction
+          the strip's TOP is 90° counter-clockwise from the triangle
+          direction and its BOTTOM 90° clockwise (visual sense, y-down),
+          so the triangles tell the reader which wall is up/down;
+        * the rotation-centre dot (red = keyed/fixed, blue = interpolated/
+          movable), with a white crosshair for visibility on grey IVUS.
+        """
+        cx_i, cy_i = self.ivus_center_image
+        a = float(self.ivus_la_angle)
+        w_img, h_img = self._img_size
+        half = math.hypot(w_img, h_img) / 2.0          # full lateral extent
+        ux, uy = math.cos(a), math.sin(a)              # cut line: top↔bottom
+        wt = self._image_to_widget_f((cx_i - half * ux, cy_i - half * uy))
+        wb = self._image_to_widget_f((cx_i + half * ux, cy_i + half * uy))
+        wc = self._image_to_widget_f((cx_i, cy_i))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Cut line — same yellow as the strip's axis line.
+        p.setPen(QPen(QColor(255, 220, 80, 170), 1, Qt.PenStyle.DashLine))
+        p.drawLine(int(round(wt[0])), int(round(wt[1])),
+                   int(round(wb[0])), int(round(wb[1])))
+        # Projection direction = long-axis angle − 90° (image coords); the
+        # image→widget map is a uniform positive scale, so the same unit
+        # vector orients the triangles in widget space.
+        pdx, pdy = math.sin(a), -math.cos(a)
+        # Place the two triangles 1.5 メモリ (1.5 mm) out from the centre along
+        # the cut line — computed in IMAGE px (via PixelSpacing) and mapped to
+        # widget so the marks ride the 1.5 mm ring through zoom/pan. Falls back
+        # to a fraction of the frame on an uncalibrated series.
+        sx_mm, sy_mm = self._mm_scale()
+        denom = math.hypot(ux * sx_mm, uy * sy_mm)
+        if self.spacing_mm is not None and denom > 1e-6:
+            off_img = 1.5 / denom
+        else:
+            off_img = 0.08 * min(w_img, h_img)
+        # Triangle size: ×1.25 the original (ts 8 → 10), aspect kept. The
+        # APEX sits on the cut line at the 1.5 mm point and the body hangs on
+        # the −proj side, so the apex *touches* the yellow line (mirroring the
+        # long-axis cursor's arrowheads, whose apex touches the section line).
+        ts = 10.0
+        height = ts * 1.6          # apex→base distance, along proj
+        half_w = ts                # base half-width, along the cut line
+        # Colour the two triangles by orientation so up/down reads at a glance
+        # and matches the long-axis cursor (cyan = strip top, dark red = strip
+        # bottom). For the triangle offset by s·(ux,uy) from the centre, the
+        # base→apex vector (= proj) is visually counter-clockwise from the
+        # centre→triangle vector when (pos × proj) < 0 (screen y-down). That
+        # cross product is s·(ux·pdy − uy·pdx) = −s, so s = +1 is the CCW
+        # triangle. Colours chosen so the cross-section cyan triangle lines
+        # up with the long-axis cursor's cyan (top) end: cyan at s = +1, red
+        # at s = −1.
+        cyan = QColor(0, 160, 210, 240)
+        red = QColor(215, 45, 45, 240)
+        for s in (1.0, -1.0):
+            ax, ay = self._image_to_widget_f(
+                (cx_i + s * off_img * ux, cy_i + s * off_img * uy)
+            )
+            apex = QPoint(int(round(ax)), int(round(ay)))   # on the cut line
+            bcx, bcy = ax - pdx * height, ay - pdy * height  # base centre
+            b1 = QPoint(int(round(bcx - ux * half_w)),
+                        int(round(bcy - uy * half_w)))
+            b2 = QPoint(int(round(bcx + ux * half_w)),
+                        int(round(bcy + uy * half_w)))
+            p.setPen(QPen(QColor(0, 0, 0, 180), 1))
+            p.setBrush(cyan if s > 0 else red)
+            p.drawConvexPolygon(QPolygon([apex, b1, b2]))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Rotation-centre marker, on top of the guide.
+        wp = QPoint(int(round(wc[0])), int(round(wc[1])))
+        fill = (QColor(230, 30, 30, 230) if self.ivus_center_keyed
+                else QColor(50, 140, 255, 230))
+        p.setPen(QPen(QColor(0, 0, 0, 180), 3))
+        p.setBrush(fill)
+        p.drawEllipse(wp, 6, 6)
+        p.setPen(QPen(QColor(255, 255, 255), 1))
+        p.drawLine(wp.x() - 10, wp.y(), wp.x() + 10, wp.y())
+        p.drawLine(wp.x(), wp.y() - 10, wp.x(), wp.y() + 10)
 
     def _paint_hint(self, p: QPainter, text: str) -> None:
         """Status hint centred at the top of the canvas — used while

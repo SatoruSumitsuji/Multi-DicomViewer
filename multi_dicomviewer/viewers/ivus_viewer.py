@@ -220,10 +220,16 @@ class IVUSViewer(XAViewer):
         self.long_axis.rotation_finished.connect(self._on_la_rotation_finished)
         self.long_axis.frame_picked.connect(self._on_la_frame_picked)
         self.long_axis.export_requested.connect(self._on_export_long_axis)
+        # Right-click on a long-axis keyframe ▼/▲ → remove that manual centre.
+        self.long_axis.keyframe_remove.connect(self._on_la_keyframe_remove)
         # Hook the cross-section canvases for the rotation-centre marker.
         for c in (self.canvas, self.canvas2):
             c.ivus_center_changed.connect(self._on_center_dragged)
             c.ivus_center_reset.connect(self._on_center_reset)
+            # Dragging the yellow cut line on the cross-section re-angles
+            # the long-axis plane (live draft, then full rebuild on release).
+            c.ivus_angle_changed.connect(self._on_la_angle_set)
+            c.ivus_angle_finished.connect(self._on_la_rotation_finished)
 
         # The inherited (XA) series-nav row already runs Series…Flip-H/Flip-V
         # and would overflow with the IVUS controls added on the end. So the
@@ -503,6 +509,7 @@ class IVUSViewer(XAViewer):
         for c in (self.canvas, self.canvas2):
             c.ivus_center_image = (cx, cy)
             c.ivus_center_keyed = keyed
+            c.ivus_la_angle = self._la_angle
             c.update()
 
     def _frames_for_long_axis(
@@ -649,6 +656,8 @@ class IVUSViewer(XAViewer):
     # ----------------------------- mouse callbacks (long-axis canvas)
     def _on_la_rotated(self, dtheta: float) -> None:
         self._la_angle = (self._la_angle + float(dtheta)) % (2 * math.pi)
+        # Rotate the cross-section cut line + projection triangles live too.
+        self._refresh_center_marker()
         # Live preview at reduced LOD; full-res rebuild fires on release.
         self._rebuild_long_axis(draft=True)
 
@@ -656,8 +665,24 @@ class IVUSViewer(XAViewer):
         # Drag ended → crisp full-resolution strip.
         self._rebuild_long_axis(draft=False)
 
+    def _on_la_angle_set(self, angle: float) -> None:
+        """Cut-line drag on the cross-section set an absolute long-axis
+        angle. Sync the angle, redraw the cross-section guide on both
+        planes, and preview the strip at draft LOD (full rebuild fires
+        from ivus_angle_finished on release)."""
+        self._la_angle = float(angle) % (2 * math.pi)
+        self._refresh_center_marker()
+        self._rebuild_long_axis(draft=True)
+
     def _on_la_frame_picked(self, idx: int) -> None:
         self.frame_slider.setValue(int(idx))   # triggers _seek
+
+    def _on_la_keyframe_remove(self, scope: str, frame: int) -> None:
+        """Right-click ▸ Remove on a long-axis keyframe ▼/▲. Routes to the
+        shared centre-reset on the CLICKED keyframe (not necessarily the
+        current frame), so removing a point on the strip behaves exactly
+        like removing it on the cross-section's red centre marker."""
+        self._on_center_reset(scope, frame)
 
     def _on_export_long_axis(self, fmt_key) -> None:
         """Right-click export on the long-axis strip. Still image (PNG/JPEG/
@@ -697,12 +722,13 @@ class IVUSViewer(XAViewer):
         if self._la_visible:
             self._rebuild_long_axis()
 
-    def _on_center_reset(self, scope: str) -> None:
-        """Right-click menu on the marker:
+    def _on_center_reset(self, scope: str, frame: int | None = None) -> None:
+        """Remove-point menu on the marker (cross-section red centre or a
+        long-axis keyframe ▼/▲):
 
-        * "frame": un-key this frame; its centre is then recomputed from
-          interpolation (or returns to the image centre when no keys
-          remain on the plane).
+        * "frame": un-key *frame* (defaults to the current frame); its centre
+          is then recomputed from interpolation (or returns to the image
+          centre when no keys remain on the plane).
         * "all":  un-key every frame on this plane; every centre returns
           to the image centre, restoring the original long-axis view.
         """
@@ -716,8 +742,9 @@ class IVUSViewer(XAViewer):
         centers = self._la_centers[pi]
         keyed = self._la_center_keyed[pi]
         if scope == "frame":
-            if self._frame < len(centers):
-                keyed[self._frame] = False
+            fr = self._frame if frame is None else int(frame)
+            if 0 <= fr < len(centers):
+                keyed[fr] = False
             self._reinterp_centers(pi)
         else:  # "all"
             keyed[:] = False

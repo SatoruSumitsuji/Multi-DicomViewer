@@ -35,7 +35,7 @@ from PyQt6.QtCore import QPoint, QRect, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QImage, QPainter, QPen, QPixmap, QPolygon,
 )
-from PyQt6.QtWidgets import QWidget
+from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.core.image_export import pick_export_format
 
@@ -76,7 +76,11 @@ def build_long_axis(
         return out
     half = (lateral_samples - 1) / 2.0
     ux, uy = math.cos(angle_rad), math.sin(angle_rad)
-    r = (np.arange(lateral_samples, dtype=np.float32) - half) * float(step)
+    # Row 0 (strip TOP) samples the +(ux,uy) end of the cut line, the last
+    # row (strip BOTTOM) the −(ux,uy) end — so the strip's top lines up with
+    # the cross-section's cyan projection triangle (at +(ux,uy)) and the
+    # cyan-topped / red-bottomed long-axis cursor.
+    r = (half - np.arange(lateral_samples, dtype=np.float32)) * float(step)
     dxs = r * ux
     dys = r * uy
     for i in range(n):
@@ -117,6 +121,10 @@ class LongAxisCanvas(QWidget):
     #: reduced LOD for speed).
     rotation_finished = pyqtSignal()
     frame_picked = pyqtSignal(int)     # frame index (0-based)
+    #: Right-click on a keyframe (manual-centre) ▼/▲ marker → carries the
+    #: scope ('frame' = remove just that frame's manual centre, 'all' =
+    #: remove every manual centre) and the clicked keyframe's frame index.
+    keyframe_remove = pyqtSignal(str, int)
     #: Emitted whenever a new long-axis image is pushed in; the host
     #: scroll area listens so it can re-size the canvas to keep the
     #: source aspect ratio at the current viewport height.
@@ -311,15 +319,69 @@ class LongAxisCanvas(QWidget):
         f = (x - r.x()) / max(r.width(), 1) * self._n_frames
         return int(max(0, min(self._n_frames - 1, f)))
 
+    def _keyframe_tri_size(self, r: QRect) -> tuple[int, int]:
+        """(tri_h, tri_w) for the keyframe ▼/▲ markers at draw-rect *r* —
+        0.8× the original size, aspect ratio kept. Shared by paint and the
+        click hit-test so the clickable area always matches what's drawn."""
+        base_h = max(8, min(14, r.height() // 8))
+        base_w = max(5, base_h - 2)
+        return max(3, int(round(base_h * 0.8))), max(2, int(round(base_w * 0.8)))
+
+    def _keyframe_at_widget(self, x: float, y: float) -> Optional[int]:
+        """Keyframe index whose marker is under (x, y) widget px, or None.
+        The grab area is a ±tri_w column (the triangle width) spanning the
+        FULL strip height — so a click anywhere near the vertical line (not
+        only on the top/bottom triangles) counts. When two adjacent markers'
+        columns overlap, the one whose line is nearest the click wins."""
+        if not self._keyframes or self._n_frames == 0:
+            return None
+        r = self._draw_rect()
+        if not r.isValid():
+            return None
+        _tri_h, tri_w = self._keyframe_tri_size(r)
+        top_y, bot_y = r.y(), r.y() + r.height()
+        if not (top_y - 2 <= y <= bot_y + 2):
+            return None
+        best, best_dx = None, None
+        for f in self._keyframes:
+            if not (0 <= f < self._n_frames):
+                continue
+            mx = r.x() + int((f + 0.5) / self._n_frames * r.width())
+            dx = abs(x - mx)
+            if dx <= tri_w and (best_dx is None or dx < best_dx):
+                best, best_dx = f, dx
+        return best
+
+    def _keyframe_menu(self, frame: int, global_pos: QPoint) -> None:
+        """Remove this point / Remove all points for the keyframe ▼/▲ at
+        *frame* — mirrors the cross-section red-centre menu but targets the
+        clicked keyframe explicitly (it need not be the current frame)."""
+        menu = QMenu(self)
+        a_one = menu.addAction("Remove this point")
+        a_all = menu.addAction("Remove all points")
+        chosen = menu.exec(global_pos)
+        if chosen is a_one:
+            self.keyframe_remove.emit("frame", int(frame))
+        elif chosen is a_all:
+            self.keyframe_remove.emit("all", int(frame))
+
     # ----------------------------------------------------- mouse
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.RightButton:
-            # No measure tool on the long-axis strip, so right-click always
-            # offers a still export (when an image is loaded).
-            if self._qimg is not None:
-                key = pick_export_format(self, e.globalPosition().toPoint())
-                if key:
-                    self.export_requested.emit(key)
+            if self._qimg is None:
+                return
+            # Right-click ON a keyframe ▼/▲ (within the triangle width) →
+            # the same Remove this point / Remove all points menu as the
+            # cross-section's red centre marker, acting on THAT keyframe.
+            pos = e.position().toPoint()
+            kf = self._keyframe_at_widget(pos.x(), pos.y())
+            if kf is not None:
+                self._keyframe_menu(kf, e.globalPosition().toPoint())
+                return
+            # Otherwise the strip offers a still export.
+            key = pick_export_format(self, e.globalPosition().toPoint())
+            if key:
+                self.export_requested.emit(key)
             return
         if e.button() == Qt.MouseButton.LeftButton:
             self._press_pos = e.position().toPoint()
@@ -382,9 +444,13 @@ class LongAxisCanvas(QWidget):
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._press_was_left
                 and not self._dragged):
-            # Pure click → frame jump.
+            # Pure click → frame jump. A click landing ON a keyframe ▼/▲
+            # snaps to that exact manual-centre frame (precise even when
+            # neighbours are close); anywhere else seeks to the clicked x.
+            pt = e.position().toPoint()
+            kf = self._keyframe_at_widget(pt.x(), pt.y())
             self.frame_picked.emit(
-                self._x_to_frame(e.position().toPoint().x())
+                kf if kf is not None else self._x_to_frame(pt.x())
             )
         elif (e.button() == Qt.MouseButton.LeftButton
                 and self._drag_axis == "rot" and self._dragged):
@@ -426,10 +492,13 @@ class LongAxisCanvas(QWidget):
         # against dark IVUS. Red matches the "fixed = red" colour
         # convention used by the cross-section centre marker.
         if self._keyframes and self._n_frames > 0:
-            red_fill = QColor(255, 60, 60, 230)
-            red_pen = QColor(0, 0, 0, 220)        # outline for contrast
-            tri_h = max(8, min(14, r.height() // 8))
-            tri_w = max(5, tri_h - 2)
+            # Manual-centre (keyframe) markers — YELLOW ▼/▲ at the top and
+            # bottom edges with a faint connecting tick. Yellow keeps them
+            # distinct from the current-frame cursor's cyan/red arrows (which
+            # previously shared the red). Triangles are 0.8× the old size.
+            # Clicking ON a triangle jumps to that exact keyframe (see
+            # _keyframe_at_widget) so dense neighbours don't interfere.
+            tri_h, tri_w = self._keyframe_tri_size(r)
             top_y = r.y()
             bot_y = r.y() + r.height()
             for f in self._keyframes:
@@ -438,13 +507,20 @@ class LongAxisCanvas(QWidget):
                 mx = r.x() + int(
                     (f + 0.5) / self._n_frames * r.width()
                 )
+                # The marker for the CURRENT frame is drawn fully opaque so
+                # "you are on a manual-centre frame" stands out at a glance;
+                # every other keyframe marker is faded to 50% alpha.
+                fa = 1.0 if f == self._cur_frame else 0.5
+                tick = QColor(255, 220, 0, int(130 * fa))
+                fill = QColor(255, 220, 0, int(235 * fa))
+                outline = QColor(0, 0, 0, int(220 * fa))
                 # Thin vertical tick connecting the two triangles —
                 # easy to spot even on a very wide zoomed-in strip.
-                p.setPen(QPen(QColor(255, 60, 60, 160), 1))
+                p.setPen(QPen(tick, 1))
                 p.drawLine(mx, top_y + tri_h, mx, bot_y - tri_h)
                 # Top ▼ (apex pointing down into the strip)
-                p.setPen(QPen(red_pen, 1))
-                p.setBrush(red_fill)
+                p.setPen(QPen(outline, 1))
+                p.setBrush(fill)
                 p.drawConvexPolygon(QPolygon([
                     QPoint(mx, top_y + tri_h),
                     QPoint(mx - tri_w, top_y),
@@ -457,12 +533,43 @@ class LongAxisCanvas(QWidget):
                     QPoint(mx + tri_w, bot_y),
                 ]))
             p.setBrush(Qt.BrushStyle.NoBrush)
-        # Current frame cursor (yellow vertical line).
+        # Current frame cursor — the vertical bar standing for the cross-
+        # section shown above. Top half CYAN, bottom half RED to match the
+        # strip's up/down. Each half carries a LEFT-pointing arrowhead on the
+        # RIGHT side of the line (apex touching the line): cyan at the top
+        # end, red at the bottom end — so up/down maps to the cyan/red
+        # projection triangles on the cross-section. Antialias the heads.
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
         cx = r.x() + int(
             (self._cur_frame + 0.5) / max(self._n_frames, 1) * r.width()
         )
-        p.setPen(QPen(QColor(255, 220, 0, 220), 2))
-        p.drawLine(cx, r.y(), cx, r.y() + r.height())
+        top_y = r.y()
+        bot_y = r.y() + r.height()
+        mid_y = r.y() + r.height() // 2
+        cyan = QColor(0, 160, 210, 235)
+        red = QColor(215, 45, 45, 235)
+        p.setPen(QPen(cyan, 2))
+        p.drawLine(cx, top_y, cx, mid_y)
+        p.setPen(QPen(red, 2))
+        p.drawLine(cx, mid_y, cx, bot_y)
+        # Left-pointing arrowheads, apex on the line, body to the right.
+        aw, ah = 11, 7
+        p.setPen(Qt.PenStyle.NoPen)
+        cy_y = top_y + ah + 1          # cyan ◄ hugging the top end
+        p.setBrush(cyan)
+        p.drawConvexPolygon(QPolygon([
+            QPoint(cx, cy_y),
+            QPoint(cx + aw, cy_y - ah),
+            QPoint(cx + aw, cy_y + ah),
+        ]))
+        rd_y = bot_y - ah - 1          # red ◄ hugging the bottom end
+        p.setBrush(red)
+        p.drawConvexPolygon(QPolygon([
+            QPoint(cx, rd_y),
+            QPoint(cx + aw, rd_y - ah),
+            QPoint(cx + aw, rd_y + ah),
+        ]))
+        p.setBrush(Qt.BrushStyle.NoBrush)
         # Small label.
         p.setPen(QColor("#cfe8ff"))
         p.drawText(
