@@ -131,18 +131,22 @@ jobs:
             --entitlements "$ENT" --sign "$IDENTITY" "$APP"
           codesign --verify --deep --strict --verbose=2 "$APP"
 
-      # ----- Windows: zip the onedir output -----
+      # ----- Windows: zip the onedir output (incl. the restart launcher) -----
       - name: Zip (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Ship the one-click restart launcher next to the exe so users get it
+          # out of the box (the .cmd auto-detects the exe vs a dev checkout).
+          Copy-Item restart_viewer.cmd dist/Multi-DicomViewer/ -Force
           Compress-Archive -Path dist/Multi-DicomViewer/* `
                            -DestinationPath dist/Multi-DicomViewer-windows.zip
 
-      # ----- macOS: zip the .app bundle (preserve symlinks/perms with ditto) -----
+      # ----- macOS: zip the bare .app as the NOTARIZATION CARRIER only -----
       # Full app on macOS too: CT renders via the pygfx (wgpu→Metal) viewer.
-      # When signing is on, this zip is the notarization carrier and is
-      # re-created from the stapled app in the next step.
+      # The distributed archive is rebuilt (with the restart launcher) in the
+      # "Package macOS" step below; this carrier stays a bare .app so Apple
+      # notarizes exactly the bundle.
       - name: Zip (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -150,9 +154,8 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent \
                 Multi-DicomViewer.app Multi-DicomViewer-macos.zip
 
-      # Submit to Apple, wait for the result, staple the ticket onto the .app,
-      # then re-zip so the distributed archive carries the stapled ticket
-      # (lets Gatekeeper pass even offline).
+      # Submit to Apple, wait for the result, staple the ticket onto the .app
+      # (lets Gatekeeper pass even offline). The final zip is built next.
       - name: Notarize + staple (macOS)
         if: runner.os == 'macOS' && steps.signcfg.outputs.enabled == 'true'
         env:
@@ -166,10 +169,23 @@ jobs:
           xcrun notarytool submit dist/Multi-DicomViewer-macos.zip \
             --key "$KEY_PATH" --key-id "$KEY_ID" --issuer "$ISSUER" --wait
           xcrun stapler staple dist/Multi-DicomViewer.app
+
+      # Rebuild the DISTRIBUTED zip as a folder holding the (stapled) .app AND
+      # the one-click restart launcher, so users get the launcher out of the
+      # box. ditto preserves the signature + stapled ticket on the copied .app.
+      - name: Package macOS (app + restart launcher)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
           cd dist
           rm -f Multi-DicomViewer-macos.zip
+          rm -rf pkg && mkdir -p "pkg/Multi-DicomViewer"
+          ditto "Multi-DicomViewer.app" "pkg/Multi-DicomViewer/Multi-DicomViewer.app"
+          cp ../restart_viewer.command "pkg/Multi-DicomViewer/restart_viewer.command"
+          chmod +x "pkg/Multi-DicomViewer/restart_viewer.command"
+          cd pkg
           ditto -c -k --sequesterRsrc --keepParent \
-                Multi-DicomViewer.app Multi-DicomViewer-macos.zip
+                "Multi-DicomViewer" ../Multi-DicomViewer-macos.zip
 
       # Artifact name is what GitHub shows in the run's UI.
       - name: Upload artifact

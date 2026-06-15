@@ -5,23 +5,22 @@
 #  Double-click this when the viewer has frozen. It force-closes the hung
 #  viewer and reopens it, with NO Activity Monitor / Force Quit dialog.
 #
-#  How it works: launches the app with "--restart", which runs as a small
-#  separate process — so it works even while the main window is completely
-#  frozen. That helper kills the recorded viewer PID and relaunches it.
+#  Works both in a downloaded release (next to Multi-DicomViewer.app) and in a
+#  source checkout (next to run.py): it launches the app with "--restart",
+#  which runs as a small separate process and so works even while the main
+#  window is completely frozen — it kills the recorded viewer PID and
+#  relaunches it.
 #
-#  First-time setup:
-#    1) Make it executable (once):   chmod +x restart_viewer.command
-#    2) For a Desktop/Dock icon: drag this file to the Desktop (or Dock), or
-#       right-click > Make Alias and move the alias to the Desktop.
-#       The alias persists; you only set it up once.
-#
-#  NOTE: this dev launcher uses `python3 run.py`. A packaged .app should
-#  instead relaunch via the bundle (e.g. `open -n MultiDicomViewer.app
-#  --args --restart`).
+#  First-time setup for a Desktop/Dock icon: drag this file to the Desktop (or
+#  Dock), or right-click > Make Alias and move the alias to the Desktop. The
+#  alias persists; you only set it up once. (macOS may ask to confirm opening
+#  it the first time: right-click > Open.)
 # ============================================================================
 cd "$(dirname "$0")"
-# Prefer python3; fall back to python.
-if command -v python3 >/dev/null 2>&1; then
+APP="$(/bin/ls -d *.app 2>/dev/null | head -n 1)"
+if [ -n "$APP" ]; then
+    open -n "./$APP" --args --restart
+elif command -v python3 >/dev/null 2>&1; then
     python3 run.py --restart
 else
     python run.py --restart
