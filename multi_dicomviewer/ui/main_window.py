@@ -14,7 +14,7 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtCore import QEvent, QMimeData, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QMimeData, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QDrag,
@@ -681,6 +681,15 @@ class MainWindow(QMainWindow):
         # choice); the toolbar buttons mirror whichever pane is active.
         #: Shared DICOM-tag overlay text size (pt) for every viewer/modality.
         self._tag_font_pt = TAG_FONT_PT_DEFAULT
+        #: Debounce for the Tag-size slider. Applying a new size touches EVERY
+        #: viewer in EVERY pane (each XA/IVUS canvas repaints; a CT pane does a
+        #: full VTK render). Doing that on every valueChanged froze a 2x3 grid
+        #: while dragging — so we collapse a drag into a single apply ~160 ms
+        #: after the last change (and on release).
+        self._tag_font_timer = QTimer(self)
+        self._tag_font_timer.setSingleShot(True)
+        self._tag_font_timer.setInterval(160)
+        self._tag_font_timer.timeout.connect(self._apply_tag_font_pt)
         self._panes: list[ViewerPane] = []
         for i in range(_MAX_PANES):
             pane = ViewerPane(i)
@@ -2517,9 +2526,11 @@ class MainWindow(QMainWindow):
             self._mp4_ranges[uid] = (int(start), int(end))
 
     def _set_tag_font_pt(self, pt: int) -> None:
-        """Broadcast the DICOM-tag overlay text size to every viewer in every
-        pane so the size stays uniform across modalities. Also keeps the
-        shell's global Tag-size slider in step (no recursion: blocked)."""
+        """Record the new DICOM-tag overlay text size and keep the shell's
+        global Tag-size slider in step (no recursion: blocked). The actual
+        broadcast to every viewer is debounced via ``_tag_font_timer`` so a
+        slider drag doesn't re-render all panes on every tick (see
+        :py:meth:`_apply_tag_font_pt`)."""
         pt = int(pt)
         self._tag_font_pt = pt
         sl = getattr(self, "_tag_font_slider", None)
@@ -2527,6 +2538,16 @@ class MainWindow(QMainWindow):
             sl.blockSignals(True)
             sl.setValue(pt)
             sl.blockSignals(False)
+        # Coalesce a burst of valueChanged into one apply shortly after the
+        # user stops dragging. (restart() resets the countdown each tick.)
+        self._tag_font_timer.start()
+
+    def _apply_tag_font_pt(self) -> None:
+        """Broadcast the latest DICOM-tag overlay text size to every viewer in
+        every pane so the size stays uniform across modalities. Debounced from
+        :py:meth:`_set_tag_font_pt` so the (per-pane repaint / CT VTK render)
+        cost is paid once per drag, not once per slider step."""
+        pt = int(self._tag_font_pt)
         for pane in self._panes:
             for v in pane.all_viewers():
                 if hasattr(v, "set_overlay_font_pt"):

@@ -1621,10 +1621,28 @@ class XAViewer(AbstractViewer):
         release already settled it (pending cleared in _on_seek_end)."""
         if not self._seek_render_pending:
             return
+        # While the handle is held, NEVER block-decode a cold frame on the UI
+        # thread: a compressed frame is ~10-15 ms and the JPEG codec holds the
+        # GIL, and XAPlane.frame() takes a lock shared with the background
+        # prefetch — so a synchronous decode here stalls the whole window. With
+        # several series loaded across a multi-pane (2×3) grid the prefetch is
+        # spread thin, scrub targets are far more often cold, and the stalls
+        # pile up into a freeze. Hold instead: poll until the prefetch warms the
+        # target (the strip keeps showing the last decoded frame), and let
+        # _on_seek_end settle — and decode once — on release.
+        if self._seeking and not self._seek_frame_ready():
+            self._seek_render_pending = True
+            QTimer.singleShot(40, self._flush_seek_render)
+            return
         self._seek_render_pending = False
         self._render()
         if not self._suspend_frame_signal:
             self.frame_changed.emit(self._frame)
+
+    def _seek_frame_ready(self) -> bool:
+        """True when the current frame is already decoded on every shown plane
+        — so rendering it won't block-decode on the UI thread."""
+        return all(p.is_ready(self._frame) for p in self._shown_planes())
 
     def _reset_play_range(self) -> None:
         """One-click reset of the Play range back to the whole clip — fired

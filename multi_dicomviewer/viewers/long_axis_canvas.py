@@ -158,6 +158,9 @@ class LongAxisCanvas(QWidget):
         #: only the thin cursor/axis overlay is redrawn each frame.
         self._scaled_pix: Optional[QPixmap] = None
         self._scaled_key: Optional[tuple] = None
+        #: Top-left widget point at which ``_scaled_pix`` (the visible-band
+        #: pixmap) should be blitted.
+        self._scaled_origin: tuple = (0, 0)
         self._n_frames = 0
         self._cur_frame = 0
         #: Frame indices at which the user has set a manual rotation
@@ -277,21 +280,34 @@ class LongAxisCanvas(QWidget):
             self._keyframes = clean
             self.update()
 
-    def _ensure_scaled(self, w: int, h: int) -> None:
-        """(Re)build the cached down-scaled strip pixmap for widget size
-        (w, h). No-op when the image and size are unchanged — so the frequent
-        frame-cursor repaints just blit this pixmap instead of re-scaling a
-        multi-thousand-column QImage every time. FastTransformation matches
-        the previous drawImage (nearest) scaling, so the look is identical."""
-        if self._qimg is None or w <= 0 or h <= 0:
+    def _ensure_scaled(self, full_r: QRect, vis: QRect) -> None:
+        """(Re)build the cached strip pixmap for the VISIBLE band *vis* of the
+        full canvas rect *full_r*. Only the columns that intersect *vis* are
+        scaled — at high horizontal zoom the full strip is tens of thousands of
+        px wide, and scaling all of it to a pixmap on every paint (the previous
+        behaviour) allocated a huge image and froze the viewer; a frame-cursor
+        move or a zoom drag now costs only the viewport width. Stored with its
+        blit origin in ``_scaled_origin``. FastTransformation matches the old
+        nearest scaling, so the look is identical."""
+        if self._qimg is None or vis.width() <= 0 or vis.height() <= 0:
             self._scaled_pix = None
             self._scaled_key = None
             return
-        key = (self._qimg.cacheKey(), int(w), int(h))
+        src_w = self._qimg.width()
+        src_h = self._qimg.height()
+        fw = max(1, full_r.width())
+        # Source columns covering the visible band (clamped to the image).
+        sx0 = int(math.floor((vis.x() - full_r.x()) / fw * src_w))
+        sx1 = int(math.ceil((vis.x() + vis.width() - full_r.x()) / fw * src_w))
+        sx0 = max(0, min(sx0, src_w - 1))
+        sx1 = max(sx0 + 1, min(sx1, src_w))
+        key = (self._qimg.cacheKey(), sx0, sx1, vis.width(), vis.height())
+        self._scaled_origin = (vis.x(), vis.y())
         if self._scaled_pix is not None and self._scaled_key == key:
             return
-        scaled = self._qimg.scaled(
-            int(w), int(h),
+        sub = self._qimg.copy(sx0, 0, sx1 - sx0, src_h)
+        scaled = sub.scaled(
+            int(vis.width()), int(vis.height()),
             Qt.AspectRatioMode.IgnoreAspectRatio,
             Qt.TransformationMode.FastTransformation,
         )
@@ -465,7 +481,7 @@ class LongAxisCanvas(QWidget):
         self._drag_axis = None
 
     # ----------------------------------------------------- paint
-    def paintEvent(self, _e):
+    def paintEvent(self, e):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor("#0a0a0a"))
         if self._qimg is None or self._n_frames == 0:
@@ -477,9 +493,17 @@ class LongAxisCanvas(QWidget):
             )
             return
         r = self._draw_rect()
-        self._ensure_scaled(r.width(), r.height())
+        # Only scale the columns Qt is actually asking us to repaint (the
+        # exposed viewport band), spanning the FULL strip height. At high
+        # horizontal zoom r is tens of thousands of px wide; scaling the whole
+        # of it per paint froze the viewer. The thin overlays below still draw
+        # against the full rect r (Qt clips them to the exposed region).
+        vis = r.intersected(e.rect())
+        vis = QRect(vis.x(), r.y(), max(1, vis.width()), r.height())
+        self._ensure_scaled(r, vis)
         if self._scaled_pix is not None:
-            p.drawPixmap(r.x(), r.y(), self._scaled_pix)
+            p.drawPixmap(self._scaled_origin[0], self._scaled_origin[1],
+                         self._scaled_pix)
         # Horizontal axis (where all rotation centres project — by
         # construction the strip's vertical mid-row).
         p.setPen(QPen(QColor(255, 220, 80, 110), 1, Qt.PenStyle.DashLine))

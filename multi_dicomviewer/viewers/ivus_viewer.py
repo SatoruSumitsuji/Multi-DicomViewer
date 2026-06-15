@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -179,6 +179,15 @@ class IVUSViewer(XAViewer):
         #: re-composites instead of re-decoding. Set on the drag's first
         #: build, cleared by the full-resolution rebuild on release.
         self._la_drag_frames: list | None = None
+        #: Debounce for rebuilding the long-axis strip after a W/L drag. Each
+        #: W/L tick previews the strip at draft LOD (cheap); this fires ~160 ms
+        #: after the user stops to rebuild it crisp. Without it every W/L step
+        #: ran the full-resolution (decode-gated, modal) rebuild and froze the
+        #: viewer — badly in a 2×3 grid.
+        self._la_wl_timer = QTimer(self)
+        self._la_wl_timer.setSingleShot(True)
+        self._la_wl_timer.setInterval(160)
+        self._la_wl_timer.timeout.connect(self._on_la_wl_settle)
 
         self.long_axis = LongAxisCanvas()
         # Long-axis lives inside a horizontally-scrollable area so its
@@ -488,7 +497,17 @@ class IVUSViewer(XAViewer):
     def _wl_changed(self):
         super()._wl_changed()
         if self._la_visible:
-            self._rebuild_long_axis()
+            # Live preview at draft LOD (re-composites cached frames — cheap),
+            # then a crisp full-res rebuild once the slider settles. The first
+            # draft decodes+caches the frames (slow path); subsequent ticks hit
+            # the fast re-composite path, so dragging stays responsive.
+            self._rebuild_long_axis(draft=True)
+            self._la_wl_timer.start()
+
+    def _on_la_wl_settle(self) -> None:
+        """W/L slider stopped → rebuild the long-axis strip at full resolution."""
+        if self._la_visible:
+            self._rebuild_long_axis(draft=False)
 
     # ======================================================== long-axis
     def _active_plane_idx(self) -> int:
