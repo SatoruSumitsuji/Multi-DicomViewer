@@ -196,6 +196,10 @@ class ImageCanvas(QWidget):
         # sets this whenever the active frame or the keyframe set
         # changes.
         self.ivus_center_keyed: bool = False
+        # Whether W/L applies to the shown series — the host (XA/IVUS viewer)
+        # sets this from its slider state. False on a colour series (e.g. a
+        # colour IVUS), so the right-click ▸ Change W/L item greys out.
+        self.wl_enabled: bool = True
         # Current long-axis cut angle (radians, image coords) pushed in by
         # IVUSViewer. Used to draw the MPR-style cut line + projection-
         # direction triangles through the rotation centre: the strip's TOP
@@ -733,7 +737,7 @@ class ImageCanvas(QWidget):
         key = pick_export_format(
             self, self.mapToGlobal(QPoint(int(sx), int(sy))),
             include_dicom=True, include_mp4=True, include_anon=True,
-            include_wl=True,
+            include_wl=True, wl_enabled=self.wl_enabled,
         )
         if key == "wl":
             self.wl_change_requested.emit()

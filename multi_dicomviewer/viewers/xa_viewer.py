@@ -867,6 +867,13 @@ class XAViewer(AbstractViewer):
             self._win_val_lbl.setText(f"{int(self._window)}")
             self._lvl_val_lbl.setText(f"{int(self._level)}")
 
+    def _sync_wl_enabled(self) -> None:
+        """Mirror W/L availability onto the canvases so the image right-click
+        ▸ Change W/L greys out when W/L doesn't apply (e.g. a colour IVUS)."""
+        on = self.win_slider.isEnabled()
+        for c in (self.canvas, self.canvas2):
+            c.wl_enabled = on
+
     def _clear_measurements(self):
         for c in (self.canvas, self.canvas2):
             c.clear_measurements()
@@ -1024,6 +1031,7 @@ class XAViewer(AbstractViewer):
             self.lvl_slider.setValue(int(self._level))
         for s in (self.win_slider, self.lvl_slider):
             s.blockSignals(False)
+        self._sync_wl_enabled()
         self._refresh_wl_lut()
 
         n = max(p.volume.shape[0] for p in self._planes)
