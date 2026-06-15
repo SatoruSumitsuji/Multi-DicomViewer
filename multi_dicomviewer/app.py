@@ -84,12 +84,19 @@ def _restart() -> int:
         argv = [a for a in argv if a != "--restart"]
     # Strip --restart from the relaunch command so we don't recurse.
     argv = [a for a in argv if a != "--restart"]
-    flags = 0
+    # Detach the relaunched app so it outlives this helper (and the Terminal
+    # the macOS .command ran in): Windows → its own process group; POSIX →
+    # a new session.
+    kwargs: dict = {"cwd": cwd, "close_fds": True}
     if os.name == "nt":
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) \
+        kwargs["creationflags"] = (
+            getattr(subprocess, "DETACHED_PROCESS", 0)
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        )
+    else:
+        kwargs["start_new_session"] = True
     try:
-        subprocess.Popen(argv, cwd=cwd, close_fds=True, creationflags=flags)
+        subprocess.Popen(argv, **kwargs)
     except OSError as exc:
         sys.stderr.write(f"[restart] failed to relaunch {argv!r}: {exc}\n")
         return 1
