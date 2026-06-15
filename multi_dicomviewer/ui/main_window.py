@@ -914,9 +914,12 @@ class MainWindow(QMainWindow):
                 preset.append(None)
                 preset_frames.append(0)
                 preset_viewers.append(None)
+        # MultiSync uses 2 slots for a 2-pane main layout (1×2 / 2×1) and 4
+        # otherwise. len(preset) == the current layout's pane count (preset has
+        # one entry per shown pane).
         self._multisync = MultiSyncWindow(
             ivus,
-            layout_count=count,
+            layout_count=len(preset),
             preset=preset,
             preset_frames=preset_frames,
             preset_viewers=preset_viewers,
@@ -1699,10 +1702,24 @@ class MainWindow(QMainWindow):
         for pane in self._panes:
             pane.set_compact(compact)
             pane.set_chrome_visible(not self._chrome_hidden)
+        # IVUS long-axis is only usable (and only safe) in 1x1 — in a small
+        # multi-pane cell the strip is uselessly tiny and its rebuild is the
+        # heaviest op / main freeze source. Disable it everywhere but 1x1
+        # (force-hides any open strip).
+        self._sync_long_axis_gate()
         # Bi/Lt/Rt is per-pane (each viewer's own "Plane:" bar), so a grid
         # change never overrides any pane's plane choice — a pane left on
         # "Bi" keeps showing both planes here too (just smaller).
         self._sync_layout_gate()      # MultiSync menu = only in multi-pane
+
+    def _sync_long_axis_gate(self) -> None:
+        """Allow the IVUS long-axis only in the 1x1 layout; disable it in every
+        multi-pane layout on every IVUS viewer in every pane."""
+        allowed = self._layout_key == "1x1"
+        for pane in self._panes:
+            for v in pane.all_viewers():
+                if hasattr(v, "set_long_axis_allowed"):
+                    v.set_long_axis_allowed(allowed)
 
     def _swap_panes(self, src_index: int, dest_index: int) -> None:
         """Swap two panes' grid slots (drag a pane title onto another)."""
@@ -1839,6 +1856,11 @@ class MainWindow(QMainWindow):
         if v is None or getattr(v, "handles_modality", "") != "IVUS":
             self.statusBar().showMessage(
                 "Long-axis view is IVUS-only."
+            )
+            return
+        if not getattr(v, "_la_allowed", True):
+            self.statusBar().showMessage(
+                "Long-axis view is available only in single-pane (1x1) layout."
             )
             return
         v.toggle_long_axis()
@@ -2511,6 +2533,10 @@ class MainWindow(QMainWindow):
             viewer.overlay_font_changed.connect(self._set_tag_font_pt)
         if hasattr(viewer, "set_overlay_font_pt"):
             viewer.set_overlay_font_pt(self._tag_font_pt)
+        # IVUS long-axis allowed only in 1x1 — apply the current layout's gate
+        # to this (possibly just-created) viewer.
+        if hasattr(viewer, "set_long_axis_allowed"):
+            viewer.set_long_axis_allowed(self._layout_key == "1x1")
 
     def _on_play_range_changed(
         self, uid: str, start: int, end: int, total: int

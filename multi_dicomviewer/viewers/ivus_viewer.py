@@ -171,6 +171,11 @@ class IVUSViewer(XAViewer):
         self._la_angle: float = 0.0
         #: Toggled by V (or _ivus_toggle_long_axis from MainWindow).
         self._la_visible: bool = False
+        #: Long-axis is only allowed in the 1x1 (full-screen) layout — in a
+        #: small multi-pane cell the strip is uselessly tiny and its rebuild is
+        #: the heaviest op (the main freeze source). The shell flips this via
+        #: set_long_axis_allowed() on every layout change.
+        self._la_allowed: bool = True
         #: Built lazily — kept so frame changes only update the cursor,
         #: not the full strip.
         self._la_img: np.ndarray | None = None
@@ -188,6 +193,16 @@ class IVUSViewer(XAViewer):
         self._la_wl_timer.setSingleShot(True)
         self._la_wl_timer.setInterval(160)
         self._la_wl_timer.timeout.connect(self._on_la_wl_settle)
+        #: While the background prefetch is still warming this pull-back, the
+        #: long-axis is built from whatever frames are ready (cold frames are
+        #: black columns) — it NEVER block-decodes on the UI thread. This timer
+        #: re-composites every ~1 s so the strip fills in as frames warm, then
+        #: stops (and rebuilds crisp) once every frame is ready. This is what
+        #: stopped a long colour pull-back freezing / aborting the UI on a
+        #: long-axis rotate.
+        self._la_warm_timer = QTimer(self)
+        self._la_warm_timer.setInterval(1000)
+        self._la_warm_timer.timeout.connect(self._on_la_warm_tick)
 
         self.long_axis = LongAxisCanvas()
         # Long-axis lives inside a horizontally-scrollable area so its
@@ -320,11 +335,32 @@ class IVUSViewer(XAViewer):
             b.setEnabled(False)
 
     # ============================================================ public
+    def set_long_axis_allowed(self, allowed: bool) -> None:
+        """Enable/disable the long-axis feature for this viewer. The shell
+        calls this on every layout change: long-axis is allowed ONLY in the
+        1x1 (full-screen) layout. In a multi-pane grid the strip is uselessly
+        small and its rebuild is the heaviest op (the main freeze source), so
+        it is disabled there. Disabling force-hides a currently-shown strip and
+        greys out the Long View button; the V shortcut becomes a no-op."""
+        self._la_allowed = bool(allowed)
+        if hasattr(self, "_long_view_btn"):
+            self._long_view_btn.setEnabled(self._la_allowed)
+            self._long_view_btn.setToolTip(
+                "Long-axis (longitudinal) view — available only in single-pane"
+                " (1x1) layout" if not self._la_allowed
+                else "Show/hide the long-axis (longitudinal) view  [V]"
+            )
+        if not self._la_allowed and self._la_visible:
+            self.toggle_long_axis()      # hide it (stops warm timer, clears)
+
     def toggle_long_axis(self) -> None:
         """V shortcut / Long View button entry point. Shows/hides the
         strip and the per-frame rotation-centre marker on the cross-
         section canvas. Keeps the Long View button's check state in
         sync with the visibility so V and the button never disagree."""
+        # Disallowed in multi-pane (see set_long_axis_allowed): never turn ON.
+        if not self._la_visible and not self._la_allowed:
+            return
         self._la_visible = not self._la_visible
         self._la_scroll.setVisible(self._la_visible)
         if hasattr(self, "_long_view_btn"):
@@ -335,6 +371,7 @@ class IVUSViewer(XAViewer):
             self._refresh_center_marker()
             self._rebuild_long_axis()
         else:
+            self._la_warm_timer.stop()
             self.long_axis.clear()
             for c in (self.canvas, self.canvas2):
                 c.update()
@@ -534,24 +571,33 @@ class IVUSViewer(XAViewer):
             c.ivus_la_angle = self._la_angle
             c.update()
 
-    def _frames_for_long_axis(
-        self, plane, progress=None
-    ) -> list[np.ndarray]:
+    def _frames_for_long_axis(self, plane, progress=None):
         """All frames of *plane*. Forces a decode of any not-yet-ready
         frame (the prefetch usually has them; for a long pull-back this
-        may briefly block the UI). Returns None placeholders for any
-        frame that fails to decode. *progress*, if given, is called as
+        may briefly block the UI). *progress*, if given, is called as
         ``progress(done, total)`` after every frame so the caller can
-        drive a QProgressDialog."""
+        drive a QProgressDialog.
+
+        Returns the plane's contiguous ``(n, H, W[, 3])`` volume ndarray
+        when EVERY frame decoded — so ``build_long_axis`` can gather all
+        columns in one vectorised pass instead of looping per frame (the
+        per-frame loop was the bulk of the long-axis rebuild freeze). If any
+        frame failed to decode, returns a list with ``None`` placeholders so
+        the caller's per-frame fallback can skip them."""
         out: list[np.ndarray | None] = []
         n = plane.total_frames
+        ok = True
         for i in range(n):
             try:
                 out.append(plane.frame(i))
             except Exception:
                 out.append(None)
+                ok = False
             if progress is not None:
                 progress(i + 1, n)
+        vol = getattr(plane, "volume", None)
+        if ok and isinstance(vol, np.ndarray) and vol.shape[0] == n:
+            return vol
         return out
 
     #: Resolution divisor for the live-rotation preview (both axes), so the
@@ -605,53 +651,40 @@ class IVUSViewer(XAViewer):
 
         center_pairs = [(float(c[0]), float(c[1])) for c in centers]
 
-        # Fast path: live rotation preview. The frames were decoded on the
-        # drag's first build and cached, so we only re-composite (at reduced
-        # LOD) — no decode, no dialog.
-        if draft and self._la_drag_frames is not None:
-            self._set_la_image(self._la_drag_frames, center_pairs, lateral,
-                               to_u8, draft=True)
+        # Build the strip straight from the plane's VOLUME — NEVER block-decode
+        # on the UI thread. Frames the background prefetch hasn't warmed yet are
+        # zero (black) columns; the warm-timer re-composites as they fill in and
+        # finalises once all are ready. Forcing a synchronous full decode here
+        # (esp. a multi-GB colour pull-back) was what froze — and sometimes
+        # aborted — the UI on a long-axis rotate, and no W/L draft path avoided
+        # it because the very FIRST build had to decode everything.
+        frames = plane.volume
+        ready = getattr(plane, "_ready", None)
+        all_ready = bool(ready.all()) if ready is not None else True
+
+        self._set_la_image(frames, center_pairs, lateral, to_u8, draft=draft)
+
+        # Keep filling the strip as the prefetch warms the rest; finalise &
+        # stop once every frame is ready.
+        if all_ready:
+            self._la_warm_timer.stop()
+        elif not self._la_warm_timer.isActive():
+            self._la_warm_timer.start()
+
+    def _on_la_warm_tick(self) -> None:
+        """Periodic re-composite while the pull-back warms (frames decode in
+        the background). Re-draws at draft LOD so the refresh itself stays
+        cheap; once every frame is ready it rebuilds crisp and stops."""
+        if not (self._la_visible and self._planes and self._la_centers):
+            self._la_warm_timer.stop()
             return
-
-        # Slow path: force every frame to decode (mostly cache hits once the
-        # prefetch finished; several seconds on a fresh pull-back), then
-        # composite. minimumDuration=400 ms keeps W/L tweaks and the first
-        # rotation build (cache hits, well under that) from flashing a dialog.
-        n = plane.total_frames
-        dlg = QProgressDialog(
-            "Decoding frames for long-axis view…",
-            None, 0, n, self,
-        )
-        dlg.setWindowTitle("Building Long View")
-        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
-        dlg.setMinimumDuration(400)
-        dlg.setAutoClose(False)
-        dlg.setAutoReset(False)
-        dlg.setValue(0)
-
-        def _cb(done: int, total: int) -> None:
-            if dlg.maximum() != total:
-                dlg.setMaximum(total)
-            dlg.setValue(done)
-            # Only pump the event loop every few frames so the cache-hit
-            # fast path (a few ms per "decode") doesn't spend most of
-            # its time in processEvents() overhead.
-            if done % 8 == 0 or done == total:
-                QApplication.processEvents()
-
-        try:
-            frames = self._frames_for_long_axis(plane, progress=_cb)
-            # Cache for the rest of a rotation drag; a full rebuild drops it.
-            # (Grayscale only — colour takes the persistent-luma branch above.)
-            self._la_drag_frames = frames if draft else None
-            dlg.setLabelText("Compositing long-axis image…")
-            dlg.setMaximum(0)            # 0,0 -> indeterminate busy bar
-            dlg.setValue(0)
-            QApplication.processEvents()
-            self._set_la_image(frames, center_pairs, lateral, to_u8,
-                               draft=draft)
-        finally:
-            dlg.close()
+        plane = self._planes[self._active_plane_idx()]
+        ready = getattr(plane, "_ready", None)
+        if ready is None or bool(ready.all()):
+            self._la_warm_timer.stop()
+            self._rebuild_long_axis(draft=False)      # final crisp strip
+        else:
+            self._rebuild_long_axis(draft=True)       # cheap progressive fill
 
     def _set_la_image(self, frames, center_pairs, lateral, to_u8,
                       draft: bool) -> None:

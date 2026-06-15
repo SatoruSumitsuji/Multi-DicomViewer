@@ -64,16 +64,6 @@ def build_long_axis(
     a coarse, fast low-LOD preview that still spans the full vessel depth.
     """
     n = len(frames)
-    # Colour strip when the frames are RGB — the cut-line colour is sampled
-    # as-is (so a colour IVUS, e.g. a NIRS chemogram, keeps its colour in the
-    # long axis); plain (lateral, n) grayscale otherwise.
-    is_color = any(f is not None and f.ndim == 3 for f in frames)
-    out = np.zeros(
-        (lateral_samples, n, 3) if is_color else (lateral_samples, n),
-        dtype=np.uint8,
-    )
-    if n == 0:
-        return out
     half = (lateral_samples - 1) / 2.0
     ux, uy = math.cos(angle_rad), math.sin(angle_rad)
     # Row 0 (strip TOP) samples the +(ux,uy) end of the cut line, the last
@@ -83,6 +73,42 @@ def build_long_axis(
     r = (half - np.arange(lateral_samples, dtype=np.float32)) * float(step)
     dxs = r * ux
     dys = r * uy
+
+    # Fast path: when every frame is present and the stack is a single
+    # contiguous (n, H, W[, 3]) ndarray (the common case — `frames` is the
+    # plane's volume, see IVUSViewer._frames_for_long_axis), gather all
+    # columns at once instead of one Python iteration per frame. The per-frame
+    # loop over a long colour pull-back was the bulk of the UI-thread freeze on
+    # a long-axis rotate/rebuild; this vectorised gather is the same maths and
+    # is bit-identical to the loop below (see tools/test_long_axis.py).
+    vol = frames if isinstance(frames, np.ndarray) else None
+    if vol is not None and vol.ndim in (3, 4) and n > 0:
+        is_color = vol.ndim == 4
+        h, w = vol.shape[1], vol.shape[2]
+        cx = np.asarray([c[0] for c in centers], dtype=np.float64)
+        cy = np.asarray([c[1] for c in centers], dtype=np.float64)
+        # (n, lateral) integer sample coordinates.
+        xs = np.rint(cx[:, None] + dxs[None, :]).astype(np.int64)
+        ys = np.rint(cy[:, None] + dys[None, :]).astype(np.int64)
+        mask = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        fi = np.arange(n)[:, None]                      # (n, 1) frame index
+        gathered = vol[fi, np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)]
+        gathered[~mask] = 0                             # out-of-image -> 0
+        # (n, lateral[, 3]) -> (lateral, n[, 3]); apply_u8 is element-wise so
+        # running it once over the whole strip == once per column.
+        sampled = (gathered.transpose(1, 0, 2) if is_color
+                   else gathered.T)
+        return np.ascontiguousarray(apply_u8(sampled), dtype=np.uint8)
+
+    # Fallback: a list that may contain None / mixed shapes (e.g. a partly
+    # decoded pull-back) — sample frame by frame.
+    is_color = any(f is not None and f.ndim == 3 for f in frames)
+    out = np.zeros(
+        (lateral_samples, n, 3) if is_color else (lateral_samples, n),
+        dtype=np.uint8,
+    )
+    if n == 0:
+        return out
     for i in range(n):
         f = frames[i]
         if f is None:

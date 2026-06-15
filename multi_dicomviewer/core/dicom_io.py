@@ -1029,6 +1029,15 @@ def prefetch_planes(
     if not planes or all(p.total_frames <= 1 for p in planes):
         return
     maxf = max(p.total_frames for p in planes)
+    # Inter-frame yield when NOT playing. The JPEG codec holds the GIL for the
+    # whole ~10-15 ms decode and does not release it, so warming "flat out"
+    # (a sleep(0)) lets this thread re-grab the GIL immediately after each
+    # frame — starving the UI thread. On a short clip the starvation is
+    # invisible, but a long pull-back (e.g. a 4000-frame colour IVUS) warms for
+    # tens of seconds and the app looks frozen right after a heavy 2x3 loads.
+    # A small real sleep hands the event loop a reliable slice every frame: the
+    # UI stays responsive while warming continues (only marginally slower).
+    idle_sleep = 0.003
     for i in range(maxf):
         for plane in planes:
             if should_stop():
@@ -1040,10 +1049,9 @@ def prefetch_planes(
                     continue
                 plane.volume[i] = _plane_decode(plane, i)
                 plane._ready[i] = True
-            # sleep(0) still yields the GIL briefly (responsive stop,
-            # warm rate ~= raw decode speed); 4 ms hands the cine timer
-            # a slice on every frame while playing.
-            time.sleep(0.004 if is_playing() else 0)
+            # 4 ms hands the cine timer a slice on every frame while playing;
+            # idle_sleep keeps the UI responsive while warming a long clip.
+            time.sleep(0.004 if is_playing() else idle_sleep)
 
 
 def load_xa(
