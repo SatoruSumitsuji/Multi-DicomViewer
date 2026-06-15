@@ -328,6 +328,16 @@ class _ClickLabel(QLabel):
         super().mousePressEvent(e)
 
 
+class _AutoHideLabel(QLabel):
+    """A QLabel that collapses (hides) when its text is empty, so an idle
+    status line reserves NO height. Used for the bottom readout — otherwise
+    an empty label left a one-line gap under the seek bar."""
+
+    def setText(self, text) -> None:
+        super().setText(text)
+        self.setVisible(bool(text))
+
+
 class _Prefetcher(QThread):
     """Decodes the remaining cine frames off the UI thread."""
 
@@ -463,8 +473,9 @@ class XAViewer(AbstractViewer):
 
         self.title_label = QLabel("—")
         self.title_label.setStyleSheet("color:#ccc; padding:2px 6px;")
-        self.readout = QLabel("")
+        self.readout = _AutoHideLabel("")
         self.readout.setStyleSheet("color:#27e0c0; padding:2px 6px;")
+        self.readout.setVisible(False)   # empty → no wasted line under the seek bar
 
         # cine timer
         self._timer = QTimer(self)
