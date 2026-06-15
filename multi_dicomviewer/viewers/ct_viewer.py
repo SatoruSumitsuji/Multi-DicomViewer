@@ -165,6 +165,16 @@ _SEEK_SLIDER_QSS = (
     "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
     "stop:0 #1c6fd0,stop:0.55 #1c6fd0,stop:0.60 #ffffff,stop:1 #ffffff);}"
 )
+#: Compact (multi-row layout) seek slider — smaller groove + handle.
+_SEEK_SLIDER_QSS_COMPACT = (
+    "QSlider::groove:horizontal{height:4px;border-radius:2px;background:#c4c4c4;}"
+    "QSlider::handle:horizontal{width:12px;height:12px;margin:-4px 0;"
+    "border:1px solid #6a6a6a;border-radius:6px;"
+    "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,fx:0.5,fy:0.5,"
+    "stop:0 #1c6fd0,stop:0.55 #1c6fd0,stop:0.60 #ffffff,stop:1 #ffffff);}"
+)
+#: Qt's "no maximum" sentinel for clearing a setMaximumHeight.
+_QWIDGETSIZE_MAX = 16777215
 _TOOL_KEYS = {
     Qt.Key.Key_Z: "ZOOM", Qt.Key.Key_V: "MOVE", Qt.Key.Key_S: "SPIN",
     Qt.Key.Key_G: "PAGING", Qt.Key.Key_W: "WL", Qt.Key.Key_R: "ROTATE",
@@ -1304,6 +1314,9 @@ class CTViewer(AbstractViewer):
         tags.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
+        # DICOM-tag controls moved to the shell's global top row; hide the
+        # per-viewer copy (kept only for set_overlay_font_pt slider sync).
+        tags_box.setVisible(False)
 
         hist = FitButton("Measure History")
         hist.setHelpToolTip("Show this study's measurement history")
@@ -2620,18 +2633,25 @@ class CTViewer(AbstractViewer):
         single image). Hidden in 3-D MPR (paging there is continuous, not
         discrete frames) and for single-frame series."""
         self._seek_wrap = QWidget()
+        # Survive the shell's "Max Image" (Hide Buttons): the slice scrubber +
+        # its Frame/count labels stay visible so paging is still usable.
+        self._seek_wrap._mdv_keep_on_max = True
         row = QHBoxLayout(self._seek_wrap)
         row.setContentsMargins(8, 2, 8, 2)
 
+        # Natural label point size; set_compact() toggles between the big
+        # (1.55× bold) presentation size and a compact normal size.
+        self._seek_base_pt = QLabel("x").font().pointSizeF() or 9.0
+
         def _big(lbl):                          # ~1.55× label (readable, compact)
             f = lbl.font()
-            ps = f.pointSizeF()
-            f.setPointSizeF((ps if ps > 0 else 9.0) * 1.55)
+            f.setPointSizeF(self._seek_base_pt * 1.55)
             f.setBold(True)
             lbl.setFont(f)
             return lbl
 
-        row.addWidget(_big(QLabel("Frame:")))
+        self._seek_frame_lbl = _big(QLabel("Frame:"))
+        row.addWidget(self._seek_frame_lbl)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setMinimum(0)
         self._seek_slider.setMaximum(0)
@@ -2643,7 +2663,35 @@ class CTViewer(AbstractViewer):
         self._seek_lbl.setMinimumWidth(96)
         row.addWidget(self._seek_lbl)
         self._seek_wrap.setVisible(False)
+        # Apply the current compact state (set before this bar was built).
+        if getattr(self, "_ct_compact", False):
+            self._apply_seek_compact(True)
         return self._seek_wrap
+
+    def set_compact(self, on: bool) -> None:
+        """Shrink the bottom slice scrubber (Frame label + slider + N/total)
+        for multi-row layouts so it matches the cine viewers' compact
+        transport. Called by the shell from _apply_layout."""
+        on = bool(on)
+        if getattr(self, "_ct_compact", False) == on:
+            return
+        self._ct_compact = on
+        if hasattr(self, "_seek_slider"):
+            self._apply_seek_compact(on)
+
+    def _apply_seek_compact(self, on: bool) -> None:
+        base = getattr(self, "_seek_base_pt", 9.0) or 9.0
+        for lbl in (self._seek_frame_lbl, self._seek_lbl):
+            f = lbl.font()
+            f.setPointSizeF(base * (1.0 if on else 1.55))
+            f.setBold(not on)               # big = bold, compact = normal
+            lbl.setFont(f)
+        self._seek_lbl.setMinimumWidth(60 if on else 96)
+        self._seek_slider.setMinimumHeight(16 if on else 26)
+        self._seek_slider.setMaximumHeight(16 if on else _QWIDGETSIZE_MAX)
+        self._seek_slider.setStyleSheet(
+            _SEEK_SLIDER_QSS_COMPACT if on else _SEEK_SLIDER_QSS
+        )
 
     def _on_seek(self, val):
         """Scrubber moved → jump to that native slice (2-D mode)."""

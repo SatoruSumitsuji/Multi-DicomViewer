@@ -65,6 +65,30 @@ _SLIDER_QSS = (
     " stop:0 #2f7fd1, stop:0.32 #2f7fd1, stop:0.40 #ffffff, stop:1 #ffffff); }"
 )
 
+#: Qt's "no maximum" sentinel for clearing a setMaximumHeight/Width.
+_QWIDGETSIZE_MAX = 16777215
+
+#: Seek-bar stylesheet — full-size (handle 18 px) vs compact (handle 12 px,
+#: used in multi-row layouts so the transport strip is roughly half height).
+_SEEK_QSS = (
+    "QSlider::groove:horizontal{height:6px;border-radius:3px;"
+    "background:#c4c4c4;}"
+    "QSlider::handle:horizontal{width:18px;height:18px;"
+    "margin:-6px 0;border:1px solid #6a6a6a;border-radius:9px;"
+    "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,"
+    "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.55 #1c6fd0,"
+    "stop:0.60 #ffffff,stop:1 #ffffff);}"
+)
+_SEEK_QSS_COMPACT = (
+    "QSlider::groove:horizontal{height:4px;border-radius:2px;"
+    "background:#c4c4c4;}"
+    "QSlider::handle:horizontal{width:12px;height:12px;"
+    "margin:-4px 0;border:1px solid #6a6a6a;border-radius:6px;"
+    "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,"
+    "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.55 #1c6fd0,"
+    "stop:0.60 #ffffff,stop:1 #ffffff);}"
+)
+
 
 class _RangeMarks(QWidget):
     """Interactive strip drawn directly above the cine seek bar carrying two
@@ -407,6 +431,9 @@ class XAViewer(AbstractViewer):
         # Load-time W/L baseline — what "Reset" in the W/L popup restores.
         self._window_init = 1.0
         self._level_init = 0.5
+        #: Compact (half-height) transport — set by the shell in multi-row
+        #: layouts so the Play/seek strip doesn't crowd the smaller panes.
+        self._compact = False
         self._is_color = False
         self._wl_lut = None          # (uint8 lut, offset) or None
         self._wl_off = 0
@@ -491,7 +518,13 @@ class XAViewer(AbstractViewer):
         # toggles it on, and only on series that carry an ECG waveform).
         layout.addWidget(self._ecg_strip)
         layout.addWidget(self._build_plane_bar())
-        layout.addLayout(self._build_transport())
+        # Transport (Play + seek) wrapped in a widget flagged to SURVIVE the
+        # shell's "Max Image" (Hide Buttons) so playback stays usable while
+        # the rest of the chrome is hidden.
+        self._transport_bar = QWidget()
+        self._transport_bar.setLayout(self._build_transport())
+        self._transport_bar._mdv_keep_on_max = True
+        layout.addWidget(self._transport_bar)
         # W/L is rarely used on XA/IVUS and ate a permanent toolbar row, so it
         # now lives in a small popup opened from the image right-click ▸
         # Change W/L (built here so the sliders exist before load_series).
@@ -665,6 +698,9 @@ class XAViewer(AbstractViewer):
         tags_btn.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
+        # The DICOM-tag controls now live in the shell's global top row; the
+        # per-viewer copy is kept (for set_overlay_font_pt sync) but hidden.
+        tags_box.setVisible(False)
         self._series_nav_right_anchor = tags_box   # left edge of the pair
         hist_btn = QPushButton("Measure History")
         hist_btn.setToolTip("Show this study's measurement history")
@@ -730,6 +766,9 @@ class XAViewer(AbstractViewer):
         if _ps > 0:
             _pf.setPointSizeF(_ps * 1.3)
             self.play_btn.setFont(_pf)
+        # Remember the natural Play-button point size so set_compact() can
+        # scale it down (multi-row layouts) and back without drift.
+        self._play_base_pt = self.play_btn.font().pointSizeF()
 
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
@@ -751,16 +790,9 @@ class XAViewer(AbstractViewer):
         # Seek-bar handle now carries the LARGE inner blue dot (radius ratio
         # 0.55) — swapped with the W/L sliders, which took the small one.
         # The 18 px handle pixel size is unchanged; only the inner-dot
-        # proportion (the "mark") moved here.
-        self.frame_slider.setStyleSheet(
-            "QSlider::groove:horizontal{height:6px;border-radius:3px;"
-            "background:#c4c4c4;}"
-            "QSlider::handle:horizontal{width:18px;height:18px;"
-            "margin:-6px 0;border:1px solid #6a6a6a;border-radius:9px;"
-            "background:qradialgradient(cx:0.5,cy:0.5,radius:0.5,"
-            "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.55 #1c6fd0,"
-            "stop:0.60 #ffffff,stop:1 #ffffff);}"
-        )
+        # proportion (the "mark") moved here. set_compact() swaps in a
+        # smaller-handle stylesheet for multi-row layouts.
+        self.frame_slider.setStyleSheet(_SEEK_QSS)
 
         # Draggable Play-range start/end triangles, painted on a thin strip
         # directly above the seek bar and sharing its x / width so they line
@@ -790,6 +822,11 @@ class XAViewer(AbstractViewer):
         self.fps_spin.setValue(DEFAULT_CINE_FPS)
         self.fps_spin.setSuffix(" fps")
         self.fps_spin.valueChanged.connect(self._set_fps)
+
+        # Remember the natural fonts so set_compact() can shrink the frame
+        # counter + fps box to match the smaller Play/seek and back.
+        self._frame_lbl_base_pt = self.frame_lbl.font().pointSizeF()
+        self._fps_base_pt = self.fps_spin.font().pointSizeF()
 
         row.addWidget(self.play_btn)
         row.addLayout(seek_col, 1)
@@ -873,6 +910,38 @@ class XAViewer(AbstractViewer):
         on = self.win_slider.isEnabled()
         for c in (self.canvas, self.canvas2):
             c.wl_enabled = on
+
+    def set_compact(self, on: bool) -> None:
+        """Shrink the Play/seek transport to ~half height (and a smaller Play
+        button) for multi-row layouts; restore full size when off. Called by
+        the shell from _apply_layout. W/L already moved to a popup, so the
+        transport row is the only height left to reclaim for the image."""
+        on = bool(on)
+        if self._compact == on:
+            return
+        self._compact = on
+        # Play button: scale the (1.3×) natural font down, cap its size.
+        if self._play_base_pt and self._play_base_pt > 0:
+            f = self.play_btn.font()
+            f.setPointSizeF(self._play_base_pt * (0.85 if on else 1.0))
+            self.play_btn.setFont(f)
+        self.play_btn.setMaximumHeight(22 if on else _QWIDGETSIZE_MAX)
+        # Seek slider: shorter groove + smaller handle.
+        self.frame_slider.setMinimumHeight(16 if on else 24)
+        self.frame_slider.setMaximumHeight(16 if on else _QWIDGETSIZE_MAX)
+        self.frame_slider.setStyleSheet(_SEEK_QSS_COMPACT if on else _SEEK_QSS)
+        # Frame counter + fps box: match the shrunk Play/seek (smaller font,
+        # capped height) so they don't tower over the compact transport.
+        for widget, base in (
+            (self.frame_lbl, self._frame_lbl_base_pt),
+            (self.fps_spin, self._fps_base_pt),
+        ):
+            if base and base > 0:
+                f = widget.font()
+                f.setPointSizeF(base * (0.8 if on else 1.0))
+                widget.setFont(f)
+            widget.setMaximumHeight(18 if on else _QWIDGETSIZE_MAX)
+        self.frame_lbl.setMinimumWidth(48 if on else 70)
 
     def _clear_measurements(self):
         for c in (self.canvas, self.canvas2):

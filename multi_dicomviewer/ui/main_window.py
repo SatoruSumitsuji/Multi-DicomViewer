@@ -37,6 +37,7 @@ from PyQt6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSizePolicy,
+    QSlider,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -61,7 +62,9 @@ from multi_dicomviewer.ui.study_browser import (
     StudyPanel,
 )
 from multi_dicomviewer.ui.tag_dialog import TagSelectionDialog
-from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT
+from multi_dicomviewer.ui.tag_font import (
+    TAG_FONT_PT_DEFAULT, TAG_FONT_PT_MAX, TAG_FONT_PT_MIN,
+)
 from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
 from multi_dicomviewer.viewers.xa_viewer import XAViewer
 
@@ -110,13 +113,96 @@ _LAYOUTS = {
     "1x2": (1, 2, 2),
     "2x1": (2, 1, 2),
     "2x2": (2, 2, 4),
+    "2x3": (2, 3, 6),
+}
+#: The 2×3 grid is the MASTER arrangement of the 6 panes. Every other
+#: (non-1×1) layout shows a FIXED sub-block of it, identified by the canonical
+#: 2×3 cell indices (0..5, reading order) its grid cells map to. So a given
+#: pane always sits in the same on-screen spot no matter how you reached the
+#: layout: 1×2 = top-left+top-middle, 2×1 = top-left+bottom-left, 2×2 = left &
+#: middle columns. 1×1 is special (shows the active pane).
+_LAYOUT_CELLS = {
+    "1x2": [0, 1],
+    "2x1": [0, 3],
+    "2x2": [0, 1, 3, 4],
+    "2x3": [0, 1, 2, 3, 4, 5],
 }
 #: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
-_MULTI_PANE = ("1x2", "2x1", "2x2")
-_MAX_PANES = 4
+_MULTI_PANE = ("1x2", "2x1", "2x2", "2x3")
+#: Enough panes for the largest layout (2×3 = 6).
+_MAX_PANES = max(c for _r, _c, c in _LAYOUTS.values())
+#: Grid dimensions of the largest layout — used to reset stretch on every
+#: row/col when shrinking back to a smaller grid.
+_GRID_MAX_ROWS = max(r for r, _c, _cnt in _LAYOUTS.values())
+_GRID_MAX_COLS = max(c for _r, c, _cnt in _LAYOUTS.values())
 
 #: drag payload (source pane index) for swapping pane positions
 PANE_MIME = "application/x-mdv-pane"
+
+
+def _viewer_chrome_widgets(viewer) -> list:
+    """Every toolbar/control widget of *viewer* — i.e. all leaf widgets in
+    its top-level layout EXCEPT the image area. The image area is the one
+    top-level item carrying a stretch factor (`addWidget(canvas, 1)` /
+    `addLayout(imgrow, 1)`), which every viewer (XA, IVUS, CT-VTK, CT-pygfx)
+    uses, so it is kept while the rest is hidden for "Max Image". Bare
+    sub-layouts (XA's series-nav / transport rows added via addLayout) are
+    walked recursively so their buttons toggle too."""
+    lay = viewer.layout()
+    out: list = []
+    if lay is None:
+        return out
+
+    def walk(layout):
+        for i in range(layout.count()):
+            item = layout.itemAt(i)
+            w = item.widget()
+            if w is not None:
+                if not getattr(w, "_mdv_keep_on_max", False):
+                    out.append(w)
+            elif item.layout() is not None:
+                walk(item.layout())
+
+    for i in range(lay.count()):
+        if lay.stretch(i) > 0:
+            continue                       # the image area — keep it visible
+        item = lay.itemAt(i)
+        w = item.widget()
+        if w is not None:
+            # Widgets flagged _mdv_keep_on_max (e.g. the Play/seek transport)
+            # stay visible in Max Image so playback is still usable.
+            if not getattr(w, "_mdv_keep_on_max", False):
+                out.append(w)
+        elif item.layout() is not None:
+            walk(item.layout())
+    return out
+
+
+def set_viewer_chrome_visible(viewer, visible: bool) -> None:
+    """Hide (False) / restore (True) a viewer's toolbars for "Max Image".
+    On hide, each chrome widget's own shown/hidden state is remembered (via
+    isHidden(), which ignores ancestor visibility) so restoring brings back
+    exactly what was showing — e.g. a collapsed Measure bar stays collapsed.
+    Restoring is a no-op when the viewer was never hidden, so it can be called
+    unconditionally (e.g. on every layout change) without forcing default-
+    hidden rows (Measure bar, ECG strip) back on."""
+    if not visible:
+        widgets = _viewer_chrome_widgets(viewer)
+        if not getattr(viewer, "_mdv_chrome_hidden", False):
+            viewer._mdv_chrome_saved = {
+                id(w): (not w.isHidden()) for w in widgets
+            }
+            viewer._mdv_chrome_hidden = True
+        for w in widgets:
+            w.setVisible(False)
+    else:
+        if not getattr(viewer, "_mdv_chrome_hidden", False):
+            return                       # never hidden — leave widgets as-is
+        saved = getattr(viewer, "_mdv_chrome_saved", None) or {}
+        for w in _viewer_chrome_widgets(viewer):
+            w.setVisible(saved.get(id(w), True))
+        viewer._mdv_chrome_hidden = False
+        viewer._mdv_chrome_saved = None
 
 
 class _DragTitle(QLabel):
@@ -185,6 +271,7 @@ class ViewerPane(QFrame):
     files_dropped = pyqtSignal(list)          # individual DICOM file(s) dropped
     viewer_ready = pyqtSignal(object)         # a viewer was just created
     pane_move_requested = pyqtSignal(int, int)  # (src index, dest index)
+    pane_cleared = pyqtSignal(object)         # the ✕ emptied this pane
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -207,13 +294,35 @@ class ViewerPane(QFrame):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
+        # Title BAR = the dark grey band: a draggable title label (left) and
+        # a close ✕ (right). The ✕ empties just THIS pane (keeps the grid
+        # layout) so a new series can be dropped in.
         self._title = _DragTitle(self)
         self._title.setToolTip(
             "Drag and drop onto another pane to swap their positions"
         )
         self._title.setStyleSheet(
-            "padding:2px 6px; color:#ccc; background:#2a2a2a;"
+            "padding:2px 6px; color:#ccc; background:transparent;"
         )
+        self._close_btn = QPushButton("✕")
+        self._close_btn.setToolTip(
+            "この枠の画像を閉じる(レイアウトは保持してドロップ待ちに戻す)"
+        )
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setFixedWidth(26)
+        self._close_btn.setFlat(True)
+        self._close_btn.setStyleSheet(
+            "QPushButton{color:#ccc; border:none; font-weight:bold;}"
+            "QPushButton:hover{color:#fff; background:#c0392b;}"
+        )
+        self._close_btn.clicked.connect(self._on_close_clicked)
+        self._title_bar = QWidget()
+        self._title_bar.setStyleSheet("background:#2a2a2a;")
+        _tb = QHBoxLayout(self._title_bar)
+        _tb.setContentsMargins(0, 0, 0, 0)
+        _tb.setSpacing(0)
+        _tb.addWidget(self._title, 1)
+        _tb.addWidget(self._close_btn)
 
         self._idle = _Placeholder(
             f"Pane {index + 1}\n\n"
@@ -226,10 +335,16 @@ class ViewerPane(QFrame):
         self._box = QVBoxLayout(self)
         self._box.setContentsMargins(1, 1, 1, 1)
         self._box.setSpacing(0)
-        self._box.addWidget(self._title)
+        self._box.addWidget(self._title_bar)
         self._box.addWidget(self._stack, 1)
         self._active_on = False
         self._full_bleed = False
+        #: "Hide Buttons (Max Image)" state for this pane — hides the title
+        #: bar AND the current viewer's toolbars. Stored so it re-applies when
+        #: the pane swaps to another modality's cached viewer.
+        self._chrome_visible = True
+        #: Compact transport (half-height) — on in multi-row layouts.
+        self._compact = False
         self._refresh_border()
         # Catch drops over the title bar / placeholder too (viewers added
         # later are covered in _viewer_for).
@@ -247,10 +362,45 @@ class ViewerPane(QFrame):
         """1×1 mode: hide the title bar and drop the border/margins so the
         viewer fills the entire central frame."""
         self._full_bleed = on
-        self._title.setVisible(not on)
+        # Title bar hidden in 1×1 OR while "Max Image" is on.
+        self._title_bar.setVisible(not on and self._chrome_visible)
         m = 0 if on else 1
         self._box.setContentsMargins(m, m, m, m)
         self._refresh_border()
+
+    def set_chrome_visible(self, visible: bool) -> None:
+        """Show / hide this pane's chrome (title bar + the current viewer's
+        toolbars) for the shell-wide "Max Image" toggle."""
+        self._chrome_visible = visible
+        self._title_bar.setVisible(visible and not self._full_bleed)
+        v = self._cur_viewer
+        if v is not None:
+            set_viewer_chrome_visible(v, visible)
+
+    def _on_close_clicked(self) -> None:
+        """✕ on the title bar — empty THIS pane (keep its grid slot) so a new
+        series can be dropped. The pane's cached viewers are released; the
+        shell re-syncs nav/MultiSync via pane_cleared."""
+        self.activated.emit(self)        # make this the active pane first
+        self.reset()
+        self.pane_cleared.emit(self)
+
+    def set_compact(self, on: bool) -> None:
+        """Half-height transport for multi-row layouts (viewers that support
+        it expose set_compact; others are left unchanged)."""
+        self._compact = on
+        v = self._cur_viewer
+        if v is not None and hasattr(v, "set_compact"):
+            v.set_compact(on)
+
+    def _apply_pane_state(self, viewer) -> None:
+        """Re-apply this pane's Max-Image / compact state to *viewer* — used
+        when a (possibly cached) viewer becomes the shown one."""
+        if viewer is None:
+            return
+        set_viewer_chrome_visible(viewer, self._chrome_visible)
+        if hasattr(viewer, "set_compact"):
+            viewer.set_compact(self._compact)
 
     def _refresh_border(self) -> None:
         if self._full_bleed:
@@ -299,6 +449,9 @@ class ViewerPane(QFrame):
         self._stack.setCurrentWidget(viewer)
         self._cur_viewer = viewer
         self._title.setText(f"● Pane {self.index + 1} — {title}")
+        # A freshly built or re-shown viewer must match this pane's current
+        # Max-Image / compact state.
+        self._apply_pane_state(viewer)
 
     def _show_message(self, text: str) -> None:
         # Reuse the idle widget's label to surface load/availability errors.
@@ -522,6 +675,8 @@ class MainWindow(QMainWindow):
 
         # --- configurable viewer grid ---
         self._layout_key = "1x1"
+        #: "Max Image" (toolbars hidden) state, shared across every pane.
+        self._chrome_hidden = False
         # Bi / Lt / Rt is per-pane now (each viewer stores its own plane
         # choice); the toolbar buttons mirror whichever pane is active.
         #: Shared DICOM-tag overlay text size (pt) for every viewer/modality.
@@ -535,6 +690,7 @@ class MainWindow(QMainWindow):
             pane.files_dropped.connect(self._load_files)
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
+            pane.pane_cleared.connect(self._on_pane_cleared)
             self._panes.append(pane)
         # Panes in grid-slot order (drag a title onto another to swap).
         self._order: list[ViewerPane] = list(self._panes)
@@ -567,6 +723,7 @@ class MainWindow(QMainWindow):
             self._fit_studies_dock_width
         )
         self.browser.dicom_info_toggled.connect(self._on_dicom_info_btn)
+        self.browser.dicom_tags_requested.connect(self._open_tag_dialog_active)
 
         self._build_menu()
         self._build_shortcuts()
@@ -702,8 +859,7 @@ class MainWindow(QMainWindow):
             v = (self._active.current_viewer()
                  if self._active is not None else None)
             return self._viewer_has_positioner_angles(v)
-        _, _, count = _LAYOUTS[self._layout_key]
-        for pane in self._order[:count]:
+        for pane in self._shown_panes():
             if not pane.isVisible():
                 continue
             if self._viewer_has_positioner_angles(pane.current_viewer()):
@@ -730,7 +886,6 @@ class MainWindow(QMainWindow):
                 "pull-backs first.",
             )
             return
-        count = _LAYOUTS[self._layout_key][2]
         # Pre-fill each slot from the matching pane (in display order);
         # non-IVUS panes leave their slot empty. We also hand over the
         # pane's current frame index AND its viewer instance so MultiSync
@@ -739,8 +894,7 @@ class MainWindow(QMainWindow):
         preset: list = []
         preset_frames: list = []
         preset_viewers: list = []
-        for i in range(count):
-            pane = self._order[i]
+        for pane in self._shown_panes():
             se = self._series_by_uid.get(pane.shown_series_uid())
             if se is not None and se.modality == Modality.IVUS:
                 v = pane.current_viewer()
@@ -1031,13 +1185,7 @@ class MainWindow(QMainWindow):
         from multi_dicomviewer.ui.orthogonal_view import OrthogonalViewWindow
 
         # Enumerate visible panes in display order.
-        if self._layout_key == "1x1":
-            visible_panes = (
-                [self._active] if self._active is not None else []
-            )
-        else:
-            _, _, count = _LAYOUTS[self._layout_key]
-            visible_panes = [p for p in self._order[:count] if p.isVisible()]
+        visible_panes = [p for p in self._shown_panes() if p.isVisible()]
 
         panels = []
         for pane in visible_panes:
@@ -1396,6 +1544,7 @@ class MainWindow(QMainWindow):
             ("1×2", "1x2"),
             ("2×1", "2x1"),
             ("2×2", "2x2"),
+            ("2×3", "2x3"),
         ):
             btn = FitButton(label)
             btn.setCheckable(True)
@@ -1404,15 +1553,91 @@ class MainWindow(QMainWindow):
             self._layout_group.addButton(btn)
             row.addWidget(btn)
 
+        row.addSpacing(12)
+        # "Max Image" toggle pair: Hide Buttons strips every pane down to just
+        # the image (and the title bar) for presentation; Show Buttons brings
+        # the toolbars back. Applies to ALL panes at once.
+        self._hide_btns_btn = FitButton("Hide Buttons (Max Image)")
+        self._hide_btns_btn.setHelpToolTip(
+            "Hide every pane's toolbars/title to maximise the image "
+            "(for presentation). Use Show Buttons to bring them back."
+        )
+        self._hide_btns_btn.clicked.connect(lambda: self._set_chrome_hidden(True))
+        row.addWidget(self._hide_btns_btn)
+        self._show_btns_btn = FitButton("Show Buttons")
+        self._show_btns_btn.setHelpToolTip("Restore every pane's toolbars.")
+        self._show_btns_btn.clicked.connect(
+            lambda: self._set_chrome_hidden(False)
+        )
+        row.addWidget(self._show_btns_btn)
+        self._sync_chrome_buttons()
+
+        row.addSpacing(12)
+        # Global DICOM-overlay controls (apply to every pane), so they live in
+        # the shell's top row instead of stacked in each viewer's toolbar.
+        # "DICOM Info" unifies the old tree "DICOM Info" + image "DICOM Tags":
+        #   left-click  → show/hide the on-image DICOM text;
+        #   right-click → choose which tags to overlay (active pane's modality).
+        # The tag-size slider sits to its right.
+        self._tags_btn = FitButton("DICOM Info")
+        self._tags_btn.setCheckable(True)
+        self._tags_btn.setChecked(not self._overlay_hidden)
+        self._tags_btn.setHelpToolTip(
+            "左クリック: 画像上のDICOM情報の表示/非表示\n"
+            "右クリック: 表示するタグ項目を選択"
+        )
+        # Connect AFTER setChecked so the initial state doesn't fire the toggle.
+        self._tags_btn.toggled.connect(self._set_overlay_shown)
+        self._tags_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self._tags_btn.customContextMenuRequested.connect(
+            lambda _p: self._open_tag_dialog_active()
+        )
+        row.addWidget(self._tags_btn)
+        row.addWidget(QLabel("Tag size:"))
+        self._tag_font_slider = QSlider(Qt.Orientation.Horizontal)
+        self._tag_font_slider.setRange(TAG_FONT_PT_MIN, TAG_FONT_PT_MAX)
+        self._tag_font_slider.setValue(int(self._tag_font_pt))
+        self._tag_font_slider.setFixedWidth(110)
+        self._tag_font_slider.setToolTip("DICOM tag text size (all panes)")
+        self._tag_font_slider.valueChanged.connect(self._set_tag_font_pt)
+        row.addWidget(self._tag_font_slider)
+
         # Bi/Lt/Rt lives inside each viewer's own "Plane:" bar now (per-pane),
         # so there is no global plane switch in this top bar anymore.
         row.addStretch(1)
         return bar
 
+    def _set_chrome_hidden(self, hidden: bool) -> None:
+        """Apply "Max Image" (hide toolbars) to every pane, and remember it so
+        new/swapped viewers and layout changes keep the same state."""
+        self._chrome_hidden = hidden
+        for pane in self._panes:
+            pane.set_chrome_visible(not hidden)
+        self._sync_chrome_buttons()
+
+    def _sync_chrome_buttons(self) -> None:
+        """Enable only the button that does something in the current state."""
+        hidden = getattr(self, "_chrome_hidden", False)
+        if hasattr(self, "_hide_btns_btn"):
+            self._hide_btns_btn.setEnabled(not hidden)
+            self._show_btns_btn.setEnabled(hidden)
+
     def _toggle_info(self, *_a) -> None:
         vis = not self._studies_dock.isVisible()
         self._studies_dock.setVisible(vis)
         self._info_btn.setText("◀ Info shown" if vis else "Info hidden ▶")
+
+    def _shown_panes(self) -> list:
+        """Panes currently on screen, in display (reading) order. 1×1 shows
+        the active pane; every other layout shows a fixed sub-block of the
+        canonical 2×3 arrangement (``_LAYOUT_CELLS``), so each pane keeps its
+        on-screen position no matter which layout you switch from."""
+        if self._layout_key == "1x1":
+            a = self._active if self._active is not None else self._order[0]
+            return [a]
+        return [self._order[i] for i in _LAYOUT_CELLS[self._layout_key]]
 
     def _apply_layout(self, key: str) -> None:
         self._layout_key = key
@@ -1426,39 +1651,49 @@ class MainWindow(QMainWindow):
         self._grid.setSpacing(0 if full else 2)
         if full:
             # 1×1 shows the active pane WITHOUT disturbing self._order, so
-            # returning to 1×2 / 2×2 restores the original Pane 1, 2, 3, 4
-            # arrangement.
+            # returning to a grid restores the canonical arrangement.
             shown = self._active if self._active is not None else self._order[0]
             self._grid.addWidget(shown, 0, 0)
             shown.setVisible(True)
             shown.set_full_bleed(True)
         else:
-            for i in range(count):
+            # Place the canonical 2×3 cells this layout maps to (so e.g. 2×2
+            # always shows the 2×3's left+middle columns, both rows).
+            for i, cell_idx in enumerate(_LAYOUT_CELLS[key]):
                 r, c = divmod(i, cols)
-                self._grid.addWidget(self._order[i], r, c)
-                self._order[i].setVisible(True)
-                self._order[i].set_full_bleed(False)
-        # Reset stretch on ALL grid lines (max 2×2): a leftover stretch on
-        # an now-empty row/col from a bigger layout would otherwise still
-        # reserve space, shrinking the panes when going back to 1×1/1×2.
-        max_r, max_c = _LAYOUTS["2x2"][0], _LAYOUTS["2x2"][1]
-        for r in range(max_r):
+                pane = self._order[cell_idx]
+                self._grid.addWidget(pane, r, c)
+                pane.setVisible(True)
+                pane.set_full_bleed(False)
+        # Reset stretch on ALL grid lines (up to the largest layout, 2×3): a
+        # leftover stretch on a now-empty row/col from a bigger layout would
+        # otherwise still reserve space, shrinking the panes on the way back.
+        for r in range(_GRID_MAX_ROWS):
             self._grid.setRowStretch(r, 1 if r < rows else 0)
-        for c in range(max_c):
+        for c in range(_GRID_MAX_COLS):
             self._grid.setColumnStretch(c, 1 if c < cols else 0)
 
         if full:
             # 1×1: the shown pane is the only one visible — keep it active.
             shown = self._active if self._active is not None else self._order[0]
             self._set_active_pane(shown)
-        elif self._active not in self._order[:count]:
-            self._set_active_pane(self._order[0])
         else:
-            self._set_active_pane(self._active)
+            shown = self._shown_panes()
+            if self._active not in shown:
+                self._set_active_pane(shown[0])
+            else:
+                self._set_active_pane(self._active)
+        # Compact transport (half-height) on every multi-row layout so the
+        # Play/seek strip doesn't eat the smaller panes; re-apply the shared
+        # Max-Image state too (panes were detached/re-shown above).
+        compact = rows >= 2
+        for pane in self._panes:
+            pane.set_compact(compact)
+            pane.set_chrome_visible(not self._chrome_hidden)
         # Bi/Lt/Rt is per-pane (each viewer's own "Plane:" bar), so a grid
         # change never overrides any pane's plane choice — a pane left on
         # "Bi" keeps showing both planes here too (just smaller).
-        self._sync_layout_gate()      # MultiSync menu = only in 1×2 / 2×2
+        self._sync_layout_gate()      # MultiSync menu = only in multi-pane
 
     def _swap_panes(self, src_index: int, dest_index: int) -> None:
         """Swap two panes' grid slots (drag a pane title onto another)."""
@@ -1475,6 +1710,12 @@ class MainWindow(QMainWindow):
         for p in self._panes:
             p.set_active(p is pane and p.isVisible())
         self._sync_xa_shortcuts()
+
+    def _on_pane_cleared(self, pane: ViewerPane) -> None:
+        """A pane's ✕ emptied it (layout kept). Re-sync the features that
+        depend on pane contents: the cine shortcuts and the MultiSync gate."""
+        self._sync_xa_shortcuts()
+        self._sync_layout_gate()
 
     # --------------------------------------------------- series navigation
     def _build_shortcuts(self) -> None:
@@ -2277,13 +2518,32 @@ class MainWindow(QMainWindow):
 
     def _set_tag_font_pt(self, pt: int) -> None:
         """Broadcast the DICOM-tag overlay text size to every viewer in every
-        pane so the size stays uniform across modalities."""
+        pane so the size stays uniform across modalities. Also keeps the
+        shell's global Tag-size slider in step (no recursion: blocked)."""
         pt = int(pt)
         self._tag_font_pt = pt
+        sl = getattr(self, "_tag_font_slider", None)
+        if sl is not None and sl.value() != pt:
+            sl.blockSignals(True)
+            sl.setValue(pt)
+            sl.blockSignals(False)
         for pane in self._panes:
             for v in pane.all_viewers():
                 if hasattr(v, "set_overlay_font_pt"):
                     v.set_overlay_font_pt(pt)
+
+    def _open_tag_dialog_active(self) -> None:
+        """Global "DICOM Tags" button (top row): open the overlay-tag picker
+        for the ACTIVE pane's viewer (its modality's selection applies to
+        every pane of that modality)."""
+        v = self._active.current_viewer() if self._active is not None else None
+        if v is None:
+            QMessageBox.information(
+                self, "DICOM Tags",
+                "Load a series first, then choose overlay items.",
+            )
+            return
+        self._open_tag_dialog(v)
 
     # ------------------------------------------- anonymize / DICOM-tag overlay
     @staticmethod
@@ -2349,17 +2609,30 @@ class MainWindow(QMainWindow):
             "DICOM overlay: hidden" if hidden else "DICOM overlay: shown"
         )
 
+    def _set_overlay_shown(self, show: bool) -> None:
+        """Single source of truth for the DICOM-info overlay show/hide. Keeps
+        every control in step (all blocked to avoid re-entrancy): the tree's
+        DICOM Info button, the top-row DICOM Info button and the View-menu
+        'Hide DICOM overlay' action. All three toggle paths funnel here."""
+        show = bool(show)
+        self._apply_overlay_hidden(not show)
+        self.browser.set_dicom_info_shown(show)        # already blocks signals
+        if hasattr(self, "_hide_overlay_act"):
+            self._hide_overlay_act.blockSignals(True)
+            self._hide_overlay_act.setChecked(not show)
+            self._hide_overlay_act.blockSignals(False)
+        if hasattr(self, "_tags_btn"):
+            self._tags_btn.blockSignals(True)
+            self._tags_btn.setChecked(show)
+            self._tags_btn.blockSignals(False)
+
     def _toggle_overlay_hidden(self, on: bool) -> None:
-        """View ▸ Hide DICOM overlay — also sync the toolbar button."""
-        self._apply_overlay_hidden(on)
-        self.browser.set_dicom_info_shown(not on)
+        """View ▸ Hide DICOM overlay (checked = hidden)."""
+        self._set_overlay_shown(not on)
 
     def _on_dicom_info_btn(self, show: bool) -> None:
-        """'DICOM Info' button (checked = show) — also sync the menu."""
-        self._apply_overlay_hidden(not show)
-        self._hide_overlay_act.blockSignals(True)
-        self._hide_overlay_act.setChecked(not show)
-        self._hide_overlay_act.blockSignals(False)
+        """Tree 'DICOM Info' button (checked = show)."""
+        self._set_overlay_shown(show)
 
     def _tag_viewers(self) -> list:
         out = []
