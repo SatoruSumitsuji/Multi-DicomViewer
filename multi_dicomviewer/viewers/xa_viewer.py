@@ -754,6 +754,9 @@ class XAViewer(AbstractViewer):
 
     def _build_transport(self):
         row = QHBoxLayout()
+        # No top/bottom padding — the default layout margins (≈11 px each on
+        # macOS) otherwise opened a gap between the image and the seek bar.
+        row.setContentsMargins(4, 0, 4, 0)
         self.play_btn = QPushButton("▶ Play")
         self.play_btn.setCheckable(True)
         self.play_btn.toggled.connect(self._toggle_play)
@@ -942,6 +945,19 @@ class XAViewer(AbstractViewer):
                 widget.setFont(f)
             widget.setMaximumHeight(18 if on else _QWIDGETSIZE_MAX)
         self.frame_lbl.setMinimumWidth(48 if on else 70)
+        # Trim the Play-range strip's spare grab room (the mostly-empty band
+        # above the seek bar) so the seek bar hugs the image.
+        self._range_marks.setFixedHeight(
+            _RangeMarks._TRI_H if on
+            else _RangeMarks._TRI_H + _RangeMarks._GRAB_TOP_PAD
+        )
+        # Collapse the inter-row spacing of the viewer's main column so no gap
+        # is left between the image and the transport strip.
+        lay = self.layout()
+        if lay is not None:
+            if not hasattr(self, "_base_layout_spacing"):
+                self._base_layout_spacing = lay.spacing()
+            lay.setSpacing(0 if on else self._base_layout_spacing)
 
     def _clear_measurements(self):
         for c in (self.canvas, self.canvas2):
