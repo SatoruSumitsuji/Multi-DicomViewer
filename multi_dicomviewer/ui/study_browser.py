@@ -1075,6 +1075,8 @@ class StudyPanel(QWidget):
     #: right-click on the Anonymous button → open the anonymize-settings dialog
     anon_settings_requested = pyqtSignal()
     dicom_info_toggled = pyqtSignal(bool)    # "DICOM Info" (True = show)
+    #: right-click on the DICOM Info button → choose which tags to overlay
+    dicom_tags_requested = pyqtSignal()
     delete_requested = pyqtSignal(str, str, str)  # (kind, key, label)
     #: ("dicom"|"mp4"|"csv"|"anon-dicom", [Series])
     export_requested = pyqtSignal(str, list)
@@ -1215,9 +1217,17 @@ class StudyPanel(QWidget):
         self.btn_dicom.setCheckable(True)
         self.btn_dicom.setChecked(True)        # overlay shown by default
         self.btn_dicom.setHelpToolTip(
-            "Show/hide the DICOM tag text drawn on the image"
+            "左クリック: 画像上のDICOM情報の表示/非表示\n"
+            "右クリック: 表示するタグ項目を選択"
         )
         self.btn_dicom.toggled.connect(self.dicom_info_toggled)
+        # Right-click → choose overlay tags (mirrors the top-row DICOM Info).
+        self.btn_dicom.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.btn_dicom.customContextMenuRequested.connect(
+            lambda _p: self.dicom_tags_requested.emit()
+        )
 
         # Let every toolbar button shrink (text clips) so the whole dock
         # can be dragged down to roughly one minimum thumbnail wide.
