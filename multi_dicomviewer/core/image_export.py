@@ -70,6 +70,7 @@ def pick_export_format(
     include_mp4: bool = False,
     include_anon: bool = False,
     include_wl: bool = False,
+    wl_enabled: bool = True,
 ) -> Optional[str]:
     """Show the right-click export menu at *global_point*; return the chosen
     format key, or None if dismissed.
@@ -83,7 +84,8 @@ def pick_export_format(
 
     When *include_wl* is set, a separator and a "Change W/L…" item are added
     below the export list; choosing it returns the key ``"wl"`` so the host
-    can open its Window/Level popup."""
+    can open its Window/Level popup. The item is greyed out when
+    *wl_enabled* is False (e.g. a colour series has no W/L)."""
     items = list(_STILL_FORMATS)
     if include_dicom:
         items.append(("Export DICOM (lossless)", "dicom"))
@@ -96,7 +98,9 @@ def pick_export_format(
     acts = [(menu.addAction(label), key) for label, key in items]
     if include_wl:
         menu.addSeparator()
-        acts.append((menu.addAction("Change W/L…"), "wl"))
+        wl_act = menu.addAction("Change W/L…")
+        wl_act.setEnabled(bool(wl_enabled))
+        acts.append((wl_act, "wl"))
     chosen = menu.exec(global_point)
     for act, key in acts:
         if act is chosen:

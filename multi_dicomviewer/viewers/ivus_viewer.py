@@ -450,6 +450,7 @@ class IVUSViewer(XAViewer):
             self.lvl_slider.setValue(int(self._level))
         for s in (self.win_slider, self.lvl_slider):
             s.blockSignals(False)
+        self._sync_wl_enabled()      # grey out right-click Change W/L in colour
         self._refresh_wl_lut()
 
         # Reflect the new tone in the title bar (… | color | … vs grayscale).
@@ -570,11 +571,17 @@ class IVUSViewer(XAViewer):
         window, level = self._window, self._level
 
         def to_u8(col: np.ndarray) -> np.ndarray:
-            if col.dtype == np.uint8:
-                return col
+            # Apply W/L the SAME way the cross-section does (XAViewer._frame_of)
+            # so the strip tracks the W/L sliders. The LUT is built only for
+            # grayscale integer series (None in colour mode), so it is tried
+            # FIRST — otherwise an 8-bit IVUS (uint8) short-circuited here and
+            # the strip ignored W/L. The uint8 pass-through then only catches
+            # already-display-ready pixels (e.g. a colour RGB strip).
             if (wl_lut is not None
                     and np.issubdtype(col.dtype, np.integer)):
                 return wl_lut[col + wl_off] if wl_off else wl_lut[col]
+            if col.dtype == np.uint8:
+                return col
             return apply_window(col, window, level)
 
         center_pairs = [(float(c[0]), float(c[1])) for c in centers]
