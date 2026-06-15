@@ -23,11 +23,19 @@ _SESSION_FILE = os.path.join(tempfile.gettempdir(), "multi_dicomviewer_session.j
 def _relaunch_argv() -> list[str]:
     """The command that re-launches this app exactly as it was started.
 
-    * Frozen (PyInstaller): argv[0] IS the executable, so [exe, *args].
+    * Frozen macOS .app: relaunch the BUNDLE via `open -n` (running the inner
+      Mach-O binary directly can mis-set the bundle environment / Gatekeeper).
+    * Frozen Windows/Linux: argv[0] IS the executable, so [exe, *args].
     * Dev (`python run.py …`): [python, run.py, *args]."""
+    extra = list(sys.argv[1:])
     if getattr(sys, "frozen", False):
-        return [sys.executable, *sys.argv[1:]]
-    return [sys.executable, os.path.abspath(sys.argv[0]), *sys.argv[1:]]
+        if sys.platform == "darwin":
+            i = sys.executable.find(".app/")
+            if i != -1:
+                app = sys.executable[: i + 4]      # ".../Multi-DicomViewer.app"
+                return ["open", "-n", app] + (["--args", *extra] if extra else [])
+        return [sys.executable, *extra]
+    return [sys.executable, os.path.abspath(sys.argv[0]), *extra]
 
 
 def _write_session() -> None:
