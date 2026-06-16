@@ -2051,10 +2051,15 @@ class MainWindow(QMainWindow):
         try:
             new_patients = scan_fn(_progress)
         except Exception as exc:
+            dlg.reset()
             dlg.close()
             QMessageBox.critical(self, "Scan failed", str(exc))
             return
-        dlg.setValue(dlg.maximum())   # ensure it closes
+        # reset() — not just setValue(max) — cancels the minimumDuration
+        # force-show timer and hides the dialog. For a fast/empty scan the timer
+        # would otherwise fire AFTER this function returned and pop a "Scanning"
+        # window that nothing ever closed (the empty-folder hang).
+        dlg.reset()
         dlg.close()
         # Series UIDs contributed by THIS folder — used to auto-open the
         # newly dropped study (not whatever sorts first overall).
@@ -2064,6 +2069,17 @@ class MainWindow(QMainWindow):
             for st in p.studies.values()
             for se in st.series.values()
         }
+        # Nothing displayable was dropped (empty folder, or no DICOM files):
+        # say so plainly and stop — don't leave a spinner up or re-open some
+        # unrelated already-loaded series.
+        if not new_uids:
+            self.statusBar().showMessage("対象のDICOMファイルがありませんでした。")
+            QMessageBox.information(
+                self, "対象ファイルなし",
+                "ドロップされたフォルダ／ファイルに、表示できる DICOM が"
+                "ありませんでした。",
+            )
+            return
         # Accumulate: a new folder adds its studies; previously loaded
         # ones stay in the info panel.
         dicom_io.merge_patients(self._patients, new_patients)
