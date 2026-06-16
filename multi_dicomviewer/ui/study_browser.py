@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QLayout,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QTreeWidget,
@@ -76,6 +77,25 @@ class FitButton(QPushButton):
         super().__init__(text, parent)
         self._full_text = text
         self._help_tip = ""
+        # QPushButton defaults to a non-shrinking horizontal policy (Minimum),
+        # which — together with sizeHint() pinned to the full label — would let
+        # the button force its full width as a hard minimum, so a toolbar of
+        # them could not shrink and (e.g. at 1920×1080 / 150% scaling) ate all
+        # the room, blocking the Studies dock from widening. Preferred lets the
+        # layout squeeze us down to minimumSizeHint() (icon + first char).
+        self.setSizePolicy(QSizePolicy.Policy.Preferred,
+                           self.sizePolicy().verticalPolicy())
+
+    def minimumSizeHint(self):  # noqa: N802 (Qt override)
+        # Floor = chrome + the leftmost char, so a tight layout can squeeze the
+        # button down to just its icon/first char (always legible) instead of
+        # the full label — without that floor the full-label sizeHint would be
+        # the minimum and the toolbar could not shrink.
+        hint = super().minimumSizeHint()
+        fm = self.fontMetrics()
+        first = self._full_text[:1] if self._full_text else ""
+        hint.setWidth(self._chrome_px() + fm.horizontalAdvance(first) + 2)
+        return hint
 
     def setHelpToolTip(self, tip: str) -> None:
         """Tooltip shown when the label fits (and appended after the full
