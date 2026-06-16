@@ -14,18 +14,20 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtCore import QEvent, QMimeData, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QColor,
     QDrag,
     QDragEnterEvent,
     QDropEvent,
     QKeySequence,
+    QPainter,
+    QPen,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication,
-    QButtonGroup,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -33,6 +35,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QPushButton,
@@ -42,6 +45,7 @@ from PyQt6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QWidgetAction,
 )
 
 from multi_dicomviewer.config import (
@@ -107,29 +111,31 @@ _VIEWER_FACTORY = {
     Modality.OTHER: XAViewer,
 }
 
-#: layout key -> (rows, cols, pane-count). Panes 0..count-1 are shown,
-#: filling left-to-right, top-to-bottom.
+#: Max grid the visual layout picker offers (rows × cols). 4×3 = up to 12 panes.
+_MAX_GRID_ROWS = 4
+_MAX_GRID_COLS = 3
+#: layout key "RxC" -> (rows, cols, pane-count). Every R∈1..4, C∈1..3 combo is a
+#: valid layout, chosen from the visual grid picker (no more 1×2-vs-2×1 button
+#: confusion). Panes fill left-to-right, top-to-bottom.
 _LAYOUTS = {
-    "1x1": (1, 1, 1),
-    "1x2": (1, 2, 2),
-    "2x1": (2, 1, 2),
-    "2x2": (2, 2, 4),
-    "2x3": (2, 3, 6),
+    f"{r}x{c}": (r, c, r * c)
+    for r in range(1, _MAX_GRID_ROWS + 1)
+    for c in range(1, _MAX_GRID_COLS + 1)
 }
-#: The 2×3 grid is the MASTER arrangement of the 6 panes. Every other
-#: (non-1×1) layout shows a FIXED sub-block of it, identified by the canonical
-#: 2×3 cell indices (0..5, reading order) its grid cells map to. So a given
-#: pane always sits in the same on-screen spot no matter how you reached the
-#: layout: 1×2 = top-left+top-middle, 2×1 = top-left+bottom-left, 2×2 = left &
-#: middle columns. 1×1 is special (shows the active pane).
+#: The full _MAX_GRID_ROWS×_MAX_GRID_COLS grid is the MASTER arrangement. Every
+#: other (non-1×1) layout shows the TOP-LEFT R×C sub-block of it, identified by
+#: the canonical cell indices (row*_MAX_GRID_COLS + col, reading order). Because
+#: the canonical column count is fixed, a given pane always sits in the same
+#: on-screen spot no matter which layout you reached it from. 1×1 is special
+#: (shows the active pane).
 _LAYOUT_CELLS = {
-    "1x2": [0, 1],
-    "2x1": [0, 3],
-    "2x2": [0, 1, 3, 4],
-    "2x3": [0, 1, 2, 3, 4, 5],
+    f"{r}x{c}": [rr * _MAX_GRID_COLS + cc
+                 for rr in range(r) for cc in range(c)]
+    for r in range(1, _MAX_GRID_ROWS + 1)
+    for c in range(1, _MAX_GRID_COLS + 1)
 }
 #: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
-_MULTI_PANE = ("1x2", "2x1", "2x2", "2x3")
+_MULTI_PANE = tuple(k for k, (_r, _c, n) in _LAYOUTS.items() if n >= 2)
 #: Separator between fields in a pane's top-band title (kept short — a long
 #: em-dash read too wide). e.g. "● Pane 1 - YAMADA TARO - 20260615 - 3/12".
 _PANE_SEP = " - "
@@ -142,6 +148,98 @@ _GRID_MAX_COLS = max(c for _r, c, _cnt in _LAYOUTS.values())
 
 #: drag payload (source pane index) for swapping pane positions
 PANE_MIME = "application/x-mdv-pane"
+
+
+class LayoutGridPicker(QWidget):
+    """Office-"insert table"-style visual layout chooser. Hover (or drag) over
+    a ROWS×COLS grid of cells: the top-left R×C block highlights and a "R×C"
+    caption updates; click (or release) picks that grid layout. Replaces the
+    discrete 1×2 / 2×1 / … buttons that were easy to mix up."""
+
+    #: emitted with (rows, cols) when the user picks a cell
+    picked = pyqtSignal(int, int)
+
+    _CELL = 22
+    _GAP = 4
+    _MARGIN = 7
+    _CAPTION_H = 18
+
+    def __init__(self, rows: int, cols: int, parent=None):
+        super().__init__(parent)
+        self._rows = rows
+        self._cols = cols
+        self._hover = (1, 1)        # (R, C) currently highlighted
+        self._current = (1, 1)      # the layout actually in effect
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def sizeHint(self) -> QSize:
+        w = 2 * self._MARGIN + self._cols * self._CELL + (self._cols - 1) * self._GAP
+        h = (2 * self._MARGIN + self._rows * self._CELL
+             + (self._rows - 1) * self._GAP + self._CAPTION_H)
+        return QSize(w, h)
+
+    def set_current(self, rows: int, cols: int) -> None:
+        self._current = (rows, cols)
+        self._hover = (rows, cols)
+        self.update()
+
+    def _cell_rect(self, r: int, c: int) -> QRect:
+        x = self._MARGIN + c * (self._CELL + self._GAP)
+        y = self._MARGIN + r * (self._CELL + self._GAP)
+        return QRect(x, y, self._CELL, self._CELL)
+
+    def _cell_at(self, x: float, y: float):
+        for r in range(self._rows):
+            for c in range(self._cols):
+                if self._cell_rect(r, c).adjusted(
+                        -self._GAP // 2, -self._GAP // 2,
+                        self._GAP // 2, self._GAP // 2).contains(int(x), int(y)):
+                    return r + 1, c + 1
+        return None
+
+    def mouseMoveEvent(self, e):
+        hit = self._cell_at(e.position().x(), e.position().y())
+        if hit and hit != self._hover:
+            self._hover = hit
+            self.update()
+
+    def leaveEvent(self, _e):
+        self._hover = self._current
+        self.update()
+
+    def mousePressEvent(self, e):
+        hit = self._cell_at(e.position().x(), e.position().y())
+        if hit:
+            self._hover = hit
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        hit = self._cell_at(e.position().x(), e.position().y()) or self._hover
+        self.picked.emit(hit[0], hit[1])
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor("#2b2b2b"))
+        hr, hc = self._hover
+        on = QColor("#4a90d9")
+        off = QColor("#5a5a5a")
+        edge = QColor("#1f1f1f")
+        for r in range(self._rows):
+            for c in range(self._cols):
+                sel = (r < hr and c < hc)
+                p.setPen(QPen(edge, 1))
+                p.setBrush(on if sel else off)
+                p.drawRoundedRect(self._cell_rect(r, c), 3, 3)
+        # caption "R×C"
+        p.setPen(QColor("#e0e0e0"))
+        p.drawText(
+            QRect(0, self.height() - self._CAPTION_H,
+                  self.width(), self._CAPTION_H),
+            Qt.AlignmentFlag.AlignCenter,
+            f"{hr}×{hc}",
+        )
 
 
 def _viewer_chrome_widgets(viewer) -> list:
@@ -1585,25 +1683,23 @@ class MainWindow(QMainWindow):
         row.addWidget(self._info_btn)
         row.addSpacing(12)
 
-        _layout_lbl = QLabel("Layout:")
-        _layout_lbl.setMinimumWidth(0)       # may clip when the bar is squeezed
-        row.addWidget(_layout_lbl)
-
-        self._layout_group = QButtonGroup(self)
-        self._layout_group.setExclusive(True)
-        for label, key in (
-            ("1×1", "1x1"),
-            ("1×2", "1x2"),
-            ("2×1", "2x1"),
-            ("2×2", "2x2"),
-            ("2×3", "2x3"),
-        ):
-            btn = FitButton(label)
-            btn.setCheckable(True)
-            btn.setChecked(key == self._layout_key)
-            btn.clicked.connect(lambda _c, k=key: self._apply_layout(k))
-            self._layout_group.addButton(btn)
-            row.addWidget(btn)
+        # Visual layout picker (Office "insert table" style): a "Layout ▾"
+        # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
+        # mixing up 1×2 vs 2×1.
+        self._layout_btn = QPushButton(self._layout_btn_text())
+        self._layout_btn.setToolTip("画面分割をグリッドから選択")
+        self._layout_menu = QMenu(self._layout_btn)
+        self._layout_picker = LayoutGridPicker(_GRID_MAX_ROWS, _GRID_MAX_COLS)
+        self._layout_picker.picked.connect(self._on_layout_picked)
+        _wa = QWidgetAction(self._layout_menu)
+        _wa.setDefaultWidget(self._layout_picker)
+        self._layout_menu.addAction(_wa)
+        self._layout_btn.setMenu(self._layout_menu)
+        self._layout_menu.aboutToShow.connect(
+            lambda: self._layout_picker.set_current(
+                *_LAYOUTS[self._layout_key][:2])
+        )
+        row.addWidget(self._layout_btn)
 
         row.addSpacing(12)
         # "Max Image" toggle pair: Hide Buttons strips every pane down to just
@@ -1700,9 +1796,22 @@ class MainWindow(QMainWindow):
             return [a]
         return [self._order[i] for i in _LAYOUT_CELLS[self._layout_key]]
 
+    def _layout_btn_text(self) -> str:
+        # setMenu() adds the native dropdown arrow, so the text itself stays
+        # plain: "Layout  2×3".
+        return f"Layout  {self._layout_key.replace('x', '×')}"
+
+    def _on_layout_picked(self, rows: int, cols: int) -> None:
+        """A cell was chosen in the visual grid picker → apply that R×C layout
+        and dismiss the popup."""
+        self._layout_menu.hide()
+        self._apply_layout(f"{rows}x{cols}")
+
     def _apply_layout(self, key: str) -> None:
         self._layout_key = key
         rows, cols, count = _LAYOUTS[key]
+        if hasattr(self, "_layout_btn"):
+            self._layout_btn.setText(self._layout_btn_text())
 
         # Detach every pane, then re-add the visible subset to the grid.
         for pane in self._panes:
