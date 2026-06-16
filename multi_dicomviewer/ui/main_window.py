@@ -2409,11 +2409,18 @@ class MainWindow(QMainWindow):
     def _pane_bar(self, series: Series) -> str:
         """Pane top-band body: "Name - YYYYMMDD - SeriesNo/InstanceNo".
         Missing fields are dropped; a missing series/instance number shows "?".
-        (The pane prefixes "● Pane N - " itself.)"""
-        patient, study = self._series_patient_study(series)
-        name = self._clean_name(patient.name) if patient is not None else ""
-        date = self._fmt_date(study.date) if (study and study.date) \
-            else self._fmt_date((getattr(series, "acq_time", "") or "")[:8])
+        (The pane prefixes "● Pane N - " itself.)
+
+        When Anonymize is ON the real patient name and date are MASKED — the
+        literal placeholders "Name" and "Date" are shown instead (the
+        series/instance numbers are not PHI and stay)."""
+        if self._anon:
+            name, date = "Name", "Date"
+        else:
+            patient, study = self._series_patient_study(series)
+            name = self._clean_name(patient.name) if patient is not None else ""
+            date = self._fmt_date(study.date) if (study and study.date) \
+                else self._fmt_date((getattr(series, "acq_time", "") or "")[:8])
         sn = series.number if series.number is not None else "?"
         inst = series.instance_number if series.instance_number is not None \
             else "?"
@@ -2759,11 +2766,25 @@ class MainWindow(QMainWindow):
         self.browser.set_anonymized(on)  # also reflects its own button
         for v in self._tag_viewers():
             v.set_anonymized(on)
+        # Mask/unmask the Name + Date in every pane's top-band title now, so the
+        # change is immediate (the title is otherwise only built on open).
+        self._refresh_pane_titles()
         self.statusBar().showMessage(
             "Anonymize: ON (case info masked on screen)"
             if on
             else "Anonymize: OFF"
         )
+
+    def _refresh_pane_titles(self) -> None:
+        """Re-apply each loaded pane's top-band title (e.g. after the Anonymize
+        toggle, so Name/Date mask or unmask without reopening the series)."""
+        for pane in self._panes:
+            if pane.current_viewer() is None:
+                continue
+            uid = pane.shown_series_uid()
+            se = self._series_by_uid.get(uid) if uid else None
+            if se is not None:
+                pane._set_pane_title(self._pane_bar(se))
 
     def _open_anon_settings(self) -> None:
         """Right-click on the Anonymous button → choose which tags the
