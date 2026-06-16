@@ -676,12 +676,14 @@ class MainWindow(QMainWindow):
 
         # Widen the dock separator (the drag handle between the Studies
         # dock and the central viewer grid) — Qt's default is 4 px which
-        # is hard to grab. Same rule for any future horizontally-docked
-        # widget. Background tone matches the chrome so the bar still
-        # reads as inert until the cursor hovers.
+        # is hard to grab. The whole separator IS the draggable hit zone, so
+        # making it 24 px (3× the old 8 px line) means you can be off by up to
+        # a line-width on either side and still grab it to resize the Tree.
+        # Same rule for any future horizontally-docked widget. Background tone
+        # matches the chrome so the bar still reads as inert until hover.
         self.setStyleSheet(
             "QMainWindow::separator {"
-            " background:#a8a8a8; width:8px; height:8px;"
+            " background:#a8a8a8; width:24px; height:24px;"
             "}"
             "QMainWindow::separator:hover {"
             " background:#4a90d9;"
