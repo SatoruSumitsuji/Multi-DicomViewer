@@ -5,8 +5,6 @@ on activation, so the shell does not care which one is showing.
 """
 from __future__ import annotations
 
-import sys
-
 import numpy as np
 from PyQt6.QtCore import QMimeData, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -32,6 +30,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSlider,
     QStackedWidget,
+    QStyle,
+    QStyleOptionButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -54,12 +54,6 @@ _THUMB_GEN_PX = 280
 
 #: Drag payload carrying a series_uid, dropped onto a viewer pane.
 SERIES_MIME = "application/x-mdv-series-uid"
-
-
-#: Horizontal px reserved for a FitButton's frame/padding when eliding its
-#: label. macOS native buttons pad/round wider and centre the text, so they
-#: need a bigger reserve than Windows or the leftmost char gets clipped.
-_FIT_RESERVE = 30 if sys.platform == "darwin" else 14
 
 
 class FitButton(QPushButton):
@@ -96,14 +90,20 @@ class FitButton(QPushButton):
 
     def _relayout_text(self) -> None:
         fm = self.fontMetrics()
-        # Room reserved for the button's frame/padding on both sides. macOS
-        # native push buttons have wider internal padding + rounded ends AND
-        # centre their text, so too small a reserve let the "fitted" text
-        # overflow the real text area and clip BOTH ends — cutting the leftmost
-        # character (the icon emoji the user reads to recognise the button).
-        # Reserve more on macOS so the elided text genuinely fits and the start
-        # stays visible.
-        avail = self.width() - _FIT_RESERVE
+        # Width actually available for the LABEL — taken from the style's
+        # content rect, NOT a guessed constant. This is correct per platform:
+        # macOS native buttons pad/round wider than Windows, and a guessed
+        # reserve was either too small (the "fitted" text overflowed and the
+        # centred label clipped its leftmost char) or too big (over-elided to
+        # just the icon at any width). The style rect makes the elided text
+        # truly fit, so a wide button shows the full label and a narrow one
+        # shows as many leading chars as fit.
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        content = self.style().subElementRect(
+            QStyle.SubElement.SE_PushButtonContents, opt, self
+        )
+        avail = content.width() - 2          # tiny safety margin
         if avail <= 0:
             return
         if fm.horizontalAdvance(self._full_text) <= avail:
