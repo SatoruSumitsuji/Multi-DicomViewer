@@ -1562,7 +1562,9 @@ class MainWindow(QMainWindow):
         row.addWidget(self._info_btn)
         row.addSpacing(12)
 
-        row.addWidget(QLabel("Layout:"))
+        _layout_lbl = QLabel("Layout:")
+        _layout_lbl.setMinimumWidth(0)       # may clip when the bar is squeezed
+        row.addWidget(_layout_lbl)
 
         self._layout_group = QButtonGroup(self)
         self._layout_group.setExclusive(True)
@@ -1622,17 +1624,26 @@ class MainWindow(QMainWindow):
             lambda _p: self._open_tag_dialog_active()
         )
         row.addWidget(self._tags_btn)
-        row.addWidget(QLabel("Tag size:"))
+        _tagsz_lbl = QLabel("Tag size:")
+        _tagsz_lbl.setMinimumWidth(0)        # may clip when the bar is squeezed
+        row.addWidget(_tagsz_lbl)
         self._tag_font_slider = QSlider(Qt.Orientation.Horizontal)
         self._tag_font_slider.setRange(TAG_FONT_PT_MIN, TAG_FONT_PT_MAX)
         self._tag_font_slider.setValue(int(self._tag_font_pt))
-        self._tag_font_slider.setFixedWidth(110)
+        # Prefer ~110 px but allow shrinking, so the top bar can get narrow
+        # enough (e.g. at 1920×1080 / 150% scaling) to free the Studies dock.
+        self._tag_font_slider.setMinimumWidth(40)
+        self._tag_font_slider.setMaximumWidth(110)
         self._tag_font_slider.setToolTip("DICOM tag text size (all panes)")
         self._tag_font_slider.valueChanged.connect(self._set_tag_font_pt)
         row.addWidget(self._tag_font_slider)
 
         # Bi/Lt/Rt lives inside each viewer's own "Plane:" bar now (per-pane),
         # so there is no global plane switch in this top bar anymore.
+        # (FitButton itself is now shrinkable — Preferred policy + an icon/first-
+        # char minimumSizeHint — so this bar no longer forces a large minimum
+        # width on the central area, which had blocked the Studies dock from
+        # widening at small logical resolutions e.g. 1920×1080 at 150% scaling.)
         row.addStretch(1)
         return bar
 
