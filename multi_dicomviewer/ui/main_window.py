@@ -2387,8 +2387,15 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _clean_name(raw) -> str:
-        """DICOM PersonName ("Family^Given^…") → spaces, whitespace collapsed."""
-        return " ".join(str(raw or "").replace("^", " ").split())
+        """DICOM PersonName → a short alphabetic display name.
+
+        A PersonName can carry up to three "=" separated representations
+        (Alphabetic=Ideographic=Phonetic, i.e. romaji=漢字=カナ). Keep ONLY the
+        first (alphabetic) one so the pane title stays short, then turn the
+        "Family^Given^…" component carets into spaces and collapse whitespace.
+        """
+        alpha = str(raw or "").split("=", 1)[0]
+        return " ".join(alpha.replace("^", " ").split())
 
     def _series_patient_study(self, series: Series):
         """The (Patient, Study) *series* belongs to, or (None, None)."""
