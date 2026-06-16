@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSlider,
     QStackedWidget,
@@ -729,7 +730,26 @@ class MainWindow(QMainWindow):
         col = QVBoxLayout(central)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(0)
-        col.addWidget(self._build_layout_bar())
+        # Wrap the top layout bar in a width-decoupled scroll container so it
+        # does NOT pin the central area's minimum width. Otherwise the bar's
+        # full-width minimum capped how wide the Studies dock could grow (worst
+        # at small logical resolutions, e.g. 1920×1080 at 150% scaling). The
+        # bar's buttons elide as the area narrows; only at extreme narrowness
+        # does a horizontal scrollbar appear. Height stays one row.
+        _bar = self._build_layout_bar()
+        _bar_scroll = QScrollArea()
+        _bar_scroll.setWidget(_bar)
+        _bar_scroll.setWidgetResizable(True)
+        _bar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        _bar_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        _bar_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        _bar_scroll.setMinimumWidth(0)       # don't pin the central min width
+        _bar_scroll.setFixedHeight(_bar.sizeHint().height())
+        col.addWidget(_bar_scroll)
         col.addWidget(self._grid_host, 1)
         self.setCentralWidget(central)
         # Studies dock: minimum width = roughly one minimum-size
@@ -2832,7 +2852,9 @@ class MainWindow(QMainWindow):
         if not dock.isVisible():
             dock.setVisible(True)
             self._info_btn.setText("◀ Info shown")
-        cap = max(300, self.width() - 360)   # leave ≥360px for the panes
+        # Leave only a small slice for the panes so the Tree can get large;
+        # resizeDocks still won't shrink the central area below its own minimum.
+        cap = max(300, self.width() - 120)
         w = max(200, min(int(width), cap))
         self.resizeDocks([dock], [w], Qt.Orientation.Horizontal)
 
@@ -2844,7 +2866,9 @@ class MainWindow(QMainWindow):
         if not dock.isVisible():
             dock.setVisible(True)
             self._info_btn.setText("◀ Info shown")
-        cap = max(dock.minimumWidth(), self.width() - 360)
+        # Leave only a small slice for the panes so the Tree can get large;
+        # resizeDocks still clamps to the central area's own minimum width.
+        cap = max(dock.minimumWidth(), self.width() - 120)
         w = max(dock.minimumWidth(), min(dock.width() + delta, cap))
         self.resizeDocks([dock], [w], Qt.Orientation.Horizontal)
 
