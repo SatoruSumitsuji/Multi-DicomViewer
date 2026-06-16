@@ -129,6 +129,9 @@ _LAYOUT_CELLS = {
 }
 #: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
 _MULTI_PANE = ("1x2", "2x1", "2x2", "2x3")
+#: Separator between fields in a pane's top-band title (kept short — a long
+#: em-dash read too wide). e.g. "● Pane 1 - YAMADA TARO - 20260615 - 3/12".
+_PANE_SEP = " - "
 #: Enough panes for the largest layout (2×3 = 6).
 _MAX_PANES = max(c for _r, _c, c in _LAYOUTS.values())
 #: Grid dimensions of the largest layout — used to reset stretch on every
@@ -352,7 +355,16 @@ class ViewerPane(QFrame):
 
     # ---------------------------------------------------------- appearance
     def _idle_title(self) -> str:
-        return f"● Pane {self.index + 1} — empty"
+        return f"● Pane {self.index + 1}{_PANE_SEP}empty"
+
+    def _set_pane_title(self, body: str) -> None:
+        """Set the top-band title to "● Pane N - <body>" (or just "● Pane N"
+        when body is empty)."""
+        body = (body or "").strip()
+        self._title.setText(
+            f"● Pane {self.index + 1}{_PANE_SEP}{body}" if body
+            else f"● Pane {self.index + 1}"
+        )
 
     def set_active(self, on: bool) -> None:
         self._active_on = on
@@ -432,7 +444,11 @@ class ViewerPane(QFrame):
         self.viewer_ready.emit(viewer)
         return viewer
 
-    def show_series(self, loaded, title: str) -> None:
+    def show_series(self, loaded, title: str,
+                    pane_label: str | None = None) -> None:
+        """Load *loaded* into this pane. *title* is the viewer's own header
+        (kept descriptive); *pane_label* is the top-band body
+        ("Name - YYYYMMDD - SeriesNo/InstanceNo"), defaulting to *title*."""
         viewer = self._viewer_for(loaded.modality)
         if viewer is None:
             mod = loaded.modality.value
@@ -441,14 +457,12 @@ class ViewerPane(QFrame):
                 "(Supported: XA, CT, IVUS. OCT/OFDI/NM planned.)"
             )
             self._cur_viewer = None
-            self._title.setText(
-                f"● Pane {self.index + 1} — {mod} (unsupported)"
-            )
+            self._set_pane_title(f"{mod} (unsupported)")
             return
         viewer.load_series(loaded, title)
         self._stack.setCurrentWidget(viewer)
         self._cur_viewer = viewer
-        self._title.setText(f"● Pane {self.index + 1} — {title}")
+        self._set_pane_title(pane_label if pane_label is not None else title)
         # A freshly built or re-shown viewer must match this pane's current
         # Max-Image / compact state.
         self._apply_pane_state(viewer)
@@ -469,15 +483,16 @@ class ViewerPane(QFrame):
         v = self._viewers.get(modality)
         return v is not None and getattr(v, "_loaded_uid", "") == series_uid
 
-    def switch_to_loaded(self, modality, title: str) -> None:
+    def switch_to_loaded(self, modality, pane_label: str) -> None:
         """Bring the cached viewer for *modality* to the front without
-        calling load_series. Caller must verify with is_loaded() first."""
+        calling load_series. Caller must verify with is_loaded() first.
+        *pane_label* is the top-band body (see show_series)."""
         viewer = self._viewers.get(modality)
         if viewer is None:
             return
         self._stack.setCurrentWidget(viewer)
         self._cur_viewer = viewer
-        self._title.setText(f"● Pane {self.index + 1} — {title}")
+        self._set_pane_title(pane_label)
 
     def set_shown_series(self, uid: str | None) -> None:
         self._shown_uid = uid
@@ -2370,24 +2385,33 @@ class MainWindow(QMainWindow):
         raw = (raw or "").strip()
         return raw[:8] if len(raw) >= 8 and raw[:8].isdigit() else ""
 
-    def _series_study_date(self, series: Series) -> str:
-        """The exam (study) date for *series* as "YYYYMMDD", or "" if none.
-        Falls back to the series' own acquisition date when StudyDate is
-        absent."""
-        study_uid = self._study_by_series_uid.get(series.series_uid, "")
-        if study_uid:
-            for p in self._patients.values():
-                st = p.studies.get(study_uid)
-                if st is not None and st.date:
-                    return self._fmt_date(st.date)
-        return self._fmt_date((getattr(series, "acq_time", "") or "")[:8])
+    @staticmethod
+    def _clean_name(raw) -> str:
+        """DICOM PersonName ("Family^Given^…") → spaces, whitespace collapsed."""
+        return " ".join(str(raw or "").replace("^", " ").split())
 
-    def _pane_title(self, series: Series) -> str:
-        """Pane title text: "YYYYMMDD — #SeriesNo Kind — Description [N img]"
-        (the exam date prepended to the series label). Date omitted when
-        unknown."""
-        date = self._series_study_date(series)
-        return f"{date} — {series.label}" if date else series.label
+    def _series_patient_study(self, series: Series):
+        """The (Patient, Study) *series* belongs to, or (None, None)."""
+        study_uid = self._study_by_series_uid.get(series.series_uid, "")
+        for p in self._patients.values():
+            st = p.studies.get(study_uid)
+            if st is not None:
+                return p, st
+        return None, None
+
+    def _pane_bar(self, series: Series) -> str:
+        """Pane top-band body: "Name - YYYYMMDD - SeriesNo/InstanceNo".
+        Missing fields are dropped; a missing series/instance number shows "?".
+        (The pane prefixes "● Pane N - " itself.)"""
+        patient, study = self._series_patient_study(series)
+        name = self._clean_name(patient.name) if patient is not None else ""
+        date = self._fmt_date(study.date) if (study and study.date) \
+            else self._fmt_date((getattr(series, "acq_time", "") or "")[:8])
+        sn = series.number if series.number is not None else "?"
+        inst = series.instance_number if series.instance_number is not None \
+            else "?"
+        parts = [p for p in (name, date, f"{sn}/{inst}") if p]
+        return _PANE_SEP.join(parts)
 
     def _open_series(self, series: Series, pane: ViewerPane) -> None:
         # Mac build cannot render CT (VTK's OpenGL→Metal path hangs). Tell
@@ -2406,7 +2430,7 @@ class MainWindow(QMainWindow):
         # too — so returning to a series is instant and its frame /
         # camera / W-L / measurements all stay put.
         if pane.is_loaded(series.modality, series.series_uid):
-            pane.switch_to_loaded(series.modality, self._pane_title(series))
+            pane.switch_to_loaded(series.modality, self._pane_bar(series))
             pane.set_shown_series(series.series_uid)
             self._cur_study_uid = self._study_by_series_uid.get(
                 series.series_uid
@@ -2491,7 +2515,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         self._cur_study_uid = self._study_by_series_uid.get(series.series_uid)
-        pane.show_series(loaded, self._pane_title(series))
+        pane.show_series(loaded, series.label, self._pane_bar(series))
         if dlg is not None:
             dlg.close()
         # Carry the current anonymize + tag-overlay choices onto the
