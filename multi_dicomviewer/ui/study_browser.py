@@ -30,8 +30,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSlider,
     QStackedWidget,
-    QStyle,
-    QStyleOptionButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -61,11 +59,17 @@ class FitButton(QPushButton):
 
     When the full label fits, it is shown in full (centred, as normal) and
     the tooltip falls back to the optional help text. When the label is too
-    wide, it is elided from the right — so the *start* of the label is always
-    legible — and the tooltip exposes the complete text. Eliding (rather than
-    setting ``text-align: left`` via a stylesheet) is used deliberately: a
-    stylesheet would override the native checked/pressed appearance these
-    buttons rely on, whereas re-eliding the text leaves the look untouched.
+    wide, it is elided from the right — so the *start* of the label (its icon +
+    leading chars) is always legible — and the tooltip exposes the complete
+    text. Eliding (rather than setting ``text-align: left`` via a stylesheet) is
+    used deliberately: a stylesheet would override the native checked/pressed
+    appearance these buttons rely on, whereas re-eliding the text leaves the
+    look untouched.
+
+    sizeHint() is pinned to the FULL label so eliding the displayed text can't
+    feed back into the layout and shrink the button further (that loop
+    collapsed macOS buttons to just their icon); the available width is derived
+    from Qt's own size hint, so it is correct on Windows and macOS alike.
     """
 
     def __init__(self, text: str, parent: QWidget | None = None) -> None:
@@ -88,22 +92,35 @@ class FitButton(QPushButton):
         super().resizeEvent(e)
         self._relayout_text()
 
+    def _chrome_px(self) -> int:
+        """Non-text width (bezel + side margins) around the label, derived from
+        Qt's own size hint so it is correct on every platform (macOS rounds /
+        pads wider than Windows). It is constant for any text, so it can be
+        read off whatever text is current."""
+        fm = self.fontMetrics()
+        return max(0, super().sizeHint().width()
+                   - fm.horizontalAdvance(super().text()))
+
+    def sizeHint(self):  # noqa: N802 (Qt override)
+        # Always hint for the FULL label, never the (possibly elided) text on
+        # screen. Otherwise eliding shrank the hint → the layout shrank the
+        # button → it elided more … collapsing macOS buttons to just the icon
+        # even when the dock was wide. setMinimumWidth(0) still lets the layout
+        # squeeze the button below this hint when space is genuinely tight.
+        hint = super().sizeHint()
+        fm = self.fontMetrics()
+        hint.setWidth(hint.width() + max(
+            0, fm.horizontalAdvance(self._full_text)
+            - fm.horizontalAdvance(super().text())))
+        return hint
+
     def _relayout_text(self) -> None:
         fm = self.fontMetrics()
-        # Width actually available for the LABEL — taken from the style's
-        # content rect, NOT a guessed constant. This is correct per platform:
-        # macOS native buttons pad/round wider than Windows, and a guessed
-        # reserve was either too small (the "fitted" text overflowed and the
-        # centred label clipped its leftmost char) or too big (over-elided to
-        # just the icon at any width). The style rect makes the elided text
-        # truly fit, so a wide button shows the full label and a narrow one
-        # shows as many leading chars as fit.
-        opt = QStyleOptionButton()
-        self.initStyleOption(opt)
-        content = self.style().subElementRect(
-            QStyle.SubElement.SE_PushButtonContents, opt, self
-        )
-        avail = content.width() - 2          # tiny safety margin
+        # Available label width = actual button width minus its constant chrome
+        # (from Qt's size hint, accurate per platform). When the button is at
+        # its hinted width this equals the full label, so a wide button shows
+        # the whole "icon + text"; a squeezed one elides from the right.
+        avail = self.width() - self._chrome_px()
         if avail <= 0:
             return
         if fm.horizontalAdvance(self._full_text) <= avail:
