@@ -5,6 +5,8 @@ on activation, so the shell does not care which one is showing.
 """
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 from PyQt6.QtCore import QMimeData, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import (
@@ -54,6 +56,12 @@ _THUMB_GEN_PX = 280
 SERIES_MIME = "application/x-mdv-series-uid"
 
 
+#: Horizontal px reserved for a FitButton's frame/padding when eliding its
+#: label. macOS native buttons pad/round wider and centre the text, so they
+#: need a bigger reserve than Windows or the leftmost char gets clipped.
+_FIT_RESERVE = 30 if sys.platform == "darwin" else 14
+
+
 class FitButton(QPushButton):
     """A push button that stays readable when the toolbar is dragged narrow.
 
@@ -88,8 +96,14 @@ class FitButton(QPushButton):
 
     def _relayout_text(self) -> None:
         fm = self.fontMetrics()
-        # leave room for the button's frame/padding on both sides
-        avail = self.width() - 14
+        # Room reserved for the button's frame/padding on both sides. macOS
+        # native push buttons have wider internal padding + rounded ends AND
+        # centre their text, so too small a reserve let the "fitted" text
+        # overflow the real text area and clip BOTH ends — cutting the leftmost
+        # character (the icon emoji the user reads to recognise the button).
+        # Reserve more on macOS so the elided text genuinely fits and the start
+        # stays visible.
+        avail = self.width() - _FIT_RESERVE
         if avail <= 0:
             return
         if fm.horizontalAdvance(self._full_text) <= avail:
@@ -100,6 +114,11 @@ class FitButton(QPushButton):
             elided = fm.elidedText(
                 self._full_text, Qt.TextElideMode.ElideRight, avail
             )
+            # At very narrow widths elidedText can collapse to just "…"/empty,
+            # hiding exactly the leftmost char the user needs — force the first
+            # character to remain.
+            if self._full_text and elided.strip("… ") == "":
+                elided = self._full_text[0]
             if super().text() != elided:
                 super().setText(elided)
             tip = self._full_text
