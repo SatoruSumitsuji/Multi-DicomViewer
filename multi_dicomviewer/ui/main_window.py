@@ -746,6 +746,9 @@ class MainWindow(QMainWindow):
         self.browser.fit_dock_width_requested.connect(
             self._fit_studies_dock_width
         )
+        self.browser.resize_dock_step_requested.connect(
+            self._step_studies_dock_width
+        )
         self.browser.dicom_info_toggled.connect(self._on_dicom_info_btn)
         self.browser.dicom_tags_requested.connect(self._open_tag_dialog_active)
 
@@ -2831,6 +2834,18 @@ class MainWindow(QMainWindow):
             self._info_btn.setText("◀ Info shown")
         cap = max(300, self.width() - 360)   # leave ≥360px for the panes
         w = max(200, min(int(width), cap))
+        self.resizeDocks([dock], [w], Qt.Orientation.Horizontal)
+
+    def _step_studies_dock_width(self, delta: int) -> None:
+        """◀ / ▶ toolbar buttons → widen/narrow the Studies dock by *delta* px.
+        An always-available alternative to dragging the thin separator. Clamped
+        to the dock minimum and to leaving the central panes usable room."""
+        dock = self._studies_dock
+        if not dock.isVisible():
+            dock.setVisible(True)
+            self._info_btn.setText("◀ Info shown")
+        cap = max(dock.minimumWidth(), self.width() - 360)
+        w = max(dock.minimumWidth(), min(dock.width() + delta, cap))
         self.resizeDocks([dock], [w], Qt.Orientation.Horizontal)
 
     def _open_tag_dialog(self, viewer) -> None:

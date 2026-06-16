@@ -1139,6 +1139,10 @@ class StudyPanel(QWidget):
     #: "Fit: min × 10 across" → ask the shell to widen the Studies dock to
     #: roughly this pixel width (the dock is shell-owned).
     fit_dock_width_requested = pyqtSignal(int)
+    #: ◀ / ▶ toolbar buttons → ask the shell to step the Studies dock width by
+    #: this many px (negative = narrower, positive = wider). The dock is
+    #: shell-owned, so the resize itself happens in MainWindow.
+    resize_dock_step_requested = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1285,6 +1289,24 @@ class StudyPanel(QWidget):
             lambda _p: self.dicom_tags_requested.emit()
         )
 
+        # ◀ / ▶ : step the Studies-dock width narrower / wider. An always-
+        # available alternative to dragging the thin separator (handy on small
+        # screens / high-DPI where the seam is fiddly to grab). The dock is
+        # shell-owned, so these just emit a step request.
+        _STEP = 60
+        self.btn_dock_narrow = QPushButton("◀")
+        self.btn_dock_narrow.setToolTip("Tree枠を狭く")
+        self.btn_dock_narrow.setMaximumWidth(34)
+        self.btn_dock_narrow.clicked.connect(
+            lambda: self.resize_dock_step_requested.emit(-_STEP)
+        )
+        self.btn_dock_widen = QPushButton("▶")
+        self.btn_dock_widen.setToolTip("Tree枠を広く")
+        self.btn_dock_widen.setMaximumWidth(34)
+        self.btn_dock_widen.clicked.connect(
+            lambda: self.resize_dock_step_requested.emit(_STEP)
+        )
+
         # Let every toolbar button shrink (text clips) so the whole dock
         # can be dragged down to roughly one minimum thumbnail wide.
         for b in (self.btn_info, self.btn_thumb,
@@ -1297,6 +1319,8 @@ class StudyPanel(QWidget):
         top.addWidget(self.btn_thumb)
         top.addWidget(self.btn_anon)
         top.addWidget(self.btn_dicom)
+        top.addWidget(self.btn_dock_narrow)
+        top.addWidget(self.btn_dock_widen)
         top.addStretch(1)
         top.addWidget(QLabel("🖼"))
         top.addWidget(self.thumb_size)
