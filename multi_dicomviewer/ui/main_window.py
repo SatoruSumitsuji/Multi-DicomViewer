@@ -2363,6 +2363,32 @@ class MainWindow(QMainWindow):
         if series is not None:
             self._open_series(series, pane)
 
+    @staticmethod
+    def _fmt_date(raw: str) -> str:
+        """Normalise a DICOM date to the raw "YYYYMMDD" 8-digit form (kept as-is,
+        no separators). Returns "" for an empty/unrecognised value."""
+        raw = (raw or "").strip()
+        return raw[:8] if len(raw) >= 8 and raw[:8].isdigit() else ""
+
+    def _series_study_date(self, series: Series) -> str:
+        """The exam (study) date for *series* as "YYYYMMDD", or "" if none.
+        Falls back to the series' own acquisition date when StudyDate is
+        absent."""
+        study_uid = self._study_by_series_uid.get(series.series_uid, "")
+        if study_uid:
+            for p in self._patients.values():
+                st = p.studies.get(study_uid)
+                if st is not None and st.date:
+                    return self._fmt_date(st.date)
+        return self._fmt_date((getattr(series, "acq_time", "") or "")[:8])
+
+    def _pane_title(self, series: Series) -> str:
+        """Pane title text: "YYYYMMDD — #SeriesNo Kind — Description [N img]"
+        (the exam date prepended to the series label). Date omitted when
+        unknown."""
+        date = self._series_study_date(series)
+        return f"{date} — {series.label}" if date else series.label
+
     def _open_series(self, series: Series, pane: ViewerPane) -> None:
         # Mac build cannot render CT (VTK's OpenGL→Metal path hangs). Tell
         # the user explicitly and abort the load before any disk read /
@@ -2380,7 +2406,7 @@ class MainWindow(QMainWindow):
         # too — so returning to a series is instant and its frame /
         # camera / W-L / measurements all stay put.
         if pane.is_loaded(series.modality, series.series_uid):
-            pane.switch_to_loaded(series.modality, series.label)
+            pane.switch_to_loaded(series.modality, self._pane_title(series))
             pane.set_shown_series(series.series_uid)
             self._cur_study_uid = self._study_by_series_uid.get(
                 series.series_uid
@@ -2465,7 +2491,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         self._cur_study_uid = self._study_by_series_uid.get(series.series_uid)
-        pane.show_series(loaded, series.label)
+        pane.show_series(loaded, self._pane_title(series))
         if dlg is not None:
             dlg.close()
         # Carry the current anonymize + tag-overlay choices onto the
