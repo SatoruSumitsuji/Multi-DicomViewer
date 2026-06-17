@@ -489,6 +489,10 @@ class XAViewer(AbstractViewer):
         self._buffer_timer = QTimer(self)
         self._buffer_timer.setInterval(40)
         self._buffer_timer.timeout.connect(self._buffer_poll)
+        #: Optional shell callback (viewer) -> bool that vetoes STARTING
+        #: playback when too many panes already play at once (set via
+        #: set_play_gate). None = no limit.
+        self._play_gate = None
         self._fps = DEFAULT_CINE_FPS
         # Cine speed multiplier toggled by D (1.0 = 1×, 2.0 = 2×).
         self._play_speed: float = 1.0
@@ -1528,10 +1532,28 @@ class XAViewer(AbstractViewer):
         last = min(self._frame + need, n - 1)
         return all(p.is_ready(last) for p in self._shown_planes())
 
+    def set_play_gate(self, fn) -> None:
+        """Shell sets a callback ``fn(viewer) -> bool``; returning False vetoes
+        starting playback (e.g. the simultaneous-play cap). fn shows its own
+        message."""
+        self._play_gate = fn
+
+    def is_playing(self) -> bool:
+        """True while this viewer's cine is engaged (Play button down)."""
+        return self.play_btn.isChecked()
+
     def _toggle_play(self, on: bool):
         n = max((p.volume.shape[0] for p in self._planes), default=0)
         if n < 2:
             self.play_btn.setChecked(False)
+            return
+        # Shell cap on simultaneous playback: if vetoed, snap the button back
+        # to "Play" and do nothing (the gate already told the user why).
+        if on and self._play_gate is not None and not self._play_gate(self):
+            self.play_btn.blockSignals(True)
+            self.play_btn.setChecked(False)
+            self.play_btn.blockSignals(False)
+            self.play_btn.setText("▶ Play")
             return
         self.play_btn.setText("⏸ Pause" if on else "▶ Play")
         if on:
