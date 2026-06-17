@@ -138,7 +138,7 @@ _LAYOUT_CELLS = {
 _MULTI_PANE = tuple(k for k, (_r, _c, n) in _LAYOUTS.items() if n >= 2)
 #: Max cine viewers (panes) allowed to play at once. Starting a play beyond this
 #: is refused with a message — guards against multi-pane decode/render overload.
-_PLAY_CAP = 3
+_PLAY_CAP = 4
 #: Separator between fields in a pane's top-band title (kept short — a long
 #: em-dash read too wide). e.g. "● Pane 1 - YAMADA TARO - 20260615 - 3/12".
 _PANE_SEP = " - "
