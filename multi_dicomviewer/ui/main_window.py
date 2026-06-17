@@ -136,6 +136,9 @@ _LAYOUT_CELLS = {
 }
 #: Multi-pane layouts (used to gate MultiSync, which needs 2+ panes).
 _MULTI_PANE = tuple(k for k, (_r, _c, n) in _LAYOUTS.items() if n >= 2)
+#: Max cine viewers (panes) allowed to play at once. Starting a play beyond this
+#: is refused with a message — guards against multi-pane decode/render overload.
+_PLAY_CAP = 3
 #: Separator between fields in a pane's top-band title (kept short — a long
 #: em-dash read too wide). e.g. "● Pane 1 - YAMADA TARO - 20260615 - 3/12".
 _PANE_SEP = " - "
@@ -2760,6 +2763,30 @@ class MainWindow(QMainWindow):
         # to this (possibly just-created) viewer.
         if hasattr(viewer, "set_long_axis_allowed"):
             viewer.set_long_axis_allowed(self._layout_key == "1x1")
+        # Cap how many panes may play a cine at once (avoids decode/render
+        # overload across panes).
+        if hasattr(viewer, "set_play_gate"):
+            viewer.set_play_gate(self._play_gate_check)
+
+    def _play_gate_check(self, viewer) -> bool:
+        """Veto STARTING playback when _PLAY_CAP panes already play. Counts the
+        cine viewers currently shown in OTHER panes; if that already reaches the
+        cap, tell the user and refuse."""
+        others = 0
+        for pane in self._panes:
+            v = pane.current_viewer()
+            if v is None or v is viewer:
+                continue
+            if getattr(v, "is_playing", None) and v.is_playing():
+                others += 1
+        if others >= _PLAY_CAP:
+            QMessageBox.information(
+                self, "同時再生の上限",
+                f"同時に再生できるのは最大 {_PLAY_CAP} 画面までです。\n"
+                "別の画面を再生するには、再生中のいずれかを停止してください。",
+            )
+            return False
+        return True
 
     def _on_play_range_changed(
         self, uid: str, start: int, end: int, total: int
