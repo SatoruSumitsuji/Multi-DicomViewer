@@ -2064,10 +2064,12 @@ class MainWindow(QMainWindow):
             ]
             if scoped:
                 lst = scoped
-        # Prefer the per-kind last-opened series (so IVUS resumes from
-        # its last view even if the pane has shown CT/XA since, and
-        # NM does not lump together with other OTHER-bucket modalities).
-        cur = (self._last_by_modality.get(mod) or cur_series)
+        # Navigate relative to the series ACTUALLY shown in the (active) cine
+        # pane. Using the app-wide "last opened of this modality" instead made
+        # First/Prev/Next/Last jump to an unrelated image in multi-pane layouts
+        # (another pane's series could be the more-recent open). Fall back to
+        # the last-opened only when this pane has no series of the kind.
+        cur = (cur_series or self._last_by_modality.get(mod))
         try:
             idx = lst.index(cur)
         except ValueError:
