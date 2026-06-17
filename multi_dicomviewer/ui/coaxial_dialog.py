@@ -324,8 +324,8 @@ class CoaxialResultDialog(QDialog):
                         "Optimal GC-target assessment angle:\n"
                         f"    {_fmt_proj(b1, a1)}\n"
                         f"    {_fmt_proj(b2, a2)}  (opposite direction)\n"
-                        "    (this projection shows the true angle without "
-                        "foreshortening)"
+                        "    (this projection shows the target lesion without "
+                        "shortening)"
                     )
                     ov.setStyleSheet(
                         "color:#0b3d91; font-size:10pt; font-weight:bold; "

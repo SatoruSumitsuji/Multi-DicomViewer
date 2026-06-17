@@ -628,7 +628,7 @@ class MultiSyncWindow(QMainWindow):
         add.clicked.connect(self._add_sync_point)
         top.addWidget(add)
         srt = _tinted("Sort Sync…", "#e8daef")           # light purple
-        srt.setToolTip("Sort sync points by ascending frame")
+        srt.setToolTip("Sort Sync-Points by frame number")
         srt.clicked.connect(self._sort_sync)
         top.addWidget(srt)
         save = _tinted("Save Sync…", "#fcf3cf")          # light yellow
@@ -713,7 +713,7 @@ class MultiSyncWindow(QMainWindow):
                 "color:#c0392b;font-weight:bold;"
             )
             self._sync_status.setText(
-                "A sync point needs IVUS in two or more slots."
+                "Two or more IVUS data are needed for Sync"
             )
             return
         cand = self.sync_points + [{"frames": frames, "rots": rots}]
@@ -722,8 +722,8 @@ class MultiSyncWindow(QMainWindow):
                 "color:#c0392b;font-weight:bold;"
             )
             self._sync_status.setText(
-                "Inconsistent — the current per-slot frames reverse the "
-                "order relative to an existing sync point. Adjust the frames."
+                "Inconsistent: Frames are out of order. Check and adjust "
+                "Sync settings."
             )
             return
         self.sync_points.append({"frames": frames, "rots": rots})
@@ -755,7 +755,7 @@ class MultiSyncWindow(QMainWindow):
         self._active_point = None
         self._editing = None
         self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
-        self._sync_status.setText("Sorted sync points by frame.")
+        self._sync_status.setText("Sorted Sync points by frame number")
         self._rebuild_sync_editor()
 
     def _rebuild_sync_editor(self) -> None:
@@ -1020,24 +1020,24 @@ class MultiSyncWindow(QMainWindow):
                     cell.setStyleSheet(
                         "QLabel { color:#8a8a8a;" + cell_box + "}"
                     )
-                    cell.setToolTip("Provisional computed value — Edit → ○ to confirm")
+                    cell.setToolTip("Provisional value — Edit → ○ to confirm")
             h.addWidget(cell)
         # Tighter horizontal padding so Jump / Edit aren't so wide
         # (roughly half the default side spacing).
         nav_css = "QPushButton { padding:3px 8px; }"
         jump = QPushButton("Jump")
         jump.setStyleSheet(nav_css)
-        jump.setToolTip("Move all images to this sync point")
+        jump.setToolTip("Move all images to this Sync point")
         jump.clicked.connect(lambda _c, p=pi: self._jump_to_point(p))
         h.addWidget(jump)
         edit = QPushButton("Edit")
         edit.setStyleSheet(nav_css)
-        edit.setToolTip("Move to this sync point and fine-tune → ○ to confirm")
+        edit.setToolTip("Move to this Sync point and fine-tune → ○ to confirm")
         edit.clicked.connect(lambda _c, p=pi: self._edit_point(p))
         h.addWidget(edit)
         ok = QPushButton("○")
         ok.setFixedWidth(28)
-        ok.setToolTip("Confirm each image's current frame as this sync point (all cells black)")
+        ok.setToolTip("Confirm each image's current frame as this Sync point")
         ok.clicked.connect(lambda _c, p=pi: self._confirm_point(p))
         h.addWidget(ok)
         dele = QPushButton("✕")
@@ -1110,7 +1110,7 @@ class MultiSyncWindow(QMainWindow):
         if len(loaded) < 2:
             self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
             self._sync_status.setText(
-                "Confirming needs IVUS in two or more slots."
+                "Two or more IVUS data is needed to confirm"
             )
             return
         cand = [
@@ -1121,8 +1121,8 @@ class MultiSyncWindow(QMainWindow):
         if multisync.has_conflict(cand, self._master, _N_SLOTS):
             self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
             self._sync_status.setText(
-                "Inconsistent — the current frames reverse the order "
-                "relative to another sync point. Adjust the frames."
+                "Inconsistent: Frames are out of order. Check and adjust "
+                "Sync settings."
             )
             return
         self.sync_points[pi]["frames"] = frames
