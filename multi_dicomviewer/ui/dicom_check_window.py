@@ -101,6 +101,7 @@ class DicomCheckWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("DicomCheck — remove non-DICOM files")
         self.resize(900, 700)
+        self.setAcceptDrops(True)                  # drop a folder anywhere
         self._root: str | None = None
         self._worker: _ScanWorker | None = None
         self._guard = False                        # re-entrancy for itemChanged
@@ -156,11 +157,41 @@ class DicomCheckWindow(QMainWindow):
         btns.addWidget(self._del_btn)
         root.addLayout(btns)
 
+    # ---------------------------------------------------------- drag&drop
+    @staticmethod
+    def _dropped_dir(ev) -> str | None:
+        md = ev.mimeData()
+        if not md.hasUrls():
+            return None
+        for u in md.urls():
+            p = u.toLocalFile()
+            if p and os.path.isdir(p):
+                return p
+        return None
+
+    def dragEnterEvent(self, ev):                  # noqa: N802 (Qt override)
+        busy = self._worker is not None and self._worker.isRunning()
+        if not busy and self._dropped_dir(ev) is not None:
+            ev.acceptProposedAction()
+
+    def dragMoveEvent(self, ev):                   # noqa: N802 (Qt override)
+        self.dragEnterEvent(ev)
+
+    def dropEvent(self, ev):                        # noqa: N802 (Qt override)
+        d = self._dropped_dir(ev)
+        if d:
+            ev.acceptProposedAction()
+            self._start_scan(d)
+
     # --------------------------------------------------------------- scan
     def _pick(self) -> None:
-        start = self._root or ""
-        d = QFileDialog.getExistingDirectory(self, "Select folder", start)
-        if not d:
+        d = QFileDialog.getExistingDirectory(
+            self, "Select folder", self._root or "")
+        if d:
+            self._start_scan(d)
+
+    def _start_scan(self, d: str) -> None:
+        if self._worker is not None and self._worker.isRunning():
             return
         self._root = d
         self._path_lbl.setText(f"Folder: {d}")
@@ -316,17 +347,7 @@ class DicomCheckWindow(QMainWindow):
         QMessageBox.information(self, "DicomCheck", msg + ".")
         # Re-scan so the tree reflects the new state.
         if self._root:
-            self._pick_again(self._root)
-
-    def _pick_again(self, d: str) -> None:
-        self._tree.clear()
-        self._set_busy(True)
-        self._bar.setVisible(True)
-        self._bar.setRange(0, 0)
-        self._worker = _ScanWorker(d, self._inc_cb.isChecked())
-        self._worker.progress.connect(self._on_progress)
-        self._worker.done.connect(self._on_scan_done)
-        self._worker.start()
+            self._start_scan(self._root)
 
     def _remove_empty_dirs(self) -> int:
         if not self._root:

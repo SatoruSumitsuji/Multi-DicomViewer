@@ -2268,15 +2268,48 @@ class CTViewer(AbstractViewer):
         self._refresh()
 
     # ------------------------------------------------------- geometry
-    def _init_frames(self):
-        self._frame = {
-            "A": (np.array([1.0, 0.0, 0.0]),
-                  np.array([0.0, 1.0, 0.0]),
-                  np.array([0.0, 0.0, 1.0])),
-            "B": (np.array([1.0, 0.0, 0.0]),
-                  np.array([0.0, 0.0, 1.0]),
-                  np.array([0.0, 1.0, 0.0])),
-        }
+    def _init_frames(self, native=False):
+        """Set the two panes' initial (u=right, v=up, n=normal) frames.
+
+        3-D MPR default (native=False): orient the panes from the patient
+        coordinate system (via patient_basis) rather than the raw volume axes,
+        so the first image is anatomically correct regardless of how the
+        series was stored:
+
+          * Pane A — axial, viewed from below ("下から見上げる"): screen-right =
+            patient LEFT, screen-up = ANTERIOR (sternum), screen-down =
+            POSTERIOR (spine). This puts the left ventricle on the image right
+            and the right ventricle on the image left.
+          * Pane B — frontal/coronal companion: screen-right = patient LEFT,
+            screen-up = SUPERIOR.
+
+        native=True restores the raw volume-axis frames (used by the 2-D lock,
+        which pages the acquired slices as-is)."""
+        pb = getattr(self, "_pbasis", None)
+        if native or pb is None:
+            self._frame = {
+                "A": (np.array([1.0, 0.0, 0.0]),
+                      np.array([0.0, 1.0, 0.0]),
+                      np.array([0.0, 0.0, 1.0])),
+                "B": (np.array([1.0, 0.0, 0.0]),
+                      np.array([0.0, 0.0, 1.0]),
+                      np.array([0.0, 1.0, 0.0])),
+            }
+        else:
+            # patient = pbasis @ volume  →  volume = inv(pbasis) @ patient.
+            # Build the desired axes in patient LPS (+X=Left, +Y=Posterior,
+            # +Z=Superior) and map them back into volume space.
+            try:
+                inv = np.linalg.inv(np.asarray(pb, dtype=np.float64))
+            except np.linalg.LinAlgError:
+                inv = np.eye(3)
+            left = inv @ np.array([1.0, 0.0, 0.0])     # patient Left
+            ant = inv @ np.array([0.0, -1.0, 0.0])     # patient Anterior
+            sup = inv @ np.array([0.0, 0.0, 1.0])      # patient Superior
+            self._frame = {
+                "A": self._ortho(left, ant),           # axial from below
+                "B": self._ortho(left, sup),           # frontal/coronal
+            }
         self._cross_ang = {"A": 0.0, "B": 0.0}
 
     def _ortho(self, u, v):
@@ -2519,12 +2552,11 @@ class CTViewer(AbstractViewer):
             return ""
         n = self._pbasis @ (n / nrm)                 # -> patient LPS
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
-        # Resolve the ±N ambiguity to the anterior hemisphere so a
-        # frontal/coronal projection reads LAO0 CRA0 (SSMview).
-        if (ny > 1e-9
-                or (abs(ny) <= 1e-9 and nz < -1e-9)
-                or (abs(ny) <= 1e-9 and abs(nz) <= 1e-9 and nx < 0)):
-            nx, ny, nz = -nx, -ny, -nz
+        # NOTE: the old code folded ±N into the anterior hemisphere here. That
+        # made a fully-reversed view (e.g. spinning the cross-line 180° so the
+        # companion looks from the opposite side) collapse back to the same
+        # reading. We now keep the real signed normal so a reversed LAO30
+        # correctly reads RAO150, etc.
         axial = math.hypot(nx, ny)
         prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
         sec = math.degrees(math.atan2(nz, axial))
@@ -2587,7 +2619,7 @@ class CTViewer(AbstractViewer):
             self._frames["A"].setVisible(True)
             self._frames["B"].setVisible(False)
             self._update_active_frames()
-            self._init_frames()                      # lock to native axial
+            self._init_frames(native=True)           # lock to native axial
             self._apply_2d_axes()                    # re-apply rotate/flip state
             self._thick = {"A": 0.0, "B": 0.0}
             # Snap the reslice plane onto the nearest native slice so no z
@@ -2887,6 +2919,14 @@ class CTViewer(AbstractViewer):
             # pygfx/Mac viewer.
             uw, _vw, nw = self._frame[which]
             other = "B" if which == "A" else "A"
+            # Both +nw and -nw describe the SAME companion plane, so pick the
+            # sign that keeps the companion's "up" continuous with its previous
+            # frame. Without this the companion would suddenly flip up/down (and
+            # mirror left/right) whenever the rotated pane's normal swept across
+            # the companion's plane.
+            _ou, ov, _on = self._frame[other]
+            if float(np.dot(nw, ov)) < 0.0:
+                nw = -nw
             self._frame[other] = self._ortho(uw, nw)
             self._cross_ang[which] = 0.0
             self._cross_ang[other] = 0.0

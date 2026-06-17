@@ -220,6 +220,7 @@ class DicomFolderWindow(QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("DicomFolder — organize DICOM files")
         self.resize(950, 720)
+        self.setAcceptDrops(True)                  # drop a folder = source
         self._files: list[dict] = []
         self._source: str | None = start_dir
         self._target: str | None = None
@@ -327,11 +328,41 @@ class DicomFolderWindow(QMainWindow):
                   self._parent_btn, self._go_btn):
             w.setEnabled(not busy)
 
+    # ---------------------------------------------------------- drag&drop
+    @staticmethod
+    def _dropped_dir(ev) -> str | None:
+        md = ev.mimeData()
+        if not md.hasUrls():
+            return None
+        for u in md.urls():
+            p = u.toLocalFile()
+            if p and os.path.isdir(p):
+                return p
+        return None
+
+    def dragEnterEvent(self, ev):                  # noqa: N802 (Qt override)
+        busy = self._worker is not None and self._worker.isRunning()
+        if not busy and self._dropped_dir(ev) is not None:
+            ev.acceptProposedAction()
+
+    def dragMoveEvent(self, ev):                   # noqa: N802 (Qt override)
+        self.dragEnterEvent(ev)
+
+    def dropEvent(self, ev):                        # noqa: N802 (Qt override)
+        d = self._dropped_dir(ev)
+        if d:
+            ev.acceptProposedAction()
+            self._set_source_and_scan(d)            # a dropped folder = source
+
     # ----------------------------------------------------------- source
     def _pick_source(self) -> None:
         d = QFileDialog.getExistingDirectory(
             self, "Select source folder", self._source or "")
-        if not d:
+        if d:
+            self._set_source_and_scan(d)
+
+    def _set_source_and_scan(self, d: str) -> None:
+        if self._worker is not None and self._worker.isRunning():
             return
         self._source = d
         self._src_lbl.setText(d)
