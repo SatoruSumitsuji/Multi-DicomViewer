@@ -37,15 +37,15 @@ class AnonSettingsDialog(QDialog):
 
     def __init__(self, selected_tags, emptify_private: bool, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Anonymize settings — 匿名化する項目")
+        self.setWindowTitle("Anonymize settings — items to anonymize")
         self.setMinimumWidth(460)
         sel = {(int(g), int(e)) for g, e in (selected_tags or ())}
 
         root = QVBoxLayout(self)
         root.addWidget(QLabel(
-            "チェックした項目の値を空にします（タグ自体は残ります）。\n"
-            "この設定は「画面表示の匿名化（Anonymousボタン）」と\n"
-            "「Export (Anon DICOM)」の両方に適用されます。"
+            "Checked items have their values cleared (the tags themselves remain).\n"
+            "This setting applies to both on-screen anonymization (the Anonymous button)\n"
+            "and Export (Anon DICOM)."
         ))
 
         scroll = QScrollArea()
@@ -66,7 +66,7 @@ class AnonSettingsDialog(QDialog):
         root.addWidget(scroll, 1)
 
         self._priv = QCheckBox(
-            "Private タグ（ベンダー私的タグ）の値もすべて空にする"
+            "Also clear all Private (vendor) tag values"
         )
         self._priv.setChecked(bool(emptify_private))
         root.addWidget(self._priv)

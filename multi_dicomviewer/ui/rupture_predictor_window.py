@@ -40,27 +40,29 @@ _CLINICAL_POINTS = ("A1", "A2", "AC", "B")
 _ALL_POINTS = _CALIB_POINTS + _CLINICAL_POINTS
 
 # Workflow steps (verbatim Japanese strings from HTML 3379-3390).
-_STEP_TAIL = ("このウインドウで点指定がしづらい場合はウインドウを動かすことが"
-              "できます。点の位置は後で調整可能です。")
+_STEP_TAIL = ("If clicking points in this window is awkward, you can move the "
+              "window. Point positions can be adjusted later.")
 _WORKFLOW = [
-    ("CH1", f"Horizontal Calibration (横のキャリブレーション) の1つ目の点 "
-            f"CH1を指定してください。{_STEP_TAIL}", "point"),
-    ("CH2", f"Horizontal Calibration (横のキャリブレーション) の2つ目の点 "
-            f"CH2を指定してください。{_STEP_TAIL}", "point"),
-    ("CH_INPUT", "CH (横のキャリブレーション) の実際の距離を入力してください",
+    ("CH1", f"Specify the first point of the Horizontal Calibration, "
+            f"CH1. {_STEP_TAIL}", "point"),
+    ("CH2", f"Specify the second point of the Horizontal Calibration, "
+            f"CH2. {_STEP_TAIL}", "point"),
+    ("CH_INPUT", "Enter the actual distance for CH (horizontal calibration)",
      "input"),
-    ("CV1", f"Vertical Calibration (縦のキャリブレーション) の1つ目の点 "
-            f"CV1を指定してください。{_STEP_TAIL}", "point"),
-    ("CV2", f"Vertical Calibration (縦のキャリブレーション) の2つ目の点 "
-            f"CV2を指定してください。{_STEP_TAIL}", "point"),
-    ("CV_INPUT", "CV (縦のキャリブレーション) の実際の距離を入力してください",
+    ("CV1", f"Specify the first point of the Vertical Calibration, "
+            f"CV1. {_STEP_TAIL}", "point"),
+    ("CV2", f"Specify the second point of the Vertical Calibration, "
+            f"CV2. {_STEP_TAIL}", "point"),
+    ("CV_INPUT", "Enter the actual distance for CV (vertical calibration)",
      "input"),
-    ("A1", f"進展する外膜の断端の1つを指定してください。{_STEP_TAIL}", "point"),
-    ("A2", f"進展する外膜のもう1つの断端を指定してください。{_STEP_TAIL}", "point"),
-    ("AC", f"進展する外膜の真ん中の点（円弧の中心）ACを指定してください。"
-           f"{_STEP_TAIL}", "point"),
-    ("B", f"バルーンが拡張する一番血管側の点 Bを指定してください。{_STEP_TAIL}",
+    ("A1", f"Specify one stump of the propagating adventitia. {_STEP_TAIL}",
      "point"),
+    ("A2", f"Specify the other stump of the propagating adventitia. "
+           f"{_STEP_TAIL}", "point"),
+    ("AC", f"Specify the midpoint of the propagating adventitia (arc center), "
+           f"AC. {_STEP_TAIL}", "point"),
+    ("B", f"Specify the most vessel-side point of balloon expansion, B. "
+          f"{_STEP_TAIL}", "point"),
 ]
 
 # Standard semi-compliant balloon sizes for the quick-pick combo (mm).
@@ -318,8 +320,8 @@ class RuptureCanvas(QWidget):
 
     def _context_menu(self, sx: float, sy: float) -> None:
         menu = QMenu(self)
-        a_reset = menu.addAction("全ての点をリセット")
-        a_restart = menu.addAction("A1 から指定し直す")
+        a_reset = menu.addAction("Reset all points")
+        a_restart = menu.addAction("Re-specify from A1")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         win = self.window()
         if chosen == a_reset and hasattr(win, "reset_all"):
@@ -554,7 +556,7 @@ class _StepDialog(QDialog):
         lay.addWidget(self._msg)
         row = QHBoxLayout()
         row.addStretch(1)
-        self._back = QPushButton("戻る")
+        self._back = QPushButton("Back")
         self._back.clicked.connect(self.back_requested.emit)
         row.addWidget(self._back)
         lay.addLayout(row)
@@ -653,7 +655,7 @@ class RupturePredictorWindow(QMainWindow):
             return
         # point step
         self.canvas.workflow_active = name
-        self.canvas.hint_text = f"{name} をクリックして指定"
+        self.canvas.hint_text = f"Click to specify {name}"
         self.canvas.update()
         self._step_dialog.show_message(message, can_back=self._wf_index > 0)
         if not self._step_dialog.isVisible():
@@ -727,7 +729,7 @@ class RupturePredictorWindow(QMainWindow):
             pts["A1"], pts["A2"], pts["AC"], pts["B"], diameter, avg)
         if res is None:
             QMessageBox.warning(self, "Rupture-Predictor",
-                                "A1, AC, A2の点から円を計算できませんでした")
+                                "Could not compute a circle from points A1, AC, A2")
             return
         self.canvas.viz = res
         self.canvas.update()
@@ -751,7 +753,7 @@ class RupturePredictorWindow(QMainWindow):
 
         # Balloon diameter input + common-size combo.
         row = QHBoxLayout()
-        row.addWidget(QLabel("バルーン直径(mm):"))
+        row.addWidget(QLabel("Balloon diameter (mm):"))
         self._diam_spin = QDoubleSpinBox()
         self._diam_spin.setRange(0.50, 20.00)
         self._diam_spin.setSingleStep(0.25)
@@ -759,7 +761,7 @@ class RupturePredictorWindow(QMainWindow):
         self._diam_spin.valueChanged.connect(self._on_diameter_changed)
         row.addWidget(self._diam_spin)
         self._diam_combo = QComboBox()
-        self._diam_combo.addItem("選択", 0.0)
+        self._diam_combo.addItem("Select", 0.0)
         for d in _COMMON_DIAMETERS:
             self._diam_combo.addItem(f"{d:.2f}", d)
         self._diam_combo.currentIndexChanged.connect(self._on_combo_changed)
@@ -770,24 +772,24 @@ class RupturePredictorWindow(QMainWindow):
         self._info_label.setWordWrap(True)
         lay.addWidget(self._info_label)
 
-        lay.addWidget(QLabel("径ごとの結果 (直径クリックで反映)"))
+        lay.addWidget(QLabel("Results per diameter (click a diameter to apply)"))
         self._results_table = QTableWidget(0, 3)
         self._results_table.setHorizontalHeaderLabels(
-            ["直径(mm)", "進展外膜長(mm)", "Stretch Ratio"])
+            ["Diameter (mm)", "Stretched adventitia (mm)", "Stretch Ratio"])
         self._results_table.verticalHeader().setVisible(False)
         self._results_table.cellClicked.connect(self._on_result_clicked)
         lay.addWidget(self._results_table, 1)
 
-        lay.addWidget(QLabel("目標伸展率→必要直径 (クリックで反映)"))
+        lay.addWidget(QLabel("Target stretch ratio → required diameter (click to apply)"))
         self._rate_table = QTableWidget(0, 2)
-        self._rate_table.setHorizontalHeaderLabels(["Stretch Ratio", "直径(mm)"])
+        self._rate_table.setHorizontalHeaderLabels(["Stretch Ratio", "Diameter (mm)"])
         self._rate_table.verticalHeader().setVisible(False)
         self._rate_table.cellClicked.connect(self._on_rate_clicked)
         self._rate_table.setMaximumHeight(130)
         lay.addWidget(self._rate_table)
 
         btns = QHBoxLayout()
-        b_reset = QPushButton("リセット")
+        b_reset = QPushButton("Reset")
         b_reset.clicked.connect(self.reset_all)
         b_zin = QPushButton("＋")
         b_zin.clicked.connect(self.canvas.zoom_in)
@@ -824,10 +826,10 @@ class RupturePredictorWindow(QMainWindow):
                 f"H: {self._calib.hpxmm:.2f} px/mm   "
                 f"V: {self._calib.vpxmm:.2f} px/mm")
         self._info_label.setText(
-            f"元の弧長 (A1-AC-A2): {res.original_arc_len_mm:.2f} mm\n"
-            f"角度 ∠A1-C-A2: {res.angle_a1ca2_deg:.1f}°\n"
-            f"仮想バルーン直径: {res.balloon_diameter_mm:.2f} mm\n"
-            f"伸展外膜長: {res.stretched_adventitia_len_mm:.2f} mm")
+            f"Original arc length (A1-AC-A2): {res.original_arc_len_mm:.2f} mm\n"
+            f"Angle ∠A1-C-A2: {res.angle_a1ca2_deg:.1f}°\n"
+            f"Virtual balloon diameter: {res.balloon_diameter_mm:.2f} mm\n"
+            f"Stretched adventitia length: {res.stretched_adventitia_len_mm:.2f} mm")
         self._fill_results_table()
         self._fill_rate_table()
 
@@ -855,7 +857,7 @@ class RupturePredictorWindow(QMainWindow):
                     fnt = item.font()
                     fnt.setUnderline(True)
                     item.setFont(fnt)
-                    item.setToolTip("クリックでこの直径を反映")
+                    item.setToolTip("Click to apply this diameter")
                 self._results_table.setItem(i, c, item)
 
     def _fill_rate_table(self) -> None:
@@ -866,7 +868,7 @@ class RupturePredictorWindow(QMainWindow):
         self._rate_table.setRowCount(len(table))
         for i, (rate, diam) in enumerate(table):
             self._rate_table.setItem(i, 0, QTableWidgetItem(f"{rate:.1f}"))
-            txt = f"{diam:.2f}" if diam is not None else "範囲外"
+            txt = f"{diam:.2f}" if diam is not None else "Out of range"
             self._rate_table.setItem(i, 1, QTableWidgetItem(txt))
 
     def _on_diameter_changed(self, _v: float) -> None:
@@ -1006,8 +1008,8 @@ class RupturePredictorWindow(QMainWindow):
                 self.canvas.workflow_active = name
                 self.canvas.update()
                 self._toast(
-                    f"点は フレーム {self._lock_index + 1} にロックされています"
-                    "。そのフレームに戻して指定してください。")
+                    f"Points are locked to frame {self._lock_index + 1}. "
+                    "Return to that frame to specify.")
                 return
         if (self._wf_index < len(self._steps)
                 and self._steps[self._wf_index][0] == name):

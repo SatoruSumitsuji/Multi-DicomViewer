@@ -11,8 +11,8 @@ APP_VERSION = "1.6.7"
 # constant so the UI gate below stays in place should a build ever need it.
 BLOCK_CT = False
 BLOCK_CT_MESSAGE = (
-    "このアプリはCTデータに対応していません。\n"
-    "（Mac版はCTビューワーを搭載していません）"
+    "This build does not support CT data.\n"
+    "(The Mac build has no CT viewer.)"
 )
 
 # Hounsfield-unit window/level presets for the CT viewer (W, L).

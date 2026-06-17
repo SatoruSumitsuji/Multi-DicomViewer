@@ -628,7 +628,7 @@ class MultiSyncWindow(QMainWindow):
         add.clicked.connect(self._add_sync_point)
         top.addWidget(add)
         srt = _tinted("Sort Sync…", "#e8daef")           # light purple
-        srt.setToolTip("Sync点をフレームの小さい順に並べ替え")
+        srt.setToolTip("Sort sync points by ascending frame")
         srt.clicked.connect(self._sort_sync)
         top.addWidget(srt)
         save = _tinted("Save Sync…", "#fcf3cf")          # light yellow
@@ -713,7 +713,7 @@ class MultiSyncWindow(QMainWindow):
                 "color:#c0392b;font-weight:bold;"
             )
             self._sync_status.setText(
-                "Sync点には2つ以上のスロットにIVUSが必要です。"
+                "A sync point needs IVUS in two or more slots."
             )
             return
         cand = self.sync_points + [{"frames": frames, "rots": rots}]
@@ -722,15 +722,15 @@ class MultiSyncWindow(QMainWindow):
                 "color:#c0392b;font-weight:bold;"
             )
             self._sync_status.setText(
-                "矛盾しています — 現在の各スロットのフレームは既存の"
-                "Sync点と前後関係が逆転します。フレームを調整してください。"
+                "Inconsistent — the current per-slot frames reverse the "
+                "order relative to an existing sync point. Adjust the frames."
             )
             return
         self.sync_points.append({"frames": frames, "rots": rots})
         self._rebuild_sync_editor()
         self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
         self._sync_status.setText(
-            "Sync-%d 追加: %s" % (
+            "Sync-%d added: %s" % (
                 len(self.sync_points),
                 "  ".join(f"S{i + 1} F{frames[i] + 1}" for i in loaded),
             )
@@ -755,7 +755,7 @@ class MultiSyncWindow(QMainWindow):
         self._active_point = None
         self._editing = None
         self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
-        self._sync_status.setText("Sync点をフレーム順に並べ替えました。")
+        self._sync_status.setText("Sorted sync points by frame.")
         self._rebuild_sync_editor()
 
     def _rebuild_sync_editor(self) -> None:
@@ -1020,24 +1020,24 @@ class MultiSyncWindow(QMainWindow):
                     cell.setStyleSheet(
                         "QLabel { color:#8a8a8a;" + cell_box + "}"
                     )
-                    cell.setToolTip("仮の計算値 — Edit→○ で確定")
+                    cell.setToolTip("Provisional computed value — Edit → ○ to confirm")
             h.addWidget(cell)
         # Tighter horizontal padding so Jump / Edit aren't so wide
         # (roughly half the default side spacing).
         nav_css = "QPushButton { padding:3px 8px; }"
         jump = QPushButton("Jump")
         jump.setStyleSheet(nav_css)
-        jump.setToolTip("全画像をこのSync点へ移動")
+        jump.setToolTip("Move all images to this sync point")
         jump.clicked.connect(lambda _c, p=pi: self._jump_to_point(p))
         h.addWidget(jump)
         edit = QPushButton("Edit")
         edit.setStyleSheet(nav_css)
-        edit.setToolTip("このSync点へ移動して微調整 → ○ で確定")
+        edit.setToolTip("Move to this sync point and fine-tune → ○ to confirm")
         edit.clicked.connect(lambda _c, p=pi: self._edit_point(p))
         h.addWidget(edit)
         ok = QPushButton("○")
         ok.setFixedWidth(28)
-        ok.setToolTip("各画像の現在フレームをこのSync点として確定（全セル黒）")
+        ok.setToolTip("Confirm each image's current frame as this sync point (all cells black)")
         ok.clicked.connect(lambda _c, p=pi: self._confirm_point(p))
         h.addWidget(ok)
         dele = QPushButton("✕")
@@ -1089,8 +1089,8 @@ class MultiSyncWindow(QMainWindow):
         self._goto_point(pi)
         self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
         self._sync_status.setText(
-            f"Sync-{pi + 1} 編集中 — 各画像を微調整（独立調整は Sync OFF）"
-            "して ○ で確定。"
+            f"Editing Sync-{pi + 1} — fine-tune each image (turn Sync OFF "
+            "for independent adjustment), then ○ to confirm."
         )
         self._rebuild_sync_editor()
 
@@ -1110,7 +1110,7 @@ class MultiSyncWindow(QMainWindow):
         if len(loaded) < 2:
             self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
             self._sync_status.setText(
-                "確定には2つ以上のスロットにIVUSが必要です。"
+                "Confirming needs IVUS in two or more slots."
             )
             return
         cand = [
@@ -1121,8 +1121,8 @@ class MultiSyncWindow(QMainWindow):
         if multisync.has_conflict(cand, self._master, _N_SLOTS):
             self._sync_status.setStyleSheet("color:#c0392b;font-weight:bold;")
             self._sync_status.setText(
-                "矛盾しています — 現在の各フレームは他のSync点と前後関係が"
-                "逆転します。フレームを調整してください。"
+                "Inconsistent — the current frames reverse the order "
+                "relative to another sync point. Adjust the frames."
             )
             return
         self.sync_points[pi]["frames"] = frames
@@ -1130,7 +1130,7 @@ class MultiSyncWindow(QMainWindow):
         self._editing = None
         self._active_point = pi
         self._sync_status.setStyleSheet("color:#1e8449;font-weight:bold;")
-        self._sync_status.setText(f"Sync-{pi + 1} 確定。")
+        self._sync_status.setText(f"Sync-{pi + 1} confirmed.")
         self._rebuild_sync_editor()
         if self._sync_on:
             self._drive_followers()
