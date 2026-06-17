@@ -1735,7 +1735,7 @@ class MainWindow(QMainWindow):
         self._tags_btn.setChecked(not self._overlay_hidden)
         self._tags_btn.setHelpToolTip(
             "Left-click: show/hide DICOM info on the image\n"
-            "Right-click: choose which tag items to show"
+            "Right-click: choose which tag data to show"
         )
         # Connect AFTER setChecked so the initial state doesn't fire the toggle.
         self._tags_btn.toggled.connect(self._set_overlay_shown)
