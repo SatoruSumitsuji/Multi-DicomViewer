@@ -1634,7 +1634,9 @@ class ImageCanvas(QWidget):
         lines = self._wrap_px(self.overlay_lines, fm, max_px)
         text_w = max(fm.horizontalAdvance(s) for s in lines)
         box = QRect(6, 6, text_w + 2 * pad, lh * len(lines) + 2 * pad)
-        p.fillRect(box, QColor(0, 0, 0, 140))
+        # No background fill behind the DICOM tags — the grey box was found to
+        # hurt readability over angio images, so the white text is drawn
+        # straight onto the image (per user request).
         p.setPen(QColor("#ffffff"))
         y = box.y() + pad + fm.ascent()
         for line in lines:

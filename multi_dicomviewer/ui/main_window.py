@@ -968,6 +968,20 @@ class MainWindow(QMainWindow):
         )
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
+
+        tm.addSeparator()
+        self._dicomcheck_act = QAction("DicomCheck…", self)
+        self._dicomcheck_act.setToolTip(
+            "Scan a folder and delete non-DICOM files (and empty folders)"
+        )
+        self._dicomcheck_act.triggered.connect(self._open_dicom_check)
+        tm.addAction(self._dicomcheck_act)
+        self._dicomfolder_act = QAction("DicomFolder…", self)
+        self._dicomfolder_act.setToolTip(
+            "Organize DICOM files into sub-folders by date / modality / study"
+        )
+        self._dicomfolder_act.triggered.connect(self._open_dicom_folder)
+        tm.addAction(self._dicomfolder_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -1068,6 +1082,28 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
+
+    def _open_dicom_check(self) -> None:
+        """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
+        from multi_dicomviewer.ui.dicom_check_window import DicomCheckWindow
+        self._dicomcheck_win = DicomCheckWindow(
+            start_dir=self._last_open_dir(), parent=self)
+        self._dicomcheck_win.show()
+        self._dicomcheck_win.raise_()
+
+    def _open_dicom_folder(self) -> None:
+        """Launch the DicomFolder tool (organize DICOM files by tag)."""
+        from multi_dicomviewer.ui.dicom_folder_window import DicomFolderWindow
+        self._dicomfolder_win = DicomFolderWindow(
+            start_dir=self._last_open_dir(), parent=self)
+        self._dicomfolder_win.show()
+        self._dicomfolder_win.raise_()
+
+    def _last_open_dir(self):
+        """Best-effort starting folder for the file tools — the last folder
+        the user opened, or None."""
+        d = getattr(self, "_last_dir", None)
+        return d if isinstance(d, str) and d else None
 
     def _active_display_image(self):
         """QImage of the frame currently shown in the active pane's
@@ -2126,6 +2162,7 @@ class MainWindow(QMainWindow):
             self._load_files(files)
 
     def _load_folder(self, folder: str) -> None:
+        self._last_dir = folder              # seeds the DicomCheck/Folder tools
         self._load_index(
             f"Scanning {folder} …",
             lambda prog: dicom_io.scan_folder(folder, prog),
