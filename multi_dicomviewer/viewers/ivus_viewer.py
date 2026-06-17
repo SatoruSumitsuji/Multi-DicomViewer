@@ -314,11 +314,11 @@ class IVUSViewer(XAViewer):
         # consistent toolbar; on a truly monochrome series the click is a no-op
         # and reports "no colour" (see _on_color_toggle). The choice persists
         # per SeriesInstanceUID (core.settings.save_ivus_color).
-        self._color_btn = QPushButton("カラー表示")
+        self._color_btn = QPushButton("Color")
         self._color_btn.setCheckable(True)
         self._color_btn.setToolTip(
-            "IVUS をカラー表示に切り替える(NIRS ケモグラム等の色情報を復元)。\n"
-            "通常の IVUS はグレイのまま。もう一度押すとグレイに戻ります。"
+            "Switch the IVUS to color (restores color info such as NIRS chemograms).\n"
+            "Normal IVUS stays gray. Press again to return to gray."
         )
         self._color_btn.setStyleSheet(
             "QPushButton:checked { background:#c0392b; color:white; }"
@@ -436,15 +436,15 @@ class IVUSViewer(XAViewer):
             self._color_btn.setChecked(False)
             self._color_btn.blockSignals(False)
             self.readout.setText(
-                "このIVUSにカラー情報はありません(グレイ表示のまま)。"
+                "This IVUS has no color information (staying gray)."
             )
             return
         uid = getattr(self, "_loaded_uid", "")
         if uid:
             save_ivus_color(uid, achieved)
         self.readout.setText(
-            "カラー表示に切り替えました。" if achieved
-            else "グレイスケール表示に戻しました。"
+            "Switched to color." if achieved
+            else "Reverted to grayscale."
         )
 
     def _set_color_mode(self, color: bool) -> bool:

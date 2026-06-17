@@ -411,7 +411,7 @@ class ViewerPane(QFrame):
         )
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip(
-            "この枠の画像を閉じる(レイアウトは保持してドロップ待ちに戻す)"
+            "Close this pane's image (keeps the layout; returns to drop-waiting state)"
         )
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setFixedWidth(26)
@@ -1515,7 +1515,7 @@ class MainWindow(QMainWindow):
             if qimg is None:
                 QMessageBox.warning(
                     self, "Rupture-Predictor",
-                    "アクティブなペインに表示中の画像がありません。")
+                    "The active pane has no image displayed.")
                 return
             self._rupture_win = RupturePredictorWindow(
                 qimage=qimg, calib=calib, parent=self)
@@ -1690,7 +1690,7 @@ class MainWindow(QMainWindow):
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip("画面分割をグリッドから選択")
+        self._layout_btn.setToolTip("Pick the pane layout from a grid")
         self._layout_menu = QMenu(self._layout_btn)
         self._layout_picker = LayoutGridPicker(_GRID_MAX_ROWS, _GRID_MAX_COLS)
         self._layout_picker.picked.connect(self._on_layout_picked)
@@ -1734,8 +1734,8 @@ class MainWindow(QMainWindow):
         self._tags_btn.setCheckable(True)
         self._tags_btn.setChecked(not self._overlay_hidden)
         self._tags_btn.setHelpToolTip(
-            "左クリック: 画像上のDICOM情報の表示/非表示\n"
-            "右クリック: 表示するタグ項目を選択"
+            "Left-click: show/hide DICOM info on the image\n"
+            "Right-click: choose which tag items to show"
         )
         # Connect AFTER setChecked so the initial state doesn't fire the toggle.
         self._tags_btn.toggled.connect(self._set_overlay_shown)
@@ -2187,11 +2187,10 @@ class MainWindow(QMainWindow):
         # say so plainly and stop — don't leave a spinner up or re-open some
         # unrelated already-loaded series.
         if not new_uids:
-            self.statusBar().showMessage("対象のDICOMファイルがありませんでした。")
+            self.statusBar().showMessage("No displayable DICOM files were found.")
             QMessageBox.information(
-                self, "対象ファイルなし",
-                "ドロップされたフォルダ／ファイルに、表示できる DICOM が"
-                "ありませんでした。",
+                self, "No DICOM files",
+                "The dropped folder/file(s) contained no displayable DICOM.",
             )
             return
         # Accumulate: a new folder adds its studies; previously loaded
@@ -2596,9 +2595,9 @@ class MainWindow(QMainWindow):
         # the user explicitly and abort the load before any disk read /
         # viewer construction touches VTK.
         if BLOCK_CT and series.modality == Modality.CT:
-            QMessageBox.information(self, "未対応のデータ", BLOCK_CT_MESSAGE)
+            QMessageBox.information(self, "Unsupported data", BLOCK_CT_MESSAGE)
             self.statusBar().showMessage(
-                "CTデータはこのビルドでは読み込めません。"
+                "CT data cannot be loaded in this build."
             )
             return
         # Fast-path: this exact series is already loaded in this pane's
@@ -2783,9 +2782,9 @@ class MainWindow(QMainWindow):
                 others += 1
         if others >= _PLAY_CAP:
             QMessageBox.information(
-                self, "同時再生の上限",
-                f"同時に再生できるのは最大 {_PLAY_CAP} 画面までです。\n"
-                "別の画面を再生するには、再生中のいずれかを停止してください。",
+                self, "Playback limit",
+                f"At most {_PLAY_CAP} panes can play at once.\n"
+                "Stop one of the playing panes to play another.",
             )
             return False
         return True

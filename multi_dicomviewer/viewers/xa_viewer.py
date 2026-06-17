@@ -830,7 +830,7 @@ class XAViewer(AbstractViewer):
         self.frame_lbl.setMinimumWidth(70)
         self.frame_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         self.frame_lbl.setToolTip(
-            "クリックで再生範囲を全範囲に戻す "
+            "Click to reset the playback range to the full range "
             "(click to reset the Play range to the whole clip)"
         )
         self.frame_lbl.clicked.connect(self._reset_play_range)
@@ -886,7 +886,7 @@ class XAViewer(AbstractViewer):
         grid.addWidget(self._lvl_val_lbl, 1, 2)
 
         reset_btn = QPushButton("Reset")
-        reset_btn.setToolTip("W/L を読み込み時の初期設定に戻す")
+        reset_btn.setToolTip("Reset W/L to the load-time default")
         reset_btn.clicked.connect(self._reset_wl)
         grid.addWidget(
             reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
@@ -909,7 +909,7 @@ class XAViewer(AbstractViewer):
         """Open the Window/Level popup (image right-click ▸ Change W/L).
         No-op while W/L is disabled (e.g. a colour series has no W/L)."""
         if not self.win_slider.isEnabled():
-            self.readout.setText("このシリーズに W/L 調整はありません。")
+            self.readout.setText("This series has no W/L adjustment.")
             return
         self._update_wl_labels()
         self._wl_dialog.show()

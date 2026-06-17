@@ -111,45 +111,46 @@ def _confidence_summary(det: dict) -> dict | None:
             level = 2
         band = None
 
-    band_txt = f"±{band}°" if band is not None else "不明"
+    band_txt = f"±{band}°" if band is not None else "unknown"
 
     if level == 0:
         return {
             "level": 0, "color": "#2b8a3e",
-            "headline": "信頼度: 高い  ✓",
+            "headline": "Confidence: High  ✓",
             "band_deg": band,
             "detail": (
-                f"複数の撮影方向からの推定がよく一致しています"
-                f"（角度のぶれ幅の目安: {band_txt}）。"
+                f"The estimates from the different projection angles agree well "
+                f"(approximate angular uncertainty: {band_txt})."
             ),
         }
     if level == 1:
         if not have_crosscheck:
             detail = (
-                "2方向のみで計算しており、結果が妥当かを別方向で"
-                "検算できていません。撮影方向が互いに似ていると不安定に"
-                "なります。可能なら、離れた角度の像をもう1つ追加して"
-                "ください。"
+                "Computed from only two projections, so the result could not "
+                "be cross-checked against another direction. The estimate "
+                "becomes unstable when the projection directions are similar. "
+                "If possible, add one more view at a well-separated angle."
             )
         else:
             detail = (
-                f"撮影方向によって推定が {band_txt} ほどばらついています。"
-                f"短縮の強い像や血管の曲がりが影響している可能性があります。"
-                f"値は参考程度に扱ってください。"
+                f"The estimate varies by about {band_txt} across projection "
+                f"angles. Strongly foreshortened views or vessel curvature may "
+                f"be contributing. Treat the value as a reference only."
             )
         return {
             "level": 1, "color": "#e8590c",
-            "headline": "信頼度: 中程度",
+            "headline": "Confidence: Moderate",
             "band_deg": band, "detail": detail,
         }
     return {
         "level": 2, "color": "#c92a2a",
-        "headline": "信頼度: 低い  ⚠",
+        "headline": "Confidence: Low  ⚠",
         "band_deg": band,
         "detail": (
-            f"撮影方向によって推定が大きく（{band_txt}程度）ばらついています。"
-            f"この値はミスリードの恐れがあります。血管が長く直線的に写り、"
-            f"互いに十分離れた角度の像で引き直すことを推奨します。"
+            f"The estimate varies widely (about {band_txt}) across projection "
+            f"angles. This value may be misleading. We recommend re-deriving it "
+            f"using views where the vessel appears long and straight and the "
+            f"angles are well separated from one another."
         ),
     }
 
@@ -223,9 +224,10 @@ def _steps_text(label: str, det: dict, gc_det: dict) -> str:
     # One-line glossary so the technical cues above are self-explanatory.
     if per_view or pw or cg is not None or cv is not None:
         lines.append(
-            "  ※ spread/ばらつき = 撮影方向ごとの推定の食い違い"
-            "（小さいほど信頼可）／ κ = 撮影方向の幾何的多様性"
-            "（1に近いほど良、大きいと方向が似すぎ）"
+            "  * spread = disagreement of the estimate across projection "
+            "angles (smaller is more reliable) / κ = geometric diversity of "
+            "the projection directions (closer to 1 is better; large means "
+            "the directions are too similar)"
         )
     return "\n".join(lines)
 
@@ -298,9 +300,9 @@ class CoaxialResultDialog(QDialog):
                     band_line = ""
                     if band is not None:
                         band_line = (
-                            f"\n    想定されるぶれ幅: 約 ±{band}°"
-                            f"（{deg:.0f}° → およそ "
-                            f"{max(0, deg - band):.0f}〜{min(90, deg + band):.0f}°）"
+                            f"\n    Expected uncertainty: about ±{band}°"
+                            f" ({deg:.0f}° → roughly "
+                            f"{max(0, deg - band):.0f}–{min(90, deg + band):.0f}°)"
                         )
                     rel = QLabel(
                         f"{summary['headline']}\n    {summary['detail']}"
@@ -319,10 +321,11 @@ class CoaxialResultDialog(QDialog):
                 if opt:
                     (b1, a1), (b2, a2) = opt
                     ov = QLabel(
-                        "GC-Target評価最適角度:\n"
+                        "Optimal GC-target assessment angle:\n"
                         f"    {_fmt_proj(b1, a1)}\n"
-                        f"    {_fmt_proj(b2, a2)}  (反対方向)\n"
-                        "    （この投影で短縮なく実角度が観察できます）"
+                        f"    {_fmt_proj(b2, a2)}  (opposite direction)\n"
+                        "    (this projection shows the true angle without "
+                        "foreshortening)"
                     )
                     ov.setStyleSheet(
                         "color:#0b3d91; font-size:10pt; font-weight:bold; "
@@ -331,8 +334,9 @@ class CoaxialResultDialog(QDialog):
                     col.addWidget(ov)
                 elif det and "optimal_view" in det:
                     ov = QLabel(
-                        "GC-Target評価最適角度: — "
-                        "(GCと血管がほぼ同軸のため一意に定まりません)"
+                        "Optimal GC-target assessment angle: — "
+                        "(GC and vessel are nearly coaxial, so it is not "
+                        "uniquely defined)"
                     )
                     ov.setStyleSheet(
                         "color:#555555; font-size:9pt; padding:0 0 2px 14px;"

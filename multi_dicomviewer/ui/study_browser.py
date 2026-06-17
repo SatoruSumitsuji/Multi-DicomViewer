@@ -1277,8 +1277,8 @@ class StudyPanel(QWidget):
         self.btn_dicom.setCheckable(True)
         self.btn_dicom.setChecked(True)        # overlay shown by default
         self.btn_dicom.setHelpToolTip(
-            "左クリック: 画像上のDICOM情報の表示/非表示\n"
-            "右クリック: 表示するタグ項目を選択"
+            "Left-click: show/hide DICOM info on the image\n"
+            "Right-click: choose which tag items to show"
         )
         self.btn_dicom.toggled.connect(self.dicom_info_toggled)
         # Right-click → choose overlay tags (mirrors the top-row DICOM Info).
@@ -1295,13 +1295,13 @@ class StudyPanel(QWidget):
         # shell-owned, so these just emit a step request.
         _STEP = 60
         self.btn_dock_narrow = QPushButton("◀")
-        self.btn_dock_narrow.setToolTip("Tree枠を狭く")
+        self.btn_dock_narrow.setToolTip("Narrow the tree pane")
         self.btn_dock_narrow.setMaximumWidth(34)
         self.btn_dock_narrow.clicked.connect(
             lambda: self.resize_dock_step_requested.emit(-_STEP)
         )
         self.btn_dock_widen = QPushButton("▶")
-        self.btn_dock_widen.setToolTip("Tree枠を広く")
+        self.btn_dock_widen.setToolTip("Widen the tree pane")
         self.btn_dock_widen.setMaximumWidth(34)
         self.btn_dock_widen.clicked.connect(
             lambda: self.resize_dock_step_requested.emit(_STEP)
