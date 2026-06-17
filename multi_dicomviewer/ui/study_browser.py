@@ -1278,7 +1278,7 @@ class StudyPanel(QWidget):
         self.btn_dicom.setChecked(True)        # overlay shown by default
         self.btn_dicom.setHelpToolTip(
             "Left-click: show/hide DICOM info on the image\n"
-            "Right-click: choose which tag items to show"
+            "Right-click: choose which tag data to show"
         )
         self.btn_dicom.toggled.connect(self.dicom_info_toggled)
         # Right-click → choose overlay tags (mirrors the top-row DICOM Info).

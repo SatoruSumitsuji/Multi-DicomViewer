@@ -40,7 +40,7 @@ _CLINICAL_POINTS = ("A1", "A2", "AC", "B")
 _ALL_POINTS = _CALIB_POINTS + _CLINICAL_POINTS
 
 # Workflow steps (verbatim Japanese strings from HTML 3379-3390).
-_STEP_TAIL = ("If clicking points in this window is awkward, you can move the "
+_STEP_TAIL = ("If clicking points in this window is difficult, you can move the "
               "window. Point positions can be adjusted later.")
 _WORKFLOW = [
     ("CH1", f"Specify the first point of the Horizontal Calibration, "
@@ -55,11 +55,11 @@ _WORKFLOW = [
             f"CV2. {_STEP_TAIL}", "point"),
     ("CV_INPUT", "Enter the actual distance for CV (vertical calibration)",
      "input"),
-    ("A1", f"Specify one stump of the propagating adventitia. {_STEP_TAIL}",
+    ("A1", f"Specify one of the edges of stretching adventitia. {_STEP_TAIL}",
      "point"),
-    ("A2", f"Specify the other stump of the propagating adventitia. "
+    ("A2", f"Specify the other edges of stretching adventitia. "
            f"{_STEP_TAIL}", "point"),
-    ("AC", f"Specify the midpoint of the propagating adventitia (arc center), "
+    ("AC", f"Specify the midpoint of the stretching adventitia (arc center), "
            f"AC. {_STEP_TAIL}", "point"),
     ("B", f"Specify the most vessel-side point of balloon expansion, B. "
           f"{_STEP_TAIL}", "point"),
@@ -321,7 +321,7 @@ class RuptureCanvas(QWidget):
     def _context_menu(self, sx: float, sy: float) -> None:
         menu = QMenu(self)
         a_reset = menu.addAction("Reset all points")
-        a_restart = menu.addAction("Re-specify from A1")
+        a_restart = menu.addAction("Re-Specify from A1")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         win = self.window()
         if chosen == a_reset and hasattr(win, "reset_all"):
@@ -729,7 +729,7 @@ class RupturePredictorWindow(QMainWindow):
             pts["A1"], pts["A2"], pts["AC"], pts["B"], diameter, avg)
         if res is None:
             QMessageBox.warning(self, "Rupture-Predictor",
-                                "Could not compute a circle from points A1, AC, A2")
+                                "Failed to identify the arc from points A1, AC, A2")
             return
         self.canvas.viz = res
         self.canvas.update()

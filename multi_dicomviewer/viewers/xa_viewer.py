@@ -886,7 +886,7 @@ class XAViewer(AbstractViewer):
         grid.addWidget(self._lvl_val_lbl, 1, 2)
 
         reset_btn = QPushButton("Reset")
-        reset_btn.setToolTip("Reset W/L to the load-time default")
+        reset_btn.setToolTip("Reset W/L to the default setting")
         reset_btn.clicked.connect(self._reset_wl)
         grid.addWidget(
             reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
@@ -909,7 +909,7 @@ class XAViewer(AbstractViewer):
         """Open the Window/Level popup (image right-click ▸ Change W/L).
         No-op while W/L is disabled (e.g. a colour series has no W/L)."""
         if not self.win_slider.isEnabled():
-            self.readout.setText("This series has no W/L adjustment.")
+            self.readout.setText("This series has no W/L setting")
             return
         self._update_wl_labels()
         self._wl_dialog.show()

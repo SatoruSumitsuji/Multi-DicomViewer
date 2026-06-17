@@ -317,8 +317,8 @@ class IVUSViewer(XAViewer):
         self._color_btn = QPushButton("Color")
         self._color_btn.setCheckable(True)
         self._color_btn.setToolTip(
-            "Switch the IVUS to color (restores color info such as NIRS chemograms).\n"
-            "Normal IVUS stays gray. Press again to return to gray."
+            "IVUS: Gray to Color (NIRS chemograms, etc.)\n"
+            "Return to Gray"
         )
         self._color_btn.setStyleSheet(
             "QPushButton:checked { background:#c0392b; color:white; }"
@@ -436,7 +436,7 @@ class IVUSViewer(XAViewer):
             self._color_btn.setChecked(False)
             self._color_btn.blockSignals(False)
             self.readout.setText(
-                "This IVUS has no color information (staying gray)."
+                "This IVUS has no color information"
             )
             return
         uid = getattr(self, "_loaded_uid", "")

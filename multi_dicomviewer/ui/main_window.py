@@ -1690,7 +1690,7 @@ class MainWindow(QMainWindow):
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip("Pick the pane layout from a grid")
+        self._layout_btn.setToolTip("Choose the pane layout from a grid")
         self._layout_menu = QMenu(self._layout_btn)
         self._layout_picker = LayoutGridPicker(_GRID_MAX_ROWS, _GRID_MAX_COLS)
         self._layout_picker.picked.connect(self._on_layout_picked)
@@ -2783,8 +2783,8 @@ class MainWindow(QMainWindow):
         if others >= _PLAY_CAP:
             QMessageBox.information(
                 self, "Playback limit",
-                f"At most {_PLAY_CAP} panes can play at once.\n"
-                "Stop one of the playing panes to play another.",
+                f"At most {_PLAY_CAP} data can play at once.\n"
+                "Stop one of the playing data to play another.",
             )
             return False
         return True
