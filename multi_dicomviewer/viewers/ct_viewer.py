@@ -824,7 +824,7 @@ class _Pane:
         # yellow legible even when the slice background turns white.
         _ANGLE_FONT = 18
         self.angle_halo = []
-        _hd = 0.004                              # halo offset (normalised vp)
+        _hd = 0.0055                             # halo offset (normalised vp)
         for _ox, _oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
                          (1, 0), (-1, 1), (0, 1), (1, 1)):
             ha = vtkTextActor()
@@ -862,28 +862,47 @@ class _Pane:
         # slider ineffective and let long lines sprawl across the image. These
         # honour the slider's exact pixel size; the viewer word-wraps their text
         # to ~40% of the pane width so left tags and right results never collide.
-        def _mk_overlay_text(justify_right, rgb):
-            a = vtkTextActor()
-            a.SetTextScaleModeToNone()              # fixed font size, no auto-fit
-            tp = a.GetTextProperty()
-            tp.SetColor(*rgb)
-            tp.SetFontFamilyToArial()
-            _set_vtk_tag_font(tp)                   # Meiryo via file when present
-            tp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
-            tp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
-            tp.SetVerticalJustificationToTop()
-            tp.SetJustificationToRight() if justify_right \
-                else tp.SetJustificationToLeft()
-            a.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-            a.GetPositionCoordinate().SetValue(0.988 if justify_right else 0.012,
-                                               0.985)
-            a.SetInput("")
-            return a
+        def _mk_overlay_text(justify_right, rgb, outline=False):
+            base_x = 0.988 if justify_right else 0.012
 
-        # Tags white; results yellow (255,217,0) to match the other modalities
-        # and to read apart from the white DICOM tags.
-        self.tagact = _mk_overlay_text(False, (1.0, 1.0, 1.0))       # top-left
-        self.resultact = _mk_overlay_text(True, (1.0, 0.851, 0.0))   # top-right
+            def _one(color):
+                a = vtkTextActor()
+                a.SetTextScaleModeToNone()          # fixed font size, no auto-fit
+                tp = a.GetTextProperty()
+                tp.SetColor(*color)
+                tp.SetFontFamilyToArial()
+                _set_vtk_tag_font(tp)               # Meiryo via file when present
+                tp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+                tp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+                tp.SetVerticalJustificationToTop()
+                tp.SetJustificationToRight() if justify_right \
+                    else tp.SetJustificationToLeft()
+                a.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+                a.SetInput("")
+                return a
+
+            # Thin black outline ("細めの黒枠"): black copies nudged ±~1px around
+            # the text, drawn UNDER it so e.g. white tags stay legible on a white
+            # slice. Added before the main actor so the colour sits on top.
+            halos = []
+            if outline:
+                _td = 0.002
+                for ox, oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                               (1, 0), (-1, 1), (0, 1), (1, 1)):
+                    ha = _one((0.0, 0.0, 0.0))
+                    ha.GetPositionCoordinate().SetValue(base_x + ox * _td,
+                                                        0.985 + oy * _td)
+                    self.ren.AddViewProp(ha)
+                    halos.append(ha)
+            a = _one(rgb)
+            a.GetPositionCoordinate().SetValue(base_x, 0.985)
+            return a, halos
+
+        # Tags white (with a thin black outline so they read over bright/white
+        # slices); results yellow (255,217,0) to match the other modalities.
+        self.tagact, self.tagact_halo = _mk_overlay_text(
+            False, (1.0, 1.0, 1.0), outline=True)               # top-left
+        self.resultact, _ = _mk_overlay_text(True, (1.0, 0.851, 0.0))  # top-right
         self.ren.AddViewProp(self.tagact)
         self.ren.AddViewProp(self.resultact)
 
@@ -1484,6 +1503,8 @@ class CTViewer(AbstractViewer):
             # to rebuild; results re-wrap the stored (unwrapped) lines so we
             # don't recompute HU stats on every slider tick.
             p.tagact.GetTextProperty().SetFontSize(vf)
+            for _ha in p.tagact_halo:           # outline tracks the tag size
+                _ha.GetTextProperty().SetFontSize(vf)
             p.resultact.GetTextProperty().SetFontSize(vf)
             if self._header is not None:
                 self._update_info(key, False)
@@ -2342,6 +2363,8 @@ class CTViewer(AbstractViewer):
             self.pane[key].info.SetText(0, "")
             self.pane[key].info.SetText(1, "")
             self.pane[key].tagact.SetInput("")
+            for _ha in self.pane[key].tagact_halo:
+                _ha.SetInput("")
             self.pane[key].resultact.SetInput("")
             self.pane[key].angle.SetInput("")
             for _ha in self.pane[key].angle_halo:
@@ -2620,7 +2643,10 @@ class CTViewer(AbstractViewer):
         head = wrap_lines_to_chars(head, self._wrap_budget(key))
         slab = self._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
-        p.tagact.SetInput("\n".join(head))          # top-left (fixed-size actor)
+        _tagtext = "\n".join(head)
+        p.tagact.SetInput(_tagtext)                 # top-left (fixed-size actor)
+        for _ha in p.tagact_halo:                   # thin black outline copies
+            _ha.SetInput(_tagtext)
         p.info.SetText(
             0, f"WW {self._win:.0f}  WL {self._lvl:.0f}"
         )                                           # bottom-left
