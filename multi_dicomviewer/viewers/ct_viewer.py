@@ -516,6 +516,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
+        # Right-click ON the bottom-centre angio readout → angle dialog
+        # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
+        # first, in any tool/measure mode, since it's a fixed screen target.
+        if e.button() == Qt.MouseButton.RightButton and self._owner._angio_hit(
+                self._which, e.position().x(), e.position().y(),
+                self.width(), self.height()):
+            self._owner._open_angio_dialog(self._which)
+            return
         # Right-click with NO measure tool active → still-image export of
         # this pane (in measure mode the right button edits measurements).
         if not self._owner._meas_on \
@@ -807,11 +815,36 @@ class _Pane:
         # SSMview-style angio-angle readout: yellow, image bottom-centre.
         # vtkCornerAnnotation only has the 4 corners, so this is its own
         # text actor pinned to the bottom-centre in normalised viewport
-        # coords (stays centred & same size at any pane/zoom).
+        # coords (stays centred & same size at any pane/zoom). Font 18 =
+        # the old 15 ×1.2 (clinician asked for a larger, easier-to-read tag).
+        #
+        # Black outline ("縁取り"): vtkTextProperty has no glyph stroke, so the
+        # outline is 8 black copies of the same text nudged ±a few px around
+        # the centre, drawn UNDER the yellow one — a halo that keeps the
+        # yellow legible even when the slice background turns white.
+        _ANGLE_FONT = 18
+        self.angle_halo = []
+        _hd = 0.004                              # halo offset (normalised vp)
+        for _ox, _oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                         (1, 0), (-1, 1), (0, 1), (1, 1)):
+            ha = vtkTextActor()
+            ha.SetTextScaleModeToNone()
+            htp = ha.GetTextProperty()
+            htp.SetColor(0.0, 0.0, 0.0)
+            htp.SetFontSize(_ANGLE_FONT)
+            htp.SetBold(True)
+            htp.SetJustificationToCentered()
+            htp.SetVerticalJustificationToBottom()
+            ha.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            ha.GetPositionCoordinate().SetValue(0.5 + _ox * _hd,
+                                                0.012 + _oy * _hd)
+            ha.SetInput("")
+            self.ren.AddViewProp(ha)             # added BEFORE the yellow actor
+            self.angle_halo.append(ha)
         self.angle = vtkTextActor()
         self.angle.SetTextScaleModeToNone()
         self.angle.GetTextProperty().SetColor(1.0, 0.9, 0.0)
-        self.angle.GetTextProperty().SetFontSize(15)
+        self.angle.GetTextProperty().SetFontSize(_ANGLE_FONT)
         self.angle.GetTextProperty().SetBold(True)
         self.angle.GetTextProperty().SetJustificationToCentered()
         self.angle.GetTextProperty().SetVerticalJustificationToBottom()
@@ -820,6 +853,7 @@ class _Pane:
         self.angle.SetInput("")
         # Always visible (like the WW/WL corner), independent of the
         # CenterLine overlay toggle — it's clinical info, not clutter.
+        # Added AFTER the halo so the yellow text sits on top of the outline.
         self.ren.AddViewProp(self.angle)
 
         # DICOM tags (top-left) and measure results (top-right) render as their
@@ -861,6 +895,62 @@ class _Pane:
 
     def render(self):
         self.canvas.GetRenderWindow().Render()
+
+
+class _AngioAngleDialog(QDialog):
+    """Pick a C-arm view (LAO/RAO primary + CRA/CAU secondary, each with a
+    degree value) to rotate the CT slice to. Opened by right-clicking the
+    bottom-centre angio readout; pre-filled with the pane's current angle so
+    small tweaks are easy. values() returns signed degrees (LAO+/RAO−,
+    CRA+/CAU−) to feed _set_angio_angle."""
+
+    def __init__(self, prim, sec, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Angio Angle")
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("対応するアンギオ像の角度に回転します"))
+
+        r1 = QHBoxLayout()
+        self._lr = QComboBox()
+        self._lr.addItems(["LAO", "RAO"])
+        self._lr.setCurrentIndex(0 if prim >= 0 else 1)
+        self._lr_val = QSpinBox()
+        self._lr_val.setRange(0, 180)
+        self._lr_val.setSuffix(" °")
+        self._lr_val.setValue(abs(int(prim)))
+        r1.addWidget(QLabel("Primary:"))
+        r1.addWidget(self._lr, 1)
+        r1.addWidget(self._lr_val, 1)
+        v.addLayout(r1)
+
+        r2 = QHBoxLayout()
+        self._cc = QComboBox()
+        self._cc.addItems(["CRA", "CAU"])
+        self._cc.setCurrentIndex(0 if sec >= 0 else 1)
+        self._cc_val = QSpinBox()
+        self._cc_val.setRange(0, 90)
+        self._cc_val.setSuffix(" °")
+        self._cc_val.setValue(abs(int(sec)))
+        r2.addWidget(QLabel("Secondary:"))
+        r2.addWidget(self._cc, 1)
+        r2.addWidget(self._cc_val, 1)
+        v.addLayout(r2)
+
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        ok = QPushButton("OK")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        v.addLayout(btns)
+
+    def values(self):
+        prim = self._lr_val.value() * (1 if self._lr.currentIndex() == 0 else -1)
+        sec = self._cc_val.value() * (1 if self._cc.currentIndex() == 0 else -1)
+        return prim, sec
 
 
 class _ColorMapDialog(QDialog):
@@ -2254,6 +2344,8 @@ class CTViewer(AbstractViewer):
             self.pane[key].tagact.SetInput("")
             self.pane[key].resultact.SetInput("")
             self.pane[key].angle.SetInput("")
+            for _ha in self.pane[key].angle_halo:
+                _ha.SetInput("")
             self.pane[key].render()
 
     def current_header(self):
@@ -2533,7 +2625,10 @@ class CTViewer(AbstractViewer):
             0, f"WW {self._win:.0f}  WL {self._lvl:.0f}"
         )                                           # bottom-left
         p.info.SetText(1, f"{key}  |  {kind}")      # bottom-right
-        p.angle.SetInput(self._angio_angle(key))    # bottom-centre (yellow)
+        _ang = self._angio_angle(key)
+        p.angle.SetInput(_ang)                      # bottom-centre (yellow)
+        for _ha in p.angle_halo:                    # black outline copies
+            _ha.SetInput(_ang)
 
     def _angio_angle(self, key) -> str:
         """SSMview-style C-arm angle of this pane's projection direction.
@@ -2546,10 +2641,22 @@ class CTViewer(AbstractViewer):
         against the SSMview screen: a coronal view -> "LAO0 CRA0", an
         axial view -> "LAO0 CRA90".
         """
+        vals = self._angio_angle_vals(key)
+        if vals is None:
+            return ""
+        pi_, si_ = vals
+        lao = f"LAO{pi_}" if pi_ >= 0 else f"RAO{-pi_}"
+        cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
+        return f"{lao} {cra}"
+
+    def _angio_angle_vals(self, key):
+        """The readout's (primary, secondary) C-arm angles as signed ints
+        (LAO + / RAO −, CRA + / CAU −), or None when the frame is degenerate.
+        Shared by the readout text and the right-click angle dialog."""
         n = np.asarray(self._frame[key][2], dtype=np.float64)
         nrm = float(np.linalg.norm(n))
         if nrm < 1e-9:
-            return ""
+            return None
         n = self._pbasis @ (n / nrm)                 # -> patient LPS
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
         # NOTE: the old code folded ±N into the anterior hemisphere here. That
@@ -2560,10 +2667,74 @@ class CTViewer(AbstractViewer):
         axial = math.hypot(nx, ny)
         prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
         sec = math.degrees(math.atan2(nz, axial))
-        pi_, si_ = int(round(prim)), int(round(sec))
-        lao = f"LAO{pi_}" if pi_ >= 0 else f"RAO{-pi_}"
-        cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
-        return f"{lao} {cra}"
+        return int(round(prim)), int(round(sec))
+
+    def _frame_from_angio(self, prim_deg, sec_deg):
+        """Inverse of _angio_angle_vals: build a pane frame (u, v, n) whose
+        normal projects to the C-arm primary (LAO + / RAO −) and secondary
+        (CRA + / CAU −) angle. Screen-up = patient SUPERIOR, matching the
+        frontal default (LAO0 CRA0 → coronal viewed from the front).
+
+        The detector/observer normal in patient LPS is
+          n = (cos·sin prim, −cos·cos prim, sin sec)·(axial=cos sec)
+        which round-trips through _angio_angle_vals; map it back into volume
+        coords via the inverse patient basis."""
+        pr, se = math.radians(prim_deg), math.radians(sec_deg)
+        n_pat = np.array([math.cos(se) * math.sin(pr),
+                          -math.cos(se) * math.cos(pr),
+                          math.sin(se)], dtype=np.float64)
+        try:
+            inv = np.linalg.inv(np.asarray(self._pbasis, dtype=np.float64))
+        except np.linalg.LinAlgError:
+            inv = np.eye(3)
+        n = _norm(inv @ n_pat)                       # normal in volume coords
+        sup = _norm(inv @ np.array([0.0, 0.0, 1.0]))  # patient superior
+        if abs(float(np.dot(sup, n))) > 0.999:       # looking down the SI axis
+            sup = _norm(inv @ np.array([0.0, -1.0, 0.0]))  # fall back: anterior
+        u = _norm(np.cross(sup, n))                  # screen-right
+        v = np.cross(n, u)                           # screen-up (u×v = n)
+        return (u, v, n)
+
+    def _set_angio_angle(self, which, prim_deg, sec_deg):
+        """Re-orient pane *which* so it projects from the given C-arm angle,
+        pivoting about the CrossLine intersection (_center). The companion
+        pane re-derives as the coupled orthogonal section — same linkage as
+        the ROTATE tool — so the pair stays consistent."""
+        if self._image is None or self._mode != "3D":
+            return
+        self._frame[which] = self._frame_from_angio(prim_deg, sec_deg)
+        uw, _vw, nw = self._frame[which]
+        other = "B" if which == "A" else "A"
+        # Keep the companion's "up" continuous (see the ROTATE handler).
+        _ou, ov, _on = self._frame[other]
+        if float(np.dot(nw, ov)) < 0.0:
+            nw = -nw
+        self._frame[other] = self._ortho(uw, nw)
+        self._cross_ang[which] = 0.0
+        self._cross_ang[other] = 0.0
+        self._pc = {"A": self._center.copy(), "B": self._center.copy()}
+        self._view_initial = False
+        self._refresh()
+
+    def _angio_hit(self, which, x, y, w, h):
+        """True if widget point (x, y) (Qt px, y-down) is over the bottom-centre
+        angio readout of pane *which* — the right-click target that opens the
+        angle dialog. Only in 3-D MPR with a real readout shown."""
+        if self._image is None or self._mode != "3D":
+            return False
+        if not self._angio_angle(which):
+            return False
+        band = 50.0
+        return (h - band) <= y <= (h - 2) and (w * 0.30) <= x <= (w * 0.70)
+
+    def _open_angio_dialog(self, which):
+        """Right-click on the readout → pick LAO/RAO + CRA/CAU and rotate the
+        pane to that C-arm angle (to line the slice up with an angio view)."""
+        vals = self._angio_angle_vals(which) or (0, 0)
+        dlg = _AngioAngleDialog(vals[0], vals[1], self)
+        if dlg.exec():
+            prim, sec = dlg.values()
+            self._set_angio_angle(which, prim, sec)
 
     # ----------------------------------------------------------- tools
     def _set_active(self, which):
