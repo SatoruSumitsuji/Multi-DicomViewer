@@ -156,17 +156,24 @@ def _norm(v):
 
 def _draw_outlined_text(p, rect, flags, text, fill, width=1.0):
     """Draw *text* in *fill* colour with a black outline ("黒枠"), by stamping
-    black copies at 8 compass offsets (two radii for a solid edge) then the
-    fill on top. *width* ≈ outline thickness in px. Unlike a QPainterPath this
+    black copies at 8 compass offsets then the fill on top. *width* ≈ outline
+    thickness in px. To stay smooth (not blotchy) for thicker outlines, the
+    copies are placed on CONCENTRIC rings spaced ≤~0.9px apart so neighbouring
+    shadows always overlap into one continuous halo. Unlike a QPainterPath this
     works with multi-line / word-wrapped drawText, so it suits the tag block
     too. Leaves the painter pen set to *fill*."""
+    dirs = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+            (1, 0), (-1, 1), (0, 1), (1, 1))
+    radii = []
+    r = min(0.9, width)
+    while r < width - 1e-6:
+        radii.append(r)
+        r += 0.9
+    radii.append(width)
     p.setPen(QColor(0, 0, 0))
-    offs = []
-    for r in (width * 0.5, width):
-        offs += [(-r, -r), (0.0, -r), (r, -r), (-r, 0.0),
-                 (r, 0.0), (-r, r), (0.0, r), (r, r)]
-    for ox, oy in offs:
-        p.drawText(rect.translated(ox, oy), flags, text)
+    for rad in radii:
+        for ox, oy in dirs:
+            p.drawText(rect.translated(ox * rad, oy * rad), flags, text)
     p.setPen(fill)
     p.drawText(rect, flags, text)
 

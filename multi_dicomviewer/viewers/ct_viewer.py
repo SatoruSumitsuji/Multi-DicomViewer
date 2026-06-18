@@ -822,25 +822,30 @@ class _Pane:
         # outline is 8 black copies of the same text nudged ±a few px around
         # the centre, drawn UNDER the yellow one — a halo that keeps the
         # yellow legible even when the slice background turns white.
+        # A single ring of copies looks blotchy (斑) once the offset is large
+        # enough that the 8 shadows no longer overlap — you see them as
+        # discrete images. So use TWO concentric rings: a tight inner ring
+        # (like the clean DICOM-tag outline) fills the near gaps, an outer ring
+        # adds a touch of thickness; their union reads as one smooth outline.
         _ANGLE_FONT = 18
         self.angle_halo = []
-        _hd = 0.0055                             # halo offset (normalised vp)
-        for _ox, _oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
-                         (1, 0), (-1, 1), (0, 1), (1, 1)):
-            ha = vtkTextActor()
-            ha.SetTextScaleModeToNone()
-            htp = ha.GetTextProperty()
-            htp.SetColor(0.0, 0.0, 0.0)
-            htp.SetFontSize(_ANGLE_FONT)
-            htp.SetBold(True)
-            htp.SetJustificationToCentered()
-            htp.SetVerticalJustificationToBottom()
-            ha.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-            ha.GetPositionCoordinate().SetValue(0.5 + _ox * _hd,
-                                                0.012 + _oy * _hd)
-            ha.SetInput("")
-            self.ren.AddViewProp(ha)             # added BEFORE the yellow actor
-            self.angle_halo.append(ha)
+        for _r in (0.002, 0.004):                # inner (fill) + outer (thickness)
+            for _ox, _oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                             (1, 0), (-1, 1), (0, 1), (1, 1)):
+                ha = vtkTextActor()
+                ha.SetTextScaleModeToNone()
+                htp = ha.GetTextProperty()
+                htp.SetColor(0.0, 0.0, 0.0)
+                htp.SetFontSize(_ANGLE_FONT)
+                htp.SetBold(True)
+                htp.SetJustificationToCentered()
+                htp.SetVerticalJustificationToBottom()
+                ha.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+                ha.GetPositionCoordinate().SetValue(0.5 + _ox * _r,
+                                                    0.012 + _oy * _r)
+                ha.SetInput("")
+                self.ren.AddViewProp(ha)         # added BEFORE the yellow actor
+                self.angle_halo.append(ha)
         self.angle = vtkTextActor()
         self.angle.SetTextScaleModeToNone()
         self.angle.GetTextProperty().SetColor(1.0, 0.9, 0.0)
