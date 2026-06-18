@@ -88,6 +88,14 @@ _SEEK_QSS_COMPACT = (
     "fx:0.5,fy:0.5,stop:0 #1c6fd0,stop:0.55 #1c6fd0,"
     "stop:0.60 #ffffff,stop:1 #ffffff);}"
 )
+#: Grey inner dot for the same handle — used on single-frame series, where
+#: there is nothing to play and the Play button is greyed out. A blue dot there
+#: looked "active" and was mistaken for a live control, so it is desaturated to
+#: match the disabled Play button.
+_SEEK_DOT_GREY = "#9a9a9a"
+_SEEK_QSS_DISABLED = _SEEK_QSS.replace(_SEEK_DOT_BLUE, _SEEK_DOT_GREY)
+_SEEK_QSS_COMPACT_DISABLED = _SEEK_QSS_COMPACT.replace(
+    _SEEK_DOT_BLUE, _SEEK_DOT_GREY)
 
 
 class _RangeMarks(QWidget):
@@ -810,7 +818,12 @@ class XAViewer(AbstractViewer):
         # The 18 px handle pixel size is unchanged; only the inner-dot
         # proportion (the "mark") moved here. set_compact() swaps in a
         # smaller-handle stylesheet for multi-row layouts.
-        self.frame_slider.setStyleSheet(_SEEK_QSS)
+        # Track compact / playable state so the handle dot (blue when a cine
+        # can play, grey when single-frame) and the compact size stay in sync
+        # whichever changes. Start grey: no multi-frame series is loaded yet.
+        self._seek_compact = False
+        self._seek_playable = False
+        self._refresh_seek_style()
 
         # Draggable Play-range start/end triangles, painted on a thin strip
         # directly above the seek bar and sharing its x / width so they line
@@ -947,7 +960,8 @@ class XAViewer(AbstractViewer):
         # Seek slider: shorter groove + smaller handle.
         self.frame_slider.setMinimumHeight(16 if on else 24)
         self.frame_slider.setMaximumHeight(16 if on else _QWIDGETSIZE_MAX)
-        self.frame_slider.setStyleSheet(_SEEK_QSS_COMPACT if on else _SEEK_QSS)
+        self._seek_compact = on
+        self._refresh_seek_style()
         # Frame counter + fps box: match the shrunk Play/seek (smaller font,
         # capped height) so they don't tower over the compact transport.
         for widget, base in (
@@ -973,6 +987,18 @@ class XAViewer(AbstractViewer):
             if not hasattr(self, "_base_layout_spacing"):
                 self._base_layout_spacing = lay.spacing()
             lay.setSpacing(0 if on else self._base_layout_spacing)
+
+    def _refresh_seek_style(self) -> None:
+        """Apply the seek-bar stylesheet for the current compact + playable
+        state: blue inner dot when a multi-frame cine can play, grey when the
+        series is single-frame (Play greyed out)."""
+        compact = getattr(self, "_seek_compact", False)
+        playable = getattr(self, "_seek_playable", False)
+        if playable:
+            qss = _SEEK_QSS_COMPACT if compact else _SEEK_QSS
+        else:
+            qss = _SEEK_QSS_COMPACT_DISABLED if compact else _SEEK_QSS_DISABLED
+        self.frame_slider.setStyleSheet(qss)
 
     def _clear_measurements(self):
         for c in (self.canvas, self.canvas2):
@@ -1148,6 +1174,10 @@ class XAViewer(AbstractViewer):
         if single and self.play_btn.isChecked():
             self.play_btn.setChecked(False)
         self.play_btn.setEnabled(not single)
+        # Grey the seek handle's inner dot when there's nothing to play, so it
+        # no longer looks like an active control next to the greyed Play button.
+        self._seek_playable = not single
+        self._refresh_seek_style()
         self.fps_spin.setValue(self._fps)
 
         # Restore (or default-to-full) this series' Play range and sync the

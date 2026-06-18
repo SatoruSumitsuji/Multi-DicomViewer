@@ -36,6 +36,10 @@ _BY_MOD = "modality"
 _BY_UID = "studyInstanceUID"
 _BY_COMBINED = "combined"
 
+#: Modalities that are inherently single-frame (cross-sectional / static), so a
+#: 1-frame file is NOT a "still" and must not get the "@STILL" suffix.
+_STILL_EXEMPT = {"CT", "MR", "NM"}
+
 
 def _is_dicom(path: str) -> bool:
     try:
@@ -104,11 +108,12 @@ def _group_of(f: dict, group_by: str, separate_single: bool) -> tuple[str, str]:
         uid = f["studyInstanceUID"]
         return uid, _safe(f"Study_{uid[:20]}")
     # combined
-    # CT is inherently single-frame, so a 1-frame CT is NOT a "still" — keep
-    # it as plain "CT;<date>" rather than "CT@STILL;<date>". The STILL split is
-    # meant for genuinely single-shot images (e.g. an XA spot film vs a cine).
+    # CT/MR/NM are inherently single-frame, so a 1-frame file there is NOT a
+    # "still" — keep it as plain "<MOD>;<date>" rather than "<MOD>@STILL;<date>".
+    # The STILL split is meant for genuinely single-shot images (e.g. an XA spot
+    # film vs a cine).
     still = (separate_single and f["numberOfFrames"] == 1
-             and f["modality"].upper() != "CT")
+             and f["modality"].upper() not in _STILL_EXEMPT)
     if still:
         return (f"{f['studyDate']}_{f['modality']}_STILL",
                 _safe(f"{f['modality']}@STILL;{raw}"))
