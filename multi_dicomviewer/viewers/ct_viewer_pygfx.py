@@ -154,6 +154,23 @@ def _norm(v):
     return v / n if n > 1e-9 else v
 
 
+def _draw_outlined_text(p, rect, flags, text, fill, width=1.0):
+    """Draw *text* in *fill* colour with a black outline ("黒枠"), by stamping
+    black copies at 8 compass offsets (two radii for a solid edge) then the
+    fill on top. *width* ≈ outline thickness in px. Unlike a QPainterPath this
+    works with multi-line / word-wrapped drawText, so it suits the tag block
+    too. Leaves the painter pen set to *fill*."""
+    p.setPen(QColor(0, 0, 0))
+    offs = []
+    for r in (width * 0.5, width):
+        offs += [(-r, -r), (0.0, -r), (r, -r), (-r, 0.0),
+                 (r, 0.0), (-r, r), (0.0, r), (r, r)]
+    for ox, oy in offs:
+        p.drawText(rect.translated(ox, oy), flags, text)
+    p.setPen(fill)
+    p.drawText(rect, flags, text)
+
+
 def _rotate(v, axis, deg):
     """Rodrigues rotation of vector *v* about unit *axis* by *deg*."""
     a = _norm(axis)
@@ -541,12 +558,14 @@ class _Overlay(QWidget):
             if head:
                 p.setFont(overlay_qfont(v._overlay_font_pt))
                 # Confine tags to the left 40% and word-wrap, so a larger font
-                # never runs them into the right-side measure results.
+                # never runs them into the right-side measure results. A thin
+                # black outline keeps the white tags legible over bright slices.
                 flags = (int(Qt.AlignmentFlag.AlignLeft)
                          | int(Qt.AlignmentFlag.AlignTop)
                          | int(Qt.TextFlag.TextWordWrap))
-                p.drawText(QRectF(6, 4, w * 0.40 - 6, h - 40), flags,
-                           "\n".join(head))
+                _draw_outlined_text(p, QRectF(6, 4, w * 0.40 - 6, h - 40),
+                                    flags, "\n".join(head),
+                                    QColor(255, 255, 255), width=1.0)
         p.setFont(QFont("monospace", 12))       # corner readouts stay compact
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
@@ -567,14 +586,8 @@ class _Overlay(QWidget):
             rect = QRectF(0, h - 42, w, 36)
             flags = (Qt.AlignmentFlag.AlignHCenter
                      | Qt.AlignmentFlag.AlignBottom)
-            p.setPen(QColor(0, 0, 0))            # black 縁取り (8-way halo)
-            for ox in (-1.4, 0.0, 1.4):
-                for oy in (-1.4, 0.0, 1.4):
-                    if ox == 0.0 and oy == 0.0:
-                        continue
-                    p.drawText(rect.translated(ox, oy), flags, ang)
-            p.setPen(QColor(255, 230, 0))        # yellow on top
-            p.drawText(rect, flags, ang)
+            _draw_outlined_text(p, rect, flags, ang,
+                                QColor(255, 230, 0), width=2.0)
 
 
 class _AngioAngleDialog(QDialog):
