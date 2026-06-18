@@ -104,7 +104,11 @@ def _group_of(f: dict, group_by: str, separate_single: bool) -> tuple[str, str]:
         uid = f["studyInstanceUID"]
         return uid, _safe(f"Study_{uid[:20]}")
     # combined
-    still = separate_single and f["numberOfFrames"] == 1
+    # CT is inherently single-frame, so a 1-frame CT is NOT a "still" — keep
+    # it as plain "CT;<date>" rather than "CT@STILL;<date>". The STILL split is
+    # meant for genuinely single-shot images (e.g. an XA spot film vs a cine).
+    still = (separate_single and f["numberOfFrames"] == 1
+             and f["modality"].upper() != "CT")
     if still:
         return (f"{f['studyDate']}_{f['modality']}_STILL",
                 _safe(f"{f['modality']}@STILL;{raw}"))
