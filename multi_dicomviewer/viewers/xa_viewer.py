@@ -1451,9 +1451,13 @@ class XAViewer(AbstractViewer):
             self._wl_lut is not None
             and np.issubdtype(f.dtype, np.integer)
         ):
-            # Fast path: one array gather instead of float math/clip.
-            return self._wl_lut[f + self._wl_off] if self._wl_off \
-                else self._wl_lut[f]
+            # Fast path: one array gather instead of float math/clip. Index in
+            # a wide int — a signed dtype (e.g. int16 MR/PSIR, _wl_off=32768)
+            # would otherwise overflow when the offset is added (NumPy 2 / NEP50
+            # raises OverflowError instead of upcasting), which crashed the app.
+            if self._wl_off:
+                return self._wl_lut[f.astype(np.intp) + self._wl_off]
+            return self._wl_lut[f]
         return apply_window(f, self._window, self._level)
 
     @staticmethod

@@ -644,7 +644,12 @@ class IVUSViewer(XAViewer):
             # already-display-ready pixels (e.g. a colour RGB strip).
             if (wl_lut is not None
                     and np.issubdtype(col.dtype, np.integer)):
-                return wl_lut[col + wl_off] if wl_off else wl_lut[col]
+                # Wide-int index so a signed dtype (wl_off>0) can't overflow
+                # when the offset is added (NumPy 2 / NEP50 raises instead of
+                # upcasting). Mirrors XAViewer._frame_of.
+                if wl_off:
+                    return wl_lut[col.astype(np.intp) + wl_off]
+                return wl_lut[col]
             if col.dtype == np.uint8:
                 return col
             return apply_window(col, window, level)
