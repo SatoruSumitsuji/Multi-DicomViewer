@@ -288,9 +288,15 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
             for uid, se in study.series.items():
                 # XA: 2 files = biplane (keep), ≥3 = packed (split). US/OTHER/
                 # IVUS have no biplane concept, so split at ≥2 files. CT and
-                # anything else are left intact.
-                _splittable = se.modality in (
-                    Modality.XA, Modality.IVUS, Modality.OTHER
+                # anything else are left intact. MR/NM are EXCLUDED from the
+                # split: their multi-file series are a single cine / stack (one
+                # frame per file) and must stay together so they play as a 2-D
+                # cine (load_series routes them to load_secondary_capture), not
+                # as N separate single-image rows.
+                _kind = (se.dicom_modality or "").upper()
+                _splittable = (
+                    se.modality in (Modality.XA, Modality.IVUS, Modality.OTHER)
+                    and _kind not in ("MR", "NM")
                 )
                 _min_files = 3 if se.modality == Modality.XA else 2
                 if not _splittable or len(se.files) < _min_files:
@@ -1491,4 +1497,11 @@ def load_series(
         if _series_is_secondary_capture(series):
             return load_secondary_capture(series, progress)
         return load_ct(series, progress)
+    # MR / NM multi-image series are stored one single-frame file per frame, so
+    # stack them into a 2-D cine (one page per file, like a Secondary-Capture
+    # stack) instead of treating each file as an independent "plane" — load_xa
+    # would otherwise show only one file and stall on "Buffering…".
+    if (series.dicom_modality or "").upper() in ("MR", "NM") \
+            and len(series.files) > 1:
+        return load_secondary_capture(series, progress)
     return load_xa(series, progress)
