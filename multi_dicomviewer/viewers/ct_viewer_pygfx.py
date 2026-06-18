@@ -2344,7 +2344,13 @@ class CTViewer(AbstractViewer):
         self._cross_ang[which] += d
         a = math.radians(self._cross_ang[which])
         crossdir = u * math.cos(a) + v * math.sin(a)
-        self._frame[other] = self._ortho(crossdir, n)
+        # +n and -n describe the SAME companion plane (its up = ±n). Pick the
+        # sign that keeps the companion's "up" continuous with its current
+        # frame, else it flips up/down the instant the crossline starts to
+        # rotate (pane A's normal points inferior in the initial axial view).
+        # Same fix the ROTATE tool already carries.
+        nn = n if float(np.dot(n, self._frame[other][1])) >= 0.0 else -n
+        self._frame[other] = self._ortho(crossdir, nn)
         self._cross_ang[other] = 0.0
         self._pc[other] = self._center.copy()
         self._view_initial = False
