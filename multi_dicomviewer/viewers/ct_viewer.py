@@ -3328,14 +3328,27 @@ class CTViewer(AbstractViewer):
         self._cross_ang[which] += d
         a = math.radians(self._cross_ang[which])
         crossdir = u * math.cos(a) + v * math.sin(a)
-        # +n and -n describe the SAME companion plane (its up = ±n). Pick the
-        # sign that keeps the companion's "up" continuous with its current
-        # frame, else it flips up/down the instant the crossline starts to
-        # rotate (pane A's normal points inferior in the initial axial view).
-        # Same fix the ROTATE tool already carries.
-        nn = n if float(np.dot(n, self._frame[other][1])) >= 0.0 else -n
-        self._frame[other] = self._ortho(crossdir, nn)
-        self._cross_ang[other] = 0.0
+        # Re-derive the companion plane (it must stay perpendicular to this pane
+        # and contain the rotated crossline L = crossdir). DON'T rebuild it as a
+        # fresh ortho(crossdir, n): that snapped the companion's crossline back
+        # to straight and spun its image every time you touched the other pane.
+        # Instead keep the companion's image orientation CONTINUOUS — rotate its
+        # old "up" minimally into the new plane — and set its crossline angle so
+        # it still marks L. So rotating one pane no longer resets the other
+        # pane's crossline/orientation. (The new_n sign choice also subsumes the
+        # earlier up-flip fix.)
+        ou, ov, on = self._frame[other]
+        new_n = _norm(np.cross(crossdir, n))            # companion plane normal
+        if float(np.dot(new_n, on)) < 0.0:
+            new_n = -new_n                              # keep the viewing side stable
+        v_new = ov - float(np.dot(ov, new_n)) * new_n   # old up projected in-plane
+        if float(np.linalg.norm(v_new)) < 1e-6:         # old up ⟂ new plane
+            v_new = np.cross(new_n, crossdir)
+        v_new = _norm(v_new)
+        u_new = np.cross(v_new, new_n)                  # u×v = new_n (ortho convention)
+        self._frame[other] = (u_new, v_new, new_n)
+        self._cross_ang[other] = math.degrees(math.atan2(
+            float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
         self._pc[other] = self._center.copy()
         self._view_initial = False
         self._refresh()
