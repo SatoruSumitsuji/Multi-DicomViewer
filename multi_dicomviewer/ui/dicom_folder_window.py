@@ -37,9 +37,11 @@ _BY_MOD = "modality"
 _BY_UID = "studyInstanceUID"
 _BY_COMBINED = "combined"
 
-#: Modalities that are inherently single-frame (cross-sectional / static), so a
-#: 1-frame file is NOT a "still" and must not get the "@STILL" suffix.
-_STILL_EXEMPT = {"CT", "MR", "NM"}
+#: Only XA gets the "@STILL" single-frame split: an XA spot film (1 frame) is a
+#: genuine still, distinct from a cine run. Every other modality keeps its
+#: 1-frame files in the regular "<MOD>;<date>" group (a single-frame CT/MR/NM/US
+#: image is normal data, not a "still").
+_STILL_MODALITY = "XA"
 
 
 def _is_dicom(path: str) -> bool:
@@ -109,12 +111,11 @@ def _group_of(f: dict, group_by: str, separate_single: bool) -> tuple[str, str]:
         uid = f["studyInstanceUID"]
         return uid, _safe(f"Study_{uid[:20]}")
     # combined
-    # CT/MR/NM are inherently single-frame, so a 1-frame file there is NOT a
-    # "still" — keep it as plain "<MOD>;<date>" rather than "<MOD>@STILL;<date>".
-    # The STILL split is meant for genuinely single-shot images (e.g. an XA spot
-    # film vs a cine).
+    # Only XA single-frame files are split off as "<MOD>@STILL;<date>" (a spot
+    # film vs a cine run). Every other modality keeps its 1-frame files in the
+    # plain "<MOD>;<date>" group.
     still = (separate_single and f["numberOfFrames"] == 1
-             and f["modality"].upper() not in _STILL_EXEMPT)
+             and f["modality"].upper() == _STILL_MODALITY)
     if still:
         return (f"{f['studyDate']}_{f['modality']}_STILL",
                 _safe(f"{f['modality']}@STILL;{raw}"))
