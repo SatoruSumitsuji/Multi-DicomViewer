@@ -284,7 +284,7 @@ class DicomFolderWindow(QMainWindow):
             self._radios[key] = rb
             orow.addWidget(rb)
         self._radios[_BY_COMBINED].setChecked(True)
-        self._sep_cb = QCheckBox("Separate single-frame (STILL)")
+        self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
         self._sep_cb.setChecked(True)
         orow.addWidget(self._sep_cb)
         orow.addStretch(1)
