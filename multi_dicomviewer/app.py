@@ -150,11 +150,22 @@ def main(argv: list[str]) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
 
-    # Show the splash BEFORE importing MainWindow (which loads pydicom/numpy/…),
-    # so something is on screen within a moment instead of several blank seconds.
-    splash = _make_splash()
-    splash.show()
-    app.processEvents()
+    # A frozen Windows/Linux build shows a NATIVE PyInstaller splash before
+    # Python even starts (see the .spec) — that's the only thing that can cover
+    # the first 2-3 s while the big Qt/DICOM DLLs cold-load. Use it when present;
+    # otherwise (dev run / macOS) show a Qt splash so SOMETHING is on screen
+    # while the heavy DICOM stack imports.
+    try:
+        import pyi_splash                       # only exists in the native build
+        have_native_splash = True
+    except Exception:
+        have_native_splash = False
+
+    splash = None
+    if not have_native_splash:
+        splash = _make_splash()
+        splash.show()
+        app.processEvents()
 
     _write_session()
     from multi_dicomviewer.ui.main_window import MainWindow   # heavy import
@@ -162,5 +173,12 @@ def main(argv: list[str]) -> int:
     initial = argv[1] if len(argv) > 1 else None
     win = MainWindow(initial_folder=initial)
     win.showMaximized()
-    splash.finish(win)                                        # close once shown
+    if have_native_splash:
+        try:
+            import pyi_splash
+            pyi_splash.close()
+        except Exception:
+            pass
+    if splash is not None:
+        splash.finish(win)                                    # close once shown
     return app.exec()
