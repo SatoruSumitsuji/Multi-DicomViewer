@@ -8,10 +8,14 @@ import subprocess
 import sys
 import tempfile
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
+from PyQt6.QtWidgets import QApplication, QSplashScreen
 
 from multi_dicomviewer.config import APP_NAME
-from multi_dicomviewer.ui.main_window import MainWindow
+# NOTE: MainWindow is imported LAZILY inside main(), AFTER the splash is shown.
+# It pulls in pydicom/numpy/pylibjpeg/etc. (~1s+ — the bulk of startup), so
+# importing it at module load would block with nothing on screen.
 
 #: Where the running session records its PID + how to relaunch itself, so the
 #: external "restart" shortcut can force-kill a hung instance and reopen it
@@ -111,6 +115,32 @@ def _restart() -> int:
     return 0
 
 
+def _make_splash() -> QSplashScreen:
+    """A tiny in-code splash (no image asset) shown the instant Qt is up, so the
+    user sees the app immediately while the heavy DICOM stack imports."""
+    pm = QPixmap(440, 240)
+    pm.fill(QColor(28, 30, 36))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    p.setPen(QColor(236, 239, 245))
+    f = QFont()
+    f.setPointSize(20)
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(pm.rect().adjusted(0, -22, 0, -22),
+               Qt.AlignmentFlag.AlignCenter, APP_NAME)
+    f.setPointSize(11)
+    f.setBold(False)
+    p.setFont(f)
+    p.setPen(QColor(150, 200, 255))
+    p.drawText(pm.rect().adjusted(0, 58, 0, 58),
+               Qt.AlignmentFlag.AlignCenter, "起動中… / Loading…")
+    p.end()
+    splash = QSplashScreen(pm)
+    splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    return splash
+
+
 def main(argv: list[str]) -> int:
     # External "restart" shortcut launches us with --restart: kill the hung
     # instance and reopen it, then exit (no GUI for this helper process).
@@ -119,9 +149,18 @@ def main(argv: list[str]) -> int:
 
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
+
+    # Show the splash BEFORE importing MainWindow (which loads pydicom/numpy/…),
+    # so something is on screen within a moment instead of several blank seconds.
+    splash = _make_splash()
+    splash.show()
+    app.processEvents()
+
     _write_session()
+    from multi_dicomviewer.ui.main_window import MainWindow   # heavy import
 
     initial = argv[1] if len(argv) > 1 else None
     win = MainWindow(initial_folder=initial)
     win.showMaximized()
+    splash.finish(win)                                        # close once shown
     return app.exec()
