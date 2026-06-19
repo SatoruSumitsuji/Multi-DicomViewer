@@ -336,6 +336,12 @@ class DicomFolderWindow(QMainWindow):
         self._go_btn.setEnabled(False)
         self._go_btn.clicked.connect(self._organize)
         brow.addWidget(self._go_btn)
+        # "Clear Selection" (right of Sort Files): reset source/output folders
+        # and the scanned groups back to the initial empty state.
+        self._clear_btn = QPushButton("Clear Selection")
+        self._clear_btn.setFont(_go_font)
+        self._clear_btn.clicked.connect(self._clear)
+        brow.addWidget(self._clear_btn)
         root.addLayout(brow)
 
         # Initial label/button states (no source, no target yet).
@@ -351,8 +357,25 @@ class DicomFolderWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         for w in (self._src_btn, self._tgt_btn, self._same_btn,
-                  self._parent_btn, self._go_btn):
+                  self._parent_btn, self._go_btn, self._clear_btn):
             w.setEnabled(not busy)
+
+    def _clear(self) -> None:
+        """Clear ALL selections — source/output folders and the scanned groups —
+        returning the window to its initial empty state."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._source = None
+        self._target = None
+        self._files = []
+        self._name_map = {}
+        self._tree.clear()
+        self._src_lbl.setText("(none)")
+        self._src_lbl.setStyleSheet("color:#555;")
+        self._stat_lbl.setText("")
+        self._bar.setVisible(False)
+        self._update_tgt_lbl()                      # output (none) back to grey
+        self._update_go()                           # disable Sort Files, hide warning
 
     # ---------------------------------------------------------- drag&drop
     @staticmethod
