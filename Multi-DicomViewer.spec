@@ -94,9 +94,29 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
+# Native splash screen (Windows/Linux): the PyInstaller bootloader shows this
+# image the moment it starts — BEFORE Python and PyQt6 load — so the user sees
+# the app within a blink instead of staring at 2-3 blank seconds while the big
+# Qt/DICOM DLLs cold-load and Defender scans them. macOS doesn't support the
+# PyInstaller splash (and already launches instantly), so it's skipped there;
+# app.py shows a Qt splash as the fallback when this native one isn't present.
+if sys.platform != "darwin":
+    splash = Splash(
+        "packaging/splash.png",
+        binaries=a.binaries,
+        datas=a.datas,
+        text_pos=None,
+    )
+    _exe_extra = [splash]
+    _coll_extra = [splash.binaries]
+else:
+    _exe_extra = []
+    _coll_extra = []
+
 exe = EXE(
     pyz,
     a.scripts,
+    *_exe_extra,
     [],
     exclude_binaries=True,
     name="Multi-DicomViewer",
@@ -114,6 +134,7 @@ exe = EXE(
 
 coll = COLLECT(
     exe,
+    *_coll_extra,
     a.binaries,
     a.datas,
     strip=False,
