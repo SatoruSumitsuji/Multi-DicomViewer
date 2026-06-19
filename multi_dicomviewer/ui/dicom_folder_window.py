@@ -13,6 +13,7 @@ import shutil
 
 import pydicom
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -319,11 +320,27 @@ class DicomFolderWindow(QMainWindow):
 
         brow = QHBoxLayout()
         brow.addStretch(1)
-        self._go_btn = QPushButton("Organize")
+        # Red warning shown (left of the button) while no output folder is set.
+        # Kept at the button's ORIGINAL text size (per request), so capture that
+        # before enlarging the button.
+        self._go_btn = QPushButton("Sort Files")
+        _base_font = QFont(self._go_btn.font())
+        self._no_out_lbl = QLabel("Output folder is not selected")
+        self._no_out_lbl.setFont(_base_font)
+        self._no_out_lbl.setStyleSheet("color:#d00;")
+        brow.addWidget(self._no_out_lbl)
+        # Enlarge the action button ×1.5 to make it stand out (was "Organize").
+        _go_font = QFont(_base_font)
+        _go_font.setPointSizeF(_base_font.pointSizeF() * 1.5)
+        self._go_btn.setFont(_go_font)
         self._go_btn.setEnabled(False)
         self._go_btn.clicked.connect(self._organize)
         brow.addWidget(self._go_btn)
         root.addLayout(brow)
+
+        # Initial label/button states (no source, no target yet).
+        self._update_tgt_lbl()
+        self._update_go()
 
     # ----------------------------------------------------------- helpers
     def _group_by(self) -> str:
@@ -375,6 +392,7 @@ class DicomFolderWindow(QMainWindow):
             return
         self._source = d
         self._src_lbl.setText(d)
+        self._update_tgt_lbl()                      # (none) turns red once a source exists
         self._scan(d)
 
     def _scan(self, d: str) -> None:
@@ -414,8 +432,24 @@ class DicomFolderWindow(QMainWindow):
 
     def _set_target(self, d: str) -> None:
         self._target = d
-        self._tgt_lbl.setText(d)
+        self._update_tgt_lbl()
         self._update_go()
+
+    def _update_tgt_lbl(self) -> None:
+        """Output-folder label state:
+          * output set            -> the folder path, grey
+          * no source yet         -> "(none)", grey
+          * source set, no output -> "(none)", BOLD RED (it's now the thing the
+                                     user must still pick before sorting)."""
+        if self._target:
+            self._tgt_lbl.setText(self._target)
+            self._tgt_lbl.setStyleSheet("color:#555;")
+        elif self._source:
+            self._tgt_lbl.setText("(none)")
+            self._tgt_lbl.setStyleSheet("color:#d00; font-weight:bold;")
+        else:
+            self._tgt_lbl.setText("(none)")
+            self._tgt_lbl.setStyleSheet("color:#555;")
 
     def _target_parent(self) -> None:
         if not self._source:
@@ -425,7 +459,11 @@ class DicomFolderWindow(QMainWindow):
             self._set_target(parent)
 
     def _update_go(self) -> None:
-        self._go_btn.setEnabled(bool(self._files) and bool(self._target))
+        has_target = bool(self._target)
+        self._go_btn.setEnabled(bool(self._files) and has_target)
+        # "Sort Files" is greyed out until an output folder is chosen; the red
+        # "Output folder is not selected" note sits to its left until then.
+        self._no_out_lbl.setVisible(not has_target)
 
     # ----------------------------------------------------------- grouping
     def _regroup(self) -> None:

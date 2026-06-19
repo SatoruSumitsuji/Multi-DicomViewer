@@ -69,6 +69,29 @@ COLOR_CHOICES: list[tuple[str, str]] = [
 DEFAULT_MEAS_COLOR = COLOR_CHOICES[0][1]   # cyan
 
 
+def draw_outlined_line(p: QPainter, x: float, y: float, text: str,
+                       fill: QColor, width: float = 1.0) -> None:
+    """Draw one baseline line of *text* in *fill* with a thin black outline —
+    the SAME readability treatment the CT viewer gives its DICOM tags, so every
+    modality's overlay reads cleanly over bright/white images. Black copies are
+    placed on concentric rings spaced <=0.9 px apart (so neighbours overlap into
+    a smooth edge), then the fill is drawn on top. Leaves the pen set to *fill*."""
+    dirs = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+            (1, 0), (-1, 1), (0, 1), (1, 1))
+    radii = []
+    r = min(0.9, width)
+    while r < width - 1e-6:
+        radii.append(r)
+        r += 0.9
+    radii.append(width)
+    p.setPen(QColor(0, 0, 0))
+    for rad in radii:
+        for ox, oy in dirs:
+            p.drawText(QPointF(x + ox * rad, y + oy * rad), text)
+    p.setPen(fill)
+    p.drawText(QPointF(x, y), text)
+
+
 class ImageCanvas(QWidget):
     measurement_done = pyqtSignal(object)  # emits Measurement
     #: IVUS long-axis: user dragged the rotation-centre marker. Emits the
@@ -1637,10 +1660,10 @@ class ImageCanvas(QWidget):
         # No background fill behind the DICOM tags — the grey box was found to
         # hurt readability over angio images, so the white text is drawn
         # straight onto the image (per user request).
-        p.setPen(QColor("#ffffff"))
+        white = QColor("#ffffff")
         y = box.y() + pad + fm.ascent()
         for line in lines:
-            p.drawText(box.x() + pad, y, line)
+            draw_outlined_line(p, box.x() + pad, y, line, white)
             y += lh
 
     def _paint_results(self, p: QPainter):

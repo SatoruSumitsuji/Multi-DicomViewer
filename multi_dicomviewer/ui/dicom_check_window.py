@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -155,6 +156,11 @@ class DicomCheckWindow(QMainWindow):
         btns.addStretch(1)
         self._del_btn.setEnabled(False)
         btns.addWidget(self._del_btn)
+        # Enlarge the bottom action buttons ×1.5 for readability (user request).
+        for b in (self._all_btn, self._none_btn, self._del_btn):
+            f = b.font()
+            f.setPointSizeF(f.pointSizeF() * 1.5)
+            b.setFont(f)
         root.addLayout(btns)
 
     # ---------------------------------------------------------- drag&drop
