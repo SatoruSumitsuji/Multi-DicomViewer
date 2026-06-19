@@ -899,6 +899,14 @@ class MainWindow(QMainWindow):
         open_act.triggered.connect(self._choose_folder)
         m.addAction(open_act)
 
+        open_file_act = QAction("Open DICOM &file…", self)
+        open_file_act.setShortcut("Ctrl+Shift+O")
+        open_file_act.setToolTip(
+            "Open one or more individual DICOM files (not the whole folder)"
+        )
+        open_file_act.triggered.connect(self._choose_files)
+        m.addAction(open_file_act)
+
         clear_act = QAction("&Clear viewers", self)
         clear_act.triggered.connect(self._clear_all)
         m.addAction(clear_act)
@@ -991,6 +999,13 @@ class MainWindow(QMainWindow):
         )
         self._dicomfolder_act.triggered.connect(self._open_dicom_folder)
         tm.addAction(self._dicomfolder_act)
+        self._bintag_act = QAction("Export binary DICOM tag…", self)
+        self._bintag_act.setToolTip(
+            "Write a binary VR tag (OB/OW/UN — shown as <binary>) to text "
+            "as hex / Base64 / Latin-1"
+        )
+        self._bintag_act.triggered.connect(self._open_bintag_export)
+        tm.addAction(self._bintag_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
@@ -1099,6 +1114,12 @@ class MainWindow(QMainWindow):
             start_dir=self._last_open_dir(), parent=self)
         self._dicomcheck_win.show()
         self._dicomcheck_win.raise_()
+
+    def _open_bintag_export(self) -> None:
+        """Launch the binary-tag export dialog (hex / Base64 / Latin-1)."""
+        from multi_dicomviewer.ui.binary_tag_export import BinaryTagExportDialog
+        dlg = BinaryTagExportDialog(getattr(self, "_last_dir", "") or None, self)
+        dlg.exec()
 
     def _open_dicom_folder(self) -> None:
         """Launch the DicomFolder tool (organize DICOM files by tag)."""
@@ -2148,6 +2169,18 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Open DICOM folder")
         if folder:
             self._load_folder(folder)
+
+    def _choose_files(self) -> None:
+        # "All files" is the default filter because DICOM files very often have
+        # no extension (e.g. "STUDY.1"); the .dcm convenience filter is second.
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Open DICOM file(s)", getattr(self, "_last_dir", "") or "",
+            "All files (*);;DICOM files (*.dcm *.DCM *.ima *.IMA *.dicom)",
+        )
+        paths = [p for p in paths if p]
+        if paths:
+            self._last_dir = os.path.dirname(paths[0])
+            self._load_files(paths)
 
     # ---------------------------------------------------- drag & drop a folder
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
