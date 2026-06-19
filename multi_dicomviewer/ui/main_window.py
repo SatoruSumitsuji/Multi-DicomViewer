@@ -73,30 +73,39 @@ from multi_dicomviewer.ui.tag_font import (
 from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
 from multi_dicomviewer.viewers.xa_viewer import XAViewer
 
-try:
-    # macOS renders CT with pygfx (wgpu→Metal): VTK's OpenGL→Metal path hangs.
-    # Windows/Linux keep the proven VTK viewer. Both expose the same CTViewer
-    # interface, so only the import target differs.
-    if sys.platform == "darwin":
-        from multi_dicomviewer.viewers.ct_viewer_pygfx import CTViewer
-    else:
-        from multi_dicomviewer.viewers.ct_viewer import CTViewer
-
-    _CT_IMPORT_ERROR = ""
-except Exception as exc:  # backend missing / broken — keep app usable for XA.
-    CTViewer = None
-    _CT_IMPORT_ERROR = str(exc)
+# CT's render backend is heavy and slow to import (VTK on Windows/Linux —
+# hundreds of DLLs; pygfx/wgpu on macOS). Importing it at startup was most of
+# the perceived launch delay (worst on Windows, where a freshly-downloaded,
+# unsigned build also gets a one-time Defender scan of those DLLs). Import it
+# LAZILY — only when the first CT study is opened — so the main window appears
+# immediately; users who never open a CT never pay the cost. Cached after the
+# first call.
+_CTViewer = None            # the CTViewer class, imported on first CT open
+_CT_IMPORT_ERROR = ""       # set if the backend can't be imported
 
 
 def _ct_viewer():
-    if CTViewer is None:
+    global _CTViewer, _CT_IMPORT_ERROR
+    if _CTViewer is None and not _CT_IMPORT_ERROR:
+        try:
+            # macOS renders CT with pygfx (wgpu→Metal): VTK's OpenGL→Metal path
+            # hangs. Windows/Linux keep the proven VTK viewer. Both expose the
+            # same CTViewer interface, so only the import target differs.
+            if sys.platform == "darwin":
+                from multi_dicomviewer.viewers.ct_viewer_pygfx import CTViewer
+            else:
+                from multi_dicomviewer.viewers.ct_viewer import CTViewer
+            _CTViewer = CTViewer
+        except Exception as exc:  # backend missing/broken — keep app usable for XA.
+            _CT_IMPORT_ERROR = str(exc) or "unknown import error"
+    if _CTViewer is None:
         hint = ("pip install -r requirements-mac.txt" if sys.platform == "darwin"
                 else "pip install vtk")
         raise RuntimeError(
             "CT viewer unavailable — its render backend failed to import:\n"
             f"{_CT_IMPORT_ERROR}\n\n{hint}"
         )
-    return CTViewer()
+    return _CTViewer()
 
 
 #: modality -> zero-arg factory building its viewer. Add OCT / NM here as
