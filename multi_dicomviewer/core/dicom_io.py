@@ -816,6 +816,37 @@ def _fast_raw_frame(ds, index: int):
         return None
 
 
+def _jfif_rgb_override(ds, index: int):
+    """Correct a JPEG colour frame that is MIS-TAGGED PhotometricInterpretation
+    = RGB while its codestream is actually JFIF-YCbCr (seen on GE volume-render
+    "Processed Images" — field report: CT Series #302/#303, a green cast over a
+    pink heart on black). The lossless-JPEG / pydicom decoders return the raw
+    YCbCr samples un-converted, and because the tag says RGB no YBR->RGB step
+    runs, so the image shows a green/teal cast. imagecodecs.jpeg_decode honours
+    the JPEG's own JFIF marker and returns the true display RGB. Returns that
+    ndarray, or None when this case doesn't apply (caller keeps the normal
+    decode)."""
+    if str(getattr(ds, "PhotometricInterpretation", "")) != "RGB":
+        return None
+    ts = str(getattr(getattr(ds, "file_meta", None), "TransferSyntaxUID", ""))
+    if ts not in _FAST_TS:                       # encapsulated JPEG-family only
+        return None
+    ic = _imagecodecs()
+    if ic is None or not hasattr(ic, "jpeg_decode"):
+        return None
+    try:
+        nf = int(_to_float(getattr(ds, "NumberOfFrames", 1), 1)) or 1
+        fb = get_frame(ds.PixelData, index, number_of_frames=nf)
+        if b"JFIF" not in fb[:64]:               # codestream isn't JFIF-YCbCr
+            return None
+        rgb = np.asarray(ic.jpeg_decode(fb))
+        if rgb.ndim == 3 and rgb.shape[-1] >= 3:
+            return np.ascontiguousarray(rgb[..., :3])
+    except Exception:
+        return None
+    return None
+
+
 def _raw_frame(ds, index: int) -> np.ndarray:
     """Decoded pixels for one frame, color space untouched.
 
@@ -906,7 +937,12 @@ def _decode_frame(ds, index: int, force_color: bool = False) -> np.ndarray:
             except Exception:
                 rgb = arr
     else:  # RGB
-        rgb = arr
+        # Some encapsulated JPEG colour frames are mis-tagged PI=RGB but carry a
+        # JFIF-YCbCr codestream; decode those honouring the JFIF marker so they
+        # don't show a green cast (see _jfif_rgb_override). Everything else keeps
+        # the already-decoded array.
+        override = _jfif_rgb_override(ds, index)
+        rgb = override if override is not None else arr
     if rgb.ndim == 2:                       # safety: not actually color
         return rgb.astype(np.float32)
     rgb = rgb[..., :3]
