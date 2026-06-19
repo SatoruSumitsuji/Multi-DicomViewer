@@ -490,6 +490,8 @@ class DicomFolderWindow(QMainWindow):
         # (before that there's nothing to sort yet, so it would be noise) and an
         # output folder still isn't set.
         self._no_out_lbl.setVisible(bool(self._source) and not has_target)
+        # Nothing to clear until a source folder is picked.
+        self._clear_btn.setEnabled(bool(self._source))
 
     # ----------------------------------------------------------- grouping
     def _regroup(self) -> None:
