@@ -393,6 +393,7 @@ class DicomFolderWindow(QMainWindow):
         self._source = d
         self._src_lbl.setText(d)
         self._update_tgt_lbl()                      # (none) turns red once a source exists
+        self._update_go()                           # show the red warning now too
         self._scan(d)
 
     def _scan(self, d: str) -> None:
@@ -461,9 +462,11 @@ class DicomFolderWindow(QMainWindow):
     def _update_go(self) -> None:
         has_target = bool(self._target)
         self._go_btn.setEnabled(bool(self._files) and has_target)
-        # "Sort Files" is greyed out until an output folder is chosen; the red
-        # "Output folder is not selected" note sits to its left until then.
-        self._no_out_lbl.setVisible(not has_target)
+        # "Sort Files" is greyed out until an output folder is chosen. The red
+        # "Output folder is not selected" note appears only ONCE A SOURCE EXISTS
+        # (before that there's nothing to sort yet, so it would be noise) and an
+        # output folder still isn't set.
+        self._no_out_lbl.setVisible(bool(self._source) and not has_target)
 
     # ----------------------------------------------------------- grouping
     def _regroup(self) -> None:
