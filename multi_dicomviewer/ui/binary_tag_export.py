@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFileDialog,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,6 +33,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+#: Pane-grid geometry for the "Select" picker (matches the app's max layout).
+_GRID_ROWS, _GRID_COLS = 4, 3
 
 #: (format key, file-suffix, checkbox label) for the three representations.
 _FORMATS = (
@@ -92,28 +96,74 @@ def export_tag(file_path: str, tag: Tag, raw: bytes,
     return written
 
 
-class BinaryTagExportDialog(QDialog):
-    """Pick a DICOM file + a tag, read its raw bytes, and export the chosen
-    text representation(s)."""
+class _PaneGridDialog(QDialog):
+    """A 4×3 grid mirroring the main window's panes. Clicking a pane that has a
+    series loaded picks that series' source file. *entries* is a list of dicts
+    (in grid-slot order) with keys slot / label / path (path None = empty)."""
 
-    def __init__(self, start_dir: str | None = None, parent=None):
+    def __init__(self, entries, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select a pane")
+        self.chosen_path: str | None = None
+        self.chosen_label: str = ""
+        v = QVBoxLayout(self)
+        v.addWidget(QLabel("Click a pane to use its DICOM file as the source:"))
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        for i, e in enumerate(entries):
+            r, c = divmod(i, _GRID_COLS)
+            path = e.get("path")
+            label = e.get("label") or ""
+            btn = QPushButton(f"Pane {e.get('slot', i + 1)}\n"
+                              + (label if path else "(empty)"))
+            btn.setMinimumSize(150, 64)
+            if path:
+                btn.setToolTip(path)
+                btn.clicked.connect(
+                    lambda _c=False, p=path, lb=label: self._pick(p, lb))
+            else:
+                btn.setEnabled(False)
+            grid.addWidget(btn, r, c)
+        v.addLayout(grid)
+        brow = QHBoxLayout()
+        brow.addStretch(1)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        brow.addWidget(cancel)
+        v.addLayout(brow)
+
+    def _pick(self, path: str, label: str) -> None:
+        self.chosen_path = path
+        self.chosen_label = label
+        self.accept()
+
+
+class BinaryTagExportDialog(QDialog):
+    """Pick a loaded pane's DICOM file + a tag, read its raw bytes, and export
+    the chosen text representation(s)."""
+
+    def __init__(self, pane_entries=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Export binary DICOM tag")
         self.resize(560, 300)
         self._vr = None
         self._raw: bytes | None = None
-        self._start_dir = start_dir or ""
+        #: panes (grid order) to choose the source file from — see _PaneGridDialog.
+        self._pane_entries = list(pane_entries or [])
 
         v = QVBoxLayout(self)
 
-        # --- DICOM file
+        # --- DICOM file: chosen from a currently-open pane (not the filesystem)
         frow = QHBoxLayout()
         frow.addWidget(QLabel("DICOM file:"))
         self._file = QLineEdit()
+        self._file.setReadOnly(True)
+        self._file.setPlaceholderText("(choose a pane with Select →)")
         frow.addWidget(self._file, 1)
-        fb = QPushButton("Browse…")
-        fb.clicked.connect(self._browse_file)
-        frow.addWidget(fb)
+        sb = QPushButton("Select")
+        sb.setToolTip("Pick the source from a currently-open pane")
+        sb.clicked.connect(self._select_from_panes)
+        frow.addWidget(sb)
         v.addLayout(frow)
 
         # --- tag + read
@@ -165,17 +215,22 @@ class BinaryTagExportDialog(QDialog):
         v.addLayout(brow)
 
     # ----------------------------------------------------------- helpers
-    def _browse_file(self) -> None:
-        start = self._file.text() or ""
-        start_dir = os.path.dirname(start) if start else self._start_dir
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Choose DICOM file", start_dir,
-            "All files (*);;DICOM files (*.dcm *.ima *.dicom)",
-        )
-        if path:
-            self._file.setText(path)
-            if not self._out.text():
-                self._out.setText(os.path.dirname(path))
+    def _select_from_panes(self) -> None:
+        if not any(e.get("path") for e in self._pane_entries):
+            QMessageBox.information(
+                self, "Export binary DICOM tag",
+                "No DICOM data is open. Load a series into a pane first.")
+            return
+        picker = _PaneGridDialog(self._pane_entries, self)
+        if picker.exec() and picker.chosen_path:
+            self._file.setText(picker.chosen_path)
+            self._out.setText(os.path.dirname(os.path.abspath(picker.chosen_path)))
+            # a new source invalidates a previous Read
+            self._raw = None
+            self._export_btn.setEnabled(False)
+            self._info.setText(
+                f"Selected: {picker.chosen_label or picker.chosen_path}.  "
+                "Enter a tag and click Read.")
 
     def _browse_out(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Output folder",
