@@ -1116,10 +1116,18 @@ class MainWindow(QMainWindow):
         self._dicomcheck_win.raise_()
 
     def _open_bintag_export(self) -> None:
-        """Launch the binary-tag export dialog (hex / Base64 / Latin-1)."""
+        """Launch the binary-tag export dialog (hex / Base64 / Latin-1). The
+        source file is chosen from a currently-open pane (4×3 grid)."""
         from multi_dicomviewer.ui.binary_tag_export import BinaryTagExportDialog
-        dlg = BinaryTagExportDialog(getattr(self, "_last_dir", "") or None, self)
-        dlg.exec()
+        entries = []
+        for i, pane in enumerate(self._order):       # on-screen grid-slot order
+            uid = pane.shown_series_uid()
+            se = self._series_by_uid.get(uid) if uid else None
+            path = se.files[0] if (se and se.files) else None
+            entries.append({"slot": i + 1,
+                            "label": (se.label if se else ""),
+                            "path": path})
+        BinaryTagExportDialog(entries, self).exec()
 
     def _open_dicom_folder(self) -> None:
         """Launch the DicomFolder tool (organize DICOM files by tag)."""
