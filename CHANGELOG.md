@@ -9,6 +9,22 @@ Multi-DICOMviewer のバージョンごとの主な機能・修正の履歴で�
 
 ---
 
+## 1.8.4 — 2026-06-20
+
+**新機能**
+- **File ▸ 「Open DICOM file…」（Ctrl+Shift+O）を追加**しました。フォルダ全体ではなく、個別の
+  DICOM ファイル（複数選択可）を開けます。
+- **Tools ▸ 「Export binary DICOM tag…」を追加**しました。バイナリ VR タグ（OB/OW/UN — タグ
+  ビューアでは `<binary>` としか表示されないもの）を3形式でテキスト書き出しできます。
+  - 対象ファイルは **「Select」ボタン → 4×3 のペイングリッド**から、現在開いているペインを
+    クリックして選びます。
+  - タグを入力して **Read**（VR・バイト数・印字可能率を表示）→ 形式を選んで **Export**:
+    - `<stem>.<GGGG_EEEE>.hex.txt`（16進ダンプ）
+    - `<stem>.<GGGG_EEEE>.base64.txt`（Base64・可逆）
+    - `<stem>.<GGGG_EEEE>.latin1.txt`（latin-1 1:1・埋め込みテキスト確認）
+
+---
+
 ## 1.8.3 — 2026-06-19
 
 **修正（カラー表示）**
