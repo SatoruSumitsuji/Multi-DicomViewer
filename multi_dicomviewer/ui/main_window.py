@@ -182,6 +182,10 @@ class LayoutGridPicker(QWidget):
         self._cols = cols
         self._hover = (1, 1)        # (R, C) currently highlighted
         self._current = (1, 1)      # the layout actually in effect
+        #: 0-based (row, col) cells whose backing pane currently holds data.
+        #: Drives the bright-vs-dark grey so you can see how big a layout you
+        #: must open to reveal every loaded pane.
+        self._occupied: set = set()
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -194,6 +198,11 @@ class LayoutGridPicker(QWidget):
     def set_current(self, rows: int, cols: int) -> None:
         self._current = (rows, cols)
         self._hover = (rows, cols)
+        self.update()
+
+    def set_occupancy(self, occupied) -> None:
+        """*occupied* = iterable of 0-based (row, col) cells that hold data."""
+        self._occupied = set(occupied)
         self.update()
 
     def _cell_rect(self, r: int, c: int) -> QRect:
@@ -235,14 +244,19 @@ class LayoutGridPicker(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#2b2b2b"))
         hr, hc = self._hover
-        on = QColor("#4a90d9")
-        off = QColor("#5a5a5a")
+        on = QColor("#4a90d9")          # in the hovered R×C block (would apply)
+        off_data = QColor("#8a8a8a")    # outside the block, pane HAS data
+        off_empty = QColor("#3a3a3a")   # outside the block, pane is empty
         edge = QColor("#1f1f1f")
         for r in range(self._rows):
             for c in range(self._cols):
                 sel = (r < hr and c < hc)
+                if sel:
+                    brush = on
+                else:
+                    brush = off_data if (r, c) in self._occupied else off_empty
                 p.setPen(QPen(edge, 1))
-                p.setBrush(on if sel else off)
+                p.setBrush(brush)
                 p.drawRoundedRect(self._cell_rect(r, c), 3, 3)
         # caption "R×C"
         p.setPen(QColor("#e0e0e0"))
@@ -386,6 +400,7 @@ class ViewerPane(QFrame):
     viewer_ready = pyqtSignal(object)         # a viewer was just created
     pane_move_requested = pyqtSignal(int, int)  # (src index, dest index)
     pane_cleared = pyqtSignal(object)         # the ✕ emptied this pane
+    maximize_requested = pyqtSignal(object)   # 1×1 button / double-click → 1×1
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -418,6 +433,22 @@ class ViewerPane(QFrame):
         self._title.setStyleSheet(
             "padding:2px 6px; color:#ccc; background:transparent;"
         )
+        # 1×1 button (left of ✕): jump straight to a single-pane view of THIS
+        # pane — quicker and clearer than reaching for "Layout 1×1".
+        self._maxi_btn = QPushButton("1×1")
+        self._maxi_btn.setToolTip(
+            "Show only this pane (1×1). Double-clicking the pane does the same."
+        )
+        self._maxi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._maxi_btn.setFixedWidth(34)
+        self._maxi_btn.setFlat(True)
+        self._maxi_btn.setStyleSheet(
+            "QPushButton{color:#ccc; border:none; font-weight:bold;}"
+            "QPushButton:hover{color:#fff; background:#2c6fb0;}"
+        )
+        self._maxi_btn.clicked.connect(
+            lambda: self.maximize_requested.emit(self)
+        )
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip(
             "Close this pane's image (keeps the layout; returns to drop-waiting state)"
@@ -436,6 +467,7 @@ class ViewerPane(QFrame):
         _tb.setContentsMargins(0, 0, 0, 0)
         _tb.setSpacing(0)
         _tb.addWidget(self._title, 1)
+        _tb.addWidget(self._maxi_btn)
         _tb.addWidget(self._close_btn)
 
         self._idle = _Placeholder(
@@ -586,6 +618,11 @@ class ViewerPane(QFrame):
     def current_viewer(self):
         return self._cur_viewer
 
+    def has_data(self) -> bool:
+        """True if this pane currently shows a loaded series (drives the
+        layout-picker's bright-vs-dark cell shading)."""
+        return self._cur_viewer is not None
+
     def is_loaded(self, modality, series_uid: str) -> bool:
         """True if this pane already has *series_uid* loaded into the
         cached viewer for *modality* — lets the shell skip the whole
@@ -630,6 +667,19 @@ class ViewerPane(QFrame):
     # ------------------------------------------------------ click / drop
     def mousePressEvent(self, _event) -> None:
         self.activated.emit(self)
+
+    def mouseDoubleClickEvent(self, _event) -> None:
+        # Double-click anywhere on the pane body (not the title bar) → 1×1.
+        # Only outside 1×1, so a double-click that commits a measurement in
+        # the maximised view isn't hijacked.
+        if not self._full_bleed:
+            self.maximize_requested.emit(self)
+
+    def _in_title_bar(self, obj) -> bool:
+        """True if *obj* is the dark title band or one of its buttons — those
+        keep their own behaviour and never trigger double-click maximise."""
+        return obj in (self._title_bar, self._title,
+                       self._maxi_btn, self._close_btn)
 
     def _install_dnd(self, widget) -> None:
         """Make *widget* and every descendant forward drags to this pane.
@@ -710,6 +760,13 @@ class ViewerPane(QFrame):
             # Activate the pane, but DON'T consume the event — the click
             # must still reach the viewer (measure, crosshair, etc.).
             self.activated.emit(self)
+        elif t == QEvent.Type.MouseButtonDblClick:
+            # Double-click on the image/placeholder (anything but the title
+            # bar) maximises to 1×1. Suppressed in 1×1 so viewer double-click
+            # actions (e.g. committing a polygon measurement) still work.
+            if not self._full_bleed and not self._in_title_bar(obj):
+                self.maximize_requested.emit(self)
+                return True
         return super().eventFilter(obj, event)
 
 
@@ -826,6 +883,7 @@ class MainWindow(QMainWindow):
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
             pane.pane_cleared.connect(self._on_pane_cleared)
+            pane.maximize_requested.connect(self._maximize_pane)
             self._panes.append(pane)
         # Panes in grid-slot order (drag a title onto another to swap).
         self._order: list[ViewerPane] = list(self._panes)
@@ -1772,10 +1830,7 @@ class MainWindow(QMainWindow):
         _wa.setDefaultWidget(self._layout_picker)
         self._layout_menu.addAction(_wa)
         self._layout_btn.setMenu(self._layout_menu)
-        self._layout_menu.aboutToShow.connect(
-            lambda: self._layout_picker.set_current(
-                *_LAYOUTS[self._layout_key][:2])
-        )
+        self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
         row.addSpacing(12)
@@ -1873,6 +1928,12 @@ class MainWindow(QMainWindow):
             return [a]
         return [self._order[i] for i in _LAYOUT_CELLS[self._layout_key]]
 
+    def _refresh_layout_picker(self) -> None:
+        """Before the picker pops up: highlight the current layout and shade
+        each cell by whether its pane holds data."""
+        self._layout_picker.set_current(*_LAYOUTS[self._layout_key][:2])
+        self._layout_picker.set_occupancy(self._pane_occupancy())
+
     def _layout_btn_text(self) -> str:
         # setMenu() adds the native dropdown arrow, so the text itself stays
         # plain: "Layout  2×3".
@@ -1883,6 +1944,23 @@ class MainWindow(QMainWindow):
         and dismiss the popup."""
         self._layout_menu.hide()
         self._apply_layout(f"{rows}x{cols}")
+
+    def _maximize_pane(self, pane: ViewerPane) -> None:
+        """1×1 button / double-click on a pane → show only that pane (1×1).
+        Make it the active pane first so _apply_layout('1x1') shows it."""
+        self._set_active_pane(pane)
+        self._apply_layout("1x1")
+
+    def _pane_occupancy(self) -> set:
+        """0-based (row, col) master-grid cells whose backing pane holds data —
+        fed to the layout picker so loaded panes shade bright, empty ones dark.
+        Cell (r, c) maps to the same canonical pane _apply_layout places there
+        (self._order[r * _MAX_GRID_COLS + c])."""
+        occ = set()
+        for idx, pane in enumerate(self._order):
+            if pane.has_data():
+                occ.add(divmod(idx, _MAX_GRID_COLS))
+        return occ
 
     def _apply_layout(self, key: str) -> None:
         self._layout_key = key
