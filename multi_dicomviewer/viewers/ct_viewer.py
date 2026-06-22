@@ -3115,23 +3115,16 @@ class CTViewer(AbstractViewer):
             u = _rotate(_rotate(u, v, -dx * 0.5), u, -dy * 0.5)
             v = _rotate(_rotate(v, v, -dx * 0.5), u, -dy * 0.5)
             self._frame[which] = self._ortho(u, v)
-            # Linked: re-derive the OTHER pane as the orthogonal section that
-            # shares this pane's horizontal axis and contains its normal, so the
-            # two panes stay coupled (mouse AND arrow-key rotate). Matches the
-            # pygfx/Mac viewer.
-            uw, _vw, nw = self._frame[which]
-            other = "B" if which == "A" else "A"
-            # Both +nw and -nw describe the SAME companion plane, so pick the
-            # sign that keeps the companion's "up" continuous with its previous
-            # frame. Without this the companion would suddenly flip up/down (and
-            # mirror left/right) whenever the rotated pane's normal swept across
-            # the companion's plane.
-            _ou, ov, _on = self._frame[other]
-            if float(np.dot(nw, ov)) < 0.0:
-                nw = -nw
-            self._frame[other] = self._ortho(uw, nw)
-            self._cross_ang[which] = 0.0
-            self._cross_ang[other] = 0.0
+            un, vn, _nn = self._frame[which]
+            # KEEP the crossline angle exactly as it was (the crossline is fixed
+            # to the pane's frame and rotates WITH it). This branch used to reset
+            # _cross_ang to 0 — snapping an oblique crossline back to orthogonal
+            # on every plane rotation. Matches the pygfx/Mac viewer.
+            a = math.radians(self._cross_ang[which])
+            crossdir = _norm(un * math.cos(a) + vn * math.sin(a))
+            # Re-derive the companion so it still marks that crossline, with a
+            # continuous orientation (see _couple_companion).
+            self._couple_companion(which, crossdir)
             self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         elif t == "SPIN":
             # SSMview SPIN = "whole-screen rotation": roll the camera so
@@ -3256,34 +3249,98 @@ class CTViewer(AbstractViewer):
             self._center_camera(k)
         self._refresh()
 
+    def _couple_companion(self, which, crossdir) -> None:
+        """Re-derive the OTHER pane as the plane ⟂ to *which* that contains the
+        unit crossline *crossdir* (a 3-D vector lying in *which*'s plane),
+        keeping the companion's image orientation CONTINUOUS and its crossline
+        still marking that line — instead of rebuilding a fresh ortho() that
+        snaps the companion's crossline back to straight. Shared by the
+        crosshair-rotate gesture and the ROTATE tool so neither resets the
+        crossline. Mirrors the pygfx/Mac viewer."""
+        other = "B" if which == "A" else "A"
+        n = self._frame[which][2]
+        _ou, ov, on = self._frame[other]
+        new_n = _norm(np.cross(crossdir, n))            # companion plane normal
+        if float(np.dot(new_n, on)) < 0.0:
+            new_n = -new_n                              # keep the viewing side stable
+        v_new = ov - float(np.dot(ov, new_n)) * new_n   # old up projected in-plane
+        if float(np.linalg.norm(v_new)) < 1e-6:         # old up ⟂ new plane
+            v_new = np.cross(new_n, crossdir)
+        v_new = _norm(v_new)
+        u_new = np.cross(v_new, new_n)                  # u×v = new_n (ortho convention)
+        self._frame[other] = (u_new, v_new, new_n)
+        self._cross_ang[other] = math.degrees(math.atan2(
+            float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
+        self._pc[other] = self._center.copy()
+
     def _cross_press(self, which, sx, sy) -> bool:
-        """Start a CrossLine gesture, overriding the active tool, when
-        the press is on the crosshair. Near the intersection -> MOVE
-        (translate the crossline along one of its 2 directions); on a
-        line away from the centre -> ROTATE. Follows the current
-        crosshair angle so it keeps working after rotation/paging."""
+        """Start a CrossLine gesture, overriding the active tool, when the press
+        lands ON the crosshair; else False so the active tool handles the drag.
+
+        Distances are measured in NORMALISED screen space — each pane axis
+        scaled to [-1, 1] (centre→edge = 1) via VTK WorldToDisplay (so camera
+        roll/zoom are included). The catch band is 10% of the actual screen on
+        EACH side of a crossline (10% left/right of the vertical line, 10%
+        up/down of the horizontal), on both axes regardless of the pane's aspect
+        ratio (vital for side-by-side multi-pane) and at any zoom. (It used to be
+        tied to the fixed FOV self._half, which ballooned to most of a zoomed-in
+        pane and hijacked paging / tool drags.) Of the caught span, the INNER
+        half (near the centre) translates the plane; the OUTER half rotates it.
+        Mirrors the pygfx/Mac viewer."""
         if self._image is None:
             return False
-        wx, wy = self._disp_to_world(which, sx, sy)
+        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
         ccx, ccy = self._cc(which)
-        rx, ry = wx - ccx, wy - ccy           # relative to crosshair centre
+        canvas = self.pane[which].canvas
+        ren = self.pane[which].ren
+        hpix = canvas.height()
+        dpr = canvas.devicePixelRatioF()
+
+        def _w2s(ox, oy):
+            """Reslice-output point (ox,oy) → Qt-widget pixels (y down)."""
+            ren.SetWorldPoint(float(ox), float(oy), 0.0, 1.0)
+            ren.WorldToDisplay()
+            ddx, ddy, _ddz = ren.GetDisplayPoint()
+            return ddx / dpr, hpix - ddy / dpr
+
+        hx = max(1.0, canvas.width() / 2.0)
+        hy = max(1.0, hpix / 2.0)
+        cx, cy = _w2s(ccx, ccy)                        # crosshair centre, px
+
+        def _ndir(ux, uy):
+            """Output-basis crossline direction → unit vector in normalised
+            screen space (carries camera roll + pixel aspect)."""
+            px, py = _w2s(ccx + ux, ccy + uy)
+            ddx, ddy = (px - cx) / hx, (py - cy) / hy
+            nlen = math.hypot(ddx, ddy) or 1.0
+            return ddx / nlen, ddy / nlen
+
         a = math.radians(self._cross_ang[which])
-        uh = (math.cos(a), math.sin(a))       # horizontal-line direction
-        uv = (-math.sin(a), math.cos(a))      # vertical-line direction
-        tol = max(3.0, 0.02 * self._half)
-        ctol = max(6.0, 0.06 * self._half)    # "near the intersection"
-        if math.hypot(rx, ry) < ctol:
+        uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
+        uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
+        # Press point in normalised screen space, relative to the centre.
+        rx, ry = (sx - cx) / hx, (sy - cy) / hy
+        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 10%-of-
+        # screen catch on each side is therefore 0.20 in these units.
+        band = 0.20                           # perpendicular catch = 10% screen/side
+        mid = 0.50                            # inner half → move, outer → rotate
+        d_to_h = abs(rx * uh[1] - ry * uh[0])
+        along_h = abs(rx * uh[0] + ry * uh[1])
+        d_to_v = abs(rx * uv[1] - ry * uv[0])
+        along_v = abs(rx * uv[0] + ry * uv[1])
+        on_h, on_v = d_to_h < band, d_to_v < band
+        if not (on_h or on_v):
+            return False                      # off the crosshair → tool runs
+        along = min(along_h if on_h else float("inf"),
+                    along_v if on_v else float("inf"))
+        if along <= mid:
             self._cross_mode = "move"
             self._cross_axis = None           # locked on first move
             self._cross_ppt = (wx, wy)
-            return True
-        d_to_h = abs(rx * uv[0] + ry * uv[1])  # dist to horizontal line
-        d_to_v = abs(rx * uh[0] + ry * uh[1])  # dist to vertical line
-        if d_to_h < tol or d_to_v < tol:
+        else:
             self._cross_mode = "rotate"
-            self._cross_prev = math.atan2(ry, rx)
-            return True
-        return False
+            self._cross_prev = math.atan2(wy - ccy, wx - ccx)
+        return True
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
@@ -3328,28 +3385,10 @@ class CTViewer(AbstractViewer):
         self._cross_ang[which] += d
         a = math.radians(self._cross_ang[which])
         crossdir = u * math.cos(a) + v * math.sin(a)
-        # Re-derive the companion plane (it must stay perpendicular to this pane
-        # and contain the rotated crossline L = crossdir). DON'T rebuild it as a
-        # fresh ortho(crossdir, n): that snapped the companion's crossline back
-        # to straight and spun its image every time you touched the other pane.
-        # Instead keep the companion's image orientation CONTINUOUS — rotate its
-        # old "up" minimally into the new plane — and set its crossline angle so
-        # it still marks L. So rotating one pane no longer resets the other
-        # pane's crossline/orientation. (The new_n sign choice also subsumes the
-        # earlier up-flip fix.)
-        ou, ov, on = self._frame[other]
-        new_n = _norm(np.cross(crossdir, n))            # companion plane normal
-        if float(np.dot(new_n, on)) < 0.0:
-            new_n = -new_n                              # keep the viewing side stable
-        v_new = ov - float(np.dot(ov, new_n)) * new_n   # old up projected in-plane
-        if float(np.linalg.norm(v_new)) < 1e-6:         # old up ⟂ new plane
-            v_new = np.cross(new_n, crossdir)
-        v_new = _norm(v_new)
-        u_new = np.cross(v_new, new_n)                  # u×v = new_n (ortho convention)
-        self._frame[other] = (u_new, v_new, new_n)
-        self._cross_ang[other] = math.degrees(math.atan2(
-            float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
-        self._pc[other] = self._center.copy()
+        # Re-derive the companion plane so it stays ⟂ to this pane and still
+        # contains the rotated crossline, keeping its orientation continuous
+        # (see _couple_companion — it does NOT snap the companion straight).
+        self._couple_companion(which, crossdir)
         self._view_initial = False
         self._refresh()
 
