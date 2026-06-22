@@ -2195,26 +2195,19 @@ class CTViewer(AbstractViewer):
                 self._sync_slab_spin()
         elif t == "ROTATE":
             u, v, n = self._frame[which]
-            # The crossline's CURRENT 3-D direction, captured BEFORE the
-            # rotation so it can be carried through it — this branch used to
-            # reset _cross_ang to 0, snapping an oblique crossline back to
-            # orthogonal whenever the user rotated the plane.
-            a0 = math.radians(self._cross_ang[which])
-            crossdir0 = u * math.cos(a0) + v * math.sin(a0)
             u = _rotate(_rotate(u, v, -dx * 0.5), u, -dy * 0.5)
             v = _rotate(_rotate(v, v, -dx * 0.5), u, -dy * 0.5)
             self._frame[which] = self._ortho(u, v)
-            un, vn, nn = self._frame[which]
-            # Re-project the old crossline into the rotated plane and keep its
-            # angle there, then re-derive the companion to still mark that line
-            # (continuous orientation) — same coupling the crosshair-rotate
-            # gesture uses, so neither pane's crossline resets.
-            crossdir = crossdir0 - float(np.dot(crossdir0, nn)) * nn
-            if float(np.linalg.norm(crossdir)) < 1e-6:   # old line ⟂ new plane
-                crossdir = un
-            crossdir = _norm(crossdir)
-            self._cross_ang[which] = math.degrees(math.atan2(
-                float(np.dot(crossdir, vn)), float(np.dot(crossdir, un))))
+            un, vn, _nn = self._frame[which]
+            # KEEP the crossline angle exactly as it was (the crossline is fixed
+            # to the pane's frame and rotates WITH it). This branch used to reset
+            # _cross_ang to 0 — snapping an oblique crossline back to orthogonal
+            # on every plane rotation. (Re-projecting it into the new plane,
+            # tried earlier, also drifted toward orthogonal on large rotations.)
+            a = math.radians(self._cross_ang[which])
+            crossdir = _norm(un * math.cos(a) + vn * math.sin(a))
+            # Re-derive the companion so it still marks that crossline, with a
+            # continuous orientation (see _couple_companion).
             self._couple_companion(which, crossdir)
             self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         elif t == "ZOOM":
@@ -2315,13 +2308,15 @@ class CTViewer(AbstractViewer):
         crosshair, else False so the selected tool handles the drag.
 
         Distances are measured in NORMALISED screen space — each pane axis
-        scaled to [-1, 1] (centre→edge = 1). So the catch band is ~10% of the
-        screen on BOTH axes regardless of the pane's aspect ratio (vital for
-        the extreme aspect of side-by-side multi-pane), and stays ~10% at any
-        zoom (it used to be tied to the fixed volume diagonal self._half, which
-        ballooned to most of a zoomed-in thin-MIP pane and hijacked paging /
-        tool drags). Of the caught span, the INNER half (near the centre)
-        translates the plane; the OUTER half rotates it."""
+        scaled to [-1, 1] (centre→edge = 1). So the catch band is 10% of the
+        actual screen on EACH side of a crossline (10% left/right of the
+        vertical line, 10% up/down of the horizontal line), on both axes
+        regardless of the pane's aspect ratio (vital for the extreme aspect of
+        side-by-side multi-pane) and at any zoom. (It used to be tied to the
+        fixed volume diagonal self._half, which ballooned to most of a
+        zoomed-in thin-MIP pane and hijacked paging / tool drags.) Of the
+        caught span, the INNER half (near the centre) translates the plane; the
+        OUTER half rotates it."""
         if self._vol is None:
             return False
         wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
@@ -2344,7 +2339,9 @@ class CTViewer(AbstractViewer):
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
         # Press point in normalised screen space, relative to the centre.
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        band = 0.10                           # perpendicular catch ≈ 10% screen
+        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 10%-of-
+        # screen catch on each side is therefore 0.20 in these units.
+        band = 0.20                           # perpendicular catch = 10% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         # Perpendicular distance to each crossline (|r × û|) + distance ALONG it
         # from the centre (|r · û|).
