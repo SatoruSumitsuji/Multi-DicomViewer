@@ -669,17 +669,18 @@ class ViewerPane(QFrame):
         self.activated.emit(self)
 
     def mouseDoubleClickEvent(self, _event) -> None:
-        # Double-click anywhere on the pane body (not the title bar) → 1×1.
-        # Only outside 1×1, so a double-click that commits a measurement in
-        # the maximised view isn't hijacked.
+        # Double-click landing directly on the pane frame → 1×1. (Child
+        # widgets — title band, image — are handled in eventFilter.) Only
+        # outside 1×1, so a double-click that commits a measurement in the
+        # maximised view isn't hijacked.
         if not self._full_bleed:
             self.maximize_requested.emit(self)
 
-    def _in_title_bar(self, obj) -> bool:
-        """True if *obj* is the dark title band or one of its buttons — those
-        keep their own behaviour and never trigger double-click maximise."""
-        return obj in (self._title_bar, self._title,
-                       self._maxi_btn, self._close_btn)
+    def _is_titlebar_button(self, obj) -> bool:
+        """True only for the two title-bar BUTTONS (1×1 / ✕) — they keep their
+        own click action. Everything else, including the dark title band and
+        its draggable label, double-clicks to 1×1 (window-title metaphor)."""
+        return obj in (self._maxi_btn, self._close_btn)
 
     def _install_dnd(self, widget) -> None:
         """Make *widget* and every descendant forward drags to this pane.
@@ -761,10 +762,11 @@ class ViewerPane(QFrame):
             # must still reach the viewer (measure, crosshair, etc.).
             self.activated.emit(self)
         elif t == QEvent.Type.MouseButtonDblClick:
-            # Double-click on the image/placeholder (anything but the title
-            # bar) maximises to 1×1. Suppressed in 1×1 so viewer double-click
+            # Double-click anywhere on the pane (the dark title band, the
+            # image, the placeholder) maximises to 1×1 — only the 1×1 / ✕
+            # buttons are exempt. Suppressed in 1×1 so viewer double-click
             # actions (e.g. committing a polygon measurement) still work.
-            if not self._full_bleed and not self._in_title_bar(obj):
+            if not self._full_bleed and not self._is_titlebar_button(obj):
                 self.maximize_requested.emit(self)
                 return True
         return super().eventFilter(obj, event)
