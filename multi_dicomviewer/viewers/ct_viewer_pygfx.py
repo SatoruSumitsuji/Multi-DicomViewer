@@ -405,12 +405,17 @@ class _Overlay(QWidget):
         ps = v._ps[key]
         d = 0.255 * ps
         sz = 0.024 * ps
+        # Draw-only: the LEFT pane (A)'s ▲ points the opposite way (apex on the
+        # −uv side). Visual only — the image/frame, the angle readout and the
+        # paging-sense are all unchanged. Painted here every repaint, so it
+        # persists through ROTATE/SPIN and reset. (Parity with VTK 948d500.)
+        apex_sgn = -1.0 if key == "A" else 1.0
         p.setBrush(QColor(0, 242, 64))
         p.setPen(Qt.PenStyle.NoPen)
         for sgn in (1.0, -1.0):
             ax = ccx + sgn * d * uh[0]
             ay = ccy + sgn * d * uh[1]
-            apex = S(ax + sz * uv[0], ay + sz * uv[1])
+            apex = S(ax + apex_sgn * sz * uv[0], ay + apex_sgn * sz * uv[1])
             b1 = S(ax - 0.6 * sz * uh[0], ay - 0.6 * sz * uh[1])
             b2 = S(ax + 0.6 * sz * uh[0], ay + 0.6 * sz * uh[1])
             p.drawPolygon(QPolygonF([apex, b1, b2]))
