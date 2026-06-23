@@ -2662,17 +2662,16 @@ class CTViewer(AbstractViewer):
             _ha.SetInput(_ang)
 
     def _angio_angle(self, key) -> str:
-        """SSMview-style C-arm angle of this pane's projection direction.
+        """SSMview-style C-arm angle of this pane's GREEN ▲ direction.
 
-        The pane is viewed along its normal N. Map N into patient LPS
-        (x = Left, y = Posterior, z = Head) via the volume's patient
-        basis, then decompose into the DICOM Positioner primary angle
-        (LAO + / RAO −, azimuth in the axial plane) and secondary angle
-        (CRA + / CAU −, elevation toward the head). Anchors verified
-        against the SSMview screen: a coronal view -> "LAO0 CRA0", an
-        axial view -> "LAO0 CRA90".
+        The angle is taken along the green ▲ marker's base→apex direction
+        (_apex_dir3 — the projection direction it marks), mapped into patient
+        LPS (x = Left, y = Posterior, z = Head) and decomposed into the DICOM
+        Positioner primary (LAO + / RAO −) and secondary (CRA + / CAU −) angles.
+        DIRECTIONAL: reverse the ▲ (flip the crossline) and RAO↔LAO / CRA↔CAU
+        flip too — it reads the angle the arrow actually points.
         """
-        vals = self._angio_angle_vals(key)
+        vals = self._angio_angle_vals(key, self._apex_dir3(key))
         if vals is None:
             return ""
         pi_, si_ = vals
@@ -2680,26 +2679,17 @@ class CTViewer(AbstractViewer):
         cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
         return f"{lao} {cra}"
 
-    def _angio_angle_vals(self, key):
-        """The readout's (primary, secondary) C-arm angles as signed ints
-        (LAO + / RAO −, CRA + / CAU −), or None when the frame is degenerate.
-        Shared by the readout text and the right-click angle dialog."""
-        n = np.asarray(self._frame[key][2], dtype=np.float64)
+    def _angio_angle_vals(self, key, vec=None):
+        """(primary, secondary) C-arm angles as signed ints (LAO + / RAO −,
+        CRA + / CAU −) for a 3-D direction *vec* in volume coords (default: the
+        pane normal). SIGNED / directional — reversing *vec* flips RAO↔LAO and
+        CRA↔CAU (no anterior folding). None when the direction is degenerate."""
+        v = self._frame[key][2] if vec is None else vec
+        n = np.asarray(v, dtype=np.float64)
         nrm = float(np.linalg.norm(n))
         if nrm < 1e-9:
             return None
         n = self._pbasis @ (n / nrm)                 # -> patient LPS
-        # Report the CONVENTIONAL angiographic angle: the C-arm primary/secondary
-        # are referenced to the ANTERIOR (frontal) hemisphere, so fold the plane
-        # normal onto its anterior-pointing side (LPS +y = posterior). The raw
-        # signed normal can otherwise land in the posterior hemisphere and read
-        # the 180° partner — e.g. a normal coronary view showing "RAO166 CRA22"
-        # instead of the expected "LAO14 CAU22". (±N describe the SAME imaging
-        # plane, and a real C-arm reads the detector/anterior side, so this is
-        # the clinically correct reading; the trade-off is that a deliberately
-        # 180°-reversed view is no longer distinguished.)
-        if float(n[1]) > 0.0:
-            n = -n
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
         axial = math.hypot(nx, ny)
         prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
