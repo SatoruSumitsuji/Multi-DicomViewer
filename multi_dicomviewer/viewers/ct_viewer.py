@@ -3123,6 +3123,18 @@ class CTViewer(AbstractViewer):
             # Re-derive the companion so it still marks that crossline, with a
             # continuous orientation (see _couple_companion).
             self._couple_companion(which, crossdir)
+            # _couple_companion picks the companion's viewing side from its
+            # pre-tilt history; after a plane tilt that can land "behind",
+            # showing the companion MIRRORED (same plane seen from the back) vs
+            # this pane. Force the side continuous with this pane's view — the
+            # +90° proper rotation of n about the crossline — to un-mirror it.
+            other = "B" if which == "A" else "A"
+            ou, ov, on = self._frame[other]
+            if float(np.dot(on, np.cross(crossdir, self._frame[which][2]))) < 0.0:
+                ou, on = -ou, -on                 # flip view side (stays right-handed)
+                self._frame[other] = (ou, ov, on)
+                self._cross_ang[other] = math.degrees(math.atan2(
+                    float(np.dot(crossdir, ov)), float(np.dot(crossdir, ou))))
             self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         elif t == "SPIN":
             # SSMview SPIN = "whole-screen rotation": roll the camera so
