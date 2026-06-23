@@ -2689,12 +2689,18 @@ class CTViewer(AbstractViewer):
         if nrm < 1e-9:
             return None
         n = self._pbasis @ (n / nrm)                 # -> patient LPS
+        # Report the CONVENTIONAL angiographic angle: the C-arm primary/secondary
+        # are referenced to the ANTERIOR (frontal) hemisphere, so fold the plane
+        # normal onto its anterior-pointing side (LPS +y = posterior). The raw
+        # signed normal can otherwise land in the posterior hemisphere and read
+        # the 180° partner — e.g. a normal coronary view showing "RAO166 CRA22"
+        # instead of the expected "LAO14 CAU22". (±N describe the SAME imaging
+        # plane, and a real C-arm reads the detector/anterior side, so this is
+        # the clinically correct reading; the trade-off is that a deliberately
+        # 180°-reversed view is no longer distinguished.)
+        if float(n[1]) > 0.0:
+            n = -n
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
-        # NOTE: the old code folded ±N into the anterior hemisphere here. That
-        # made a fully-reversed view (e.g. spinning the cross-line 180° so the
-        # companion looks from the opposite side) collapse back to the same
-        # reading. We now keep the real signed normal so a reversed LAO30
-        # correctly reads RAO150, etc.
         axial = math.hypot(nx, ny)
         prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
         sec = math.degrees(math.atan2(nz, axial))
