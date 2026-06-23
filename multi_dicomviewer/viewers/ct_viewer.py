@@ -2662,16 +2662,18 @@ class CTViewer(AbstractViewer):
             _ha.SetInput(_ang)
 
     def _angio_angle(self, key) -> str:
-        """SSMview-style C-arm angle of this pane's GREEN ▲ direction.
+        """SSMview-style C-arm angle of the OTHER pane's GREEN ▲ direction.
 
-        The angle is taken along the green ▲ marker's base→apex direction
-        (_apex_dir3 — the projection direction it marks), mapped into patient
-        LPS (x = Left, y = Posterior, z = Head) and decomposed into the DICOM
-        Positioner primary (LAO + / RAO −) and secondary (CRA + / CAU −) angles.
-        DIRECTIONAL: reverse the ▲ (flip the crossline) and RAO↔LAO / CRA↔CAU
-        flip too — it reads the angle the arrow actually points.
+        This pane shows the 3-D model observed along the COMPANION pane's
+        section line (its green ▲ marker), from that ▲'s base→apex direction —
+        so this pane's readout is the C-arm angle of the OTHER pane's ▲
+        (_apex_dir3(other)), mapped into patient LPS (x = Left, y = Posterior,
+        z = Head) and decomposed into the DICOM Positioner primary (LAO + /
+        RAO −) and secondary (CRA + / CAU −) angles. DIRECTIONAL: reverse that
+        ▲ (flip the companion's crossline) and RAO↔LAO / CRA↔CAU flip too.
         """
-        vals = self._angio_angle_vals(key, self._apex_dir3(key))
+        other = "B" if key == "A" else "A"
+        vals = self._angio_angle_vals(key, self._apex_dir3(other))
         if vals is None:
             return ""
         pi_, si_ = vals
