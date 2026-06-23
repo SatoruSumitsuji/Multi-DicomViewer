@@ -2617,9 +2617,13 @@ class CTViewer(AbstractViewer):
         sz = 0.024 * ps
         d = 0.255 * ps
         z = zc + 0.1
+        # Draw-only: the RIGHT pane (B)'s ▲ points the opposite way (apex on the
+        # −uv side). Visual only — the image (frame), the angle readout (+n) and
+        # the paging-sense (_apex_dir3) are all unchanged.
+        apex_sgn = -1.0 if key == "B" else 1.0
         p.tri_mapper.SetInputData(
             _tris_pd([
-                (pt(a, sz, z), pt(a - 0.6 * sz, 0.0, z),
+                (pt(a, apex_sgn * sz, z), pt(a - 0.6 * sz, 0.0, z),
                  pt(a + 0.6 * sz, 0.0, z))
                 for a in (d, -d)
             ])
