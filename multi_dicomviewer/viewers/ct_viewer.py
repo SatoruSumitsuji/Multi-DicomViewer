@@ -3123,13 +3123,13 @@ class CTViewer(AbstractViewer):
             # continuous orientation (see _couple_companion).
             self._couple_companion(which, crossdir)
             # _couple_companion picks the companion's viewing side from its
-            # pre-tilt history; after a plane tilt that can land "behind",
-            # showing the companion MIRRORED (same plane seen from the back) vs
-            # this pane. Force the side continuous with this pane's view — the
-            # +90° proper rotation of n about the crossline — to un-mirror it.
+            # pre-tilt history. Force a DETERMINISTIC side (the −90° rotation of
+            # n about the crossline) so the companion's image — and its +n-based
+            # angle, which follows the same frame — are consistent. (The sign
+            # here selects which of the two mirror-partner views is shown.)
             other = "B" if which == "A" else "A"
             ou, ov, on = self._frame[other]
-            if float(np.dot(on, np.cross(crossdir, self._frame[which][2]))) < 0.0:
+            if float(np.dot(on, np.cross(crossdir, self._frame[which][2]))) > 0.0:
                 ou, on = -ou, -on                 # flip view side (stays right-handed)
                 self._frame[other] = (ou, ov, on)
                 self._cross_ang[other] = math.degrees(math.atan2(
