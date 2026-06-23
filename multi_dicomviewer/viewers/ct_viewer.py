@@ -2617,10 +2617,11 @@ class CTViewer(AbstractViewer):
         sz = 0.024 * ps
         d = 0.255 * ps
         z = zc + 0.1
-        # Draw-only: the RIGHT pane (B)'s ▲ points the opposite way (apex on the
-        # −uv side). Visual only — the image (frame), the angle readout (+n) and
-        # the paging-sense (_apex_dir3) are all unchanged.
-        apex_sgn = -1.0 if key == "B" else 1.0
+        # Draw-only: the LEFT pane (A)'s ▲ points the opposite way (apex on the
+        # −uv side). Visual only — the image/frame, the angle readout and the
+        # paging-sense are all unchanged. Applied here in the per-render
+        # crosshair update, so it persists through ROTATE/SPIN and every redraw.
+        apex_sgn = -1.0 if key == "A" else 1.0
         p.tri_mapper.SetInputData(
             _tris_pd([
                 (pt(a, apex_sgn * sz, z), pt(a - 0.6 * sz, 0.0, z),
@@ -2666,17 +2667,17 @@ class CTViewer(AbstractViewer):
             _ha.SetInput(_ang)
 
     def _angio_angle(self, key) -> str:
-        """SSMview-style C-arm angle of THIS pane's projection normal (+n).
+        """SSMview-style C-arm angle of this pane's projection direction.
 
-        Taken from this pane's OWN normal (n), which is parallel to the OTHER
-        pane's green ▲ section-line direction — so it is the angle the ▲ marks,
-        but independent of the companion's (possibly mirror-corrected / flipped)
-        frame, so both panes read consistently. Mapped into patient LPS
-        (x = Left, y = Posterior, z = Head) and decomposed into the DICOM
-        Positioner primary (LAO + / RAO −) and secondary (CRA + / CAU −) angles.
-        DIRECTIONAL: reverse the view and RAO↔LAO / CRA↔CAU flip too.
+        The pane is viewed along its normal N. Map N into patient LPS
+        (x = Left, y = Posterior, z = Head) via the volume's patient
+        basis, then decompose into the DICOM Positioner primary angle
+        (LAO + / RAO −, azimuth in the axial plane) and secondary angle
+        (CRA + / CAU −, elevation toward the head). Anchors verified
+        against the SSMview screen: a coronal view -> "LAO0 CRA0", an
+        axial view -> "LAO0 CRA90".
         """
-        vals = self._angio_angle_vals(key, self._frame[key][2])
+        vals = self._angio_angle_vals(key)
         if vals is None:
             return ""
         pi_, si_ = vals
@@ -2684,18 +2685,21 @@ class CTViewer(AbstractViewer):
         cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
         return f"{lao} {cra}"
 
-    def _angio_angle_vals(self, key, vec=None):
-        """(primary, secondary) C-arm angles as signed ints (LAO + / RAO −,
-        CRA + / CAU −) for a 3-D direction *vec* in volume coords (default: the
-        pane normal). SIGNED / directional — reversing *vec* flips RAO↔LAO and
-        CRA↔CAU (no anterior folding). None when the direction is degenerate."""
-        v = self._frame[key][2] if vec is None else vec
-        n = np.asarray(v, dtype=np.float64)
+    def _angio_angle_vals(self, key):
+        """The readout's (primary, secondary) C-arm angles as signed ints
+        (LAO + / RAO −, CRA + / CAU −), or None when the frame is degenerate.
+        Shared by the readout text and the right-click angle dialog."""
+        n = np.asarray(self._frame[key][2], dtype=np.float64)
         nrm = float(np.linalg.norm(n))
         if nrm < 1e-9:
             return None
         n = self._pbasis @ (n / nrm)                 # -> patient LPS
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
+        # NOTE: the old code folded ±N into the anterior hemisphere here. That
+        # made a fully-reversed view (e.g. spinning the cross-line 180° so the
+        # companion looks from the opposite side) collapse back to the same
+        # reading. We now keep the real signed normal so a reversed LAO30
+        # correctly reads RAO150, etc.
         axial = math.hypot(nx, ny)
         prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
         sec = math.degrees(math.atan2(nz, axial))
@@ -3126,18 +3130,6 @@ class CTViewer(AbstractViewer):
             # Re-derive the companion so it still marks that crossline, with a
             # continuous orientation (see _couple_companion).
             self._couple_companion(which, crossdir)
-            # _couple_companion picks the companion's viewing side from its
-            # pre-tilt history. Force a DETERMINISTIC side (the −90° rotation of
-            # n about the crossline) so the companion's image — and its +n-based
-            # angle, which follows the same frame — are consistent. (The sign
-            # here selects which of the two mirror-partner views is shown.)
-            other = "B" if which == "A" else "A"
-            ou, ov, on = self._frame[other]
-            if float(np.dot(on, np.cross(crossdir, self._frame[which][2]))) > 0.0:
-                ou, on = -ou, -on                 # flip view side (stays right-handed)
-                self._frame[other] = (ou, ov, on)
-                self._cross_ang[other] = math.degrees(math.atan2(
-                    float(np.dot(crossdir, ov)), float(np.dot(crossdir, ou))))
             self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         elif t == "SPIN":
             # SSMview SPIN = "whole-screen rotation": roll the camera so
