@@ -3761,30 +3761,31 @@ class CTViewer(AbstractViewer):
             amt = float(np.dot(d2, self._cross_axis))
             dir3 = u * self._cross_axis[0] + v * self._cross_axis[1]
             self._center = self._center + amt * dir3
-            self._clamp_center()
             # Moving the centre ALONG uh — the green-▲ line direction, the shared
             # crossline that also lies in the companion plane — is the "non-▲
-            # line" translate: keep the companion IMAGE fixed and let its
-            # crosshair slide, with a dead-zone so it never leaves view (then pan
-            # to follow). Moving along uv (the ▲ line) re-slices the companion.
+            # line" translate.
             along_uh = (abs(float(np.dot(self._cross_axis, uh)))
                         >= abs(float(np.dot(self._cross_axis, uv))))
             if along_uh:
-                # The slide is along dir3 = the green-▲ line direction in the
-                # companion. Pan ONLY along dir3 (so the ▲ line slides along
-                # itself and never moves sideways): measure the companion
-                # crosshair's offset ALONG dir3 and pan just the excess past the
-                # dead-zone. Per-axis clamping panned off-direction and dragged
-                # the ▲ line; this keeps it fixed.
+                # Keep BOTH images fixed (never pan) and the crosshair slide
+                # along dir3 only. Do NOT _clamp_center here: that axis-aligned
+                # box clamp pulls the centre OFF the slide line at the data edge
+                # and drifts the ▲ line. Instead cap the slide at the view edge
+                # in either pane, so the non-▲ centre line stops at the edge;
+                # past the data it just shows black. (Recentre to go further.)
                 dn = dir3 / (float(np.linalg.norm(dir3)) or 1.0)
-                off = float(np.dot(self._center - self._pc[other], dn))
-                ps = self.pane[other].ren.GetActiveCamera().GetParallelScale()
-                limit = 0.8 * ps                   # ~80% of half-view = dead-zone
-                excess = off - max(-limit, min(limit, off))
-                if excess:                         # past the dead-zone → pan
-                    self._pc[other] = self._pc[other] + excess * dn
+                over = 0.0
+                for pk in (which, other):
+                    offp = float(np.dot(self._center - self._pc[pk], dn))
+                    limp = self.pane[pk].ren.GetActiveCamera().GetParallelScale()
+                    op = offp - max(-limp, min(limp, offp))
+                    if abs(op) > abs(over):
+                        over = op                  # the binding pane's overflow
+                if over:
+                    self._center = self._center - over * dn
             else:
-                self._pc[other] = self._center.copy()   # ▲ line: other reslices
+                self._clamp_center()               # ▲ line: reslice → box-clamp OK
+                self._pc[other] = self._center.copy()
             self._view_initial = False
             self._refresh()
             return
