@@ -39,7 +39,8 @@ import pygfx as gfx
 import pylinalg as la
 from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QImage, QKeySequence, QPainter, QPen, QPolygonF, QShortcut,
+    QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen,
+    QPolygonF, QShortcut,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -81,6 +82,7 @@ from multi_dicomviewer.core.measure_geom import (
     ellipse_from_major as _ellipse_from_major,
     ellipse_outline as _ellipse_outline,
     gap_color as _gap_color,
+    gap_legend as _gap_legend,
     major_minor as _major_minor,
     percent_area_diff as _percent_area_diff,
     point_in_poly as _point_in_poly,
@@ -565,38 +567,61 @@ class _Overlay(QWidget):
             for (skey, smi) in v._cmp_sel:
                 if skey == key and 0 <= smi < len(v._measures[key]):
                     draw_outline(v._outline(v._measures[key][smi]),
-                                 (0, 229, 255), width=3.2)   # cyan = picked
-        cmp = v._compare
-        if cmp and cmp["key"] == key:
-            show_thk = bool(cmp.get("show_thk"))
-            show_pa = bool(cmp.get("show_pa"))
-            if show_thk:
-                for r in cmp["radials"]:                     # inner→outer rays
+                                 (0, 229, 255), width=6.0)   # cyan = picked
+            # instruction banner (top-centre) so the workflow is discoverable
+            fb = QFont("monospace", 13)
+            fb.setBold(True)
+            p.setFont(fb)
+            p.setPen(QColor(0, 229, 255))
+            n_sel = sum(1 for s in v._cmp_sel if s[0] == key)
+            p.drawText(QRectF(0, 8, w, 26),
+                       int(Qt.AlignmentFlag.AlignHCenter)
+                       | int(Qt.AlignmentFlag.AlignTop),
+                       f"Click to select 2 Ellipse/Polygon data to compare"
+                       f"  ({n_sel}/2)")
+        cmps = [c for c in v._compares if c["key"] == key]
+        for c in cmps:
+            # Filled region between the two outlines (outer colour @ ~35% alpha
+            # = 65% transparent). Even-odd fill of outer minus inner = annulus;
+            # this is also the right-click → Delete hit area.
+            path = QPainterPath()
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            path.addPolygon(poly(c["outer"]))
+            path.addPolygon(poly(c["inner"]))
+            fr = c["fill_rgb"]
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(path, QColor(fr[0], fr[1], fr[2], 90))
+            if c["show_thk"]:
+                for r in c["radials"]:                       # inner→outer rays
                     p.setPen(QPen(QColor(_gap_color(r["gap"])), 1.6))
                     p.drawLine(S(r["inner"]), S(r["outer"]))
                 p.setPen(Qt.PenStyle.NoPen)                  # centroid dot
                 p.setBrush(QColor(0, 229, 255))
-                p.drawEllipse(S(cmp["centroid"]), 3.0, 3.0)
-            # summary + colour legend, lower-left (above the WW/WL readout)
+                p.drawEllipse(S(c["centroid"]), 3.0, 3.0)
+        if cmps:
+            # one summary line per result + a single colour legend if any result
+            # is a Thickness run, lower-left above the WW/WL readout.
             p.setFont(QFont("monospace", 11))
-            bands = (("<5 mm", "#2ecc71"), ("5-7 mm", "#f1c40f"),
-                     ("7-9 mm", "#e67e22"), (">9 mm", "#e74c3c"))
-            rows = len(bands) if show_thk else 0
+            bands = _gap_legend() if any(c["show_thk"] for c in cmps) else []
+            heads = []
+            for c in cmps:
+                ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
+                if c["show_pa"]:
+                    ht += f"  %Area:{c['pct']:.1f}%"
+                heads.append(ht)
             lh = 16.0
-            y0 = h - 40 - (rows + 1) * lh
-            head = f"Compare #{cmp['big_id']} vs #{cmp['small_id']}"
-            if show_pa:
-                head += f"  %Area:{cmp['pct']:.1f}%"
+            y = h - 40 - (len(heads) + len(bands)) * lh
             p.setPen(QColor(0, 229, 255))
-            p.drawText(QPointF(10, y0), head)
-            if show_thk:
-                for i, (lab, hexc) in enumerate(bands):
-                    yy = y0 + (i + 1) * lh
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.setBrush(QColor(hexc))
-                    p.drawRect(QRectF(10, yy - 10, 12, 12))
-                    p.setPen(QColor(230, 230, 230))
-                    p.drawText(QPointF(28, yy), lab)
+            for ht in heads:
+                p.drawText(QPointF(10, y), ht)
+                y += lh
+            for lab, hexc in bands:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(hexc))
+                p.drawRect(QRectF(10, y - 10, 12, 12))
+                p.setPen(QColor(230, 230, 230))
+                p.drawText(QPointF(28, y), lab)
+                y += lh
 
     # -- corner info text + angio readout ----------------------------------
     def _paint_info(self, p, key, w, h):
@@ -931,7 +956,7 @@ class CTViewer(AbstractViewer):
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
         self._cmp_sel = []                   # [(key, mi)] picked shapes (max 2)
-        self._compare = None                 # computed {key,big_id,small_id,pct,...}
+        self._compares = []                  # persisted results (right-click→Delete)
         self._cmp_want_pa = False            # last-used: compute %PA (IVUS)
         self._cmp_want_thk = True            # last-used: compute Thickness (CT LV)
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
@@ -1076,6 +1101,14 @@ class CTViewer(AbstractViewer):
         if self._drag_btn == 2 and self._angio_hit(key, x, y):
             self._open_angio_dialog(key)
             return
+        # Right-click on a compare result's filled region → Delete menu. Defer
+        # the modal menu out of the pointer handler (pointer-up safety).
+        if self._drag_btn == 2:
+            ci = self._compare_hit(key, x, y)
+            if ci is not None:
+                target = self._compares[ci]
+                QTimer.singleShot(0, lambda t=target: self._compare_delete_menu(t))
+                return
         if self._meas_on:
             self._cross_grab = False
             if self._drag_btn == 2:           # right-click: measure menu
@@ -2375,25 +2408,20 @@ class CTViewer(AbstractViewer):
         self._pc[other] = self._center.copy()
 
     def _recalc_companion(self):
-        """ReCalc: treat the ACTIVE pane as master and rebuild the OTHER pane
-        cleanly as the plane that cuts the master along its green-▲ centre line
-        (right-handed, so it can't come out mirrored). Fixes a companion that
-        drifted to a wrong / mirror orientation after a sequence of rotations,
-        WITHOUT resetting the master — the view the user wants to keep."""
+        """ReCalc: rebuild the OTHER pane as the plane that cuts the ACTIVE pane
+        along its green-▲ centre line, fixing a MIRROR without moving the view.
+
+        _couple_companion keeps u×v = n (right-handed, so a prior mirror is
+        undone) and projects the old up vector, so only the (possibly mirrored)
+        in-plane sense flips — the companion's ZOOM, PAN (centre-line position)
+        and ROLL are all left as they are. The master pane is untouched."""
         if self._vol is None:
             return
         master = self._active_pane
-        other = "B" if master == "A" else "A"
         u, v, _n = self._frame[master]
         a = math.radians(self._cross_ang[master])
         crossdir = u * math.cos(a) + v * math.sin(a)
-        # Re-derive the companion ⟂ to master through master's crossline. This
-        # builds u×v = n (right-handed), so any prior mirror is undone, and it
-        # re-straightens the companion crossline (see _couple_companion).
         self._couple_companion(master, crossdir)
-        self._roll[other] = 0.0                # straighten the companion roll
-        self._pc[other] = self._center.copy()
-        self._fit_pane(other)                  # refit only the companion camera
         self._view_initial = False
         self._refresh()
 
@@ -2703,7 +2731,7 @@ class CTViewer(AbstractViewer):
         self._draft = None
         self._edit = None
         self._meas_hover = None
-        self._compare = None
+        self._compares = []
         self._cmp_sel = []
         for k in ("A", "B"):
             self._redraw_meas(k)
@@ -2711,12 +2739,10 @@ class CTViewer(AbstractViewer):
     # ---- Compare: %Area + radial gap between two Polygon/Ellipse shapes ----
     def _toggle_compare(self):
         """Enter/leave Compare-select mode. While on, a left-click picks a
-        Polygon/Ellipse (toggles); picking the 2nd computes and shows the
-        %Area difference and the radial gap colour map."""
+        Polygon/Ellipse (toggles); picking the 2nd computes and ADDS a result
+        (prior results persist — right-click a filled region to Delete one)."""
         self._cmp_on = self._cmp_btn.isChecked()
         self._cmp_sel = []
-        if self._cmp_on:
-            self._compare = None             # clear any previous result
         for k in ("A", "B"):
             self._overlay[k].update()
 
@@ -2759,11 +2785,11 @@ class CTViewer(AbstractViewer):
         self._do_compare()
 
     def _cancel_compare(self):
-        key = self._cmp_sel[0][0] if self._cmp_sel else self._active_pane
         self._cmp_on = False
         self._cmp_sel = []
         self._cmp_btn.setChecked(False)
-        self._overlay[key].update()
+        for k in ("A", "B"):
+            self._overlay[k].update()
 
     def _do_compare(self):
         sel = self._cmp_sel
@@ -2778,20 +2804,49 @@ class CTViewer(AbstractViewer):
         if a2 > a1:
             m1, m2, o1, o2, a1, a2 = m2, m1, o2, o1, a2, a1
         cen = _polygon_centroid(o1)
-        # Radials only when Thickness is requested (skip the 360-ray cost for
-        # a %PA-only run).
-        radials = (_radial_gap_compare(o1, o2, cen, 1.0)
-                   if self._cmp_want_thk else [])
-        self._compare = {
+        # Radials are always computed (they also drive the filled-region hit
+        # area); they're only DRAWN as a colour map when Thickness is wanted.
+        radials = _radial_gap_compare(o1, o2, cen, 1.0)
+        self._compares.append({
             "key": key, "big_id": m1["id"], "small_id": m2["id"],
             "pct": _percent_area_diff(a1, a2), "centroid": cen,
-            "radials": radials, "step": 1.0,
+            "outer": o1, "inner": o2, "radials": radials, "step": 1.0,
             "show_pa": self._cmp_want_pa, "show_thk": self._cmp_want_thk,
-        }
+            "fill_rgb": _hex_to_rgb(m1.get("color")),   # outer (larger) colour
+        })
         self._cmp_on = False
         self._cmp_sel = []
         self._cmp_btn.setChecked(False)
-        self._overlay[key].update()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _compare_hit(self, key, sx, sy):
+        """Index in self._compares of the result whose filled region (inside the
+        outer outline, outside the inner) contains screen point (sx,sy) on pane
+        *key* — topmost first — else None."""
+        wx, wy = self._disp_to_world(key, sx, sy)
+        for i in range(len(self._compares) - 1, -1, -1):
+            c = self._compares[i]
+            if c["key"] != key:
+                continue
+            if (_point_in_poly(wx, wy, c["outer"])
+                    and not _point_in_poly(wx, wy, c["inner"])):
+                return i
+        return None
+
+    def _compare_delete_menu(self, target):
+        """Right-click menu on a compare result's filled region → Delete it."""
+        if target not in self._compares:
+            return
+        menu = QMenu(self)
+        act = menu.addAction("Delete this comparison")
+        if menu.exec(QCursor.pos()) is act:
+            try:
+                self._compares.remove(target)
+            except ValueError:
+                pass
+            for k in ("A", "B"):
+                self._overlay[k].update()
 
     # ---- per-measure geometry ----
     def _ellipse_cab(self, m):
