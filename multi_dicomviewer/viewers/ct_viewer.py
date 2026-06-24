@@ -29,7 +29,7 @@ import os
 
 import numpy as np
 from PyQt6.QtCore import QPoint as QtPoint, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QKeySequence, QShortcut
+from PyQt6.QtGui import QColor, QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QColorDialog,
     QComboBox,
@@ -129,6 +129,7 @@ from multi_dicomviewer.core.measure_geom import (
     ellipse_from_major as _ellipse_from_major,
     ellipse_outline as _ellipse_outline,
     gap_color as _gap_color,
+    gap_legend as _gap_legend,
     major_minor as _major_minor_pure,
     min_width as _min_width,
     percent_area_diff as _percent_area_diff,
@@ -375,6 +376,34 @@ def _colored_multi_pd(polylines, colors) -> vtkPolyData:
     return pd
 
 
+def _filled_tris_pd(tris, colors) -> vtkPolyData:
+    """Polydata of filled triangles (each ``(p0, p1, p2)`` of (x,y) points) with
+    a per-cell RGB colour (uint8 triple). Used for the translucent compare-fill
+    annulus; the actor sets the overall opacity."""
+    pd = vtkPolyData()
+    vp = vtkPoints()
+    polys = vtkCellArray()
+    cell_rgb = vtkUnsignedCharArray()
+    cell_rgb.SetNumberOfComponents(3)
+    cell_rgb.SetName("Colors")
+    base = 0
+    for (p0, p1, p2), rgb in zip(tris, colors):
+        vp.InsertNextPoint(float(p0[0]), float(p0[1]), 0.55)
+        vp.InsertNextPoint(float(p1[0]), float(p1[1]), 0.55)
+        vp.InsertNextPoint(float(p2[0]), float(p2[1]), 0.55)
+        polys.InsertNextCell(3)
+        polys.InsertCellPoint(base)
+        polys.InsertCellPoint(base + 1)
+        polys.InsertCellPoint(base + 2)
+        cell_rgb.InsertNextTuple3(*rgb)
+        base += 3
+    pd.SetPoints(vp)
+    pd.SetPolys(polys)
+    if cell_rgb.GetNumberOfTuples() > 0:
+        pd.GetCellData().SetScalars(cell_rgb)
+    return pd
+
+
 def _colored_dashed_pd(segments, colors, z=0.66) -> vtkPolyData:
     """_dashed_multi_pd + per-segment RGB colours (one colour per input
     segment, applied to every dash cell of that segment)."""
@@ -538,6 +567,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self.width(), self.height()):
             self._owner._open_angio_dialog(self._which)
             return
+        # Right-click on a compare result's filled region → Delete menu.
+        if e.button() == Qt.MouseButton.RightButton:
+            ci = self._owner._compare_hit(
+                self._which, e.position().x(), e.position().y())
+            if ci is not None:
+                self._owner._compare_delete_menu(self._owner._compares[ci])
+                return
         # Right-click with NO measure tool active → still-image export of
         # this pane (in measure mode the right button edits measurements).
         if not self._owner._meas_on \
@@ -714,6 +750,18 @@ class _Pane:
         if hasattr(ma.GetProperty(), "SetRenderLinesAsTubes"):
             ma.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(ma)
+        # Compare filled region (annulus between the two outlines), translucent
+        # (~35% opacity = 65% transparent); per-cell RGB = outer shape colour.
+        # Also the right-click → Delete hit area.
+        self.cmp_fill_mapper = vtkPolyDataMapper()
+        self.cmp_fill_mapper.SetInputData(vtkPolyData())
+        self.cmp_fill_mapper.ScalarVisibilityOn()
+        self.cmp_fill_mapper.SetScalarModeToUseCellData()
+        self.cmp_fill_mapper.SetColorModeToDirectScalars()
+        cfa = vtkActor()
+        cfa.SetMapper(self.cmp_fill_mapper)
+        cfa.GetProperty().SetOpacity(0.35)
+        self.ren.AddActor(cfa)
         # Compare radial gap map: thin lines between the two outlines, each
         # cell coloured by its gap band (set by _redraw_compare).
         self.cmp_mapper = vtkPolyDataMapper()
@@ -735,7 +783,7 @@ class _Pane:
         self.cmp_sel_mapper.SetColorModeToDirectScalars()
         csa = vtkActor()
         csa.SetMapper(self.cmp_sel_mapper)
-        csa.GetProperty().SetLineWidth(3.2)
+        csa.GetProperty().SetLineWidth(6.0)
         if hasattr(csa.GetProperty(), "SetRenderLinesAsTubes"):
             csa.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(csa)
@@ -1255,7 +1303,7 @@ class CTViewer(AbstractViewer):
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
         self._cmp_sel = []                   # [(key, mi)] picked shapes (max 2)
-        self._compare = None                 # computed {key,big_id,small_id,pct,...}
+        self._compares = []                  # persisted results (right-click→Delete)
         self._cmp_want_pa = False            # last-used: compute %PA (IVUS)
         self._cmp_want_thk = True            # last-used: compute Thickness (CT LV)
         self._active_pane = "A"
@@ -1670,7 +1718,7 @@ class CTViewer(AbstractViewer):
         self._measures = {"A": [], "B": []}
         self._draft = None
         self._edit = None
-        self._compare = None
+        self._compares = []
         self._cmp_sel = []
         for k in ("A", "B"):
             self._redraw_meas(k)
@@ -1683,8 +1731,6 @@ class CTViewer(AbstractViewer):
         %Area difference and the radial gap colour map."""
         self._cmp_on = self._cmp_btn.isChecked()
         self._cmp_sel = []
-        if self._cmp_on:
-            self._compare = None             # clear any previous result
         for k in ("A", "B"):
             self._redraw_compare(k)
 
@@ -1726,11 +1772,11 @@ class CTViewer(AbstractViewer):
         self._do_compare()
 
     def _cancel_compare(self):
-        key = self._cmp_sel[0][0] if self._cmp_sel else self._active_pane
         self._cmp_on = False
         self._cmp_sel = []
         self._cmp_btn.setChecked(False)
-        self._redraw_compare(key)
+        for k in ("A", "B"):
+            self._redraw_compare(k)
 
     def _do_compare(self):
         sel = self._cmp_sel
@@ -1744,20 +1790,49 @@ class CTViewer(AbstractViewer):
         if a2 > a1:                          # the LARGER shape is the reference
             m1, m2, o1, o2, a1, a2 = m2, m1, o2, o1, a2, a1
         cen = _polygon_centroid(o1)
-        # Radials only when Thickness is requested (the 360-ray cost is skipped
-        # for a %PA-only run).
-        radials = (_radial_gap_compare(o1, o2, cen, 1.0)
-                   if self._cmp_want_thk else [])
-        self._compare = {
+        # Radials are always computed (they also drive the filled-region geometry
+        # and hit area); only DRAWN as a colour map when Thickness is wanted.
+        radials = _radial_gap_compare(o1, o2, cen, 1.0)
+        self._compares.append({
             "key": key, "big_id": m1["id"], "small_id": m2["id"],
             "pct": _percent_area_diff(a1, a2), "centroid": cen,
-            "radials": radials, "step": 1.0,
+            "outer": o1, "inner": o2, "radials": radials, "step": 1.0,
             "show_pa": self._cmp_want_pa, "show_thk": self._cmp_want_thk,
-        }
+            "fill_rgb": _hex_to_rgb(m1.get("color")),   # outer (larger) colour
+        })
         self._cmp_on = False
         self._cmp_sel = []
         self._cmp_btn.setChecked(False)
-        self._redraw_compare(key)
+        for k in ("A", "B"):
+            self._redraw_compare(k)
+
+    def _compare_hit(self, which, sx, sy):
+        """Index in self._compares of the result whose filled region (inside the
+        outer outline, outside the inner) contains screen point (sx,sy) on pane
+        *which* — topmost first — else None."""
+        wx, wy = self._disp_to_world(which, sx, sy)
+        for i in range(len(self._compares) - 1, -1, -1):
+            c = self._compares[i]
+            if c["key"] != which:
+                continue
+            if (_point_in_poly(wx, wy, c["outer"])
+                    and not _point_in_poly(wx, wy, c["inner"])):
+                return i
+        return None
+
+    def _compare_delete_menu(self, target):
+        """Right-click menu on a compare result's filled region → Delete it."""
+        if target not in self._compares:
+            return
+        menu = QMenu(self)
+        act = menu.addAction("Delete this comparison")
+        if menu.exec(QCursor.pos()) is act:
+            try:
+                self._compares.remove(target)
+            except ValueError:
+                pass
+            for k in ("A", "B"):
+                self._redraw_compare(k)
 
     def _redraw_compare(self, key):
         """Rebuild the compare overlay for a pane: cyan selection outlines, the
@@ -1771,45 +1846,69 @@ class CTViewer(AbstractViewer):
                     sel_lines.append(self._outline(self._measures[key][smi]))
                     sel_cols.append((0, 229, 255))
         p.cmp_sel_mapper.SetInputData(_colored_multi_pd(sel_lines, sel_cols))
-        # radial gap map — only for a Thickness run
+        # All persisted results on this pane: filled annulus + (Thickness) radials
+        cmps = [c for c in self._compares if c["key"] == key]
+        fill_tris, fill_cols = [], []
         segs, cols = [], []
-        cmp = self._compare
-        show = bool(cmp and cmp["key"] == key)
-        show_thk = bool(show and cmp.get("show_thk"))
-        show_pa = bool(show and cmp.get("show_pa"))
-        if show_thk:
-            for r in cmp["radials"]:
-                segs.append([r["inner"], r["outer"]])
-                cols.append(_hex_to_rgb(_gap_color(r["gap"])))
+        for c in cmps:
+            rad = c["radials"]
+            n = len(rad)
+            for i in range(n):                       # annulus fill triangles
+                a, b = rad[i], rad[(i + 1) % n]
+                da = abs(b["ang"] - a["ang"]) % 360.0
+                if 2.5 * c["step"] < da < 360.0 - 2.5 * c["step"]:
+                    continue                         # a skipped-ray gap
+                fill_tris.append((a["inner"], a["outer"], b["outer"]))
+                fill_tris.append((a["inner"], b["outer"], b["inner"]))
+                fill_cols += [c["fill_rgb"], c["fill_rgb"]]
+            if c.get("show_thk"):                    # gap colour map
+                for r in rad:
+                    segs.append([r["inner"], r["outer"]])
+                    cols.append(_hex_to_rgb(_gap_color(r["gap"])))
+        p.cmp_fill_mapper.SetInputData(_filled_tris_pd(fill_tris, fill_cols))
         p.cmp_mapper.SetInputData(_colored_multi_pd(segs, cols))
-        # legend text actors (rebuilt each call)
+        # text actors (hint + per-result summary + a single colour legend)
         for a in p.cmp_text:
             p.ren.RemoveActor(a)
         p.cmp_text = []
-        if show:
-            head = f"Compare #{cmp['big_id']} vs #{cmp['small_id']}"
-            if show_pa:
-                head += f"  %Area:{cmp['pct']:.1f}%"
-            rows = [(head, (0, 229, 255))]
-            if show_thk:
-                rows += [
-                    ("  <5 mm", (46, 204, 113)),
-                    ("  5-7 mm", (241, 196, 15)),
-                    ("  7-9 mm", (230, 126, 34)),
-                    ("  >9 mm", (231, 76, 60)),
-                ]
-            for i, (txt, rgb) in enumerate(rows):
-                ta = vtkTextActor()
-                ta.SetInput(txt)
-                tp = ta.GetTextProperty()
-                tp.SetColor(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
-                tp.SetFontSize(14)
-                tp.SetBold(True)
-                ta.GetPositionCoordinate(
-                    ).SetCoordinateSystemToNormalizedViewport()
-                ta.SetPosition(0.02, 0.30 - i * 0.04)
-                p.ren.AddActor(ta)
-                p.cmp_text.append(ta)
+        rows = []
+        # Instruction banner (top-centre) while picking, so it's discoverable.
+        if self._cmp_on:
+            n_sel = sum(1 for s in self._cmp_sel if s[0] == key)
+            hint = vtkTextActor()
+            hint.SetInput(
+                "Click to select 2 Ellipse/Polygon data to compare"
+                f"  ({n_sel}/2)")
+            htp = hint.GetTextProperty()
+            htp.SetColor(0.0, 0.9, 1.0)
+            htp.SetFontSize(15)
+            htp.SetBold(True)
+            htp.SetJustificationToCentered()
+            hint.GetPositionCoordinate(
+                ).SetCoordinateSystemToNormalizedViewport()
+            hint.SetPosition(0.5, 0.94)
+            p.ren.AddActor(hint)
+            p.cmp_text.append(hint)
+        for c in cmps:                               # one summary line each
+            head = f"Compare #{c['big_id']} vs #{c['small_id']}"
+            if c.get("show_pa"):
+                head += f"  %Area:{c['pct']:.1f}%"
+            rows.append((head, (0, 229, 255)))
+        if any(c.get("show_thk") for c in cmps):     # single colour legend
+            rows += [("  " + lab, _hex_to_rgb(hexc))
+                     for lab, hexc in _gap_legend()]
+        for i, (txt, rgb) in enumerate(rows):
+            ta = vtkTextActor()
+            ta.SetInput(txt)
+            tp = ta.GetTextProperty()
+            tp.SetColor(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+            tp.SetFontSize(14)
+            tp.SetBold(True)
+            ta.GetPositionCoordinate(
+                ).SetCoordinateSystemToNormalizedViewport()
+            ta.SetPosition(0.02, 0.34 - i * 0.04)
+            p.ren.AddActor(ta)
+            p.cmp_text.append(ta)
         p.render()
 
     # ---- world<->screen ----
@@ -3641,24 +3740,21 @@ class CTViewer(AbstractViewer):
             self._refresh()
 
     def _recalc_companion(self):
-        """ReCalc: treat the ACTIVE pane as master and rebuild the OTHER pane
-        cleanly as the plane that cuts the master along its green-▲ centre line
-        (right-handed, so it can't come out mirrored). Fixes a companion that
-        drifted to a wrong / mirror orientation after a sequence of rotations,
-        WITHOUT resetting the master — the view the user wants to keep."""
+        """ReCalc: rebuild the OTHER pane as the plane that cuts the ACTIVE pane
+        along its green-▲ centre line, fixing a MIRROR without moving the view.
+
+        _couple_companion keeps u×v = n (right-handed, so a prior mirror is
+        undone) and projects the old up vector, so only the (possibly mirrored)
+        in-plane sense flips. _refresh() keeps the camera (reset_cam=False), so
+        the companion's ZOOM and centre-line position are preserved. The master
+        pane is untouched."""
         if self._image is None:
             return
         master = self._active_pane
-        other = "B" if master == "A" else "A"
         u, v, _n = self._frame[master]
         a = math.radians(self._cross_ang[master])
         crossdir = u * math.cos(a) + v * math.sin(a)
-        # Re-derive the companion ⟂ to master through master's crossline. This
-        # builds u×v = n (right-handed), so any prior mirror is undone, and it
-        # re-straightens the companion crossline (see _couple_companion).
         self._couple_companion(master, crossdir)
-        self._pc[other] = self._center.copy()
-        self._fit_pane(other)                  # refit only the companion camera
         self._view_initial = False
         self._refresh()
 

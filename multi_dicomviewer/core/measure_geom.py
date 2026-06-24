@@ -448,12 +448,14 @@ def major_minor(m):
 # macOS (pygfx) compute identically; each viewer only renders the result.
 # --------------------------------------------------------------------------
 
-#: Gap colour bands (upper bound in mm, hex colour). <5 / 5–7 / 7–9 / >9 mm.
+#: Gap colour bands (upper bound in mm, hex colour). A SMALL gap is the
+#: clinically notable case, so it is the "hot" red end: <5 red, 5–7 orange,
+#: 7–9 yellow, >9 green.
 GAP_BANDS = (
-    (5.0, "#2ecc71"),          # green   — < 5 mm
-    (7.0, "#f1c40f"),          # yellow  — 5–7 mm
-    (9.0, "#e67e22"),          # orange  — 7–9 mm
-    (float("inf"), "#e74c3c"),  # red     — > 9 mm
+    (5.0, "#e74c3c"),          # red     — < 5 mm
+    (7.0, "#e67e22"),          # orange  — 5–7 mm
+    (9.0, "#f1c40f"),          # yellow  — 7–9 mm
+    (float("inf"), "#2ecc71"),  # green   — > 9 mm
 )
 
 
@@ -463,6 +465,22 @@ def gap_color(gap_mm: float) -> str:
         if gap_mm < hi:
             return col
     return GAP_BANDS[-1][1]
+
+
+def gap_legend():
+    """Legend rows [(label, hex)] derived from GAP_BANDS, so the legend always
+    matches the actual colouring (single source of truth)."""
+    rows = []
+    lo = 0.0
+    for hi, col in GAP_BANDS:
+        if hi == float("inf"):
+            rows.append((f">{lo:g} mm", col))
+        elif lo == 0.0:
+            rows.append((f"<{hi:g} mm", col))
+        else:
+            rows.append((f"{lo:g}-{hi:g} mm", col))
+        lo = hi
+    return rows
 
 
 def percent_area_diff(area_big: float, area_small: float) -> float:
