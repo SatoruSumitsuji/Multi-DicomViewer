@@ -1783,7 +1783,17 @@ class XAViewer(AbstractViewer):
             b.clicked.connect(lambda _c, k=key: self._set_measure_type(k))
             self._meas_btns[key] = b
             row.addWidget(b)
-        clr = QPushButton("Clear")
+        # Compare two Ellipse/Polygon: %Area (%PA) and/or radial gap (Thickness)
+        # — same flow as the CT viewers. Right of Angle, Clear All Result after.
+        self._cmp_btn = QPushButton("Compare")
+        self._cmp_btn.setCheckable(True)
+        self._cmp_btn.setToolTip(
+            "Compare two Ellipse/Polygon: click the two shapes, then pick %PA "
+            "and/or Thickness")
+        self._cmp_btn.clicked.connect(self._toggle_compare)
+        row.addWidget(self._cmp_btn)
+        clr = QPushButton("Clear All Result")
+        clr.setToolTip("Clear all measurements and comparison results")
         clr.clicked.connect(self._clear_measurements)
         row.addWidget(clr)
         row.addWidget(QLabel(
@@ -1791,7 +1801,20 @@ class XAViewer(AbstractViewer):
             " right-click finishes Polyline / Polygon"
         ))
         row.addStretch(1)
+        # A canvas that finishes/cancels a Compare un-checks the button.
+        for c in (self.canvas, self.canvas2):
+            c.compare_finished.connect(self._on_compare_finished)
         return bar
+
+    def _toggle_compare(self):
+        on = self._cmp_btn.isChecked()
+        for c in (self.canvas, self.canvas2):
+            c.set_compare_mode(on)
+
+    def _on_compare_finished(self):
+        self._cmp_btn.setChecked(False)
+        for c in (self.canvas, self.canvas2):
+            c.set_compare_mode(False)
 
     def _toggle_measure(self):
         on = self._meas_btn.isChecked()
@@ -1801,6 +1824,8 @@ class XAViewer(AbstractViewer):
         if not on:
             for c in (self.canvas, self.canvas2):
                 c.set_measure_type("")
+                c.set_compare_mode(False)
+            self._cmp_btn.setChecked(False)
             for b in self._meas_btns.values():
                 b.setChecked(False)
                 b.setStyleSheet("")
