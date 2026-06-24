@@ -130,6 +130,7 @@ from multi_dicomviewer.core.measure_geom import (
     ellipse_outline as _ellipse_outline,
     gap_color as _gap_color,
     gap_legend as _gap_legend,
+    gap_linewidth as _gap_linewidth,
     major_minor as _major_minor_pure,
     min_width as _min_width,
     percent_area_diff as _percent_area_diff,
@@ -775,6 +776,19 @@ class _Pane:
         if hasattr(cma.GetProperty(), "SetRenderLinesAsTubes"):
             cma.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(cma)
+        # Compare radial gap map — the hottest (<5 mm red) band, drawn thicker
+        # so it stands out (separate actor: VTK line width is per-actor).
+        self.cmp_red_mapper = vtkPolyDataMapper()
+        self.cmp_red_mapper.SetInputData(vtkPolyData())
+        self.cmp_red_mapper.ScalarVisibilityOn()
+        self.cmp_red_mapper.SetScalarModeToUseCellData()
+        self.cmp_red_mapper.SetColorModeToDirectScalars()
+        crm = vtkActor()
+        crm.SetMapper(self.cmp_red_mapper)
+        crm.GetProperty().SetLineWidth(4.0)
+        if hasattr(crm.GetProperty(), "SetRenderLinesAsTubes"):
+            crm.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(crm)
         # Compare selection highlight: the two picked outlines (cyan, thick).
         self.cmp_sel_mapper = vtkPolyDataMapper()
         self.cmp_sel_mapper.SetInputData(vtkPolyData())
@@ -1809,6 +1823,37 @@ class CTViewer(AbstractViewer):
         for k in ("A", "B"):
             self._redraw_compare(k)
 
+    def _recompute_compares(self, key):
+        """Re-derive any compare results on *key* from the CURRENT outlines of
+        the measures they reference (by id), so editing a shape live-updates its
+        comparison. A result whose shape was deleted is dropped."""
+        if not self._compares:
+            return
+        by_id = {m["id"]: m for m in self._measures[key]}
+        out = []
+        for c in self._compares:
+            if c["key"] != key:
+                out.append(c)
+                continue
+            mb, ms = by_id.get(c["big_id"]), by_id.get(c["small_id"])
+            if mb is None or ms is None:
+                continue                     # a referenced shape is gone → drop
+            ob, os_ = self._outline(mb), self._outline(ms)
+            ab, asm = _poly_area(ob), _poly_area(os_)
+            if asm > ab:                     # keep outer = larger
+                mb, ms, ob, os_, ab, asm = ms, mb, os_, ob, asm, ab
+            cen = _polygon_centroid(ob)
+            c = dict(c)
+            c.update({
+                "big_id": mb["id"], "small_id": ms["id"],
+                "outer": ob, "inner": os_, "centroid": cen,
+                "pct": _percent_area_diff(ab, asm),
+                "radials": _radial_gap_compare(ob, os_, cen, c.get("step", 1.0)),
+                "fill_rgb": _hex_to_rgb(mb.get("color")),
+            })
+            out.append(c)
+        self._compares = out
+
     def _compare_hit(self, which, sx, sy):
         """Index in self._compares of the result whose filled region (inside the
         outer outline, outside the inner) contains screen point (sx,sy) on pane
@@ -1852,7 +1897,8 @@ class CTViewer(AbstractViewer):
         # All persisted results on this pane: filled annulus + (Thickness) radials
         cmps = [c for c in self._compares if c["key"] == key]
         fill_tris, fill_cols = [], []
-        segs, cols = [], []
+        segs, cols = [], []                          # normal-width radials
+        red_segs, red_cols = [], []                  # hottest band (<5 mm, thick)
         for c in cmps:
             rad = c["radials"]
             n = len(rad)
@@ -1866,10 +1912,17 @@ class CTViewer(AbstractViewer):
                 fill_cols += [c["fill_rgb"], c["fill_rgb"]]
             if c.get("show_thk"):                    # gap colour map
                 for r in rad:
-                    segs.append([r["inner"], r["outer"]])
-                    cols.append(_hex_to_rgb(_gap_color(r["gap"])))
+                    seg = [r["inner"], r["outer"]]
+                    col = _hex_to_rgb(_gap_color(r["gap"]))
+                    if _gap_linewidth(r["gap"], 1.0) > 1.0:   # hottest band
+                        red_segs.append(seg)
+                        red_cols.append(col)
+                    else:
+                        segs.append(seg)
+                        cols.append(col)
         p.cmp_fill_mapper.SetInputData(_filled_tris_pd(fill_tris, fill_cols))
         p.cmp_mapper.SetInputData(_colored_multi_pd(segs, cols))
+        p.cmp_red_mapper.SetInputData(_colored_multi_pd(red_segs, red_cols))
         # text actors (hint + per-result summary + a single colour legend)
         for a in p.cmp_text:
             p.ren.RemoveActor(a)
@@ -2124,7 +2177,9 @@ class CTViewer(AbstractViewer):
         p.render()
 
     def _redraw_meas(self, key):
+        self._recompute_compares(key)      # keep comparisons in sync on edit/delete
         self._redraw_geom(key)
+        self._redraw_compare(key)
         p = self.pane[key]
         lines = [self._metrics_text(key, m) for m in self._measures[key]]
         self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
@@ -2232,7 +2287,9 @@ class CTViewer(AbstractViewer):
         else:
             m["pts"][e["vi"]] = w
             self._resnap_center_angle(m)
+        self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
+        self._redraw_compare(e["key"])
 
     def _resnap_center_angle(self, m):
         """After the shape itself changes (a vertex / ellipse-handle drag),

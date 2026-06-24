@@ -467,6 +467,12 @@ def gap_color(gap_mm: float) -> str:
     return GAP_BANDS[-1][1]
 
 
+def gap_linewidth(gap_mm: float, base: float = 1.6) -> float:
+    """Radial line width for a gap: the hottest (smallest-gap) band is drawn
+    thicker so the clinically-critical <5 mm red stands out."""
+    return base * 2.4 if gap_mm < GAP_BANDS[0][0] else base
+
+
 def gap_legend():
     """Legend rows [(label, hex)] derived from GAP_BANDS, so the legend always
     matches the actual colouring (single source of truth)."""
