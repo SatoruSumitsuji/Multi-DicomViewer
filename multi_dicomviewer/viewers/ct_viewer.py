@@ -3762,7 +3762,26 @@ class CTViewer(AbstractViewer):
             dir3 = u * self._cross_axis[0] + v * self._cross_axis[1]
             self._center = self._center + amt * dir3
             self._clamp_center()
-            self._pc[other] = self._center.copy()   # other follows line
+            # Moving the centre ALONG uh — the green-▲ line direction, the shared
+            # crossline that also lies in the companion plane — is the "non-▲
+            # line" translate: keep the companion IMAGE fixed and let its
+            # crosshair slide, with a dead-zone so it never leaves view (then pan
+            # to follow). Moving along uv (the ▲ line) re-slices the companion.
+            along_uh = (abs(float(np.dot(self._cross_axis, uh)))
+                        >= abs(float(np.dot(self._cross_axis, uv))))
+            if along_uh:
+                ou, ov, _on = self._frame[other]
+                delta = self._center - self._pc[other]
+                co_u = float(np.dot(delta, ou))
+                co_v = float(np.dot(delta, ov))
+                ps = self.pane[other].ren.GetActiveCamera().GetParallelScale()
+                limit = 0.8 * ps                   # ~80% of half-view = dead-zone
+                ex_u = co_u - max(-limit, min(limit, co_u))
+                ex_v = co_v - max(-limit, min(limit, co_v))
+                if ex_u or ex_v:                   # past the dead-zone → pan
+                    self._pc[other] = self._pc[other] + ex_u * ou + ex_v * ov
+            else:
+                self._pc[other] = self._center.copy()   # ▲ line: other reslices
             self._view_initial = False
             self._refresh()
             return

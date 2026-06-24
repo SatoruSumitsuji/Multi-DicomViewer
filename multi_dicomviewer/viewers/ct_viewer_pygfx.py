@@ -103,7 +103,7 @@ from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 _SPIN_SIGN = 1.0
 
 # Slab-MIP level-of-detail. The slab MIP is a CPU max-over-N-oblique-planes
-# image (see _slab_mip_hu); its cost scales with sample columns² × plane count.
+# image (see _compute_slab_qimage); cost scales with sample columns² × planes.
 # At rest we build it full quality; DURING an interactive drag/page we build a
 # COARSER one — fewer sample columns and fewer MIP planes — so the THICK image
 # KEEPS its slab look (instead of dropping to the thin GPU slice) while staying
@@ -274,6 +274,58 @@ def _trilinear_sample(vol: np.ndarray, fx, fy, fz) -> np.ndarray:
     c0 = c00 * (1 - dy) + c01 * dy
     c1 = c10 * (1 - dy) + c11 * dy
     return c0 * (1 - dz) + c1 * dz
+
+
+def _compute_slab_qimage(p):
+    """Pure slab-MIP → RGB QImage from a snapshot dict (NO Qt-widget / no self
+    access), so the heavy full-quality rebuild can run on a worker thread. The
+    snapshot is taken on the GUI thread by CTViewerPygfx._slab_params; this is
+    the same maths as the inline path, only parameterised."""
+    u, v, n = p["u"], p["v"], p["n"]
+    pc = p["pc"]
+    sx, sy, sz = p["dims"]
+    px, py = p["pan"]
+    pw, ph, iw, ih = p["pw"], p["ph"], p["iw"], p["ih"]
+    scale = ph / (2.0 * max(1e-3, p["ps"]))
+    a = math.radians(p["roll"])
+    ca, sa = math.cos(a), math.sin(a)
+    SX, SY = np.meshgrid(np.linspace(0.0, pw, iw), np.linspace(0.0, ph, ih))
+    aa = (SX - pw / 2.0) / scale
+    bb = (ph / 2.0 - SY) / scale
+    WX = px + aa * ca - bb * sa
+    WY = py + aa * sa + bb * ca
+    bx = pc[0] + WX * u[0] + WY * v[0]
+    by = pc[1] + WX * u[1] + WY * v[1]
+    bz = pc[2] + WX * u[2] + WY * v[2]
+    th = p["thick"]
+    vol = p["vol"]
+    step = max(1e-3, min(p["dims"]))
+    nplanes = int(max(1, min(p["max_planes"], round(th / step))))
+    offs = (np.linspace(-th / 2.0, th / 2.0, nplanes)
+            if nplanes > 1 else np.array([0.0]))
+    nz, ny, nx = vol.shape
+    mip = np.full((ih, iw), -np.inf, np.float32)
+    for t in offs:
+        vx = (bx + t * n[0]) / sx
+        vy = (by + t * n[1]) / sy
+        vz = (bz + t * n[2]) / sz
+        hu = _trilinear_sample(vol, vx, vy, vz).astype(np.float32)
+        oob = ((vx < 0) | (vx > nx - 1) | (vy < 0) | (vy > ny - 1)
+               | (vz < 0) | (vz > nz - 1))
+        np.putmask(hu, oob, _HU_LO)
+        mip = np.maximum(mip, hu)
+    if p["color"]:
+        lut = _band_lut_array(p["bands"], p["opacity"], p["win"], p["lvl"])
+        idx = np.clip((mip - _HU_LO) / (_HU_HI - _HU_LO) * 511.0,
+                      0, 511).astype(np.int32)
+        rgb = (lut[idx, :3] * 255.0).astype(np.uint8)
+    else:
+        g = np.clip((mip - (p["lvl"] - p["win"] / 2.0))
+                    / max(1e-6, p["win"]), 0.0, 1.0)
+        gg = (g * 255.0).astype(np.uint8)
+        rgb = np.stack([gg, gg, gg], axis=2)
+    rgb = np.ascontiguousarray(rgb)
+    return QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
 
 
 # ----------------------------------------------------------------- pane
@@ -906,6 +958,10 @@ class CTViewer(AbstractViewer):
     #: reliably under rendercanvas ondemand (see _arm_lod / _lod_settle).
     _lod_wake = pyqtSignal()
 
+    #: Carries a finished high-res slab rebuild (gen, {key: QImage}) from the
+    #: compute worker back to the GUI thread (see _lod_settle / _on_slab_done).
+    _slab_done = pyqtSignal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._vol = None
@@ -993,7 +1049,9 @@ class CTViewer(AbstractViewer):
         self._lod_pending = False
         self._lod_due = None             # monotonic deadline for the rebuild
         self._lod_thread = None          # single reusable debounce worker
+        self._slab_gen = 0               # generation token for async slab builds
         self._lod_wake.connect(self._lod_settle)
+        self._slab_done.connect(self._on_slab_done)
         disp = QApplication.instance().eventDispatcher() if \
             QApplication.instance() is not None else None
         if disp is not None:
@@ -1091,6 +1149,12 @@ class CTViewer(AbstractViewer):
 
     def _on_down(self, key, ev):
         self._set_active(key)
+        # Auto-recover from a lost pointer-up: if a previous gesture left state
+        # behind (drag off-pane, or an event dropped while the GUI thread was
+        # busy), clear it AND release any stuck mouse grab so this fresh press —
+        # and the toolbar buttons — work again. (The Mac dead-buttons bug.)
+        if self._drag_btn is not None or self._cross_grab or self._meas_drag:
+            self._reset_pointer_state()
         self._drag_btn = ev.get("button")
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
@@ -1187,11 +1251,34 @@ class CTViewer(AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
+        # Proactively drop any mouse grab so it can never linger into the next
+        # gesture and deaden the toolbar buttons.
+        try:
+            gw = QWidget.mouseGrabber()
+            if gw is not None:
+                gw.releaseMouse()
+        except Exception:
+            pass
         # If an interactive (coarse) slab refresh is owed a quality upgrade, do
         # it NOW on release for the snappiest crisp-up (the idle backstop and
         # debounce timer would otherwise get it a moment later).
         if self._lod_pending:
             self._lod_settle()
+
+    def _reset_pointer_state(self):
+        """Clear stale drag/gesture flags and release any stuck Qt mouse grab —
+        the recovery for a lost pointer-up that otherwise leaves the canvas
+        holding the grab, diverting clicks away from the toolbar buttons."""
+        self._drag_btn = None
+        self._cross_grab = False
+        self._meas_drag = False
+        self._spin_prev = None
+        try:
+            gw = QWidget.mouseGrabber()
+            if gw is not None:
+                gw.releaseMouse()
+        except Exception:
+            pass
 
     def _on_dblclick(self, key, ev):
         # Right double-click is the high-res ("force crisp") gesture, detected
@@ -2053,84 +2140,35 @@ class CTViewer(AbstractViewer):
         return self._world_to_screen(key, ccx, ccy)
 
     # ----------------------------------------------------- slab-MIP (CPU)
-    def _slab_mip_hu(self, key, iw, ih, max_planes=_SLAB_PLANES_FULL):
-        """(ih,iw) HU array = max over N parallel oblique planes within
-        ±thick/2 of the pane plane, sampled across the current viewport.
-
-        The sample grid is built in SCREEN space and unprojected with the same
-        roll+pan as _disp_to_world, so the slab image rotates with SPIN/ROTATE
-        and stays pixel-aligned with the crosshair (the image is drawn
-        full-rect by the overlay). The slab depth direction is the frame
-        normal N."""
-        u, v, n = self._frame[key]
-        pc = self._pc[key]
-        sx, sy, sz = self._dims
-        px, py = self._pan[key]
-        pw = max(1, self.pane[key].canvas.width())
-        ph = max(1, self.pane[key].canvas.height())
-        scale = ph / (2.0 * max(1e-3, self._ps[key]))
-        a = math.radians(self._roll[key])
-        ca, sa = math.cos(a), math.sin(a)
-        SX, SY = np.meshgrid(np.linspace(0.0, pw, iw),
-                             np.linspace(0.0, ph, ih))
-        aa = (SX - pw / 2.0) / scale
-        bb = (ph / 2.0 - SY) / scale
-        WX = px + aa * ca - bb * sa          # screen → output (roll/pan)
-        WY = py + aa * sa + bb * ca
-        bx = pc[0] + WX * u[0] + WY * v[0]
-        by = pc[1] + WX * u[1] + WY * v[1]
-        bz = pc[2] + WX * u[2] + WY * v[2]
-        th = self._thick[key]
-        step = max(1e-3, min(self._dims))
-        nplanes = int(max(1, min(max_planes, round(th / step))))
-        offs = (np.linspace(-th / 2.0, th / 2.0, nplanes)
-                if nplanes > 1 else np.array([0.0]))
-        nz, ny, nx = self._vol.shape
-        mip = np.full((ih, iw), -np.inf, np.float32)
-        for t in offs:
-            vx = (bx + t * n[0]) / sx
-            vy = (by + t * n[1]) / sy
-            vz = (bz + t * n[2]) / sz
-            hu = _trilinear_sample(self._vol, vx, vy, vz).astype(np.float32)
-            # _trilinear_sample clamps each coord to the border, so a sample
-            # past the volume (e.g. above the z-extent in a sagittal slab)
-            # would otherwise read the edge axial slice's body tissue and, under
-            # MAX projection, smear it across the background as bright streaks —
-            # the Mac "washed-out / milky" slab-MIP bug. Force out-of-volume
-            # samples to air so they never win the max (VTK's reslice bounds the
-            # slab the same way on the Windows backend).
-            oob = ((vx < 0) | (vx > nx - 1) | (vy < 0) | (vy > ny - 1)
-                   | (vz < 0) | (vz > nz - 1))
-            np.putmask(hu, oob, _HU_LO)
-            mip = np.maximum(mip, hu)
-        return mip
-
-    def _build_slab_qimage(self, key, lod=False):
-        """Render the slab MIP for a pane to a viewport-filling RGB QImage
-        (W/L or HU colormap applied CPU-side). *lod*=True builds a coarser
-        image (fewer columns + MIP planes) for smooth interactive drag/page."""
+    def _slab_params(self, key, lod=False) -> dict:
+        """Snapshot (on the GUI thread) everything _compute_slab_qimage needs:
+        a plain dict of numpy/scalars + the (read-only, shared) volume — no Qt
+        widget access — so the build can run on a worker thread."""
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         iw = min(pw, _SLAB_IW_LOD if lod else _SLAB_IW_FULL)
         ih = max(1, int(round(iw * ph / pw)))
-        mip = self._slab_mip_hu(
-            key, iw, ih,
-            max_planes=_SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL)
-        if self._color:
-            lut = _band_lut_array(self._bands, self._opacity,
-                                  self._win, self._lvl)        # (512,4)
-            idx = np.clip((mip - _HU_LO) / (_HU_HI - _HU_LO) * 511.0,
-                          0, 511).astype(np.int32)
-            rgb = (lut[idx, :3] * 255.0).astype(np.uint8)       # (ih,iw,3)
-        else:
-            g = np.clip((mip - (self._lvl - self._win / 2.0))
-                        / max(1e-6, self._win), 0.0, 1.0)
-            gg = (g * 255.0).astype(np.uint8)
-            rgb = np.stack([gg, gg, gg], axis=2)
-        rgb = np.ascontiguousarray(rgb)
-        return QImage(rgb.data, iw, ih, 3 * iw,
-                      QImage.Format.Format_RGB888).copy()
+        u, v, n = self._frame[key]
+        return {
+            "u": np.asarray(u, float), "v": np.asarray(v, float),
+            "n": np.asarray(n, float), "pc": np.asarray(self._pc[key], float),
+            "dims": tuple(self._dims),
+            "pan": (float(self._pan[key][0]), float(self._pan[key][1])),
+            "pw": pw, "ph": ph, "iw": iw, "ih": ih,
+            "ps": float(self._ps[key]), "roll": float(self._roll[key]),
+            "thick": float(self._thick[key]), "vol": self._vol,
+            "max_planes": _SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL,
+            "color": bool(self._color),
+            "bands": [dict(b) for b in self._bands],
+            "opacity": float(self._opacity),
+            "win": float(self._win), "lvl": float(self._lvl),
+        }
+
+    def _build_slab_qimage(self, key, lod=False):
+        """Synchronous slab MIP → QImage (used by the non-interactive refresh).
+        Interactive full-quality rebuilds go through the async worker instead."""
+        return _compute_slab_qimage(self._slab_params(key, lod=lod))
 
     def _fit_pane(self, key):
         """Fit the volume content (projected onto the plane) to the viewport
@@ -2164,6 +2202,9 @@ class CTViewer(AbstractViewer):
         # quality once the interaction settles.
         if self._vol is None:
             return
+        # Any refresh (interactive frame or full) supersedes an in-flight async
+        # high-res slab build, so bump the generation to discard a late result.
+        self._slab_gen += 1
         for key in ("A", "B"):
             p = self.pane[key]
             if p.material is None:
@@ -2248,17 +2289,49 @@ class CTViewer(AbstractViewer):
             self._lod_settle()
 
     def _lod_settle(self):
-        """Rebuild the slab at full quality and force a SYNCHRONOUS repaint.
+        """Build the slab at full quality OFF the GUI thread, then swap it in.
+
         Runs at most once per interaction (guarded by _lod_pending), whichever
-        path gets there first: pointer-up, aboutToBlock (idle), or the
-        background thread wake. repaint() flushes immediately so the crisp image
-        shows without waiting for the next input event to pump the loop."""
+        path gets there first: pointer-up, aboutToBlock (idle), or the worker
+        wake. The heavy CPU MIP must NOT run on the GUI thread — a multi-second
+        rebuild there froze the event loop and dropped the pointer-up, leaving
+        macOS holding a stuck mouse grab so the buttons went dead. Here we only
+        SNAPSHOT params on the GUI thread and hand the maths to a worker; the
+        coarse image stays on screen until the crisp one arrives."""
         if not self._lod_pending:
             return
         self._cancel_lod()
-        self._refresh(lod=False)        # clears _lod_pending (non-lod branch)
-        for k in ("A", "B"):
-            self._overlay[k].repaint()
+        self._lod_pending = False
+        params = {k: self._slab_params(k, lod=False)
+                  for k in ("A", "B") if self._thick[k] > 0}
+        if not params:
+            return
+        self._slab_gen += 1
+        gen = self._slab_gen
+        threading.Thread(target=self._slab_compute_worker,
+                         args=(gen, params), daemon=True).start()
+
+    def _slab_compute_worker(self, gen, params):
+        """Worker thread: build the full-quality slab QImage(s) and post them
+        back to the GUI thread via the _slab_done signal (queued connection)."""
+        out = {}
+        for k, pr in params.items():
+            try:
+                out[k] = _compute_slab_qimage(pr)
+            except Exception:
+                out[k] = None
+        self._slab_done.emit((gen, out))
+
+    def _on_slab_done(self, payload):
+        """GUI thread: adopt a finished async slab build unless it was
+        superseded (a newer interaction/refresh bumped the generation)."""
+        gen, out = payload
+        if gen != self._slab_gen:
+            return
+        for k, img in out.items():
+            if img is not None and self._thick[k] > 0:
+                self._mip_img[k] = img
+                self._overlay[k].update()
 
     def _force_crisp(self):
         """Unconditionally rebuild the slab at full quality and repaint now.
@@ -2514,7 +2587,26 @@ class CTViewer(AbstractViewer):
             dir3 = u * self._cross_axis[0] + v * self._cross_axis[1]
             self._center = self._center + amt * dir3
             self._clamp_center()
-            self._pc[other] = self._center.copy()
+            # Which crossline is being dragged? Moving the centre ALONG uh — the
+            # green-▲ line direction, which is the shared crossline and also lies
+            # in the companion plane — is the "non-▲ line" translate: keep the
+            # companion IMAGE fixed and let its crosshair slide, with a dead-zone
+            # so it never leaves view (then pan to follow). Moving along uv (the
+            # ▲ line) re-slices the companion as before.
+            along_uh = (abs(float(np.dot(self._cross_axis, uh)))
+                        >= abs(float(np.dot(self._cross_axis, uv))))
+            if along_uh:
+                ou, ov, _on = self._frame[other]
+                delta = self._center - self._pc[other]
+                co_u = float(np.dot(delta, ou))
+                co_v = float(np.dot(delta, ov))
+                limit = 0.8 * self._ps[other]      # ~80% of half-view = dead-zone
+                ex_u = co_u - max(-limit, min(limit, co_u))
+                ex_v = co_v - max(-limit, min(limit, co_v))
+                if ex_u or ex_v:                   # past the dead-zone → pan
+                    self._pc[other] = self._pc[other] + ex_u * ou + ex_v * ov
+            else:
+                self._pc[other] = self._center.copy()
             self._view_initial = False
             self._refresh(lod=True)            # coarse slab while dragging
             return
