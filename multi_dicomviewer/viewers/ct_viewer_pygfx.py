@@ -2698,6 +2698,8 @@ class CTViewer(AbstractViewer):
         clr = FitButton("Clear All Result")
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.setHelpToolTip("Clear all measurements and comparison results")
+        clr.setStyleSheet(                                    # match ReCalc
+            "QPushButton { background:#8a8a8a; color:#101010; }")
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
         self._cmp_hint = QLabel("  Left-click = add point /"
