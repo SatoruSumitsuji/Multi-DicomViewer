@@ -808,12 +808,17 @@ class ImageCanvas(QWidget):
         if target not in self._compares:
             return
         menu = QMenu(self)
-        act = menu.addAction("Delete this comparison")
-        if menu.exec(QCursor.pos()) is act:
+        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
+        chosen = menu.exec(QCursor.pos())
+        if chosen is del_act:
             try:
                 self._compares.remove(target)
             except ValueError:
                 pass
+            self.update()
+        elif chosen is vis_act:
+            target["hidden"] = not target.get("hidden", False)
             self.update()
 
     # ----------------------------------------------- right-click menus
@@ -1785,8 +1790,9 @@ class ImageCanvas(QWidget):
                        "Click to select 2 Ellipse/Polygon data to compare"
                        f"  ({n}/2)")
 
-        cmps = self._compares
-        for c in cmps:
+        for c in self._compares:
+            if c.get("hidden"):                          # Hidden → no fill/rays
+                continue
             path = QPainterPath()                        # annulus = outer − inner
             path.setFillRule(Qt.FillRule.OddEvenFill)
             path.addPolygon(QPolygonF([W(q) for q in c["outer"]]))
@@ -1803,23 +1809,17 @@ class ImageCanvas(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(0, 229, 255))
                 p.drawEllipse(W(c["centroid"]), 3.0, 3.0)
-        if cmps:
+        # Colour legend (lower-left) only when a VISIBLE Thickness result exists.
+        # The %Area result text itself is listed top-right by _paint_results.
+        bands = (G.gap_legend()
+                 if any(c["show_thk"] and not c.get("hidden")
+                        for c in self._compares) else [])
+        if bands:
             f = QFont()
             f.setPointSize(self._overlay_font_pt)
             p.setFont(f)
-            bands = G.gap_legend() if any(c["show_thk"] for c in cmps) else []
-            heads = []
-            for c in cmps:
-                ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
-                if c["show_pa"]:
-                    ht += f"  %Area:{c['pct']:.1f}%"
-                heads.append(ht)
             lh = 16.0
-            y = self.height() - 10 - (len(heads) + len(bands)) * lh
-            p.setPen(QColor(0, 229, 255))
-            for ht in heads:
-                p.drawText(QPointF(10, y), ht)
-                y += lh
+            y = self.height() - 10 - len(bands) * lh
             for lab, hexc in bands:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(hexc))
@@ -1829,28 +1829,42 @@ class ImageCanvas(QWidget):
                 y += lh
 
     def _paint_results(self, p: QPainter):
-        if not self.measures:
+        if not self.measures and not self._compares:
             return
         font = QFont()
         font.setPointSize(self._overlay_font_pt)
         p.setFont(font)
         fm = p.fontMetrics()
-
-        lines = [self._metrics(m) for m in self.measures]
-
         pad, lh = 6, fm.height()
         # Confine results to the right ~40% and word-wrap, so a larger font
         # can't run them into the left-side DICOM tags.
         max_px = max(20, int(self.width() * 0.40) - 2 * pad)
-        lines = self._wrap_px(lines, fm, max_px)
-        text_w = max(fm.horizontalAdvance(s) for s in lines)
+        # Measure metrics (yellow) then the compare %Area results (cyan), listed
+        # just below — same content/colour as before, only relocated here.
+        meas_lines = self._wrap_px(
+            [self._metrics(m) for m in self.measures], fm, max_px)
+        cmp_raw = []
+        for c in self._compares:
+            ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
+            if c.get("show_pa"):
+                ht += f"  %Area:{c['pct']:.1f}%"
+            cmp_raw.append(ht)
+        cmp_lines = self._wrap_px(cmp_raw, fm, max_px) if cmp_raw else []
+        all_lines = meas_lines + cmp_lines
+        if not all_lines:
+            return
+        text_w = max(fm.horizontalAdvance(s) for s in all_lines)
         box = QRect(
             self.width() - text_w - 2 * pad - 6, 6,
-            text_w + 2 * pad, lh * len(lines) + 2 * pad,
+            text_w + 2 * pad, lh * len(all_lines) + 2 * pad,
         )
         p.fillRect(box, QColor(0, 0, 0, 140))
         y = box.y() + pad + fm.ascent()
         p.setPen(QColor(255, 217, 0))
-        for line in lines:
+        for line in meas_lines:
+            p.drawText(box.x() + pad, y, line)
+            y += lh
+        p.setPen(QColor(0, 229, 255))               # compare results in cyan
+        for line in cmp_lines:
             p.drawText(box.x() + pad, y, line)
             y += lh
