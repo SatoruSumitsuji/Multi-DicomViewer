@@ -1794,6 +1794,7 @@ class XAViewer(AbstractViewer):
         row.addWidget(self._cmp_btn)
         clr = QPushButton("Clear All Result")
         clr.setToolTip("Clear all measurements and comparison results")
+        clr.setStyleSheet("background:#bdbdbd;color:black;")   # match 3DCT
         clr.clicked.connect(self._clear_measurements)
         row.addWidget(clr)
         row.addWidget(QLabel(
