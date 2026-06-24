@@ -936,6 +936,10 @@ class ImageCanvas(QWidget):
                     if chosen is act:
                         m["color"] = hexcol
                         break
+        # A colour / spline / vertex change to a shape that is part of a
+        # comparison must refresh that comparison NOW (fill colour + outline),
+        # not on some later action.
+        self._recompute_compares()
         self.update()
 
     def _center_angle_add(self, pt) -> None:
