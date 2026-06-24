@@ -452,9 +452,9 @@ def major_minor(m):
 #: clinically notable case, so it is the "hot" red end: <5 red, 5–7 orange,
 #: 7–9 yellow, >9 green.
 GAP_BANDS = (
-    (5.0, "#e74c3c"),          # red     — < 5 mm
-    (7.0, "#e67e22"),          # orange  — 5–7 mm
-    (9.0, "#f1c40f"),          # yellow  — 7–9 mm
+    (5.0, "#b30000"),          # dark red — < 5 mm  (deep, distinct from orange)
+    (7.0, "#ff8c00"),          # orange   — 5–7 mm  (bright, clearly orange)
+    (9.0, "#f1c40f"),          # yellow   — 7–9 mm
     (float("inf"), "#2ecc71"),  # green   — > 9 mm
 )
 
