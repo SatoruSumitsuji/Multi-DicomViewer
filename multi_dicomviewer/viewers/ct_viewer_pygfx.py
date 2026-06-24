@@ -161,14 +161,15 @@ def _norm(v):
     return v / n if n > 1e-9 else v
 
 
-def _draw_outlined_text(p, rect, flags, text, fill, width=1.0):
-    """Draw *text* in *fill* colour with a black outline ("黒枠"), by stamping
-    black copies at 8 compass offsets then the fill on top. *width* ≈ outline
-    thickness in px. To stay smooth (not blotchy) for thicker outlines, the
-    copies are placed on CONCENTRIC rings spaced ≤~0.9px apart so neighbouring
-    shadows always overlap into one continuous halo. Unlike a QPainterPath this
-    works with multi-line / word-wrapped drawText, so it suits the tag block
-    too. Leaves the painter pen set to *fill*."""
+def _draw_outlined_text(p, rect, flags, text, fill, width=1.0, outline=None):
+    """Draw *text* in *fill* colour with an *outline* halo (default black 黒枠;
+    pass white for 白枠), by stamping outline-colour copies at 8 compass offsets
+    then the fill on top. *width* ≈ outline thickness in px. To stay smooth (not
+    blotchy) for thicker outlines, the copies are placed on CONCENTRIC rings
+    spaced ≤~0.9px apart so neighbouring shadows always overlap into one
+    continuous halo. Unlike a QPainterPath this works with multi-line /
+    word-wrapped drawText, so it suits the tag block too. Leaves the painter pen
+    set to *fill*."""
     dirs = ((-1, -1), (0, -1), (1, -1), (-1, 0),
             (1, 0), (-1, 1), (0, 1), (1, 1))
     radii = []
@@ -177,7 +178,7 @@ def _draw_outlined_text(p, rect, flags, text, fill, width=1.0):
         radii.append(r)
         r += 0.9
     radii.append(width)
-    p.setPen(QColor(0, 0, 0))
+    p.setPen(outline if outline is not None else QColor(0, 0, 0))
     for rad in radii:
         for ox, oy in dirs:
             p.drawText(rect.translated(ox * rad, oy * rad), flags, text)
@@ -582,6 +583,8 @@ class _Overlay(QWidget):
                        f"  ({n_sel}/2)")
         cmps = [c for c in v._compares if c["key"] == key]
         for c in cmps:
+            if c.get("hidden"):                          # Hidden → no fill/rays
+                continue
             # Filled region between the two outlines (outer colour @ ~35% alpha
             # = 65% transparent). Even-odd fill of outer minus inner = annulus;
             # this is also the right-click → Delete hit area.
@@ -602,9 +605,13 @@ class _Overlay(QWidget):
                 p.drawEllipse(S(c["centroid"]), 3.0, 3.0)
         if cmps:
             # one summary line per result + a single colour legend if any result
-            # is a Thickness run, lower-left above the WW/WL readout.
+            # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
+            # Text wears a thin halo: white 枠 on the <5 mm row, black 枠 else.
             p.setFont(QFont("monospace", 11))
-            bands = _gap_legend() if any(c["show_thk"] for c in cmps) else []
+            _black, _white = QColor(0, 0, 0), QColor(255, 255, 255)
+            bands = (_gap_legend()
+                     if any(c["show_thk"] and not c.get("hidden") for c in cmps)
+                     else [])
             heads = []
             for c in cmps:
                 ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
@@ -613,16 +620,19 @@ class _Overlay(QWidget):
                 heads.append(ht)
             lh = 16.0
             y = h - 40 - (len(heads) + len(bands)) * lh
-            p.setPen(QColor(0, 229, 255))
+            fl = int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter)
             for ht in heads:
-                p.drawText(QPointF(10, y), ht)
+                _draw_outlined_text(p, QRectF(10, y - lh, 360, lh), fl, ht,
+                                    QColor(0, 229, 255), 1.0, _black)
                 y += lh
-            for lab, hexc in bands:
+            for i, (lab, hexc) in enumerate(bands):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(hexc))
                 p.drawRect(QRectF(10, y - 10, 12, 12))
-                p.setPen(QColor(230, 230, 230))
-                p.drawText(QPointF(28, y), lab)
+                # <5 mm (first band) → white 枠; all other rows → black 枠.
+                _draw_outlined_text(p, QRectF(28, y - lh, 200, lh), fl, lab,
+                                    QColor(230, 230, 230), 1.0,
+                                    _white if i == 0 else _black)
                 y += lh
 
     # -- corner info text + angio readout ----------------------------------
@@ -2872,18 +2882,26 @@ class CTViewer(AbstractViewer):
         return None
 
     def _compare_delete_menu(self, target):
-        """Right-click menu on a compare result's filled region → Delete it."""
+        """Right-click on a compare result's filled region → Delete / Hide·Show.
+        Hide keeps the result but stops drawing its fill + radials; right-click
+        the (still-clickable) region again to Show."""
         if target not in self._compares:
             return
         menu = QMenu(self)
-        act = menu.addAction("Delete this comparison")
-        if menu.exec(QCursor.pos()) is act:
+        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
+        chosen = menu.exec(QCursor.pos())
+        if chosen is del_act:
             try:
                 self._compares.remove(target)
             except ValueError:
                 pass
-            for k in ("A", "B"):
-                self._overlay[k].update()
+        elif chosen is vis_act:
+            target["hidden"] = not target.get("hidden", False)
+        else:
+            return
+        for k in ("A", "B"):
+            self._overlay[k].update()
 
     # ---- per-measure geometry ----
     def _ellipse_cab(self, m):

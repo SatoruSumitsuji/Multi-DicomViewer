@@ -1873,14 +1873,20 @@ class CTViewer(AbstractViewer):
         if target not in self._compares:
             return
         menu = QMenu(self)
-        act = menu.addAction("Delete this comparison")
-        if menu.exec(QCursor.pos()) is act:
+        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
+        chosen = menu.exec(QCursor.pos())
+        if chosen is del_act:
             try:
                 self._compares.remove(target)
             except ValueError:
                 pass
-            for k in ("A", "B"):
-                self._redraw_compare(k)
+        elif chosen is vis_act:
+            target["hidden"] = not target.get("hidden", False)
+        else:
+            return
+        for k in ("A", "B"):
+            self._redraw_compare(k)
 
     def _redraw_compare(self, key):
         """Rebuild the compare overlay for a pane: cyan selection outlines, the
@@ -1900,6 +1906,8 @@ class CTViewer(AbstractViewer):
         segs, cols = [], []                          # normal-width radials
         red_segs, red_cols = [], []                  # hottest band (<5 mm, thick)
         for c in cmps:
+            if c.get("hidden"):                      # Hidden → no fill/rays
+                continue
             rad = c["radials"]
             n = len(rad)
             for i in range(n):                       # annulus fill triangles
@@ -1927,44 +1935,59 @@ class CTViewer(AbstractViewer):
         for a in p.cmp_text:
             p.ren.RemoveActor(a)
         p.cmp_text = []
-        rows = []
-        # Instruction banner (top-centre) while picking, so it's discoverable.
-        if self._cmp_on:
-            n_sel = sum(1 for s in self._cmp_sel if s[0] == key)
-            hint = vtkTextActor()
-            hint.SetInput(
-                "Click to select 2 Ellipse/Polygon data to compare"
-                f"  ({n_sel}/2)")
-            htp = hint.GetTextProperty()
-            htp.SetColor(0.0, 0.9, 1.0)
-            htp.SetFontSize(15)
-            htp.SetBold(True)
-            htp.SetJustificationToCentered()
-            hint.GetPositionCoordinate(
-                ).SetCoordinateSystemToNormalizedViewport()
-            hint.SetPosition(0.5, 0.94)
-            p.ren.AddActor(hint)
-            p.cmp_text.append(hint)
-        for c in cmps:                               # one summary line each
-            head = f"Compare #{c['big_id']} vs #{c['small_id']}"
-            if c.get("show_pa"):
-                head += f"  %Area:{c['pct']:.1f}%"
-            rows.append((head, (0, 229, 255)))
-        if any(c.get("show_thk") for c in cmps):     # single colour legend
-            rows += [("  " + lab, _hex_to_rgb(hexc))
-                     for lab, hexc in _gap_legend()]
-        for i, (txt, rgb) in enumerate(rows):
+
+        def _add_cmp_text(txt, rgb, halo, fx, fy, size=14, centered=False):
+            """A text actor + a thin 8-offset halo (枠) of colour *halo* (0–1
+            triple) behind it, so it stays legible over the image."""
+            for ox, oy in ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                           (1, 0), (-1, 1), (0, 1), (1, 1)):
+                ha = vtkTextActor()
+                ha.SetInput(txt)
+                htp = ha.GetTextProperty()
+                htp.SetColor(*halo)
+                htp.SetFontSize(size)
+                htp.SetBold(True)
+                if centered:
+                    htp.SetJustificationToCentered()
+                ha.GetPositionCoordinate(
+                    ).SetCoordinateSystemToNormalizedViewport()
+                ha.SetPosition(fx + ox * 0.0016, fy + oy * 0.0016)
+                p.ren.AddActor(ha)
+                p.cmp_text.append(ha)
             ta = vtkTextActor()
             ta.SetInput(txt)
             tp = ta.GetTextProperty()
             tp.SetColor(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
-            tp.SetFontSize(14)
+            tp.SetFontSize(size)
             tp.SetBold(True)
+            if centered:
+                tp.SetJustificationToCentered()
             ta.GetPositionCoordinate(
                 ).SetCoordinateSystemToNormalizedViewport()
-            ta.SetPosition(0.02, 0.34 - i * 0.04)
+            ta.SetPosition(fx, fy)
             p.ren.AddActor(ta)
             p.cmp_text.append(ta)
+
+        # Instruction banner (top-centre) while picking — black 枠.
+        if self._cmp_on:
+            n_sel = sum(1 for s in self._cmp_sel if s[0] == key)
+            _add_cmp_text(
+                "Click to select 2 Ellipse/Polygon data to compare"
+                f"  ({n_sel}/2)", (0, 229, 255), (0.0, 0.0, 0.0),
+                0.5, 0.94, size=15, centered=True)
+        rows = []
+        for c in cmps:                               # one summary line each
+            head = f"Compare #{c['big_id']} vs #{c['small_id']}"
+            if c.get("show_pa"):
+                head += f"  %Area:{c['pct']:.1f}%"
+            rows.append((head, (0, 229, 255), (0.0, 0.0, 0.0)))   # black 枠
+        if any(c.get("show_thk") and not c.get("hidden") for c in cmps):
+            for i, (lab, hexc) in enumerate(_gap_legend()):
+                # <5 mm (first) → white 枠; other rows → black 枠.
+                halo = (1.0, 1.0, 1.0) if i == 0 else (0.0, 0.0, 0.0)
+                rows.append(("  " + lab, _hex_to_rgb(hexc), halo))
+        for i, (txt, rgb, halo) in enumerate(rows):
+            _add_cmp_text(txt, rgb, halo, 0.02, 0.34 - i * 0.04)
         p.render()
 
     # ---- world<->screen ----
