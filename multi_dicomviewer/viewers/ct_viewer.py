@@ -1684,6 +1684,7 @@ class CTViewer(AbstractViewer):
         clr = FitButton("Clear All Result")
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.setHelpToolTip("Clear all measurements and comparison results")
+        clr.setStyleSheet("background:#bdbdbd;color:black;")   # match ReCalc
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
         row.addWidget(QLabel(
