@@ -83,6 +83,7 @@ from multi_dicomviewer.core.measure_geom import (
     ellipse_outline as _ellipse_outline,
     gap_color as _gap_color,
     gap_legend as _gap_legend,
+    gap_linewidth as _gap_linewidth,
     major_minor as _major_minor,
     percent_area_diff as _percent_area_diff,
     point_in_poly as _point_in_poly,
@@ -593,7 +594,8 @@ class _Overlay(QWidget):
             p.fillPath(path, QColor(fr[0], fr[1], fr[2], 90))
             if c["show_thk"]:
                 for r in c["radials"]:                       # inner→outer rays
-                    p.setPen(QPen(QColor(_gap_color(r["gap"])), 1.6))
+                    p.setPen(QPen(QColor(_gap_color(r["gap"])),
+                                  _gap_linewidth(r["gap"])))   # red = thicker
                     p.drawLine(S(r["inner"]), S(r["outer"]))
                 p.setPen(Qt.PenStyle.NoPen)                  # centroid dot
                 p.setBrush(QColor(0, 229, 255))
@@ -2824,6 +2826,37 @@ class CTViewer(AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
 
+    def _recompute_compares(self, key):
+        """Re-derive any compare results on *key* from the CURRENT outlines of
+        the measures they reference (by id), so editing a shape live-updates its
+        comparison. A result whose shape was deleted is dropped."""
+        if not self._compares:
+            return
+        by_id = {m["id"]: m for m in self._measures[key]}
+        out = []
+        for c in self._compares:
+            if c["key"] != key:
+                out.append(c)
+                continue
+            mb, ms = by_id.get(c["big_id"]), by_id.get(c["small_id"])
+            if mb is None or ms is None:
+                continue                     # a referenced shape is gone → drop
+            ob, os_ = self._outline(mb), self._outline(ms)
+            ab, asm = _poly_area(ob), _poly_area(os_)
+            if asm > ab:                     # keep outer = larger
+                mb, ms, ob, os_, ab, asm = ms, mb, os_, ob, asm, ab
+            cen = _polygon_centroid(ob)
+            c = dict(c)
+            c.update({
+                "big_id": mb["id"], "small_id": ms["id"],
+                "outer": ob, "inner": os_, "centroid": cen,
+                "pct": _percent_area_diff(ab, asm),
+                "radials": _radial_gap_compare(ob, os_, cen, c.get("step", 1.0)),
+                "fill_rgb": _hex_to_rgb(mb.get("color")),
+            })
+            out.append(c)
+        self._compares = out
+
     def _compare_hit(self, key, sx, sy):
         """Index in self._compares of the result whose filled region (inside the
         outer outline, outside the inner) contains screen point (sx,sy) on pane
@@ -2923,6 +2956,7 @@ class CTViewer(AbstractViewer):
         self._overlay[key].update()
 
     def _redraw_meas(self, key):
+        self._recompute_compares(key)      # keep comparisons in sync on edit/delete
         self._metrics[key] = [self._metrics_text(key, m)
                               for m in self._measures[key]]
         self._overlay[key].update()
@@ -3012,6 +3046,7 @@ class CTViewer(AbstractViewer):
         else:
             m["pts"][e["vi"]] = w
             self._resnap_center_angle(m)
+        self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
 
     def _resnap_center_angle(self, m):
