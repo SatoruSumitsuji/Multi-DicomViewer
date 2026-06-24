@@ -80,10 +80,13 @@ from multi_dicomviewer.core.measure_geom import (
     ellipse_drag as _ellipse_drag,
     ellipse_from_major as _ellipse_from_major,
     ellipse_outline as _ellipse_outline,
+    gap_color as _gap_color,
     major_minor as _major_minor,
+    percent_area_diff as _percent_area_diff,
     point_in_poly as _point_in_poly,
     poly_area as _poly_area,
     polygon_centroid as _polygon_centroid,
+    radial_gap_compare as _radial_gap_compare,
     project_to_polyline as _project_to_polyline,
     seg_dist as _seg_dist,
     smooth_closed as _smooth_closed,
@@ -91,6 +94,7 @@ from multi_dicomviewer.core.measure_geom import (
 )
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.ui.study_browser import FitButton
+from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
 _SPIN_SIGN = 1.0
@@ -556,6 +560,44 @@ class _Overlay(QWidget):
             p.drawText(QRectF(rx, 4, w - rx - 6, h - 40), flags,
                        "\n".join(lines))
 
+        # ---- Compare: selection highlight + radial gap colour map ----
+        if v._cmp_on:
+            for (skey, smi) in v._cmp_sel:
+                if skey == key and 0 <= smi < len(v._measures[key]):
+                    draw_outline(v._outline(v._measures[key][smi]),
+                                 (0, 229, 255), width=3.2)   # cyan = picked
+        cmp = v._compare
+        if cmp and cmp["key"] == key:
+            show_thk = bool(cmp.get("show_thk"))
+            show_pa = bool(cmp.get("show_pa"))
+            if show_thk:
+                for r in cmp["radials"]:                     # inner→outer rays
+                    p.setPen(QPen(QColor(_gap_color(r["gap"])), 1.6))
+                    p.drawLine(S(r["inner"]), S(r["outer"]))
+                p.setPen(Qt.PenStyle.NoPen)                  # centroid dot
+                p.setBrush(QColor(0, 229, 255))
+                p.drawEllipse(S(cmp["centroid"]), 3.0, 3.0)
+            # summary + colour legend, lower-left (above the WW/WL readout)
+            p.setFont(QFont("monospace", 11))
+            bands = (("<5 mm", "#2ecc71"), ("5-7 mm", "#f1c40f"),
+                     ("7-9 mm", "#e67e22"), (">9 mm", "#e74c3c"))
+            rows = len(bands) if show_thk else 0
+            lh = 16.0
+            y0 = h - 40 - (rows + 1) * lh
+            head = f"Compare #{cmp['big_id']} vs #{cmp['small_id']}"
+            if show_pa:
+                head += f"  %Area:{cmp['pct']:.1f}%"
+            p.setPen(QColor(0, 229, 255))
+            p.drawText(QPointF(10, y0), head)
+            if show_thk:
+                for i, (lab, hexc) in enumerate(bands):
+                    yy = y0 + (i + 1) * lh
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(hexc))
+                    p.drawRect(QRectF(10, yy - 10, 12, 12))
+                    p.setPen(QColor(230, 230, 230))
+                    p.drawText(QPointF(28, yy), lab)
+
     # -- corner info text + angio readout ----------------------------------
     def _paint_info(self, p, key, w, h):
         v = self._v
@@ -886,6 +928,12 @@ class CTViewer(AbstractViewer):
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
         self._meas_hover = None              # cursor (output coords) for draft preview
+        # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
+        self._cmp_on = False                 # Compare-select mode: click 2 shapes
+        self._cmp_sel = []                   # [(key, mi)] picked shapes (max 2)
+        self._compare = None                 # computed {key,big_id,small_id,pct,...}
+        self._cmp_want_pa = False            # last-used: compute %PA (IVUS)
+        self._cmp_want_thk = True            # last-used: compute Thickness (CT LV)
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
@@ -1010,6 +1058,10 @@ class CTViewer(AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
+        # Compare-select mode: a left-click picks the two shapes to compare.
+        if self._cmp_on and self._drag_btn == 1:
+            self._compare_pick(key, x, y)
+            return
         # Shift + right-click (single two-finger tap + Shift) = full-quality
         # ("high-res") rebuild. A single gesture so trackpad users don't need
         # the hard-to-do right-DOUBLE-click (which is kept). It only re-renders,
@@ -1062,6 +1114,8 @@ class CTViewer(AbstractViewer):
 
     def _on_move(self, key, ev):
         x, y = ev["x"], ev["y"]
+        if self._cmp_on:                      # Compare-select: clicks pick, no drag
+            return
         if self._meas_on:
             if self._meas_drag:
                 self._measure_drag(key, x, y)
@@ -1294,6 +1348,18 @@ class CTViewer(AbstractViewer):
         reset.setStyleSheet(_sr_qss)
         reset.clicked.connect(self._reset)
         row.addWidget(reset)
+
+        # ReCalc: same size/font as Reset, a slightly lighter grey so it reads
+        # as a sibling utility yet is easy to tell apart. Rebuilds the OTHER
+        # pane from the selected pane's green-▲ centre line (un-mirror / fix a
+        # companion that drifted after complex rotations) without a full Reset.
+        recalc = FitButton("ReCalc")
+        recalc.setStyleSheet("QPushButton { background:#8a8a8a; color:#101010; }")
+        recalc.setHelpToolTip(
+            "Re-derive the OTHER pane from the selected pane's green-▲ centre "
+            "line — fixes a mirrored / wrong companion after complex rotations")
+        recalc.clicked.connect(self._recalc_companion)
+        row.addWidget(recalc)
 
         self._cmap_btn = FitButton("ColorMap")
         self._cmap_btn.setCheckable(True)
@@ -2308,6 +2374,29 @@ class CTViewer(AbstractViewer):
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
         self._pc[other] = self._center.copy()
 
+    def _recalc_companion(self):
+        """ReCalc: treat the ACTIVE pane as master and rebuild the OTHER pane
+        cleanly as the plane that cuts the master along its green-▲ centre line
+        (right-handed, so it can't come out mirrored). Fixes a companion that
+        drifted to a wrong / mirror orientation after a sequence of rotations,
+        WITHOUT resetting the master — the view the user wants to keep."""
+        if self._vol is None:
+            return
+        master = self._active_pane
+        other = "B" if master == "A" else "A"
+        u, v, _n = self._frame[master]
+        a = math.radians(self._cross_ang[master])
+        crossdir = u * math.cos(a) + v * math.sin(a)
+        # Re-derive the companion ⟂ to master through master's crossline. This
+        # builds u×v = n (right-handed), so any prior mirror is undone, and it
+        # re-straightens the companion crossline (see _couple_companion).
+        self._couple_companion(master, crossdir)
+        self._roll[other] = 0.0                # straighten the companion roll
+        self._pc[other] = self._center.copy()
+        self._fit_pane(other)                  # refit only the companion camera
+        self._view_initial = False
+        self._refresh()
+
     def _cross_press(self, which, sx, sy) -> bool:
         """True (and arm a MOVE/ROTATE gesture) if the press lands ON the
         crosshair, else False so the selected tool handles the drag.
@@ -2572,8 +2661,18 @@ class CTViewer(AbstractViewer):
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
-        row.addWidget(QLabel("  Left-click = add point /"
-                             " right-click finishes Polyline / Polygon"))
+        # Compare two Polygon/Ellipse: %Area difference + radial gap colour map.
+        self._cmp_btn = FitButton("Compare")
+        self._cmp_btn.setMinimumWidth(min(self._cmp_btn.sizeHint().width(), 64))
+        self._cmp_btn.setCheckable(True)
+        self._cmp_btn.setHelpToolTip(
+            "Compare two Polygon/Ellipse: click the two shapes — shows %Area "
+            "difference and a radial gap colour map (<5 / 5–7 / 7–9 / >9 mm)")
+        self._cmp_btn.clicked.connect(self._toggle_compare)
+        row.addWidget(self._cmp_btn)
+        self._cmp_hint = QLabel("  Left-click = add point /"
+                                " right-click finishes Polyline / Polygon")
+        row.addWidget(self._cmp_hint)
         row.addStretch(1)
         return bar
 
@@ -2604,8 +2703,95 @@ class CTViewer(AbstractViewer):
         self._draft = None
         self._edit = None
         self._meas_hover = None
+        self._compare = None
+        self._cmp_sel = []
         for k in ("A", "B"):
             self._redraw_meas(k)
+
+    # ---- Compare: %Area + radial gap between two Polygon/Ellipse shapes ----
+    def _toggle_compare(self):
+        """Enter/leave Compare-select mode. While on, a left-click picks a
+        Polygon/Ellipse (toggles); picking the 2nd computes and shows the
+        %Area difference and the radial gap colour map."""
+        self._cmp_on = self._cmp_btn.isChecked()
+        self._cmp_sel = []
+        if self._cmp_on:
+            self._compare = None             # clear any previous result
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _compare_pick(self, key, sx, sy) -> bool:
+        """Compare-mode left-click: toggle the Polygon/Ellipse under the cursor
+        in the selection (one pane only). Returns True if the click was consumed
+        (i.e. Compare mode is active)."""
+        if not self._cmp_on:
+            return False
+        mi = self._pick_measure(key, sx, sy)
+        if mi is not None and self._measures[key][mi]["type"] in (
+                "polygon", "ellipse"):
+            # Selecting on a different pane restarts the selection there.
+            if self._cmp_sel and self._cmp_sel[0][0] != key:
+                self._cmp_sel = []
+            item = (key, mi)
+            if item in self._cmp_sel:
+                self._cmp_sel.remove(item)
+            elif len(self._cmp_sel) < 2:
+                self._cmp_sel.append(item)
+            if len(self._cmp_sel) == 2:
+                # Defer the modal options dialog out of the pointer handler (so
+                # a blocking exec() can't swallow the pointer-up).
+                QTimer.singleShot(0, self._compare_prompt)
+        self._overlay[key].update()
+        return True
+
+    def _compare_prompt(self):
+        """Ask which analysis to run (%PA / Thickness), then compute."""
+        if not self._cmp_on or len(self._cmp_sel) != 2:
+            return
+        dlg = CompareOptionsDialog(self._cmp_want_pa, self._cmp_want_thk, self)
+        if not dlg.exec():
+            self._cancel_compare()
+            return
+        self._cmp_want_pa, self._cmp_want_thk = dlg.values()
+        if not (self._cmp_want_pa or self._cmp_want_thk):
+            self._cancel_compare()           # nothing ticked → abort
+            return
+        self._do_compare()
+
+    def _cancel_compare(self):
+        key = self._cmp_sel[0][0] if self._cmp_sel else self._active_pane
+        self._cmp_on = False
+        self._cmp_sel = []
+        self._cmp_btn.setChecked(False)
+        self._overlay[key].update()
+
+    def _do_compare(self):
+        sel = self._cmp_sel
+        if len(sel) != 2 or sel[0][0] != sel[1][0]:
+            return
+        key = sel[0][0]
+        m1 = self._measures[key][sel[0][1]]
+        m2 = self._measures[key][sel[1][1]]
+        o1, o2 = self._outline(m1), self._outline(m2)
+        a1, a2 = _poly_area(o1), _poly_area(o2)
+        # The LARGER shape is the outer reference (centroid + denominator).
+        if a2 > a1:
+            m1, m2, o1, o2, a1, a2 = m2, m1, o2, o1, a2, a1
+        cen = _polygon_centroid(o1)
+        # Radials only when Thickness is requested (skip the 360-ray cost for
+        # a %PA-only run).
+        radials = (_radial_gap_compare(o1, o2, cen, 1.0)
+                   if self._cmp_want_thk else [])
+        self._compare = {
+            "key": key, "big_id": m1["id"], "small_id": m2["id"],
+            "pct": _percent_area_diff(a1, a2), "centroid": cen,
+            "radials": radials, "step": 1.0,
+            "show_pa": self._cmp_want_pa, "show_thk": self._cmp_want_thk,
+        }
+        self._cmp_on = False
+        self._cmp_sel = []
+        self._cmp_btn.setChecked(False)
+        self._overlay[key].update()
 
     # ---- per-measure geometry ----
     def _ellipse_cab(self, m):
