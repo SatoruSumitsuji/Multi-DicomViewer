@@ -440,3 +440,81 @@ def major_minor(m):
     foot = (vfar[0] - nx * width, vfar[1] - ny * width)  # foot on the far line
     # Both endpoints lie on the polygon boundary; the segment length == bw.
     return (p1, p2), (vfar, foot), dmax, bw
+
+
+# --------------------------------------------------------------------------
+# Two-shape comparison: %Area difference + radial gap map between two closed
+# outlines (Polygon / Ellipse). Shared by both CT viewers so Windows (VTK) and
+# macOS (pygfx) compute identically; each viewer only renders the result.
+# --------------------------------------------------------------------------
+
+#: Gap colour bands (upper bound in mm, hex colour). <5 / 5–7 / 7–9 / >9 mm.
+GAP_BANDS = (
+    (5.0, "#2ecc71"),          # green   — < 5 mm
+    (7.0, "#f1c40f"),          # yellow  — 5–7 mm
+    (9.0, "#e67e22"),          # orange  — 7–9 mm
+    (float("inf"), "#e74c3c"),  # red     — > 9 mm
+)
+
+
+def gap_color(gap_mm: float) -> str:
+    """Hex colour for a radial gap length (mm) per GAP_BANDS."""
+    for hi, col in GAP_BANDS:
+        if gap_mm < hi:
+            return col
+    return GAP_BANDS[-1][1]
+
+
+def percent_area_diff(area_big: float, area_small: float) -> float:
+    """|big − small| / big × 100  (divide by the LARGER area)."""
+    if area_big <= 1e-9:
+        return 0.0
+    return abs(area_big - area_small) / area_big * 100.0
+
+
+def _ray_polyline_hit(cx, cy, dx, dy, poly):
+    """Nearest t>0 where ray (cx,cy)+t·(dx,dy) crosses the CLOSED polyline
+    *poly* (list of (x,y); segment n→0 closes it). Returns t or None.
+    With (dx,dy) a unit vector, t is the distance in the same units as poly."""
+    best_t = None
+    n = len(poly)
+    for i in range(n):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % n]
+        ex, ey = bx - ax, by - ay
+        denom = dx * ey - dy * ex
+        if abs(denom) < 1e-12:                       # ray ∥ segment
+            continue
+        rx, ry = ax - cx, ay - cy
+        t = (rx * ey - ry * ex) / denom              # along the ray
+        s = (rx * dy - ry * dx) / denom              # along the segment
+        if t > 1e-9 and -1e-9 <= s <= 1.0 + 1e-9:
+            if best_t is None or t < best_t:
+                best_t = t
+    return best_t
+
+
+def radial_gap_compare(outer, inner, centroid, step_deg: float = 1.0):
+    """Cast rays every *step_deg* over 360° from *centroid* (the LARGER shape's
+    area centroid). For each ray, intersect the OUTER and INNER closed outlines
+    and record the gap between the two crossings.
+
+    Returns a list of dicts: {ang, inner:(x,y), outer:(x,y), gap}. Rays that
+    miss either outline are skipped. Units follow the outlines (mm)."""
+    cx, cy = centroid
+    out = []
+    n = max(1, int(round(360.0 / step_deg)))
+    for k in range(n):
+        ang = math.radians(k * step_deg)
+        dx, dy = math.cos(ang), math.sin(ang)
+        to = _ray_polyline_hit(cx, cy, dx, dy, outer)
+        ti = _ray_polyline_hit(cx, cy, dx, dy, inner)
+        if to is None or ti is None:
+            continue
+        out.append({
+            "ang": k * step_deg,
+            "inner": (cx + ti * dx, cy + ti * dy),
+            "outer": (cx + to * dx, cy + to * dy),
+            "gap": abs(to - ti),
+        })
+    return out
