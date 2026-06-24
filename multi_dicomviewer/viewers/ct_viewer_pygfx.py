@@ -2685,11 +2685,8 @@ class CTViewer(AbstractViewer):
             b.clicked.connect(lambda _c, k=key: self._set_measure_type(k))
             self._meas_btns[key] = b
             row.addWidget(b)
-        clr = FitButton("Clear")
-        clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
-        clr.clicked.connect(self._measure_clear)
-        row.addWidget(clr)
         # Compare two Polygon/Ellipse: %Area difference + radial gap colour map.
+        # Placed right of Angle, with Clear All Result to its right.
         self._cmp_btn = FitButton("Compare")
         self._cmp_btn.setMinimumWidth(min(self._cmp_btn.sizeHint().width(), 64))
         self._cmp_btn.setCheckable(True)
@@ -2698,6 +2695,11 @@ class CTViewer(AbstractViewer):
             "difference and a radial gap colour map (<5 / 5–7 / 7–9 / >9 mm)")
         self._cmp_btn.clicked.connect(self._toggle_compare)
         row.addWidget(self._cmp_btn)
+        clr = FitButton("Clear All Result")
+        clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
+        clr.setHelpToolTip("Clear all measurements and comparison results")
+        clr.clicked.connect(self._measure_clear)
+        row.addWidget(clr)
         self._cmp_hint = QLabel("  Left-click = add point /"
                                 " right-click finishes Polyline / Polygon")
         row.addWidget(self._cmp_hint)
