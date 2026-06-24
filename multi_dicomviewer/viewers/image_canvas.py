@@ -16,13 +16,15 @@ import math
 import sys
 
 import numpy as np
-from PyQt6.QtCore import QPoint, QPointF, QRect, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
-    QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QPolygon,
+    QColor, QCursor, QFont, QIcon, QImage, QPainter, QPainterPath, QPen,
+    QPixmap, QPolygon, QPolygonF,
 )
 from PyQt6.QtWidgets import QMenu, QWidget
 
 from multi_dicomviewer.core import measure_geom as G
+from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
 from multi_dicomviewer.core.image_export import pick_export_format
 from multi_dicomviewer.core.measurements import Measurement
@@ -127,6 +129,10 @@ class ImageCanvas(QWidget):
     #: arrow behaviour when THEY are focused.
     arrow_pressed = pyqtSignal(str)
 
+    #: Emitted when a Compare gesture ends (computed or cancelled) so the host
+    #: viewer can un-check its "Compare" button.
+    compare_finished = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(80, 80)
@@ -164,10 +170,14 @@ class ImageCanvas(QWidget):
         self._draft: dict | None = None    # {type, pts}
         self._edit: dict | None = None     # {mi, vi}
         self._hover: tuple[float, float] | None = None
-        # IVUS-only %PlaqueArea state. Set True by IVUSViewer; when there
-        # are 3+ area measures the user picks 2 by ID via context menu.
-        self.is_ivus: bool = False
-        self._plaque_selected: list[int] = []   # ordered, max 2 ids
+        # Compare (%PA + radial Thickness gap between two Ellipse/Polygon),
+        # same flow as the CT viewers: arm with the Compare button, click two
+        # shapes, pick analysis, results persist (right-click a fill → Delete).
+        self._cmp_on: bool = False           # Compare-select mode
+        self._cmp_sel: list[int] = []        # picked measure indices (max 2)
+        self._compares: list[dict] = []      # persisted results
+        self._cmp_want_pa: bool = True       # last-used: %PA (IVUS default)
+        self._cmp_want_thk: bool = False     # last-used: Thickness
         # Zoom (Z = zoom in / Shift+Z = zoom out / mouse wheel also).
         # Wheel zooms toward the cursor; Z/Shift+Z toward the view centre.
         self._zoom: float = 1.0
@@ -313,7 +323,8 @@ class ImageCanvas(QWidget):
         self._draft = None
         self._edit = None
         self._hover = None
-        self._plaque_selected.clear()
+        self._compares.clear()
+        self._cmp_sel = []
         self._center_angle_target = -1
         self.update()
 
@@ -674,7 +685,7 @@ class ImageCanvas(QWidget):
                     return mi, vi
         return None
 
-    # ---------------------------------------- area & %PlaqueArea (IVUS)
+    # ------------------------------------------------- area (mm² / px²)
     def _area(self, m) -> float:
         """Area in mm² (or px² when uncalibrated). 0 for non-area shapes."""
         if m["type"] == "ellipse":
@@ -687,48 +698,123 @@ class ImageCanvas(QWidget):
             return G.poly_area(pts_mm)
         return 0.0
 
-    def _area_measures(self) -> list[dict]:
-        return [m for m in self.measures
-                if m["type"] in ("ellipse", "polygon")]
+    # -------------------------------------------------- Compare (%PA + gap)
+    def set_compare_mode(self, on: bool) -> None:
+        """Arm/disarm Compare-select mode (host viewer's Compare button)."""
+        self._cmp_on = bool(on)
+        self._cmp_sel = []
+        self.update()
 
-    def _plaque_compute(self):
-        """Returns one of:
-          None — IVUS off, or fewer than 2 area measures.
-          ('auto', pct, small, large) — exactly 2 areas (auto-paired).
-          ('selected', pct, small, large) — 3+ and user picked 2.
-          ('prompt', [ids]) — 3+ and the user must pick 2.
-        """
-        if not self.is_ivus:
-            return None
-        areas = [(m["id"], self._area(m)) for m in self._area_measures()]
-        if len(areas) < 2:
-            return None
-        if len(areas) == 2:
-            a1, a2 = areas[0][1], areas[1][1]
-        else:
-            sel = [(mid, a) for (mid, a) in areas
-                   if mid in self._plaque_selected]
-            if len(sel) != 2:
-                return ("prompt", [mid for mid, _ in areas])
-            a1, a2 = sel[0][1], sel[1][1]
-        large, small = max(a1, a2), min(a1, a2)
-        if large < 1e-9:
-            return None
-        pct = (large - small) / large * 100.0
-        kind = "auto" if len(areas) == 2 else "selected"
-        return (kind, pct, small, large)
+    def _compare_pick(self, sx, sy) -> None:
+        """Compare-mode left-click: toggle the Ellipse/Polygon under the cursor
+        in the selection; the 2nd pick opens the analysis dialog and computes."""
+        mi = self._pick_measure(sx, sy)
+        if mi is not None and self.measures[mi]["type"] in ("ellipse", "polygon"):
+            if mi in self._cmp_sel:
+                self._cmp_sel.remove(mi)
+            elif len(self._cmp_sel) < 2:
+                self._cmp_sel.append(mi)
+            if len(self._cmp_sel) == 2:
+                QTimer.singleShot(0, self._compare_prompt)
+        self.update()
 
-    def _cleanup_plaque_selection(self):
-        ids = {m["id"] for m in self.measures}
-        self._plaque_selected = [i for i in self._plaque_selected if i in ids]
+    def _compare_prompt(self) -> None:
+        if not self._cmp_on or len(self._cmp_sel) != 2:
+            return
+        dlg = CompareOptionsDialog(self._cmp_want_pa, self._cmp_want_thk, self)
+        if not dlg.exec():
+            self._cancel_compare()
+            return
+        self._cmp_want_pa, self._cmp_want_thk = dlg.values()
+        if not (self._cmp_want_pa or self._cmp_want_thk):
+            self._cancel_compare()
+            return
+        self._do_compare()
 
-    def _toggle_plaque(self, mid: int) -> None:
-        if mid in self._plaque_selected:
-            self._plaque_selected.remove(mid)
-        else:
-            self._plaque_selected.append(mid)
-            if len(self._plaque_selected) > 2:
-                self._plaque_selected = self._plaque_selected[-2:]
+    def _cancel_compare(self) -> None:
+        self._cmp_on = False
+        self._cmp_sel = []
+        self.compare_finished.emit()
+        self.update()
+
+    def _do_compare(self) -> None:
+        if len(self._cmp_sel) != 2:
+            return
+        m1, m2 = self.measures[self._cmp_sel[0]], self.measures[self._cmp_sel[1]]
+        o1, o2 = self._outline_px(m1), self._outline_px(m2)
+        a1, a2 = self._area(m1), self._area(m2)
+        if a2 > a1:                          # outer = larger
+            m1, m2, o1, o2, a1, a2 = m2, m1, o2, o1, a2, a1
+        cen = G.polygon_centroid(o1)
+        radials = G.radial_gap_compare(o1, o2, cen, 1.0)
+        for r in radials:                    # gap in mm (or px), via calibration
+            r["gap"] = G.dist(self._to_mm(r["inner"]), self._to_mm(r["outer"]))
+        self._compares.append({
+            "big_id": m1["id"], "small_id": m2["id"],
+            "pct": G.percent_area_diff(a1, a2), "centroid": cen,
+            "outer": o1, "inner": o2, "radials": radials, "step": 1.0,
+            "show_pa": self._cmp_want_pa, "show_thk": self._cmp_want_thk,
+            "fill_hex": m1.get("color") or "#33e6ff",
+        })
+        self._cmp_on = False
+        self._cmp_sel = []
+        self.compare_finished.emit()
+        self.update()
+
+    def _recompute_compares(self) -> None:
+        """Re-derive each compare result from the CURRENT outlines of the
+        measures it references (by id), so editing a shape live-updates its
+        comparison; a result whose shape was deleted is dropped."""
+        if not self._compares:
+            return
+        by_id = {m["id"]: m for m in self.measures}
+        out = []
+        for c in self._compares:
+            mb, ms = by_id.get(c["big_id"]), by_id.get(c["small_id"])
+            if mb is None or ms is None:
+                continue
+            ob, os_ = self._outline_px(mb), self._outline_px(ms)
+            ab, asm = self._area(mb), self._area(ms)
+            if asm > ab:
+                mb, ms, ob, os_, ab, asm = ms, mb, os_, ob, asm, ab
+            cen = G.polygon_centroid(ob)
+            radials = G.radial_gap_compare(ob, os_, cen, c.get("step", 1.0))
+            for r in radials:
+                r["gap"] = G.dist(self._to_mm(r["inner"]), self._to_mm(r["outer"]))
+            c = dict(c)
+            c.update({
+                "big_id": mb["id"], "small_id": ms["id"],
+                "outer": ob, "inner": os_, "centroid": cen,
+                "pct": G.percent_area_diff(ab, asm), "radials": radials,
+                "fill_hex": mb.get("color") or "#33e6ff",
+            })
+            out.append(c)
+        self._compares = out
+
+    def _compare_hit(self, sx, sy):
+        """Index of the compare result whose filled region (inside outer, outside
+        inner) contains widget point (sx,sy) — topmost first — else None."""
+        pt = self._widget_to_image(QPoint(int(sx), int(sy)))
+        if pt is None:
+            return None
+        for i in range(len(self._compares) - 1, -1, -1):
+            c = self._compares[i]
+            if (G.point_in_poly(pt[0], pt[1], c["outer"])
+                    and not G.point_in_poly(pt[0], pt[1], c["inner"])):
+                return i
+        return None
+
+    def _compare_delete_menu(self, target) -> None:
+        if target not in self._compares:
+            return
+        menu = QMenu(self)
+        act = menu.addAction("Delete this comparison")
+        if menu.exec(QCursor.pos()) is act:
+            try:
+                self._compares.remove(target)
+            except ValueError:
+                pass
+            self.update()
 
     # ----------------------------------------------- right-click menus
     def _ca_hit(self, sx, sy):
@@ -785,7 +871,7 @@ class ImageCanvas(QWidget):
             self._delete_point(mi, vi)
         elif chosen is del_res:
             del self.measures[mi]
-            self._cleanup_plaque_selection()
+            self._recompute_compares()      # drop/refresh affected comparisons
         self.update()
 
     def _outline_menu(self, mi, sx, sy):
@@ -800,15 +886,6 @@ class ImageCanvas(QWidget):
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction("Center Angle")
-        toggle_pl = None
-        if (self.is_ivus
-                and m["type"] in ("ellipse", "polygon")
-                and len(self._area_measures()) >= 3):
-            sel = m["id"] in self._plaque_selected
-            toggle_pl = menu.addAction(
-                "Unselect for %PlaqueArea" if sel
-                else "Select for %PlaqueArea"
-            )
         # Vessel type — tag a Line as the Guiding Catheter or a coronary
         # proximal segment, so the Coaxial-Eval tool can pick it up. Only
         # meaningful for straight lines; a "(none)" entry clears the tag.
@@ -843,11 +920,9 @@ class ImageCanvas(QWidget):
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = mi
             m.pop("center_angle", None)              # restart picking
-        elif toggle_pl is not None and chosen is toggle_pl:
-            self._toggle_plaque(m["id"])
         elif chosen is del_act:
             del self.measures[mi]
-            self._cleanup_plaque_selection()
+            self._recompute_compares()      # drop/refresh affected comparisons
         else:
             for act, label in vessel_actions:
                 if chosen is act:
@@ -1101,6 +1176,11 @@ class ImageCanvas(QWidget):
             if hit is not None:
                 self._handle_menu(hit, sx, sy)
                 return
+            # Right-click on a compare result's filled region → Delete menu.
+            ci = self._compare_hit(sx, sy)
+            if ci is not None:
+                self._compare_delete_menu(self._compares[ci])
+                return
             mi = self._pick_measure(sx, sy)
             if mi is None:
                 # Empty area + no active measure tool → offer still export.
@@ -1113,6 +1193,11 @@ class ImageCanvas(QWidget):
             return
 
         if e.button() != Qt.MouseButton.LeftButton:
+            return
+
+        # Compare-select mode: a left-click picks the two shapes to compare.
+        if self._cmp_on:
+            self._compare_pick(sx, sy)
             return
 
         # Center-Angle pick mode consumes left-clicks until 3 perimeter
@@ -1211,6 +1296,7 @@ class ImageCanvas(QWidget):
             else:
                 m["pts"][vi] = pt
                 self._resnap_center_angle(m)    # CA follows the reshaped polygon
+            self._recompute_compares()          # live-update any comparison
             self.update()
             return
         if self._draft is not None:
@@ -1492,6 +1578,9 @@ class ImageCanvas(QWidget):
                 w = self._image_to_widget(q)
                 p.drawEllipse(w, 3, 3)
 
+        # Compare overlay (filled regions + radial gap map + selection / hint).
+        self._paint_compare(p)
+
         # Result lines (top-right, beneath any overlay would be busy).
         self._paint_results(p)
 
@@ -1666,6 +1755,75 @@ class ImageCanvas(QWidget):
             draw_outlined_line(p, box.x() + pad, y, line, white)
             y += lh
 
+    def _paint_compare(self, p: QPainter):
+        """Filled annulus + radial gap colour map per persisted comparison, plus
+        the cyan selection highlight and instruction banner while picking."""
+        def W(pt):
+            wf = self._image_to_widget_f(pt)
+            return QPointF(wf[0], wf[1])
+
+        if self._cmp_on:
+            for mi in self._cmp_sel:
+                if 0 <= mi < len(self.measures):
+                    ol = self._outline_px(self.measures[mi])
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(QColor(0, 229, 255), 6.0))   # cyan = picked
+                    p.drawPolyline(QPolygonF([W(q) for q in ol]))
+            f = QFont()
+            f.setPointSize(self._overlay_font_pt + 1)
+            f.setBold(True)
+            p.setFont(f)
+            p.setPen(QColor(0, 229, 255))
+            n = len(self._cmp_sel)
+            p.drawText(QRect(0, 6, self.width(), 26),
+                       int(Qt.AlignmentFlag.AlignHCenter)
+                       | int(Qt.AlignmentFlag.AlignTop),
+                       "Click to select 2 Ellipse/Polygon data to compare"
+                       f"  ({n}/2)")
+
+        cmps = self._compares
+        for c in cmps:
+            path = QPainterPath()                        # annulus = outer − inner
+            path.setFillRule(Qt.FillRule.OddEvenFill)
+            path.addPolygon(QPolygonF([W(q) for q in c["outer"]]))
+            path.addPolygon(QPolygonF([W(q) for q in c["inner"]]))
+            fr = QColor(c["fill_hex"])
+            fr.setAlpha(90)                              # ~35% opaque
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillPath(path, fr)
+            if c["show_thk"]:
+                for r in c["radials"]:
+                    p.setPen(QPen(QColor(G.gap_color(r["gap"])),
+                                  G.gap_linewidth(r["gap"])))   # red = thicker
+                    p.drawLine(W(r["inner"]), W(r["outer"]))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(0, 229, 255))
+                p.drawEllipse(W(c["centroid"]), 3.0, 3.0)
+        if cmps:
+            f = QFont()
+            f.setPointSize(self._overlay_font_pt)
+            p.setFont(f)
+            bands = G.gap_legend() if any(c["show_thk"] for c in cmps) else []
+            heads = []
+            for c in cmps:
+                ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
+                if c["show_pa"]:
+                    ht += f"  %Area:{c['pct']:.1f}%"
+                heads.append(ht)
+            lh = 16.0
+            y = self.height() - 10 - (len(heads) + len(bands)) * lh
+            p.setPen(QColor(0, 229, 255))
+            for ht in heads:
+                p.drawText(QPointF(10, y), ht)
+                y += lh
+            for lab, hexc in bands:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(hexc))
+                p.drawRect(QRectF(10, y - 10, 12, 12))
+                p.setPen(QColor(230, 230, 230))
+                p.drawText(QPointF(28, y), lab)
+                y += lh
+
     def _paint_results(self, p: QPainter):
         if not self.measures:
             return
@@ -1674,35 +1832,7 @@ class ImageCanvas(QWidget):
         p.setFont(font)
         fm = p.fontMetrics()
 
-        # IVUS %PlaqueArea (if applicable) — and a "★ " prefix on the
-        # measures the user has selected to be the two compared.
-        pa = self._plaque_compute()
-        selected_ids: set[int] = set()
-        if pa and pa[0] == "prompt":
-            selected_ids = set(self._plaque_selected)
-        elif pa and pa[0] == "selected":
-            selected_ids = set(self._plaque_selected)
-
-        lines = []
-        for m in self.measures:
-            prefix = "★ " if m["id"] in selected_ids else ""
-            lines.append(prefix + self._metrics(m))
-        if pa:
-            unit = self._unit()
-            if pa[0] in ("auto", "selected"):
-                _, pct, small, large = pa
-                lines.append(
-                    f"%PlaqueArea: {pct:.1f}%  "
-                    f"(small {small:.1f}{unit}² / large {large:.1f}{unit}²)"
-                )
-            else:                                # prompt: ids to pick from
-                ids = " ".join(f"#{i}" for i in pa[1])
-                lines.append(
-                    f"%PlaqueArea: choose 2 from  {ids}"
-                )
-                lines.append(
-                    "  (right-click an outline → Select for %PlaqueArea)"
-                )
+        lines = [self._metrics(m) for m in self.measures]
 
         pad, lh = 6, fm.height()
         # Confine results to the right ~40% and word-wrap, so a larger font
@@ -1716,10 +1846,7 @@ class ImageCanvas(QWidget):
         )
         p.fillRect(box, QColor(0, 0, 0, 140))
         y = box.y() + pad + fm.ascent()
+        p.setPen(QColor(255, 217, 0))
         for line in lines:
-            # %PlaqueArea result line in green so it stands out.
-            colour = QColor(120, 230, 130) if line.startswith("%PlaqueArea:") \
-                else QColor(255, 217, 0)
-            p.setPen(colour)
             p.drawText(box.x() + pad, y, line)
             y += lh

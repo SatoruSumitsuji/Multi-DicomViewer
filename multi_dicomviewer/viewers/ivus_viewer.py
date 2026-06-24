@@ -147,11 +147,9 @@ class IVUSViewer(XAViewer):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # IVUS enables the %PlaqueArea readout on each canvas: when two
-        # Ellipse/Polygon measures exist they are auto-paired; with 3+
-        # the user picks 2 via the outline right-click menu.
-        for c in (self.canvas, self.canvas2):
-            c.is_ivus = True
+        # %PlaqueArea is now done through the shared "Compare" flow (pick two
+        # Ellipse/Polygon, choose %PA / Thickness) — same as the CT viewers —
+        # so there is no longer an IVUS-specific auto-%PA mode to enable here.
 
         # Long-axis state ----------------------------------------------
         # Per-plane rotation-centre array, lazily populated on series
