@@ -3770,16 +3770,19 @@ class CTViewer(AbstractViewer):
             along_uh = (abs(float(np.dot(self._cross_axis, uh)))
                         >= abs(float(np.dot(self._cross_axis, uv))))
             if along_uh:
-                ou, ov, _on = self._frame[other]
-                delta = self._center - self._pc[other]
-                co_u = float(np.dot(delta, ou))
-                co_v = float(np.dot(delta, ov))
+                # The slide is along dir3 = the green-▲ line direction in the
+                # companion. Pan ONLY along dir3 (so the ▲ line slides along
+                # itself and never moves sideways): measure the companion
+                # crosshair's offset ALONG dir3 and pan just the excess past the
+                # dead-zone. Per-axis clamping panned off-direction and dragged
+                # the ▲ line; this keeps it fixed.
+                dn = dir3 / (float(np.linalg.norm(dir3)) or 1.0)
+                off = float(np.dot(self._center - self._pc[other], dn))
                 ps = self.pane[other].ren.GetActiveCamera().GetParallelScale()
                 limit = 0.8 * ps                   # ~80% of half-view = dead-zone
-                ex_u = co_u - max(-limit, min(limit, co_u))
-                ex_v = co_v - max(-limit, min(limit, co_v))
-                if ex_u or ex_v:                   # past the dead-zone → pan
-                    self._pc[other] = self._pc[other] + ex_u * ou + ex_v * ov
+                excess = off - max(-limit, min(limit, off))
+                if excess:                         # past the dead-zone → pan
+                    self._pc[other] = self._pc[other] + excess * dn
             else:
                 self._pc[other] = self._center.copy()   # ▲ line: other reslices
             self._view_initial = False
