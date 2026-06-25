@@ -98,6 +98,9 @@ from multi_dicomviewer.core.measure_geom import (
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.ui.study_browser import FitButton
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
+from multi_dicomviewer.ui.measure_style_menu import (
+    add_color_submenu, add_transparency_submenu, transp_to_alpha,
+)
 
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
 _SPIN_SIGN = 1.0
@@ -507,9 +510,9 @@ class _Overlay(QWidget):
         def poly(pts):
             return QPolygonF([S(q) for q in pts])
 
-        def draw_outline(pts, rgb, width=1.8):    # 1.5 ×1.2 — readability
+        def draw_outline(pts, rgb, width=1.8, alpha=255):  # 1.5 ×1.2 — readability
             p.setBrush(Qt.BrushStyle.NoBrush)
-            p.setPen(QPen(QColor(*rgb), width))
+            p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], alpha), width))
             if len(pts) >= 2:
                 p.drawPolyline(poly(pts))
 
@@ -536,7 +539,8 @@ class _Overlay(QWidget):
             if v._results_hidden or m.get("hidden"):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
-            draw_outline(v._outline(m), rgb)
+            draw_outline(v._outline(m), rgb,
+                         alpha=transp_to_alpha(m.get("transp", 0)))
             if m["type"] in ("ellipse", "polygon"):
                 maj, mnr, _, _ = _major_minor(m)
                 for seg in (maj, mnr):
@@ -656,7 +660,7 @@ class _Overlay(QWidget):
                     if 2.5 * c["step"] < da < 360.0 - 2.5 * c["step"]:
                         continue                         # a skipped-ray gap
                     col = QColor(_gap_color(a["gap"]))
-                    col.setAlpha(128)                    # 50% (was 65% transp.)
+                    col.setAlpha(transp_to_alpha(c.get("transp", 50)))  # Change Transparency
                     p.setBrush(col)
                     p.setPen(QPen(col, 0.8))             # cover sector seams
                     p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
@@ -673,7 +677,8 @@ class _Overlay(QWidget):
                 path.addPolygon(poly(c["outer"]))
                 path.addPolygon(poly(c["inner"]))
                 fr = c["fill_rgb"]
-                p.fillPath(path, QColor(fr[0], fr[1], fr[2], 128))   # 50%
+                p.fillPath(path, QColor(fr[0], fr[1], fr[2],
+                                        transp_to_alpha(c.get("transp", 50))))
         if cmps:
             # one summary line per result + a single colour legend if any result
             # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
@@ -3076,8 +3081,10 @@ class CTViewer(AbstractViewer):
                 "outer": ob, "inner": os_, "centroid": cen,
                 "pct": _percent_area_diff(ab, asm),
                 "radials": _radial_gap_compare(ob, os_, cen, c.get("step", 1.0)),
-                "fill_rgb": _hex_to_rgb(mb.get("color")),
             })
+            # Keep a user-chosen fill colour; otherwise track the outer outline.
+            if not c.get("fill_custom"):
+                c["fill_rgb"] = _hex_to_rgb(mb.get("color"))
             out.append(c)
         self._compares = out
 
@@ -3101,7 +3108,12 @@ class CTViewer(AbstractViewer):
         outlines are separate measures and are unaffected."""
         if target not in self._compares:
             return
+        from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         menu = QMenu(self)
+        # Independently-selectable fill colour (separate from the outlines);
+        # preserved across recompute via the "fill_custom" flag.
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
         vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(QCursor.pos())
@@ -3113,7 +3125,21 @@ class CTViewer(AbstractViewer):
             except ValueError:
                 pass
         else:
-            return
+            hit = False
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    target["fill_rgb"] = _hex_to_rgb(hexcol)
+                    target["fill_custom"] = True
+                    hit = True
+                    break
+            if not hit:
+                for act, val in transp_actions:
+                    if chosen is act:
+                        target["transp"] = val
+                        hit = True
+                        break
+            if not hit:
+                return
         for k in ("A", "B"):
             self._overlay[k].update()
         self._update_hideall_btn()
@@ -3424,6 +3450,11 @@ class CTViewer(AbstractViewer):
             del_pt = menu.addAction("Delete point")
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        # Change Color / Change Transparency — on every result type (incl.
+        # Line/Angle, most easily right-clicked on a handle).
+        from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction("Delete result")
@@ -3437,6 +3468,16 @@ class CTViewer(AbstractViewer):
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
             del self._measures[which][mi]
+        else:
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    m["color"] = hexcol
+                    break
+            for act, val in transp_actions:
+                if chosen is act:
+                    m["transp"] = val
+                    break
+        self._recompute_compares(which)     # a colour change refreshes any compare
         self._redraw_meas(which)
 
     def _outline_right(self, which, mi, sx, sy):
@@ -3460,6 +3501,7 @@ class CTViewer(AbstractViewer):
             pix.fill(QColor(hexcol))
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
@@ -3480,6 +3522,11 @@ class CTViewer(AbstractViewer):
                 if chosen is act:
                     m["color"] = hexcol
                     break
+            for act, val in transp_actions:
+                if chosen is act:
+                    m["transp"] = val
+                    break
+        self._recompute_compares(which)     # a colour change refreshes any compare
         self._redraw_meas(which)
 
     def _center_angle_add(self, w) -> None:

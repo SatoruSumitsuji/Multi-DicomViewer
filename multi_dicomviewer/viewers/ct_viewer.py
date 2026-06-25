@@ -146,6 +146,9 @@ from multi_dicomviewer.core.measure_geom import (
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.ui.study_browser import FitButton
+from multi_dicomviewer.ui.measure_style_menu import (
+    add_color_submenu, add_transparency_submenu, transp_to_alpha,
+)
 
 _TOOLS = ("ZOOM", "MOVE", "ROTATE", "SPIN", "PAGING", "THICK", "WL")
 #: Button captions carry the keyboard shortcut so it's discoverable on-screen.
@@ -349,15 +352,20 @@ def _hex_to_rgb(hexstr, default=(0x33, 0xE6, 0xFF)):
         return default
 
 
+def _rgba(c):
+    """Normalise a colour to a 4-tuple RGBA uint8 (pad opaque if no alpha)."""
+    return (int(c[0]), int(c[1]), int(c[2]), int(c[3]) if len(c) > 3 else 255)
+
+
 def _colored_multi_pd(polylines, colors) -> vtkPolyData:
-    """Same as _multi_pd but each polyline cell carries its own RGB
-    colour (uint8 triple). Caller's mapper must enable cell-scalar
-    direct-colour to see the per-measure colours."""
+    """Same as _multi_pd but each polyline cell carries its own RGBA colour
+    (uint8; 3-tuples are treated as opaque). Caller's mapper must enable
+    cell-scalar direct-colour; alpha < 255 makes that cell translucent."""
     pd = vtkPolyData()
     vp = vtkPoints()
     lines = vtkCellArray()
     cell_rgb = vtkUnsignedCharArray()
-    cell_rgb.SetNumberOfComponents(3)
+    cell_rgb.SetNumberOfComponents(4)
     cell_rgb.SetName("Colors")
     base = 0
     for pl, rgb in zip(polylines, colors):
@@ -368,7 +376,7 @@ def _colored_multi_pd(polylines, colors) -> vtkPolyData:
             lines.InsertNextCell(n)
             for k in range(n):
                 lines.InsertCellPoint(base + k)
-            cell_rgb.InsertNextTuple3(*rgb)
+            cell_rgb.InsertNextTuple4(*_rgba(rgb))
         base += n
     pd.SetPoints(vp)
     pd.SetLines(lines)
@@ -379,13 +387,13 @@ def _colored_multi_pd(polylines, colors) -> vtkPolyData:
 
 def _filled_tris_pd(tris, colors) -> vtkPolyData:
     """Polydata of filled triangles (each ``(p0, p1, p2)`` of (x,y) points) with
-    a per-cell RGB colour (uint8 triple). Used for the translucent compare-fill
-    annulus; the actor sets the overall opacity."""
+    a per-cell RGBA colour (uint8; 3-tuples opaque). Used for the translucent
+    compare-fill annulus — alpha now lives in the cells (per-result)."""
     pd = vtkPolyData()
     vp = vtkPoints()
     polys = vtkCellArray()
     cell_rgb = vtkUnsignedCharArray()
-    cell_rgb.SetNumberOfComponents(3)
+    cell_rgb.SetNumberOfComponents(4)
     cell_rgb.SetName("Colors")
     base = 0
     for (p0, p1, p2), rgb in zip(tris, colors):
@@ -396,7 +404,7 @@ def _filled_tris_pd(tris, colors) -> vtkPolyData:
         polys.InsertCellPoint(base)
         polys.InsertCellPoint(base + 1)
         polys.InsertCellPoint(base + 2)
-        cell_rgb.InsertNextTuple3(*rgb)
+        cell_rgb.InsertNextTuple4(*_rgba(rgb))
         base += 3
     pd.SetPoints(vp)
     pd.SetPolys(polys)
@@ -760,7 +768,7 @@ class _Pane:
         self.cmp_fill_mapper.SetColorModeToDirectScalars()
         cfa = vtkActor()
         cfa.SetMapper(self.cmp_fill_mapper)
-        cfa.GetProperty().SetOpacity(0.5)    # 50% (was 65% transparent)
+        cfa.GetProperty().SetOpacity(1.0)    # per-result alpha lives in the cells
         self.ren.AddActor(cfa)
         # Compare radial gap map: thin lines between the two outlines, each
         # cell coloured by its gap band (set by _redraw_compare).
@@ -1901,8 +1909,10 @@ class CTViewer(AbstractViewer):
                 "outer": ob, "inner": os_, "centroid": cen,
                 "pct": _percent_area_diff(ab, asm),
                 "radials": _radial_gap_compare(ob, os_, cen, c.get("step", 1.0)),
-                "fill_rgb": _hex_to_rgb(mb.get("color")),
             })
+            # Keep a user-chosen fill colour; otherwise track the outer outline.
+            if not c.get("fill_custom"):
+                c["fill_rgb"] = _hex_to_rgb(mb.get("color"))
             out.append(c)
         self._compares = out
 
@@ -1925,7 +1935,12 @@ class CTViewer(AbstractViewer):
         only the region COLOUR fill; the defining outlines are unaffected."""
         if target not in self._compares:
             return
+        from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         menu = QMenu(self)
+        # Independently-selectable fill colour (separate from the outlines);
+        # preserved across recompute via the "fill_custom" flag.
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
         vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(QCursor.pos())
@@ -1937,7 +1952,21 @@ class CTViewer(AbstractViewer):
             except ValueError:
                 pass
         else:
-            return
+            hit = False
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    target["fill_rgb"] = _hex_to_rgb(hexcol)
+                    target["fill_custom"] = True
+                    hit = True
+                    break
+            if not hit:
+                for act, val in transp_actions:
+                    if chosen is act:
+                        target["transp"] = val
+                        hit = True
+                        break
+            if not hit:
+                return
         for k in ("A", "B"):
             self._redraw_compare(k)
         self._update_hideall_btn()
@@ -1967,13 +1996,15 @@ class CTViewer(AbstractViewer):
             rad = c["radials"]
             n = len(rad)
             thk = bool(c.get("show_thk"))
+            alpha = transp_to_alpha(c.get("transp", 50))   # Change Transparency
             for i in range(n):                       # annulus fill triangles
                 a, b = rad[i], rad[(i + 1) % n]
                 da = abs(b["ang"] - a["ang"]) % 360.0
                 if 2.5 * c["step"] < da < 360.0 - 2.5 * c["step"]:
                     continue                         # a skipped-ray gap
                 # Thickness → this sector's gap-band colour; %PA → outer colour.
-                col = _hex_to_rgb(_gap_color(a["gap"])) if thk else c["fill_rgb"]
+                rgb = _hex_to_rgb(_gap_color(a["gap"])) if thk else c["fill_rgb"]
+                col = (rgb[0], rgb[1], rgb[2], alpha)
                 fill_tris.append((a["inner"], a["outer"], b["outer"]))
                 fill_tris.append((a["inner"], b["outer"], b["inner"]))
                 fill_cols += [col, col]
@@ -2192,8 +2223,9 @@ class CTViewer(AbstractViewer):
             if self._results_hidden or m.get("hidden"):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
+            a4 = transp_to_alpha(m.get("transp", 0))   # Change Transparency
             polylines.append(self._outline(m))
-            outline_colors.append(rgb)
+            outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
             # Solid orange arc on the outline between the two endpoints, passing
             # through the selector — only shown once all 3 points are placed
             # (drawn over the outline via the same solid-line mapper).
@@ -2592,6 +2624,7 @@ class CTViewer(AbstractViewer):
     def _handle_right(self, which, hit, sx, sy):
         """Right-click on a measure handle: 'Delete point' + 'Delete
         result' for Polyline/Polygon, just 'Delete' for Line/Ellipse."""
+        from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         mi, vi = hit
         m = self._measures[which][mi]
         menu = QMenu(self)
@@ -2600,6 +2633,10 @@ class CTViewer(AbstractViewer):
             del_pt = menu.addAction("Delete point")
             if len(m["pts"]) <= 2:                # never shrink below Line
                 del_pt.setEnabled(False)
+        # Change Color / Change Transparency — on every result type (incl.
+        # Line/Angle, most easily right-clicked on a handle).
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction("Delete result")
@@ -2616,7 +2653,16 @@ class CTViewer(AbstractViewer):
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
             del self._measures[which][mi]
-        self._redraw_meas(which)
+        else:
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    m["color"] = hexcol
+                    break
+            for act, val in transp_actions:
+                if chosen is act:
+                    m["transp"] = val
+                    break
+        self._redraw_meas(which)              # recomputes + redraws compares too
 
     def _outline_right(self, which, mi, sx, sy):
         """Right-click on a measure outline: Add point / Spline (Polyline)
@@ -2641,6 +2687,7 @@ class CTViewer(AbstractViewer):
             pix = QPixmap(16, 16); pix.fill(_QColor(hexcol))
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(
@@ -2663,6 +2710,10 @@ class CTViewer(AbstractViewer):
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
+                    break
+            for act, val in transp_actions:
+                if chosen is act:
+                    m["transp"] = val
                     break
         self._redraw_meas(which)
 
