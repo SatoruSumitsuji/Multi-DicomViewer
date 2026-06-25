@@ -63,9 +63,11 @@ from vtkmodules.vtkImagingCore import vtkImageMapToColors, vtkImageReslice
 from vtkmodules.vtkRenderingAnnotation import vtkCornerAnnotation
 from vtkmodules.vtkRenderingCore import (
     vtkActor,
+    vtkActor2D,
     vtkBillboardTextActor3D,
     vtkImageActor,
     vtkPolyDataMapper,
+    vtkPolyDataMapper2D,
     vtkRenderer,
     vtkRenderWindow,
     vtkTextActor,
@@ -2064,23 +2066,37 @@ class CTViewer(AbstractViewer):
                           0.02, 0.34 - row_i * 0.04)
             row_i += 1
         # Colour legend: a band-coloured swatch + a WHITE label (matches Mac).
-        # The swatch is a tiny text actor of spaces with a coloured BACKGROUND
-        # (a real ■ glyph doesn't render in VTK's text font).
+        # The swatch is a small SQUARE 2-D quad sized in pixels (a fixed-size
+        # square, aspect-independent — matching Mac's 12 px square), rather than
+        # a text-background box whose width tracked the glyph (→ a rectangle).
         if any(c.get("show_thk") and not c.get("hidden") for c in cmps):
+            sq = 13                                  # swatch side, pixels
             for lab, hexc in _gap_legend():
                 rgb = _hex_to_rgb(hexc)
                 fy = 0.34 - row_i * 0.04
-                sw = vtkTextActor()
-                sw.SetInput("  ")
-                swp = sw.GetTextProperty()
-                swp.SetBackgroundColor(rgb[0] / 255.0, rgb[1] / 255.0,
-                                       rgb[2] / 255.0)
-                swp.SetBackgroundOpacity(1.0)
-                swp.SetFontSize(14)
-                swp.SetBold(True)
+                sq_pd = vtkPolyData()
+                sq_pts = vtkPoints()
+                # Points are DISPLAY-space pixel offsets from the actor's
+                # normalized-viewport PositionCoordinate, so the box is a true
+                # square regardless of the viewport's aspect ratio.
+                for px, py in ((0, 0), (sq, 0), (sq, sq), (0, sq)):
+                    sq_pts.InsertNextPoint(px, py, 0.0)
+                sq_quad = vtkCellArray()
+                sq_quad.InsertNextCell(4)
+                for k in range(4):
+                    sq_quad.InsertCellPoint(k)
+                sq_pd.SetPoints(sq_pts)
+                sq_pd.SetPolys(sq_quad)
+                sq_map = vtkPolyDataMapper2D()
+                sq_map.SetInputData(sq_pd)
+                sw = vtkActor2D()
+                sw.SetMapper(sq_map)
                 sw.GetPositionCoordinate(
                     ).SetCoordinateSystemToNormalizedViewport()
-                sw.SetPosition(0.02, fy)
+                sw.GetPositionCoordinate().SetValue(0.02, fy)
+                sw.GetProperty().SetColor(rgb[0] / 255.0, rgb[1] / 255.0,
+                                          rgb[2] / 255.0)
+                sw.GetProperty().SetOpacity(1.0)
                 p.ren.AddActor(sw)
                 p.cmp_text.append(sw)
                 _add_cmp_text(lab, (255, 255, 255), (0.0, 0.0, 0.0), 0.05, fy)
