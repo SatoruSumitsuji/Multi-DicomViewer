@@ -563,7 +563,7 @@ class XAViewer(AbstractViewer):
         # colours (Clear All Result, the active tool) still apply over it.
         self.setStyleSheet(
             "QPushButton {"
-            " text-align: left; padding: 9px 10px;"
+            " text-align: left; padding: 7px 10px;"
             " border: 1px solid #9a9a9a; border-radius: 6px;"
             " background: #ededed; }")
 
