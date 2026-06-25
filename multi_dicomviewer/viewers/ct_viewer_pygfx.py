@@ -706,7 +706,9 @@ class _Overlay(QWidget):
             for lab, hexc in bands:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(hexc))
-                p.drawRect(QRectF(10, y - 10, 12, 12))
+                # Lift the swatch 30% of its height (12 px → 3.6 px) to line up
+                # with its label, matching the Windows viewer's nudge.
+                p.drawRect(QRectF(10, y - 10 - 3.6, 12, 12))
                 # White text with a thin black 枠 on every row (readable on any
                 # background; the white-on-<5mm-red row was unreadable before).
                 _draw_outlined_text(p, QRectF(28, y - lh, 200, lh), fl, lab,
