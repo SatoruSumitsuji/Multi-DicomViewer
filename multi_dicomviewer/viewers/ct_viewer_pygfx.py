@@ -2857,8 +2857,15 @@ class CTViewer(AbstractViewer):
 
     def _toggle_hide_all(self):
         """Hide / Show ALL results (every measurement line, region colour and
-        result text) at once."""
+        result text) at once. Show reveals EVERYTHING, including results that
+        were individually hidden, regardless of their per-item Hide."""
         self._results_hidden = not self._results_hidden
+        if not self._results_hidden:
+            for k in ("A", "B"):
+                for m in self._measures[k]:
+                    m.pop("hidden", None)
+            for c in self._compares:
+                c.pop("hidden", None)
         for k in ("A", "B"):
             self._overlay[k].update()
         self._update_hideall_btn()
