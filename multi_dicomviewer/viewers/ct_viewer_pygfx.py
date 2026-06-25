@@ -656,7 +656,7 @@ class _Overlay(QWidget):
                     if 2.5 * c["step"] < da < 360.0 - 2.5 * c["step"]:
                         continue                         # a skipped-ray gap
                     col = QColor(_gap_color(a["gap"]))
-                    col.setAlpha(90)
+                    col.setAlpha(128)                    # 50% (was 65% transp.)
                     p.setBrush(col)
                     p.setPen(QPen(col, 0.8))             # cover sector seams
                     p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
@@ -673,7 +673,7 @@ class _Overlay(QWidget):
                 path.addPolygon(poly(c["outer"]))
                 path.addPolygon(poly(c["inner"]))
                 fr = c["fill_rgb"]
-                p.fillPath(path, QColor(fr[0], fr[1], fr[2], 90))
+                p.fillPath(path, QColor(fr[0], fr[1], fr[2], 128))   # 50%
         if cmps:
             # one summary line per result + a single colour legend if any result
             # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
@@ -1523,7 +1523,7 @@ class CTViewer(AbstractViewer):
         # as a sibling utility yet is easy to tell apart. Rebuilds the OTHER
         # pane from the selected pane's green-▲ centre line (un-mirror / fix a
         # companion that drifted after complex rotations) without a full Reset.
-        recalc = FitButton("ReCalc")
+        self._recalc_btn = recalc = FitButton("ReCalc")
         recalc.setStyleSheet("QPushButton { background:#8a8a8a; color:#101010; }")
         recalc.setHelpToolTip(
             "Re-derive the OTHER pane from the selected pane's green-▲ centre "
@@ -1538,6 +1538,8 @@ class CTViewer(AbstractViewer):
 
         self._meas_btn = FitButton("📏 Measure")
         self._meas_btn.setCheckable(True)
+        self._meas_btn.setStyleSheet(            # blue when in Measure mode (= IVUS)
+            "QPushButton:checked { background:#1f77b4; color:white; }")
         self._meas_btn.setHelpToolTip(
             "Measure on the image (Line / Polyline / Ellipse / Polygon / Angle)")
         self._meas_btn.clicked.connect(self._toggle_measure)
@@ -2533,23 +2535,54 @@ class CTViewer(AbstractViewer):
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
         self._pc[other] = self._center.copy()
 
+    def _patient_axis_vol(self, p):
+        """A patient-LPS direction (e.g. (1,0,0)=Left) in volume coords."""
+        pb = getattr(self, "_pbasis", None)
+        try:
+            inv = (np.linalg.inv(np.asarray(pb, float))
+                   if pb is not None else np.eye(3))
+        except np.linalg.LinAlgError:
+            inv = np.eye(3)
+        return _norm(inv @ np.array(p, float))
+
+    def _flash_recalc(self):
+        """Briefly flash the ReCalc button green so the click is visibly
+        acknowledged even when nothing in the image changes."""
+        btn = getattr(self, "_recalc_btn", None)
+        if btn is None:
+            return
+        btn.setStyleSheet("QPushButton { background:#2ecc71; color:#101010; }")
+        QTimer.singleShot(380, lambda: btn.setStyleSheet(
+            "QPushButton { background:#8a8a8a; color:#101010; }"))
+
     def _recalc_companion(self):
         """ReCalc: rebuild the OTHER pane as the plane that cuts the ACTIVE pane
-        along its green-▲ centre line, fixing a MIRROR without moving the view.
+        along its green-▲ centre line, fixing a MIRROR while keeping the view.
 
-        _couple_companion keeps u×v = n (right-handed, so a prior mirror is
-        undone) and projects the old up vector, so only the (possibly mirrored)
-        in-plane sense flips — the companion's ZOOM, PAN (centre-line position)
-        and ROLL are all left as they are. The master pane is untouched."""
+        _couple_companion rebuilds it right-handed but PRESERVES the companion's
+        existing viewing side, so a mirrored companion would stay mirrored. We
+        then force the non-mirror side: screen-right ≈ patient LEFT (the
+        _init_frames convention). Flipping u (and n) keeps the up vector, so the
+        zoom/roll are preserved and only the left-right mirror is corrected.
+        The master pane is untouched."""
         if self._vol is None:
             return
         master = self._active_pane
+        other = "B" if master == "A" else "A"
         u, v, _n = self._frame[master]
         a = math.radians(self._cross_ang[master])
         crossdir = u * math.cos(a) + v * math.sin(a)
         self._couple_companion(master, crossdir)
+        ou, ov, on = self._frame[other]
+        left = self._patient_axis_vol((1.0, 0.0, 0.0))      # patient Left in vol
+        if float(np.dot(ou, left)) < 0.0:                   # mirrored → un-mirror
+            ou, on = -ou, -on
+            self._frame[other] = (ou, ov, on)
+            self._cross_ang[other] = math.degrees(math.atan2(
+                float(np.dot(crossdir, ov)), float(np.dot(crossdir, ou))))
         self._view_initial = False
         self._refresh()
+        self._flash_recalc()
 
     def _cross_press(self, which, sx, sy) -> bool:
         """True (and arm a MOVE/ROTATE gesture) if the press lands ON the
@@ -2852,8 +2885,8 @@ class CTViewer(AbstractViewer):
             min(self._hideall_btn.sizeHint().width(), 64))
         self._hideall_btn.setHelpToolTip(
             "Hide / Show every measurement line, region colour and result text")
-        self._hideall_btn.setStyleSheet(                     # match ReCalc
-            "QPushButton { background:#8a8a8a; color:#101010; }")
+        self._hideall_btn.setStyleSheet(                     # light grey, black text
+            "QPushButton { background:#bdbdbd; color:#101010; }")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
         clr = FitButton("Clear All Result")
