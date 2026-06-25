@@ -3872,9 +3872,9 @@ class CTViewer(AbstractViewer):
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
         # Press point in normalised screen space, relative to the centre.
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 10%-of-
-        # screen catch on each side is therefore 0.20 in these units.
-        band = 0.20                           # perpendicular catch = 10% screen/side
+        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 5%-of-
+        # screen catch on each side is therefore 0.10 in these units.
+        band = 0.10                           # perpendicular catch = 5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
         along_h = abs(rx * uh[0] + ry * uh[1])
