@@ -558,8 +558,14 @@ class XAViewer(AbstractViewer):
         # than centring it and clipping both ends. Include VERTICAL padding: a
         # stylesheet turns off the native macOS button height, so without it the
         # button collapses and the text overflows top/bottom.
+        # Rounded-corner buttons (match the CT viewer's shape). The base rule
+        # only sets shape/border/neutral background, so per-button background
+        # colours (Clear All Result, the active tool) still apply over it.
         self.setStyleSheet(
-            "QPushButton { text-align: left; padding: 9px 10px; }")
+            "QPushButton {"
+            " text-align: left; padding: 9px 10px;"
+            " border: 1px solid #9a9a9a; border-radius: 6px;"
+            " background: #ededed; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
@@ -1829,6 +1835,13 @@ class XAViewer(AbstractViewer):
         hide = not getattr(self.canvas, "_results_hidden", False)
         for c in (self.canvas, self.canvas2):
             c._results_hidden = hide
+            if not hide:
+                # Show All → reveal EVERYTHING, including results that were
+                # individually hidden, regardless of their per-item Hide.
+                for m in c.measures:
+                    m.pop("hidden", None)
+                for cmp in c._compares:
+                    cmp.pop("hidden", None)
             c.update()
         self._update_hideall_btn()
 
