@@ -62,6 +62,7 @@ from PyQt6.QtWidgets import (
 from rendercanvas.pyqt6 import RenderCanvas
 
 from multi_dicomviewer.config import CT_WL_PRESETS
+from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
 from multi_dicomviewer.core.image_export import (
@@ -1087,6 +1088,10 @@ class CTViewer(AbstractViewer):
         # it does fire), and the thread wake (guaranteed) — all coordinated by
         # _lod_pending so _lod_settle runs exactly once per interaction.
         self._lod_pending = False
+        # Persisted image-quality prefs; ct_full_quality=True turns the coarse
+        # interactive LOD OFF so a fast Mac always shows full-quality MPR.
+        self._dq = settings.load_display_quality()
+        self._lod_off = bool(self._dq.get("ct_full_quality"))
         self._lod_due = None             # monotonic deadline for the rebuild
         self._lod_thread = None          # single reusable debounce worker
         self._slab_gen = 0               # generation token for async slab builds
@@ -1572,6 +1577,18 @@ class CTViewer(AbstractViewer):
         self._cl_btn.setHelpToolTip("Show/hide crosshair & slab lines")
         self._cl_btn.clicked.connect(self._toggle_centerline)
         row.addWidget(self._cl_btn)
+
+        # HiRes: disable the coarse interactive LOD so drag/zoom stays full
+        # quality (smoother on a fast Mac, heavier on a slow one). Default OFF
+        # = keep the LOD. Persisted across restarts.
+        self._hires_btn = FitButton("HiRes")
+        self._hires_btn.setCheckable(True)
+        self._hires_btn.setChecked(self._lod_off)
+        self._hires_btn.setHelpToolTip(
+            "Always full-quality MPR: turn OFF the coarse preview shown while "
+            "dragging/zooming. Smoother on a fast Mac; heavier on a slow one.")
+        self._hires_btn.toggled.connect(self._toggle_hires)
+        row.addWidget(self._hires_btn)
 
         setting = FitButton("Setting")
         setting.setHelpToolTip(
@@ -2258,6 +2275,10 @@ class CTViewer(AbstractViewer):
         # quality once the interaction settles.
         if self._vol is None:
             return
+        # "HiRes" (ct_full_quality): never use the coarse interactive LOD — a
+        # fast Mac rebuilds full quality every frame instead.
+        if self._lod_off:
+            lod = False
         # Any refresh (interactive frame or full) supersedes an in-flight async
         # high-res slab build, so bump the generation to discard a late result.
         self._slab_gen += 1
@@ -3615,6 +3636,15 @@ class CTViewer(AbstractViewer):
         self._cl_on = self._cl_btn.isChecked()
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    def _toggle_hires(self, on: bool) -> None:
+        """HiRes toggle: disable/enable the coarse interactive LOD, persist the
+        choice, and repaint at full quality now."""
+        self._lod_off = bool(on)
+        self._dq["ct_full_quality"] = self._lod_off
+        settings.save_display_quality(self._dq)
+        if self._vol is not None:
+            self._refresh(lod=False)
 
     # ---------------------------------------------------- HU colormap
     def _lut_texture(self):
