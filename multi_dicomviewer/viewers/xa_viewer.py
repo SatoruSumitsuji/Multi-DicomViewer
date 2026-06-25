@@ -727,15 +727,17 @@ class XAViewer(AbstractViewer):
         # High-quality cine: keep frames bilinear-smooth even during playback
         # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
         # for fast machines). Persisted across restarts.
-        self._hq_cine_btn = QPushButton("HQ Cine")
+        self._hq_cine_btn = QPushButton("HQ-Img")
         self._hq_cine_btn.setCheckable(True)
         # The viewer's base QPushButton stylesheet de-natives the checked look,
         # so style the active state explicitly (same blue as Measure).
         self._hq_cine_btn.setStyleSheet(
             "QPushButton:checked { background:#1f77b4; color:white; }")
         self._hq_cine_btn.setToolTip(
-            "High-quality cine: smooth (bilinear) frames even during playback. "
-            "Default off (fast). Turn on for crisper motion on a fast machine.")
+            "High-quality image: keep frames bilinear-smooth even during cine "
+            "playback (paused frames are already smooth). Default off (fast "
+            "nearest-neighbour cine). Higher-quality still-image upscaling "
+            "(smoothing) is added separately.")
         self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
         self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
         row.addWidget(self._hq_cine_btn)
