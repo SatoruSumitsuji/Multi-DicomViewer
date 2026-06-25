@@ -2588,36 +2588,7 @@ class CTViewer(AbstractViewer):
         self._couple_companion(master, crossdir)
         ou, ov, on = self._frame[other]
         left = self._patient_axis_vol((1.0, 0.0, 0.0))      # patient Left in vol
-        will_flip = float(np.dot(ou, left)) < 0.0
-        # --- TEMP diagnostic (ReCalc mirror on Mac): dumps the exact vectors so
-        # the sign decision can be checked. Remove once the cause is confirmed.
-        try:
-            import sys
-            def _f(x):
-                return np.array2string(np.asarray(x, float), precision=3,
-                                       suppress_small=True)
-            pb = getattr(self, "_pbasis", None)
-            print("[ReCalc-DEBUG] ----------------------------------------",
-                  file=sys.stderr)
-            print(f"  master={master} other={other}  pbasis_set={pb is not None}",
-                  file=sys.stderr)
-            if pb is not None:
-                print(f"  pbasis=\n{_f(pb)}", file=sys.stderr)
-            print(f"  master u={_f(u)} v={_f(v)}  cross_ang={self._cross_ang[master]:.1f}",
-                  file=sys.stderr)
-            print(f"  crossdir={_f(crossdir)}", file=sys.stderr)
-            print(f"  companion ou={_f(ou)} ov={_f(ov)} on={_f(on)}",
-                  file=sys.stderr)
-            print(f"  left(vol)={_f(left)}", file=sys.stderr)
-            print(f"  dot(ou,left)={float(np.dot(ou, left)):+.3f}  "
-                  f"dot(ov,left)={float(np.dot(ov, left)):+.3f}  "
-                  f"dot(on,left)={float(np.dot(on, left)):+.3f}", file=sys.stderr)
-            print(f"  in-plane(left)={math.hypot(float(np.dot(ou, left)), float(np.dot(ov, left))):.3f}"
-                  f"  WILL_FLIP={will_flip}", file=sys.stderr)
-        except Exception as _e:
-            print(f"[ReCalc-DEBUG] dump failed: {_e}", file=sys.stderr)
-        # --- end diagnostic ---
-        if will_flip:                                       # mirrored → un-mirror
+        if float(np.dot(ou, left)) < 0.0:                   # mirrored → un-mirror
             ou, on = -ou, -on
             self._frame[other] = (ou, ov, on)
             self._cross_ang[other] = math.degrees(math.atan2(
