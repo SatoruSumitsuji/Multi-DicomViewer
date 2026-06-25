@@ -1810,11 +1810,13 @@ class XAViewer(AbstractViewer):
         self._hideall_btn = QPushButton("Hide All Result")
         self._hideall_btn.setToolTip(
             "Hide / Show every measurement line, region colour and result text")
+        self._hideall_btn.setStyleSheet(                      # light grey, black
+            "background:#bdbdbd;color:#101010;")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
         clr = QPushButton("Clear All Result")
         clr.setToolTip("Clear all measurements and comparison results")
-        clr.setStyleSheet("background:#bdbdbd;color:black;")   # match 3DCT
+        clr.setStyleSheet("background:#6e6e6e;color:#d8d8d8;")  # dark grey, white
         clr.clicked.connect(self._clear_measurements)
         row.addWidget(clr)
         row.addWidget(QLabel(

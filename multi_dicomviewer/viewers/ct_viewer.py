@@ -760,7 +760,7 @@ class _Pane:
         self.cmp_fill_mapper.SetColorModeToDirectScalars()
         cfa = vtkActor()
         cfa.SetMapper(self.cmp_fill_mapper)
-        cfa.GetProperty().SetOpacity(0.35)
+        cfa.GetProperty().SetOpacity(0.5)    # 50% (was 65% transparent)
         self.ren.AddActor(cfa)
         # Compare radial gap map: thin lines between the two outlines, each
         # cell coloured by its gap band (set by _redraw_compare).
@@ -1497,7 +1497,7 @@ class CTViewer(AbstractViewer):
         # a sibling utility yet is easy to tell apart. Rebuilds the OTHER pane
         # from the selected pane's green-▲ centre line (un-mirror / fix a
         # companion that drifted after complex rotations) without a full Reset.
-        recalc = FitButton("ReCalc")
+        self._recalc_btn = recalc = FitButton("ReCalc")
         recalc.setHelpToolTip(
             "Re-derive the OTHER pane from the selected (active) pane's "
             "green-▲ centre line — fixes a mirrored / wrong companion after "
@@ -1514,6 +1514,8 @@ class CTViewer(AbstractViewer):
 
         self._meas_btn = FitButton("📏 Measure")
         self._meas_btn.setCheckable(True)
+        self._meas_btn.setStyleSheet(            # blue when in Measure mode (= IVUS)
+            "QPushButton:checked { background:#1f77b4; color:white; }")
         self._meas_btn.setHelpToolTip(
             "Measure on the image (Line / Polyline / Ellipse / Polygon)"
         )
@@ -1714,7 +1716,7 @@ class CTViewer(AbstractViewer):
             min(self._hideall_btn.sizeHint().width(), 64))
         self._hideall_btn.setHelpToolTip(
             "Hide / Show every measurement line, region colour and result text")
-        self._hideall_btn.setStyleSheet("background:#8a8a8a;color:#101010;")
+        self._hideall_btn.setStyleSheet("background:#bdbdbd;color:#101010;")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
         clr = FitButton("Clear All Result")
@@ -2030,11 +2032,26 @@ class CTViewer(AbstractViewer):
             _add_cmp_text(head, (0, 229, 255), (0.0, 0.0, 0.0),
                           0.02, 0.34 - row_i * 0.04)
             row_i += 1
-        # Colour legend: a band-coloured ■ swatch + a WHITE label (matches Mac).
+        # Colour legend: a band-coloured swatch + a WHITE label (matches Mac).
+        # The swatch is a tiny text actor of spaces with a coloured BACKGROUND
+        # (a real ■ glyph doesn't render in VTK's text font).
         if any(c.get("show_thk") and not c.get("hidden") for c in cmps):
             for lab, hexc in _gap_legend():
+                rgb = _hex_to_rgb(hexc)
                 fy = 0.34 - row_i * 0.04
-                _add_cmp_text("■", _hex_to_rgb(hexc), (0.0, 0.0, 0.0), 0.02, fy)
+                sw = vtkTextActor()
+                sw.SetInput("  ")
+                swp = sw.GetTextProperty()
+                swp.SetBackgroundColor(rgb[0] / 255.0, rgb[1] / 255.0,
+                                       rgb[2] / 255.0)
+                swp.SetBackgroundOpacity(1.0)
+                swp.SetFontSize(14)
+                swp.SetBold(True)
+                sw.GetPositionCoordinate(
+                    ).SetCoordinateSystemToNormalizedViewport()
+                sw.SetPosition(0.02, fy)
+                p.ren.AddActor(sw)
+                p.cmp_text.append(sw)
                 _add_cmp_text(lab, (255, 255, 255), (0.0, 0.0, 0.0), 0.05, fy)
                 row_i += 1
         p.render()
@@ -3912,24 +3929,56 @@ class CTViewer(AbstractViewer):
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
 
+    def _patient_axis_vol(self, p):
+        """A patient-LPS direction (e.g. (1,0,0)=Left) expressed in volume
+        coords, via the inverse patient basis. Falls back to the raw axis."""
+        pb = getattr(self, "_pbasis", None)
+        try:
+            inv = (np.linalg.inv(np.asarray(pb, float))
+                   if pb is not None else np.eye(3))
+        except np.linalg.LinAlgError:
+            inv = np.eye(3)
+        return _norm(inv @ np.array(p, float))
+
+    def _flash_recalc(self):
+        """Briefly flash the ReCalc button green so the user can SEE the click
+        registered (ReCalc often changes nothing visible when already correct)."""
+        btn = getattr(self, "_recalc_btn", None)
+        if btn is None:
+            return
+        btn.setStyleSheet("background:#2ecc71;color:#101010;")   # flash green
+        QTimer.singleShot(
+            380, lambda: btn.setStyleSheet("background:#8a8a8a;color:#101010;"))
+
     def _recalc_companion(self):
         """ReCalc: rebuild the OTHER pane as the plane that cuts the ACTIVE pane
-        along its green-▲ centre line, fixing a MIRROR without moving the view.
+        along its green-▲ centre line, fixing a MIRROR while keeping the view.
 
-        _couple_companion keeps u×v = n (right-handed, so a prior mirror is
-        undone) and projects the old up vector, so only the (possibly mirrored)
-        in-plane sense flips. _refresh() keeps the camera (reset_cam=False), so
-        the companion's ZOOM and centre-line position are preserved. The master
-        pane is untouched."""
+        _couple_companion rebuilds it right-handed but PRESERVES the companion's
+        existing viewing side — so a mirrored companion would stay mirrored. We
+        then force the non-mirror side: screen-right ≈ patient LEFT (the
+        _init_frames convention). Flipping u (and n) keeps the up vector, so the
+        zoom/rotation are preserved and only the left-right mirror is corrected.
+        The master pane is untouched."""
         if self._image is None:
             return
         master = self._active_pane
+        other = "B" if master == "A" else "A"
         u, v, _n = self._frame[master]
         a = math.radians(self._cross_ang[master])
         crossdir = u * math.cos(a) + v * math.sin(a)
         self._couple_companion(master, crossdir)
+        ou, ov, on = self._frame[other]
+        left = self._patient_axis_vol((1.0, 0.0, 0.0))      # patient Left in vol
+        if float(np.dot(ou, left)) < 0.0:                   # mirrored → un-mirror
+            ou, on = -ou, -on
+            self._frame[other] = (ou, ov, on)
+            self._cross_ang[other] = math.degrees(math.atan2(
+                float(np.dot(crossdir, ov)), float(np.dot(crossdir, ou))))
+        self._pc[other] = self._center.copy()
         self._view_initial = False
         self._refresh()
+        self._flash_recalc()
 
     def _apply_preset(self, name):
         if name in CT_WL_PRESETS:

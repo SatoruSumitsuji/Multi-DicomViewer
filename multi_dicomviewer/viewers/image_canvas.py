@@ -1832,7 +1832,7 @@ class ImageCanvas(QWidget):
             path.addPolygon(QPolygonF([W(q) for q in c["outer"]]))
             path.addPolygon(QPolygonF([W(q) for q in c["inner"]]))
             fr = QColor(c["fill_hex"])
-            fr.setAlpha(90)                              # ~35% opaque
+            fr.setAlpha(128)                             # 50% (was 65% transp.)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(path, fr)
             if c["show_thk"]:
