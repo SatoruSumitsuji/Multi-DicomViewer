@@ -2071,6 +2071,8 @@ class CTViewer(AbstractViewer):
         # a text-background box whose width tracked the glyph (→ a rectangle).
         if any(c.get("show_thk") and not c.get("hidden") for c in cmps):
             sq = 13                                  # swatch side, pixels
+            sq_dy = sq * 0.30                        # lift 30% of its height to
+            #                                          align with the text row
             for lab, hexc in _gap_legend():
                 rgb = _hex_to_rgb(hexc)
                 fy = 0.34 - row_i * 0.04
@@ -2080,7 +2082,7 @@ class CTViewer(AbstractViewer):
                 # normalized-viewport PositionCoordinate, so the box is a true
                 # square regardless of the viewport's aspect ratio.
                 for px, py in ((0, 0), (sq, 0), (sq, sq), (0, sq)):
-                    sq_pts.InsertNextPoint(px, py, 0.0)
+                    sq_pts.InsertNextPoint(px, py + sq_dy, 0.0)
                 sq_quad = vtkCellArray()
                 sq_quad.InsertNextCell(4)
                 for k in range(4):
