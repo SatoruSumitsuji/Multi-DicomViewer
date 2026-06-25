@@ -531,6 +531,10 @@ class _Overlay(QWidget):
         edit_ca = bool(e.get("ca")) if (e and e["key"] == key) else False
 
         for mi, m in enumerate(v._measures[key]):
+            # Hidden by "Hide/Show All Result" (global) or this measure's own
+            # right-click Hide → skip its line, handles and id label entirely.
+            if v._results_hidden or m.get("hidden"):
+                continue
             rgb = _hex_to_rgb(m.get("color"))
             draw_outline(v._outline(m), rgb)
             if m["type"] in ("ellipse", "polygon"):
@@ -606,7 +610,7 @@ class _Overlay(QWidget):
         # per-measure result strings, top-right, confined to the right 40% and
         # word-wrapped so growing the font can't make them overlap the tags.
         lines = v._metrics.get(key, [])
-        if lines:
+        if lines and not v._results_hidden:
             p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
             p.setFont(QFont("monospace", v._overlay_font_pt))
             rx = w * 0.60
@@ -633,15 +637,17 @@ class _Overlay(QWidget):
                        | int(Qt.AlignmentFlag.AlignTop),
                        f"Click to select 2 Ellipse/Polygon data to compare"
                        f"  ({n_sel}/2)")
-        cmps = [c for c in v._compares if c["key"] == key]
+        cmps = [] if v._results_hidden else [c for c in v._compares
+                                             if c["key"] == key]
         for c in cmps:
             if c.get("hidden"):                          # Hidden → no fill
                 continue
-            p.setPen(Qt.PenStyle.NoPen)
             if c["show_thk"]:
                 # Thickness: FILL each angular sector of the annulus by its gap
                 # band colour (heatmap) at ~35% alpha = 65% transparent (same as
-                # the IVUS fill) — easier to read than radial lines.
+                # the IVUS fill) — a COMPLETE fill, not radial lines. The pen is
+                # the same colour as the brush so adjacent sectors leave no
+                # anti-aliased seam (which read as faint radial lines).
                 rad = c["radials"]
                 nr = len(rad)
                 for i in range(nr):
@@ -652,11 +658,14 @@ class _Overlay(QWidget):
                     col = QColor(_gap_color(a["gap"]))
                     col.setAlpha(90)
                     p.setBrush(col)
+                    p.setPen(QPen(col, 0.8))             # cover sector seams
                     p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
                                              S(b["outer"]), S(b["inner"])]))
+                p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(0, 229, 255))          # centroid dot
                 p.drawEllipse(S(c["centroid"]), 3.0, 3.0)
             else:
+                p.setPen(Qt.PenStyle.NoPen)
                 # %PA: single outer-colour annulus fill (65% transparent). Even
                 # -odd fill of outer minus inner = annulus; also the Delete area.
                 path = QPainterPath()
@@ -668,7 +677,7 @@ class _Overlay(QWidget):
         if cmps:
             # one summary line per result + a single colour legend if any result
             # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
-            # Text wears a thin halo: white 枠 on the <5 mm row, black 枠 else.
+            # Legend text is white with a thin black 枠 (readable on any colour).
             p.setFont(QFont("monospace", 11))
             _black, _white = QColor(0, 0, 0), QColor(255, 255, 255)
             bands = (_gap_legend()
@@ -1037,6 +1046,7 @@ class CTViewer(AbstractViewer):
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
         self._cmp_sel = []                   # [(key, mi)] picked shapes (max 2)
         self._compares = []                  # persisted results (right-click→Delete)
+        self._results_hidden = False         # "Hide/Show All Result" global toggle
         self._cmp_want_pa = False            # last-used: compute %PA (IVUS)
         self._cmp_want_thk = True            # last-used: compute Thickness (CT LV)
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
@@ -1189,20 +1199,24 @@ class CTViewer(AbstractViewer):
         if self._drag_btn == 2 and self._angio_hit(key, x, y):
             self._open_angio_dialog(key)
             return
-        # Right-click on a compare result's filled region → Delete menu. Defer
-        # the modal menu out of the pointer handler (pointer-up safety).
+        # Right-click priority: a measure LINE / handle gets its own menu first
+        # (Hide that line / Delete); only an EMPTY spot inside a compare region
+        # falls through to the region's colour Hide/Delete menu. Defer the modal
+        # region menu out of the pointer handler (pointer-up safety).
         if self._drag_btn == 2:
+            self._cross_grab = False
+            self._meas_drag = False
+            if self._meas_on and self._measure_right(key, x, y):
+                return                        # handled a measure line/handle
             ci = self._compare_hit(key, x, y)
             if ci is not None:
                 target = self._compares[ci]
                 QTimer.singleShot(0, lambda t=target: self._compare_delete_menu(t))
                 return
+            if self._meas_on:
+                return                        # right-click in measure mode = no-op
         if self._meas_on:
             self._cross_grab = False
-            if self._drag_btn == 2:           # right-click: measure menu
-                self._meas_drag = False
-                self._measure_right(key, x, y)
-                return
             started = self._measure_left(key, x, y)
             self._meas_drag = bool(started)
             return
@@ -2815,18 +2829,51 @@ class CTViewer(AbstractViewer):
             "difference and a radial gap colour map (<5 / 5–7 / 7–9 / >9 mm)")
         self._cmp_btn.clicked.connect(self._toggle_compare)
         row.addWidget(self._cmp_btn)
+        # Hide/Show ALL results (lines + region colours + text) at once, between
+        # Compare and Clear All Result. Same grey as ReCalc; disabled when there
+        # is nothing to hide.
+        self._hideall_btn = FitButton("Hide All Result")
+        self._hideall_btn.setMinimumWidth(
+            min(self._hideall_btn.sizeHint().width(), 64))
+        self._hideall_btn.setHelpToolTip(
+            "Hide / Show every measurement line, region colour and result text")
+        self._hideall_btn.setStyleSheet(                     # match ReCalc
+            "QPushButton { background:#8a8a8a; color:#101010; }")
+        self._hideall_btn.clicked.connect(self._toggle_hide_all)
+        row.addWidget(self._hideall_btn)
         clr = FitButton("Clear All Result")
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.setHelpToolTip("Clear all measurements and comparison results")
-        clr.setStyleSheet(                                    # match ReCalc
-            "QPushButton { background:#8a8a8a; color:#101010; }")
+        clr.setStyleSheet(                                    # Reset's darker grey
+            "QPushButton { background:#6e6e6e; color:#d8d8d8; }")
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
         self._cmp_hint = QLabel("  Left-click = add point /"
                                 " right-click finishes Polyline / Polygon")
         row.addWidget(self._cmp_hint)
         row.addStretch(1)
+        self._update_hideall_btn()
         return bar
+
+    def _toggle_hide_all(self):
+        """Hide / Show ALL results (every measurement line, region colour and
+        result text) at once."""
+        self._results_hidden = not self._results_hidden
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        self._update_hideall_btn()
+
+    def _update_hideall_btn(self):
+        """Sync the Hide/Show-All button: greyed when there is nothing to hide,
+        else labelled Hide (results visible) or Show (results hidden)."""
+        btn = getattr(self, "_hideall_btn", None)
+        if btn is None:
+            return
+        has = (any(self._measures[k] for k in ("A", "B"))
+               or bool(self._compares))
+        btn.setEnabled(has)
+        btn.setText("Show All Result" if self._results_hidden
+                    else "Hide All Result")
 
     def _toggle_measure(self):
         self._meas_on = self._meas_btn.isChecked()
@@ -2857,6 +2904,7 @@ class CTViewer(AbstractViewer):
         self._meas_hover = None
         self._compares = []
         self._cmp_sel = []
+        self._results_hidden = False
         for k in ("A", "B"):
             self._redraw_meas(k)
 
@@ -2943,6 +2991,7 @@ class CTViewer(AbstractViewer):
         self._cmp_btn.setChecked(False)
         for k in ("A", "B"):
             self._overlay[k].update()
+        self._update_hideall_btn()
 
     def _recompute_compares(self, key):
         """Re-derive any compare results on *key* from the CURRENT outlines of
@@ -2990,26 +3039,27 @@ class CTViewer(AbstractViewer):
         return None
 
     def _compare_delete_menu(self, target):
-        """Right-click on a compare result's filled region → Delete / Hide·Show.
-        Hide keeps the result but stops drawing its fill + radials; right-click
-        the (still-clickable) region again to Show."""
+        """Right-click INSIDE a compare result's filled region → Hide·Show /
+        Delete. Hide toggles only the region COLOUR (its fill); the defining
+        outlines are separate measures and are unaffected."""
         if target not in self._compares:
             return
         menu = QMenu(self)
-        del_act = menu.addAction("Delete")
         vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
+        del_act = menu.addAction("Delete")
         chosen = menu.exec(QCursor.pos())
-        if chosen is del_act:
+        if chosen is vis_act:
+            target["hidden"] = not target.get("hidden", False)
+        elif chosen is del_act:
             try:
                 self._compares.remove(target)
             except ValueError:
                 pass
-        elif chosen is vis_act:
-            target["hidden"] = not target.get("hidden", False)
         else:
             return
         for k in ("A", "B"):
             self._overlay[k].update()
+        self._update_hideall_btn()
 
     # ---- per-measure geometry ----
     def _ellipse_cab(self, m):
@@ -3086,6 +3136,7 @@ class CTViewer(AbstractViewer):
         self._metrics[key] = [self._metrics_text(key, m)
                               for m in self._measures[key]]
         self._overlay[key].update()
+        self._update_hideall_btn()
 
     # ---- picking ----
     def _pick_handle(self, which, sx, sy):
@@ -3249,7 +3300,10 @@ class CTViewer(AbstractViewer):
         if d and d["type"] in ("polyline", "polygon") and len(d["pts"]) >= 2:
             self._commit_draft()
 
-    def _measure_right(self, which, sx, sy):
+    def _measure_right(self, which, sx, sy) -> bool:
+        """Right-click on a measure (handle / outline / Center-Angle marker) →
+        its context menu. Returns True if a measure was hit/handled, False if
+        the click landed on nothing (so the caller can try the compare region)."""
         cat = self._center_angle_target
         if cat and cat.get("key") == which:
             mi = cat["mi"]
@@ -3257,11 +3311,11 @@ class CTViewer(AbstractViewer):
                 self._measures[which][mi].pop("center_angle", None)
             self._center_angle_target = None
             self._redraw_meas(which)
-            return
+            return True
         if self._draft and self._draft["pane"] == which \
                 and self._draft["type"] in ("polyline", "polygon"):
             self._measure_finish_draft()
-            return
+            return True
         # Right-click ON a Center-Angle marker or spoke deletes JUST the Center
         # Angle (the polygon/ellipse stays). Checked before the vertex/outline
         # menus since the markers sit on the outline.
@@ -3274,15 +3328,16 @@ class CTViewer(AbstractViewer):
             if chosen is del_ca:
                 self._measures[which][ca_mi].pop("center_angle", None)
                 self._redraw_meas(which)
-            return
+            return True
         hit = self._pick_handle(which, sx, sy)
         if hit is not None:
             self._handle_right(which, hit, sx, sy)
-            return
+            return True
         mi = self._pick_measure(which, sx, sy)
         if mi is None:
-            return
+            return False
         self._outline_right(which, mi, sx, sy)
+        return True
 
     def _ca_hit(self, which, sx, sy):
         """mi of a measure whose Center-Angle marker point OR spoke line is
@@ -3312,6 +3367,8 @@ class CTViewer(AbstractViewer):
             del_pt = menu.addAction("Delete point")
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction("Delete result")
         else:
             del_res = menu.addAction("Delete")
@@ -3319,6 +3376,8 @@ class CTViewer(AbstractViewer):
             QPoint(int(sx), int(sy))))
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
+        elif chosen is hide_act:
+            m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
             del self._measures[which][mi]
         self._redraw_meas(which)
@@ -3344,6 +3403,7 @@ class CTViewer(AbstractViewer):
             pix.fill(QColor(hexcol))
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
+        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
             QPoint(int(sx), int(sy))))
@@ -3354,6 +3414,8 @@ class CTViewer(AbstractViewer):
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = {"key": which, "mi": mi}
             m.pop("center_angle", None)
+        elif chosen is hide_act:
+            m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_act:
             del self._measures[which][mi]
         else:
