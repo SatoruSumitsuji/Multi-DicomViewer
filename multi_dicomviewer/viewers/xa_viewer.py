@@ -729,6 +729,10 @@ class XAViewer(AbstractViewer):
         # for fast machines). Persisted across restarts.
         self._hq_cine_btn = QPushButton("HQ Cine")
         self._hq_cine_btn.setCheckable(True)
+        # The viewer's base QPushButton stylesheet de-natives the checked look,
+        # so style the active state explicitly (same blue as Measure).
+        self._hq_cine_btn.setStyleSheet(
+            "QPushButton:checked { background:#1f77b4; color:white; }")
         self._hq_cine_btn.setToolTip(
             "High-quality cine: smooth (bilinear) frames even during playback. "
             "Default off (fast). Turn on for crisper motion on a fast machine.")
