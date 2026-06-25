@@ -608,14 +608,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._last = e.position() if started else None
             return
         self._owner._spin_prev = None        # restart SPIN wheel angle
-        # Pressing ON the crosshair (with tolerance) rotates it about the
-        # centre, overriding the selected tool (SSMview behaviour) — EXCEPT for
-        # SPIN, which rolls the whole view about the centre and whose natural
-        # sweep begins near/over the crosslines, exactly where the grab band
-        # would otherwise hijack it. SPIN must own the drag.
-        self._cross = (self._owner._tool != "SPIN"
-                       and self._owner._cross_press(
-                           self._which, e.position().x(), e.position().y()))
+        # Pressing within the (now 5%) crosshair grab band grabs the centreline
+        # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
+        # is small, so SPIN still owns the drag everywhere off the lines; on the
+        # lines, grabbing the centreline takes priority (per request).
+        self._cross = self._owner._cross_press(
+            self._which, e.position().x(), e.position().y()
+        )
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
@@ -3883,11 +3882,20 @@ class CTViewer(AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return False                      # off the crosshair → tool runs
-        along = min(along_h if on_h else float("inf"),
-                    along_v if on_v else float("inf"))
+        # The ▲ markers sit on the HORIZONTAL crossline (uh) → that is the
+        # green-▲ line. Where the two 5% bands overlap (the central square) the
+        # green-▲ line WINS; otherwise grab whichever line was hit.
+        grab_h = on_h                         # green-▲ (H); True also if both
+        along = along_h if grab_h else along_v
         if along <= mid:
             self._cross_mode = "move"
-            self._cross_axis = None           # locked on first move
+            # Lock the slide to the grabbed line so the grab is deterministic
+            # (no drag-direction auto-detect): the green-▲ (H) line slides ⟂ to
+            # itself = along uv (→ reslice/repage); the non-▲ (V) line slides
+            # along uh (→ edge-capped centre-line slide). Output-basis vectors.
+            ouh = np.array([math.cos(a), math.sin(a)])
+            ouv = np.array([-math.sin(a), math.cos(a)])
+            self._cross_axis = ouv if grab_h else ouh
             self._cross_ppt = (wx, wy)
         else:
             self._cross_mode = "rotate"

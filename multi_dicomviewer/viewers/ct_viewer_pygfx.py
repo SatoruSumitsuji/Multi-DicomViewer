@@ -1256,13 +1256,11 @@ class CTViewer(AbstractViewer):
             self._pending_rclick = (key, x, y)
             self._rclick_timer.start(dbl_ms)
             return
-        # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool —
-        # EXCEPT for SPIN. SPIN rolls the whole view about the centre and its
-        # natural sweep begins near/over the crosslines, exactly where the grab
-        # band (10% of screen either side of each crossline) would otherwise
-        # hijack it into crosshair move/rotate — so SPIN must own the drag.
+        # Pressing within the (now 5%) crosshair grab band grabs the centreline
+        # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
+        # is small, so SPIN still owns the drag everywhere off the lines; on the
+        # lines, grabbing the centreline takes priority (per request).
         self._cross_grab = (self._drag_btn == 1
-                            and self._tool != "SPIN"
                             and self._cross_press(key, x, y))
 
     def _on_move(self, key, ev):
@@ -2643,11 +2641,20 @@ class CTViewer(AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return False                      # off the crosshair → tool runs
-        along = min(along_h if on_h else float("inf"),
-                    along_v if on_v else float("inf"))
+        # The ▲ markers sit on the HORIZONTAL crossline (uh) → that is the
+        # green-▲ line. Where the two 5% bands overlap (the central square) the
+        # green-▲ line WINS; otherwise grab whichever line was hit.
+        grab_h = on_h                         # green-▲ (H); True also if both
+        along = along_h if grab_h else along_v
         if along <= mid:
             self._cross_mode = "move"
-            self._cross_axis = None
+            # Lock the slide to the grabbed line so the grab is deterministic
+            # (no drag-direction auto-detect): the green-▲ (H) line slides ⟂ to
+            # itself = along uv (→ reslice/repage); the non-▲ (V) line slides
+            # along uh (→ edge-capped centre-line slide). Output-basis vectors.
+            ouh = np.array([math.cos(a), math.sin(a)])
+            ouv = np.array([-math.sin(a), math.cos(a)])
+            self._cross_axis = ouv if grab_h else ouh
             self._cross_ppt = (wx, wy)
         else:
             self._cross_mode = "rotate"
