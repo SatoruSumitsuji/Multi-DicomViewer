@@ -1256,8 +1256,13 @@ class CTViewer(AbstractViewer):
             self._pending_rclick = (key, x, y)
             self._rclick_timer.start(dbl_ms)
             return
-        # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool.
+        # Pressing ON the crosshair grabs it (MOVE/ROTATE), overriding tool —
+        # EXCEPT for SPIN. SPIN rolls the whole view about the centre and its
+        # natural sweep begins near/over the crosslines, exactly where the grab
+        # band (10% of screen either side of each crossline) would otherwise
+        # hijack it into crosshair move/rotate — so SPIN must own the drag.
         self._cross_grab = (self._drag_btn == 1
+                            and self._tool != "SPIN"
                             and self._cross_press(key, x, y))
 
     def _on_move(self, key, ev):
