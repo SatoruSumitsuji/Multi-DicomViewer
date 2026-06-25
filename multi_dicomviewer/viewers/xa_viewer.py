@@ -563,9 +563,9 @@ class XAViewer(AbstractViewer):
         # colours (Clear All Result, the active tool) still apply over it.
         self.setStyleSheet(
             "QPushButton {"
-            " text-align: left; padding: 5px 10px;"
-            " border: 1px solid #9a9a9a; border-radius: 6px;"
-            " background: #ededed; }")
+            " text-align: left; padding: 3px 8px;"
+            " border: 1px solid #c8c8c8; border-radius: 6px;"
+            " background: #ededed; color: #101010; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)

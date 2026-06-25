@@ -985,6 +985,14 @@ class CTViewer(AbstractViewer):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Unified button look (matches the Angio/IVUS viewer): a light-grey
+        # rounded border + consistent padding/background on EVERY button. Each
+        # active/coloured button only overrides background+colour, so it keeps
+        # this shape and size (the closer per-button rule wins for colour only).
+        self.setStyleSheet(
+            "QPushButton {"
+            " border:1px solid #c8c8c8; border-radius:6px;"
+            " padding:3px 8px; background:#ededed; color:#101010; }")
         self._vol = None
         self._header = None
         self._pbasis = np.eye(3)
@@ -1435,7 +1443,11 @@ class CTViewer(AbstractViewer):
             return
         side = self.current_side()
         for key, b in btns.items():
-            b.setChecked(side == key)
+            on = (side == key)
+            b.setChecked(on)
+            # The base stylesheet de-natives the button, so give the active
+            # Plane its own blue+white fill (colour-only → keeps shape/size).
+            b.setStyleSheet("background:#1f77b4;color:white;" if on else "")
 
     def current_side(self) -> str:
         """Current Bi/Lt/Rt state (derived from pane visibility) so the
@@ -1644,11 +1656,10 @@ class CTViewer(AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-            # Keep the rounded shape in the active (red) state too — a bare
-            # background stylesheet would square off the corners.
+            # Active = red background + WHITE text; only colour is overridden so
+            # the button keeps the base border/radius/padding (no size change).
             b.setStyleSheet(
-                "background:#c0392b;color:black;border-radius:6px;padding:2px 6px;"
-                if n == name else "")
+                "background:#c0392b;color:white;" if n == name else "")
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
@@ -2906,10 +2917,9 @@ class CTViewer(AbstractViewer):
         self._meas_hover = None
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
-            # Keep the rounded shape in the active (blue) state too.
+            # Active = blue + WHITE text; colour-only override keeps size/shape.
             b.setStyleSheet(
-                "background:#1f77b4;color:black;border-radius:6px;padding:2px 6px;"
-                if k == key else "")
+                "background:#1f77b4;color:white;" if k == key else "")
 
     def _measure_clear(self):
         self._measures = {"A": [], "B": []}

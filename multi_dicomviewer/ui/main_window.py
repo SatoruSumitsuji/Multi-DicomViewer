@@ -856,6 +856,12 @@ class MainWindow(QMainWindow):
             "QMainWindow::separator:hover {"
             " background:#4a90d9;"
             "}"
+            # Rounded "Layout 1×3" dropdown (and any other top-bar combo) so it
+            # matches the rounded buttons across the panes.
+            "QComboBox {"
+            " border:1px solid #c8c8c8; border-radius:6px;"
+            " padding:2px 8px; background:#ededed; color:#101010;"
+            "}"
         )
 
         # --- configurable viewer grid ---
