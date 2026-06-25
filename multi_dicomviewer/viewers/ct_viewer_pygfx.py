@@ -711,7 +711,10 @@ class _Overlay(QWidget):
                 p.drawRect(QRectF(10, y - 10 - 3.6, 12, 12))
                 # White text with a thin black 枠 on every row (readable on any
                 # background; the white-on-<5mm-red row was unreadable before).
-                _draw_outlined_text(p, QRectF(28, y - lh, 200, lh), fl, lab,
+                # Start the label one swatch-width (12 px) clear of the square's
+                # right edge (10+12=22 → 34): the square stays put, the text
+                # shifts right so the two don't crowd.
+                _draw_outlined_text(p, QRectF(34, y - lh, 200, lh), fl, lab,
                                     _white, 1.0, _black)
                 y += lh
 
