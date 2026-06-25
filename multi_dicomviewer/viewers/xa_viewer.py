@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.ecg import ECGTrace, read_ecg
 from multi_dicomviewer.core.dicom_io import (
     LoadedSeries,
@@ -474,9 +475,14 @@ class XAViewer(AbstractViewer):
         #: pull-back's slider fires many valueChanged per mouse move; we render
         #: once per event-loop pass instead of per step so the handle keeps up.
         self._seek_render_pending = False
+        # Persisted image-quality toggles (default all-OFF = current look).
+        self._dq = settings.load_display_quality()
 
         self.canvas = ImageCanvas()    # primary / Front
         self.canvas2 = ImageCanvas()   # Lateral, only in side-by-side
+        # Apply the persisted HQ-cine choice to both canvases.
+        self.canvas.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
+        self.canvas2.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
         self.canvas2.hide()
 
         self.title_label = QLabel("—")
@@ -717,6 +723,18 @@ class XAViewer(AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._image_transform(k))
             self._orient_btns.append(b)
             row.addWidget(b)
+
+        # High-quality cine: keep frames bilinear-smooth even during playback
+        # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
+        # for fast machines). Persisted across restarts.
+        self._hq_cine_btn = QPushButton("HQ Cine")
+        self._hq_cine_btn.setCheckable(True)
+        self._hq_cine_btn.setToolTip(
+            "High-quality cine: smooth (bilinear) frames even during playback. "
+            "Default off (fast). Turn on for crisper motion on a fast machine.")
+        self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
+        self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
+        row.addWidget(self._hq_cine_btn)
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
@@ -1023,6 +1041,15 @@ class XAViewer(AbstractViewer):
         biplane pair stays consistent; for single-plane SC only canvas matters."""
         for c in (self.canvas, self.canvas2):
             c.apply_orient(kind)
+
+    def _toggle_hq_cine(self, on: bool) -> None:
+        """High-quality cine toggle: smooth frames during playback on both
+        canvases, and persist the choice across restarts."""
+        on = bool(on)
+        for c in (self.canvas, self.canvas2):
+            c.set_hq_cine(on)
+        self._dq["xa_hq_cine"] = on
+        settings.save_display_quality(self._dq)
 
     # ----------------------------------------------- zoom (Z / Shift+Z)
     def zoom_in(self) -> None:

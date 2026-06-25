@@ -260,8 +260,18 @@ class ImageCanvas(QWidget):
         # display — the Mac "playback not as smooth as Windows" report) and off
         # when paused so a still frame is still crisply upscaled.
         self._fast_scale: bool = False
+        self._hq_cine: bool = False        # smooth (bilinear) even during cine
 
     # ---------------------------------------------------------------- public
+    def set_hq_cine(self, on: bool) -> None:
+        """When ON, frames stay bilinear-smooth even during cine playback (the
+        per-frame upscale cost is heavier; for fast machines). Default OFF keeps
+        the fast nearest-neighbour cine scaling."""
+        on = bool(on)
+        if on != self._hq_cine:
+            self._hq_cine = on
+            self.update()
+
     def set_frame(self, frame8: np.ndarray) -> None:
         self._raw_frame8 = frame8
         f = self._oriented(frame8)
@@ -1491,7 +1501,7 @@ class ImageCanvas(QWidget):
         # During playback/seek the viewer sets _fast_scale so the per-frame
         # bilinear cost (heavy on a high-DPI Mac) doesn't stutter the cine; a
         # paused/still frame keeps the smooth upscale.
-        if not self._fast_scale:
+        if self._hq_cine or not self._fast_scale:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(r, self._qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)

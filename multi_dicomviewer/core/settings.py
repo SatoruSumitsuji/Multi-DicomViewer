@@ -18,6 +18,7 @@ TAG_CONDITIONS_PATH = SETTINGS_DIR / "tag_conditions.json"
 EXPORT_FIELDS_PATH = SETTINGS_DIR / "export_fields.json"
 ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
 IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
+DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
 _SCHEMA_VERSION = 2
 
 #: Modalities that get their own persisted tag list. Anything else
@@ -222,6 +223,45 @@ def save_ivus_color(series_uid: str, color: bool) -> None:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+    except OSError:
+        pass
+
+
+# --------------------------------------------------- display-quality prefs
+#: App-wide image-quality toggles (default OFF / current behaviour, so a fresh
+#: install renders exactly as before). Persisted so the user sets them once.
+_DQ_DEFAULTS = {
+    "xa_hq_cine": False,      # Angio/IVUS: smooth (bilinear) frames during cine
+    "xa_smooth": False,       # Angio/IVUS: high-quality (Lanczos) upscaling
+    "xa_denoise": False,      # Angio/IVUS: edge-preserving noise reduction
+    "ct_full_quality": False,  # Mac 3DCT: disable the interactive coarse LOD
+}
+
+
+def load_display_quality() -> dict:
+    """Return the persisted image-quality toggles, falling back to the
+    all-OFF defaults for any missing/unreadable key."""
+    out = dict(_DQ_DEFAULTS)
+    try:
+        data = json.loads(DISPLAY_QUALITY_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k in _DQ_DEFAULTS:
+                if isinstance(data.get(k), bool):
+                    out[k] = data[k]
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def save_display_quality(prefs: dict) -> None:
+    """Best-effort persist of the image-quality toggles. A failed write must
+    not break the session."""
+    try:
+        out = {k: bool(prefs.get(k, _DQ_DEFAULTS[k])) for k in _DQ_DEFAULTS}
+        out["version"] = 1
+        DISPLAY_QUALITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DISPLAY_QUALITY_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
 
