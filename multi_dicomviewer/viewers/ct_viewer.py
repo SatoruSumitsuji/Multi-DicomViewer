@@ -609,10 +609,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             return
         self._owner._spin_prev = None        # restart SPIN wheel angle
         # Pressing ON the crosshair (with tolerance) rotates it about the
-        # centre, overriding the selected tool (SSMview behaviour).
-        self._cross = self._owner._cross_press(
-            self._which, e.position().x(), e.position().y()
-        )
+        # centre, overriding the selected tool (SSMview behaviour) — EXCEPT for
+        # SPIN, which rolls the whole view about the centre and whose natural
+        # sweep begins near/over the crosslines, exactly where the grab band
+        # would otherwise hijack it. SPIN must own the drag.
+        self._cross = (self._owner._tool != "SPIN"
+                       and self._owner._cross_press(
+                           self._which, e.position().x(), e.position().y()))
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
