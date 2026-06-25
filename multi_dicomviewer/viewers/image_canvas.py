@@ -28,6 +28,9 @@ from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
 from multi_dicomviewer.core.image_export import pick_export_format
 from multi_dicomviewer.core.measurements import Measurement
+from multi_dicomviewer.ui.measure_style_menu import (
+    add_color_submenu, add_transparency_submenu, transp_to_alpha,
+)
 from multi_dicomviewer.ui.tag_font import TAG_FONT_PT_DEFAULT, overlay_qfont
 
 
@@ -794,8 +797,10 @@ class ImageCanvas(QWidget):
                 "big_id": mb["id"], "small_id": ms["id"],
                 "outer": ob, "inner": os_, "centroid": cen,
                 "pct": G.percent_area_diff(ab, asm), "radials": radials,
-                "fill_hex": mb.get("color") or "#33e6ff",
             })
+            # Keep a user-chosen fill colour; otherwise track the outer outline.
+            if not c.get("fill_custom"):
+                c["fill_hex"] = mb.get("color") or "#33e6ff"
             out.append(c)
         self._compares = out
 
@@ -819,6 +824,11 @@ class ImageCanvas(QWidget):
         if target not in self._compares:
             return
         menu = QMenu(self)
+        # The %Area / Thickness fill colour is independently selectable here
+        # (separate from the defining outlines' colours). Once set it sticks —
+        # _recompute_compares preserves it via the "fill_custom" flag.
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
         vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(QCursor.pos())
@@ -832,6 +842,18 @@ class ImageCanvas(QWidget):
                 pass
             self.update()
             self.results_changed.emit()
+        else:
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    target["fill_hex"] = hexcol
+                    target["fill_custom"] = True
+                    self.update()
+                    break
+            for act, val in transp_actions:
+                if chosen is act:
+                    target["transp"] = val
+                    self.update()
+                    break
 
     # ----------------------------------------------- right-click menus
     def _ca_hit(self, sx, sy):
@@ -880,6 +902,10 @@ class ImageCanvas(QWidget):
             # Don't let the user shrink below 2 vertices (Line minimum).
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        # Change Color / Change Transparency — available on every result type
+        # (incl. Line/Angle, which are most easily right-clicked on a handle).
+        color_actions = add_color_submenu(menu, COLOR_CHOICES)
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction("Delete result")
@@ -894,6 +920,16 @@ class ImageCanvas(QWidget):
             del self.measures[mi]
             self._recompute_compares()      # drop/refresh affected comparisons
             self.results_changed.emit()
+        else:
+            for act, hexcol in color_actions:
+                if chosen is act:
+                    m["color"] = hexcol
+                    break
+            for act, val in transp_actions:
+                if chosen is act:
+                    m["transp"] = val
+                    break
+        self._recompute_compares()          # a colour change refreshes any compare
         self.update()
 
     def _outline_menu(self, mi, sx, sy):
@@ -933,6 +969,7 @@ class ImageCanvas(QWidget):
             pix = QPixmap(16, 16); pix.fill(QColor(hexcol))
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
+        transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
@@ -961,6 +998,10 @@ class ImageCanvas(QWidget):
                 for act, hexcol in color_actions:
                     if chosen is act:
                         m["color"] = hexcol
+                        break
+                for act, val in transp_actions:
+                    if chosen is act:
+                        m["transp"] = val
                         break
         # A colour / spline / vertex change to a shape that is part of a
         # comparison must refresh that comparison NOW (fill colour + outline),
@@ -1486,6 +1527,7 @@ class ImageCanvas(QWidget):
             except Exception:
                 continue
             col = QColor(m.get("color", DEFAULT_MEAS_COLOR))
+            col.setAlpha(transp_to_alpha(m.get("transp", 0)))   # Change Transparency
             p.setPen(QPen(col, 1.92))    # 1.6 ×1.2 — readability
             wpts = [self._image_to_widget(q) for q in outline]
             for a, b in zip(wpts, wpts[1:]):
@@ -1832,7 +1874,7 @@ class ImageCanvas(QWidget):
             path.addPolygon(QPolygonF([W(q) for q in c["outer"]]))
             path.addPolygon(QPolygonF([W(q) for q in c["inner"]]))
             fr = QColor(c["fill_hex"])
-            fr.setAlpha(128)                             # 50% (was 65% transp.)
+            fr.setAlpha(transp_to_alpha(c.get("transp", 50)))   # Change Transparency (def 50%)
             p.setPen(Qt.PenStyle.NoPen)
             p.fillPath(path, fr)
             if c["show_thk"]:
