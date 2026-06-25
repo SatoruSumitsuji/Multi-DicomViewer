@@ -1818,7 +1818,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 3, 6, 3)
 
-        self._info_btn = FitButton("◀ Info shown")
+        self._info_btn = FitButton("◀ Hide Studies")
         self._info_btn.setHelpToolTip(
             "Show/hide the left Info window (study tree)"
         )
@@ -1930,7 +1930,7 @@ class MainWindow(QMainWindow):
     def _toggle_info(self, *_a) -> None:
         vis = not self._studies_dock.isVisible()
         self._studies_dock.setVisible(vis)
-        self._info_btn.setText("◀ Info shown" if vis else "Info hidden ▶")
+        self._info_btn.setText("◀ Hide Studies" if vis else "Show Studies ▶")
 
     def _shown_panes(self) -> list:
         """Panes currently on screen, in display (reading) order. 1×1 shows
@@ -3183,7 +3183,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText("◀ Info shown")
+            self._info_btn.setText("◀ Hide Studies")
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still won't shrink the central area below its own minimum.
         cap = max(300, self.width() - 120)
@@ -3197,7 +3197,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText("◀ Info shown")
+            self._info_btn.setText("◀ Hide Studies")
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still clamps to the central area's own minimum width.
         cap = max(dock.minimumWidth(), self.width() - 120)
