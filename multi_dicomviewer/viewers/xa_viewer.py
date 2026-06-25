@@ -559,7 +559,7 @@ class XAViewer(AbstractViewer):
         # stylesheet turns off the native macOS button height, so without it the
         # button collapses and the text overflows top/bottom.
         self.setStyleSheet(
-            "QPushButton { text-align: left; padding: 4px 8px; }")
+            "QPushButton { text-align: left; padding: 9px 10px; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
