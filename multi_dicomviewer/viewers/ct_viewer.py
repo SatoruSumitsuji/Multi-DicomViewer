@@ -2370,13 +2370,16 @@ class CTViewer(AbstractViewer):
         return None
 
     def _pick_measure(self, which, sx, sy):
-        wx, wy = self._disp_to_world(which, sx, sy)
-        tol = max(3.0, 0.02 * self._half)
+        # Pixel-based catch (constant on-screen width, zoom/DPR independent), so
+        # the boundary band can't balloon when zoomed in and shadow the filled
+        # compare region — a click ≥5 px inside the annulus now selects the fill.
+        tol = 5.0                              # screen px, each side of the line
         best, bi = tol, None
         for mi, m in enumerate(self._measures[which]):
-            ol = self._outline(m)
-            for i in range(len(ol) - 1):
-                d = _seg_dist(wx, wy, ol[i], ol[i + 1])
+            wpts = [self._world_to_qt(which, q[0], q[1])
+                    for q in self._outline(m)]
+            for i in range(len(wpts) - 1):
+                d = _seg_dist(sx, sy, wpts[i], wpts[i + 1])
                 if d < best:
                     best, bi = d, mi
         return bi
