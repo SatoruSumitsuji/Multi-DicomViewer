@@ -1644,7 +1644,11 @@ class CTViewer(AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-            b.setStyleSheet("background:#c0392b;color:black;" if n == name else "")
+            # Keep the rounded shape in the active (red) state too — a bare
+            # background stylesheet would square off the corners.
+            b.setStyleSheet(
+                "background:#c0392b;color:black;border-radius:6px;padding:2px 6px;"
+                if n == name else "")
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
@@ -2902,7 +2906,10 @@ class CTViewer(AbstractViewer):
         self._meas_hover = None
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
-            b.setStyleSheet("background:#1f77b4;color:black;" if k == key else "")
+            # Keep the rounded shape in the active (blue) state too.
+            b.setStyleSheet(
+                "background:#1f77b4;color:black;border-radius:6px;padding:2px 6px;"
+                if k == key else "")
 
     def _measure_clear(self):
         self._measures = {"A": [], "B": []}
