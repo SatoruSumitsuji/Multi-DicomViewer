@@ -555,9 +555,11 @@ class XAViewer(AbstractViewer):
         layout.addWidget(self.readout)
         # Left-align every toolbar button's caption so a too-narrow button shows
         # the START of its label (e.g. "Clear All Result", the tool names) rather
-        # than centring it and clipping both ends. text-align is the only
-        # property set here, so per-button background styles still apply.
-        self.setStyleSheet("QPushButton { text-align: left; padding-left: 6px; }")
+        # than centring it and clipping both ends. Include VERTICAL padding: a
+        # stylesheet turns off the native macOS button height, so without it the
+        # button collapses and the text overflows top/bottom.
+        self.setStyleSheet(
+            "QPushButton { text-align: left; padding: 4px 8px; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
@@ -1797,6 +1799,13 @@ class XAViewer(AbstractViewer):
             "and/or Thickness")
         self._cmp_btn.clicked.connect(self._toggle_compare)
         row.addWidget(self._cmp_btn)
+        # Hide/Show ALL results (lines + region colours + text) at once, between
+        # Compare and Clear All Result. Disabled when there is nothing to hide.
+        self._hideall_btn = QPushButton("Hide All Result")
+        self._hideall_btn.setToolTip(
+            "Hide / Show every measurement line, region colour and result text")
+        self._hideall_btn.clicked.connect(self._toggle_hide_all)
+        row.addWidget(self._hideall_btn)
         clr = QPushButton("Clear All Result")
         clr.setToolTip("Clear all measurements and comparison results")
         clr.setStyleSheet("background:#bdbdbd;color:black;")   # match 3DCT
@@ -1807,10 +1816,31 @@ class XAViewer(AbstractViewer):
             " right-click finishes Polyline / Polygon"
         ))
         row.addStretch(1)
-        # A canvas that finishes/cancels a Compare un-checks the button.
+        # A canvas that finishes/cancels a Compare un-checks the button; any
+        # change to the result set refreshes the Hide/Show-All button.
         for c in (self.canvas, self.canvas2):
             c.compare_finished.connect(self._on_compare_finished)
+            c.results_changed.connect(self._update_hideall_btn)
+            c.measurement_done.connect(lambda _m: self._update_hideall_btn())
+        self._update_hideall_btn()
         return bar
+
+    def _toggle_hide_all(self):
+        hide = not getattr(self.canvas, "_results_hidden", False)
+        for c in (self.canvas, self.canvas2):
+            c._results_hidden = hide
+            c.update()
+        self._update_hideall_btn()
+
+    def _update_hideall_btn(self):
+        btn = getattr(self, "_hideall_btn", None)
+        if btn is None:
+            return
+        has = any(c.measures or c._compares
+                  for c in (self.canvas, self.canvas2))
+        hidden = getattr(self.canvas, "_results_hidden", False)
+        btn.setEnabled(has)
+        btn.setText("Show All Result" if hidden else "Hide All Result")
 
     def _toggle_compare(self):
         on = self._cmp_btn.isChecked()

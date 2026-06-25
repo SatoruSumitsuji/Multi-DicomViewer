@@ -133,6 +133,10 @@ class ImageCanvas(QWidget):
     #: viewer can un-check its "Compare" button.
     compare_finished = pyqtSignal()
 
+    #: Emitted whenever the set of measurements / comparisons changes (add,
+    #: delete, clear) so the host can refresh its "Hide/Show All Result" button.
+    results_changed = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(80, 80)
@@ -176,6 +180,7 @@ class ImageCanvas(QWidget):
         self._cmp_on: bool = False           # Compare-select mode
         self._cmp_sel: list[int] = []        # picked measure indices (max 2)
         self._compares: list[dict] = []      # persisted results
+        self._results_hidden: bool = False   # "Hide/Show All Result" global toggle
         self._cmp_want_pa: bool = True       # last-used: %PA (IVUS default)
         self._cmp_want_thk: bool = False     # last-used: Thickness
         # Zoom (Z = zoom in / Shift+Z = zoom out / mouse wheel also).
@@ -325,8 +330,10 @@ class ImageCanvas(QWidget):
         self._hover = None
         self._compares.clear()
         self._cmp_sel = []
+        self._results_hidden = False
         self._center_angle_target = -1
         self.update()
+        self.results_changed.emit()
 
     # ----------------------------------------------------- zoom (Z key)
     def _apply_zoom(self, factor: float, ax: float, ay: float) -> None:
@@ -759,6 +766,7 @@ class ImageCanvas(QWidget):
         self._cmp_on = False
         self._cmp_sel = []
         self.compare_finished.emit()
+        self.results_changed.emit()
         self.update()
 
     def _recompute_compares(self) -> None:
@@ -805,21 +813,25 @@ class ImageCanvas(QWidget):
         return None
 
     def _compare_delete_menu(self, target) -> None:
+        """Right-click INSIDE a compare region → Hide·Show / Delete. Hide toggles
+        only the region COLOUR fill; the defining outlines are separate measures
+        and are unaffected."""
         if target not in self._compares:
             return
         menu = QMenu(self)
-        del_act = menu.addAction("Delete")
         vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
+        del_act = menu.addAction("Delete")
         chosen = menu.exec(QCursor.pos())
-        if chosen is del_act:
+        if chosen is vis_act:
+            target["hidden"] = not target.get("hidden", False)
+            self.update()
+        elif chosen is del_act:
             try:
                 self._compares.remove(target)
             except ValueError:
                 pass
             self.update()
-        elif chosen is vis_act:
-            target["hidden"] = not target.get("hidden", False)
-            self.update()
+            self.results_changed.emit()
 
     # ----------------------------------------------- right-click menus
     def _ca_hit(self, sx, sy):
@@ -868,15 +880,20 @@ class ImageCanvas(QWidget):
             # Don't let the user shrink below 2 vertices (Line minimum).
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction("Delete result")
         else:
             del_res = menu.addAction("Delete")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if del_pt is not None and chosen is del_pt:
             self._delete_point(mi, vi)
+        elif chosen is hide_act:
+            m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
             del self.measures[mi]
             self._recompute_compares()      # drop/refresh affected comparisons
+            self.results_changed.emit()
         self.update()
 
     def _outline_menu(self, mi, sx, sy):
@@ -916,6 +933,7 @@ class ImageCanvas(QWidget):
             pix = QPixmap(16, 16); pix.fill(QColor(hexcol))
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
+        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if chosen is add_pt:
@@ -925,9 +943,12 @@ class ImageCanvas(QWidget):
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = mi
             m.pop("center_angle", None)              # restart picking
+        elif chosen is hide_act:
+            m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_act:
             del self.measures[mi]
             self._recompute_compares()      # drop/refresh affected comparisons
+            self.results_changed.emit()
         else:
             for act, label in vessel_actions:
                 if chosen is act:
@@ -1185,20 +1206,22 @@ class ImageCanvas(QWidget):
             if hit is not None:
                 self._handle_menu(hit, sx, sy)
                 return
-            # Right-click on a compare result's filled region → Delete menu.
+            # A measure LINE/outline takes priority next (its own Hide/Delete);
+            # only an EMPTY spot inside a compare region falls through to the
+            # region's colour Hide/Delete menu.
+            mi = self._pick_measure(sx, sy)
+            if mi is not None:
+                self._outline_menu(mi, sx, sy)
+                return
             ci = self._compare_hit(sx, sy)
             if ci is not None:
                 self._compare_delete_menu(self._compares[ci])
                 return
-            mi = self._pick_measure(sx, sy)
-            if mi is None:
-                # Empty area + no active measure tool → offer still export.
-                # (In measure mode an empty right-click stays a no-op so it
-                # can't interrupt drawing.)
-                if not self.meas_type:
-                    self._export_menu(sx, sy)
-                return
-            self._outline_menu(mi, sx, sy)
+            # Empty area + no active measure tool → offer still export.
+            # (In measure mode an empty right-click stays a no-op so it
+            # can't interrupt drawing.)
+            if not self.meas_type:
+                self._export_menu(sx, sy)
             return
 
         if e.button() != Qt.MouseButton.LeftButton:
@@ -1407,6 +1430,7 @@ class ImageCanvas(QWidget):
         # contextMenuEvent and the two events collide on the same widget.
         def _publish(self=self, meas=meas):
             self.measurement_done.emit(meas)
+            self.results_changed.emit()
             self.update()
         QTimer.singleShot(0, _publish)
 
@@ -1438,6 +1462,8 @@ class ImageCanvas(QWidget):
         # polygon-vertex colour (yellow) so the long/short-diameter lines read
         # as part of the shape — matching the CT viewers.
         for m in self.measures:
+            if self._results_hidden or m.get("hidden"):
+                continue
             try:
                 segs = self._axis_segs_px(m)
             except Exception:
@@ -1453,6 +1479,8 @@ class ImageCanvas(QWidget):
 
         # Outlines — per-measure colour (Change Color menu).
         for m in self.measures:
+            if self._results_hidden or m.get("hidden"):
+                continue
             try:
                 outline = self._outline_px(m)
             except Exception:
@@ -1466,6 +1494,8 @@ class ImageCanvas(QWidget):
         # Center-Angle annotations (3 spokes from shape centre + small
         # dots on the picked perimeter points).
         for mi, m in enumerate(self.measures):
+            if self._results_hidden or m.get("hidden"):
+                continue
             ca = m.get("center_angle")
             if not ca or "pts" not in ca:
                 continue
@@ -1529,6 +1559,8 @@ class ImageCanvas(QWidget):
         font.setBold(True)
         p.setFont(font)
         for mi, m in enumerate(self.measures):
+            if self._results_hidden or m.get("hidden"):
+                continue
             for vi, q in enumerate(self._handles(m)):
                 is_edit = (mi == edit_mi and vi == edit_vi)
                 col = green if is_edit else yellow
@@ -1790,7 +1822,9 @@ class ImageCanvas(QWidget):
                        "Click to select 2 Ellipse/Polygon data to compare"
                        f"  ({n}/2)")
 
-        for c in self._compares:
+        # "Hide/Show All Result" hides every region fill + legend at once.
+        compares = [] if self._results_hidden else self._compares
+        for c in compares:
             if c.get("hidden"):                          # Hidden → no fill/rays
                 continue
             path = QPainterPath()                        # annulus = outer − inner
@@ -1813,7 +1847,7 @@ class ImageCanvas(QWidget):
         # The %Area result text itself is listed top-right by _paint_results.
         bands = (G.gap_legend()
                  if any(c["show_thk"] and not c.get("hidden")
-                        for c in self._compares) else [])
+                        for c in compares) else [])
         if bands:
             f = QFont()
             f.setPointSize(self._overlay_font_pt)
@@ -1829,6 +1863,9 @@ class ImageCanvas(QWidget):
                 y += lh
 
     def _paint_results(self, p: QPainter):
+        # "Hide/Show All Result" hides every measurement / compare result text.
+        if self._results_hidden:
+            return
         if not self.measures and not self._compares:
             return
         font = QFont()
