@@ -635,26 +635,36 @@ class _Overlay(QWidget):
                        f"  ({n_sel}/2)")
         cmps = [c for c in v._compares if c["key"] == key]
         for c in cmps:
-            if c.get("hidden"):                          # Hidden → no fill/rays
+            if c.get("hidden"):                          # Hidden → no fill
                 continue
-            # Filled region between the two outlines (outer colour @ ~35% alpha
-            # = 65% transparent). Even-odd fill of outer minus inner = annulus;
-            # this is also the right-click → Delete hit area.
-            path = QPainterPath()
-            path.setFillRule(Qt.FillRule.OddEvenFill)
-            path.addPolygon(poly(c["outer"]))
-            path.addPolygon(poly(c["inner"]))
-            fr = c["fill_rgb"]
             p.setPen(Qt.PenStyle.NoPen)
-            p.fillPath(path, QColor(fr[0], fr[1], fr[2], 90))
             if c["show_thk"]:
-                for r in c["radials"]:                       # inner→outer rays
-                    p.setPen(QPen(QColor(_gap_color(r["gap"])),
-                                  _gap_linewidth(r["gap"])))   # red = thicker
-                    p.drawLine(S(r["inner"]), S(r["outer"]))
-                p.setPen(Qt.PenStyle.NoPen)                  # centroid dot
-                p.setBrush(QColor(0, 229, 255))
+                # Thickness: FILL each angular sector of the annulus by its gap
+                # band colour (heatmap) at ~35% alpha = 65% transparent (same as
+                # the IVUS fill) — easier to read than radial lines.
+                rad = c["radials"]
+                nr = len(rad)
+                for i in range(nr):
+                    a, b = rad[i], rad[(i + 1) % nr]
+                    da = abs(b["ang"] - a["ang"]) % 360.0
+                    if 2.5 * c["step"] < da < 360.0 - 2.5 * c["step"]:
+                        continue                         # a skipped-ray gap
+                    col = QColor(_gap_color(a["gap"]))
+                    col.setAlpha(90)
+                    p.setBrush(col)
+                    p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
+                                             S(b["outer"]), S(b["inner"])]))
+                p.setBrush(QColor(0, 229, 255))          # centroid dot
                 p.drawEllipse(S(c["centroid"]), 3.0, 3.0)
+            else:
+                # %PA: single outer-colour annulus fill (65% transparent). Even
+                # -odd fill of outer minus inner = annulus; also the Delete area.
+                path = QPainterPath()
+                path.setFillRule(Qt.FillRule.OddEvenFill)
+                path.addPolygon(poly(c["outer"]))
+                path.addPolygon(poly(c["inner"]))
+                fr = c["fill_rgb"]
+                p.fillPath(path, QColor(fr[0], fr[1], fr[2], 90))
         if cmps:
             # one summary line per result + a single colour legend if any result
             # is a VISIBLE Thickness run, lower-left above the WW/WL readout.
@@ -664,6 +674,8 @@ class _Overlay(QWidget):
             bands = (_gap_legend()
                      if any(c["show_thk"] and not c.get("hidden") for c in cmps)
                      else [])
+            # NOTE: this legend style (white text + thin black 枠) is intended to
+            # be ported to the Windows viewer too once approved on Mac.
             heads = []
             for c in cmps:
                 ht = f"Compare #{c['big_id']} vs #{c['small_id']}"
@@ -677,14 +689,14 @@ class _Overlay(QWidget):
                 _draw_outlined_text(p, QRectF(10, y - lh, 360, lh), fl, ht,
                                     QColor(0, 229, 255), 1.0, _black)
                 y += lh
-            for i, (lab, hexc) in enumerate(bands):
+            for lab, hexc in bands:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(hexc))
                 p.drawRect(QRectF(10, y - 10, 12, 12))
-                # <5 mm (first band) → white 枠; all other rows → black 枠.
+                # White text with a thin black 枠 on every row (readable on any
+                # background; the white-on-<5mm-red row was unreadable before).
                 _draw_outlined_text(p, QRectF(28, y - lh, 200, lh), fl, lab,
-                                    QColor(230, 230, 230), 1.0,
-                                    _white if i == 0 else _black)
+                                    _white, 1.0, _black)
                 y += lh
 
     # -- corner info text + angio readout ----------------------------------

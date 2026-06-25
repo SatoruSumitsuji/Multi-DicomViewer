@@ -553,6 +553,11 @@ class XAViewer(AbstractViewer):
         # Change W/L (built here so the sliders exist before load_series).
         self._build_wl_dialog()
         layout.addWidget(self.readout)
+        # Left-align every toolbar button's caption so a too-narrow button shows
+        # the START of its label (e.g. "Clear All Result", the tool names) rather
+        # than centring it and clipping both ends. text-align is the only
+        # property set here, so per-button background styles still apply.
+        self.setStyleSheet("QPushButton { text-align: left; padding-left: 6px; }")
 
         self.canvas.measurement_done.connect(self._on_measurement)
         self.canvas2.measurement_done.connect(self._on_measurement)
