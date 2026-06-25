@@ -1831,6 +1831,12 @@ class MainWindow(QMainWindow):
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
         self._layout_btn.setToolTip("Choose the pane layout from a grid")
+        # This menu-button renders square on macOS; give it the same light-grey
+        # rounded border as the pane buttons so the top bar matches.
+        self._layout_btn.setStyleSheet(
+            "QPushButton {"
+            " border:1px solid #c8c8c8; border-radius:6px;"
+            " padding:3px 10px 3px 8px; background:#ededed; color:#101010; }")
         self._layout_menu = QMenu(self._layout_btn)
         self._layout_picker = LayoutGridPicker(_GRID_MAX_ROWS, _GRID_MAX_COLS)
         self._layout_picker.picked.connect(self._on_layout_picked)
