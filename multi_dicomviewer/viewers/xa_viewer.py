@@ -730,22 +730,22 @@ class XAViewer(AbstractViewer):
         # High-quality cine: keep frames bilinear-smooth even during playback
         # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
         # for fast machines). Persisted across restarts.
-        self._hq_cine_btn = QPushButton("HQ-Img")
+        self._hq_cine_btn = QPushButton("S-Cine")
         self._hq_cine_btn.setCheckable(True)
         # The viewer's base QPushButton stylesheet de-natives the checked look,
         # so style the active state explicitly (same blue as Measure).
         self._hq_cine_btn.setStyleSheet(
             "QPushButton:checked { background:#1f77b4; color:white; }")
         self._hq_cine_btn.setToolTip(
-            "High-quality image: keep frames bilinear-smooth even during cine "
-            "playback (paused frames are already smooth). Default off (fast "
-            "nearest-neighbour cine). Higher-quality still-image upscaling "
-            "(smoothing) is added separately.")
+            "Smooth Cine: keep frames bilinear-smooth even during cine playback "
+            "(paused frames are already smooth). Default off (fast nearest-"
+            "neighbour cine). This affects motion only — for sharper enlarged "
+            "stills use S-Zoom.")
         self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
         self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
         row.addWidget(self._hq_cine_btn)
 
-        # Smooth: high-quality (Lanczos) upscaling of the enlarged image —
+        # S-Zoom: high-quality (Lanczos) upscaling of the enlarged image —
         # sharper than the default bilinear. Denoise: edge-preserving (bilateral)
         # noise reduction that calms speckle/quantum noise while keeping vessel
         # borders crisp. Both default OFF, opt-in (heavier; for fast machines),
@@ -753,12 +753,12 @@ class XAViewer(AbstractViewer):
         _have_cv2 = image_quality.available()
         _q_css = "QPushButton:checked { background:#1f77b4; color:white; }"
 
-        self._smooth_btn = QPushButton("Smooth")
+        self._smooth_btn = QPushButton("S-Zoom")
         self._smooth_btn.setCheckable(True)
         self._smooth_btn.setStyleSheet(_q_css)
         self._smooth_btn.setToolTip(
-            "High-quality (Lanczos) upscaling: sharper image when enlarged "
-            "(vs the default bilinear). Default off. For fast machines.")
+            "Smooth Zoom: high-quality (Lanczos) upscaling — sharper image when "
+            "enlarged (vs the default bilinear). Default off. For fast machines.")
         self._smooth_btn.setChecked(bool(self._dq.get("xa_smooth")))
         self._smooth_btn.setEnabled(_have_cv2)
         self._smooth_btn.toggled.connect(self._toggle_smooth)
