@@ -22,3 +22,9 @@ imagecodecs>=2024.1.1
 # honoured through ffmpeg directly.
 imageio>=2.34
 imageio-ffmpeg>=0.5
+
+# Optional image-quality toggles for the Angio/IVUS viewer (Smooth = Lanczos
+# upscaling, Denoise = edge-preserving bilateral). Headless build (no GUI deps)
+# so it never clashes with the PyQt6 event loop. If absent, the toggles disable
+# themselves and display falls back to Qt's bilinear scaling.
+opencv-python-headless>=4.9

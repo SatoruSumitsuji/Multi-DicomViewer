@@ -39,6 +39,14 @@ plop_datas, plop_binaries, plop_hidden = collect_all("pylibjpeg_openjpeg")
 # --- imagecodecs: many C extensions, prefer the kitchen-sink helper ---
 ic_datas, ic_binaries, ic_hidden = collect_all("imagecodecs")
 
+# --- OpenCV (Angio/IVUS Smooth/Denoise): native libs PyInstaller won't fully
+#     auto-detect. Optional — guarded so a build environment without cv2 still
+#     packages (the app then just disables the quality toggles at runtime). ---
+try:
+    cv2_datas, cv2_binaries, cv2_hidden = collect_all("cv2")
+except Exception:
+    cv2_datas, cv2_binaries, cv2_hidden = [], [], []
+
 # --- pydicom encoders/handlers (plugin discovery) ---
 pyd_datas, pyd_binaries, pyd_hidden = collect_all("pydicom")
 
@@ -48,8 +56,8 @@ iio_datas, iio_binaries, iio_hidden = collect_all("imageio")
 iiof_datas, iiof_binaries, iiof_hidden = collect_all("imageio_ffmpeg")
 
 datas = (
-    ct_datas + plj_datas + pllj_datas + plop_datas + ic_datas + pyd_datas
-    + iio_datas + iiof_datas
+    ct_datas + plj_datas + pllj_datas + plop_datas + ic_datas + cv2_datas
+    + pyd_datas + iio_datas + iiof_datas
     # Resources shipped with the app — the DICOM-aware Rupture-Predictor
     # HTML is launched from Tools and must be present in the bundle.
     # Preserve the source-tree path so the dev and bundle layouts match.
@@ -60,7 +68,7 @@ datas = (
 )
 binaries = (
     ct_binaries + plj_binaries + pllj_binaries + plop_binaries
-    + ic_binaries + pyd_binaries + iio_binaries + iiof_binaries
+    + ic_binaries + cv2_binaries + pyd_binaries + iio_binaries + iiof_binaries
 )
 hiddenimports = (
     ct_hidden
@@ -68,6 +76,7 @@ hiddenimports = (
     + pllj_hidden
     + plop_hidden
     + ic_hidden
+    + cv2_hidden
     + pyd_hidden
     + iio_hidden
     + iiof_hidden

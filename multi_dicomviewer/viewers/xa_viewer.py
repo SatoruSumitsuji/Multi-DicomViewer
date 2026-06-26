@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.ecg import ECGTrace, read_ecg
 from multi_dicomviewer.core.dicom_io import (
@@ -480,9 +481,11 @@ class XAViewer(AbstractViewer):
 
         self.canvas = ImageCanvas()    # primary / Front
         self.canvas2 = ImageCanvas()   # Lateral, only in side-by-side
-        # Apply the persisted HQ-cine choice to both canvases.
-        self.canvas.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
-        self.canvas2.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
+        # Apply the persisted image-quality choices to both canvases.
+        for _c in (self.canvas, self.canvas2):
+            _c.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
+            _c.set_smooth(bool(self._dq.get("xa_smooth")))
+            _c.set_denoise(bool(self._dq.get("xa_denoise")))
         self.canvas2.hide()
 
         self.title_label = QLabel("—")
@@ -741,6 +744,39 @@ class XAViewer(AbstractViewer):
         self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
         self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
         row.addWidget(self._hq_cine_btn)
+
+        # Smooth: high-quality (Lanczos) upscaling of the enlarged image —
+        # sharper than the default bilinear. Denoise: edge-preserving (bilateral)
+        # noise reduction that calms speckle/quantum noise while keeping vessel
+        # borders crisp. Both default OFF, opt-in (heavier; for fast machines),
+        # OpenCV-backed, and persisted across restarts.
+        _have_cv2 = image_quality.available()
+        _q_css = "QPushButton:checked { background:#1f77b4; color:white; }"
+
+        self._smooth_btn = QPushButton("Smooth")
+        self._smooth_btn.setCheckable(True)
+        self._smooth_btn.setStyleSheet(_q_css)
+        self._smooth_btn.setToolTip(
+            "High-quality (Lanczos) upscaling: sharper image when enlarged "
+            "(vs the default bilinear). Default off. For fast machines.")
+        self._smooth_btn.setChecked(bool(self._dq.get("xa_smooth")))
+        self._smooth_btn.setEnabled(_have_cv2)
+        self._smooth_btn.toggled.connect(self._toggle_smooth)
+        row.addWidget(self._smooth_btn)
+
+        self._denoise_btn = QPushButton("Denoise")
+        self._denoise_btn.setCheckable(True)
+        self._denoise_btn.setStyleSheet(_q_css)
+        self._denoise_btn.setToolTip(
+            "Edge-preserving noise reduction: calms speckle / quantum noise "
+            "while keeping vessel and catheter edges crisp. Default off.")
+        self._denoise_btn.setChecked(bool(self._dq.get("xa_denoise")))
+        self._denoise_btn.setEnabled(_have_cv2)
+        self._denoise_btn.toggled.connect(self._toggle_denoise)
+        row.addWidget(self._denoise_btn)
+        if not _have_cv2:
+            for _b in (self._smooth_btn, self._denoise_btn):
+                _b.setToolTip(_b.toolTip() + "  (OpenCV not available)")
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
@@ -1055,6 +1091,22 @@ class XAViewer(AbstractViewer):
         for c in (self.canvas, self.canvas2):
             c.set_hq_cine(on)
         self._dq["xa_hq_cine"] = on
+        settings.save_display_quality(self._dq)
+
+    def _toggle_smooth(self, on: bool) -> None:
+        """Lanczos high-quality upscaling toggle (both canvases), persisted."""
+        on = bool(on)
+        for c in (self.canvas, self.canvas2):
+            c.set_smooth(on)
+        self._dq["xa_smooth"] = on
+        settings.save_display_quality(self._dq)
+
+    def _toggle_denoise(self, on: bool) -> None:
+        """Edge-preserving denoise toggle (both canvases), persisted."""
+        on = bool(on)
+        for c in (self.canvas, self.canvas2):
+            c.set_denoise(on)
+        self._dq["xa_denoise"] = on
         settings.save_display_quality(self._dq)
 
     # ----------------------------------------------- zoom (Z / Shift+Z)
