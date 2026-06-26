@@ -23,6 +23,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QMenu, QWidget
 
+from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.core.coaxial import VESSEL_LABELS
@@ -261,6 +262,15 @@ class ImageCanvas(QWidget):
         # when paused so a still frame is still crisply upscaled.
         self._fast_scale: bool = False
         self._hq_cine: bool = False        # smooth (bilinear) even during cine
+        # Opt-in OpenCV image-quality toggles (default OFF = current look).
+        self._smooth: bool = False         # Lanczos high-quality upscaling
+        self._denoise: bool = False        # edge-preserving noise reduction
+        # Oriented (and, when _denoise is on, denoised) source frame backing
+        # _qimg — kept so the Lanczos paint path can resample the real pixels.
+        self._proc8: np.ndarray | None = None
+        # Cache for the Lanczos-upscaled QImage: (target_w, target_h, QImage).
+        # Invalidated whenever the frame, orientation, or a toggle changes.
+        self._lanczos_cache: tuple[int, int, QImage] | None = None
 
     # ---------------------------------------------------------------- public
     def set_hq_cine(self, on: bool) -> None:
@@ -272,11 +282,42 @@ class ImageCanvas(QWidget):
             self._hq_cine = on
             self.update()
 
+    def set_smooth(self, on: bool) -> None:
+        """High-quality (Lanczos) upscaling of the displayed frame instead of
+        Qt's bilinear. Sharper when the image is enlarged; heavier per paint.
+        Default OFF. No-op (Qt bilinear) if OpenCV is unavailable."""
+        on = bool(on)
+        if on != self._smooth:
+            self._smooth = on
+            self._lanczos_cache = None
+            self.update()
+
+    def set_denoise(self, on: bool) -> None:
+        """Edge-preserving noise reduction (bilateral) on the source frame.
+        Changes the actual pixels shown, so the frame is rebuilt. Default OFF;
+        no-op if OpenCV is unavailable."""
+        on = bool(on)
+        if on != self._denoise:
+            self._denoise = on
+            self._rebuild_frame()
+
     def set_frame(self, frame8: np.ndarray) -> None:
         self._raw_frame8 = frame8
-        f = self._oriented(frame8)
+        self._rebuild_frame()
+
+    def _rebuild_frame(self) -> None:
+        """(Re)build _proc8 / _qimg from the raw frame: apply orientation, then
+        the optional denoise, then publish. Called on a new frame and whenever
+        denoise/orientation changes the source pixels."""
+        if self._raw_frame8 is None:
+            return
+        f = self._oriented(self._raw_frame8)
+        if self._denoise:
+            f = image_quality.denoise(f)
+        self._proc8 = f
         self._qimg = to_qimage(f)
         self._img_size = (f.shape[1], f.shape[0])
+        self._lanczos_cache = None       # source changed → drop the upscale
         self.update()
 
     def set_fast_scaling(self, on: bool) -> None:
@@ -1501,9 +1542,32 @@ class ImageCanvas(QWidget):
         # During playback/seek the viewer sets _fast_scale so the per-frame
         # bilinear cost (heavy on a high-DPI Mac) doesn't stutter the cine; a
         # paused/still frame keeps the smooth upscale.
-        if self._hq_cine or not self._fast_scale:
+        allow_heavy = self._hq_cine or not self._fast_scale
+        qimg = self._qimg
+        used_lanczos = False
+        # "Smooth" (Lanczos high-quality upscaling): when the frame is being
+        # ENLARGED, resample the real source pixels to the exact draw-rect size
+        # with cv2 Lanczos-4 — visibly sharper than Qt's bilinear. Cached by
+        # target size so a still frame is resampled once, not every paint. Held
+        # off during cine (unless HQ-Img) so the per-frame cost can't stutter
+        # playback; a paused frame then gets the crisp Lanczos upscale.
+        if (self._smooth and allow_heavy and self._proc8 is not None
+                and r.isValid()):
+            tw, th = r.width(), r.height()
+            ih, iw = self._proc8.shape[:2]
+            if tw > iw or th > ih:
+                c = self._lanczos_cache
+                if c is None or c[0] != tw or c[1] != th:
+                    arr = image_quality.lanczos_resize(self._proc8, tw, th)
+                    self._lanczos_cache = (
+                        (tw, th, to_qimage(arr)) if arr is not None else None)
+                    c = self._lanczos_cache
+                if c is not None:
+                    qimg = c[2]          # already target-sized → drawn 1:1
+                    used_lanczos = True
+        if not used_lanczos and allow_heavy:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        p.drawImage(r, self._qimg)
+        p.drawImage(r, qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Rebuilt as labels are drawn below; clear so a deleted measure's
         # stale rect can't linger for the next drag hit-test.

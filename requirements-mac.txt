@@ -29,6 +29,11 @@ imagecodecs>=2024.1.1
 imageio>=2.34
 imageio-ffmpeg>=0.5
 
+# Optional Angio/IVUS image-quality toggles (Smooth = Lanczos upscaling,
+# Denoise = edge-preserving bilateral). Headless build (no GUI deps). If
+# absent, the toggles disable themselves and fall back to Qt's bilinear.
+opencv-python-headless>=4.9
+
 # --- pygfx GPU stack (replaces VTK for CT MPR on Mac via Metal) ---
 # Phase 0 spike validates these render an oblique CT slice on Metal.
 pygfx>=0.16
