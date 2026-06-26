@@ -1474,7 +1474,15 @@ class CTViewer(AbstractViewer):
         b = self._frames["B"].isVisible()
         if a and b:
             return "Bi"
-        return "Lt" if a else "Rt"
+        if a:
+            return "Lt"
+        if b:
+            return "Rt"
+        # Neither frame reports visible yet — happens right after load while
+        # the pane/window is still being shown (Qt isVisible() stays False
+        # even after setVisible(True) until an ancestor is shown). Fall back
+        # to the intended plane so the buttons don't wrongly default to "Rt".
+        return self._side
 
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
