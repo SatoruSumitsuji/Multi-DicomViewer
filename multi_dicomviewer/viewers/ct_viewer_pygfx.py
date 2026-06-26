@@ -1586,15 +1586,20 @@ class CTViewer(AbstractViewer):
         self._cl_btn.clicked.connect(self._toggle_centerline)
         row.addWidget(self._cl_btn)
 
-        # HiRes: disable the coarse interactive LOD so drag/zoom stays full
-        # quality (smoother on a fast Mac, heavier on a slow one). Default OFF
-        # = keep the LOD. Persisted across restarts.
-        self._hires_btn = FitButton("HiRes")
+        # HQ-Img: disable the coarse interactive LOD so drag/zoom/rotate stays
+        # full quality (smoother on a fast Mac, heavier on a slow one). Default
+        # OFF = keep the LOD. Persisted across restarts. The viewer-wide button
+        # stylesheet has no :checked rule, so give it an explicit blue active
+        # state (otherwise a toggled-on button looks identical to off).
+        self._hires_btn = FitButton("HQ-Img")
         self._hires_btn.setCheckable(True)
         self._hires_btn.setChecked(self._lod_off)
+        self._hires_btn.setStyleSheet(
+            "QPushButton:checked { background:#1f77b4; color:white; }")
         self._hires_btn.setHelpToolTip(
-            "Always full-quality MPR: turn OFF the coarse preview shown while "
-            "dragging/zooming. Smoother on a fast Mac; heavier on a slow one.")
+            "Full-quality images: keep MPR sharp even while dragging / zooming "
+            "/ rotating (turns OFF the coarse interactive preview). Smoother on "
+            "a fast Mac; heavier on a slow one.")
         self._hires_btn.toggled.connect(self._toggle_hires)
         row.addWidget(self._hires_btn)
 
@@ -2283,7 +2288,7 @@ class CTViewer(AbstractViewer):
         # quality once the interaction settles.
         if self._vol is None:
             return
-        # "HiRes" (ct_full_quality): never use the coarse interactive LOD — a
+        # "HQ-Img" (ct_full_quality): never use the coarse interactive LOD — a
         # fast Mac rebuilds full quality every frame instead.
         if self._lod_off:
             lod = False
@@ -3646,7 +3651,7 @@ class CTViewer(AbstractViewer):
             self._overlay[k].update()
 
     def _toggle_hires(self, on: bool) -> None:
-        """HiRes toggle: disable/enable the coarse interactive LOD, persist the
+        """HQ-Img toggle: disable/enable the coarse interactive LOD, persist the
         choice, and repaint at full quality now."""
         self._lod_off = bool(on)
         self._dq["ct_full_quality"] = self._lod_off
