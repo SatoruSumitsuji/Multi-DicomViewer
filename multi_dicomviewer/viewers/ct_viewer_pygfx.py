@@ -1601,7 +1601,10 @@ class CTViewer(AbstractViewer):
             "/ rotating (turns OFF the coarse interactive preview). Smoother on "
             "a fast Mac; heavier on a slow one.")
         self._hires_btn.toggled.connect(self._toggle_hires)
-        row.addWidget(self._hires_btn)
+        # Placed at the very LEFT of this row (before the "Plane:" label) so the
+        # full-quality toggle is the first, most prominent control on the strip.
+        row.insertWidget(0, self._hires_btn)
+        row.insertSpacing(1, 8)
 
         setting = FitButton("Setting")
         setting.setHelpToolTip(
