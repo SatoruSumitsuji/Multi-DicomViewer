@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="556" viewBox="0 0 1000 556" font-family="'Helvetica Neue', Arial, 'Hiragino Sans', 'Yu Gothic', 'Meiryo', sans-serif">
+  <rect x="0" y="0" width="1000" height="556" fill="#ffffff"/>
+  <!-- Title -->
+  <text x="20" y="34" font-size="22" font-weight="700" fill="#202124">HQ-Img — 動作スペックの目安 / Spec guidance (macOS, 3D CT)</text>
+  <text x="20" y="56" font-size="13" fill="#5f6368">処理内容からの目安（実測ベンチではありません）。Windows版には影響しません。  /  Guidance, not measured benchmarks. No effect on Windows.</text>
+
+  <!-- Header row -->
+  <rect x="20" y="68" width="960" height="38" fill="#e8eaed"/>
+  <text x="34"  y="92" font-size="14" font-weight="700" fill="#202124">区分 / Class</text>
+  <text x="224" y="92" font-size="14" font-weight="700" fill="#202124">スペック（機材のみ）/ Hardware</text>
+  <text x="574" y="92" font-size="14" font-weight="700" fill="#202124">HQ-Img</text>
+  <text x="714" y="92" font-size="14" font-weight="700" fill="#202124">想定挙動（データ量で変動）/ Behaviour</text>
+
+  <!-- Column separators -->
+  <g stroke="#dadce0" stroke-width="1">
+    <line x1="210" y1="68" x2="210" y2="514"/>
+    <line x1="560" y1="68" x2="560" y2="514"/>
+    <line x1="700" y1="68" x2="700" y2="514"/>
+  </g>
+
+  <!-- Row 1: Safe -->
+  <rect x="20" y="106" width="960" height="92" fill="#e6f4ea"/>
+  <circle cx="40" cy="140" r="7" fill="#34a853"/>
+  <text x="56" y="145" font-size="14" font-weight="700" fill="#202124">安全</text>
+  <text x="34" y="172" font-size="12" fill="#5f6368">Safe</text>
+  <text x="224" y="145" font-size="14" fill="#202124">Apple Silicon Pro / Max、または 24GB 以上</text>
+  <text x="224" y="172" font-size="12" fill="#5f6368">Apple Silicon Pro / Max, or 24 GB+</text>
+  <text x="574" y="145" font-size="14" fill="#202124">常用OK</text>
+  <text x="574" y="172" font-size="12" fill="#5f6368">Use freely</text>
+  <text x="714" y="145" font-size="14" fill="#202124">大容量（600枚超・薄スライス）でも滑らか</text>
+  <text x="714" y="172" font-size="12" fill="#5f6368">Smooth even on large data</text>
+
+  <!-- Row 2: OK -->
+  <rect x="20" y="198" width="960" height="92" fill="#f1f8f3"/>
+  <circle cx="40" cy="232" r="7" fill="#34a853"/>
+  <text x="56" y="237" font-size="14" font-weight="700" fill="#202124">推奨可</text>
+  <text x="34" y="264" font-size="12" fill="#5f6368">OK</text>
+  <text x="224" y="237" font-size="14" fill="#202124">Apple Silicon 16GB（M1〜M5）</text>
+  <text x="224" y="264" font-size="12" fill="#5f6368">Apple Silicon 16 GB (M1–M5)</text>
+  <text x="574" y="237" font-size="14" fill="#202124">通常データOK</text>
+  <text x="574" y="264" font-size="12" fill="#5f6368">OK / normal data</text>
+  <text x="714" y="237" font-size="14" fill="#202124">一般的なCT（〜数百枚）で快適。超大容量＋Slabのみ注意</text>
+  <text x="714" y="264" font-size="12" fill="#5f6368">Fine on typical CT; watch very large data + Slab</text>
+
+  <!-- Row 3: Conditional -->
+  <rect x="20" y="290" width="960" height="92" fill="#fef7e0"/>
+  <circle cx="40" cy="324" r="7" fill="#f9ab00"/>
+  <text x="56" y="329" font-size="14" font-weight="700" fill="#202124">条件付き</text>
+  <text x="34" y="356" font-size="12" fill="#5f6368">Conditional</text>
+  <text x="224" y="329" font-size="14" fill="#202124">Apple Silicon 8GB（主に旧 M1／M2）</text>
+  <text x="224" y="356" font-size="12" fill="#5f6368">8 GB (mostly older M1 / M2; M4/M5 are 16 GB+)</text>
+  <text x="574" y="329" font-size="14" fill="#202124">基本OFF推奨</text>
+  <text x="574" y="356" font-size="12" fill="#5f6368">Off recommended</text>
+  <text x="714" y="329" font-size="14" fill="#202124">大容量でカクつき／一時フリーズの恐れ</text>
+  <text x="714" y="356" font-size="12" fill="#5f6368">Large data may stutter / briefly freeze</text>
+
+  <!-- Row 4: High risk -->
+  <rect x="20" y="382" width="960" height="92" fill="#fce8e6"/>
+  <circle cx="40" cy="416" r="7" fill="#ea4335"/>
+  <text x="56" y="421" font-size="14" font-weight="700" fill="#202124">高リスク</text>
+  <text x="34" y="448" font-size="12" fill="#5f6368">High risk</text>
+  <text x="224" y="421" font-size="14" fill="#202124">Intel Mac（チップ世代を問わず）</text>
+  <text x="224" y="448" font-size="12" fill="#5f6368">Intel Mac (any generation)</text>
+  <text x="574" y="421" font-size="14" fill="#202124">非推奨</text>
+  <text x="574" y="448" font-size="12" fill="#5f6368">Not recommended</text>
+  <text x="714" y="421" font-size="14" fill="#202124">大容量でハングアップ・無応答の危険</text>
+  <text x="714" y="448" font-size="12" fill="#5f6368">Large data may hang / stop responding</text>
+
+  <!-- Outer border -->
+  <rect x="20" y="68" width="960" height="446" fill="none" stroke="#bdc1c6" stroke-width="1.5"/>
+
+  <!-- Footer -->
+  <text x="20" y="536" font-size="12" fill="#5f6368">推奨：Apple Silicon・16GB以上。8GB/旧Intel Macは大きなCTでHQ-ImgをOFF推奨（既定OFF）。  /  Recommended: Apple Silicon, 16 GB+. On 8 GB or Intel, keep HQ-Img OFF for large CT.</text>
+</svg>

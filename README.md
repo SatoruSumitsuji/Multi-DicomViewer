@@ -1,14 +1,19 @@
 # Multi-DICOMviewer
 
 Research multi-modality DICOM viewer. **XA angiography (cath cine)** and
-**cardiac CT (CCTA)** today, with **IVUS, OCT/OFDI, NM and MRI** on the roadmap.
+**CT (3D MPR)** today, with **IVUS, OCT/OFDI, NM and MRI** on the roadmap.
+
+> **Terminology.** The CT viewer is a general 3D MPR tool (not heart-only), so
+> we say just **"CT"**. Use **"cardiac CT"** only when the myocardium / valves
+> are specifically in view, and **"coronary CTA"** only for coronary-vessel-only
+> imaging — never the narrower term for the broader content.
 
 > Research / educational use only. Not a medical device. Not for clinical diagnosis.
 
 ## Why one app
 
 Angio and cardiac CT are normally separate tools. They are combined here so the
-**same patient's CCTA and invasive angiogram load side by side** (CT in the left
+**same patient's CT and invasive angiogram load side by side** (CT in the left
 pane, XA in the right), which is the correlation researchers actually want. The
 DICOM core, study browser, and measurement model are fully shared; only the two
 rendering modules are modality-specific.
@@ -42,8 +47,10 @@ run.py                    entry point
 python -m pip install -r requirements.txt
 ```
 
-Python 3.13, Windows. The CT viewer needs VTK; if VTK fails to import the app
-still runs and the XA side stays fully usable (the CT pane shows why).
+Python 3.13. **Windows/Linux** render CT with VTK (`requirements.txt`); **macOS**
+renders CT with pygfx/wgpu→Metal (`requirements-mac.txt`) because VTK's
+OpenGL→Metal path hangs. If the CT backend fails to import the app still runs and
+the XA side stays fully usable (the CT pane shows why).
 
 ## Run
 
@@ -59,28 +66,23 @@ Or launch with no argument and use **File ▸ Open DICOM folder…**.
 
 ## macOS build — first launch
 
-The prebuilt macOS app (`Multi-DicomViewer.app`, shipped in
-`Multi-DicomViewer-macos.zip`) is **not code-signed**, so macOS Gatekeeper
-blocks it the first time. Clear the quarantine flag once and it launches
-normally afterwards.
+**No workaround needed (v1.5.0 and later).** The prebuilt macOS app
+(`Multi-DicomViewer.app`, shipped in `Multi-DicomViewer-macos.zip`) is now
+**code-signed with a Developer ID, notarized by Apple, and stapled**, so
+Gatekeeper passes it on a normal double-click — even offline.
 
-1. **Unzip** the download to get `Multi-DicomViewer.app`, and move it into your
+1. **Unzip** the download to get `Multi-DicomViewer.app` and move it into your
    **Applications** folder.
-2. Open the **Terminal** app, then **copy & paste this single line** and press
-   Return:
+2. **Double-click** to launch (or open it from Launchpad). That's it.
 
-   ```bash
-   { find /Applications ~/Applications ~/Downloads -maxdepth 2 -name "Multi-DicomViewer.app" -print; mdfind -name "Multi-DicomViewer.app"; } | sort -u | while read -r p; do xattr -dr com.apple.quarantine "$p"; done
-   ```
-
-   You don't need to `cd` anywhere — it searches by name, so your current
-   directory doesn't matter, and it's safe to run even if more than one copy
-   exists (e.g. both `/Applications` and `~/Applications`).
-3. Open the app normally (double-click, or from Launchpad).
-
-What the command does: `find` checks the usual spots, `mdfind` uses Spotlight as
-a disk-wide fallback, `sort -u` de-duplicates, and `xattr -dr
-com.apple.quarantine` removes the Gatekeeper flag from every copy found.
+> **Old unsigned builds only (before v1.5.0).** If you are running a much older
+> download that Gatekeeper still blocks, clear its quarantine flag once with the
+> command below, then open it normally. **You do not need this for v1.5.0+
+> (including v1.10.0).**
+>
+> ```bash
+> { find /Applications ~/Applications ~/Downloads -maxdepth 2 -name "Multi-DicomViewer.app" -print; mdfind -name "Multi-DicomViewer.app"; } | sort -u | while read -r p; do xattr -dr com.apple.quarantine "$p"; done
+> ```
 
 ## Using it
 
@@ -98,6 +100,29 @@ com.apple.quarantine` removes the Gatekeeper flag from every copy found.
 > snaps back to full quality when you stop, so paging stays smooth on low-memory
 > Macs. If a coarse image ever lingers after you stop, **right-click the image**
 > to force it back to full quality immediately. (No effect on the Windows build.)
+
+### macOS only — the "HQ-Img" toggle (3D CT)
+
+**HQ-Img** keeps the MPR at **full resolution even while you drag / zoom /
+rotate** (it turns the coarse interactive preview OFF). It looks sharper, but
+re-reconstructs every frame, so it is heavier on GPU and unified memory. The
+button sits at the far left of the Plane row; the blue state means ON. Default
+is OFF.
+
+**Recommended: Apple Silicon with 16 GB or more.** On 8 GB Macs (mostly older
+M1 / M2) or older Intel Macs, large CT data (thin slices, many images) may
+stutter or briefly freeze — turn HQ-Img **OFF** in that case.
+
+| Class | Hardware (machine only) | HQ-Img | Behaviour (varies with data size) |
+|---|---|---|---|
+| 🟢 Safe | Apple Silicon **Pro / Max**, or **24 GB+** | Use freely | Smooth even on large data (600+ slices, thin) |
+| 🟢 OK | Apple Silicon **16 GB** (M1–M5) | OK for normal data | Comfortable on typical CT (~hundreds of slices); watch only very large data + Slab together |
+| 🟡 Conditional | Apple Silicon **8 GB** (mainly older M1 / M2; M4/M5 ship with 16 GB+) | Off recommended | Heavier as data grows; large data may stutter / briefly freeze |
+| 🔴 High risk | **Intel Mac** (any generation) | Not recommended | Full-quality reconstruction is heavy; large data may hang / stop responding |
+
+> Figures are guidance derived from the processing involved, **not measured
+> benchmarks**. (No effect on the Windows build.) A bilingual notice and a
+> shareable image are in [`docs/`](docs/HQ-IMG_notice.md).
 
 ## Scope / next steps
 
