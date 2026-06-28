@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="556" viewBox="0 0 1000 556" font-family="'Helvetica Neue', Arial, 'Hiragino Sans', 'Yu Gothic', 'Meiryo', sans-serif">
-  <rect x="0" y="0" width="1000" height="556" fill="#ffffff"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1140" height="556" viewBox="0 0 1140 556" font-family="'Helvetica Neue', Arial, 'Hiragino Sans', 'Yu Gothic', 'Meiryo', sans-serif">
+  <rect x="0" y="0" width="1140" height="556" fill="#ffffff"/>
   <!-- Title -->
   <text x="20" y="34" font-size="22" font-weight="700" fill="#202124">HQ-Img — 動作スペックの目安 / Spec guidance (macOS, 3D CT)</text>
   <text x="20" y="56" font-size="13" fill="#5f6368">処理内容からの目安（実測ベンチではありません）。Windows版には影響しません。  /  Guidance, not measured benchmarks. No effect on Windows.</text>
 
   <!-- Header row -->
-  <rect x="20" y="68" width="960" height="38" fill="#e8eaed"/>
+  <rect x="20" y="68" width="1100" height="38" fill="#e8eaed"/>
   <text x="34"  y="92" font-size="14" font-weight="700" fill="#202124">区分 / Class</text>
   <text x="224" y="92" font-size="14" font-weight="700" fill="#202124">スペック（機材のみ）/ Hardware</text>
   <text x="574" y="92" font-size="14" font-weight="700" fill="#202124">HQ-Img</text>
@@ -19,7 +19,7 @@
   </g>
 
   <!-- Row 1: Safe -->
-  <rect x="20" y="106" width="960" height="92" fill="#e6f4ea"/>
+  <rect x="20" y="106" width="1100" height="92" fill="#e6f4ea"/>
   <circle cx="40" cy="140" r="7" fill="#34a853"/>
   <text x="56" y="145" font-size="14" font-weight="700" fill="#202124">安全</text>
   <text x="34" y="172" font-size="12" fill="#5f6368">Safe</text>
@@ -31,7 +31,7 @@
   <text x="714" y="172" font-size="12" fill="#5f6368">Smooth even on large data</text>
 
   <!-- Row 2: OK -->
-  <rect x="20" y="198" width="960" height="92" fill="#f1f8f3"/>
+  <rect x="20" y="198" width="1100" height="92" fill="#f1f8f3"/>
   <circle cx="40" cy="232" r="7" fill="#34a853"/>
   <text x="56" y="237" font-size="14" font-weight="700" fill="#202124">推奨可</text>
   <text x="34" y="264" font-size="12" fill="#5f6368">OK</text>
@@ -43,7 +43,7 @@
   <text x="714" y="264" font-size="12" fill="#5f6368">Fine on typical CT; watch very large data + Slab</text>
 
   <!-- Row 3: Conditional -->
-  <rect x="20" y="290" width="960" height="92" fill="#fef7e0"/>
+  <rect x="20" y="290" width="1100" height="92" fill="#fef7e0"/>
   <circle cx="40" cy="324" r="7" fill="#f9ab00"/>
   <text x="56" y="329" font-size="14" font-weight="700" fill="#202124">条件付き</text>
   <text x="34" y="356" font-size="12" fill="#5f6368">Conditional</text>
@@ -55,7 +55,7 @@
   <text x="714" y="356" font-size="12" fill="#5f6368">Large data may stutter / briefly freeze</text>
 
   <!-- Row 4: High risk -->
-  <rect x="20" y="382" width="960" height="92" fill="#fce8e6"/>
+  <rect x="20" y="382" width="1100" height="92" fill="#fce8e6"/>
   <circle cx="40" cy="416" r="7" fill="#ea4335"/>
   <text x="56" y="421" font-size="14" font-weight="700" fill="#202124">高リスク</text>
   <text x="34" y="448" font-size="12" fill="#5f6368">High risk</text>
@@ -67,7 +67,7 @@
   <text x="714" y="448" font-size="12" fill="#5f6368">Large data may hang / stop responding</text>
 
   <!-- Outer border -->
-  <rect x="20" y="68" width="960" height="446" fill="none" stroke="#bdc1c6" stroke-width="1.5"/>
+  <rect x="20" y="68" width="1100" height="446" fill="none" stroke="#bdc1c6" stroke-width="1.5"/>
 
   <!-- Footer -->
   <text x="20" y="536" font-size="12" fill="#5f6368">推奨：Apple Silicon・16GB以上。8GB/旧Intel Macは大きなCTでHQ-ImgをOFF推奨（既定OFF）。  /  Recommended: Apple Silicon, 16 GB+. On 8 GB or Intel, keep HQ-Img OFF for large CT.</text>
