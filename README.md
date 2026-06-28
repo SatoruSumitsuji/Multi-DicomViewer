@@ -66,6 +66,9 @@ Or launch with no argument and use **File ▸ Open DICOM folder…**.
 
 ## macOS build — first launch
 
+**Apple Silicon only.** The prebuilt macOS app is an **arm64** build, so it runs
+on Apple Silicon Macs (M1 and later). **Intel Macs are not supported.**
+
 **No workaround needed (v1.5.0 and later).** The prebuilt macOS app
 (`Multi-DicomViewer.app`, shipped in `Multi-DicomViewer-macos.zip`) is now
 **code-signed with a Developer ID, notarized by Apple, and stapled**, so
@@ -109,16 +112,19 @@ re-reconstructs every frame, so it is heavier on GPU and unified memory. The
 button sits at the far left of the Plane row; the blue state means ON. Default
 is OFF.
 
+> **Apple Silicon only.** The macOS build is arm64 — **Intel Macs are not
+> supported** (the app will not launch on them). The table below is therefore
+> all Apple Silicon.
+
 **Recommended: Apple Silicon with 16 GB or more.** On 8 GB Macs (mostly older
-M1 / M2) or older Intel Macs, large CT data (thin slices, many images) may
-stutter or briefly freeze — turn HQ-Img **OFF** in that case.
+M1 / M2), large CT data (thin slices, many images) may stutter or briefly
+freeze — turn HQ-Img **OFF** in that case.
 
 | Class | Hardware (machine only) | HQ-Img | Behaviour (varies with data size) |
 |---|---|---|---|
 | 🟢 Safe | Apple Silicon **Pro / Max**, or **24 GB+** | Use freely | Smooth even on large data (600+ slices, thin) |
 | 🟢 OK | Apple Silicon **16 GB** (M1–M5) | OK for normal data | Comfortable on typical CT (~hundreds of slices); watch only very large data + Slab together |
 | 🟡 Conditional | Apple Silicon **8 GB** (mainly older M1 / M2; M4/M5 ship with 16 GB+) | Off recommended | Heavier as data grows; large data may stutter / briefly freeze |
-| 🔴 High risk | **Intel Mac** (any generation) | Not recommended | Full-quality reconstruction is heavy; large data may hang / stop responding |
 
 > Figures are guidance derived from the processing involved, **not measured
 > benchmarks**. (No effect on the Windows build.) A bilingual notice and a

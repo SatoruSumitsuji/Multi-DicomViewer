@@ -17,9 +17,10 @@ Multi-DICOMviewer のバージョンごとの主な機能・修正の履歴で�
 - **macOS の 3DCT に「HQ-Img」トグル**：拡大・回転・移動などの操作中も MPR を
   **フル解像度で再構成**し続けます（操作中の粗いプレビューを無効化）。きれいになる
   一方で GPU・メモリ負荷が上がるため、**既定は OFF**、**Apple Silicon・16GB以上を推奨**。
-  - **8GB の Mac（主に旧世代 M1/M2）や旧 Intel Mac** では、大きな CT データ
-    （薄スライス・多枚数）で動作が重くなったり一時的に固まる場合があります。その際は
-    HQ-Img を OFF にしてください。詳細は [`docs/HQ-IMG_notice.md`](docs/HQ-IMG_notice.md)。
+  - **8GB の Mac（主に旧世代 M1/M2）** では、大きな CT データ（薄スライス・多枚数）で
+    動作が重くなったり一時的に固まる場合があります。その際は HQ-Img を OFF にしてください。
+    詳細は [`docs/HQ-IMG_notice.md`](docs/HQ-IMG_notice.md)。
+  - なお **macOS ビルドは Apple Silicon 専用（arm64）**で、**Intel Mac は非対応**です。
 
 **改善（UI）**
 - **macOS の HQ-Img ボタンを Plane 段の最左**（「Plane:」ラベルより左）へ移動し、

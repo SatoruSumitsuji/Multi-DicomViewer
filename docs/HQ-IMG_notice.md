@@ -20,9 +20,12 @@
 
 ボタンは **Plane 段の最も左**にあり、**ON のときは青く**表示されます。**既定は OFF** です。
 
+> **対象は Apple Silicon Mac のみ**です。配布ビルドは arm64 のため、**Intel Mac では
+> 起動しません（非対応）**。下表はすべて Apple Silicon 機です。
+
 - **推奨環境：Apple Silicon・メモリ 16GB 以上**
-- **8GB の Mac（主に旧世代 M1／M2）や旧 Intel Mac** では、大きな CT データ（薄スライス・
-  多枚数）で**動作が重くなったり一時的に固まる**ことがあります。その場合は HQ-Img を
+- **8GB の Mac（主に旧世代 M1／M2）** では、大きな CT データ（薄スライス・多枚数）で
+  **動作が重くなったり一時的に固まる**ことがあります。その場合は HQ-Img を
   **OFF（既定）**にしてください。
 
 | 区分 | スペック（機材のみ） | HQ-Img | 想定挙動（データ量で変動） |
@@ -30,7 +33,6 @@
 | 🟢 安全 | Apple Silicon **Pro / Max**、または **24GB 以上** | 常用OK | 大きなデータ（600枚超・薄スライス）でも滑らか |
 | 🟢 推奨可 | Apple Silicon **16GB**（M1〜M5） | 通常データOK | 一般的な CT（〜数百枚）で快適。超大容量＋Slab 同時のみ注意 |
 | 🟡 条件付き | Apple Silicon **8GB**（主に旧世代 M1／M2。M4/M5 は 16GB〜） | 基本OFF推奨 | データが大きいほど重く、大容量で**カクつき／一時フリーズ**の恐れ |
-| 🔴 高リスク | **Intel Mac**（チップ世代を問わず） | 非推奨 | フル画質再構成が重く、大きなデータで**ハングアップ・無応答**の危険 |
 
 **補足**
 - 「大容量」は **CT データの大きさ**（スライス枚数・薄さ）を指し、マシンスペックとは別の要因です。
@@ -51,17 +53,19 @@ heavier on the GPU and unified memory.
 The button is at the **far left of the Plane row**; the **blue state means ON**.
 **Default is OFF.**
 
+> **Apple Silicon Macs only.** The build is arm64, so it **will not launch on
+> Intel Macs** (unsupported). The table below is all Apple Silicon.
+
 - **Recommended: Apple Silicon with 16 GB or more.**
-- On **8 GB Macs (mostly older M1 / M2)** or **older Intel Macs**, large CT data
-  (thin slices, many images) may **stutter or briefly freeze** — turn HQ-Img
-  **OFF** (the default) in that case.
+- On **8 GB Macs (mostly older M1 / M2)**, large CT data (thin slices, many
+  images) may **stutter or briefly freeze** — turn HQ-Img **OFF** (the default)
+  in that case.
 
 | Class | Hardware (machine only) | HQ-Img | Behaviour (varies with data size) |
 |---|---|---|---|
 | 🟢 Safe | Apple Silicon **Pro / Max**, or **24 GB+** | Use freely | Smooth even on large data (600+ slices, thin) |
 | 🟢 OK | Apple Silicon **16 GB** (M1–M5) | OK for normal data | Comfortable on typical CT (~hundreds of slices); watch only very large data + Slab together |
 | 🟡 Conditional | Apple Silicon **8 GB** (mainly older M1 / M2; M4/M5 ship with 16 GB+) | Off recommended | Heavier as data grows; large data may stutter / briefly freeze |
-| 🔴 High risk | **Intel Mac** (any generation) | Not recommended | Full-quality reconstruction is heavy; large data may hang / stop responding |
 
 **Notes**
 - "Large data" means the **size of the CT** (slice count / thinness) — a separate
