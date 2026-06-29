@@ -37,7 +37,9 @@ import time
 import numpy as np
 import pygfx as gfx
 import pylinalg as la
-from PyQt6.QtCore import QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen,
     QPolygonF, QShortcut,
@@ -1181,6 +1183,41 @@ class CTViewer(AbstractViewer):
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda d=direction: self._key_arrow(d))
         self._update_active_frames()
+
+        # Last-resort safety net for the Mac "dead toolbar buttons" class of
+        # bug. The primary fix defers every modal out of the pointer handler
+        # so a grab can't get stuck — this guards anything that slips through:
+        # if a canvas ever still holds the Qt mouse grab with NO gesture in
+        # progress, a press elsewhere would be diverted to it and the toolbar
+        # would go dead. Watch presses app-wide and drop such a stray grab so
+        # the click reaches its real target. See eventFilter for why this is
+        # cheap and can't disturb a legitimate grab.
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):  # noqa: N802 (Qt override)
+        """Drop a STRAY Qt mouse grab held by one of this viewer's canvases.
+
+        Fires only on a mouse-button PRESS (so there is no per-frame / hover
+        cost), and only acts when the grabber is one of OUR canvases AND no
+        gesture is active (a real drag sets _drag_btn / _cross_grab /
+        _meas_drag, so it is never touched; other widgets' grabs — sliders,
+        menus — are never ours). A legitimate press that STARTS a drag is
+        safe too: the grab is established only after this filter runs, so at
+        filter time there is no grab yet. Never consumes the event."""
+        if ev.type() == QEvent.Type.MouseButtonPress:
+            gw = QWidget.mouseGrabber()
+            if (gw is not None
+                    and gw in (self.pane["A"].canvas, self.pane["B"].canvas)
+                    and self._drag_btn is None
+                    and not self._cross_grab
+                    and not self._meas_drag):
+                try:
+                    gw.releaseMouse()
+                except Exception:
+                    pass
+        return super().eventFilter(obj, ev)
 
     # ------------------------------------------------------ event wiring
     def _wire_events(self, key):
