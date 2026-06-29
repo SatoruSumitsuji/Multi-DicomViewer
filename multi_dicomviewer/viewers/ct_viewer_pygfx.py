@@ -779,8 +779,17 @@ class _AngioAngleDialog(QDialog):
         v = QVBoxLayout(self)
         v.addWidget(QLabel("対応するアンギオ像の角度に回転します"))
 
+        # Combos sized to their contents (+ the dropdown arrow) so the 3-letter
+        # LAO/RAO·CRA/CAU labels aren't clipped on the right.
+        def _fit_combo(cb: QComboBox) -> QComboBox:
+            cb.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToContents)
+            cb.setMinimumContentsLength(4)
+            cb.setMinimumWidth(78)
+            return cb
+
         r1 = QHBoxLayout()
-        self._lr = QComboBox()
+        self._lr = _fit_combo(QComboBox())
         self._lr.addItems(["LAO", "RAO"])
         self._lr.setCurrentIndex(0 if prim >= 0 else 1)
         self._lr_val = QSpinBox()
@@ -793,7 +802,7 @@ class _AngioAngleDialog(QDialog):
         v.addLayout(r1)
 
         r2 = QHBoxLayout()
-        self._cc = QComboBox()
+        self._cc = _fit_combo(QComboBox())
         self._cc.addItems(["CRA", "CAU"])
         self._cc.setCurrentIndex(0 if sec >= 0 else 1)
         self._cc_val = QSpinBox()
