@@ -1516,6 +1516,46 @@ class StudyPanel(QWidget):
             self.thumbs.setCurrentItem(item)
             self.thumbs.scrollToItem(item)
 
+    def sync_to_series(self, series: Series) -> None:
+        """Follow *series* in BOTH the tree and the thumbnail grid WITHOUT
+        loading any viewer. Used when the active multi-pane target changes:
+        the browser should reflect what the newly-targeted pane shows, but
+        that pane already has the series loaded, so we must NOT re-fire
+        series_chosen (unlike select_series, which emits the load signal)."""
+        # Tree: silent highlight (no series_chosen, no thumb-rebuild signal).
+        self.tree.highlight_series(series)
+        # Thumbnail grid: switch it to this series' study if needed (the
+        # grid shows only the selected study), then highlight the matching
+        # item silently. highlight_series already set the tree's current
+        # item, so current_study_key reflects the target study.
+        key = self.tree.current_study_key()
+        if key is not None and key != self._cur_study_key:
+            self._cur_study_key = key
+            self._rebuild_thumbs()
+        self._highlight_thumb_series(series)
+
+    def show_empty(self) -> None:
+        """Blank the thumbnail grid and clear the tree highlight — used when
+        the active multi-pane target is an EMPTY pane, so the browser doesn't
+        keep showing the previously-targeted pane's series."""
+        # Empty the thumbnail grid (mirrors _rebuild_thumbs' reset, but with
+        # no study to build). _cur_study_key is reset so re-targeting a pane
+        # whose series belongs to any study triggers a fresh rebuild.
+        self._stop_worker()
+        self.thumbs.clear()
+        self._thumb_headers = []
+        self._thumb_items = []
+        self._item_by_series = {}
+        self._series_by_row = []
+        self._cur_study_key = None
+        # Drop the tree selection silently (no thumb-rebuild / load signals).
+        self.tree.blockSignals(True)
+        try:
+            self.tree.clearSelection()
+            self.tree.setCurrentItem(None)
+        finally:
+            self.tree.blockSignals(False)
+
     # ------------------------------------------------------------- internals
     def _current_tree_series(self) -> Series | None:
         """Series currently selected in the Tree view, or None."""

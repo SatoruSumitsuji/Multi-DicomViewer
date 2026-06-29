@@ -2063,12 +2063,34 @@ class MainWindow(QMainWindow):
         for p in self._panes:
             p.set_active(p is pane and p.isVisible())
         self._sync_xa_shortcuts()
+        self._follow_active_pane()
+
+    def _follow_active_pane(self) -> None:
+        """Make the browser reflect whatever the ACTIVE pane shows: highlight
+        its series in the tree + thumbnail grid, or blank the browser when the
+        pane is empty. Silent (no series_chosen) so the pane is never reloaded.
+
+        Called whenever the target pane changes OR its contents change (load /
+        ✕ clear), so the Studies dock always mirrors the targeted pane."""
+        uid = self._active.shown_series_uid()
+        se = self._series_by_uid.get(uid) if uid else None
+        if se is not None:
+            self.browser.sync_to_series(se)
+        else:
+            # Empty pane targeted → blank the browser (don't leave the
+            # previously-targeted pane's thumbnail showing).
+            self.browser.show_empty()
 
     def _on_pane_cleared(self, pane: ViewerPane) -> None:
         """A pane's ✕ emptied it (layout kept). Re-sync the features that
         depend on pane contents: the cine shortcuts and the MultiSync gate."""
         self._sync_xa_shortcuts()
         self._sync_layout_gate()
+        # ✕ emits `activated` (so the cleared pane becomes active) BEFORE it
+        # resets, so the browser was last followed while the old series still
+        # showed. Now that the active pane is empty, blank the browser.
+        if pane is self._active:
+            self._follow_active_pane()
 
     # --------------------------------------------------- series navigation
     def _build_shortcuts(self) -> None:
@@ -2264,6 +2286,44 @@ class MainWindow(QMainWindow):
         self._set_active_pane(xp)
         self.browser.select_series(tgt)
 
+    def _cine_series_scope(self, pane) -> tuple:
+        """(visible_series_list, current_series) for the same-modality,
+        same-study cine list that First/Prev/Next/Last steps through in
+        *pane* — the basis for the series-position counter. Mirrors the
+        scoping used by _nav_xa."""
+        cur_series = self._series_by_uid.get(pane.shown_series_uid())
+        if cur_series is not None:
+            mod = cur_series.kind
+        else:
+            mod = getattr(pane.current_viewer(), "handles_modality", "")
+        lst = self.browser.ordered_series(mod)
+        cur_study = self._study_by_series_uid.get(
+            cur_series.series_uid if cur_series is not None else ""
+        )
+        if cur_study:
+            scoped = [
+                s for s in lst
+                if self._study_by_series_uid.get(s.series_uid) == cur_study
+            ]
+            if scoped:
+                lst = scoped
+        visible = [s for s in lst if not getattr(s, "hidden", False)]
+        return visible, cur_series
+
+    def _update_cine_series_pos(self, pane) -> None:
+        """Push '<pos>/<count>' of the series shown in *pane* (within its
+        study's same-modality cine list) into the viewer's series counter.
+        No-op for non-cine viewers (which lack set_series_position)."""
+        v = pane.current_viewer()
+        if v is None or not hasattr(v, "set_series_position"):
+            return
+        visible, cur = self._cine_series_scope(pane)
+        try:
+            idx = visible.index(cur)
+        except ValueError:
+            idx = -1
+        v.set_series_position(idx, len(visible))
+
     # ------------------------------------------------------------- data load
     def _choose_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open DICOM folder")
@@ -2392,12 +2452,35 @@ class MainWindow(QMainWindow):
         new_series = [se for se in ordered if se.series_uid in new_uids]
         target = self._initial_ct_target(new_series)
         if target is None:
-            target = next(
-                (se for se in ordered if se.series_uid in new_uids),
-                ordered[0] if ordered else None,
-            )
+            target = (self._initial_noncT_target(new_series)
+                      or (ordered[0] if ordered else None))
         if target is not None:
             self.browser.select_series(target)
+
+    @staticmethod
+    def _initial_noncT_target(candidates: list) -> "Series | None":
+        """Which non-CT series to auto-open from *candidates* (display order).
+
+        Prefer a real, playable acquisition over a static Secondary Capture
+        report/snapshot. An XA study often carries an SC summary page (a
+        multi-panel still) that sorts FIRST, so "just open the first series"
+        made a folder drop show that still instead of the angio cine. Order:
+          1) first multi-frame cine that is NOT a Secondary Capture
+          2) first series that is NOT a Secondary Capture
+          3) first candidate (all SC, or nothing else to choose)
+        Returns None only when *candidates* is empty."""
+        if not candidates:
+            return None
+        def _is_sc(se):
+            return dicom_io._series_is_secondary_capture(se)
+        cine = next(
+            (se for se in candidates if se.image_count > 1 and not _is_sc(se)),
+            None,
+        )
+        if cine is not None:
+            return cine
+        primary = next((se for se in candidates if not _is_sc(se)), None)
+        return primary if primary is not None else candidates[0]
 
     @staticmethod
     def _initial_ct_target(candidates: list) -> "Series | None":
@@ -2807,6 +2890,9 @@ class MainWindow(QMainWindow):
             if study_uid:
                 self._last_by_study[(study_uid, series.kind)] = series
             self._sync_xa_shortcuts()
+            self._update_cine_series_pos(pane)
+            if pane is self._active:
+                self._follow_active_pane()
             self.statusBar().showMessage(f"Resumed {series.label}")
             return
         self.statusBar().showMessage(f"Loading {series.label} …")
@@ -2897,6 +2983,13 @@ class MainWindow(QMainWindow):
         if study_uid_log:
             self._last_by_study[(study_uid_log, series.kind)] = series
         self._sync_xa_shortcuts()  # XA keys only when active pane is XA
+        self._update_cine_series_pos(pane)
+        # A drop / folder-load makes the pane active BEFORE the series is in
+        # it, so the browser was blanked on the way in — re-follow now that
+        # the active pane has content (also keeps tree+thumb in step for any
+        # load path).
+        if pane is self._active:
+            self._follow_active_pane()
         # Keep an open history window pointed at the now-current study.
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
             self._refresh_history_dialog()
