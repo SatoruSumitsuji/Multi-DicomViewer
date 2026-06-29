@@ -933,11 +933,20 @@ class XAViewer(AbstractViewer):
         # set_series_position; empty until a series with a known position
         # loads, so it adds no clutter for a lone series.
         self.series_lbl = QLabel("")
-        self.series_lbl.setMinimumWidth(44)
         self.series_lbl.setToolTip(
             "Series position in this study (current / total) — "
             "use First/Prev/Next/Last to move between series"
         )
+        # Make the series counter stand out: 1.5× the natural size and bold
+        # (fits the max "999/999" comfortably). Remember the ENLARGED size as
+        # the base so set_compact scales relative to it.
+        _sf = self.series_lbl.font()
+        _sp = _sf.pointSizeF()
+        if _sp > 0:
+            _sf.setPointSizeF(_sp * 1.5)
+        _sf.setBold(True)
+        self.series_lbl.setFont(_sf)
+        self.series_lbl.setMinimumWidth(66)
         self._series_lbl_base_pt = self.series_lbl.font().pointSizeF()
 
         self.fps_spin = QDoubleSpinBox()
@@ -1081,7 +1090,7 @@ class XAViewer(AbstractViewer):
                 widget.setFont(f)
             widget.setMaximumHeight(18 if on else _QWIDGETSIZE_MAX)
         self.frame_lbl.setMinimumWidth(48 if on else 70)
-        self.series_lbl.setMinimumWidth(34 if on else 44)
+        self.series_lbl.setMinimumWidth(50 if on else 66)
         # Trim the Play-range strip's spare grab room (the mostly-empty band
         # above the seek bar) so the seek bar hugs the image.
         self._range_marks.setFixedHeight(
