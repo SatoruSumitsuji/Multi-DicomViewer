@@ -3458,11 +3458,43 @@ class CTViewer(AbstractViewer):
         self._seek_lbl = _big(QLabel("1 / 1"))
         self._seek_lbl.setMinimumWidth(96)
         row.addWidget(self._seek_lbl)
+        # Series position within the study's CT series (current / total), right
+        # of the slice counter. It lives in the 2-D scrubber on purpose: that
+        # bar shows for native-slice (auxiliary, ≤200-slice) series and is
+        # hidden in 3-D MPR, so the counter appears for scout / Ca-score / thin
+        # recons and not on the full 3-D volume. A "Series:" caption (mirroring
+        # "Frame:") keeps it apart from the adjacent slice "N / total". Fed by
+        # the shell via set_series_position.
+        self._seek_series_cap = _big(QLabel("Series:"))
+        row.addWidget(self._seek_series_cap)
+        self._seek_series_lbl = _big(QLabel(""))
+        self._seek_series_lbl.setMinimumWidth(66)
+        self._seek_series_lbl.setToolTip(
+            "Series position in this study (current / total)")
+        row.addWidget(self._seek_series_lbl)
         self._seek_wrap.setVisible(False)
         # Apply the current compact state (set before this bar was built).
         if getattr(self, "_ct_compact", False):
             self._apply_seek_compact(True)
         return self._seek_wrap
+
+    def set_series_position(self, index: int, total: int) -> None:
+        """Show '<index+1>/<total>' (1-based) of this series within the study's
+        CT list, beside the 2-D slice counter. Cleared when index<0/total<=0.
+        Lives in the 2-D scrubber, so it is naturally hidden in 3-D MPR mode
+        (the full recon) and shown for native-slice auxiliary series."""
+        lbl = getattr(self, "_seek_series_lbl", None)
+        if lbl is None:
+            return
+        cap = getattr(self, "_seek_series_cap", None)
+        if total > 0 and 0 <= index < total:
+            lbl.setText(f"{index + 1}/{total}")
+            if cap is not None:
+                cap.setVisible(True)
+        else:
+            lbl.setText("")
+            if cap is not None:
+                cap.setVisible(False)   # no dangling "Series:" caption
 
     def set_compact(self, on: bool) -> None:
         """Shrink the bottom slice scrubber (Frame label + slider + N/total)
@@ -3477,12 +3509,14 @@ class CTViewer(AbstractViewer):
 
     def _apply_seek_compact(self, on: bool) -> None:
         base = getattr(self, "_seek_base_pt", 9.0) or 9.0
-        for lbl in (self._seek_frame_lbl, self._seek_lbl):
+        for lbl in (self._seek_frame_lbl, self._seek_lbl,
+                    self._seek_series_cap, self._seek_series_lbl):
             f = lbl.font()
             f.setPointSizeF(base * (1.0 if on else 1.55))
             f.setBold(not on)               # big = bold, compact = normal
             lbl.setFont(f)
         self._seek_lbl.setMinimumWidth(60 if on else 96)
+        self._seek_series_lbl.setMinimumWidth(46 if on else 66)
         self._seek_slider.setMinimumHeight(16 if on else 26)
         self._seek_slider.setMaximumHeight(16 if on else _QWIDGETSIZE_MAX)
         self._seek_slider.setStyleSheet(
