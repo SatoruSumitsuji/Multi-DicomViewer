@@ -375,22 +375,28 @@ def apply_window(vol_frame: np.ndarray, window: float, level: float) -> np.ndarr
     return (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
 
 
-def _build_wl_lut(dtype, window, level):
+def _build_wl_lut(vmin, vmax, window, level):
     """uint8 lookup table so per-frame windowing is a single array gather
     (`lut[frame + offset]`) instead of float math every frame — the main
-    cine-playback speed-up. Returns (lut, offset) or None for dtypes too
-    wide to table (caller falls back to apply_window)."""
-    if not np.issubdtype(dtype, np.integer):
+    cine-playback speed-up.
+
+    *vmin*/*vmax* are the inclusive integer value bounds the table must
+    cover. They span EVERY plane of the series (see _refresh_wl_lut), so a
+    series mixing integer widths — e.g. an 8-bit and a 16-bit copy of the
+    same still under one SeriesUID — gets one table wide enough for all of
+    them; sizing to a single plane's 8-bit range (256 entries) let a 16-bit
+    frame index past the end and crash. Returns (lut, offset) or None when
+    the combined range is too wide to table (caller falls back to
+    apply_window)."""
+    vmin, vmax = int(vmin), int(vmax)
+    n = vmax - vmin + 1
+    if n <= 0 or n > (1 << 16):             # e.g. int32 / mixed sign — don't table
         return None
-    info = np.iinfo(dtype)
-    n = int(info.max) - int(info.min) + 1
-    if n > (1 << 16):                       # e.g. int32 — don't table
-        return None
-    vals = np.arange(info.min, int(info.max) + 1, dtype=np.float64)
+    vals = np.arange(vmin, vmax + 1, dtype=np.float64)
     lo = level - window / 2.0
     out = (vals - lo) / max(window, 1e-6)
     lut = (np.clip(out, 0.0, 1.0) * 255.0).astype(np.uint8)
-    return lut, -int(info.min)
+    return lut, -vmin
 
 
 class XAViewer(AbstractViewer):
@@ -921,6 +927,19 @@ class XAViewer(AbstractViewer):
         )
         self.frame_lbl.clicked.connect(self._reset_play_range)
 
+        # Series position within the current study's same-modality cine list
+        # (what First/Prev/Next/Last step through) — shown just right of the
+        # frame counter, e.g. "3/9" = 3rd of 9 series. The shell feeds it via
+        # set_series_position; empty until a series with a known position
+        # loads, so it adds no clutter for a lone series.
+        self.series_lbl = QLabel("")
+        self.series_lbl.setMinimumWidth(44)
+        self.series_lbl.setToolTip(
+            "Series position in this study (current / total) — "
+            "use First/Prev/Next/Last to move between series"
+        )
+        self._series_lbl_base_pt = self.series_lbl.font().pointSizeF()
+
         self.fps_spin = QDoubleSpinBox()
         self.fps_spin.setRange(1.0, 60.0)
         self.fps_spin.setValue(DEFAULT_CINE_FPS)
@@ -935,8 +954,22 @@ class XAViewer(AbstractViewer):
         row.addWidget(self.play_btn)
         row.addLayout(seek_col, 1)
         row.addWidget(self.frame_lbl)
+        row.addWidget(self.series_lbl)
         row.addWidget(self.fps_spin)
         return row
+
+    def set_series_position(self, index: int, total: int) -> None:
+        """Show '<index+1>/<total>' for the series counter beside the frame
+        counter (1-based). *index* is the 0-based position of the shown series
+        in its study's same-modality cine list; <0 or total<=0 clears it
+        (e.g. a single ungrouped image, or a kind that doesn't navigate)."""
+        lbl = getattr(self, "series_lbl", None)
+        if lbl is None:
+            return
+        if total > 0 and 0 <= index < total:
+            lbl.setText(f"{index + 1}/{total}")
+        else:
+            lbl.setText("")
 
     def _build_wl_dialog(self) -> None:
         """Create the small, non-modal Window/Level popup. The sliders are
@@ -1039,6 +1072,7 @@ class XAViewer(AbstractViewer):
         # capped height) so they don't tower over the compact transport.
         for widget, base in (
             (self.frame_lbl, self._frame_lbl_base_pt),
+            (self.series_lbl, self._series_lbl_base_pt),
             (self.fps_spin, self._fps_base_pt),
         ):
             if base and base > 0:
@@ -1047,6 +1081,7 @@ class XAViewer(AbstractViewer):
                 widget.setFont(f)
             widget.setMaximumHeight(18 if on else _QWIDGETSIZE_MAX)
         self.frame_lbl.setMinimumWidth(48 if on else 70)
+        self.series_lbl.setMinimumWidth(34 if on else 44)
         # Trim the Play-range strip's spare grab room (the mostly-empty band
         # above the seek bar) so the seek bar hugs the image.
         self._range_marks.setFixedHeight(
@@ -1535,9 +1570,18 @@ class XAViewer(AbstractViewer):
         self._wl_lut = None
         if self._is_color or not self._planes:
             return
-        built = _build_wl_lut(
-            self._planes[0].volume.dtype, self._window, self._level
-        )
+        # Size the table to cover EVERY plane's value range, not just
+        # plane 0's. Planes can differ in integer width (some vendors store
+        # an 8-bit and a 16-bit copy of the same still under one SeriesUID);
+        # a table built for the 8-bit plane (256 entries) crashed when a
+        # 16-bit frame indexed past its end. A non-integer (float) plane
+        # can't be tabled at all → leave the LUT off (apply_window path).
+        dts = [p.volume.dtype for p in self._planes]
+        if not all(np.issubdtype(dt, np.integer) for dt in dts):
+            return
+        vmin = min(int(np.iinfo(dt).min) for dt in dts)
+        vmax = max(int(np.iinfo(dt).max) for dt in dts)
+        built = _build_wl_lut(vmin, vmax, self._window, self._level)
         if built is not None:
             self._wl_lut, self._wl_off = built
 
