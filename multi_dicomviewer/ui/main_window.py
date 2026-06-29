@@ -63,6 +63,7 @@ from multi_dicomviewer.core.study_model import Modality, Series
 from multi_dicomviewer.ui.history_dialog import MeasureHistoryDialog
 from multi_dicomviewer.ui.study_browser import (
     SERIES_MIME,
+    STUDY_MIME,
     FitButton,
     StudyPanel,
 )
@@ -395,6 +396,7 @@ class ViewerPane(QFrame):
 
     activated = pyqtSignal(object)            # this pane was clicked/used
     series_dropped = pyqtSignal(object, str)  # (pane, series_uid)
+    study_dropped = pyqtSignal(object, str, str)  # (pane, study_uid, kind)
     folder_dropped = pyqtSignal(str)          # a DICOM folder was dropped
     files_dropped = pyqtSignal(list)          # individual DICOM file(s) dropped
     viewer_ready = pyqtSignal(object)         # a viewer was just created
@@ -433,22 +435,8 @@ class ViewerPane(QFrame):
         self._title.setStyleSheet(
             "padding:2px 6px; color:#ccc; background:transparent;"
         )
-        # 1×1 button (left of ✕): jump straight to a single-pane view of THIS
-        # pane — quicker and clearer than reaching for "Layout 1×1".
-        self._maxi_btn = QPushButton("1×1")
-        self._maxi_btn.setToolTip(
-            "Show only this pane (1×1). Double-clicking the pane does the same."
-        )
-        self._maxi_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._maxi_btn.setFixedWidth(34)
-        self._maxi_btn.setFlat(True)
-        self._maxi_btn.setStyleSheet(
-            "QPushButton{color:#ccc; border:none; font-weight:bold;}"
-            "QPushButton:hover{color:#fff; background:#2c6fb0;}"
-        )
-        self._maxi_btn.clicked.connect(
-            lambda: self.maximize_requested.emit(self)
-        )
+        # (The per-pane "1×1" button was removed — double-clicking the pane
+        # still maximises it, and "Layout 1×1" is in the top bar.)
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip(
             "Close this pane's image (keeps the layout; returns to drop-waiting state)"
@@ -467,7 +455,6 @@ class ViewerPane(QFrame):
         _tb.setContentsMargins(0, 0, 0, 0)
         _tb.setSpacing(0)
         _tb.addWidget(self._title, 1)
-        _tb.addWidget(self._maxi_btn)
         _tb.addWidget(self._close_btn)
 
         self._idle = _Placeholder(
@@ -677,10 +664,10 @@ class ViewerPane(QFrame):
             self.maximize_requested.emit(self)
 
     def _is_titlebar_button(self, obj) -> bool:
-        """True only for the two title-bar BUTTONS (1×1 / ✕) — they keep their
-        own click action. Everything else, including the dark title band and
-        its draggable label, double-clicks to 1×1 (window-title metaphor)."""
-        return obj in (self._maxi_btn, self._close_btn)
+        """True only for the title-bar ✕ button — it keeps its own click
+        action. Everything else, including the dark title band and its
+        draggable label, double-clicks to 1×1 (window-title metaphor)."""
+        return obj is self._close_btn
 
     def _install_dnd(self, widget) -> None:
         """Make *widget* and every descendant forward drags to this pane.
@@ -708,6 +695,12 @@ class ViewerPane(QFrame):
             self.activated.emit(self)
             self.series_dropped.emit(self, uid)
             return True
+        if md.hasFormat(STUDY_MIME):
+            study_uid, _, kind = bytes(
+                md.data(STUDY_MIME)).decode("utf-8").partition("\x1f")
+            self.activated.emit(self)
+            self.study_dropped.emit(self, study_uid, kind)
+            return True
         # DICOM folder(s)/file(s) dropped onto the pane. A FOLDER drop loads
         # the whole folder; a FILE drop loads ONLY the dropped file(s) — not
         # the rest of their containing folder.
@@ -729,6 +722,7 @@ class ViewerPane(QFrame):
         return (
             md.hasFormat(PANE_MIME)
             or md.hasFormat(SERIES_MIME)
+            or md.hasFormat(STUDY_MIME)
             or md.hasUrls()
         )
 
@@ -834,6 +828,7 @@ class MainWindow(QMainWindow):
         self.browser.series_chosen.connect(self._on_series_chosen)
         self.browser.study_clicked.connect(self._on_study_clicked)
         self.browser.delete_requested.connect(self._delete_node)
+        self.browser.delete_all_requested.connect(self._delete_all_nodes)
         self.browser.export_requested.connect(self._on_export_requested)
         dock = QDockWidget("Studies", self)
         dock.setWidget(self.browser)
@@ -886,6 +881,7 @@ class MainWindow(QMainWindow):
             pane = ViewerPane(i)
             pane.activated.connect(self._set_active_pane)
             pane.series_dropped.connect(self._on_series_dropped)
+            pane.study_dropped.connect(self._on_study_dropped)
             pane.folder_dropped.connect(self._load_folder)
             pane.files_dropped.connect(self._load_files)
             pane.viewer_ready.connect(self._wire_viewer)
@@ -1847,6 +1843,17 @@ class MainWindow(QMainWindow):
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
+        # "Clear All": empty every pane at once (same as each pane's ✕). The
+        # layout is kept; the studies list is untouched.
+        self._clear_all_btn = FitButton("Clear All")
+        self._clear_all_btn.setHelpToolTip(
+            "Clear the image from every pane (same as each pane's ✕). "
+            "The layout and the studies list are kept."
+        )
+        self._clear_all_btn.clicked.connect(self._clear_all)
+        row.addSpacing(8)
+        row.addWidget(self._clear_all_btn)
+
         row.addSpacing(12)
         # "Max Image" toggle pair: Hide Buttons strips every pane down to just
         # the image (and the title bar) for presentation; Show Buttons brings
@@ -2772,6 +2779,44 @@ class MainWindow(QMainWindow):
             f"Deleted ({len(removed)} series removed from the list)"
         )
 
+    def _delete_all_nodes(self) -> None:
+        """"Delete All" button → remove EVERY study/series from the list (and
+        empty every pane). Files on disk are untouched — reloading the folder
+        restores them — but it clears everything, so confirm first."""
+        if not self._patients:
+            self.statusBar().showMessage("Nothing to delete — the list is empty.")
+            return
+        n_series = sum(
+            len(st.series)
+            for p in self._patients.values()
+            for st in p.studies.values()
+        )
+        reply = QMessageBox.question(
+            self, "Delete All",
+            f"Remove all {n_series} series from the list?\n\n"
+            "The image files on disk are NOT deleted (reloading the folder "
+            "restores them).",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        for pane in self._panes:
+            pane.reset()
+        self._patients.clear()
+        self._cur_xa = None
+        self._cur_study_uid = None
+        self._last_by_study.clear()
+        self._last_by_modality.clear()
+        self._reindex_series_maps()
+        self.browser.populate(self._patients)
+        self.browser.show_empty()          # blank the tree highlight + thumbs
+        self._sync_xa_shortcuts()
+        self._sync_layout_gate()
+        self.statusBar().showMessage(
+            f"Deleted all ({n_series} series removed from the list)"
+        )
+
     def _on_series_chosen(self, series: Series) -> None:
         """Click / keyboard nav in the browser → load into the active pane."""
         self._open_series(series, self._active)
@@ -2784,19 +2829,32 @@ class MainWindow(QMainWindow):
         Scoped to (study_uid, kind): a study_uid shared by two nodes (XA +
         OT on the same date) resolves to the clicked node's own kind, never
         the sibling's — otherwise clicking the XA node jumped to OT."""
+        tgt = self._study_target_series(study_uid, kind)
+        if tgt is not None:
+            self.browser.select_series(tgt)
+
+    def _study_target_series(self, study_uid: str, kind: str) -> "Series | None":
+        """The series a click / drop on Study node (study_uid, kind) should
+        open: the last-viewed series of that node if still present & visible,
+        else its first VISIBLE series in display order. None if it has none."""
         last = self._last_by_study.get((study_uid, kind))
         if (last is not None and last.series_uid in self._series_by_uid
                 and not getattr(last, "hidden", False)):
-            self.browser.select_series(last)
-            return
-        # Never visited (or last-viewed is now hidden) → fall back to the
-        # first VISIBLE series of this study node, in display order.
+            return last
         for se in self.browser.ordered_series():
             if (self._study_by_series_uid.get(se.series_uid) == study_uid
                     and se.kind == kind
                     and not getattr(se, "hidden", False)):
-                self.browser.select_series(se)
-                return
+                return se
+        return None
+
+    def _on_study_dropped(self, pane: ViewerPane, study_uid: str,
+                          kind: str) -> None:
+        """A Study node was dragged onto *pane* → open that study's resume /
+        first series directly into it (the drag made *pane* active first)."""
+        tgt = self._study_target_series(study_uid, kind)
+        if tgt is not None:
+            self._open_series(tgt, pane)
 
     def _on_series_dropped(self, pane: ViewerPane, uid: str) -> None:
         series = self._series_by_uid.get(uid)
@@ -2998,6 +3056,12 @@ class MainWindow(QMainWindow):
     def _clear_all(self) -> None:
         for pane in self._panes:
             pane.reset()
+        # The active pane is now empty → blank the browser highlight/thumbnail
+        # and re-sync the cine shortcuts / layout gate (panes reset directly,
+        # bypassing _set_active_pane).
+        self._follow_active_pane()
+        self._sync_xa_shortcuts()
+        self._sync_layout_gate()
         self.statusBar().showMessage("Viewers cleared.")
 
     # ------------------------------------- per-viewer signal/option wiring
