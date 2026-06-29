@@ -1220,7 +1220,14 @@ class CTViewer(AbstractViewer):
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
         # first, in any tool/measure mode, since it's a fixed screen target.
         if self._drag_btn == 2 and self._angio_hit(key, x, y):
-            self._open_angio_dialog(key)
+            # Defer the modal dialog OUT of the pointer-down handler (same as
+            # the compare-delete menu below). Running dlg.exec() inline here
+            # swallows the matching pointer-UP, so the canvas keeps its mouse
+            # grab and EVERY toolbar button goes dead afterwards — the Mac
+            # "buttons unclickable after setting the angle" bug. Clear pointer
+            # state now so no drag/grab is live while the dialog is up.
+            self._reset_pointer_state()
+            QTimer.singleShot(0, lambda k=key: self._open_angio_dialog(k))
             return
         # Right-click priority: a measure LINE / handle gets its own menu first
         # (Hide that line / Delete); only an EMPTY spot inside a compare region
@@ -2868,10 +2875,20 @@ class CTViewer(AbstractViewer):
 
     def _open_angio_dialog(self, which):
         """Right-click on the readout → pick LAO/RAO + CRA/CAU and rotate the
-        pane to that C-arm angle (to line the slice up with an angio view)."""
+        pane to that C-arm angle (to line the slice up with an angio view).
+
+        Invoked via QTimer.singleShot from _on_down so the modal exec() runs
+        OUTSIDE the pointer-down handler (see the call site for why)."""
         vals = self._angio_angle_vals(which) or (0, 0)
         dlg = _AngioAngleDialog(vals[0], vals[1], self)
-        if dlg.exec():
+        try:
+            accepted = dlg.exec()
+        finally:
+            # A modal exec() can still swallow a stray pointer-up — guarantee
+            # no Qt mouse grab lingers on the canvas (it would deaden every
+            # toolbar button until the next canvas click; Mac dead-buttons).
+            self._reset_pointer_state()
+        if accepted:
             prim, sec = dlg.values()
             self._set_angio_angle(which, prim, sec)
 
@@ -3456,28 +3473,52 @@ class CTViewer(AbstractViewer):
                 and self._draft["type"] in ("polyline", "polygon"):
             self._measure_finish_draft()
             return True
+        # The three context menus below are MODAL (menu.exec). They must NOT
+        # run inline here — this is reached from _on_down (the pointer-down
+        # handler), and a modal loop entered before the pointer-up swallows
+        # that up, leaving the canvas holding the Qt mouse grab so every
+        # toolbar button goes dead (the Mac dead-buttons bug; see
+        # _open_angio_dialog). Detect the hit synchronously (so the bool
+        # return is correct for the caller's fall-through), then DEFER the
+        # menu out of the handler via QTimer.singleShot(0) after clearing
+        # pointer state. Mirrors the compare-delete menu.
+        #
         # Right-click ON a Center-Angle marker or spoke deletes JUST the Center
         # Angle (the polygon/ellipse stays). Checked before the vertex/outline
         # menus since the markers sit on the outline.
         ca_mi = self._ca_hit(which, sx, sy)
         if ca_mi is not None:
-            menu = QMenu(self)
-            del_ca = menu.addAction("Delete Center Angle")
-            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
-                QPoint(int(sx), int(sy))))
-            if chosen is del_ca:
-                self._measures[which][ca_mi].pop("center_angle", None)
-                self._redraw_meas(which)
+            self._reset_pointer_state()
+            QTimer.singleShot(
+                0, lambda: self._center_angle_delete_menu(which, ca_mi, sx, sy))
             return True
         hit = self._pick_handle(which, sx, sy)
         if hit is not None:
-            self._handle_right(which, hit, sx, sy)
+            self._reset_pointer_state()
+            QTimer.singleShot(0, lambda: self._handle_right(which, hit, sx, sy))
             return True
         mi = self._pick_measure(which, sx, sy)
         if mi is None:
             return False
-        self._outline_right(which, mi, sx, sy)
+        self._reset_pointer_state()
+        QTimer.singleShot(0, lambda: self._outline_right(which, mi, sx, sy))
         return True
+
+    def _center_angle_delete_menu(self, which, ca_mi, sx, sy):
+        """Deferred 'Delete Center Angle' menu (see _measure_right for why it
+        must run outside the pointer-down handler)."""
+        if not (0 <= ca_mi < len(self._measures[which])):
+            return
+        menu = QMenu(self)
+        del_ca = menu.addAction("Delete Center Angle")
+        try:
+            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+                QPoint(int(sx), int(sy))))
+        finally:
+            self._reset_pointer_state()
+        if chosen is del_ca:
+            self._measures[which][ca_mi].pop("center_angle", None)
+            self._redraw_meas(which)
 
     def _ca_hit(self, which, sx, sy):
         """mi of a measure whose Center-Angle marker point OR spoke line is
@@ -3517,8 +3558,11 @@ class CTViewer(AbstractViewer):
             del_res = menu.addAction("Delete result")
         else:
             del_res = menu.addAction("Delete")
-        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
-            QPoint(int(sx), int(sy))))
+        try:
+            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+                QPoint(int(sx), int(sy))))
+        finally:
+            self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
         elif chosen is hide_act:
@@ -3561,8 +3605,11 @@ class CTViewer(AbstractViewer):
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         del_act = menu.addAction("Delete")
-        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
-            QPoint(int(sx), int(sy))))
+        try:
+            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+                QPoint(int(sx), int(sy))))
+        finally:
+            self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
         elif spline_act is not None and chosen is spline_act:
