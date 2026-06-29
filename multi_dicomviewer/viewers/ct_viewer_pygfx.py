@@ -1293,9 +1293,19 @@ class CTViewer(AbstractViewer):
                 return                        # right-click in measure mode = no-op
         if self._meas_on:
             self._cross_grab = False
+            # Left-click MEASURES while a type is selected or a Center-Angle
+            # pick is in progress, and it also grabs an existing measure's
+            # handle to edit it. Otherwise (Measure on but no type chosen) it
+            # falls through to the active tool below, so Zoom/Move/… still
+            # work — which is why the tools are only greyed once a type is
+            # selected.
+            capturing = (bool(self._meas_type)
+                         or self._center_angle_target is not None)
             started = self._measure_left(key, x, y)
-            self._meas_drag = bool(started)
-            return
+            if capturing or started:
+                self._meas_drag = bool(started)
+                return
+            # idle Measure mode → fall through to the tool / crosshair setup
         # Right-click (not measuring): a single click exports a still image;
         # a double click forces the full-quality ("high-res") rebuild. Defer
         # the export by one double-click interval so a second right-press can
@@ -1333,11 +1343,17 @@ class CTViewer(AbstractViewer):
         if self._meas_on:
             if self._meas_drag:
                 self._measure_drag(key, x, y)
-            elif self._draft and self._draft["pane"] == key:
+                return
+            if self._draft and self._draft["pane"] == key:
                 # Update the dashed draft preview that follows the cursor.
                 self._meas_hover = self._disp_to_world(key, x, y)
                 self._overlay[key].update()
-            return
+                return
+            # Measuring with a type / Center-Angle pick (but not dragging) →
+            # don't drive the tool. Idle Measure (no type chosen) falls
+            # through so Zoom/Move/… still work.
+            if bool(self._meas_type) or self._center_angle_target is not None:
+                return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
             return
         if self._cross_grab:
@@ -1757,10 +1773,31 @@ class CTViewer(AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
-            # Active = red background + WHITE text; only colour is overridden so
-            # the button keeps the base border/radius/padding (no size change).
-            b.setStyleSheet(
-                "background:#c0392b;color:white;" if n == name else "")
+        self._refresh_tool_availability()
+
+    def _refresh_tool_availability(self):
+        """Grey the interaction tools (Zoom/Move/…) while a measure TYPE is
+        active: left-click then measures, so those tools can't be driven. The
+        selected tool keeps a dimmed red so it stays identifiable. With no
+        measure type (Measure off, or on but idle) they are their normal
+        colour and usable (selected = red). MPR-only tools also stay disabled
+        in 2-D native-slice mode."""
+        measuring = getattr(self, "_meas_on", False) and bool(
+            getattr(self, "_meas_type", None))
+        is2d = getattr(self, "_mode", "3D") == "2D"
+        for n, b in self._tool_btns.items():
+            active = (n == getattr(self, "_tool", None))
+            b.setEnabled(not measuring
+                         and not (is2d and n in _MPR_ONLY_TOOLS))
+            if measuring:
+                # greyed-out; the selected tool keeps a dimmed red.
+                b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
+                                else "color:#9a9a9a;")
+            else:
+                # Active = red background + WHITE text; only colour is
+                # overridden so the button keeps its base border/radius.
+                b.setStyleSheet("background:#c0392b;color:white;" if active
+                                else "")
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
@@ -1795,8 +1832,7 @@ class CTViewer(AbstractViewer):
         for k, b in self._mode_btns.items():
             b.setChecked(k == mode)
         is2d = (mode == "2D")
-        for name in _MPR_ONLY_TOOLS:
-            self._tool_btns[name].setEnabled(not is2d)
+        self._refresh_tool_availability()   # MPR-only tools off in 2-D
         self._slab_spin.setEnabled(not is2d)
         self._cl_btn.setEnabled(not is2d)
         for b in self._side_btns.values():
@@ -3141,6 +3177,7 @@ class CTViewer(AbstractViewer):
             for b in self._meas_btns.values():
                 b.setChecked(False)
                 b.setStyleSheet("")
+        self._refresh_tool_availability()   # grey/restore the interaction tools
         for k in ("A", "B"):
             self._overlay[k].update()
 
@@ -3153,6 +3190,8 @@ class CTViewer(AbstractViewer):
             # Active = blue + WHITE text; colour-only override keeps size/shape.
             b.setStyleSheet(
                 "background:#1f77b4;color:white;" if k == key else "")
+        # A type is now active → left-click measures → grey the tools.
+        self._refresh_tool_availability()
 
     def _measure_clear(self):
         self._measures = {"A": [], "B": []}
