@@ -53,6 +53,9 @@ _THUMB_GEN_PX = 280
 
 #: Drag payload carrying a series_uid, dropped onto a viewer pane.
 SERIES_MIME = "application/x-mdv-series-uid"
+#: Drag payload carrying a Study node identity ("<study_uid>\x1f<kind>"),
+#: dropped onto a viewer pane to open that study's resume / first series.
+STUDY_MIME = "application/x-mdv-study"
 
 
 class FitButton(QPushButton):
@@ -173,6 +176,19 @@ def _start_series_drag(source: QWidget, series: Series) -> None:
     md = QMimeData()
     md.setData(SERIES_MIME, series.series_uid.encode("utf-8"))
     md.setText(series.label)
+    drag = QDrag(source)
+    drag.setMimeData(md)
+    drag.exec(Qt.DropAction.CopyAction)
+
+
+def _start_study_drag(source: QWidget, study_uid: str, kind: str,
+                      label: str) -> None:
+    """Begin dragging a Study NODE onto a viewer pane. Dropping it opens
+    that study's resume (or first visible) series — the same series a click
+    on the Study row would show — directly into the pane it lands on."""
+    md = QMimeData()
+    md.setData(STUDY_MIME, f"{study_uid}\x1f{kind}".encode("utf-8"))
+    md.setText(label)
     drag = QDrag(source)
     drag.setMimeData(md)
     drag.exec(Qt.DropAction.CopyAction)
@@ -912,6 +928,12 @@ class StudyBrowser(QTreeWidget):
             if isinstance(se, Series):
                 _start_series_drag(self, se)
                 return
+            # A Study node → drag the whole study (opens its resume / first
+            # series on drop). Its (study_uid, kind) lives in _ID_ROLE.
+            idk = it.data(0, _ID_ROLE)
+            if idk and idk[0] == "S":
+                _start_study_drag(self, idk[1], idk[2], it.text(0))
+                return
 
 
 class _ThumbWorker(QThread):
@@ -1134,6 +1156,9 @@ class StudyPanel(QWidget):
     #: right-click on the DICOM Info button → choose which tags to overlay
     dicom_tags_requested = pyqtSignal()
     delete_requested = pyqtSignal(str, str, str)  # (kind, key, label)
+    #: "Delete All" button → remove every study/series from the list (files
+    #: are untouched; same as right-click Delete done for everything).
+    delete_all_requested = pyqtSignal()
     #: ("dicom"|"mp4"|"csv"|"anon-dicom", [Series])
     export_requested = pyqtSignal(str, list)
     #: "Fit: min × 10 across" → ask the shell to widen the Studies dock to
@@ -1289,6 +1314,16 @@ class StudyPanel(QWidget):
             lambda _p: self.dicom_tags_requested.emit()
         )
 
+        # "Delete All": clear every study/series from the list in one click
+        # (files untouched — same as right-click Delete on each node). The
+        # shell confirms before acting.
+        self.btn_delete_all = FitButton("Delete All")
+        self.btn_delete_all.setHelpToolTip(
+            "Remove ALL studies/series from the list (the image files on disk "
+            "are not deleted; reload the folder to restore them)"
+        )
+        self.btn_delete_all.clicked.connect(self.delete_all_requested)
+
         # ◀ / ▶ : step the Studies-dock width narrower / wider. An always-
         # available alternative to dragging the thin separator (handy on small
         # screens / high-DPI where the seam is fiddly to grab). The dock is
@@ -1310,7 +1345,7 @@ class StudyPanel(QWidget):
         # Let every toolbar button shrink (text clips) so the whole dock
         # can be dragged down to roughly one minimum thumbnail wide.
         for b in (self.btn_info, self.btn_thumb,
-                  self.btn_anon, self.btn_dicom):
+                  self.btn_anon, self.btn_dicom, self.btn_delete_all):
             b.setMinimumWidth(0)
 
         top = QHBoxLayout()
@@ -1319,6 +1354,7 @@ class StudyPanel(QWidget):
         top.addWidget(self.btn_thumb)
         top.addWidget(self.btn_anon)
         top.addWidget(self.btn_dicom)
+        top.addWidget(self.btn_delete_all)
         top.addWidget(self.btn_dock_narrow)
         top.addWidget(self.btn_dock_widen)
         top.addStretch(1)
