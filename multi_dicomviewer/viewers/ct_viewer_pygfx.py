@@ -2959,22 +2959,37 @@ class CTViewer(AbstractViewer):
         is applied from the dialog's ``accepted`` signal instead of a return
         value, and focus is handed back to the viewer when it closes."""
         vals = self._angio_angle_vals(which) or (0, 0)
-        # Replace any dialog still open from a previous click.
+        # Close any dialog still open from a previous click. Guard against its
+        # C++ object already being gone (RuntimeError) so a stale reference
+        # can't crash the reopen. (Do NOT use WA_DeleteOnClose: closing via
+        # the window's ✕ deletes the dialog without firing `finished`, which
+        # left _angio_dlg dangling and crashed the next open.)
         old = getattr(self, "_angio_dlg", None)
+        self._angio_dlg = None
         if old is not None:
-            old.close()
-            old.deleteLater()
+            try:
+                old.close()
+            except RuntimeError:
+                pass
         dlg = _AngioAngleDialog(vals[0], vals[1], self)
         self._angio_dlg = dlg
         dlg.setModal(False)
-        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
-        def _apply():
-            prim, sec = dlg.values()
-            self._set_angio_angle(which, prim, sec)
+        def _finished(result):
+            # Fires for OK (Accepted) AND Cancel/Esc/✕ (QDialog routes the
+            # window-close to reject → Rejected), so cleanup always runs.
+            if result == QDialog.DialogCode.Accepted:
+                try:
+                    prim, sec = dlg.values()
+                    self._set_angio_angle(which, prim, sec)
+                except RuntimeError:
+                    pass
+            if self._angio_dlg is dlg:
+                self._angio_dlg = None
+            dlg.deleteLater()
+            self._after_angio_dialog()
 
-        dlg.accepted.connect(_apply)
-        dlg.finished.connect(lambda _r: self._after_angio_dialog())
+        dlg.finished.connect(_finished)
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
@@ -2983,7 +2998,6 @@ class CTViewer(AbstractViewer):
         """Hand keyboard / first-responder focus back to the viewer after the
         angle dialog closes, so macOS routes trackpad + IME input to it again,
         and clear any stale pointer state."""
-        self._angio_dlg = None
         self._reset_pointer_state()
         try:
             win = self.window()
