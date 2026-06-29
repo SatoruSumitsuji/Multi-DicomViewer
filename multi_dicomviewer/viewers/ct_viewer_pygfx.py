@@ -2949,20 +2949,49 @@ class CTViewer(AbstractViewer):
         """Right-click on the readout → pick LAO/RAO + CRA/CAU and rotate the
         pane to that C-arm angle (to line the slice up with an angio view).
 
-        Invoked via QTimer.singleShot from _on_down so the modal exec() runs
-        OUTSIDE the pointer-down handler (see the call site for why)."""
+        NON-MODAL by design. A modal ``exec()`` spins a nested Qt event loop
+        which, on macOS, hijacks the in-flight TRACKPAD gesture / first
+        responder: after the dialog closes the trackpad can no longer click
+        the toolbar (the mouse still works, and clicking with the mouse frees
+        it). The stray "TSMSendMessageToUIServer FAILED" console spam is the
+        same first-responder disturbance. A modeless dialog has no nested
+        loop, so input routing is never taken from the trackpad. The result
+        is applied from the dialog's ``accepted`` signal instead of a return
+        value, and focus is handed back to the viewer when it closes."""
         vals = self._angio_angle_vals(which) or (0, 0)
+        # Replace any dialog still open from a previous click.
+        old = getattr(self, "_angio_dlg", None)
+        if old is not None:
+            old.close()
+            old.deleteLater()
         dlg = _AngioAngleDialog(vals[0], vals[1], self)
-        try:
-            accepted = dlg.exec()
-        finally:
-            # A modal exec() can still swallow a stray pointer-up — guarantee
-            # no Qt mouse grab lingers on the canvas (it would deaden every
-            # toolbar button until the next canvas click; Mac dead-buttons).
-            self._reset_pointer_state()
-        if accepted:
+        self._angio_dlg = dlg
+        dlg.setModal(False)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def _apply():
             prim, sec = dlg.values()
             self._set_angio_angle(which, prim, sec)
+
+        dlg.accepted.connect(_apply)
+        dlg.finished.connect(lambda _r: self._after_angio_dialog())
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _after_angio_dialog(self):
+        """Hand keyboard / first-responder focus back to the viewer after the
+        angle dialog closes, so macOS routes trackpad + IME input to it again,
+        and clear any stale pointer state."""
+        self._angio_dlg = None
+        self._reset_pointer_state()
+        try:
+            win = self.window()
+            if win is not None:
+                win.activateWindow()
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
 
     def _hu_stats(self, key, pts):
         """(min, max) HU inside the polygon *pts* (pane output coords) on the
