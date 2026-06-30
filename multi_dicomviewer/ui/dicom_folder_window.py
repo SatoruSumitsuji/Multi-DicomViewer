@@ -13,6 +13,8 @@ import shutil
 
 import pydicom
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+
+from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -66,6 +68,7 @@ def _human(n: float) -> str:
 def _read_tags(path: str) -> dict | None:
     try:
         ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        _normalize_charset(ds)
     except Exception:
         return None
 
@@ -88,7 +91,7 @@ def _read_tags(path: str) -> dict | None:
         "studyDate": disp_date,
         "modality": s("Modality"),
         "studyInstanceUID": s("StudyInstanceUID"),
-        "patientName": s("PatientName"),
+        "patientName": decode_text(ds, "PatientName", "") or "Unknown",
         "numberOfFrames": nframes,
     }
 

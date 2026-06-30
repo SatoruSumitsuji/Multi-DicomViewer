@@ -1316,8 +1316,10 @@ class StudyPanel(QWidget):
 
         # "Delete All": clear every study/series from the list in one click
         # (files untouched — same as right-click Delete on each node). The
-        # shell confirms before acting.
-        self.btn_delete_all = FitButton("Delete All")
+        # shell confirms before acting. The leading ✕ matches the per-pane close
+        # glyph and, because FitButton elides from the right, stays visible
+        # (Delete's intent still readable) when the Studies dock is narrow.
+        self.btn_delete_all = FitButton("✕ Delete All")
         self.btn_delete_all.setHelpToolTip(
             "Remove ALL studies/series from the list (the image files on disk "
             "are not deleted; reload the folder to restore them)"

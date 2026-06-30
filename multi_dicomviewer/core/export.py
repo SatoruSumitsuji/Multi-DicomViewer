@@ -236,10 +236,12 @@ def export_dicom(series_list: list[Series],
         if not series.files:
             continue
         # Read the first file's header once to drive the folder name.
+        from . import dicom_io  # local import — avoid load-time cycle
         try:
             first_ds = pydicom.dcmread(
                 series.files[0], stop_before_pixels=True, force=True
             )
+            dicom_io.repair_dataset_text(first_ds)  # clean JP in folder names
         except Exception:
             first_ds = pydicom.Dataset()
         folder = build_series_folder(fields, series, first_ds) or (
@@ -254,6 +256,7 @@ def export_dicom(series_list: list[Series],
                 ds = pydicom.dcmread(
                     path, stop_before_pixels=True, force=True
                 )
+                dicom_io.repair_dataset_text(ds)  # clean JP in filenames
             except Exception:
                 ds = first_ds
             base = build_filename(fields, series, ds)
@@ -299,10 +302,12 @@ def export_anon_dicom(series_list: list[Series],
     for si, series in enumerate(series_list):
         if not series.files:
             continue
+        from . import dicom_io  # local import — avoid load-time cycle
         try:
             first_ds = pydicom.dcmread(
                 series.files[0], stop_before_pixels=True, force=True
             )
+            dicom_io.repair_dataset_text(first_ds)  # clean JP in folder names
         except Exception:
             first_ds = pydicom.Dataset()
         folder = build_series_folder(fields, series, first_ds) or (
@@ -317,6 +322,7 @@ def export_anon_dicom(series_list: list[Series],
         for path in series.files:
             try:
                 ds = pydicom.dcmread(path, force=True)   # full read (pixels)
+                dicom_io.repair_dataset_text(ds)  # clean JP before filename build
                 deidentify_dataset(ds)
                 base = build_filename(fields, series, ds)
                 target = _unique_path(os.path.join(sub, base + ".dcm"))
