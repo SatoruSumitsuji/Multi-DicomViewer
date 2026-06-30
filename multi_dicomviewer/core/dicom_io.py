@@ -6,9 +6,11 @@ fast; pixel data is pulled lazily when a series is actually opened.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -19,6 +21,18 @@ from pydicom.errors import InvalidDicomError
 from pydicom.pixels import apply_color_lut, convert_color_space, pixel_array
 
 from .study_model import Modality, Patient, Series, Study
+
+# Japanese modalities often declare the malformed SpecificCharacterSet defined
+# term "ISO 2022 IR87" (missing the space before the number). pydicom warns
+# about it from inside dcmread — before we get a chance to repair it — for every
+# such file. We deliberately handle this case (see _normalize_charset /
+# decode_text below), so silence just that one warning to keep logs clean.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Unknown encoding 'ISO 2022 IR\d+'",
+    category=UserWarning,
+    module="pydicom.charset",
+)
 
 
 def _warn(msg: str) -> None:
@@ -40,6 +54,142 @@ def _warn(msg: str) -> None:
 
 def _safe(ds, tag, default=""):
     return getattr(ds, tag, default) or default
+
+
+# --- Japanese character-set repair -------------------------------------------
+# Many Japanese XA / US / CT units write patient names and descriptions as raw
+# Shift-JIS (cp932) bytes while declaring an ISO-2022 character set in (0008,0005)
+# SpecificCharacterSet — sometimes even the mistyped defined term "ISO 2022 IR87"
+# (missing the space). Those bytes carry NO ISO-2022 ESC (0x1B) shifts, so
+# pydicom keeps the 7-bit ASCII G0 set and mangles every kanji byte ("文字化け").
+# Repair is three-fold: normalise the defined term so genuinely escape-coded
+# fields still decode (and pydicom stops warning); decode the original element
+# bytes ourselves with a self-validating codec chain (so UTF-8 / EUC-JP files are
+# also covered, not just Shift-JIS); and apply that to the WHOLE dataset on read
+# so every consumer (study tree, tag viewer, overlay, export filenames) sees
+# clean text, not just the patient tree.
+
+_IR_TERM_RE = re.compile(r"^ISO 2022 IR\s*(\d+)$")
+
+#: DICOM string VRs that can carry free-text / person-name Japanese. Numeric,
+#: date/time, UID and binary VRs are never re-decoded.
+_JP_TEXT_VRS = frozenset({"PN", "LO", "LT", "SH", "ST", "UT", "UC"})
+
+
+def _decode_jp_bytes(raw: bytes) -> str:
+    """Decode mis-encoded Japanese DICOM bytes with a self-validating codec
+    chain: UTF-8, then Shift-JIS (cp932), then EUC-JP — returning the first that
+    decodes WITHOUT error.
+
+    Order matters and makes this safe: UTF-8 is self-validating, so a Shift-JIS
+    byte stream (0x80–0x9F lead bytes appear where UTF-8 expects 0xC0+ leads)
+    almost never decodes cleanly as UTF-8 and falls through to cp932; conversely
+    genuine UTF-8 is accepted up front. Only when every strict decode fails
+    (truncated / corrupt source bytes) do we fall back to a lossy cp932 decode so
+    a partial name is still shown rather than nothing."""
+    for enc in ("utf-8", "cp932", "euc_jp"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("cp932", errors="replace")
+
+
+def _normalize_charset(ds) -> None:
+    """Fix a malformed (0008,0005) defined term in place — e.g.
+    'ISO 2022 IR87' -> 'ISO 2022 IR 87'. Must run before any text element is
+    decoded so pydicom uses the corrected term (no-op for valid datasets)."""
+    try:
+        scs = ds.get("SpecificCharacterSet")
+    except Exception:
+        return
+    if not scs:
+        return
+    items = [scs] if isinstance(scs, str) else list(scs)
+    fixed, changed = [], False
+    for term in items:
+        s = str(term).strip()
+        m = _IR_TERM_RE.match(s)
+        ns = f"ISO 2022 IR {m.group(1)}" if m else s
+        changed = changed or (ns != s)
+        fixed.append(ns)
+    if changed:
+        ds.SpecificCharacterSet = fixed if len(fixed) > 1 else fixed[0]
+
+
+def _is_raw_sjis(raw: bytes) -> bool:
+    """True when *raw* carries 8-bit (kanji) bytes but none of the ISO-2022 ESC
+    (0x1B) shifts a real 'ISO 2022 IR 87/159' value must use — the fingerprint
+    of raw Shift-JIS mislabelled as an ISO-2022 character set."""
+    return 0x1B not in raw and any(b >= 0x80 for b in raw)
+
+
+def _best_pn_part(text: str) -> str:
+    """A PN value is alphabetic=ideographic=phonetic. Show the group richest in
+    CJK characters (the kanji/kana name a clinician reads), else the first
+    non-empty group."""
+    groups = [g for g in text.split("=") if g.strip()]
+    if len(groups) <= 1:
+        return text.replace("=", " ").strip()
+    cjk = lambda s: sum(ord(ch) >= 0x3000 for ch in s)  # noqa: E731
+    best = max(groups, key=cjk) if any(cjk(g) for g in groups) else groups[0]
+    return best.strip()
+
+
+def decode_text(ds, tag, default="") -> str:
+    """Read a DICOM text/PN element for DISPLAY, repairing mis-encoded Japanese
+    on the original element bytes and, for PN, showing the most readable name
+    component. Correctly-encoded Western names and genuinely escape-coded
+    Japanese names fall through to pydicom's own decode unchanged."""
+    try:
+        item = ds.get_item(tag)
+    except Exception:
+        item = None
+    raw = getattr(item, "value", None) if item is not None else None
+    if isinstance(raw, (bytes, bytearray)) and _is_raw_sjis(bytes(raw)):
+        txt = _decode_jp_bytes(bytes(raw)).rstrip("\x00 ").strip()
+        if getattr(item, "VR", "") == "PN":
+            txt = _best_pn_part(txt)
+        return txt or default
+    return str(_safe(ds, tag, default)) or default
+
+
+def repair_dataset_text(ds) -> None:
+    """Repair mis-encoded Japanese text across the WHOLE dataset, in place.
+
+    Normalises the (0008,0005) defined term, then rewrites every text/PN element
+    whose original bytes are raw Shift-JIS / UTF-8 / EUC-JP mislabelled as
+    ISO-2022 (the :func:`_is_raw_sjis` fingerprint) with its correctly-decoded
+    value, recursing into sequences. Applied once at read time so the tag viewer,
+    overlay, export filenames and anything else reading the dataset all show
+    clean text — pure-ASCII and genuinely escape-coded values are left untouched.
+
+    Unlike :func:`decode_text` this keeps the full faithful PN value (all
+    alphabetic=ideographic=phonetic groups) rather than picking one component,
+    because a tag inspector should show the element verbatim."""
+    _normalize_charset(ds)
+    for tag in list(ds._dict):  # raw items only; get_item never converts/caches
+        try:
+            item = ds.get_item(tag)
+        except Exception:
+            continue
+        vr = getattr(item, "VR", "")
+        if vr == "SQ":
+            try:
+                for sub in ds[tag].value:
+                    repair_dataset_text(sub)
+            except Exception:
+                pass
+            continue
+        if vr not in _JP_TEXT_VRS:
+            continue
+        raw = getattr(item, "value", None)
+        if isinstance(raw, (bytes, bytearray)) and _is_raw_sjis(bytes(raw)):
+            txt = _decode_jp_bytes(bytes(raw)).rstrip("\x00 ")
+            try:
+                ds[tag] = pydicom.DataElement(item.tag, vr, txt)
+            except Exception:
+                pass
 
 
 def _acq_key(ds) -> str:
@@ -136,9 +286,14 @@ def _to_gray2d(arr: np.ndarray) -> np.ndarray:
 
 
 def _read_header(path: str):
-    """Metadata-only dataset of *path* (no pixel data), or None on failure."""
+    """Metadata-only dataset of *path* (no pixel data), or None on failure.
+
+    Japanese text is repaired dataset-wide here so every consumer of the header
+    (viewer overlay, tag dialog, export) sees clean text, not just the tree."""
     try:
-        return pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
+        repair_dataset_text(ds)
+        return ds
     except Exception:
         return None
 
@@ -204,8 +359,9 @@ def _build_tree(
             if not hasattr(ds, "SOPInstanceUID"):
                 continue
 
+            _normalize_charset(ds)
             pid = str(_safe(ds, "PatientID", "UNKNOWN"))
-            pname = str(_safe(ds, "PatientName", "Anonymous"))
+            pname = decode_text(ds, "PatientName", "Anonymous")
             patient = patients.setdefault(pid, Patient(pid, pname))
 
             st_uid = str(_safe(ds, "StudyInstanceUID", "NO_STUDY"))
@@ -213,7 +369,7 @@ def _build_tree(
                 st_uid,
                 Study(
                     study_uid=st_uid,
-                    description=str(_safe(ds, "StudyDescription")),
+                    description=decode_text(ds, "StudyDescription"),
                     date=str(_safe(ds, "StudyDate")),
                 ),
             )
@@ -228,7 +384,7 @@ def _build_tree(
                 series = Series(
                     series_uid=se_uid,
                     modality=Modality.from_dicom(raw_mod),
-                    description=str(_safe(ds, "SeriesDescription")),
+                    description=decode_text(ds, "SeriesDescription"),
                     number=int(num) if str(num).strip().isdigit() else None,
                     acq_number=(
                         int(anum) if str(anum).strip().lstrip("-").isdigit()
@@ -247,6 +403,7 @@ def _build_tree(
                 _to_float(getattr(ds, "NumberOfFrames", 1), 1) or 1
             )
 
+    _merge_studyuid_duplicate_patients(patients)
     _split_packed_xa_series(patients)
     _merge_cross_uid_biplane(patients)
     # Tree "N img" = total frames, so a single-file multi-frame series (NM/US/XA
@@ -259,6 +416,80 @@ def _build_tree(
             for se in study.series.values():
                 se.n_images = sum(frames_by_path.get(f, 1) for f in se.files)
     return patients
+
+
+def _patient_file_count(pat: Patient) -> int:
+    return sum(len(se.files) for st in pat.studies.values()
+               for se in st.series.values())
+
+
+def _merge_studyuid_duplicate_patients(patients: dict[str, Patient]) -> None:
+    """Fuse patient nodes that share a StudyInstanceUID into one.
+
+    A DICOM StudyInstanceUID is globally unique to one study of one patient, so
+    two Patient nodes carrying the SAME study UID are the same person — the
+    split is a data error. The usual cause is a single file in a series whose
+    PatientID / PatientName bytes were truncated or mangled by the modality
+    (e.g. an Iwaki XA unit that wrote a 9-digit PatientID and a cut-off cp932
+    name on its first cine while the rest of the study has the correct 10-digit
+    ID). Without this, that one clip would hang off a separate, garbled patient
+    node even though it is a real acquisition of the same study.
+
+    The merge is loss-free: every series/file is moved onto the surviving node;
+    nothing is dropped. The surviving identity is the one with the cleanest name
+    (fewest U+FFFD decode-failure marks), then the most files, then the longest
+    PatientID — i.e. the intact header wins over the truncated one.
+    """
+    # Union pids that are connected through any shared study UID.
+    parent = {pid: pid for pid in patients}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    study_pids: dict[str, list[str]] = {}
+    for pid, pat in patients.items():
+        for su in pat.studies:
+            study_pids.setdefault(su, []).append(pid)
+    for pids in study_pids.values():
+        for other in pids[1:]:
+            parent[find(other)] = find(pids[0])
+
+    groups: dict[str, list[str]] = {}
+    for pid in list(patients):
+        groups.setdefault(find(pid), []).append(pid)
+
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        canon = max(
+            members,
+            key=lambda p: (
+                -patients[p].name.count("�"),   # cleanest name first
+                _patient_file_count(patients[p]),    # then most complete
+                len(p),                              # then longest PatientID
+            ),
+        )
+        target = patients[canon]
+        for pid in members:
+            if pid == canon:
+                continue
+            src = patients.pop(pid)
+            for su, study in src.studies.items():
+                tgt_study = target.studies.get(su)
+                if tgt_study is None:
+                    target.studies[su] = study
+                    continue
+                for se_uid, se in study.series.items():
+                    existing = tgt_study.series.get(se_uid)
+                    if existing is None:
+                        tgt_study.series[se_uid] = se
+                    else:  # same series split across the two nodes — merge files
+                        for f in se.files:
+                            if f not in existing.files:
+                                existing.files.append(f)
 
 
 def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
@@ -346,9 +577,7 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                     # path so neither is lost.
                     if new_uid in new_series:
                         new_uid = f"{new_uid}@{idx}"
-                    desc = str(
-                        _safe(ds, "SeriesDescription", "") or se.description
-                    )
+                    desc = decode_text(ds, "SeriesDescription", "") or se.description
                     new_series[new_uid] = Series(
                         series_uid=new_uid,
                         modality=se.modality,

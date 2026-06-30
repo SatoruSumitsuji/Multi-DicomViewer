@@ -1844,8 +1844,10 @@ class MainWindow(QMainWindow):
         row.addWidget(self._layout_btn)
 
         # "Clear All": empty every pane at once (same as each pane's ✕). The
-        # layout is kept; the studies list is untouched.
-        self._clear_all_btn = FitButton("Clear All")
+        # layout is kept; the studies list is untouched. The leading ✕ matches
+        # the per-pane close glyph and, because FitButton elides from the right,
+        # stays visible (Clear's intent still readable) when the bar is narrow.
+        self._clear_all_btn = FitButton("✕ Clear All")
         self._clear_all_btn.setHelpToolTip(
             "Clear the image from every pane (same as each pane's ✕). "
             "The layout and the studies list are kept."
