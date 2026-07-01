@@ -1941,6 +1941,19 @@ class MainWindow(QMainWindow):
         self._studies_dock.setVisible(vis)
         self._info_btn.setText("◀ Hide Studies" if vis else "Show Studies ▶")
 
+    def closeEvent(self, e):  # noqa: N802 (Qt override)
+        # Finalize each VTK CT render window while its native window is still
+        # valid, so VTK releases its GL context cleanly instead of flooding the
+        # terminal with "wglMakeCurrent failed ... invalid handle (code 6)" when
+        # Qt destroys the HWNDs first during teardown. Duck-typed: only the VTK
+        # CT viewer defines finalize_gl (pygfx / QPainter viewers have none).
+        for pane in self._panes:
+            for viewer in pane.all_viewers():
+                fin = getattr(viewer, "finalize_gl", None)
+                if callable(fin):
+                    fin()
+        super().closeEvent(e)
+
     def _shown_panes(self) -> list:
         """Panes currently on screen, in display (reading) order. 1×1 shows
         the active pane; every other layout shows a fixed sub-block of the
