@@ -1446,6 +1446,18 @@ class CTViewer(AbstractViewer):
             return
         self._refresh(reset_cam=self._view_initial)
 
+    def finalize_gl(self) -> None:
+        """Release each pane's VTK OpenGL context while our native windows are
+        still valid — called from MainWindow.closeEvent on app quit. Without it,
+        Qt destroys the HWNDs first and VTK's later teardown floods the terminal
+        with 'wglMakeCurrent failed ... invalid handle (code 6)' during Clean().
+        Windows/VTK only (duck-typed: pygfx has no such method)."""
+        for key in ("A", "B"):
+            try:
+                self.pane[key].canvas.Finalize()
+            except Exception:
+                pass
+
     # -- Bi / Lt / Rt --------------------------------------------------
     @property
     def supports_side(self) -> bool:
