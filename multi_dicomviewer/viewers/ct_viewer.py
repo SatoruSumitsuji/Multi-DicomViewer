@@ -1044,6 +1044,15 @@ class _Pane:
             a.SetVisibility(bool(on))
 
     def render(self):
+        # Skip the GL Render while this pane's canvas is not actually on screen
+        # (a hidden QStackedWidget page during load_series, or the inactive pane
+        # in single-view). Rendering an unmapped native window binds VTK's GL
+        # context to a bad HDC — wglMakeCurrent fails ("error 2004" flood) and
+        # the pane comes up BLACK until a manual reload. CTViewer.showEvent
+        # re-renders once we are shown, so the first Render always targets a
+        # mapped, DPI-settled window. (Windows/WGL; harmless no-op elsewhere.)
+        if not self.canvas.isVisible():
+            return
         self.canvas.GetRenderWindow().Render()
 
 
@@ -1414,18 +1423,19 @@ class CTViewer(AbstractViewer):
         self._update_active_frames()
 
     def showEvent(self, e):
-        """Re-bind (if needed) and repaint once the pane is actually on screen.
+        """Fit and paint the FIRST Render once the pane is actually on screen.
 
         The shell calls ``load_series`` BEFORE it brings this viewer to the front
-        of the pane's QStackedWidget (see MainWindow.show_series), so the initial
-        fit + Render in load_series can run while the VTK canvas is still the
-        hidden page. Rendering into that unmapped native window makes VTK bind
-        its GL context to a bad HDC — ``wglMakeCurrent`` fails ("error 2004")
-        and the pane comes up BLACK until a manual reload. Now that we are being
-        shown, redo it, deferred to the next event-loop turn so Qt has settled
-        (mapped, DPI-resolved) the canvas geometry first. The heavy lifting is in
-        ``_refit_on_show``: a plain re-Render does NOT clear VTK's cached bad
-        context, so when the load happened while hidden we Finalize() first."""
+        of the pane's QStackedWidget (see MainWindow.show_series), so load_series
+        runs while our canvases are still a hidden page. ``_Pane.render`` suppr-
+        esses any GL Render while a canvas is off screen (rendering an unmapped
+        native window binds VTK's context to a bad HDC → ``wglMakeCurrent``
+        "error 2004" flood → BLACK pane), so load_series only prepares the
+        pipeline and camera. Now that we are shown, do the real first Render —
+        deferred to the next event-loop turn so Qt has settled (mapped, DPI-
+        resolved) the canvas geometry first, which is also when ``_fit_pane`` can
+        read the true canvas size. The ``_view_initial`` guard keeps a user's own
+        zoom/pan (repaint only); a fresh load refits to the real size."""
         super().showEvent(e)
         if self._image is not None:
             QTimer.singleShot(0, self._refit_on_show)
@@ -1434,23 +1444,6 @@ class CTViewer(AbstractViewer):
         # Guard: the viewer may have been cleared/destroyed before this fires.
         if self._image is None:
             return
-        if getattr(self, "_needs_rebind", False):
-            self._needs_rebind = False
-            # The initial load_series Render ran while we were a hidden stack
-            # page, so each pane's GL context may be bound to an unmapped-window
-            # HDC (wglMakeCurrent 'error 2004' → black). A plain Render keeps the
-            # cached bad context (Initialize() skips WindowInitialize while
-            # ContextId is set); Finalize() drops ContextId/DeviceContext so the
-            # next Render (_refresh below) re-runs WindowInitialize against the
-            # now-mapped, DPI-settled HDC. (VTK vtkWin32OpenGLRenderWindow.) This
-            # is what a manual reload does for the user, done automatically.
-            for key in ("A", "B"):
-                try:
-                    self.pane[key].canvas.GetRenderWindow().Finalize()
-                except Exception:
-                    pass
-        # _view_initial guard: a user who already zoomed/panned keeps their view
-        # (repaint only, no refit); the fresh-load case refits to the real size.
         self._refresh(reset_cam=self._view_initial)
 
     # -- Bi / Lt / Rt --------------------------------------------------
@@ -2946,14 +2939,6 @@ class CTViewer(AbstractViewer):
                 and getattr(self, "_loaded_uid", "") == new_uid):
             return
         self._loaded_uid = new_uid
-        # If this initial load runs while we are still a hidden QStackedWidget
-        # page (show_series calls load_series BEFORE setCurrentWidget), the very
-        # first VTK Render binds the GL context to an unmapped-window HDC and
-        # wglMakeCurrent fails ("error 2004" flood) → a black pane that a plain
-        # re-Render can't cure (VTK caches the bad ContextId). Flag it so the
-        # first on-screen showEvent rebuilds the context. Loading into an
-        # already-visible pane renders against a valid window, so no rebind.
-        self._needs_rebind = not self.isVisible()
         vol = loaded.volume
         sr, sc = loaded.spacing_mm or (1.0, 1.0)
         sz = loaded.slice_mm or 1.0
