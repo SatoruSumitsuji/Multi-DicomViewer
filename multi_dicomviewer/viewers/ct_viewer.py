@@ -1413,6 +1413,30 @@ class CTViewer(AbstractViewer):
             sc.activated.connect(lambda d=direction: self._key_arrow(d))
         self._update_active_frames()
 
+    def showEvent(self, e):
+        """Re-fit and repaint once the pane is actually on screen.
+
+        The shell calls ``load_series`` BEFORE it brings this viewer to the
+        front of the pane's QStackedWidget (see MainWindow.show_series), so the
+        initial fit + render in load_series can run while the VTK canvas is still
+        the hidden page: it then has no final size (the camera fit is computed
+        against a stale one) and renders into an unexposed framebuffer, which
+        occasionally came up BLACK until a manual reload. Now that we are being
+        shown, redo it — deferred to the next event-loop turn so Qt has settled
+        the canvas geometry first. The ``_view_initial`` guard means a user who
+        has already zoomed/panned keeps their view (we only repaint, not refit),
+        and it complements the resize-time refit for the case where being shown
+        fires no resize event (unchanged size)."""
+        super().showEvent(e)
+        if self._image is not None:
+            QTimer.singleShot(0, self._refit_on_show)
+
+    def _refit_on_show(self) -> None:
+        # Guard: the viewer may have been cleared/destroyed before this fires.
+        if self._image is None:
+            return
+        self._refresh(reset_cam=self._view_initial)
+
     # -- Bi / Lt / Rt --------------------------------------------------
     @property
     def supports_side(self) -> bool:
