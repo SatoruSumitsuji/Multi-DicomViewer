@@ -1415,6 +1415,35 @@ class CTViewer(AbstractViewer):
         # rendercanvas: wheel-up gives dy<0; page forward (+1) on wheel-up.
         self._wheel(key, 1 if ev["dy"] < 0 else -1)
 
+    def showEvent(self, e):  # noqa: N802 (Qt override)
+        """Re-fit and repaint once the pane is actually on screen.
+
+        DEFENSIVE / belt-and-suspenders — mirrors the VTK viewer's showEvent.
+        The shell calls ``load_series`` BEFORE it brings this viewer to the front
+        of the pane's QStackedWidget, so the initial fit + draw in load_series can
+        run while the wgpu canvas is still the hidden page: it then has no final
+        size (``_fit_pane`` reads ``canvas.width()/height()`` for the aspect) and
+        draws into an unexposed surface, which is the suspected cause of the
+        intermittent BLACK-CT-until-reload symptom. Now that we are being shown,
+        redo it — deferred to the next event-loop turn so Qt has settled the
+        canvas geometry first.
+
+        The ``_view_initial`` guard means a user who has already zoomed/panned
+        keeps their view (we only repaint, not refit). This COMPLEMENTS the
+        canvas ``resize``-event refit (``_on_resize``): if wgpu fires no resize on
+        first show (unchanged size) that path never runs, so this closes the gap.
+        The effect is unverified (the symptom is intermittent / low-repro), hence
+        purely defensive — keep it a minimal, easily-reverted mirror of VTK."""
+        super().showEvent(e)
+        if self._vol is not None:
+            QTimer.singleShot(0, self._refit_on_show)
+
+    def _refit_on_show(self) -> None:
+        # Guard: the viewer may have been cleared/destroyed before this fires.
+        if self._vol is None:
+            return
+        self._refresh(reset_cam=self._view_initial)
+
     def _on_resize(self, key, ev):
         if self._vol is None:
             return
