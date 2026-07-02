@@ -1378,6 +1378,12 @@ def load_xa(
                 idx * 2, n_files * 2,
             )
         ds = pydicom.dcmread(path, force=True)
+        # Repair mis-encoded Japanese text HERE too: this per-plane ds is stored
+        # on the XAPlane and is what the viewer's on-image overlay reads
+        # (XAViewer._refresh_overlay uses plane._ds, not the repaired
+        # LoadedSeries.header), so without this the overlay PatientName/text stays
+        # mojibake even though the tree and header are clean.
+        repair_dataset_text(ds)
         nf = max(1, int(_to_float(getattr(ds, "NumberOfFrames", 1), 1)))
         if progress is not None:
             progress(
@@ -1717,6 +1723,10 @@ def load_secondary_capture(
     for k, path in enumerate(sorted_files):
         try:
             ds0 = pydicom.dcmread(path, force=True)
+            # Same as load_xa: this ds0 is stored on the XAPlane and read by the
+            # viewer's on-image overlay (plane._ds), so repair mis-encoded
+            # Japanese text or the overlay PatientName stays mojibake.
+            repair_dataset_text(ds0)
             f0 = _decode_frame(ds0, 0)   # (H,W) float gray | (H,W,3) uint8 RGB
             start = k
             break
