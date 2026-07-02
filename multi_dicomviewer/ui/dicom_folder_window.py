@@ -287,9 +287,6 @@ class DicomFolderWindow(QMainWindow):
             self._radios[key] = rb
             orow.addWidget(rb)
         self._radios[_BY_COMBINED].setChecked(True)
-        self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
-        self._sep_cb.setChecked(True)
-        orow.addWidget(self._sep_cb)
         # DICOMDIR index files carry no Study/Modality tags, so they would land in
         # an "Unknown" group. Let the user keep them where they are instead.
         self._keep_dicomdir_cb = QCheckBox("Keep DICOMDIR in place")
@@ -297,6 +294,9 @@ class DicomFolderWindow(QMainWindow):
             "Leave DICOMDIR index files in their original location instead of "
             "sorting them into an 'Unknown' group.")
         orow.addWidget(self._keep_dicomdir_cb)
+        self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
+        self._sep_cb.setChecked(True)
+        orow.addWidget(self._sep_cb)
         orow.addStretch(1)
         root.addLayout(orow)
         for rb in self._radios.values():
