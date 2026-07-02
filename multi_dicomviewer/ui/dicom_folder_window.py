@@ -290,11 +290,19 @@ class DicomFolderWindow(QMainWindow):
         self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
         self._sep_cb.setChecked(True)
         orow.addWidget(self._sep_cb)
+        # DICOMDIR index files carry no Study/Modality tags, so they would land in
+        # an "Unknown" group. Let the user keep them where they are instead.
+        self._keep_dicomdir_cb = QCheckBox("Keep DICOMDIR in place")
+        self._keep_dicomdir_cb.setToolTip(
+            "Leave DICOMDIR index files in their original location instead of "
+            "sorting them into an 'Unknown' group.")
+        orow.addWidget(self._keep_dicomdir_cb)
         orow.addStretch(1)
         root.addLayout(orow)
         for rb in self._radios.values():
             rb.toggled.connect(self._regroup)
         self._sep_cb.toggled.connect(self._regroup)
+        self._keep_dicomdir_cb.toggled.connect(self._regroup)
 
         mrow = QHBoxLayout()
         mrow.addWidget(QLabel("Action:"))
@@ -488,7 +496,7 @@ class DicomFolderWindow(QMainWindow):
 
     def _update_go(self) -> None:
         has_target = bool(self._target)
-        self._go_btn.setEnabled(bool(self._files) and has_target)
+        self._go_btn.setEnabled(bool(self._active_files()) and has_target)
         # "Sort Files" is greyed out until an output folder is chosen. The red
         # "Output folder is not selected" note appears only ONCE A SOURCE EXISTS
         # (before that there's nothing to sort yet, so it would be noise) and an
@@ -498,6 +506,15 @@ class DicomFolderWindow(QMainWindow):
         self._clear_btn.setEnabled(bool(self._source))
 
     # ----------------------------------------------------------- grouping
+    def _active_files(self) -> list[dict]:
+        """The files that will actually be sorted. When 'Keep DICOMDIR in place'
+        is on, DICOMDIR index files are excluded so they stay put instead of
+        being moved/copied into an 'Unknown' group."""
+        if self._keep_dicomdir_cb.isChecked():
+            return [f for f in self._files
+                    if f["name"].upper() != "DICOMDIR"]
+        return self._files
+
     def _regroup(self) -> None:
         if not self._files:
             return
@@ -506,8 +523,9 @@ class DicomFolderWindow(QMainWindow):
         separate = self._sep_cb.isChecked()
         self._sep_cb.setEnabled(group_by == _BY_COMBINED)
 
+        active = self._active_files()
         groups: dict[str, dict] = {}
-        for f in self._files:
+        for f in active:
             key, default_sub = _group_of(f, group_by, separate)
             g = groups.setdefault(
                 key, {"default": default_sub, "files": [],
@@ -523,7 +541,9 @@ class DicomFolderWindow(QMainWindow):
             item = QTreeWidgetItem(self._tree)
             mods = ", ".join(sorted(g["mods"]))
             item.setText(0, f"{key}   [{mods} | {len(g['patients'])} pt]")
-            item.setText(1, str(len(g["files"])))
+            # Trailing spaces = a right margin so the right-aligned count doesn't
+            # butt up against the editable "Folder name" column next to it.
+            item.setText(1, f"{len(g['files'])}   ")
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
             item.setText(2, g["default"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -537,8 +557,10 @@ class DicomFolderWindow(QMainWindow):
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
         self._tree.blockSignals(False)
+        kept = len(self._files) - len(active)
+        note = f"  ({kept} DICOMDIR kept in place)" if kept else ""
         self._stat_lbl.setText(
-            f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).")
+            f"{len(active)} DICOM file(s) in {len(groups)} group(s).{note}")
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
@@ -552,21 +574,22 @@ class DicomFolderWindow(QMainWindow):
 
     # ----------------------------------------------------------- organize
     def _organize(self) -> None:
-        if not self._files or not self._target:
+        active = self._active_files()
+        if not active or not self._target:
             return
         move = self._move_rb.isChecked()
         verb = "Move" if move else "Copy"
         if QMessageBox.question(
             self, "Organize",
-            f"{verb} {len(self._files)} file(s) into sub-folders of\n"
+            f"{verb} {len(active)} file(s) into sub-folders of\n"
             f"{self._target}?",
         ) != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
         self._bar.setVisible(True)
-        self._bar.setRange(0, len(self._files))
+        self._bar.setRange(0, len(active))
         self._worker = _OrganizeWorker(
-            list(self._files), self._target, move,
+            list(active), self._target, move,
             self._group_by(), self._sep_cb.isChecked(), dict(self._name_map))
         self._worker.progress.connect(
             lambda d, t: (self._bar.setValue(d),
