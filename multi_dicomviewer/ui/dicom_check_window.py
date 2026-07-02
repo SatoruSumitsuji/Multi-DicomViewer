@@ -288,7 +288,7 @@ class DicomCheckWindow(QMainWindow):
                 c = node.child(i)
                 if c.data(0, _KIND) == "file":
                     yield c
-                walk(c)
+                yield from walk(c)   # recurse into folders (nested non-DICOM files)
         yield from walk(it)
 
     def _check_all(self, on: bool) -> None:
