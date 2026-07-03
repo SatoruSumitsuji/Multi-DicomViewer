@@ -15,7 +15,7 @@ import pydicom
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
-from PyQt6.QtGui import QColor, QFont
+from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -194,7 +194,8 @@ class _OrganizeWorker(QThread):
     progress = pyqtSignal(int, int)
     done = pyqtSignal(int, int, str)                # ok, fail, error
 
-    def __init__(self, files, target, move, group_by, separate, name_map):
+    def __init__(self, files, target, move, group_by, separate, name_map,
+                 keep_dicomdir=False):
         super().__init__()
         self._files = files
         self._target = target
@@ -202,6 +203,7 @@ class _OrganizeWorker(QThread):
         self._group_by = group_by
         self._separate = separate
         self._name_map = name_map
+        self._keep_dicomdir = keep_dicomdir
 
     def run(self) -> None:
         ok = fail = 0
@@ -209,12 +211,25 @@ class _OrganizeWorker(QThread):
         total = len(self._files)
         for i, f in enumerate(self._files):
             try:
-                key, default_sub = _group_of(f, self._group_by, self._separate)
-                sub = _safe(self._name_map.get(key, default_sub))
-                dest_dir = os.path.join(self._target, sub)
-                os.makedirs(dest_dir, exist_ok=True)
-                dest = os.path.join(
-                    dest_dir, _unique_name(dest_dir, f["name"], f["relpath"]))
+                if (self._keep_dicomdir
+                        and f["name"].upper() == "DICOMDIR"):
+                    # Preserve the DICOMDIR's ORIGINAL sub-folder path under the
+                    # output root (so each stays beside its data and the many
+                    # identically-named ones don't collide), instead of the flat
+                    # modality/'Unknown' group used for image files.
+                    dest_dir = os.path.join(
+                        self._target, os.path.dirname(f["relpath"]))
+                    os.makedirs(dest_dir, exist_ok=True)
+                    dest = os.path.join(
+                        dest_dir, _unique_name(dest_dir, f["name"], ""))
+                else:
+                    key, default_sub = _group_of(
+                        f, self._group_by, self._separate)
+                    sub = _safe(self._name_map.get(key, default_sub))
+                    dest_dir = os.path.join(self._target, sub)
+                    os.makedirs(dest_dir, exist_ok=True)
+                    dest = os.path.join(
+                        dest_dir, _unique_name(dest_dir, f["name"], f["relpath"]))
                 if self._move:
                     shutil.move(f["path"], dest)
                 else:
@@ -496,7 +511,7 @@ class DicomFolderWindow(QMainWindow):
 
     def _update_go(self) -> None:
         has_target = bool(self._target)
-        self._go_btn.setEnabled(bool(self._active_files()) and has_target)
+        self._go_btn.setEnabled(bool(self._files) and has_target)
         # "Sort Files" is greyed out until an output folder is chosen. The red
         # "Output folder is not selected" note appears only ONCE A SOURCE EXISTS
         # (before that there's nothing to sort yet, so it would be noise) and an
@@ -506,14 +521,8 @@ class DicomFolderWindow(QMainWindow):
         self._clear_btn.setEnabled(bool(self._source))
 
     # ----------------------------------------------------------- grouping
-    def _active_files(self) -> list[dict]:
-        """The files that will actually be sorted. When 'Keep DICOMDIR in place'
-        is on, DICOMDIR index files are excluded so they stay put instead of
-        being moved/copied into an 'Unknown' group."""
-        if self._keep_dicomdir_cb.isChecked():
-            return [f for f in self._files
-                    if f["name"].upper() != "DICOMDIR"]
-        return self._files
+    def _dicomdirs(self) -> list[dict]:
+        return [f for f in self._files if f["name"].upper() == "DICOMDIR"]
 
     def _regroup(self) -> None:
         if not self._files:
@@ -523,9 +532,15 @@ class DicomFolderWindow(QMainWindow):
         separate = self._sep_cb.isChecked()
         self._sep_cb.setEnabled(group_by == _BY_COMBINED)
 
-        active = self._active_files()
+        # With "Keep DICOMDIR in place" on, DICOMDIR files go to the output with
+        # their ORIGINAL sub-folder path preserved (not flattened into a modality
+        # / "Unknown" group), so keep them out of the normal grouping and give
+        # them their own structure-preserving group below.
+        keep_dd = self._keep_dicomdir_cb.isChecked()
+        norm = ([f for f in self._files if f["name"].upper() != "DICOMDIR"]
+                if keep_dd else self._files)
         groups: dict[str, dict] = {}
-        for f in active:
+        for f in norm:
             key, default_sub = _group_of(f, group_by, separate)
             g = groups.setdefault(
                 key, {"default": default_sub, "files": [],
@@ -556,32 +571,27 @@ class DicomFolderWindow(QMainWindow):
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
-        # When "Keep DICOMDIR in place" is on, still SHOW the DICOMDIR files — as
-        # a read-only, greyed group flagged "not sorted" — so it's clear they were
-        # found and will stay in their source location (not silently gone). This
-        # group has no edit flag / UserRole key, so it never joins the move/copy.
-        if self._keep_dicomdir_cb.isChecked():
-            dd = [f for f in self._files if f["name"].upper() == "DICOMDIR"]
-            if dd:
-                grey = QColor(Qt.GlobalColor.gray)
-                item = QTreeWidgetItem(self._tree)
-                item.setText(0, "DICOMDIR   [kept in place — not sorted]")
-                item.setText(1, f"{len(dd)}   ")
-                item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
-                item.setText(2, "(left in original location)")
-                for col in range(3):
-                    item.setForeground(col, grey)
-                for f in dd[:50]:
-                    leaf = QTreeWidgetItem(item)
-                    leaf.setText(0, f["name"])
-                    leaf.setText(2, f["relpath"])
-                    for col in range(3):
-                        leaf.setForeground(col, grey)
+        # DICOMDIR group (only when the toggle is on): these are saved to the
+        # output with their ORIGINAL sub-folder path preserved. Read-only — the
+        # destination mirrors the source structure (the worker routes them by
+        # relpath), so there's no flat folder name to edit. Column 2 shows each
+        # file's original relative path = where it will land under the output.
+        dd = self._dicomdirs() if keep_dd else []
+        if dd:
+            item = QTreeWidgetItem(self._tree)
+            item.setText(0, "DICOMDIR   [saved with original folder structure]")
+            item.setText(1, f"{len(dd)}   ")
+            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
+            item.setText(2, "(original path preserved per file)")
+            for f in dd[:50]:
+                leaf = QTreeWidgetItem(item)
+                leaf.setText(0, f["name"])
+                leaf.setText(2, f["relpath"])
         self._tree.blockSignals(False)
-        kept = len(self._files) - len(active)
-        note = f"  ({kept} DICOMDIR kept in place)" if kept else ""
+        note = ("  (DICOMDIR saved with original folder structure)"
+                if dd else "")
         self._stat_lbl.setText(
-            f"{len(active)} DICOM file(s) in {len(groups)} group(s).{note}")
+            f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).{note}")
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
@@ -595,23 +605,23 @@ class DicomFolderWindow(QMainWindow):
 
     # ----------------------------------------------------------- organize
     def _organize(self) -> None:
-        active = self._active_files()
-        if not active or not self._target:
+        if not self._files or not self._target:
             return
         move = self._move_rb.isChecked()
         verb = "Move" if move else "Copy"
         if QMessageBox.question(
             self, "Organize",
-            f"{verb} {len(active)} file(s) into sub-folders of\n"
+            f"{verb} {len(self._files)} file(s) into sub-folders of\n"
             f"{self._target}?",
         ) != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
         self._bar.setVisible(True)
-        self._bar.setRange(0, len(active))
+        self._bar.setRange(0, len(self._files))
         self._worker = _OrganizeWorker(
-            list(active), self._target, move,
-            self._group_by(), self._sep_cb.isChecked(), dict(self._name_map))
+            list(self._files), self._target, move,
+            self._group_by(), self._sep_cb.isChecked(), dict(self._name_map),
+            self._keep_dicomdir_cb.isChecked())
         self._worker.progress.connect(
             lambda d, t: (self._bar.setValue(d),
                           self._stat_lbl.setText(f"{verb} … {d}/{t}")))
