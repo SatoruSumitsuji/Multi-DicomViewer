@@ -15,7 +15,7 @@ import pydicom
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -556,6 +556,27 @@ class DicomFolderWindow(QMainWindow):
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
+        # When "Keep DICOMDIR in place" is on, still SHOW the DICOMDIR files — as
+        # a read-only, greyed group flagged "not sorted" — so it's clear they were
+        # found and will stay in their source location (not silently gone). This
+        # group has no edit flag / UserRole key, so it never joins the move/copy.
+        if self._keep_dicomdir_cb.isChecked():
+            dd = [f for f in self._files if f["name"].upper() == "DICOMDIR"]
+            if dd:
+                grey = QColor(Qt.GlobalColor.gray)
+                item = QTreeWidgetItem(self._tree)
+                item.setText(0, "DICOMDIR   [kept in place — not sorted]")
+                item.setText(1, f"{len(dd)}   ")
+                item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
+                item.setText(2, "(left in original location)")
+                for col in range(3):
+                    item.setForeground(col, grey)
+                for f in dd[:50]:
+                    leaf = QTreeWidgetItem(item)
+                    leaf.setText(0, f["name"])
+                    leaf.setText(2, f["relpath"])
+                    for col in range(3):
+                        leaf.setForeground(col, grey)
         self._tree.blockSignals(False)
         kept = len(self._files) - len(active)
         note = f"  ({kept} DICOMDIR kept in place)" if kept else ""
