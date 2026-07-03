@@ -206,7 +206,7 @@ class _ScanWorker(QThread):
 
 class _OrganizeWorker(QThread):
     progress = pyqtSignal(int, int)
-    done = pyqtSignal(int, int, str)                # ok, fail, error
+    done = pyqtSignal(int, int, int, str)           # ok, fail, skipped, error
 
     def __init__(self, files, target, move, group_by, separate, name_map,
                  keep_dicomdir=False):
@@ -220,23 +220,26 @@ class _OrganizeWorker(QThread):
         self._keep_dicomdir = keep_dicomdir
 
     def run(self) -> None:
-        ok = fail = 0
+        ok = fail = skipped = 0
         err = ""
         # Where each image file lands — also needed to place every DICOMDIR into
         # the group folder(s) that received its related images.
         img_dests = []
-        if self._keep_dicomdir:
-            for f in self._files:
-                if f["name"].upper() == "DICOMDIR":
-                    continue
-                key, default_sub = _group_of(f, self._group_by, self._separate)
-                img_dests.append(
-                    (f["relpath"], _safe(self._name_map.get(key, default_sub))))
+        for f in self._files:
+            if f["name"].upper() == "DICOMDIR":
+                continue
+            key, default_sub = _group_of(f, self._group_by, self._separate)
+            img_dests.append(
+                (f["relpath"], _safe(self._name_map.get(key, default_sub))))
         total = len(self._files)
         for i, f in enumerate(self._files):
             try:
-                if (self._keep_dicomdir
-                        and f["name"].upper() == "DICOMDIR"):
+                if f["name"].upper() == "DICOMDIR":
+                    if not self._keep_dicomdir:
+                        # "Keep DICOMDIR" off -> DICOMDIR is excluded from the
+                        # sort entirely (not copied, not moved, left in place).
+                        skipped += 1
+                        continue
                     # Copy this DICOMDIR into EVERY output group folder that
                     # received one of its related images, so it stays beside the
                     # data (name prefixed with its source path to disambiguate
@@ -275,7 +278,7 @@ class _OrganizeWorker(QThread):
                     err = str(exc)
             if i % 5 == 0 or i == total - 1:
                 self.progress.emit(i + 1, total)
-        self.done.emit(ok, fail, err)
+        self.done.emit(ok, fail, skipped, err)
 
 
 class DicomFolderWindow(QMainWindow):
@@ -336,12 +339,15 @@ class DicomFolderWindow(QMainWindow):
             self._radios[key] = rb
             orow.addWidget(rb)
         self._radios[_BY_COMBINED].setChecked(True)
-        # DICOMDIR index files carry no Study/Modality tags, so they would land in
-        # an "Unknown" group. Let the user keep them where they are instead.
-        self._keep_dicomdir_cb = QCheckBox("Keep DICOMDIR in place")
+        # DICOMDIR index files carry no Study/Modality tags, so they can't be
+        # sorted by the normal grouping. "Keep DICOMDIR" on -> each DICOMDIR is
+        # copied into the output group folder(s) that received its related
+        # images. Off (default) -> DICOMDIR files are excluded from the sort
+        # entirely (left untouched), since they're usually unwanted.
+        self._keep_dicomdir_cb = QCheckBox("Keep DICOMDIR")
         self._keep_dicomdir_cb.setToolTip(
-            "Leave DICOMDIR index files in their original location instead of "
-            "sorting them into an 'Unknown' group.")
+            "On: copy each DICOMDIR into every related group folder.\n"
+            "Off: exclude DICOMDIR files from the sort entirely.")
         orow.addWidget(self._keep_dicomdir_cb)
         self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
         self._sep_cb.setChecked(True)
@@ -566,13 +572,10 @@ class DicomFolderWindow(QMainWindow):
         separate = self._sep_cb.isChecked()
         self._sep_cb.setEnabled(group_by == _BY_COMBINED)
 
-        # With "Keep DICOMDIR in place" on, DICOMDIR files go to the output with
-        # their ORIGINAL sub-folder path preserved (not flattened into a modality
-        # / "Unknown" group), so keep them out of the normal grouping and give
-        # them their own structure-preserving group below.
-        keep_dd = self._keep_dicomdir_cb.isChecked()
-        norm = ([f for f in self._files if f["name"].upper() != "DICOMDIR"]
-                if keep_dd else self._files)
+        # DICOMDIR files are never sorted by tags (they carry none); they're
+        # kept out of the normal grouping here and shown in their own routed
+        # group below (copied into each related group folder by the worker).
+        norm = [f for f in self._files if f["name"].upper() != "DICOMDIR"]
         groups: dict[str, dict] = {}
         img_dests = []                               # (relpath, sub) for DICOMDIR routing
         for f in norm:
@@ -607,25 +610,39 @@ class DicomFolderWindow(QMainWindow):
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
-        # DICOMDIR group (only when the toggle is on): each DICOMDIR is copied
-        # into EVERY output group folder that received one of its related images,
-        # so it stays beside the data. Read-only — the worker derives the
-        # destinations; column 2 shows "<source path> → group1, group2, …".
-        dd = self._dicomdirs() if keep_dd else []
+        # DICOMDIR group. "Keep DICOMDIR" on -> each DICOMDIR is copied into
+        # EVERY output group folder that received one of its related images, so
+        # it stays beside the data (column 2 shows "<source path> → g1, g2, …").
+        # Off -> DICOMDIR files are excluded from the sort entirely; shown here
+        # read-only just so the user can see what will be skipped.
+        keep_dd = self._keep_dicomdir_cb.isChecked()
+        dd = self._dicomdirs()
         if dd:
             item = QTreeWidgetItem(self._tree)
-            item.setText(0, "DICOMDIR   [copied beside related images]")
+            if keep_dd:
+                item.setText(0, "DICOMDIR   [copied beside related images]")
+                item.setText(2, "(copied into each related group folder)")
+            else:
+                item.setText(0, "DICOMDIR   [excluded from sort]")
+                item.setText(2, "(not copied — 'Keep DICOMDIR' is off)")
             item.setText(1, f"{len(dd)}   ")
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
-            item.setText(2, "(copied into each related group folder)")
             for f in dd[:50]:
-                subs = _dicomdir_target_subs(f, img_dests) or ["(no related images)"]
                 leaf = QTreeWidgetItem(item)
                 leaf.setText(0, f["name"])
-                leaf.setText(2, f"{f['relpath']}  →  {', '.join(subs)}")
+                if keep_dd:
+                    subs = (_dicomdir_target_subs(f, img_dests)
+                            or ["(no related images)"])
+                    leaf.setText(2, f"{f['relpath']}  →  {', '.join(subs)}")
+                else:
+                    leaf.setText(2, f["relpath"])
         self._tree.blockSignals(False)
-        note = ("  (DICOMDIR copied into related group folders)"
-                if dd else "")
+        if not dd:
+            note = ""
+        elif keep_dd:
+            note = "  (DICOMDIR copied into related group folders)"
+        else:
+            note = f"  ({len(dd)} DICOMDIR excluded from sort)"
         self._stat_lbl.setText(
             f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).{note}")
 
@@ -661,14 +678,17 @@ class DicomFolderWindow(QMainWindow):
         self._worker.progress.connect(
             lambda d, t: (self._bar.setValue(d),
                           self._stat_lbl.setText(f"{verb} … {d}/{t}")))
-        self._worker.done.connect(lambda ok, fail, err:
-                                  self._on_organized(ok, fail, err, move))
+        self._worker.done.connect(lambda ok, fail, skipped, err:
+                                  self._on_organized(ok, fail, skipped, err, move))
         self._worker.start()
 
-    def _on_organized(self, ok: int, fail: int, err: str, moved: bool) -> None:
+    def _on_organized(self, ok: int, fail: int, skipped: int, err: str,
+                      moved: bool) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
         msg = f"{'Moved' if moved else 'Copied'} {ok} file(s)."
+        if skipped:                                  # DICOMDIR excluded (toggle off)
+            msg += f"\n{skipped} DICOMDIR excluded from the sort."
         if fail:
             msg += f"\n{fail} failed: {err}"
         QMessageBox.information(self, "DicomFolder", msg)
