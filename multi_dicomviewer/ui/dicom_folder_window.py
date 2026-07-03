@@ -144,6 +144,20 @@ def _unique_name(target_dir: str, name: str, rel_path: str) -> str:
         n += 1
 
 
+def _dicomdir_target_subs(dd: dict, img_dests: list) -> list:
+    """Output group sub-folders a DICOMDIR should be copied into: every group
+    that received an image located under the DICOMDIR's OWN source directory
+    (its "related" images). *img_dests* is a list of ``(relpath, sub)`` for the
+    non-DICOMDIR files. A DICOMDIR at the source root relates to every image."""
+    ddir = os.path.dirname(dd["relpath"])
+    prefix = ddir + os.sep if ddir else ""
+    if prefix:
+        subs = {sub for rp, sub in img_dests if rp.startswith(prefix)}
+    else:
+        subs = {sub for _rp, sub in img_dests}
+    return sorted(subs)
+
+
 class _ScanWorker(QThread):
     counting = pyqtSignal()
     progress = pyqtSignal(int, int)
@@ -208,20 +222,40 @@ class _OrganizeWorker(QThread):
     def run(self) -> None:
         ok = fail = 0
         err = ""
+        # Where each image file lands — also needed to place every DICOMDIR into
+        # the group folder(s) that received its related images.
+        img_dests = []
+        if self._keep_dicomdir:
+            for f in self._files:
+                if f["name"].upper() == "DICOMDIR":
+                    continue
+                key, default_sub = _group_of(f, self._group_by, self._separate)
+                img_dests.append(
+                    (f["relpath"], _safe(self._name_map.get(key, default_sub))))
         total = len(self._files)
         for i, f in enumerate(self._files):
             try:
                 if (self._keep_dicomdir
                         and f["name"].upper() == "DICOMDIR"):
-                    # Preserve the DICOMDIR's ORIGINAL sub-folder path under the
-                    # output root (so each stays beside its data and the many
-                    # identically-named ones don't collide), instead of the flat
-                    # modality/'Unknown' group used for image files.
-                    dest_dir = os.path.join(
-                        self._target, os.path.dirname(f["relpath"]))
-                    os.makedirs(dest_dir, exist_ok=True)
-                    dest = os.path.join(
-                        dest_dir, _unique_name(dest_dir, f["name"], ""))
+                    # Copy this DICOMDIR into EVERY output group folder that
+                    # received one of its related images, so it stays beside the
+                    # data (name prefixed with its source path to disambiguate
+                    # when several DICOMDIRs share a group). On Move, copy to all
+                    # then delete the source.
+                    subs = _dicomdir_target_subs(f, img_dests)
+                    if not subs:                    # no related images (rare)
+                        subs = [os.path.dirname(f["relpath"])]
+                    for sub in subs:
+                        dest_dir = os.path.join(self._target, sub)
+                        os.makedirs(dest_dir, exist_ok=True)
+                        shutil.copy2(f["path"], os.path.join(
+                            dest_dir, _unique_name(dest_dir, f["name"],
+                                                   f["relpath"])))
+                    if self._move:
+                        try:
+                            os.remove(f["path"])
+                        except OSError:
+                            pass
                 else:
                     key, default_sub = _group_of(
                         f, self._group_by, self._separate)
@@ -230,10 +264,10 @@ class _OrganizeWorker(QThread):
                     os.makedirs(dest_dir, exist_ok=True)
                     dest = os.path.join(
                         dest_dir, _unique_name(dest_dir, f["name"], f["relpath"]))
-                if self._move:
-                    shutil.move(f["path"], dest)
-                else:
-                    shutil.copy2(f["path"], dest)
+                    if self._move:
+                        shutil.move(f["path"], dest)
+                    else:
+                        shutil.copy2(f["path"], dest)
                 ok += 1
             except Exception as exc:                # keep going on per-file error
                 fail += 1
@@ -540,6 +574,7 @@ class DicomFolderWindow(QMainWindow):
         norm = ([f for f in self._files if f["name"].upper() != "DICOMDIR"]
                 if keep_dd else self._files)
         groups: dict[str, dict] = {}
+        img_dests = []                               # (relpath, sub) for DICOMDIR routing
         for f in norm:
             key, default_sub = _group_of(f, group_by, separate)
             g = groups.setdefault(
@@ -548,6 +583,7 @@ class DicomFolderWindow(QMainWindow):
             g["files"].append(f)
             g["patients"].add(f["patientName"])
             g["mods"].add(f["modality"])
+            img_dests.append((f["relpath"], default_sub))
 
         self._tree.blockSignals(True)
         self._tree.clear()
@@ -571,24 +607,24 @@ class DicomFolderWindow(QMainWindow):
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
-        # DICOMDIR group (only when the toggle is on): these are saved to the
-        # output with their ORIGINAL sub-folder path preserved. Read-only — the
-        # destination mirrors the source structure (the worker routes them by
-        # relpath), so there's no flat folder name to edit. Column 2 shows each
-        # file's original relative path = where it will land under the output.
+        # DICOMDIR group (only when the toggle is on): each DICOMDIR is copied
+        # into EVERY output group folder that received one of its related images,
+        # so it stays beside the data. Read-only — the worker derives the
+        # destinations; column 2 shows "<source path> → group1, group2, …".
         dd = self._dicomdirs() if keep_dd else []
         if dd:
             item = QTreeWidgetItem(self._tree)
-            item.setText(0, "DICOMDIR   [saved with original folder structure]")
+            item.setText(0, "DICOMDIR   [copied beside related images]")
             item.setText(1, f"{len(dd)}   ")
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
-            item.setText(2, "(original path preserved per file)")
+            item.setText(2, "(copied into each related group folder)")
             for f in dd[:50]:
+                subs = _dicomdir_target_subs(f, img_dests) or ["(no related images)"]
                 leaf = QTreeWidgetItem(item)
                 leaf.setText(0, f["name"])
-                leaf.setText(2, f["relpath"])
+                leaf.setText(2, f"{f['relpath']}  →  {', '.join(subs)}")
         self._tree.blockSignals(False)
-        note = ("  (DICOMDIR saved with original folder structure)"
+        note = ("  (DICOMDIR copied into related group folders)"
                 if dd else "")
         self._stat_lbl.setText(
             f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).{note}")
