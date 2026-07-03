@@ -12,6 +12,8 @@ import os
 import shutil
 
 import pydicom
+from pydicom.fileset import FileSet
+from pydicom.filebase import DicomBytesIO
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
@@ -65,11 +67,25 @@ def _human(n: float) -> str:
     return f"{n:.1f} PB"
 
 
+#: SOP Class UID of a DICOMDIR (Media Storage Directory Storage). Any file with
+#: this class is an index, not image data — always ignored during the sort,
+#: whatever its filename (covers renamed copies like "..._DICOMDIR" too).
+_DICOMDIR_SOP_CLASS = "1.2.840.10008.1.3.10"
+
+
 def _read_tags(path: str) -> dict | None:
     try:
         ds = pydicom.dcmread(path, stop_before_pixels=True, force=True)
         _normalize_charset(ds)
     except Exception:
+        return None
+
+    # Ignore DICOMDIR index files entirely, detected by content so a renamed
+    # copy is caught as well as a file literally named "DICOMDIR".
+    meta = getattr(ds, "file_meta", None)
+    if (meta is not None
+            and str(getattr(meta, "MediaStorageSOPClassUID", ""))
+            == _DICOMDIR_SOP_CLASS) or "DirectoryRecordSequence" in ds:
         return None
 
     def s(name: str, default: str = "Unknown") -> str:
@@ -126,36 +142,58 @@ def _group_of(f: dict, group_by: str, separate_single: bool) -> tuple[str, str]:
             _safe(f"{f['modality']};{raw}"))
 
 
-def _unique_name(target_dir: str, name: str, rel_path: str) -> str:
-    """File name within *target_dir* that won't collide — prefixed with the
-    source sub-folder path (parts joined by '_') and a (n) suffix on clash,
-    mirroring the original tool."""
-    parts = os.path.dirname(rel_path).split(os.sep)
-    prefix = "_".join(p for p in parts if p)
-    base = f"{prefix}_{name}" if prefix else name
-    if not os.path.exists(os.path.join(target_dir, base)):
-        return base
-    stem, ext = os.path.splitext(base)
-    n = 1
+def _flat_name(dest_dir: str, modality: str, counters: dict) -> str:
+    """A simple, short destination file name ``<MODALITY>_<6-digit>`` (e.g.
+    ``XA_000001``), numbered per output folder + modality. Kept short on purpose
+    so long path-derived names don't hit file-name / DICOMDIR length limits.
+    Skips any number already present on disk so re-runs don't collide."""
+    mod = _safe(str(modality) or "XX")
+    key = (dest_dir, mod)
     while True:
-        cand = f"{stem}({n}){ext}"
-        if not os.path.exists(os.path.join(target_dir, cand)):
+        counters[key] = counters.get(key, 0) + 1
+        cand = f"{mod}_{counters[key]:06d}"
+        if not os.path.exists(os.path.join(dest_dir, cand)):
             return cand
-        n += 1
 
 
-def _dicomdir_target_subs(dd: dict, img_dests: list) -> list:
-    """Output group sub-folders a DICOMDIR should be copied into: every group
-    that received an image located under the DICOMDIR's OWN source directory
-    (its "related" images). *img_dests* is a list of ``(relpath, sub)`` for the
-    non-DICOMDIR files. A DICOMDIR at the source root relates to every image."""
-    ddir = os.path.dirname(dd["relpath"])
-    prefix = ddir + os.sep if ddir else ""
-    if prefix:
-        subs = {sub for rp, sub in img_dests if rp.startswith(prefix)}
-    else:
-        subs = {sub for _rp, sub in img_dests}
-    return sorted(subs)
+def _write_folder_dicomdir(folder: str, flat_names: list) -> bool:
+    """Build a fresh DICOMDIR inside *folder* indexing the flat-named DICOM
+    files *flat_names* already present there. Records are built from headers
+    only (``stop_before_pixels`` — large cine files aren't fully read); each
+    IMAGE record references its file by the flat single-component name so the
+    files stay put. Returns True if a DICOMDIR was written.
+
+    The record hierarchy (PATIENT/STUDY/SERIES/IMAGE) is built by pydicom's
+    FileSet, whose ``_write_dicomdir`` recomputes all inter-record byte offsets
+    from the encoded record sizes — so overriding ReferencedFileID before the
+    encode yields a correctly-offset DICOMDIR that points at the flat files."""
+    fs = FileSet()
+    uid2flat: dict[str, str] = {}
+    for flat in flat_names:
+        try:
+            ds = pydicom.dcmread(os.path.join(folder, flat),
+                                 stop_before_pixels=True, force=True)
+            uid = getattr(ds, "SOPInstanceUID", None)
+            if uid is None:
+                continue
+            fs.add(ds)
+        except Exception:
+            continue
+        uid2flat[str(uid)] = flat
+    if not uid2flat:
+        return False
+    for node in fs._tree:
+        rec = node._record
+        uid = rec.get("ReferencedSOPInstanceUIDInFile", None)
+        if uid is not None and str(uid) in uid2flat:
+            rec.ReferencedFileID = uid2flat[str(uid)]
+    fp = DicomBytesIO()
+    fp.is_little_endian = True
+    fp.is_implicit_VR = False
+    fs._write_dicomdir(fp)
+    with open(os.path.join(folder, "DICOMDIR"), "wb") as fh:
+        fh.write(fp.getvalue())
+    return True
 
 
 class _ScanWorker(QThread):
@@ -184,6 +222,11 @@ class _ScanWorker(QThread):
         for i, fp in enumerate(all_files):
             if self._abort:
                 return
+            # Existing DICOMDIR index files are ignored entirely — they are not
+            # sorted, counted or displayed. When "With DICOMDIR" is on a fresh
+            # DICOMDIR is generated per output folder instead.
+            if os.path.basename(fp).upper() == "DICOMDIR":
+                continue
             if _is_dicom(fp):
                 tags = _read_tags(fp)
                 if tags is not None:
@@ -206,10 +249,11 @@ class _ScanWorker(QThread):
 
 class _OrganizeWorker(QThread):
     progress = pyqtSignal(int, int)
-    done = pyqtSignal(int, int, int, str)           # ok, fail, skipped, error
+    stage = pyqtSignal(str)                          # transient status text
+    done = pyqtSignal(int, int, int, str)           # ok, fail, dicomdirs, error
 
     def __init__(self, files, target, move, group_by, separate, name_map,
-                 keep_dicomdir=False):
+                 with_dicomdir=False):
         super().__init__()
         self._files = files
         self._target = target
@@ -217,60 +261,32 @@ class _OrganizeWorker(QThread):
         self._group_by = group_by
         self._separate = separate
         self._name_map = name_map
-        self._keep_dicomdir = keep_dicomdir
+        self._with_dicomdir = with_dicomdir
 
     def run(self) -> None:
-        ok = fail = skipped = 0
+        ok = fail = 0
         err = ""
-        # Where each image file lands — also needed to place every DICOMDIR into
-        # the group folder(s) that received its related images.
-        img_dests = []
-        for f in self._files:
-            if f["name"].upper() == "DICOMDIR":
-                continue
-            key, default_sub = _group_of(f, self._group_by, self._separate)
-            img_dests.append(
-                (f["relpath"], _safe(self._name_map.get(key, default_sub))))
+        # Existing DICOMDIRs were already dropped at scan time, so every file
+        # here is real image data. Each lands in its group folder under a short
+        # "<MODALITY>_<6-digit>" name; a per-(folder, modality) counter keeps
+        # them numbered and collision-free.
+        counters: dict = {}
+        folder_files: dict = {}                     # dest_dir -> [flat names]
         total = len(self._files)
         for i, f in enumerate(self._files):
             try:
-                if f["name"].upper() == "DICOMDIR":
-                    if not self._keep_dicomdir:
-                        # "Keep DICOMDIR" off -> DICOMDIR is excluded from the
-                        # sort entirely (not copied, not moved, left in place).
-                        skipped += 1
-                        continue
-                    # Copy this DICOMDIR into EVERY output group folder that
-                    # received one of its related images, so it stays beside the
-                    # data (name prefixed with its source path to disambiguate
-                    # when several DICOMDIRs share a group). On Move, copy to all
-                    # then delete the source.
-                    subs = _dicomdir_target_subs(f, img_dests)
-                    if not subs:                    # no related images (rare)
-                        subs = [os.path.dirname(f["relpath"])]
-                    for sub in subs:
-                        dest_dir = os.path.join(self._target, sub)
-                        os.makedirs(dest_dir, exist_ok=True)
-                        shutil.copy2(f["path"], os.path.join(
-                            dest_dir, _unique_name(dest_dir, f["name"],
-                                                   f["relpath"])))
-                    if self._move:
-                        try:
-                            os.remove(f["path"])
-                        except OSError:
-                            pass
+                key, default_sub = _group_of(
+                    f, self._group_by, self._separate)
+                sub = _safe(self._name_map.get(key, default_sub))
+                dest_dir = os.path.join(self._target, sub)
+                os.makedirs(dest_dir, exist_ok=True)
+                name = _flat_name(dest_dir, f["modality"], counters)
+                dest = os.path.join(dest_dir, name)
+                if self._move:
+                    shutil.move(f["path"], dest)
                 else:
-                    key, default_sub = _group_of(
-                        f, self._group_by, self._separate)
-                    sub = _safe(self._name_map.get(key, default_sub))
-                    dest_dir = os.path.join(self._target, sub)
-                    os.makedirs(dest_dir, exist_ok=True)
-                    dest = os.path.join(
-                        dest_dir, _unique_name(dest_dir, f["name"], f["relpath"]))
-                    if self._move:
-                        shutil.move(f["path"], dest)
-                    else:
-                        shutil.copy2(f["path"], dest)
+                    shutil.copy2(f["path"], dest)
+                folder_files.setdefault(dest_dir, []).append(name)
                 ok += 1
             except Exception as exc:                # keep going on per-file error
                 fail += 1
@@ -278,7 +294,21 @@ class _OrganizeWorker(QThread):
                     err = str(exc)
             if i % 5 == 0 or i == total - 1:
                 self.progress.emit(i + 1, total)
-        self.done.emit(ok, fail, skipped, err)
+
+        # Generate one fresh DICOMDIR per output folder (only when requested).
+        ndd = 0
+        if self._with_dicomdir:
+            for n, (dest_dir, names) in enumerate(folder_files.items(), 1):
+                self.stage.emit(
+                    f"Building DICOMDIR… {n}/{len(folder_files)}")
+                try:
+                    if _write_folder_dicomdir(dest_dir, names):
+                        ndd += 1
+                except Exception as exc:
+                    fail += 1
+                    if not err:
+                        err = str(exc)
+        self.done.emit(ok, fail, ndd, err)
 
 
 class DicomFolderWindow(QMainWindow):
@@ -339,16 +369,15 @@ class DicomFolderWindow(QMainWindow):
             self._radios[key] = rb
             orow.addWidget(rb)
         self._radios[_BY_COMBINED].setChecked(True)
-        # DICOMDIR index files carry no Study/Modality tags, so they can't be
-        # sorted by the normal grouping. "Keep DICOMDIR" on -> each DICOMDIR is
-        # copied into the output group folder(s) that received its related
-        # images. Off (default) -> DICOMDIR files are excluded from the sort
-        # entirely (left untouched), since they're usually unwanted.
-        self._keep_dicomdir_cb = QCheckBox("Keep DICOMDIR")
-        self._keep_dicomdir_cb.setToolTip(
-            "On: copy each DICOMDIR into every related group folder.\n"
-            "Off: exclude DICOMDIR files from the sort entirely.")
-        orow.addWidget(self._keep_dicomdir_cb)
+        # Existing DICOMDIR index files are always ignored. "With DICOMDIR" on
+        # -> generate a fresh DICOMDIR inside each output folder (indexing that
+        # folder's files). Off (default) -> no DICOMDIR is created.
+        self._with_dicomdir_cb = QCheckBox("With DICOMDIR")
+        self._with_dicomdir_cb.setToolTip(
+            "On: create a new DICOMDIR in each output folder.\n"
+            "Off: don't create any DICOMDIR.\n"
+            "(Existing DICOMDIR files in the source are always ignored.)")
+        orow.addWidget(self._with_dicomdir_cb)
         self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
         self._sep_cb.setChecked(True)
         orow.addWidget(self._sep_cb)
@@ -357,7 +386,6 @@ class DicomFolderWindow(QMainWindow):
         for rb in self._radios.values():
             rb.toggled.connect(self._regroup)
         self._sep_cb.toggled.connect(self._regroup)
-        self._keep_dicomdir_cb.toggled.connect(self._regroup)
 
         mrow = QHBoxLayout()
         mrow.addWidget(QLabel("Action:"))
@@ -561,9 +589,6 @@ class DicomFolderWindow(QMainWindow):
         self._clear_btn.setEnabled(bool(self._source))
 
     # ----------------------------------------------------------- grouping
-    def _dicomdirs(self) -> list[dict]:
-        return [f for f in self._files if f["name"].upper() == "DICOMDIR"]
-
     def _regroup(self) -> None:
         if not self._files:
             return
@@ -572,13 +597,11 @@ class DicomFolderWindow(QMainWindow):
         separate = self._sep_cb.isChecked()
         self._sep_cb.setEnabled(group_by == _BY_COMBINED)
 
-        # DICOMDIR files are never sorted by tags (they carry none); they're
-        # kept out of the normal grouping here and shown in their own routed
-        # group below (copied into each related group folder by the worker).
-        norm = [f for f in self._files if f["name"].upper() != "DICOMDIR"]
+        # Existing DICOMDIRs were dropped at scan time, so every file here is
+        # real image data. Counts and the tree never include DICOMDIR (the
+        # "With DICOMDIR" option generates fresh ones after sorting).
         groups: dict[str, dict] = {}
-        img_dests = []                               # (relpath, sub) for DICOMDIR routing
-        for f in norm:
+        for f in self._files:
             key, default_sub = _group_of(f, group_by, separate)
             g = groups.setdefault(
                 key, {"default": default_sub, "files": [],
@@ -586,7 +609,6 @@ class DicomFolderWindow(QMainWindow):
             g["files"].append(f)
             g["patients"].add(f["patientName"])
             g["mods"].add(f["modality"])
-            img_dests.append((f["relpath"], default_sub))
 
         self._tree.blockSignals(True)
         self._tree.clear()
@@ -610,41 +632,9 @@ class DicomFolderWindow(QMainWindow):
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
                 more.setText(0, f"… {len(g['files']) - 50} more")
-        # DICOMDIR group. "Keep DICOMDIR" on -> each DICOMDIR is copied into
-        # EVERY output group folder that received one of its related images, so
-        # it stays beside the data (column 2 shows "<source path> → g1, g2, …").
-        # Off -> DICOMDIR files are excluded from the sort entirely; shown here
-        # read-only just so the user can see what will be skipped.
-        keep_dd = self._keep_dicomdir_cb.isChecked()
-        dd = self._dicomdirs()
-        if dd:
-            item = QTreeWidgetItem(self._tree)
-            if keep_dd:
-                item.setText(0, "DICOMDIR   [copied beside related images]")
-                item.setText(2, "(copied into each related group folder)")
-            else:
-                item.setText(0, "DICOMDIR   [excluded from sort]")
-                item.setText(2, "(not copied — 'Keep DICOMDIR' is off)")
-            item.setText(1, f"{len(dd)}   ")
-            item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
-            for f in dd[:50]:
-                leaf = QTreeWidgetItem(item)
-                leaf.setText(0, f["name"])
-                if keep_dd:
-                    subs = (_dicomdir_target_subs(f, img_dests)
-                            or ["(no related images)"])
-                    leaf.setText(2, f"{f['relpath']}  →  {', '.join(subs)}")
-                else:
-                    leaf.setText(2, f["relpath"])
         self._tree.blockSignals(False)
-        if not dd:
-            note = ""
-        elif keep_dd:
-            note = "  (DICOMDIR copied into related group folders)"
-        else:
-            note = f"  ({len(dd)} DICOMDIR excluded from sort)"
         self._stat_lbl.setText(
-            f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).{note}")
+            f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).")
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
@@ -674,21 +664,22 @@ class DicomFolderWindow(QMainWindow):
         self._worker = _OrganizeWorker(
             list(self._files), self._target, move,
             self._group_by(), self._sep_cb.isChecked(), dict(self._name_map),
-            self._keep_dicomdir_cb.isChecked())
+            self._with_dicomdir_cb.isChecked())
         self._worker.progress.connect(
             lambda d, t: (self._bar.setValue(d),
                           self._stat_lbl.setText(f"{verb} … {d}/{t}")))
-        self._worker.done.connect(lambda ok, fail, skipped, err:
-                                  self._on_organized(ok, fail, skipped, err, move))
+        self._worker.stage.connect(self._stat_lbl.setText)
+        self._worker.done.connect(lambda ok, fail, ndd, err:
+                                  self._on_organized(ok, fail, ndd, err, move))
         self._worker.start()
 
-    def _on_organized(self, ok: int, fail: int, skipped: int, err: str,
+    def _on_organized(self, ok: int, fail: int, ndd: int, err: str,
                       moved: bool) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
         msg = f"{'Moved' if moved else 'Copied'} {ok} file(s)."
-        if skipped:                                  # DICOMDIR excluded (toggle off)
-            msg += f"\n{skipped} DICOMDIR excluded from the sort."
+        if ndd:                                      # fresh DICOMDIRs generated
+            msg += f"\nCreated {ndd} DICOMDIR(s)."
         if fail:
             msg += f"\n{fail} failed: {err}"
         QMessageBox.information(self, "DicomFolder", msg)
