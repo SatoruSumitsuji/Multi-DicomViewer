@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.ecg import ECGTrace, read_ecg
@@ -298,7 +299,7 @@ class _EcgStrip(QWidget):
             p.drawText(6, 15, "ECG")
             p.setPen(QColor("#888"))
             p.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "No ECG"
+                self.rect(), Qt.AlignmentFlag.AlignCenter, t("No ECG")
             )
             return
         pad = self._PAD
@@ -665,10 +666,10 @@ class XAViewer(AbstractViewer):
         row.setContentsMargins(2, 0, 2, 0)
         row.addWidget(QLabel("Series:"))
         for label, where, tip in (
-            ("⏮ First", "first", "First series (Home)"),
-            ("◀ Prev (A)", "prev", "Previous series — shortcut: A"),
-            ("Next (F) ▶", "next", "Next series — shortcut: F"),
-            ("Last ⏭", "last", "Last series (End)"),
+            ("⏮ First", "first", t("First series (Home)")),
+            ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
+            ("Next (F) ▶", "next", t("Next series — shortcut: F")),
+            ("Last ⏭", "last", t("Last series (End)")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -685,7 +686,7 @@ class XAViewer(AbstractViewer):
             "QPushButton:checked { background:#1f77b4; color:black; }"
         )
         self._meas_btn.setToolTip(
-            "Toggle the measure bar (Line / Polyline / Ellipse / Polygon)"
+            t("Toggle the measure bar (Line / Polyline / Ellipse / Polygon)")
         )
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
@@ -697,22 +698,22 @@ class XAViewer(AbstractViewer):
         self._zoom_in_btn = QPushButton("🔍+")
         self._zoom_in_btn.setCheckable(True)
         self._zoom_in_btn.setToolTip(
-            "Click-to-zoom IN — then click a point on the image to magnify "
-            "×1.1 centred on it (click again to zoom further)"
+            t("Click-to-zoom IN — then click a point on the image to magnify "
+              "×1.1 centred on it (click again to zoom further)")
         )
         self._zoom_in_btn.clicked.connect(lambda: self._set_zoom_click("in"))
         row.addWidget(self._zoom_in_btn)
 
         self._zoom_reset_btn = QPushButton("🔍1")
-        self._zoom_reset_btn.setToolTip("Reset zoom to the original fit")
+        self._zoom_reset_btn.setToolTip(t("Reset zoom to the original fit"))
         self._zoom_reset_btn.clicked.connect(self._reset_zoom)
         row.addWidget(self._zoom_reset_btn)
 
         self._zoom_out_btn = QPushButton("🔍−")
         self._zoom_out_btn.setCheckable(True)
         self._zoom_out_btn.setToolTip(
-            "Click-to-zoom OUT — then click a point on the image to shrink "
-            "×0.9 centred on it"
+            t("Click-to-zoom OUT — then click a point on the image to shrink "
+              "×0.9 centred on it")
         )
         self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
         row.addWidget(self._zoom_out_btn)
@@ -722,10 +723,10 @@ class XAViewer(AbstractViewer):
         # Flip-H (a left-right mirror), so it is not a separate button.
         self._orient_btns = []
         for label, kind, tip in (
-            ("Rt90°", "rt90", "Rotate the image 90° clockwise"),
-            ("Lt90°", "lt90", "Rotate the image 90° counter-clockwise"),
-            ("Flip-H", "fliph", "Flip horizontally (left-right mirror)"),
-            ("Flip-V", "flipv", "Flip vertically (top-bottom)"),
+            ("Rt90°", "rt90", t("Rotate the image 90° clockwise")),
+            ("Lt90°", "lt90", t("Rotate the image 90° counter-clockwise")),
+            ("Flip-H", "fliph", t("Flip horizontally (left-right mirror)")),
+            ("Flip-V", "flipv", t("Flip vertically (top-bottom)")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
