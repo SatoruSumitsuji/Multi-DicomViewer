@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 from multi_dicomviewer.core import dicom_io
 from multi_dicomviewer.core.anonymize import ANON_PLACEHOLDER
 from multi_dicomviewer.core.study_model import Patient, Series
+from multi_dicomviewer.i18n import t
 
 _ROLE = Qt.ItemDataRole.UserRole
 #: stable key on patient/study items so expand state survives a repopulate
@@ -330,13 +331,13 @@ class StudyBrowser(QTreeWidget):
         super().__init__(parent)
         self.setColumnCount(7)
         self.setHeaderLabels([
-            "Date/Time",
-            "Series No",
-            "Instance No",
-            "Type",
-            "Images",
-            "Description",
-            "File Path",
+            t("Date/Time"),
+            t("Series No"),
+            t("Instance No"),
+            t("Type"),
+            t("Images"),
+            t("Description"),
+            t("File Path"),
         ])
         hdr = self.header()
         hdr.setStretchLastSection(False)
@@ -763,64 +764,64 @@ class StudyBrowser(QTreeWidget):
         # several series are multi-selected).
         if sel_series:
             n = len(sel_series)
-            suffix = f" ({n} series)" if n > 1 else ""
-            act_dcm = QAction(f"Export (DICOM){suffix}", self)
-            act_dcm.setToolTip(
+            suffix = t(" ({n} series)", n=n) if n > 1 else ""
+            act_dcm = QAction(t("Export (DICOM)") + suffix, self)
+            act_dcm.setToolTip(t(
                 "Copy the original .dcm files to a chosen folder; one "
                 "subfolder per series; per-file names from the checked "
                 "filename fields. Lossless — no re-encode."
-            )
+            ))
             act_dcm.triggered.connect(
                 lambda: self.export_requested.emit("dicom", list(sel_series))
             )
             menu.addAction(act_dcm)
-            act_anon = QAction(f"Export (Anon DICOM){suffix}", self)
-            act_anon.setToolTip(
+            act_anon = QAction(t("Export (Anon DICOM)") + suffix, self)
+            act_anon.setToolTip(t(
                 "Like Export (DICOM) but de-identified: the configured tags' "
                 "values and all private tags are emptied (right-click the "
                 "Anonymous button to choose). Pixels/UIDs kept."
-            )
+            ))
             act_anon.triggered.connect(
                 lambda: self.export_requested.emit(
                     "anon-dicom", list(sel_series))
             )
             menu.addAction(act_anon)
-            act_mp4 = QAction(f"Export (MP4){suffix}", self)
-            act_mp4.setToolTip(
+            act_mp4 = QAction(t("Export (MP4)") + suffix, self)
+            act_mp4.setToolTip(t(
                 "Render each selected series to an .mp4 in a chosen "
                 "folder. Bitrate (Mbps) and FPS configurable."
-            )
+            ))
             act_mp4.triggered.connect(
                 lambda: self.export_requested.emit("mp4", list(sel_series))
             )
             menu.addAction(act_mp4)
-            act_csv = QAction(f"Export (CSV){suffix}", self)
-            act_csv.setToolTip(
+            act_csv = QAction(t("Export (CSV)") + suffix, self)
+            act_csv.setToolTip(t(
                 "Write the DICOM-Tag-overlay tags shown for each series to "
                 "a .csv (Tag Name, Tag Number, Value); one file per series. "
                 "Full values — not truncated."
-            )
+            ))
             act_csv.triggered.connect(
                 lambda: self.export_requested.emit("csv", list(sel_series))
             )
             menu.addAction(act_csv)
             # Hide / UnHide — between the Export group and Close.
             menu.addSeparator()
-            act_hide = QAction(f"Hide (hide this series){suffix}", self)
-            act_hide.setToolTip(
+            act_hide = QAction(t("Hide (hide this series)") + suffix, self)
+            act_hide.setToolTip(t(
                 "Grey out this series — kept in the list. First/Prev/Next/"
                 "Last and the keyboard shortcuts skip it; a direct mouse "
                 "click still shows it (Play / seek then work normally)."
-            )
+            ))
             act_hide.triggered.connect(
                 lambda: self.hide_requested.emit(list(sel_series))
             )
             menu.addAction(act_hide)
-            act_unhide = QAction(f"UnHide (show this series){suffix}", self)
-            act_unhide.setToolTip(
+            act_unhide = QAction(t("UnHide (show this series)") + suffix, self)
+            act_unhide.setToolTip(t(
                 "Un-hide just the selected series (the rest of the study "
                 "keeps its current hide/unhide state)."
-            )
+            ))
             act_unhide.triggered.connect(
                 lambda: self.unhide_series_requested.emit(list(sel_series))
             )
@@ -830,68 +831,68 @@ class StudyBrowser(QTreeWidget):
             su, sk_ = idk[1], idk[2]
             # Select — show only the un-hidden series rows. Hidden (greyed)
             # series are folded out of the list; their hide state is kept.
-            act_select = QAction("Select (show unhide only)", self)
-            act_select.setToolTip(
+            act_select = QAction(t("Select (show unhide only)"), self)
+            act_select.setToolTip(t(
                 "Show only the un-hidden series in this study; hidden "
                 "(greyed) series rows are folded out of the list. Nothing "
                 "is removed or un-hidden."
-            )
+            ))
             act_select.triggered.connect(
                 lambda: self._set_study_rows_visible(su, sk_, unhidden_only=True)
             )
             menu.addAction(act_select)
             # Show — show every series row, keeping each series' hide state.
-            act_show = QAction("Show (show all with hide/unhide)", self)
-            act_show.setToolTip(
+            act_show = QAction(t("Show (show all with hide/unhide)"), self)
+            act_show.setToolTip(t(
                 "Show every series in this study, keeping each series' "
                 "current hide/unhide (greyed) state."
-            )
+            ))
             act_show.triggered.connect(
                 lambda: self._set_study_rows_visible(
                     su, sk_, unhidden_only=False)
             )
             menu.addAction(act_show)
             # UnHide — clear every hidden flag and show all series.
-            act_unhide = QAction("UnHide (unhide and show all)", self)
-            act_unhide.setToolTip(
+            act_unhide = QAction(t("UnHide (unhide and show all)"), self)
+            act_unhide.setToolTip(t(
                 "Un-hide every hidden series in this study and show them all."
-            )
+            ))
             act_unhide.triggered.connect(
                 lambda: self._unhide_study_show_all(su, sk_)
             )
             menu.addAction(act_unhide)
             # Close — collapse the series list (hide/unhide state kept).
-            act_close = QAction("Close (close list)", self)
-            act_close.setToolTip(
+            act_close = QAction(t("Close (close list)"), self)
+            act_close.setToolTip(t(
                 "Collapse this study's series list. Hide/unhide state is "
                 "kept; nothing is removed."
-            )
+            ))
             act_close.triggered.connect(lambda: self._close_series_list(item))
             menu.addAction(act_close)
             # Delete — remove the whole study node from the list.
-            act_del = QAction("Delete (remove)", self)
-            act_del.setToolTip(
+            act_del = QAction(t("Delete (remove)"), self)
+            act_del.setToolTip(t(
                 "Remove this study (all its series) from the list. Files "
                 "are not deleted; reload the folder to restore."
-            )
+            ))
             act_del.triggered.connect(
                 lambda: self.delete_requested.emit(kind, key, label)
             )
             menu.addAction(act_del)
         else:
-            act_close = QAction("Close (close series list)", self)
-            act_close.setToolTip(
+            act_close = QAction(t("Close (close series list)"), self)
+            act_close.setToolTip(t(
                 "Collapse this study's series list so the Study list is "
                 "easier to browse. Nothing is removed."
-            )
+            ))
             act_close.triggered.connect(lambda: self._close_series_list(item))
             menu.addAction(act_close)
             menu.addSeparator()
-            act = QAction("Delete (remove from list)", self)
-            act.setToolTip(
+            act = QAction(t("Delete (remove from list)"), self)
+            act.setToolTip(t(
                 "Files are not deleted; just removed from the list so they "
                 "can no longer be viewed."
-            )
+            ))
             act.triggered.connect(
                 lambda: self.delete_requested.emit(kind, key, label)
             )
@@ -1076,76 +1077,76 @@ class _ThumbList(QListWidget):
                 self.setCurrentItem(item)
             sel = self._selected_series() or [se]
             n = len(sel)
-            suffix = f" ({n} series)" if n > 1 else ""
-            act_dcm = QAction(f"Export (DICOM){suffix}", self)
-            act_dcm.setToolTip(
+            suffix = t(" ({n} series)", n=n) if n > 1 else ""
+            act_dcm = QAction(t("Export (DICOM)") + suffix, self)
+            act_dcm.setToolTip(t(
                 "Copy the original .dcm files to a chosen folder; one "
                 "subfolder per series; per-file names from the checked "
                 "filename fields. Lossless — no re-encode."
-            )
+            ))
             act_dcm.triggered.connect(
                 lambda: self.export_requested.emit("dicom", list(sel))
             )
             menu.addAction(act_dcm)
-            act_anon = QAction(f"Export (Anon DICOM){suffix}", self)
-            act_anon.setToolTip(
+            act_anon = QAction(t("Export (Anon DICOM)") + suffix, self)
+            act_anon.setToolTip(t(
                 "Like Export (DICOM) but de-identified: the configured tags' "
                 "values and all private tags are emptied (right-click the "
                 "Anonymous button to choose). Pixels/UIDs kept."
-            )
+            ))
             act_anon.triggered.connect(
                 lambda: self.export_requested.emit("anon-dicom", list(sel))
             )
             menu.addAction(act_anon)
-            act_mp4 = QAction(f"Export (MP4){suffix}", self)
-            act_mp4.setToolTip(
+            act_mp4 = QAction(t("Export (MP4)") + suffix, self)
+            act_mp4.setToolTip(t(
                 "Render each selected series to an .mp4 in a chosen "
                 "folder. Bitrate (Mbps) and FPS configurable."
-            )
+            ))
             act_mp4.triggered.connect(
                 lambda: self.export_requested.emit("mp4", list(sel))
             )
             menu.addAction(act_mp4)
-            act_csv = QAction(f"Export (CSV){suffix}", self)
-            act_csv.setToolTip(
+            act_csv = QAction(t("Export (CSV)") + suffix, self)
+            act_csv.setToolTip(t(
                 "Write the DICOM-Tag-overlay tags shown for each series to a "
                 ".csv (Tag Name, Tag Number, Value); one file per series. "
                 "Full values — not truncated."
-            )
+            ))
             act_csv.triggered.connect(
                 lambda: self.export_requested.emit("csv", list(sel))
             )
             menu.addAction(act_csv)
             # Hide / UnHide.
             menu.addSeparator()
-            act_hide = QAction(f"Hide (hide this series){suffix}", self)
-            act_hide.setToolTip(
+            act_hide = QAction(t("Hide (hide this series)") + suffix, self)
+            act_hide.setToolTip(t(
                 "Grey out this series — First/Prev/Next/Last and the "
                 "keyboard shortcuts skip it; a direct mouse click still "
                 "shows it (Play / seek then work normally)."
-            )
+            ))
             act_hide.triggered.connect(
                 lambda: self.hide_requested.emit(list(sel))
             )
             menu.addAction(act_hide)
-            act_unhide = QAction(f"UnHide (show this series){suffix}", self)
-            act_unhide.setToolTip(
+            act_unhide = QAction(t("UnHide (show this series)") + suffix, self)
+            act_unhide.setToolTip(t(
                 "Un-hide just the selected series (the rest of the study "
                 "keeps its current hide/unhide state)."
-            )
+            ))
             act_unhide.triggered.connect(
                 lambda: self.unhide_requested.emit(list(sel))
             )
             menu.addAction(act_unhide)
             # Delete (one signal per series — same contract as the Tree).
             menu.addSeparator()
-            label = ("Delete (remove from list)" if n == 1
-                     else f"Delete {n} series (remove from list)")
+            label = (t("Delete (remove from list)") if n == 1
+                     else t("Delete {n} series (remove from list)", n=n))
             act_del = QAction(label, self)
-            act_del.setToolTip(
+            act_del.setToolTip(t(
                 "Files are not deleted; just removed from the list so they "
                 "can no longer be viewed."
-            )
+            ))
 
             def _emit_deletes(targets: list[Series]) -> None:
                 for s in targets:
@@ -1270,7 +1271,7 @@ class StudyPanel(QWidget):
         self.thumb_size.setValue(self._thumb_px)
         self.thumb_size.setMinimumWidth(36)
         self.thumb_size.setMaximumWidth(140)
-        self.thumb_size.setToolTip("Thumbnail size")
+        self.thumb_size.setToolTip(t("Thumbnail size"))
         self.thumb_size.valueChanged.connect(self._set_thumb_size)
 
         # Rebuild the thumbnail grid whenever the selected study changes.
@@ -1280,8 +1281,8 @@ class StudyPanel(QWidget):
         self._stack.addWidget(self.tree)
         self._stack.addWidget(self.thumbs)
 
-        self.btn_info = FitButton("📋 Tree")
-        self.btn_thumb = FitButton("🖼 Thumbnails")
+        self.btn_info = FitButton(t("📋 Tree"))
+        self.btn_thumb = FitButton(t("🖼 Thumbnails"))
         for b in (self.btn_info, self.btn_thumb):
             b.setCheckable(True)
         self.btn_info.setChecked(True)
@@ -1290,10 +1291,10 @@ class StudyPanel(QWidget):
         # Right-click the Thumbnail button → "min size × 10 across" layout
         # (re-applicable any time; the first switch to thumbnails does it
         # automatically too).
-        self.btn_thumb.setToolTip(
+        self.btn_thumb.setToolTip(t(
             "Left-click: thumbnail view (starts at min size × 10 across).\n"
             "Right-click: re-apply the min size × 10 across layout."
-        )
+        ))
         self.btn_thumb.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu
         )
@@ -1303,13 +1304,13 @@ class StudyPanel(QWidget):
         #: first switch to the thumbnail view auto-fits min × 10 across
         self._thumb_fit_done = False
 
-        self.btn_anon = FitButton("Anonymous")
+        self.btn_anon = FitButton(t("Anonymous"))
         self.btn_anon.setCheckable(True)
-        self.btn_anon.setHelpToolTip(
+        self.btn_anon.setHelpToolTip(t(
             "Left-click: mask patient/case info on all on-screen displays "
             "(files unchanged).\nRight-click: choose which tags to "
             "anonymize (also used by Export (Anon DICOM))."
-        )
+        ))
         self.btn_anon.toggled.connect(self.anonymize_toggled)
         # Right-click opens the anonymize-settings dialog (which tags to blank).
         self.btn_anon.setContextMenuPolicy(
@@ -1319,13 +1320,13 @@ class StudyPanel(QWidget):
             lambda _p: self.anon_settings_requested.emit()
         )
 
-        self.btn_dicom = FitButton("DICOM Info")
+        self.btn_dicom = FitButton(t("DICOM Info"))
         self.btn_dicom.setCheckable(True)
         self.btn_dicom.setChecked(True)        # overlay shown by default
-        self.btn_dicom.setHelpToolTip(
+        self.btn_dicom.setHelpToolTip(t(
             "Left-click: show/hide DICOM info on the image\n"
             "Right-click: choose which tag data to show"
-        )
+        ))
         self.btn_dicom.toggled.connect(self.dicom_info_toggled)
         # Right-click → choose overlay tags (mirrors the top-row DICOM Info).
         self.btn_dicom.setContextMenuPolicy(
@@ -1340,11 +1341,11 @@ class StudyPanel(QWidget):
         # shell confirms before acting. The leading ✕ matches the per-pane close
         # glyph and, because FitButton elides from the right, stays visible
         # (Delete's intent still readable) when the Studies dock is narrow.
-        self.btn_delete_all = FitButton("✕ Delete All")
-        self.btn_delete_all.setHelpToolTip(
+        self.btn_delete_all = FitButton(t("✕ Delete All"))
+        self.btn_delete_all.setHelpToolTip(t(
             "Remove ALL studies/series from the list (the image files on disk "
             "are not deleted; reload the folder to restore them)"
-        )
+        ))
         self.btn_delete_all.clicked.connect(self.delete_all_requested)
 
         # ◀ / ▶ : step the Studies-dock width narrower / wider. An always-
@@ -1353,13 +1354,13 @@ class StudyPanel(QWidget):
         # shell-owned, so these just emit a step request.
         _STEP = 60
         self.btn_dock_narrow = QPushButton("◀")
-        self.btn_dock_narrow.setToolTip("Narrow the tree pane")
+        self.btn_dock_narrow.setToolTip(t("Narrow the tree pane"))
         self.btn_dock_narrow.setMaximumWidth(34)
         self.btn_dock_narrow.clicked.connect(
             lambda: self.resize_dock_step_requested.emit(-_STEP)
         )
         self.btn_dock_widen = QPushButton("▶")
-        self.btn_dock_widen.setToolTip("Widen the tree pane")
+        self.btn_dock_widen.setToolTip(t("Widen the tree pane"))
         self.btn_dock_widen.setMaximumWidth(34)
         self.btn_dock_widen.clicked.connect(
             lambda: self.resize_dock_step_requested.emit(_STEP)
