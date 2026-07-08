@@ -701,9 +701,15 @@ class StudyBrowser(QTreeWidget):
         return
 
     def _on_activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
-        """Keyboard activation (Enter/double-click) no longer loads a pane —
-        drag & drop only (see :meth:`_on_clicked`)."""
-        return
+        """Double-click (or Enter) loads the series into the active pane —
+        an explicit, deliberate gesture. A single click (see
+        :meth:`_on_clicked`) only selects, so browsing never clobbers the
+        shown series by accident."""
+        data = item.data(0, _ROLE)
+        if isinstance(data, Series):
+            self.series_chosen.emit(data)
+            return
+        self._emit_study_click(item)
 
     def _emit_study_click(self, item: QTreeWidgetItem) -> None:
         # Clicking a Study row: tell the shell which study was picked
@@ -1243,6 +1249,7 @@ class StudyPanel(QWidget):
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.thumbs.itemClicked.connect(self._thumb_clicked)
+        self.thumbs.itemDoubleClicked.connect(self._thumb_activated)
         # Right-click menu on a thumbnail forwards the same shell-level
         # signals the Tree view emits, so Export (DICOM/MP4) and Delete-
         # from-list are reachable from either view.
@@ -1684,9 +1691,15 @@ class StudyPanel(QWidget):
             self.tree.select_study_key(cur)
 
     def _thumb_clicked(self, item: QListWidgetItem) -> None:
-        # Click only selects the thumbnail now — loading a pane is drag &
-        # drop only (drag the thumbnail / tree row onto a pane).
+        # Single click only selects — double-click (or drag) loads.
         return
+
+    def _thumb_activated(self, item: QListWidgetItem) -> None:
+        # Double-click a thumbnail → load it into the active pane (matches
+        # the tree's double-click behaviour).
+        se = item.data(_ROLE)
+        if isinstance(se, Series):
+            self.series_chosen.emit(se)
 
     def _set_thumb(self, row: int, arr: np.ndarray) -> None:
         arr = np.ascontiguousarray(arr)
