@@ -14,6 +14,8 @@ from PyQt6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QPushButton, QVBoxLayout,
 )
 
+from multi_dicomviewer.i18n import t
+
 
 class CompareOptionsDialog(QDialog):
     """Two checkboxes (%PA, Thickness) + OK/Cancel. ``values()`` returns the
@@ -22,18 +24,18 @@ class CompareOptionsDialog(QDialog):
     def __init__(self, want_pa: bool = False, want_thickness: bool = True,
                  parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Compare")
+        self.setWindowTitle(t("Compare"))
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("Required Data:"))
-        self.cb_pa = QCheckBox("%PA  (percent area — IVUS)")
-        self.cb_thk = QCheckBox("Thickness  (radial gap — CT LV wall)")
+        lay.addWidget(QLabel(t("Required Data:")))
+        self.cb_pa = QCheckBox(t("%PA  (percent area — IVUS)"))
+        self.cb_thk = QCheckBox(t("Thickness  (radial gap — CT LV wall)"))
         self.cb_pa.setChecked(want_pa)
         self.cb_thk.setChecked(want_thickness)
         lay.addWidget(self.cb_pa)
         lay.addWidget(self.cb_thk)
         btns = QHBoxLayout()
         ok = QPushButton("OK")
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(t("Cancel"))
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
         cancel.clicked.connect(self.reject)

@@ -28,6 +28,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from multi_dicomviewer.i18n import t
+
 _FULLPATH = Qt.ItemDataRole.UserRole          # leaf items: absolute path
 _KIND = Qt.ItemDataRole.UserRole + 1          # "file" | "folder"
 
@@ -100,7 +102,7 @@ class _ScanWorker(QThread):
 class DicomCheckWindow(QMainWindow):
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("DicomCheck — remove non-DICOM files")
+        self.setWindowTitle(t("DicomCheck — remove non-DICOM files"))
         self.resize(900, 700)
         self.setAcceptDrops(True)                  # drop a folder anywhere
         self._root: str | None = None
@@ -111,27 +113,27 @@ class DicomCheckWindow(QMainWindow):
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
 
-        root.addWidget(QLabel(
+        root.addWidget(QLabel(t(
             "Keep DICOM files only — find non-DICOM files and empty folders "
             "and delete the ones you select."
-        ))
+        )))
 
         row = QHBoxLayout()
-        self._pick_btn = QPushButton("Select folder…")
+        self._pick_btn = QPushButton(t("Select folder…"))
         self._pick_btn.clicked.connect(self._pick)
         row.addWidget(self._pick_btn)
-        self._inc_cb = QCheckBox("Also offer DICOMDIR for deletion")
+        self._inc_cb = QCheckBox(t("Also offer DICOMDIR for deletion"))
         self._inc_cb.setChecked(True)
         row.addWidget(self._inc_cb)
         row.addStretch(1)
         root.addLayout(row)
 
-        self._path_lbl = QLabel("No folder selected.")
+        self._path_lbl = QLabel(t("No folder selected."))
         self._path_lbl.setStyleSheet("color:#555;")
         root.addWidget(self._path_lbl)
 
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Name", "Size"])
+        self._tree.setHeaderLabels([t("Name"), t("Size")])
         self._tree.setColumnWidth(0, 600)
         self._tree.itemChanged.connect(self._on_item_changed)
         root.addWidget(self._tree, 1)
@@ -144,11 +146,11 @@ class DicomCheckWindow(QMainWindow):
         root.addWidget(self._bar)
 
         btns = QHBoxLayout()
-        self._all_btn = QPushButton("Select all")
+        self._all_btn = QPushButton(t("Select all"))
         self._all_btn.clicked.connect(lambda: self._check_all(True))
-        self._none_btn = QPushButton("Deselect all")
+        self._none_btn = QPushButton(t("Deselect all"))
         self._none_btn.clicked.connect(lambda: self._check_all(False))
-        self._del_btn = QPushButton("Delete selected files + empty folders")
+        self._del_btn = QPushButton(t("Delete selected files + empty folders"))
         self._del_btn.clicked.connect(self._delete)
         for b in (self._all_btn, self._none_btn):
             b.setEnabled(False)
@@ -192,7 +194,7 @@ class DicomCheckWindow(QMainWindow):
     # --------------------------------------------------------------- scan
     def _pick(self) -> None:
         d = QFileDialog.getExistingDirectory(
-            self, "Select folder", self._root or "")
+            self, t("Select folder"), self._root or "")
         if d:
             self._start_scan(d)
 
@@ -200,7 +202,7 @@ class DicomCheckWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             return
         self._root = d
-        self._path_lbl.setText(f"Folder: {d}")
+        self._path_lbl.setText(t("Folder: {d}", d=d))
         self._tree.clear()
         self._stat_lbl.setText("")
         self._set_busy(True)
@@ -208,7 +210,7 @@ class DicomCheckWindow(QMainWindow):
         self._bar.setRange(0, 0)                   # indeterminate while counting
         self._worker = _ScanWorker(d, self._inc_cb.isChecked())
         self._worker.counting.connect(
-            lambda: self._stat_lbl.setText("Counting files…"))
+            lambda: self._stat_lbl.setText(t("Counting files…")))
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_scan_done)
         self._worker.start()
@@ -216,7 +218,7 @@ class DicomCheckWindow(QMainWindow):
     def _on_progress(self, done: int, total: int) -> None:
         self._bar.setRange(0, max(1, total))
         self._bar.setValue(done)
-        self._stat_lbl.setText(f"Scanning… {done}/{total}")
+        self._stat_lbl.setText(t("Scanning… {done}/{total}", done=done, total=total))
 
     def _on_scan_done(self, items: list[tuple[str, str, int]]) -> None:
         self._bar.setVisible(False)
@@ -226,12 +228,12 @@ class DicomCheckWindow(QMainWindow):
         self._all_btn.setEnabled(has)
         self._none_btn.setEnabled(has)
         if not has:
-            self._stat_lbl.setText("No non-DICOM files found. ✅")
+            self._stat_lbl.setText(t("No non-DICOM files found. ✅"))
         else:
             total_bytes = sum(s for _r, _f, s in items)
-            self._stat_lbl.setText(
-                f"{len(items)} non-DICOM file(s) found  "
-                f"({_human(total_bytes)}). Selected: 0")
+            self._stat_lbl.setText(t(
+                "{n} non-DICOM file(s) found  ({size}). Selected: 0",
+                n=len(items), size=_human(total_bytes)))
 
     def _set_busy(self, busy: bool) -> None:
         self._pick_btn.setEnabled(not busy)
@@ -324,9 +326,10 @@ class DicomCheckWindow(QMainWindow):
         if not targets:
             return
         if QMessageBox.question(
-            self, "Delete",
-            f"Delete {len(targets)} file(s)? This cannot be undone.\n"
-            "Empty folders left behind will also be removed.",
+            self, t("Delete"),
+            t("Delete {n} file(s)? This cannot be undone.\n"
+              "Empty folders left behind will also be removed.",
+              n=len(targets)),
         ) != QMessageBox.StandardButton.Yes:
             return
 
@@ -345,12 +348,12 @@ class DicomCheckWindow(QMainWindow):
         removed_dirs = self._remove_empty_dirs()
         self._bar.setVisible(False)
 
-        msg = f"Deleted {ok} file(s)"
+        msg = t("Deleted {n} file(s)", n=ok)
         if removed_dirs:
-            msg += f" and {removed_dirs} empty folder(s)"
+            msg += t(" and {n} empty folder(s)", n=removed_dirs)
         if fail:
-            msg += f"  ({fail} could not be deleted)"
-        QMessageBox.information(self, "DicomCheck", msg + ".")
+            msg += t("  ({n} could not be deleted)", n=fail)
+        QMessageBox.information(self, t("DicomCheck"), msg + ".")
         # Re-scan so the tree reflects the new state.
         if self._root:
             self._start_scan(self._root)

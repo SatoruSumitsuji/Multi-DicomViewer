@@ -35,6 +35,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from multi_dicomviewer.i18n import t
+
 
 #: Filename components the user can opt in/out of, in the order they
 #: appear in the dialog AND in the order they are concatenated into the
@@ -117,13 +119,13 @@ class ExportDialog(QDialog):
             raise ValueError(f"unknown export mode: {mode!r}")
         self._mode = mode
 
-        title = title_override or {
+        title = title_override or t({
             "dicom": "Export DICOM",
             "mp4": "Export MP4",
             "csv": "Export CSV",
             "anon-dicom": "Export Anon DICOM",
-        }.get(mode, "Export")
-        plural = "" if n_series == 1 else f" ({n_series} series)"
+        }.get(mode, "Export"))
+        plural = "" if n_series == 1 else t(" ({n} series)", n=n_series)
         self.setWindowTitle(title + plural)
         self.setMinimumWidth(420)
 
@@ -141,15 +143,15 @@ class ExportDialog(QDialog):
                             if initial_fields is not None
                             else set(DEFAULT_FIELDS))
 
-            box = QGroupBox("Filename components (joined with '_')")
+            box = QGroupBox(t("Filename components (joined with '_')"))
             col = QVBoxLayout(box)
-            col.addWidget(QLabel(
+            col.addWidget(QLabel(t(
                 "Tick what to put in each output filename. Components "
                 "missing for a given series (e.g. no angle on a CT) are "
                 "skipped."
-            ))
+            )))
             for key in FIELD_KEYS:
-                cb = QCheckBox(FIELD_LABELS[key])
+                cb = QCheckBox(t(FIELD_LABELS[key]))
                 cb.setChecked(key in initial_set)
                 self._checks[key] = cb
                 self._field_order.append(key)
@@ -162,10 +164,10 @@ class ExportDialog(QDialog):
             tags = list(dicom_tags or [])
             if tags:
                 col.addSpacing(6)
-                col.addWidget(QLabel(
+                col.addWidget(QLabel(t(
                     "DICOM tags (chosen in DICOM-Tag overlay) — tick to "
                     "include the tag's value in the filename:"
-                ))
+                )))
                 # Long lists deserve a scroll area so the dialog doesn't
                 # explode vertically on series with many tags selected.
                 scroll = QScrollArea()
@@ -179,7 +181,7 @@ class ExportDialog(QDialog):
                 for ident, label in tags:
                     cb = QCheckBox(label)
                     cb.setChecked(ident in initial_set)
-                    cb.setToolTip(f"DICOM tag identifier: {ident}")
+                    cb.setToolTip(t("DICOM tag identifier: {ident}", ident=ident))
                     self._checks[ident] = cb
                     self._field_order.append(ident)
                     hcol.addWidget(cb)
@@ -191,14 +193,14 @@ class ExportDialog(QDialog):
 
         # --- MP4 bitrate / fps ---------------------------------------------
         if mode == "mp4":
-            mp4_box = QGroupBox("MP4 encoding")
+            mp4_box = QGroupBox(t("MP4 encoding"))
             form = QFormLayout(mp4_box)
 
             # Quality (CRF) vs target Bitrate. CRF is the default: constant
             # visual quality, and far smaller files than a fixed bitrate on
             # content with big flat/black areas (IVUS composites).
-            self._mode_crf = QRadioButton("Quality (CRF)")
-            self._mode_br = QRadioButton("Bitrate (Mbps)")
+            self._mode_crf = QRadioButton(t("Quality (CRF)"))
+            self._mode_br = QRadioButton(t("Bitrate (Mbps)"))
             self._mode_crf.setChecked(True)
             self._enc_group = QButtonGroup(self)
             self._enc_group.addButton(self._mode_crf)
@@ -209,18 +211,18 @@ class ExportDialog(QDialog):
             mode_lay.addWidget(self._mode_crf)
             mode_lay.addWidget(self._mode_br)
             mode_lay.addStretch(1)
-            form.addRow("Encode:", mode_row)
+            form.addRow(t("Encode:"), mode_row)
 
             self._crf = QSpinBox()
             self._crf.setRange(10, 30)
             self._crf.setValue(int(default_crf))
-            self._crf.setToolTip(
+            self._crf.setToolTip(t(
                 "Constant Rate Factor (x264). Lower = higher quality / "
                 "larger file. 10–12 ≈ near-lossless (speckle preserved), "
                 "18 visually lossless, 23 standard, 26+ compact. "
                 "Each −6 ≈ double the file size."
-            )
-            form.addRow("CRF:", self._crf)
+            ))
+            form.addRow(t("CRF:"), self._crf)
 
             self._bitrate = QSpinBox()
             self._bitrate.setRange(1, 100)
@@ -228,12 +230,12 @@ class ExportDialog(QDialog):
                 int(default_bitrate) if default_bitrate else 10
             )
             self._bitrate.setSuffix(" Mbps")
-            self._bitrate.setToolTip(
+            self._bitrate.setToolTip(t(
                 "Target H.264 bitrate (used only in Bitrate mode). "
                 "Speckle-heavy IVUS / multi-pane composites need 30–40 Mbps "
                 "@ 15 fps to match the on-screen view. Up to 100 Mbps."
-            )
-            form.addRow("Bitrate:", self._bitrate)
+            ))
+            form.addRow(t("Bitrate:"), self._bitrate)
 
             def _sync_enc_mode():
                 crf_on = self._mode_crf.isChecked()
@@ -251,10 +253,10 @@ class ExportDialog(QDialog):
                 float(default_fps) if default_fps and default_fps > 0
                 else 30.0
             )
-            self._fps.setToolTip(
+            self._fps.setToolTip(t(
                 "Playback frame rate. XA/IVUS default = the source cine "
                 "rate when available; otherwise 30 fps."
-            )
+            ))
             # Preset buttons next to the spinbox: click sets the value.
             fps_row = QWidget()
             fps_layout = QHBoxLayout(fps_row)
@@ -263,12 +265,12 @@ class ExportDialog(QDialog):
             for v in FPS_PRESETS:
                 btn = QPushButton(str(v))
                 btn.setFixedWidth(36)
-                btn.setToolTip(f"Set frame rate to {v} fps")
+                btn.setToolTip(t("Set frame rate to {v} fps", v=v))
                 btn.clicked.connect(
                     lambda _c, val=v: self._fps.setValue(float(val))
                 )
                 fps_layout.addWidget(btn)
-            form.addRow("Frame rate:", fps_row)
+            form.addRow(t("Frame rate:"), fps_row)
             root.addWidget(mp4_box)
         else:
             self._bitrate = None
