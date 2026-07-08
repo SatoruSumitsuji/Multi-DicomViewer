@@ -300,6 +300,9 @@ class StudyBrowser(QTreeWidget):
                                         # shell resolves to the LAST-viewed
                                         # series of THAT node, not series #1
                                         # and not the sibling kind's node.
+    #: Folder(s)/file(s) dropped ONTO the tree — import into the tree only,
+    #: no pane is opened (loading a pane is drag-a-series-onto-it only).
+    paths_dropped = pyqtSignal(list)
     #: (kind, key, label) — kind is "patient"|"study"|"series";
     #: key is PatientID / StudyInstanceUID / SeriesInstanceUID.
     delete_requested = pyqtSignal(str, str, str)
@@ -369,6 +372,9 @@ class StudyBrowser(QTreeWidget):
         )
         self.setDragEnabled(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        # DragOnly for its own items, but still accept a folder/file dropped
+        # FROM outside (Explorer) → import into the tree (paths_dropped).
+        self.setAcceptDrops(True)
         # Extended selection enables Ctrl+Click toggle, Shift+Click range,
         # Ctrl+A select-all — the standard Windows multi-select gestures.
         self.setSelectionMode(
@@ -689,27 +695,15 @@ class StudyBrowser(QTreeWidget):
             self.blockSignals(False)
 
     def _on_clicked(self, item: QTreeWidgetItem, _col: int = 0) -> None:
-        """Mouse click in the tree. A hidden (greyed) series IS loaded on a
-        direct mouse click — a one-off view: once shown, Play and the cine
-        seek-bar work on it normally. The on-image First/Prev/Next/Last
-        buttons and the keyboard shortcuts still skip it, and keyboard
-        activation (Enter, via :meth:`_on_activated`) skips it too."""
-        data = item.data(0, _ROLE)
-        if isinstance(data, Series):
-            self.series_chosen.emit(data)
-            return
-        self._emit_study_click(item)
+        """Click only selects/highlights the row now — loading a pane is
+        drag & drop only (drag a series onto a pane). Click-to-load was too
+        easy to trigger by accident and clobbered the shown series."""
+        return
 
     def _on_activated(self, item: QTreeWidgetItem, _col: int = 0) -> None:
-        """Keyboard activation (Enter). Hidden series are skipped here — only
-        a direct mouse click (see :meth:`_on_clicked`) loads a hidden one."""
-        data = item.data(0, _ROLE)
-        if isinstance(data, Series):
-            if getattr(data, "hidden", False):
-                return            # hidden series: keyboard does not load
-            self.series_chosen.emit(data)
-            return
-        self._emit_study_click(item)
+        """Keyboard activation (Enter/double-click) no longer loads a pane —
+        drag & drop only (see :meth:`_on_clicked`)."""
+        return
 
     def _emit_study_click(self, item: QTreeWidgetItem) -> None:
         # Clicking a Study row: tell the shell which study was picked
@@ -935,6 +929,23 @@ class StudyBrowser(QTreeWidget):
                 _start_study_drag(self, idk[1], idk[2], it.text(0))
                 return
 
+    # -- accept folder/file drops FROM outside → import (no pane load) --
+    def dragEnterEvent(self, ev) -> None:  # noqa: N802 (Qt override)
+        ev.acceptProposedAction() if ev.mimeData().hasUrls() else ev.ignore()
+
+    def dragMoveEvent(self, ev) -> None:  # noqa: N802 (Qt override)
+        ev.acceptProposedAction() if ev.mimeData().hasUrls() else ev.ignore()
+
+    def dropEvent(self, ev) -> None:  # noqa: N802 (Qt override)
+        md = ev.mimeData()
+        if md.hasUrls():
+            paths = [u.toLocalFile() for u in md.urls() if u.toLocalFile()]
+            if paths:
+                self.paths_dropped.emit(paths)
+                ev.acceptProposedAction()
+                return
+        ev.ignore()          # internal item drags aren't droppable here
+
 
 class _ThumbWorker(QThread):
     """Decodes one preview per series off the UI thread."""
@@ -1149,6 +1160,8 @@ class StudyPanel(QWidget):
 
     series_chosen = pyqtSignal(object)
     study_clicked = pyqtSignal(str, str)     # study row click (uid, kind)
+    #: folder/file dropped onto the tree → import only (no pane opened)
+    paths_dropped = pyqtSignal(list)
     anonymize_toggled = pyqtSignal(bool)     # the "Anonymous" button
     #: right-click on the Anonymous button → open the anonymize-settings dialog
     anon_settings_requested = pyqtSignal()
@@ -1182,6 +1195,7 @@ class StudyPanel(QWidget):
         # StudyBrowser._refresh_selection_color.
         self.tree.series_chosen.connect(self.series_chosen)
         self.tree.study_clicked.connect(self.study_clicked)
+        self.tree.paths_dropped.connect(self.paths_dropped)
         self.tree.delete_requested.connect(self.delete_requested)
         self.tree.export_requested.connect(self.export_requested)
         self.tree.hide_requested.connect(self._on_hide_series)
@@ -1670,12 +1684,9 @@ class StudyPanel(QWidget):
             self.tree.select_study_key(cur)
 
     def _thumb_clicked(self, item: QListWidgetItem) -> None:
-        # A hidden (greyed) series IS loaded on a direct mouse click — a
-        # one-off view; Play / seek then work on it. Only the on-image
-        # nav buttons and keyboard shortcuts skip hidden series.
-        se = item.data(_ROLE)
-        if isinstance(se, Series):
-            self.series_chosen.emit(se)
+        # Click only selects the thumbnail now — loading a pane is drag &
+        # drop only (drag the thumbnail / tree row onto a pane).
+        return
 
     def _set_thumb(self, row: int, arr: np.ndarray) -> None:
         arr = np.ascontiguousarray(arr)
