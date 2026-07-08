@@ -53,6 +53,7 @@ from multi_dicomviewer.config import (
     APP_VERSION,
     BLOCK_CT,
     BLOCK_CT_MESSAGE,
+    build_string,
 )
 from multi_dicomviewer.core import anonymize, dicom_io, settings
 from multi_dicomviewer.core.dicom_tags import (
@@ -769,7 +770,7 @@ class ViewerPane(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self, initial_folder: str | None = None):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME}  v{APP_VERSION}")
+        self.setWindowTitle(f"{APP_NAME}  {build_string()}")
         self.resize(1500, 950)
         self.setAcceptDrops(True)  # drop a DICOM folder anywhere on the window
         self._patients = {}
@@ -826,6 +827,7 @@ class MainWindow(QMainWindow):
         # --- study browser dock ---
         self.browser = StudyPanel()
         self.browser.series_chosen.connect(self._on_series_chosen)
+        self.browser.paths_dropped.connect(self._on_paths_dropped)
         self.browser.study_clicked.connect(self._on_study_clicked)
         self.browser.delete_requested.connect(self._delete_node)
         self.browser.delete_all_requested.connect(self._delete_all_nodes)
@@ -882,8 +884,11 @@ class MainWindow(QMainWindow):
             pane.activated.connect(self._set_active_pane)
             pane.series_dropped.connect(self._on_series_dropped)
             pane.study_dropped.connect(self._on_study_dropped)
-            pane.folder_dropped.connect(self._load_folder)
-            pane.files_dropped.connect(self._load_files)
+            # Folder/file dropped ON a pane → import AND open into THAT pane.
+            pane.folder_dropped.connect(
+                lambda d, p=pane: self._load_folder(d, p))
+            pane.files_dropped.connect(
+                lambda paths, p=pane: self._load_files(paths, p))
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
             pane.pane_cleared.connect(self._on_pane_cleared)
@@ -1047,6 +1052,15 @@ class MainWindow(QMainWindow):
         )
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
+        self._coreg_act = QAction("IVUS-XA CoReg…", self)
+        self._coreg_act.setToolTip(
+            "Co-register IVUS pull-back frames to positions on the angio "
+            "vessel: trace a guide, pin CoReg landmarks, then scrubbing "
+            "the IVUS drives a marker along the angio "
+            "(needs at least one IVUS and one XA series loaded)"
+        )
+        self._coreg_act.triggered.connect(self._open_coreg)
+        tm.addAction(self._coreg_act)
 
         tm.addSeparator()
         self._dicomcheck_act = QAction("DicomCheck…", self)
@@ -1168,6 +1182,46 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
+
+    def _open_coreg(self) -> None:
+        """Launch the IVUS-XA CoReg window, seeded with the IVUS and XA
+        series currently shown in the panes (IVUS pull-backs + the
+        representative angio view[s]). Needs ≥1 IVUS and ≥1 XA."""
+        from multi_dicomviewer.ui.coreg_window import CoregWindow
+        # One CoReg pane per shown pane holding an IVUS/XA series, mirroring
+        # the on-screen arrangement 1:1 (no series_uid de-dup, which dropped
+        # a pane when two shown panes shared a UID, e.g. biplane). Each spec
+        # is (series, plane_index): for a biplane pane we send exactly the
+        # projection(s) actually displayed — Lt→plane 0, Rt→plane 1, and Bi
+        # (both shown) → both planes as two CoReg views.
+        specs: list = []
+        for pane in self._shown_panes():
+            se = self._series_by_uid.get(pane.shown_series_uid())
+            if se is None or se.modality not in (Modality.IVUS, Modality.XA):
+                continue
+            v = pane.current_viewer()
+            fr = int(getattr(v, "_frame", 0))    # keep the frame on screen now
+            side = v.current_side() if hasattr(v, "current_side") else None
+            if side == "Bi":
+                specs.append((se, 0, fr))
+                specs.append((se, 1, fr))
+            elif side == "Rt":
+                specs.append((se, 1, fr))
+            else:                                # "Lt", single-plane, or none
+                specs.append((se, 0, fr))
+        specs = specs[:6]
+        has_ivus = any(s.modality == Modality.IVUS for s, _p, _f in specs)
+        if not has_ivus:
+            QMessageBox.information(
+                self, "IVUS-XA CoReg",
+                "Show at least one IVUS pull-back in the panes first. "
+                "(XA angio is optional — with no XA this behaves like a "
+                "multi-IVUS sync viewer.)",
+            )
+            return
+        self._coreg_win = CoregWindow(specs, parent=self)
+        self._coreg_win.showMaximized()
+        self._coreg_win.raise_()
 
     def _open_dicom_check(self) -> None:
         """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
@@ -2385,24 +2439,40 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
             self._load_files(files)
 
-    def _load_folder(self, folder: str) -> None:
+    def _load_folder(self, folder: str, open_in_pane=None) -> None:
         self._last_dir = folder              # seeds the DicomCheck/Folder tools
         self._load_index(
             f"Scanning {folder} …",
             lambda prog: dicom_io.scan_folder(folder, prog),
+            open_in_pane=open_in_pane,
         )
 
-    def _load_files(self, paths: list[str]) -> None:
+    def _load_files(self, paths: list[str], open_in_pane=None) -> None:
         n = len(paths)
         self._load_index(
             f"Loading {n} file(s) …",
             lambda prog: dicom_io.index_files(paths, prog),
+            open_in_pane=open_in_pane,
         )
 
-    def _load_index(self, status_msg: str, scan_fn) -> None:
+    def _on_paths_dropped(self, paths) -> None:
+        """Folder/file dropped ONTO the tree → import into the tree only; no
+        pane is opened (drag a series onto a pane to display it)."""
+        paths = [p for p in (paths or []) if p]
+        dirs = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if os.path.isfile(p)]
+        if dirs:
+            self._load_folder(dirs[0])
+        elif files:
+            self._load_files(files)
+
+    def _load_index(self, status_msg: str, scan_fn, open_in_pane=None) -> None:
         """Run *scan_fn(progress)* under a modal progress dialog, then merge
-        the resulting patients into the tree and auto-open a series. Shared by
-        folder drops (scan_folder) and file drops (index_files)."""
+        the resulting patients into the tree. *open_in_pane* opens the freshly
+        imported series into that pane (folder/file dropped ON a pane); when
+        None the import just populates the tree — nothing is loaded into a
+        pane (File▸Open, window/tree drops). Shared by folder drops
+        (scan_folder) and file drops (index_files)."""
         self.statusBar().showMessage(status_msg)
         # Bring the app to the front (drop often comes from Explorer).
         if self.isMinimized():
@@ -2470,6 +2540,10 @@ class MainWindow(QMainWindow):
         # When the folder has CT, prefer the "main" CT series (see
         # _initial_ct_target); otherwise fall back to the first series in the
         # browser's display order.
+        # Only open into a pane when the drop landed ON a pane; otherwise the
+        # import just populates the tree (drag a series onto a pane to show).
+        if open_in_pane is None:
+            return
         ordered = self.browser.ordered_series()
         new_series = [se for se in ordered if se.series_uid in new_uids]
         target = self._initial_ct_target(new_series)
@@ -2477,7 +2551,7 @@ class MainWindow(QMainWindow):
             target = (self._initial_noncT_target(new_series)
                       or (ordered[0] if ordered else None))
         if target is not None:
-            self.browser.select_series(target)
+            self._open_series(target, open_in_pane)
 
     @staticmethod
     def _initial_noncT_target(candidates: list) -> "Series | None":

@@ -846,6 +846,12 @@ class XAViewer(AbstractViewer):
         for key in ("Bi", "Lt", "Rt"):
             btn = QPushButton(key)
             btn.setCheckable(True)
+            # Blue background on the checked button so the pane ALWAYS shows
+            # its current state at a glance: Bi = both planes, Lt = left
+            # only, Rt = right only (the plain checkable look was too subtle).
+            btn.setStyleSheet(
+                "QPushButton:checked { background:#2d7ff0; color:white;"
+                " font-weight:bold; }")
             btn.clicked.connect(lambda _c, k=key: self.set_side(k, True))
             self._plane_group.addButton(btn)
             self._side_btns[key] = btn
