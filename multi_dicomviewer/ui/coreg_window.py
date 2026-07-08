@@ -108,14 +108,14 @@ class _CoregPane:
 
         # IVUS-only row: Master radio + a placement "include" checkbox.
         self.nav = QHBoxLayout()
-        self.master_radio = QRadioButton("Master")
+        self.master_radio = QRadioButton(t("Master"))
         self.master_radio.setToolTip(
-            "Make this the active IVUS — its frame drives the markers")
+            t("Make this the active IVUS — its frame drives the markers"))
         self.master_radio.toggled.connect(self._on_master_toggled)
         self.include_cb = QCheckBox(t("Include in this point"))
         self.include_cb.setChecked(True)
         self.include_cb.setToolTip(
-            "While adding a CoReg point, include this IVUS's current frame")
+            t("While adding a CoReg point, include this IVUS's current frame"))
         self.include_cb.setVisible(False)
         self.nav.addWidget(self.master_radio)
         self.nav.addStretch(1)

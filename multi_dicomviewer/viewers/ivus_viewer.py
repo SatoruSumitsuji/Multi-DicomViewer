@@ -264,7 +264,7 @@ class IVUSViewer(XAViewer):
 
         # "Long View" toggle. Mirrors the V shortcut so the check state always
         # matches _la_visible.
-        self._long_view_btn = QPushButton("Long View")
+        self._long_view_btn = QPushButton(t("Long View"))
         self._long_view_btn.setCheckable(True)
         self._long_view_btn.setMinimumWidth(110)
         self._long_view_btn.setStyleSheet(
@@ -280,7 +280,7 @@ class IVUSViewer(XAViewer):
         # Centre-keyframe controls — right of Long View so the whole "long-axis"
         # cluster reads left-to-right. Prev/Next cycle through the keyed frames
         # on the active plane (wraps); Clear removes every manual centre.
-        self._prev_key_btn = QPushButton("◀ Center")
+        self._prev_key_btn = QPushButton(t("◀ Center"))
         self._prev_key_btn.setToolTip(
             t("Jump to the previous frame with a manual rotation centre")
         )
@@ -288,7 +288,7 @@ class IVUSViewer(XAViewer):
             lambda: self._jump_to_keyframe(-1)
         )
         ivus_row.addWidget(self._prev_key_btn)
-        self._next_key_btn = QPushButton("Center ▶")
+        self._next_key_btn = QPushButton(t("Center ▶"))
         self._next_key_btn.setToolTip(
             t("Jump to the next frame with a manual rotation centre")
         )
@@ -296,7 +296,7 @@ class IVUSViewer(XAViewer):
             lambda: self._jump_to_keyframe(+1)
         )
         ivus_row.addWidget(self._next_key_btn)
-        self._clear_centers_btn = QPushButton("Clear Centers")
+        self._clear_centers_btn = QPushButton(t("Clear Centers"))
         self._clear_centers_btn.setToolTip(
             t("Remove every manual rotation centre on the active plane "
               "(same as right-click ▸ Reset all on the marker)")
@@ -313,7 +313,7 @@ class IVUSViewer(XAViewer):
         # consistent toolbar; on a truly monochrome series the click is a no-op
         # and reports "no colour" (see _on_color_toggle). The choice persists
         # per SeriesInstanceUID (core.settings.save_ivus_color).
-        self._color_btn = QPushButton("Color")
+        self._color_btn = QPushButton(t("Color"))
         self._color_btn.setCheckable(True)
         self._color_btn.setToolTip(
             t("IVUS: Gray to Color (NIRS chemograms, etc.)\n"

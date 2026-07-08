@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.core.dicom_tags import iter_tag_rows
+from multi_dicomviewer.i18n import t
 
 _KW_ROLE = Qt.ItemDataRole.UserRole
 
@@ -39,7 +40,7 @@ class TagSelectionDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("DICOM Tags — choose overlay items")
+        self.setWindowTitle(t("DICOM Tags — choose overlay items"))
         self.resize(760, 560)
         self._prev_order = list(selected)
         self._anonymized = anonymized
@@ -48,18 +49,18 @@ class TagSelectionDialog(QDialog):
         root = QVBoxLayout(self)
 
         note = QLabel(
-            "Check the tags to overlay on the image."
-            + ("   * Anonymized: case info is masked."
+            t("Check the tags to overlay on the image.")
+            + (t("   * Anonymized: case info is masked.")
                if anonymized else "")
         )
         note.setWordWrap(True)
         root.addWidget(note)
 
         filt_row = QHBoxLayout()
-        filt_row.addWidget(QLabel("Filter:"))
+        filt_row.addWidget(QLabel(t("Filter:")))
         self.filter = QLineEdit()
         self.filter.setPlaceholderText(
-            "Filter by tag name / keyword / value"
+            t("Filter by tag name / keyword / value")
         )
         self.filter.textChanged.connect(self._apply_filter)
         filt_row.addWidget(self.filter, 1)
@@ -67,7 +68,7 @@ class TagSelectionDialog(QDialog):
 
         self.table = QTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(
-            ["Show", "Tag", "Name", "VR", "Value"]
+            [t("Show"), t("Tag"), t("Name"), "VR", t("Value")]
         )
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(
@@ -122,8 +123,8 @@ class TagSelectionDialog(QDialog):
             chk.setData(_KW_ROLE, identifier)
             if not tr.keyword:
                 chk.setToolTip(
-                    "Private/unknown tag — selected by its (group,"
-                    "element) literal"
+                    t("Private/unknown tag — selected by its "
+                      "(group,element) literal")
                 )
             self.table.setItem(r, 0, chk)
             for c, text in enumerate(

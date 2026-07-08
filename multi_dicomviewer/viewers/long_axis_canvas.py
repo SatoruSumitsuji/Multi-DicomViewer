@@ -37,6 +37,8 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QMenu, QWidget
 
+from multi_dicomviewer.i18n import t
+
 from multi_dicomviewer.core.image_export import pick_export_format
 
 
@@ -399,8 +401,8 @@ class LongAxisCanvas(QWidget):
         *frame* — mirrors the cross-section red-centre menu but targets the
         clicked keyframe explicitly (it need not be the current frame)."""
         menu = QMenu(self)
-        a_one = menu.addAction("Remove this point")
-        a_all = menu.addAction("Remove all points")
+        a_one = menu.addAction(t("Remove this point"))
+        a_all = menu.addAction(t("Remove all points"))
         chosen = menu.exec(global_pos)
         if chosen is a_one:
             self.keyframe_remove.emit("frame", int(frame))
@@ -515,7 +517,7 @@ class LongAxisCanvas(QWidget):
             p.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "Long-axis: no data yet (load an IVUS series)"
+                t("Long-axis: no data yet (load an IVUS series)")
             )
             return
         r = self._draw_rect()
@@ -624,5 +626,6 @@ class LongAxisCanvas(QWidget):
         p.setPen(QColor("#cfe8ff"))
         p.drawText(
             r.x() + 6, r.y() + 16,
-            f"Long-axis · frame {self._cur_frame + 1}/{self._n_frames}"
+            t("Long-axis · frame {cur}/{total}",
+              cur=self._cur_frame + 1, total=self._n_frames)
         )

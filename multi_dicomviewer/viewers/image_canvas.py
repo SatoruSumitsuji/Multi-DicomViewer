@@ -942,8 +942,8 @@ class ImageCanvas(QWidget):
         # _recompute_compares preserves it via the "fill_custom" flag.
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
-        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction(t("Show") if target.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(QCursor.pos())
         if chosen is vis_act:
             target["hidden"] = not target.get("hidden", False)
@@ -1019,11 +1019,11 @@ class ImageCanvas(QWidget):
         # (incl. Line/Angle, which are most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
         else:
-            del_res = menu.addAction("Delete")
+            del_res = menu.addAction(t("Delete"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if del_pt is not None and chosen is del_pt:
             self._delete_point(mi, vi)
@@ -1083,8 +1083,8 @@ class ImageCanvas(QWidget):
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if chosen is add_pt:
             self._add_point_at(mi, sx, sy)
@@ -1344,7 +1344,7 @@ class ImageCanvas(QWidget):
                         return
                     if self._coreg_hit_line(sx, sy):  # on the line → insert
                         menu = QMenu(self)
-                        act = menu.addAction("点の追加")
+                        act = menu.addAction(t("Add point"))
                         if menu.exec(gpos) is act:
                             ix, iy = self._widget_to_image_f(sx, sy)
                             self._coreg_insert_vertex((float(ix), float(iy)))
@@ -1416,7 +1416,7 @@ class ImageCanvas(QWidget):
             ca_mi = self._ca_hit(sx, sy)
             if ca_mi is not None:
                 menu = QMenu(self)
-                del_ca = menu.addAction("Delete Center Angle")
+                del_ca = menu.addAction(t("Delete Center Angle"))
                 chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
                 if chosen is del_ca:
                     self.measures[ca_mi].pop("center_angle", None)
@@ -1636,8 +1636,8 @@ class ImageCanvas(QWidget):
         The actual edit is performed by the viewer (single source of truth
         for the per-frame centres array)."""
         menu = QMenu(self)
-        a_one = menu.addAction("Remove this point")
-        a_all = menu.addAction("Remove all points")
+        a_one = menu.addAction(t("Remove this point"))
+        a_all = menu.addAction(t("Remove all points"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if chosen is a_one:
             self.ivus_center_reset.emit("frame")
@@ -2396,8 +2396,8 @@ class ImageCanvas(QWidget):
             p.drawText(QRect(0, 6, self.width(), 26),
                        int(Qt.AlignmentFlag.AlignHCenter)
                        | int(Qt.AlignmentFlag.AlignTop),
-                       "Click to select 2 Ellipse/Polygon data to compare"
-                       f"  ({n}/2)")
+                       t("Click to select 2 Ellipse/Polygon data to "
+                         "compare  ({n}/2)", n=n))
 
         # "Hide/Show All Result" hides every region fill + legend at once.
         compares = [] if self._results_hidden else self._compares

@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from PyQt6.QtGui import QColor, QIcon, QPixmap
 
+from multi_dicomviewer.i18n import t
+
 
 def add_color_submenu(menu, color_choices):
     """Add a 'Change Color' submenu of swatches. Returns [(QAction, hex)]."""
-    sub = menu.addMenu("Change Color")
+    sub = menu.addMenu(t("Change Color"))
     actions = []
     for name, hexcol in color_choices:
         a = sub.addAction(name)
@@ -26,7 +28,7 @@ def add_color_submenu(menu, color_choices):
 def add_transparency_submenu(menu, current=0):
     """Add a 'Change Transparency' submenu (0–100 %, step 5; 0 = opaque). The
     current value is ticked. Returns [(QAction, int_percent)]."""
-    sub = menu.addMenu("Change Transparency")
+    sub = menu.addMenu(t("Change Transparency"))
     actions = []
     cur = int(round(current / 5.0)) * 5
     for v in range(0, 101, 5):

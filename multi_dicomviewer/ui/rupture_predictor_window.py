@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (QComboBox, QDialog, QDoubleSpinBox, QHBoxLayout,
                              QTableWidgetItem, QVBoxLayout, QWidget)
 
 from multi_dicomviewer.core import rupture_math as rm
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.image_canvas import to_qimage
 
 # Point colours, matching the HTML ``pointColors``.
@@ -40,29 +41,29 @@ _CLINICAL_POINTS = ("A1", "A2", "AC", "B")
 _ALL_POINTS = _CALIB_POINTS + _CLINICAL_POINTS
 
 # Workflow steps (verbatim Japanese strings from HTML 3379-3390).
-_STEP_TAIL = ("If clicking points in this window is difficult, you can move the "
-              "window. Point positions can be adjusted later.")
+_STEP_TAIL = t("If clicking points in this window is difficult, you can move the "
+               "window. Point positions can be adjusted later.")
 _WORKFLOW = [
-    ("CH1", f"Specify the first point of the Horizontal Calibration, "
-            f"CH1. {_STEP_TAIL}", "point"),
-    ("CH2", f"Specify the second point of the Horizontal Calibration, "
-            f"CH2. {_STEP_TAIL}", "point"),
-    ("CH_INPUT", "Enter the actual distance for CH (horizontal calibration)",
+    ("CH1", t("Specify the first point of the Horizontal Calibration, CH1.")
+            + " " + _STEP_TAIL, "point"),
+    ("CH2", t("Specify the second point of the Horizontal Calibration, CH2.")
+            + " " + _STEP_TAIL, "point"),
+    ("CH_INPUT", t("Enter the actual distance for CH (horizontal calibration)"),
      "input"),
-    ("CV1", f"Specify the first point of the Vertical Calibration, "
-            f"CV1. {_STEP_TAIL}", "point"),
-    ("CV2", f"Specify the second point of the Vertical Calibration, "
-            f"CV2. {_STEP_TAIL}", "point"),
-    ("CV_INPUT", "Enter the actual distance for CV (vertical calibration)",
+    ("CV1", t("Specify the first point of the Vertical Calibration, CV1.")
+            + " " + _STEP_TAIL, "point"),
+    ("CV2", t("Specify the second point of the Vertical Calibration, CV2.")
+            + " " + _STEP_TAIL, "point"),
+    ("CV_INPUT", t("Enter the actual distance for CV (vertical calibration)"),
      "input"),
-    ("A1", f"Specify one of the edges of stretching adventitia. {_STEP_TAIL}",
-     "point"),
-    ("A2", f"Specify the other edges of stretching adventitia. "
-           f"{_STEP_TAIL}", "point"),
-    ("AC", f"Specify the midpoint of the stretching adventitia (arc center), "
-           f"AC. {_STEP_TAIL}", "point"),
-    ("B", f"Specify the most vessel-side point of balloon expansion, B. "
-          f"{_STEP_TAIL}", "point"),
+    ("A1", t("Specify one of the edges of stretching adventitia.")
+           + " " + _STEP_TAIL, "point"),
+    ("A2", t("Specify the other edges of stretching adventitia.")
+           + " " + _STEP_TAIL, "point"),
+    ("AC", t("Specify the midpoint of the stretching adventitia (arc center), "
+             "AC.") + " " + _STEP_TAIL, "point"),
+    ("B", t("Specify the most vessel-side point of balloon expansion, B.")
+          + " " + _STEP_TAIL, "point"),
 ]
 
 # Standard semi-compliant balloon sizes for the quick-pick combo (mm).
@@ -320,8 +321,8 @@ class RuptureCanvas(QWidget):
 
     def _context_menu(self, sx: float, sy: float) -> None:
         menu = QMenu(self)
-        a_reset = menu.addAction("Reset all points")
-        a_restart = menu.addAction("Re-Specify from A1")
+        a_reset = menu.addAction(t("Reset all points"))
+        a_restart = menu.addAction(t("Re-Specify from A1"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         win = self.window()
         if chosen == a_reset and hasattr(win, "reset_all"):
@@ -556,7 +557,7 @@ class _StepDialog(QDialog):
         lay.addWidget(self._msg)
         row = QHBoxLayout()
         row.addStretch(1)
-        self._back = QPushButton("Back")
+        self._back = QPushButton(t("Back"))
         self._back.clicked.connect(self.back_requested.emit)
         row.addWidget(self._back)
         lay.addLayout(row)
@@ -655,7 +656,7 @@ class RupturePredictorWindow(QMainWindow):
             return
         # point step
         self.canvas.workflow_active = name
-        self.canvas.hint_text = f"Click to specify {name}"
+        self.canvas.hint_text = t("Click to specify {name}", name=name)
         self.canvas.update()
         self._step_dialog.show_message(message, can_back=self._wf_index > 0)
         if not self._step_dialog.isVisible():
@@ -729,7 +730,7 @@ class RupturePredictorWindow(QMainWindow):
             pts["A1"], pts["A2"], pts["AC"], pts["B"], diameter, avg)
         if res is None:
             QMessageBox.warning(self, "Rupture-Predictor",
-                                "Failed to identify the arc from points A1, AC, A2")
+                                t("Failed to identify the arc from points A1, AC, A2"))
             return
         self.canvas.viz = res
         self.canvas.update()
@@ -741,19 +742,19 @@ class RupturePredictorWindow(QMainWindow):
         panel.setFixedWidth(340)
         lay = QVBoxLayout(panel)
 
-        self._result_label = QLabel("Stretch Ratio: —")
+        self._result_label = QLabel(t("Stretch Ratio: —"))
         f = QFont()
         f.setPointSize(16)
         f.setBold(True)
         self._result_label.setFont(f)
         lay.addWidget(self._result_label)
 
-        self._calib_label = QLabel("Calibration: —")
+        self._calib_label = QLabel(t("Calibration: —"))
         lay.addWidget(self._calib_label)
 
         # Balloon diameter input + common-size combo.
         row = QHBoxLayout()
-        row.addWidget(QLabel("Balloon diameter (mm):"))
+        row.addWidget(QLabel(t("Balloon diameter (mm):")))
         self._diam_spin = QDoubleSpinBox()
         self._diam_spin.setRange(0.50, 20.00)
         self._diam_spin.setSingleStep(0.25)
@@ -761,7 +762,7 @@ class RupturePredictorWindow(QMainWindow):
         self._diam_spin.valueChanged.connect(self._on_diameter_changed)
         row.addWidget(self._diam_spin)
         self._diam_combo = QComboBox()
-        self._diam_combo.addItem("Select", 0.0)
+        self._diam_combo.addItem(t("Select"), 0.0)
         for d in _COMMON_DIAMETERS:
             self._diam_combo.addItem(f"{d:.2f}", d)
         self._diam_combo.currentIndexChanged.connect(self._on_combo_changed)
@@ -772,17 +773,17 @@ class RupturePredictorWindow(QMainWindow):
         self._info_label.setWordWrap(True)
         lay.addWidget(self._info_label)
 
-        lay.addWidget(QLabel("Results per diameter (click a diameter to apply)"))
+        lay.addWidget(QLabel(t("Results per diameter (click a diameter to apply)")))
         self._results_table = QTableWidget(0, 3)
         self._results_table.setHorizontalHeaderLabels(
-            ["Diameter (mm)", "Stretched adventitia (mm)", "Stretch Ratio"])
+            [t("Diameter (mm)"), t("Stretched adventitia (mm)"), t("Stretch Ratio")])
         self._results_table.verticalHeader().setVisible(False)
         self._results_table.cellClicked.connect(self._on_result_clicked)
         lay.addWidget(self._results_table, 1)
 
-        lay.addWidget(QLabel("Target stretch ratio → required diameter (click to apply)"))
+        lay.addWidget(QLabel(t("Target stretch ratio → required diameter (click to apply)")))
         self._rate_table = QTableWidget(0, 2)
-        self._rate_table.setHorizontalHeaderLabels(["Stretch Ratio", "Diameter (mm)"])
+        self._rate_table.setHorizontalHeaderLabels([t("Stretch Ratio"), t("Diameter (mm)")])
         self._rate_table.verticalHeader().setVisible(False)
         self._rate_table.cellClicked.connect(self._on_rate_clicked)
         self._rate_table.setMaximumHeight(130)
@@ -817,8 +818,8 @@ class RupturePredictorWindow(QMainWindow):
         fg, bg = self._ratio_colors(res.stretch_ratio)
         self._result_label.setStyleSheet("")
         self._result_label.setText(
-            "Stretch Ratio: "
-            f"<span style='font-size:40pt; font-weight:bold; color:{fg}; "
+            t("Stretch Ratio: ")
+            + f"<span style='font-size:40pt; font-weight:bold; color:{fg}; "
             f"background-color:{bg};'>&nbsp;{res.stretch_ratio:.2f}&nbsp;</span>"
         )
         if self._calib is not None:
@@ -826,10 +827,13 @@ class RupturePredictorWindow(QMainWindow):
                 f"H: {self._calib.hpxmm:.2f} px/mm   "
                 f"V: {self._calib.vpxmm:.2f} px/mm")
         self._info_label.setText(
-            f"Original arc length (A1-AC-A2): {res.original_arc_len_mm:.2f} mm\n"
-            f"Angle ∠A1-C-A2: {res.angle_a1ca2_deg:.1f}°\n"
-            f"Virtual balloon diameter: {res.balloon_diameter_mm:.2f} mm\n"
-            f"Stretched adventitia length: {res.stretched_adventitia_len_mm:.2f} mm")
+            t("Original arc length (A1-AC-A2): {v:.2f} mm",
+              v=res.original_arc_len_mm) + "\n"
+            + t("Angle ∠A1-C-A2: {v:.1f}°", v=res.angle_a1ca2_deg) + "\n"
+            + t("Virtual balloon diameter: {v:.2f} mm",
+                v=res.balloon_diameter_mm) + "\n"
+            + t("Stretched adventitia length: {v:.2f} mm",
+                v=res.stretched_adventitia_len_mm))
         self._fill_results_table()
         self._fill_rate_table()
 
@@ -857,7 +861,7 @@ class RupturePredictorWindow(QMainWindow):
                     fnt = item.font()
                     fnt.setUnderline(True)
                     item.setFont(fnt)
-                    item.setToolTip("Click to apply this diameter")
+                    item.setToolTip(t("Click to apply this diameter"))
                 self._results_table.setItem(i, c, item)
 
     def _fill_rate_table(self) -> None:
@@ -868,7 +872,7 @@ class RupturePredictorWindow(QMainWindow):
         self._rate_table.setRowCount(len(table))
         for i, (rate, diam) in enumerate(table):
             self._rate_table.setItem(i, 0, QTableWidgetItem(f"{rate:.1f}"))
-            txt = f"{diam:.2f}" if diam is not None else "Out of range"
+            txt = f"{diam:.2f}" if diam is not None else t("Out of range")
             self._rate_table.setItem(i, 1, QTableWidgetItem(txt))
 
     def _on_diameter_changed(self, _v: float) -> None:
@@ -985,7 +989,7 @@ class RupturePredictorWindow(QMainWindow):
         total = int(getattr(self._plane, "total_frames", 1))
         txt = f"{self._frame_index + 1}/{total}"
         if self._lock_index is not None:
-            txt += f"  (Locked {self._lock_index + 1})"
+            txt += t("  (Locked {n})", n=self._lock_index + 1)
             color = ("#1a7f37" if self._frame_index == self._lock_index
                      else "#c0392b")
             self._frame_label.setStyleSheet(f"color: {color};")
@@ -1008,8 +1012,9 @@ class RupturePredictorWindow(QMainWindow):
                 self.canvas.workflow_active = name
                 self.canvas.update()
                 self._toast(
-                    f"Points are locked to frame {self._lock_index + 1}. "
-                    "Return to that frame to specify.")
+                    t("Points are locked to frame {n}. "
+                      "Return to that frame to specify.",
+                      n=self._lock_index + 1))
                 return
         if (self._wf_index < len(self._steps)
                 and self._steps[self._wf_index][0] == name):

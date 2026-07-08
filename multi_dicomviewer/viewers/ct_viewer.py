@@ -1080,7 +1080,7 @@ class _AngioAngleDialog(QDialog):
         self._lr_val.setRange(0, 180)
         self._lr_val.setSuffix(" °")
         self._lr_val.setValue(abs(int(prim)))
-        r1.addWidget(QLabel("Primary:"))
+        r1.addWidget(QLabel(t("Primary:")))
         r1.addWidget(self._lr, 1)
         r1.addWidget(self._lr_val, 1)
         v.addLayout(r1)
@@ -1093,17 +1093,17 @@ class _AngioAngleDialog(QDialog):
         self._cc_val.setRange(0, 90)
         self._cc_val.setSuffix(" °")
         self._cc_val.setValue(abs(int(sec)))
-        r2.addWidget(QLabel("Secondary:"))
+        r2.addWidget(QLabel(t("Secondary:")))
         r2.addWidget(self._cc, 1)
         r2.addWidget(self._cc_val, 1)
         v.addLayout(r2)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        ok = QPushButton("OK")
+        ok = QPushButton(t("OK"))
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(t("Cancel"))
         cancel.clicked.connect(self.reject)
         btns.addWidget(ok)
         btns.addWidget(cancel)
@@ -1137,7 +1137,7 @@ class _ColorMapDialog(QDialog):
         scroll.setWidget(self._rows_host)
 
         op_row = QHBoxLayout()
-        op_row.addWidget(QLabel("Opacity"))
+        op_row.addWidget(QLabel(t("Opacity")))
         self._op = QSlider(Qt.Orientation.Horizontal)
         self._op.setRange(0, 100)
         self._op.setValue(int(round(self._opacity * 100)))
@@ -1147,11 +1147,11 @@ class _ColorMapDialog(QDialog):
         op_row.addWidget(self._op_lbl)
 
         btns = QHBoxLayout()
-        add = QPushButton("Add")
+        add = QPushButton(t("Add"))
         add.clicked.connect(self._add_band)
         rst = QPushButton("Reset")
         rst.clicked.connect(self._reset)
-        close = QPushButton("Close")
+        close = QPushButton(t("Close"))
         close.clicked.connect(self.accept)
         btns.addWidget(add)
         btns.addWidget(rst)
@@ -1227,25 +1227,25 @@ class _ColorMapDialog(QDialog):
         sw.clicked.connect(lambda _c, i=idx: self._pick_color(i))
         h.addWidget(sw)
 
-        h.addWidget(QLabel("Min"))
+        h.addWidget(QLabel(t("Min")))
         lo = QSpinBox()
         lo.setRange(-1024, 4096)
         lo.setValue(int(b["lo"]))
         lo.valueChanged.connect(lambda v, i=idx: self._set(i, "lo", v))
         h.addWidget(lo)
-        h.addWidget(QLabel("Max"))
+        h.addWidget(QLabel(t("Max")))
         hi = QSpinBox()
         hi.setRange(-1024, 4096)
         hi.setValue(int(b["hi"]))
         hi.valueChanged.connect(lambda v, i=idx: self._set(i, "hi", v))
         h.addWidget(hi)
 
-        en = QPushButton("Enabled" if b["on"] else "Disabled")
+        en = QPushButton(t("Enabled") if b["on"] else t("Disabled"))
         en.setCheckable(True)
         en.setChecked(b["on"])
         en.clicked.connect(lambda _c, i=idx: self._toggle(i))
         h.addWidget(en)
-        rm = QPushButton("Remove")
+        rm = QPushButton(t("Remove"))
         rm.clicked.connect(lambda _c, i=idx: self._remove(i))
         h.addWidget(rm)
         return w
@@ -1522,7 +1522,7 @@ class CTViewer(AbstractViewer):
         row2.setContentsMargins(0, 0, 0, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
-        row.addWidget(QLabel("Plane:"))
+        row.addWidget(QLabel(t("Plane:")))
         self._side_btns: dict[str, QPushButton] = {}
         for key, tip in (
             ("Bi", t("Show both MPR panes")),
@@ -1603,7 +1603,7 @@ class CTViewer(AbstractViewer):
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
-        row.addWidget(QLabel("Slab(mm):"))
+        row.addWidget(QLabel(t("Slab(mm):")))
         self._slab_spin = QDoubleSpinBox()
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
@@ -1622,7 +1622,7 @@ class CTViewer(AbstractViewer):
         row.addWidget(self._cl_btn)
         self._style_cl()
 
-        setting = FitButton("Setting")
+        setting = FitButton(t("Setting"))
         setting.setHelpToolTip(
             t("HU colour-map settings (band colour, HU range, opacity)")
         )
@@ -1785,7 +1785,7 @@ class CTViewer(AbstractViewer):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(QLabel("Measure:"))
+        row.addWidget(QLabel(t("Measure:")))
         self._meas_btns = {}
         for label, key in (
             ("Line", "line"), ("Polyline", "polyline"),
@@ -1800,7 +1800,7 @@ class CTViewer(AbstractViewer):
             row.addWidget(b)
         # Compare two Polygon/Ellipse: %Area difference + radial gap colour map.
         # Placed right of Angle, with Clear All Result to its right.
-        self._cmp_btn = FitButton("Compare")
+        self._cmp_btn = FitButton(t("Compare"))
         self._cmp_btn.setMinimumWidth(min(self._cmp_btn.sizeHint().width(), 64))
         self._cmp_btn.setCheckable(True)
         self._cmp_btn.setHelpToolTip(
@@ -2037,8 +2037,8 @@ class CTViewer(AbstractViewer):
         # preserved across recompute via the "fill_custom" flag.
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
-        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction(t("Show") if target.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(QCursor.pos())
         if chosen is vis_act:
             target["hidden"] = not target.get("hidden", False)
@@ -2752,11 +2752,11 @@ class CTViewer(AbstractViewer):
         # Line/Angle, most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
         else:
-            del_res = menu.addAction("Delete")
+            del_res = menu.addAction(t("Delete"))
         chosen = menu.exec(
             self.pane[which].canvas.mapToGlobal(
                 QtPoint(int(sx), int(sy))
@@ -2790,7 +2790,7 @@ class CTViewer(AbstractViewer):
         spline_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
-                "UnSpline" if m.get("smooth") else "Spline"
+                t("UnSpline") if m.get("smooth") else t("Spline")
             )
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
@@ -2803,8 +2803,8 @@ class CTViewer(AbstractViewer):
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(
             self.pane[which].canvas.mapToGlobal(
                 QtPoint(int(sx), int(sy))
@@ -3530,7 +3530,7 @@ class CTViewer(AbstractViewer):
             lbl.setFont(f)
             return lbl
 
-        self._seek_frame_lbl = _big(QLabel("Frame:"))
+        self._seek_frame_lbl = _big(QLabel(t("Frame:")))
         row.addWidget(self._seek_frame_lbl)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setMinimum(0)
@@ -3549,7 +3549,7 @@ class CTViewer(AbstractViewer):
         # recons and not on the full 3-D volume. A "Series:" caption (mirroring
         # "Frame:") keeps it apart from the adjacent slice "N / total". Fed by
         # the shell via set_series_position.
-        self._seek_series_cap = _big(QLabel("Series:"))
+        self._seek_series_cap = _big(QLabel(t("Series:")))
         row.addWidget(self._seek_series_cap)
         self._seek_series_lbl = _big(QLabel(""))
         self._seek_series_lbl.setMinimumWidth(66)
