@@ -1816,7 +1816,7 @@ class MainWindow(QMainWindow):
             # didn't just freeze the app.
             prog = QProgressDialog(
                 t("Preparing IVUS frames for Rupture-Predictor…"),
-                "Cancel", 0, 1, self,
+                t("Cancel"), 0, 1, self,
             )
             prog.setWindowModality(Qt.WindowModality.ApplicationModal)
             prog.setMinimumDuration(0)
@@ -2803,7 +2803,7 @@ class MainWindow(QMainWindow):
             "csv": t("Exporting CSV…"),
             "anon-dicom": t("Exporting Anon DICOM…"),
         }[fmt]
-        prog = QProgressDialog(title, "Cancel", 0, 1, self)
+        prog = QProgressDialog(title, t("Cancel"), 0, 1, self)
         prog.setWindowModality(Qt.WindowModality.ApplicationModal)
         prog.setMinimumDuration(0)
         prog.setAutoClose(False)
@@ -3030,7 +3030,7 @@ class MainWindow(QMainWindow):
         literal placeholders "Name" and "Date" are shown instead (the
         series/instance numbers are not PHI and stay)."""
         if self._anon:
-            name, date = "Name", "Date"
+            name, date = t("Name"), t("Date")
         else:
             patient, study = self._series_patient_study(series)
             name = self._clean_name(patient.name) if patient is not None else ""

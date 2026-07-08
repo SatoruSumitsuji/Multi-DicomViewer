@@ -52,6 +52,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from multi_dicomviewer.i18n import t
+
 
 def _image_axes_lps(beta_deg: float, alpha_deg: float):
     """(u_right, v_down) unit vectors in patient LPS for a C-arm at the
@@ -339,8 +341,8 @@ class _OrthoPanel(QWidget):
             " font-size:12pt; font-weight:bold;"
         )
         head.addWidget(sub, 1)
-        clear_btn = QPushButton("Clear")
-        clear_btn.setToolTip("Clear picks and angles on THIS image only")
+        clear_btn = QPushButton(t("Clear"))
+        clear_btn.setToolTip(t("Clear picks and angles on THIS image only"))
         clear_btn.clicked.connect(self.clear)
         clear_btn.setEnabled(self._pickable)
         head.addWidget(clear_btn)
@@ -352,12 +354,13 @@ class _OrthoPanel(QWidget):
         col.addWidget(self.canvas, 1)
 
         if not self._pickable:
-            cur = ("View only — no C-arm positioner angles in this "
+            cur = t("View only — no C-arm positioner angles in this "
                     "image's DICOM header")
         elif beta is not None and alpha is not None:
-            cur = f"Current image: {_format_angle(beta, alpha)}"
+            cur = t("Current image: {angle}",
+                    angle=_format_angle(beta, alpha))
         else:
-            cur = ("Current image: (no Positioner angles in DICOM "
+            cur = t("Current image: (no Positioner angles in DICOM "
                     "header — results are relative to image axes only)")
         self._cur_lbl = QLabel(cur)
         self._cur_lbl.setStyleSheet(
@@ -404,7 +407,7 @@ class _OrthoPanel(QWidget):
         dv /= L
         if self._beta is None or self._alpha is None:
             self._red_lbl.setText(
-                "→ (no Positioner angle in DICOM header)"
+                "→ " + t("(no Positioner angle in DICOM header)")
             )
             self._blue_lbl.setText("")
             return
@@ -434,7 +437,7 @@ class OrthogonalViewWindow(QMainWindow):
 
     def __init__(self, panels, title: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Orthogonal-View — {title}")
+        self.setWindowTitle(t("Orthogonal-View — {title}", title=title))
         n = len(panels)
         # 4-pane case needs more horizontal room than 1-/2-pane;
         # height roughly matches the shell viewer.
@@ -451,13 +454,13 @@ class OrthogonalViewWindow(QMainWindow):
         col.setSpacing(4)
 
         info = QLabel(
-            "Click two points on the image to define a vector. "
-            "The red and blue arrows mark the two C-arm angles whose "
-            "view is orthogonal to that vector."
-            + ("  (Multi-pane: each pane computes its own orthogonal "
-               "angles independently — use each pane's own Clear "
-               "button to clear just that side. Panes without C-arm "
-               "angles in their DICOM header are view-only.)"
+            t("Click two points on the image to define a vector. "
+              "The red and blue arrows mark the two C-arm angles whose "
+              "view is orthogonal to that vector.")
+            + (t("  (Multi-pane: each pane computes its own orthogonal "
+                 "angles independently — use each pane's own Clear "
+                 "button to clear just that side. Panes without C-arm "
+                 "angles in their DICOM header are view-only.)")
                if n > 1 else "")
         )
         info.setStyleSheet("color:#ccc; padding:4px;")

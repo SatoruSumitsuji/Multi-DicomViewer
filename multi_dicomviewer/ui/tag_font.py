@@ -14,6 +14,8 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QPushButton, QSlider, QVBoxLayout, QWidget
 
+from multi_dicomviewer.i18n import t
+
 #: DICOM-tag overlay font, in points. One default for every modality.
 TAG_FONT_PT_DEFAULT = 11
 TAG_FONT_PT_MIN = 7
@@ -122,10 +124,10 @@ def build_tag_font_control(pt: int = TAG_FONT_PT_DEFAULT):
     slider.setRange(TAG_FONT_PT_MIN, TAG_FONT_PT_MAX)
     slider.setValue(int(pt))
     slider.setFixedWidth(_SLIDER_W)
-    slider.setToolTip("DICOM tag text size")
+    slider.setToolTip(t("DICOM tag text size"))
 
-    button = QPushButton("DICOM Tags")
-    button.setToolTip("Choose DICOM tags to overlay on the image")
+    button = QPushButton(t("DICOM Tags"))
+    button.setToolTip(t("Choose DICOM tags to overlay on the image"))
 
     col.addWidget(slider)
     col.addWidget(button)
