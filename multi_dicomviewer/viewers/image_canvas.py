@@ -23,6 +23,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QMenu, QWidget
 
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
@@ -1010,7 +1011,7 @@ class ImageCanvas(QWidget):
         menu = QMenu(self)
         del_pt = del_res = None
         if m["type"] in ("polyline", "polygon"):
-            del_pt = menu.addAction("Delete point")
+            del_pt = menu.addAction(t("Delete point"))
             # Don't let the user shrink below 2 vertices (Line minimum).
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
@@ -1020,7 +1021,7 @@ class ImageCanvas(QWidget):
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
         if m["type"] in ("polyline", "polygon"):
-            del_res = menu.addAction("Delete result")
+            del_res = menu.addAction(t("Delete result"))
         else:
             del_res = menu.addAction("Delete")
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
@@ -1047,7 +1048,7 @@ class ImageCanvas(QWidget):
     def _outline_menu(self, mi, sx, sy):
         m = self.measures[mi]
         menu = QMenu(self)
-        add_pt = menu.addAction("Add point")
+        add_pt = menu.addAction(t("Add point"))
         spline_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
@@ -1055,15 +1056,15 @@ class ImageCanvas(QWidget):
             )
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
-            center_angle_act = menu.addAction("Center Angle")
+            center_angle_act = menu.addAction(t("Center Angle"))
         # Vessel type — tag a Line as the Guiding Catheter or a coronary
         # proximal segment, so the Coaxial-Eval tool can pick it up. Only
         # meaningful for straight lines; a "(none)" entry clears the tag.
         vessel_actions: list[tuple] = []
         if m["type"] == "line":
-            vessel_menu = menu.addMenu("Vessel type")
+            vessel_menu = menu.addMenu(t("Vessel type"))
             cur = m.get("vessel")
-            none_act = vessel_menu.addAction("(none)")
+            none_act = vessel_menu.addAction(t("(none)"))
             none_act.setCheckable(True)
             none_act.setChecked(cur is None)
             vessel_actions.append((none_act, None))
@@ -1074,7 +1075,7 @@ class ImageCanvas(QWidget):
                 a.setChecked(cur == label)
                 vessel_actions.append((a, label))
         # Change Color — 16-colour submenu (each item carries a swatch).
-        color_menu = menu.addMenu("Change Color")
+        color_menu = menu.addMenu(t("Change Color"))
         color_actions: list[tuple] = []
         for name, hexcol in COLOR_CHOICES:
             a = color_menu.addAction(name)
@@ -1333,7 +1334,7 @@ class ImageCanvas(QWidget):
                     gpos = self.mapToGlobal(QPoint(int(sx), int(sy)))
                     if vi >= 0:                      # on a vertex → delete it
                         menu = QMenu(self)
-                        act = menu.addAction("点の削除")
+                        act = menu.addAction(t("Delete point"))
                         if menu.exec(gpos) is act:
                             del self.coreg_vertices[vi]
                             self._coreg_hover_vertex = -1

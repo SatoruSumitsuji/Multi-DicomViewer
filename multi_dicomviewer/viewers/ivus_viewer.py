@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 from multi_dicomviewer.core.dicom_io import apply_color_mode_to_planes
 from multi_dicomviewer.core.image_export import export_image_as, safe_basename
 from multi_dicomviewer.core.settings import load_ivus_color, save_ivus_color
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.long_axis_canvas import (
     LongAxisCanvas, build_long_axis,
 )
@@ -271,7 +272,7 @@ class IVUSViewer(XAViewer):
             "QPushButton:checked { background:#1f77b4; color:white; }"
         )
         self._long_view_btn.setToolTip(
-            "Show/hide the IVUS long-axis (longitudinal) view — shortcut: V"
+            t("Show/hide the IVUS long-axis (longitudinal) view — shortcut: V")
         )
         self._long_view_btn.clicked.connect(self.toggle_long_axis)
         ivus_row.addWidget(self._long_view_btn)
@@ -281,7 +282,7 @@ class IVUSViewer(XAViewer):
         # on the active plane (wraps); Clear removes every manual centre.
         self._prev_key_btn = QPushButton("◀ Center")
         self._prev_key_btn.setToolTip(
-            "Jump to the previous frame with a manual rotation centre"
+            t("Jump to the previous frame with a manual rotation centre")
         )
         self._prev_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(-1)
@@ -289,7 +290,7 @@ class IVUSViewer(XAViewer):
         ivus_row.addWidget(self._prev_key_btn)
         self._next_key_btn = QPushButton("Center ▶")
         self._next_key_btn.setToolTip(
-            "Jump to the next frame with a manual rotation centre"
+            t("Jump to the next frame with a manual rotation centre")
         )
         self._next_key_btn.clicked.connect(
             lambda: self._jump_to_keyframe(+1)
@@ -297,8 +298,8 @@ class IVUSViewer(XAViewer):
         ivus_row.addWidget(self._next_key_btn)
         self._clear_centers_btn = QPushButton("Clear Centers")
         self._clear_centers_btn.setToolTip(
-            "Remove every manual rotation centre on the active plane "
-            "(same as right-click ▸ Reset all on the marker)"
+            t("Remove every manual rotation centre on the active plane "
+              "(same as right-click ▸ Reset all on the marker)")
         )
         self._clear_centers_btn.clicked.connect(self._clear_all_centers)
         ivus_row.addWidget(self._clear_centers_btn)
@@ -315,8 +316,8 @@ class IVUSViewer(XAViewer):
         self._color_btn = QPushButton("Color")
         self._color_btn.setCheckable(True)
         self._color_btn.setToolTip(
-            "IVUS: Gray to Color (NIRS chemograms, etc.)\n"
-            "Return to Gray"
+            t("IVUS: Gray to Color (NIRS chemograms, etc.)\n"
+              "Return to Gray")
         )
         self._color_btn.setStyleSheet(
             "QPushButton:checked { background:#c0392b; color:white; }"
@@ -344,9 +345,9 @@ class IVUSViewer(XAViewer):
         if hasattr(self, "_long_view_btn"):
             self._long_view_btn.setEnabled(self._la_allowed)
             self._long_view_btn.setToolTip(
-                "Long-axis (longitudinal) view — available only in single-pane"
-                " (1x1) layout" if not self._la_allowed
-                else "Show/hide the long-axis (longitudinal) view  [V]"
+                t("Long-axis (longitudinal) view — available only in "
+                  "single-pane (1x1) layout") if not self._la_allowed
+                else t("Show/hide the long-axis (longitudinal) view  [V]")
             )
         if not self._la_allowed and self._la_visible:
             self.toggle_long_axis()      # hide it (stops warm timer, clears)
@@ -434,15 +435,15 @@ class IVUSViewer(XAViewer):
             self._color_btn.setChecked(False)
             self._color_btn.blockSignals(False)
             self.readout.setText(
-                "This IVUS has no color information"
+                t("This IVUS has no color information")
             )
             return
         uid = getattr(self, "_loaded_uid", "")
         if uid:
             save_ivus_color(uid, achieved)
         self.readout.setText(
-            "Switched to color." if achieved
-            else "Reverted to grayscale."
+            t("Switched to color.") if achieved
+            else t("Reverted to grayscale.")
         )
 
     def _set_color_mode(self, color: bool) -> bool:
@@ -863,8 +864,9 @@ class IVUSViewer(XAViewer):
         self.stop()
         self.frame_slider.setValue(target)
         self.readout.setText(
-            f"Manual centre @ frame {target + 1}  ·  "
-            f"{idxs.size} centre(s) on this plane"
+            t("Manual centre @ frame {frame}  ·  "
+              "{count} centre(s) on this plane",
+              frame=target + 1, count=idxs.size)
         )
 
     def _clear_all_centers(self) -> None:
@@ -875,7 +877,7 @@ class IVUSViewer(XAViewer):
         if self._keyframe_indices().size == 0:
             return
         self._on_center_reset("all")
-        self.readout.setText("Cleared all manual rotation centres on this plane.")
+        self.readout.setText(t("Cleared all manual rotation centres on this plane."))
 
     def _reinterp_centers(self, pi: int) -> None:
         """Fill every non-keyed frame's centre with a linear interpolation
