@@ -17,6 +17,7 @@ import traceback
 from PyQt6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDrag,
     QDragEnterEvent,
@@ -55,6 +56,8 @@ from multi_dicomviewer.config import (
     BLOCK_CT_MESSAGE,
     build_string,
 )
+from multi_dicomviewer import i18n
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import anonymize, dicom_io, settings
 from multi_dicomviewer.core.dicom_tags import (
     default_overlay_keywords,
@@ -949,6 +952,10 @@ class MainWindow(QMainWindow):
         self.browser.dicom_info_toggled.connect(self._on_dicom_info_btn)
         self.browser.dicom_tags_requested.connect(self._open_tag_dialog_active)
 
+        # Resolve the UI language before any menu/label is built (strings are
+        # translated when their widget is created, so a change applies on the
+        # next launch).
+        i18n.set_language(settings.load_language())
         self._build_menu()
         self._build_shortcuts()
         self._apply_layout(self._layout_key)
@@ -958,48 +965,74 @@ class MainWindow(QMainWindow):
             self._load_folder(initial_folder)
 
     # ------------------------------------------------------------------ menu
-    def _build_menu(self) -> None:
-        m = self.menuBar().addMenu("&File")
+    def _build_language_menu(self) -> None:
+        """Language menu: pick the UI language. Items are shown in each
+        language's own native name; the current one is checked. The change
+        is persisted and applied on the next launch (strings are resolved
+        when their widget is built)."""
+        lm = self.menuBar().addMenu(t("&Language"))
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        cur = i18n.get_language()
+        for code, name in i18n.enabled_languages().items():
+            act = QAction(name, self, checkable=True)
+            act.setChecked(code == cur)
+            act.triggered.connect(lambda _c=False, cc=code: self._set_language(cc))
+            group.addAction(act)
+            lm.addAction(act)
 
-        open_act = QAction("&Open DICOM folder…", self)
+    def _set_language(self, code: str) -> None:
+        if code == i18n.get_language():
+            return
+        settings.save_language(code)
+        i18n.set_language(code)
+        QMessageBox.information(
+            self, t("Language"), t("The language changes on the next launch."))
+
+    def _build_menu(self) -> None:
+        m = self.menuBar().addMenu(t("&File"))
+
+        open_act = QAction(t("&Open DICOM folder…"), self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._choose_folder)
         m.addAction(open_act)
 
-        open_file_act = QAction("Open DICOM &file…", self)
+        open_file_act = QAction(t("Open DICOM &file…"), self)
         open_file_act.setShortcut("Ctrl+Shift+O")
         open_file_act.setToolTip(
-            "Open one or more individual DICOM files (not the whole folder)"
+            t("Open one or more individual DICOM files (not the whole folder)")
         )
         open_file_act.triggered.connect(self._choose_files)
         m.addAction(open_file_act)
 
-        clear_act = QAction("&Clear viewers", self)
+        clear_act = QAction(t("&Clear viewers"), self)
         clear_act.triggered.connect(self._clear_all)
         m.addAction(clear_act)
 
         m.addSeparator()
-        quit_act = QAction("&Quit", self)
+        quit_act = QAction(t("&Quit"), self)
         quit_act.setShortcut("Ctrl+Q")
         quit_act.triggered.connect(self.close)
         m.addAction(quit_act)
 
-        vm = self.menuBar().addMenu("&View")
-        self._anon_act = QAction("&Anonymize", self)
+        self._build_language_menu()
+
+        vm = self.menuBar().addMenu(t("&View"))
+        self._anon_act = QAction(t("&Anonymize"), self)
         self._anon_act.setCheckable(True)
         self._anon_act.setShortcut("Ctrl+Shift+A")
-        self._anon_act.setToolTip(
+        self._anon_act.setToolTip(t(
             "Mask patient/case info on all on-screen displays "
             "(files unchanged)"
-        )
+        ))
         self._anon_act.toggled.connect(self._set_anonymized)
         vm.addAction(self._anon_act)
 
-        tags_act = QAction("DICOM tag overlay items…", self)
+        tags_act = QAction(t("DICOM tag overlay items…"), self)
         tags_act.triggered.connect(self._tags_for_active_pane)
         vm.addAction(tags_act)
 
-        self._hide_overlay_act = QAction("Hide DICOM overlay", self)
+        self._hide_overlay_act = QAction(t("Hide DICOM overlay"), self)
         self._hide_overlay_act.setCheckable(True)
         # Q is the quick single-key toggle (shown in the menu); Ctrl+H
         # kept so the old shortcut still works. (D used to do this — it
@@ -1008,78 +1041,78 @@ class MainWindow(QMainWindow):
         self._hide_overlay_act.setShortcuts(
             [QKeySequence("Q"), QKeySequence("Ctrl+H")]
         )
-        self._hide_overlay_act.setToolTip(
+        self._hide_overlay_act.setToolTip(t(
             "Show/hide the DICOM tag text drawn on the image (Q)"
-        )
+        ))
         self._hide_overlay_act.toggled.connect(self._toggle_overlay_hidden)
         vm.addAction(self._hide_overlay_act)
 
         vm.addSeparator()
-        exp_act = QAction("Export DICOM tag overlay settings…", self)
+        exp_act = QAction(t("Export DICOM tag overlay settings…"), self)
         exp_act.triggered.connect(self._export_tag_conditions)
         vm.addAction(exp_act)
 
-        imp_act = QAction("Import DICOM tag overlay settings…", self)
+        imp_act = QAction(t("Import DICOM tag overlay settings…"), self)
         imp_act.triggered.connect(self._import_tag_conditions)
         vm.addAction(imp_act)
 
-        tm = self.menuBar().addMenu("&Tools")
-        self._sync_act = QAction("MultiSync IVUS viewer…", self)
-        self._sync_act.setToolTip(
+        tm = self.menuBar().addMenu(t("&Tools"))
+        self._sync_act = QAction(t("MultiSync IVUS viewer…"), self)
+        self._sync_act.setToolTip(t(
             "Open the panes' IVUS series in a synchronised viewer "
             "(only available in the 1×2 / 2×1 / 2×2 layout)"
-        )
+        ))
         self._sync_act.triggered.connect(self._open_multisync)
         tm.addAction(self._sync_act)
-        self._rupture_act = QAction("Rupture-Predictor…", self)
+        self._rupture_act = QAction(t("Rupture-Predictor…"), self)
         self._rupture_act.triggered.connect(self._open_rupture_predictor)
         tm.addAction(self._rupture_act)
-        self._ortho_act = QAction("Orthogonal-View…", self)
-        self._ortho_act.setToolTip(
+        self._ortho_act = QAction(t("Orthogonal-View…"), self)
+        self._ortho_act.setToolTip(t(
             "Pick a vector on the active XA image and get the two C-arm "
             "angles whose view is orthogonal to it "
             "(available whenever the active pane shows an XA series "
             "with C-arm positioner angles)"
-        )
+        ))
         self._ortho_act.triggered.connect(self._open_orthogonal_view)
         tm.addAction(self._ortho_act)
-        self._coaxial_act = QAction("Coaxial Eval…", self)
-        self._coaxial_act.setToolTip(
+        self._coaxial_act = QAction(t("Coaxial Eval…"), self)
+        self._coaxial_act.setToolTip(t(
             "Draw a labelled Line (GC / proxLAD / …) on the same vessel in "
             "2+ angio views, then compute the 3-D GC-to-vessel angle "
             "(available whenever a visible pane shows an XA series with "
             "C-arm positioner angles)"
-        )
+        ))
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
-        self._coreg_act = QAction("IVUS-XA CoReg…", self)
-        self._coreg_act.setToolTip(
+        self._coreg_act = QAction(t("IVUS-XA CoReg…"), self)
+        self._coreg_act.setToolTip(t(
             "Co-register IVUS pull-back frames to positions on the angio "
             "vessel: trace a guide, pin CoReg landmarks, then scrubbing "
             "the IVUS drives a marker along the angio "
             "(needs at least one IVUS and one XA series loaded)"
-        )
+        ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
 
         tm.addSeparator()
-        self._dicomcheck_act = QAction("DicomCheck…", self)
-        self._dicomcheck_act.setToolTip(
+        self._dicomcheck_act = QAction(t("DicomCheck…"), self)
+        self._dicomcheck_act.setToolTip(t(
             "Scan a folder and delete non-DICOM files (and empty folders)"
-        )
+        ))
         self._dicomcheck_act.triggered.connect(self._open_dicom_check)
         tm.addAction(self._dicomcheck_act)
-        self._dicomfolder_act = QAction("DicomFolder…", self)
-        self._dicomfolder_act.setToolTip(
+        self._dicomfolder_act = QAction(t("DicomFolder…"), self)
+        self._dicomfolder_act.setToolTip(t(
             "Organize DICOM files into sub-folders by date / modality / study"
-        )
+        ))
         self._dicomfolder_act.triggered.connect(self._open_dicom_folder)
         tm.addAction(self._dicomfolder_act)
-        self._bintag_act = QAction("Export binary DICOM tag…", self)
-        self._bintag_act.setToolTip(
+        self._bintag_act = QAction(t("Export binary DICOM tag…"), self)
+        self._bintag_act.setToolTip(t(
             "Write a binary VR tag (OB/OW/UN — shown as <binary>) to text "
             "as hex / Base64 / Latin-1"
-        )
+        ))
         self._bintag_act.triggered.connect(self._open_bintag_export)
         tm.addAction(self._bintag_act)
         self._sync_layout_gate()

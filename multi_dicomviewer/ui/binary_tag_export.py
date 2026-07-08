@@ -34,6 +34,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from multi_dicomviewer.i18n import t
+
 #: Pane-grid geometry for the "Select" picker (matches the app's max layout).
 _GRID_ROWS, _GRID_COLS = 4, 3
 
@@ -49,7 +51,8 @@ def parse_tag(s: str) -> Tag:
     """'0029,1007' / '00291007' / '(0029,1007)' → Tag(0x0029, 0x1007)."""
     t = s.strip().lstrip("(").rstrip(")").replace(",", "").replace(" ", "")
     if len(t) != 8:
-        raise ValueError(f"Tag must be 8 hex digits (group+element): {s!r}")
+        raise ValueError(
+            t("Tag must be 8 hex digits (group+element): {s}", s=repr(s)))
     return Tag(int(t[:4], 16), int(t[4:], 16))
 
 
@@ -61,7 +64,7 @@ def read_tag_bytes(file_path: str, tag: Tag) -> tuple[str, bytes]:
     if tag not in ds:
         ds = pydicom.dcmread(file_path, force=True)   # e.g. tag at/after pixels
     if tag not in ds:
-        raise KeyError(f"{tag} is not present in this file")
+        raise KeyError(t("{tag} is not present in this file", tag=tag))
     elem = ds[tag]
     raw = elem.value
     if not isinstance(raw, (bytes, bytearray, memoryview)):
@@ -103,19 +106,19 @@ class _PaneGridDialog(QDialog):
 
     def __init__(self, entries, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Select a pane")
+        self.setWindowTitle(t("Select a pane"))
         self.chosen_path: str | None = None
         self.chosen_label: str = ""
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("Click a pane to use its DICOM file as the source:"))
+        v.addWidget(QLabel(t("Click a pane to use its DICOM file as the source:")))
         grid = QGridLayout()
         grid.setSpacing(6)
         for i, e in enumerate(entries):
             r, c = divmod(i, _GRID_COLS)
             path = e.get("path")
             label = e.get("label") or ""
-            btn = QPushButton(f"Pane {e.get('slot', i + 1)}\n"
-                              + (label if path else "(empty)"))
+            btn = QPushButton(t("Pane {n}", n=e.get('slot', i + 1)) + "\n"
+                              + (label if path else t("(empty)")))
             btn.setMinimumSize(150, 64)
             if path:
                 btn.setToolTip(path)
@@ -127,7 +130,7 @@ class _PaneGridDialog(QDialog):
         v.addLayout(grid)
         brow = QHBoxLayout()
         brow.addStretch(1)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(t("Cancel"))
         cancel.clicked.connect(self.reject)
         brow.addWidget(cancel)
         v.addLayout(brow)
@@ -144,7 +147,7 @@ class BinaryTagExportDialog(QDialog):
 
     def __init__(self, pane_entries=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Export binary DICOM tag")
+        self.setWindowTitle(t("Export binary DICOM tag"))
         self.resize(560, 300)
         self._vr = None
         self._raw: bytes | None = None
@@ -155,38 +158,38 @@ class BinaryTagExportDialog(QDialog):
 
         # --- DICOM file: chosen from a currently-open pane (not the filesystem)
         frow = QHBoxLayout()
-        frow.addWidget(QLabel("DICOM file:"))
+        frow.addWidget(QLabel(t("DICOM file:")))
         self._file = QLineEdit()
         self._file.setReadOnly(True)
-        self._file.setPlaceholderText("(choose a pane with Select →)")
+        self._file.setPlaceholderText(t("(choose a pane with Select →)"))
         frow.addWidget(self._file, 1)
-        sb = QPushButton("Select")
-        sb.setToolTip("Pick the source from a currently-open pane")
+        sb = QPushButton(t("Select"))
+        sb.setToolTip(t("Pick the source from a currently-open pane"))
         sb.clicked.connect(self._select_from_panes)
         frow.addWidget(sb)
         v.addLayout(frow)
 
         # --- tag + read
         trow = QHBoxLayout()
-        trow.addWidget(QLabel("Tag (group,element):"))
+        trow.addWidget(QLabel(t("Tag (group,element):")))
         self._tag = QLineEdit()
-        self._tag.setPlaceholderText("e.g. 0029,1007")
+        self._tag.setPlaceholderText(t("e.g. 0029,1007"))
         trow.addWidget(self._tag, 1)
-        rb = QPushButton("Read")
+        rb = QPushButton(t("Read"))
         rb.clicked.connect(self._read)
         trow.addWidget(rb)
         v.addLayout(trow)
 
-        self._info = QLabel("Choose a file and tag, then Read.")
+        self._info = QLabel(t("Choose a file and tag, then Read."))
         self._info.setWordWrap(True)
         v.addWidget(self._info)
 
         # --- formats
-        box = QGroupBox("Formats to export")
+        box = QGroupBox(t("Formats to export"))
         bl = QVBoxLayout(box)
         self._checks: dict[str, QCheckBox] = {}
         for key, _suffix, label in _FORMATS:
-            cb = QCheckBox(label)
+            cb = QCheckBox(t(label))
             cb.setChecked(True)
             self._checks[key] = cb
             bl.addWidget(cb)
@@ -194,10 +197,10 @@ class BinaryTagExportDialog(QDialog):
 
         # --- output folder
         orow = QHBoxLayout()
-        orow.addWidget(QLabel("Output folder:"))
+        orow.addWidget(QLabel(t("Output folder:")))
         self._out = QLineEdit()
         orow.addWidget(self._out, 1)
-        ob = QPushButton("Browse…")
+        ob = QPushButton(t("Browse…"))
         ob.clicked.connect(self._browse_out)
         orow.addWidget(ob)
         v.addLayout(orow)
@@ -205,11 +208,11 @@ class BinaryTagExportDialog(QDialog):
         # --- actions
         brow = QHBoxLayout()
         brow.addStretch(1)
-        self._export_btn = QPushButton("Export")
+        self._export_btn = QPushButton(t("Export"))
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export)
         brow.addWidget(self._export_btn)
-        close = QPushButton("Close")
+        close = QPushButton(t("Close"))
         close.clicked.connect(self.reject)
         brow.addWidget(close)
         v.addLayout(brow)
@@ -218,8 +221,8 @@ class BinaryTagExportDialog(QDialog):
     def _select_from_panes(self) -> None:
         if not any(e.get("path") for e in self._pane_entries):
             QMessageBox.information(
-                self, "Export binary DICOM tag",
-                "No DICOM data is open. Load a series into a pane first.")
+                self, t("Export binary DICOM tag"),
+                t("No DICOM data is open. Load a series into a pane first."))
             return
         picker = _PaneGridDialog(self._pane_entries, self)
         if picker.exec() and picker.chosen_path:
@@ -229,11 +232,11 @@ class BinaryTagExportDialog(QDialog):
             self._raw = None
             self._export_btn.setEnabled(False)
             self._info.setText(
-                f"Selected: {picker.chosen_label or picker.chosen_path}.  "
-                "Enter a tag and click Read.")
+                t("Selected: {sel}.  Enter a tag and click Read.",
+                  sel=picker.chosen_label or picker.chosen_path))
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Output folder",
+        d = QFileDialog.getExistingDirectory(self, t("Output folder"),
                                              self._out.text() or "")
         if d:
             self._out.setText(d)
@@ -243,27 +246,30 @@ class BinaryTagExportDialog(QDialog):
         self._export_btn.setEnabled(False)
         path = self._file.text().strip()
         if not os.path.isfile(path):
-            QMessageBox.warning(self, "Export binary DICOM tag",
-                                "Please choose a valid DICOM file.")
+            QMessageBox.warning(self, t("Export binary DICOM tag"),
+                                t("Please choose a valid DICOM file."))
             return
         try:
             tag = parse_tag(self._tag.text())
         except ValueError as exc:
-            QMessageBox.warning(self, "Export binary DICOM tag", str(exc))
+            QMessageBox.warning(self, t("Export binary DICOM tag"), str(exc))
             return
         try:
             vr, raw = read_tag_bytes(path, tag)
         except Exception as exc:
-            QMessageBox.warning(self, "Export binary DICOM tag",
-                                f"Could not read {tag}:\n{exc}")
+            QMessageBox.warning(self, t("Export binary DICOM tag"),
+                                t("Could not read {tag}:\n{exc}", tag=tag, exc=exc))
             return
         self._vr = vr
         self._raw = raw
         printable = sum(1 for b in raw if 32 <= b < 127 or b in (9, 10, 13))
         pct = printable / max(len(raw), 1)
         self._info.setText(
-            f"Tag {tag}  VR={vr}  {len(raw):,} bytes  "
-            f"printable {printable:,}/{len(raw):,} ({pct:.1%})"
+            t("Tag {tag}  VR={vr}  {nbytes} bytes  "
+              "printable {printable}/{total} ({pct})",
+              tag=tag, vr=vr, nbytes=f"{len(raw):,}",
+              printable=f"{printable:,}", total=f"{len(raw):,}",
+              pct=f"{pct:.1%}")
         )
         if not self._out.text():
             self._out.setText(os.path.dirname(os.path.abspath(path)))
@@ -274,8 +280,8 @@ class BinaryTagExportDialog(QDialog):
             return
         formats = [k for k, cb in self._checks.items() if cb.isChecked()]
         if not formats:
-            QMessageBox.warning(self, "Export binary DICOM tag",
-                                "Select at least one format.")
+            QMessageBox.warning(self, t("Export binary DICOM tag"),
+                                t("Select at least one format."))
             return
         out_dir = self._out.text().strip() or os.path.dirname(
             os.path.abspath(self._file.text()))
@@ -284,9 +290,9 @@ class BinaryTagExportDialog(QDialog):
             written = export_tag(self._file.text(), tag, self._raw,
                                  formats, out_dir)
         except Exception as exc:
-            QMessageBox.critical(self, "Export binary DICOM tag",
-                                 f"Export failed:\n{exc}")
+            QMessageBox.critical(self, t("Export binary DICOM tag"),
+                                 t("Export failed:\n{exc}", exc=exc))
             return
         QMessageBox.information(
-            self, "Export binary DICOM tag",
-            "Wrote:\n" + "\n".join(written))
+            self, t("Export binary DICOM tag"),
+            t("Wrote:\n{files}", files="\n".join(written)))

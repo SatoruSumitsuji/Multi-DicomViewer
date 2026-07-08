@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import coreg, dicom_io
 from multi_dicomviewer.core.study_model import Modality, Series
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.image_canvas import ImageCanvas
 from multi_dicomviewer.viewers.xa_viewer import apply_window
 
@@ -111,7 +112,7 @@ class _CoregPane:
         self.master_radio.setToolTip(
             "Make this the active IVUS — its frame drives the markers")
         self.master_radio.toggled.connect(self._on_master_toggled)
-        self.include_cb = QCheckBox("この点に含める")
+        self.include_cb = QCheckBox(t("Include in this point"))
         self.include_cb.setChecked(True)
         self.include_cb.setToolTip(
             "While adding a CoReg point, include this IVUS's current frame")
@@ -257,35 +258,36 @@ class CoregWindow(QMainWindow):
         v = QVBoxLayout(panel)
 
         # Guide section — one Trace/Clear row per angio pane (filled later).
-        gbox = QGroupBox("ガイド線 (血管トレース)")
+        gbox = QGroupBox(t("Guide line (vessel trace)"))
         self._guide_box = QVBoxLayout(gbox)
         v.addWidget(gbox)
 
         # CoReg points section.
-        cbox = QGroupBox("CoReg点")
+        cbox = QGroupBox(t("CoReg points"))
         cv = QVBoxLayout(cbox)
         # Mode toggle: white = click to enter create/modify (goes blue); blue
         # = click to commit (確定). Modifies the selected CoReg point, or
         # creates a new one when none is selected.
-        self._add_btn = QPushButton("CoReg点の追加・修正・確定")
+        self._add_btn = QPushButton(t("Add / edit / commit CoReg point"))
         self._add_btn.clicked.connect(self._on_mode_button)
         cv.addWidget(self._add_btn)
-        self._sort_btn = QPushButton("CoReg点をソート")
-        self._sort_btn.setToolTip("アクティブIVUSのフレーム順に並べ替え")
+        self._sort_btn = QPushButton(t("Sort CoReg points"))
+        self._sort_btn.setToolTip(t("Sort by the active IVUS frame order"))
         self._sort_btn.clicked.connect(self._sort_landmarks)
         cv.addWidget(self._sort_btn)
-        self._clear_all_btn = QPushButton("CoReg点の一括削除")
+        self._clear_all_btn = QPushButton(t("Delete all CoReg points"))
         self._clear_all_btn.clicked.connect(self._clear_all_landmarks)
         cv.addWidget(self._clear_all_btn)
-        self._cancel_btn = QPushButton("キャンセル")
+        self._cancel_btn = QPushButton(t("Cancel"))
         self._cancel_btn.clicked.connect(self._cancel_placing)
         self._cancel_btn.setVisible(False)
         cv.addWidget(self._cancel_btn)
         # Commit a CoReg point with NO XA position — for landmarks that are
         # only identifiable on IVUS (used for IVUS↔IVUS sync only).
-        self._exclude_xa_cb = QCheckBox("XA除外（IVUS同期のみ）")
+        self._exclude_xa_cb = QCheckBox(t("Exclude XA (IVUS sync only)"))
         self._exclude_xa_cb.setToolTip(
-            "XA上で位置を決めず、このCoReg点をIVUS同期にだけ使う")
+            t("Don't set a position on XA; use this CoReg point only for "
+              "IVUS sync"))
         self._exclude_xa_cb.setVisible(False)
         cv.addWidget(self._exclude_xa_cb)
         self._status = QLabel("")
@@ -304,13 +306,13 @@ class CoregWindow(QMainWindow):
         v.addWidget(cbox, 1)
 
         # Marker style toggles.
-        sbox = QGroupBox("マーカー表示")
+        sbox = QGroupBox(t("Marker display"))
         sv = QVBoxLayout(sbox)
         self._style_cbs: dict[str, QCheckBox] = {}
-        for key, text, on in (("guide", "ガイド線", True),
-                              ("point", "点", True),
-                              ("cutline", "断面線", False),
-                              ("arrow", "方向矢印", False)):
+        for key, text, on in (("guide", t("Guide line"), True),
+                              ("point", t("Point"), True),
+                              ("cutline", t("Cut line"), False),
+                              ("arrow", t("Direction arrow"), False)):
             cb = QCheckBox(text)
             cb.setChecked(on)
             cb.toggled.connect(self._apply_style)
@@ -361,11 +363,11 @@ class CoregWindow(QMainWindow):
         angio_no = sum(1 for p in self.panes if not p.is_ivus)
         mod = pane.series.modality.value if pane.series else "?"
         lbl = QLabel(f"#{angio_no} {mod}")
-        trace = QPushButton("トレース")
+        trace = QPushButton(t("Trace"))
         trace.setCheckable(True)
         trace.toggled.connect(
             lambda on, pi=pane.index: self._toggle_trace(pi, on))
-        clr = QPushButton("クリア")
+        clr = QPushButton(t("Clear"))
         clr.clicked.connect(lambda _=False, pi=pane.index: self._clear_guide(pi))
         row.addWidget(lbl)
         row.addStretch(1)
@@ -389,9 +391,10 @@ class CoregWindow(QMainWindow):
                 pane.show_frame(int(g["frame"]))
             pane.canvas.set_coreg_edit(True)
             pane.canvas.set_coreg_mode("trace")
-            self._status.setText(
-                "クリックで頂点追加、ダブルクリックで確定。頂点は赤くなったら"
-                "ドラッグで移動／右クリック→点の削除。線上で右クリック→点の追加。")
+            self._status.setText(t(
+                "Click to add a vertex, double-click to commit. Once a vertex "
+                "turns red, drag to move it / right-click to delete it. "
+                "Right-click on the line to add a point."))
         else:
             if self._tracing == pane_idx:
                 self._tracing = -1
@@ -438,7 +441,7 @@ class CoregWindow(QMainWindow):
 
     def _start_placing(self) -> None:
         if self._active_ivus < 0:
-            QMessageBox.information(self, "CoReg", "IVUSがありません。")
+            QMessageBox.information(self, "CoReg", t("There is no IVUS."))
             return
         # XA is optional: with no angio panes this is a pure multi-IVUS sync
         # point. (An untraced XA is handled at commit — the marker just has
@@ -481,17 +484,19 @@ class CoregWindow(QMainWindow):
         self._clear_all_btn.setVisible(False)
         self._update_coreg_controls_enabled()
         if not has_angio:
-            self._status.setText(
-                "各IVUSを目印フレーム・回転へ合わせ、もう一度ボタンで確定"
-                "（IVUS同期点）。")
+            self._status.setText(t(
+                "Align each IVUS to the landmark frame/rotation, then press "
+                "the button again to commit (IVUS sync point)."))
         elif modifying:
-            self._status.setText(
-                f"CoReg-{self._selected_lm + 1} を修正中: アンギオのガイド上の"
-                "丸を目的位置へ移動 → もう一度ボタンで確定。")
+            self._status.setText(t(
+                "Editing CoReg-{n}: move the circle on the angio guide to "
+                "the target position, then press the button again to commit.",
+                n=self._selected_lm + 1))
         else:
-            self._status.setText(
-                "新規CoReg点: 同定できるアンギオでガイド上の丸を目的位置へ"
-                "移動 → もう一度ボタンで確定。")
+            self._status.setText(t(
+                "New CoReg point: on an angio where it can be identified, "
+                "move the circle on the guide to the target position, then "
+                "press the button again to commit."))
 
     def _on_slider_moved(self, pane_idx: int, s: float) -> None:
         # Provisional anchor for this angio while placing a CoReg point.
@@ -506,8 +511,8 @@ class CoregWindow(QMainWindow):
         if not exclude_xa and not self._pending_fracs:
             QMessageBox.information(
                 self, "CoReg",
-                "少なくとも1つのアンギオで丸を配置してください"
-                "（XAで決められない場合は『XA除外』をON）。")
+                t("Place the circle on at least one angio (if you cannot "
+                  "decide on XA, turn on 'Exclude XA')."))
             return
         fracs = {} if exclude_xa else dict(self._pending_fracs)
         if 0 <= self._selected_lm < len(self._landmarks):
@@ -520,7 +525,7 @@ class CoregWindow(QMainWindow):
                       if p.is_ivus and p.include_cb.isChecked()}
             if not frames:
                 QMessageBox.information(
-                    self, "CoReg", "含めるIVUSを1つ以上選んでください。")
+                    self, "CoReg", t("Select at least one IVUS to include."))
                 return
             rots = {i: self.panes[i].canvas.free_rotation() for i in frames}
             self._landmarks.append(
@@ -598,11 +603,11 @@ class CoregWindow(QMainWindow):
             h.setSpacing(3)
             x = QPushButton("✕")          # delete, moved to the left
             x.setFixedWidth(26)
-            x.setToolTip("このCoReg点を削除")
+            x.setToolTip(t("Delete this CoReg point"))
             x.clicked.connect(lambda _c, i=n - 1: self._delete_landmark(i))
             b = QPushButton(lm.get("name") or f"CoReg-{n}")   # jump / rename
             b.setFixedWidth(78)
-            b.setToolTip(self._landmark_tip(lm) + "\n(右クリックで名称変更)")
+            b.setToolTip(self._landmark_tip(lm) + t("\n(right-click to rename)"))
             b.clicked.connect(lambda _c, i=n - 1: self._goto_landmark(i))
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(
@@ -642,7 +647,7 @@ class CoregWindow(QMainWindow):
             return
         cur = self._landmarks[idx].get("name", "")
         text, ok = QInputDialog.getText(
-            self, "名称変更", "名称（8文字まで）:", text=cur)
+            self, t("Rename"), t("Name (up to 8 characters):"), text=cur)
         if ok:
             self._landmarks[idx]["name"] = text.strip()[:8]
             self._refresh_list()
@@ -677,7 +682,7 @@ class CoregWindow(QMainWindow):
         if not self._landmarks:
             return
         if QMessageBox.question(
-                self, "CoReg", "すべてのCoReg点を削除しますか？"
+                self, "CoReg", t("Delete all CoReg points?")
         ) == QMessageBox.StandardButton.Yes:
             self._landmarks.clear()
             self._selected_lm = -1
