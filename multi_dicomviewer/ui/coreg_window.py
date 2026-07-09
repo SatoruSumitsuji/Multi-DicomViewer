@@ -25,11 +25,15 @@ pre/post/FU at the same anatomy. The panes are deliberately lightweight
 """
 from __future__ import annotations
 
+import json
+import os
+
 import numpy as np
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QGroupBox,
@@ -278,6 +282,22 @@ class CoregWindow(QMainWindow):
         self._clear_all_btn = QPushButton(t("Delete all CoReg points"))
         self._clear_all_btn.clicked.connect(self._clear_all_landmarks)
         cv.addWidget(self._clear_all_btn)
+        # Persist CoReg points + guide traces to a file, and reload them
+        # (also imports a legacy MultiSync .txt as IVUS-only sync points).
+        io_row = QHBoxLayout()
+        io_row.setContentsMargins(0, 0, 0, 0)
+        self._save_btn = QPushButton(t("Save CoReg…"))
+        self._save_btn.setToolTip(
+            t("Save the CoReg points and guide traces to a file"))
+        self._save_btn.clicked.connect(self._save_coreg)
+        io_row.addWidget(self._save_btn)
+        self._load_btn = QPushButton(t("Load CoReg…"))
+        self._load_btn.setToolTip(
+            t("Load CoReg points / guide traces from a file "
+              "(or import a MultiSync .txt)"))
+        self._load_btn.clicked.connect(self._load_coreg)
+        io_row.addWidget(self._load_btn)
+        cv.addLayout(io_row)
         self._cancel_btn = QPushButton(t("Cancel"))
         self._cancel_btn.clicked.connect(self._cancel_placing)
         self._cancel_btn.setVisible(False)
@@ -688,6 +708,162 @@ class CoregWindow(QMainWindow):
             self._selected_lm = -1
             self._refresh_list()
             self._drive_markers()
+
+    # ------------------------------------------------- save / load
+    def _save_coreg(self) -> None:
+        """Write the CoReg points + guide traces to a JSON file. The guide
+        curves are NOT stored (re-derived from the vertices on load)."""
+        if not self._landmarks and not any(
+                g.get("vertices") for g in self._guides.values()):
+            QMessageBox.information(
+                self, "CoReg", t("Nothing to save yet."))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Save CoReg"), "", t("CoReg file (*.coreg.json)"))
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".coreg.json"
+        data = {
+            "format": "MDV-CoReg",
+            "version": 1,
+            "panes": [
+                {"index": p.index, "ivus": bool(p.is_ivus),
+                 "label": (p.series.label if p.series is not None else "")}
+                for p in self.panes
+            ],
+            "guides": {
+                str(i): {"vertices": [[float(x), float(y)] for (x, y) in
+                                      g.get("vertices", [])],
+                         "frame": g.get("frame")}
+                for i, g in self._guides.items() if g.get("vertices")
+            },
+            "landmarks": [
+                {"frames": {str(k): int(v) for k, v in lm.get("frames", {}).items()},
+                 "rots": {str(k): float(v) for k, v in lm.get("rots", {}).items()},
+                 "fracs": {str(k): float(v) for k, v in lm.get("fracs", {}).items()},
+                 "name": lm.get("name", "")}
+                for lm in self._landmarks
+            ],
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False, indent=1)
+        except OSError as exc:
+            QMessageBox.warning(self, t("Save CoReg"), str(exc))
+            return
+        self._status.setText(
+            t("Saved {n} CoReg point(s).", n=len(self._landmarks)))
+
+    def _load_coreg(self) -> None:
+        """Load CoReg points + guide traces from a native .coreg.json, or
+        import a legacy MultiSync .txt as IVUS-only sync points."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("Load CoReg"), "",
+            t("CoReg / MultiSync (*.json *.txt);;All files (*)"))
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError as exc:
+            QMessageBox.warning(self, t("Load CoReg"), str(exc))
+            return
+        if path.lower().endswith(".txt") or text.lstrip().startswith("#"):
+            landmarks, guides = self._parse_multisync_txt(text), {}
+        else:
+            try:
+                data = json.loads(text)
+            except ValueError as exc:
+                QMessageBox.warning(self, t("Load CoReg"), str(exc))
+                return
+            landmarks, guides = self._parse_coreg_json(data)
+        if landmarks is None:
+            QMessageBox.warning(
+                self, t("Load CoReg"), t("Unrecognised CoReg file."))
+            return
+        self._apply_loaded(landmarks, guides)
+
+    def _parse_coreg_json(self, data):
+        """(landmarks, guides) from a native file, with int-keyed maps —
+        or (None, None) if the file is not a CoReg file."""
+        if not isinstance(data, dict) or data.get("format") != "MDV-CoReg":
+            return None, None
+        lms = []
+        for lm in data.get("landmarks", []):
+            lms.append({
+                "frames": {int(k): int(v) for k, v in lm.get("frames", {}).items()},
+                "rots": {int(k): float(v) for k, v in lm.get("rots", {}).items()},
+                "fracs": {int(k): float(v) for k, v in lm.get("fracs", {}).items()},
+                "name": str(lm.get("name", "")),
+            })
+        guides = {}
+        for k, g in data.get("guides", {}).items():
+            verts = [tuple(v) for v in g.get("vertices", [])]
+            if verts:
+                guides[int(k)] = {"vertices": verts, "frame": g.get("frame")}
+        return lms, guides
+
+    def _parse_multisync_txt(self, text: str):
+        """Import a MultiSync '# MultiSync settings v1' .txt: each SyncPoint's
+        per-slot frame/rotation becomes an IVUS-only CoReg landmark. Slot k
+        maps to the k-th IVUS pane on screen (best effort; no XA fracs)."""
+        ivus_panes = [p.index for p in self.panes if p.is_ivus]
+        lms = []
+        in_pts = False
+        for raw in text.splitlines():
+            line = raw.rstrip("\n")
+            if line.startswith("[SyncPoints]"):
+                in_pts = True
+                continue
+            if line.startswith("[") and line != "[SyncPoints]":
+                in_pts = False
+            if not in_pts or not line.strip() or line.lstrip().startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) < 2:
+                continue
+            name = cols[0].strip()
+            rest = cols[1:]
+            half = len(rest) // 2
+            frames_raw, rots_raw = rest[:half], rest[half:]
+            frames, rots = {}, {}
+            for slot, fv in enumerate(frames_raw):
+                if slot >= len(ivus_panes) or fv.strip() in ("", "-"):
+                    continue
+                pi = ivus_panes[slot]
+                try:
+                    frames[pi] = int(float(fv))
+                    if slot < len(rots_raw):
+                        rots[pi] = float(rots_raw[slot])
+                except ValueError:
+                    continue
+            if frames:
+                lms.append({"frames": frames, "rots": rots,
+                            "fracs": {}, "name": name[:8]})
+        return lms
+
+    def _apply_loaded(self, landmarks, guides) -> None:
+        """Replace the current CoReg points + guides with loaded ones and
+        redraw. Guide curves are re-derived from vertices here."""
+        self._landmarks = landmarks
+        self._selected_lm = -1
+        # Guides: keep only those whose pane still exists and is an angio pane.
+        valid = {p.index for p in self.panes if not p.is_ivus}
+        for i in list(self._guides):
+            self._clear_guide(i)
+        for i, g in (guides or {}).items():
+            if i not in valid:
+                continue
+            verts = [tuple(v) for v in g["vertices"]]
+            curve = coreg.smooth_curve(verts)
+            self._guides[i] = {"vertices": verts, "curve": curve,
+                               "frame": g.get("frame")}
+            self.panes[i].canvas.set_coreg_guide(verts, curve)
+        self._refresh_list()
+        self._drive_markers()
+        self._status.setText(
+            t("Loaded {n} CoReg point(s).", n=len(self._landmarks)))
 
     def _on_ivus_grab(self) -> None:
         # User grabbed an IVUS seekbar (not during placement) → they are
