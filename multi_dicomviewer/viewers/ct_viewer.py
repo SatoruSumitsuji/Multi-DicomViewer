@@ -1149,7 +1149,7 @@ class _ColorMapDialog(QDialog):
         btns = QHBoxLayout()
         add = QPushButton(t("Add"))
         add.clicked.connect(self._add_band)
-        rst = QPushButton("Reset")
+        rst = QPushButton(t("Reset"))
         rst.clicked.connect(self._reset)
         close = QPushButton(t("Close"))
         close.clicked.connect(self.accept)
@@ -1522,7 +1522,8 @@ class CTViewer(AbstractViewer):
         row2.setContentsMargins(0, 0, 0, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
-        row.addWidget(QLabel(t("Plane:")))
+        self._plane_lbl = QLabel(t("Plane:"))
+        row.addWidget(self._plane_lbl)
         self._side_btns: dict[str, QPushButton] = {}
         for key, tip in (
             ("Bi", t("Show both MPR panes")),
@@ -1565,7 +1566,7 @@ class CTViewer(AbstractViewer):
         # grey so they read as distinct from the tool / preset buttons.
         _util_btn_css = "background:#6e6e6e;color:#d8d8d8;"   # match Mac
 
-        reset = FitButton("Reset")
+        self._reset_btn = reset = FitButton("Reset")
         reset.setHelpToolTip(
             t("1st click: keep W/L, reset the view position / "
               "click again at the initial position: also reset W/L")
@@ -1603,7 +1604,8 @@ class CTViewer(AbstractViewer):
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
-        row.addWidget(QLabel(t("Slab(mm):")))
+        self._slab_lbl = QLabel(t("Slab(mm):"))
+        row.addWidget(self._slab_lbl)
         self._slab_spin = QDoubleSpinBox()
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
@@ -1622,7 +1624,7 @@ class CTViewer(AbstractViewer):
         row.addWidget(self._cl_btn)
         self._style_cl()
 
-        setting = FitButton(t("Setting"))
+        self._setting_btn = setting = FitButton(t("Setting"))
         setting.setHelpToolTip(
             t("HU colour-map settings (band colour, HU range, opacity)")
         )
@@ -1639,9 +1641,10 @@ class CTViewer(AbstractViewer):
         # DICOM Tags on the LEFT of the pair (always visible); Measure History
         # — less critical — to its right. Tag-text-size slider stacked above
         # (kept a 2-row control, matching the two-row toolbar height).
-        tags_box, self._tag_font_slider, tags = build_tag_font_control(
-            TAG_FONT_PT_DEFAULT
+        tags_box, self._tag_font_slider, self._tags_font_btn = (
+            build_tag_font_control(TAG_FONT_PT_DEFAULT)
         )
+        tags = self._tags_font_btn
         tags.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
@@ -1649,7 +1652,7 @@ class CTViewer(AbstractViewer):
         # per-viewer copy (kept only for set_overlay_font_pt slider sync).
         tags_box.setVisible(False)
 
-        hist = FitButton(t("Measure History"))
+        self._hist_btn = hist = FitButton(t("Measure History"))
         hist.setHelpToolTip(t("Show this study's measurement history"))
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
@@ -1734,6 +1737,118 @@ class CTViewer(AbstractViewer):
                     self._metric_lines.get(key, []), self._wrap_budget(key))))
             p.render()
 
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent, user-facing string via ``t()`` so a live
+        language switch (no restart) updates the CT toolbar / controls in place.
+
+        Mirrors the toolbar / measure-bar / seek-bar construction. Safe to call
+        whether or not a CT volume is loaded — every control is guarded with
+        getattr (some are built lazily). Two-state toggle labels are re-derived
+        from the CURRENT state (never flipped) by calling their own helper.
+        On-demand dialogs (Angio Angle, ColorMap) and per-frame VTK annotations
+        are NOT touched here — they are rebuilt / redrawn when next shown."""
+        # ---- toolbar row 1: view / plane / measure controls ----
+        if getattr(self, "_plane_lbl", None) is not None:
+            self._plane_lbl.setText(t("Plane:"))
+        side_tips = {
+            "Bi": t("Show both MPR panes"),
+            "Lt": t("Show only the left MPR pane"),
+            "Rt": t("Show only the right MPR pane"),
+        }
+        for key, b in getattr(self, "_side_btns", {}).items():
+            if key in side_tips:
+                b.setHelpToolTip(side_tips[key])
+        mode_tips = {
+            "3D": t("3-D MPR reconstruction (dual oblique reslice)"),
+            "2D": t("Show native acquisition slices one at a time (paging)"),
+        }
+        for key, b in getattr(self, "_mode_btns", {}).items():
+            if key in mode_tips:
+                b.setHelpToolTip(mode_tips[key])
+        if getattr(self, "_reset_btn", None) is not None:
+            self._reset_btn.setHelpToolTip(
+                t("1st click: keep W/L, reset the view position / "
+                  "click again at the initial position: also reset W/L"))
+        if getattr(self, "_recalc_btn", None) is not None:
+            self._recalc_btn.setHelpToolTip(
+                t("Re-derive the OTHER pane from the selected (active) pane's "
+                  "green-▲ centre line — fixes a mirrored / wrong companion "
+                  "after complex rotations, without resetting your view"))
+        if getattr(self, "_meas_btn", None) is not None:
+            self._meas_btn.setHelpToolTip(
+                t("Measure on the image (Line / Polyline / Ellipse / Polygon)"))
+        if getattr(self, "_slab_lbl", None) is not None:
+            self._slab_lbl.setText(t("Slab(mm):"))
+        if getattr(self, "_slab_spin", None) is not None:
+            self._slab_spin.setToolTip(
+                t("Slab-MIP thickness of the active pane (0 = thin MPR)"))
+        if getattr(self, "_cl_btn", None) is not None:
+            self._cl_btn.setHelpToolTip(t("Show/hide crosshair & slab lines"))
+        if getattr(self, "_setting_btn", None) is not None:
+            self._setting_btn.setText(t("Setting"))
+            self._setting_btn.setHelpToolTip(
+                t("HU colour-map settings (band colour, HU range, opacity)"))
+        if getattr(self, "_hist_btn", None) is not None:
+            self._hist_btn.setText(t("Measure History"))
+            self._hist_btn.setHelpToolTip(
+                t("Show this study's measurement history"))
+        # DICOM-tag overlay font control (hidden per-viewer copy, kept in sync).
+        if getattr(self, "_tag_font_slider", None) is not None:
+            self._tag_font_slider.setToolTip(t("DICOM tag text size"))
+        if getattr(self, "_tags_font_btn", None) is not None:
+            self._tags_font_btn.setText(t("DICOM Tags"))
+            self._tags_font_btn.setToolTip(
+                t("Choose DICOM tags to overlay on the image"))
+        # ---- toolbar row 2: 2-D image transforms (rotate 90° / flip) ----
+        t2d_tips = (
+            t("Rotate the image 90° clockwise"),
+            t("Rotate the image 90° counter-clockwise"),
+            t("Flip horizontally (left-right mirror)"),
+            t("Flip vertically (top-bottom)"),
+        )
+        for b, tip in zip(getattr(self, "_t2d_btns", []), t2d_tips):
+            b.setHelpToolTip(tip)
+        # ---- measure bar ----
+        if getattr(self, "_measure_lbl", None) is not None:
+            self._measure_lbl.setText(t("Measure:"))
+        if getattr(self, "_cmp_btn", None) is not None:
+            self._cmp_btn.setText(t("Compare"))
+            self._cmp_btn.setHelpToolTip(
+                t("Compare two Polygon/Ellipse: click the two shapes — shows "
+                  "%Area difference and a radial gap colour map "
+                  "(<5 / 5–7 / 7–9 / >9 mm)"))
+        if getattr(self, "_hideall_btn", None) is not None:
+            self._hideall_btn.setHelpToolTip(
+                t("Hide / Show every measurement line, region colour and "
+                  "result text"))
+            # Re-derives the Hide / Show All Result label from current state.
+            self._update_hideall_btn()
+        if getattr(self, "_clr_btn", None) is not None:
+            self._clr_btn.setText(t("Clear All Result"))
+            self._clr_btn.setHelpToolTip(
+                t("Clear all measurements and comparison results"))
+        if getattr(self, "_measure_hint_lbl", None) is not None:
+            self._measure_hint_lbl.setText(
+                t("  Left-click = add point /"
+                  " right-click finishes Polyline / Polygon"))
+        # ---- seek bar (2-D native-slice scrubber) ----
+        if getattr(self, "_seek_frame_lbl", None) is not None:
+            self._seek_frame_lbl.setText(t("Frame:"))
+        if getattr(self, "_seek_series_cap", None) is not None:
+            self._seek_series_cap.setText(t("Series:"))
+        if getattr(self, "_seek_series_lbl", None) is not None:
+            self._seek_series_lbl.setToolTip(
+                t("Series position in this study (current / total)"))
+        # Repaint the Qt controls, then re-render the panes so on-image text
+        # (DICOM tag overlay / measure results, drawn by VTK) also refreshes.
+        # _refresh is a no-op while no volume is loaded, so this stays safe.
+        self.update()
+        for c in (getattr(self, "canvas_a", None),
+                  getattr(self, "canvas_b", None)):
+            if c is not None:
+                c.update()
+        self._refresh()
+
     def _set_tool(self, name):
         # MPR-only tools are unavailable in 2-D native-slice mode (their
         # keyboard shortcuts are otherwise still live).
@@ -1785,7 +1900,8 @@ class CTViewer(AbstractViewer):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(QLabel(t("Measure:")))
+        self._measure_lbl = QLabel(t("Measure:"))
+        row.addWidget(self._measure_lbl)
         self._meas_btns = {}
         for label, key in (
             ("Line", "line"), ("Polyline", "polyline"),
@@ -1820,16 +1936,17 @@ class CTViewer(AbstractViewer):
         self._hideall_btn.setStyleSheet("background:#bdbdbd;color:#101010;")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
-        clr = FitButton(t("Clear All Result"))
+        self._clr_btn = clr = FitButton(t("Clear All Result"))
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.setHelpToolTip(t("Clear all measurements and comparison results"))
         clr.setStyleSheet("background:#6e6e6e;color:#d8d8d8;")   # Reset's grey
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
-        row.addWidget(QLabel(
+        self._measure_hint_lbl = QLabel(
             t("  Left-click = add point /"
               " right-click finishes Polyline / Polygon")
-        ))
+        )
+        row.addWidget(self._measure_hint_lbl)
         row.addStretch(1)
         self._update_hideall_btn()
         return bar

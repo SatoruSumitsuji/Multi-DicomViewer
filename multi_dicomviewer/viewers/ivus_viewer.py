@@ -352,6 +352,81 @@ class IVUSViewer(XAViewer):
         if not self._la_allowed and self._la_visible:
             self.toggle_long_axis()      # hide it (stops warm timer, clears)
 
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent, user-facing string this viewer builds so
+        a runtime language switch takes effect without a restart. Mirrors the
+        constructor's t() calls exactly; two-state labels/tooltips are
+        re-derived from the CURRENT state (never flipped). Safe to call with or
+        without a series loaded (every ref is guarded)."""
+        # Let the inherited (XA) viewer re-apply its own persistent strings
+        # first — the series-nav row, the DICOM-tag font control built by
+        # build_tag_font_control, "Measure History", etc. all live there.
+        sup = getattr(super(), "retranslate_ui", None)
+        if callable(sup):
+            sup()
+
+        # "Long View" toggle. Text is state-independent; the tooltip depends on
+        # whether the long-axis is currently allowed (see set_long_axis_allowed).
+        btn = getattr(self, "_long_view_btn", None)
+        if btn is not None:
+            btn.setText(t("Long View"))
+            if getattr(self, "_la_allowed", True):
+                btn.setToolTip(
+                    t("Show/hide the IVUS long-axis (longitudinal) view "
+                      "— shortcut: V")
+                )
+            else:
+                btn.setToolTip(
+                    t("Long-axis (longitudinal) view — available only in "
+                      "single-pane (1x1) layout")
+                )
+
+        # Centre-keyframe navigation cluster.
+        btn = getattr(self, "_prev_key_btn", None)
+        if btn is not None:
+            btn.setText(t("◀ Center"))
+            btn.setToolTip(
+                t("Jump to the previous frame with a manual rotation centre")
+            )
+        btn = getattr(self, "_next_key_btn", None)
+        if btn is not None:
+            btn.setText(t("Center ▶"))
+            btn.setToolTip(
+                t("Jump to the next frame with a manual rotation centre")
+            )
+        btn = getattr(self, "_clear_centers_btn", None)
+        if btn is not None:
+            btn.setText(t("Clear Centers"))
+            btn.setToolTip(
+                t("Remove every manual rotation centre on the active plane "
+                  "(same as right-click ▸ Reset all on the marker)")
+            )
+
+        # "Color" (カラー表示) toggle. Text is state-independent; the tooltip
+        # names both directions of the toggle, so it is re-applied verbatim.
+        btn = getattr(self, "_color_btn", None)
+        if btn is not None:
+            btn.setText(t("Color"))
+            btn.setToolTip(
+                t("IVUS: Gray to Color (NIRS chemograms, etc.)\n"
+                  "Return to Gray")
+            )
+
+        # Cascade to the child canvases so any on-image overlay / longitudinal
+        # strip re-translates and repaints. Call each canvas' own
+        # retranslate_ui when present, then force a repaint regardless.
+        for c in (getattr(self, "canvas", None),
+                  getattr(self, "canvas2", None),
+                  getattr(self, "long_axis", None)):
+            if c is None:
+                continue
+            rt = getattr(c, "retranslate_ui", None)
+            if callable(rt):
+                rt()
+            c.update()
+
+        self.update()
+
     def toggle_long_axis(self) -> None:
         """V shortcut / Long View button entry point. Shows/hides the
         strip and the per-frame rotation-centre marker on the cross-

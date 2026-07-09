@@ -406,6 +406,21 @@ class StudyBrowser(QTreeWidget):
         self._sort_modes: dict[tuple, tuple] = {}
         hdr.setSortIndicator(1, Qt.SortOrder.AscendingOrder)
 
+    def retranslate_ui(self) -> None:
+        """Re-apply the persistent column HEADER labels in the current
+        language. Per-row DICOM data (dates, descriptions, paths) is data,
+        not chrome, so it is left untouched. Safe to call anytime."""
+        self.setHeaderLabels([
+            t("Date/Time"),
+            t("Series No"),
+            t("Instance No"),
+            t("Type"),
+            t("Images"),
+            t("Description"),
+            t("File Path"),
+        ])
+        self.update()
+
     def _on_header_clicked(self, col: int) -> None:
         key = getattr(self, "_sort_cols", {}).get(col)
         if key is None:                       # Type/Description/Path
@@ -1402,6 +1417,53 @@ class StudyPanel(QWidget):
                      super().minimumSizeHint().height())
 
     # ----------------------------------------------------------- public API
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent user-facing string on this panel (and its
+        child tree) in the current language, mirroring how the constructor
+        built each widget. Context-menu / modal-dialog strings are rebuilt on
+        demand and per-row DICOM data is left as-is, so neither is touched
+        here. Safe to call anytime — every widget access is guarded."""
+        tree = getattr(self, "tree", None)
+        if tree is not None and hasattr(tree, "retranslate_ui"):
+            tree.retranslate_ui()
+        # Tree / Thumbnails toggle: two checkable buttons whose label stays
+        # constant (the checked state, not the text, flips) — re-apply as
+        # constructed.
+        if getattr(self, "btn_info", None) is not None:
+            self.btn_info.setText(t("📋 Tree"))
+        if getattr(self, "btn_thumb", None) is not None:
+            self.btn_thumb.setText(t("🖼 Thumbnails"))
+            self.btn_thumb.setToolTip(t(
+                "Left-click: thumbnail view (starts at min size × 10 across).\n"
+                "Right-click: re-apply the min size × 10 across layout."
+            ))
+        if getattr(self, "btn_anon", None) is not None:
+            self.btn_anon.setText(t("Anonymous"))
+            self.btn_anon.setHelpToolTip(t(
+                "Left-click: mask patient/case info on all on-screen displays "
+                "(files unchanged).\nRight-click: choose which tags to "
+                "anonymize (also used by Export (Anon DICOM))."
+            ))
+        if getattr(self, "btn_dicom", None) is not None:
+            self.btn_dicom.setText(t("DICOM Info"))
+            self.btn_dicom.setHelpToolTip(t(
+                "Left-click: show/hide DICOM info on the image\n"
+                "Right-click: choose which tag data to show"
+            ))
+        if getattr(self, "btn_delete_all", None) is not None:
+            self.btn_delete_all.setText(t("✕ Delete All"))
+            self.btn_delete_all.setHelpToolTip(t(
+                "Remove ALL studies/series from the list (the image files on "
+                "disk are not deleted; reload the folder to restore them)"
+            ))
+        if getattr(self, "btn_dock_narrow", None) is not None:
+            self.btn_dock_narrow.setToolTip(t("Narrow the tree pane"))
+        if getattr(self, "btn_dock_widen", None) is not None:
+            self.btn_dock_widen.setToolTip(t("Widen the tree pane"))
+        if getattr(self, "thumb_size", None) is not None:
+            self.thumb_size.setToolTip(t("Thumbnail size"))
+        self.update()
+
     def populate(self, patients: dict[str, Patient]) -> None:
         self._patients_cache = patients
         self._populating = True
