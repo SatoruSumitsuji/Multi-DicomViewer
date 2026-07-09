@@ -3464,6 +3464,14 @@ class CTViewer(AbstractViewer):
             for mp in p.slab_mappers:
                 mp.SetInputData(vtkPolyData())
 
+        # Keep the rotate-hint arrow glued to the (possibly rotating) crossline:
+        # rebuild it from the current _cross_ang whenever this pane is
+        # highlighted in rotate mode, so it follows a rotate drag / SPIN instead
+        # of drifting off the line.
+        hi = self._cross_hi.get(key)
+        if hi is not None and hi[1] == "rotate":
+            p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(key, hi[0]))
+
     def _update_info(self, key, title_only):
         p = self.pane[key]
         head = overlay_lines(
@@ -4279,9 +4287,9 @@ class CTViewer(AbstractViewer):
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
         r = 0.60 * ps                                   # arc radius (outer zone)
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(7.5)                        # ¼ of the first pass
-        steps = 8
-        hs = 0.025 * ps                                 # ¼ head size
+        span = math.radians(3.75)                       # ⅛ of the first pass
+        steps = 6
+        hs = 0.0125 * ps                                # ⅛ head size
 
         def _head(tip, nxt):
             """Two barbs at *tip*, fanned back from the outward tangent tip←nxt."""
