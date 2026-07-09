@@ -179,7 +179,10 @@ class _CoregPane:
                  if self.total > 0 else 0)
         self.cur = start
         self.slider.blockSignals(True)
-        self.slider.setEnabled(self.total > 1)
+        # IVUS panes scrub freely (they drive CoSync); an ANGIO pane is a still
+        # — its seekbar is greyed out and only re-enabled while its Trace is on
+        # (see _toggle_trace), so the shown angio frame stays fixed after trace.
+        self.slider.setEnabled(self.total > 1 and self.is_ivus)
         self.slider.setRange(0, max(0, self.total - 1))
         self.slider.setValue(start)
         self.slider.blockSignals(False)
@@ -482,6 +485,9 @@ class CoregWindow(QMainWindow):
                 pane.show_frame(int(g["frame"]))
             pane.canvas.set_coreg_edit(True)
             pane.canvas.set_coreg_mode("trace")
+            # Trace ON → let this angio pane's seekbar move so the user can pick
+            # the frame the guide is drawn on.
+            pane.slider.setEnabled(pane.total > 1)
             self._status.setText(t(
                 "Click to add a vertex, double-click to commit. Once a vertex "
                 "turns red, drag to move it / right-click to delete it. "
@@ -491,6 +497,8 @@ class CoregWindow(QMainWindow):
                 self._tracing = -1
             pane.canvas.set_coreg_mode("")
             pane.canvas.set_coreg_edit(False)
+            # Trace finished → the angio is a still again; grey out its seekbar.
+            pane.slider.setEnabled(False)
             self._status.setText("")
         self._update_coreg_controls_enabled()
 
