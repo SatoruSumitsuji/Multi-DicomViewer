@@ -794,7 +794,7 @@ class _Pane:
         self.rot_arrow_mapper.SetInputData(vtkPolyData())
         self.rot_arrow = vtkActor()
         self.rot_arrow.SetMapper(self.rot_arrow_mapper)
-        self.rot_arrow.GetProperty().SetColor(1.0, 1.0, 0.0)    # vivid yellow
+        self.rot_arrow.GetProperty().SetColor(0.8, 0.8, 0.0)    # yellow (dimmed)
         self.rot_arrow.GetProperty().SetLineWidth(1.4)
         self.rot_arrow.SetVisibility(False)
         self.ren.AddActor(self.rot_arrow)
@@ -4231,7 +4231,7 @@ class CTViewer(AbstractViewer):
 
     # ---- centreline hover / drag highlight -----------------------------
     _CROSS_BASE = (1.0, 0.85, 0.0)          # normal crosshair: amber, 50%
-    _CROSS_HI = (1.0, 1.0, 0.0)             # caught line: vivid yellow, opaque
+    _CROSS_HI = (0.8, 0.8, 0.0)             # caught line: yellow, opaque (dimmed)
 
     def _hover_cross(self, which, sx, sy) -> None:
         """Mouse moved over a pane with NO button down: preview whether a press
