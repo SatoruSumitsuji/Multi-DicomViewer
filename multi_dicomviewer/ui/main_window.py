@@ -387,11 +387,14 @@ class _Placeholder(QWidget):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setWordWrap(True)
-        label.setStyleSheet("color:#888; font-size:13px;")
-        lay.addWidget(label)
+        self._label = QLabel(text)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet("color:#888; font-size:13px;")
+        lay.addWidget(self._label)
+
+    def set_text(self, text: str) -> None:
+        self._label.setText(text)
 
 
 class ViewerPane(QFrame):
@@ -499,6 +502,27 @@ class ViewerPane(QFrame):
         self._title.setText(
             f"{head}{_PANE_SEP}{body}" if body else head
         )
+
+    def retranslate_ui(self) -> None:
+        """Re-apply this pane's persistent strings after a live language
+        change, and cascade to every cached viewer."""
+        self._title.setToolTip(
+            t("Drag and drop onto another pane to swap their positions")
+        )
+        self._close_btn.setToolTip(
+            t("Close this pane's image (keeps the layout; returns to "
+              "drop-waiting state)")
+        )
+        self._idle.set_text(
+            t("Pane {n}\n\n"
+              "Drag & drop a series from the Info panel,\n"
+              "or a DICOM folder, here", n=self.index + 1)
+        )
+        if self._cur_viewer is None:
+            self._title.setText(self._idle_title())
+        for v in self._viewers.values():
+            if v is not None and hasattr(v, "retranslate_ui"):
+                v.retranslate_ui()
 
     def set_active(self, on: bool) -> None:
         self._active_on = on
@@ -967,9 +991,8 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ menu
     def _build_language_menu(self) -> None:
         """Language menu: pick the UI language. Items are shown in each
-        language's own native name; the current one is checked. The change
-        is persisted and applied on the next launch (strings are resolved
-        when their widget is built)."""
+        language's own native name; the current one is checked. The change is
+        persisted and applied LIVE (see retranslate_ui) — no restart."""
         lm = self.menuBar().addMenu(t("&Language"))
         group = QActionGroup(self)
         group.setExclusive(True)
@@ -986,8 +1009,91 @@ class MainWindow(QMainWindow):
             return
         settings.save_language(code)
         i18n.set_language(code)
-        QMessageBox.information(
-            self, t("Language"), t("The language changes on the next launch."))
+        # Live switch: re-apply every persistent string in place (dialogs and
+        # right-click menus are rebuilt on open, so they pick up the new
+        # language for free; on-image overlays re-evaluate t() on repaint).
+        self.retranslate_ui()
+
+    def _rebuild_menu(self) -> None:
+        """Tear the menu bar down and build it fresh in the current language.
+        The menu's checkable actions carry state (Anonymize, Hide overlay), so
+        it is rebuilt rather than text-patched; that state is restored after."""
+        mb = self.menuBar()
+        for top in mb.actions():
+            menu = top.menu()
+            if menu is None:
+                continue
+            for a in menu.actions():
+                # Drop shortcuts BEFORE the replacements are created so Qt
+                # never sees two actions claiming the same key.
+                a.setShortcut(QKeySequence())
+                a.setShortcuts([])
+                a.setParent(None)
+                a.deleteLater()
+            menu.setParent(None)
+            menu.deleteLater()
+        mb.clear()
+        self._build_menu()
+        # Restore checkable state without re-firing the toggles.
+        for act, state in (
+            (self._anon_act, self._anon),
+            (self._hide_overlay_act, self._overlay_hidden),
+        ):
+            act.blockSignals(True)
+            act.setChecked(state)
+            act.blockSignals(False)
+
+    def retranslate_ui(self) -> None:
+        """Apply the active language to every PERSISTENT widget in place, so a
+        language change takes effect immediately (no restart). On-demand
+        dialogs / windows and right-click menus are constructed fresh each time
+        they open, so they need nothing here; on-image overlays re-evaluate
+        t() on their next repaint (forced below)."""
+        self._rebuild_menu()
+        self.setWindowTitle(f"{APP_NAME}  {build_string()}")
+        self._studies_dock.setWindowTitle(t("Studies"))
+
+        # Top layout bar.
+        self._info_btn.setText(
+            t("◀ Hide Studies") if self._studies_dock.isVisible()
+            else t("Show Studies ▶")
+        )
+        self._info_btn.setHelpToolTip(
+            t("Show/hide the left Info window (study tree)")
+        )
+        self._layout_btn.setText(self._layout_btn_text())
+        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._clear_all_btn.setText(t("✕ Clear All"))
+        self._clear_all_btn.setHelpToolTip(
+            t("Clear the image from every pane (same as each pane's ✕). "
+              "The layout and the studies list are kept.")
+        )
+        self._hide_btns_btn.setText(t("Hide Buttons (Max Image)"))
+        self._hide_btns_btn.setHelpToolTip(
+            t("Hide every pane's toolbars/title to maximise the image "
+              "(for presentation). Use Show Buttons to bring them back.")
+        )
+        self._show_btns_btn.setText(t("Show Buttons"))
+        self._show_btns_btn.setHelpToolTip(t("Restore every pane's toolbars."))
+        self._tags_btn.setText(t("DICOM Info"))
+        self._tags_btn.setHelpToolTip(
+            t("Left-click: show/hide DICOM info on the image\n"
+              "Right-click: choose which tag data to show")
+        )
+        self._tagsz_lbl.setText(t("Tag size:"))
+        self._tag_font_slider.setToolTip(t("DICOM tag text size (all panes)"))
+
+        # Panes (placeholders, tooltips) + every cached viewer.
+        for pane in self._panes:
+            pane.retranslate_ui()
+        # Re-derive the "● Pane N — <series>" titles of loaded panes.
+        self._refresh_pane_titles()
+
+        # Study tree / thumbnail browser.
+        if hasattr(self.browser, "retranslate_ui"):
+            self.browser.retranslate_ui()
+
+        self.update()
 
     def _build_menu(self) -> None:
         m = self.menuBar().addMenu(t("&File"))
@@ -1989,9 +2095,9 @@ class MainWindow(QMainWindow):
             lambda _p: self._open_tag_dialog_active()
         )
         row.addWidget(self._tags_btn)
-        _tagsz_lbl = QLabel(t("Tag size:"))
-        _tagsz_lbl.setMinimumWidth(0)        # may clip when the bar is squeezed
-        row.addWidget(_tagsz_lbl)
+        self._tagsz_lbl = QLabel(t("Tag size:"))
+        self._tagsz_lbl.setMinimumWidth(0)   # may clip when the bar is squeezed
+        row.addWidget(self._tagsz_lbl)
         self._tag_font_slider = QSlider(Qt.Orientation.Horizontal)
         self._tag_font_slider.setRange(TAG_FONT_PT_MIN, TAG_FONT_PT_MAX)
         self._tag_font_slider.setValue(int(self._tag_font_pt))

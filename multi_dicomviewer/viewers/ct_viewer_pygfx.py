@@ -867,7 +867,7 @@ class _ColorMapDialog(QDialog):
         btns = QHBoxLayout()
         add = QPushButton(t("Add"))
         add.clicked.connect(self._add_band)
-        rst = QPushButton("Reset")
+        rst = QPushButton(t("Reset"))
         rst.clicked.connect(self._reset)
         close = QPushButton(t("Close"))
         close.clicked.connect(self.accept)
@@ -1584,6 +1584,159 @@ class CTViewer(AbstractViewer):
         # to the intended plane so the buttons don't wrongly default to "Rt".
         return self._side
 
+    # ---------------------------------------------------- live i18n switch
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent user-facing string via t() after a live
+        UI-language switch (no restart), mirroring how the constructor built
+        the toolbar / measure bar / seek bar.
+
+        Safe to call whether or not a CT volume is loaded: all controls are
+        guarded (they may be lazily built or None). On-image text drawn in
+        paintEvent, right-click context menus and on-demand dialogs are NOT
+        touched here — the overlays redraw (forced at the end) and the menus /
+        dialogs are rebuilt every time they open.
+        """
+        # -- toolbar / measure-bar section labels ------------------------
+        lbl = getattr(self, "_plane_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Plane:"))
+        lbl = getattr(self, "_slab_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Slab:"))
+        lbl = getattr(self, "_measure_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Measure:"))
+
+        # -- DICOM-tag overlay font control (button text + tooltips) -----
+        if getattr(self, "_tag_font_slider", None) is not None:
+            self._tag_font_slider.setToolTip(t("DICOM tag text size"))
+        if getattr(self, "_tags_btn", None) is not None:
+            self._tags_btn.setText(t("DICOM Tags"))
+            self._tags_btn.setToolTip(
+                t("Choose which DICOM tags overlay the image (key Q shows/hides)"))
+
+        # -- Plane (Bi/Lt/Rt) button tooltips ----------------------------
+        side_tips = {
+            "Bi": t("Show both MPR panes"),
+            "Lt": t("Show only the left MPR pane"),
+            "Rt": t("Show only the right MPR pane"),
+        }
+        for key, b in (getattr(self, "_side_btns", None) or {}).items():
+            if key in side_tips:
+                b.setHelpToolTip(side_tips[key])
+
+        # -- 3D / 2D display-mode button tooltips ------------------------
+        mode_tips = {
+            "3D": t("3-D MPR reconstruction (dual oblique reslice)"),
+            "2D": t("Show native acquisition slices one at a time (paging)"),
+        }
+        for key, b in (getattr(self, "_mode_btns", None) or {}).items():
+            if key in mode_tips:
+                b.setHelpToolTip(mode_tips[key])
+
+        # -- ReCalc / Measure / CenterLine / HQ-Img tooltips -------------
+        b = getattr(self, "_recalc_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Re-derive the OTHER pane from the selected pane's green-▲ "
+                "centre line — fixes a mirrored / wrong companion after "
+                "complex rotations"))
+        b = getattr(self, "_meas_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Measure on the image (Line / Polyline / Ellipse / Polygon "
+                "/ Angle)"))
+        b = getattr(self, "_cl_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t("Show/hide crosshair & slab lines"))
+        b = getattr(self, "_hires_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Full-quality images: keep MPR sharp even while dragging / "
+                "zooming / rotating (turns OFF the coarse interactive "
+                "preview). Smoother on a fast Mac; heavier on a slow one."))
+
+        # -- Setting / Measure History / DICOM-tag button ----------------
+        b = getattr(self, "_setting_btn", None)
+        if b is not None:
+            b.setText(t("Setting"))
+            b.setHelpToolTip(t(
+                "HU colour-map settings (band colour, HU range, opacity)"))
+        b = getattr(self, "_hist_btn", None)
+        if b is not None:
+            b.setText(t("Measure History"))
+            b.setHelpToolTip(t("Show this study's measurement history"))
+        b = getattr(self, "_tags_btn", None)
+        if b is not None:
+            b.setToolTip(t(
+                "Choose which DICOM tags overlay the image (key Q "
+                "shows/hides)"))
+
+        # -- 2-D image-transform (rotate / flip) tooltips ----------------
+        t2d_tips = [
+            t("Rotate the image 90° clockwise"),
+            t("Rotate the image 90° counter-clockwise"),
+            t("Flip horizontally (left-right mirror)"),
+            t("Flip vertically (top-bottom)"),
+        ]
+        for b, tip in zip(getattr(self, "_t2d_btns", None) or [], t2d_tips):
+            b.setHelpToolTip(tip)
+
+        # -- bottom 2-D seek bar -----------------------------------------
+        lbl = getattr(self, "_seek_frame_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Frame:"))
+        lbl = getattr(self, "_seek_series_cap", None)
+        if lbl is not None:
+            lbl.setText(t("Series:"))
+        lbl = getattr(self, "_seek_series_lbl", None)
+        if lbl is not None:
+            lbl.setToolTip(t(
+                "Series position in this study (current / total)"))
+
+        # -- measure bar -------------------------------------------------
+        b = getattr(self, "_cmp_btn", None)
+        if b is not None:
+            b.setText(t("Compare"))
+            b.setHelpToolTip(t(
+                "Compare two Polygon/Ellipse: click the two shapes — shows "
+                "%Area difference and a radial gap colour map "
+                "(<5 / 5–7 / 7–9 / >9 mm)"))
+        b = getattr(self, "_hideall_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Hide / Show every measurement line, region colour and "
+                "result text"))
+        b = getattr(self, "_clr_btn", None)
+        if b is not None:
+            b.setText(t("Clear All Result"))
+            b.setHelpToolTip(t(
+                "Clear all measurements and comparison results"))
+        lbl = getattr(self, "_cmp_hint", None)
+        if lbl is not None:
+            lbl.setText(t("  Left-click = add point /"
+                          " right-click finishes Polyline / Polygon"))
+
+        # Two-state toggle label (Hide All Result / Show All Result):
+        # re-derive from the CURRENT state via its helper (never flip).
+        if hasattr(self, "_update_hideall_btn"):
+            self._update_hideall_btn()
+
+        # Force on-image text (paintEvent overlays) + child widgets to
+        # repaint so the DICOM-tag / readout text picks up the new language,
+        # and cheaply re-render the current slice (self-guards vol=None).
+        self.update()
+        for ov in (getattr(self, "_overlay", None) or {}).values():
+            ov.update()
+        for name in ("_measure_bar", "_seek_wrap"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.update()
+        try:
+            self._refresh()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         # Two rows so the (now longer, shortcut-labelled) controls don't grow
@@ -1598,7 +1751,8 @@ class CTViewer(AbstractViewer):
         row2.setContentsMargins(0, 0, 0, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
-        row.addWidget(QLabel(t("Plane:")))
+        self._plane_lbl = QLabel(t("Plane:"))
+        row.addWidget(self._plane_lbl)
         self._side_btns: dict[str, QPushButton] = {}
         for key, tip in (
             ("Bi", t("Show both MPR panes")),
@@ -1671,7 +1825,8 @@ class CTViewer(AbstractViewer):
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
-        row.addWidget(QLabel(t("Slab:")))
+        self._slab_lbl = QLabel(t("Slab:"))
+        row.addWidget(self._slab_lbl)
         self._slab_spin = QDoubleSpinBox()
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
@@ -1706,7 +1861,7 @@ class CTViewer(AbstractViewer):
         row.insertWidget(0, self._hires_btn)
         row.insertSpacing(1, 8)
 
-        setting = FitButton(t("Setting"))
+        self._setting_btn = setting = FitButton(t("Setting"))
         setting.setHelpToolTip(t(
             "HU colour-map settings (band colour, HU range, opacity)"))
         setting.setStyleSheet(_sr_qss)
@@ -1726,6 +1881,7 @@ class CTViewer(AbstractViewer):
         tags_box, self._tag_font_slider, tags = build_tag_font_control(
             TAG_FONT_PT_DEFAULT
         )
+        self._tags_btn = tags
         tags.setToolTip(t(
             "Choose which DICOM tags overlay the image (key Q shows/hides)"))
         tags.clicked.connect(self.tags_requested.emit)
@@ -1735,7 +1891,7 @@ class CTViewer(AbstractViewer):
         # per-viewer copy (kept only for set_overlay_font_pt slider sync).
         tags_box.setVisible(False)
 
-        hist = FitButton(t("Measure History"))
+        self._hist_btn = hist = FitButton(t("Measure History"))
         hist.setHelpToolTip(t("Show this study's measurement history"))
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
@@ -3123,7 +3279,8 @@ class CTViewer(AbstractViewer):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(QLabel(t("Measure:")))
+        self._measure_lbl = QLabel(t("Measure:"))
+        row.addWidget(self._measure_lbl)
         self._meas_btns = {}
         for label, key in (("Line", "line"), ("Polyline", "polyline"),
                            ("Ellipse", "ellipse"), ("Polygon", "polygon"),
@@ -3156,7 +3313,7 @@ class CTViewer(AbstractViewer):
             "QPushButton { background:#bdbdbd; color:#101010; }")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
-        clr = FitButton(t("Clear All Result"))
+        self._clr_btn = clr = FitButton(t("Clear All Result"))
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
         clr.setHelpToolTip(t("Clear all measurements and comparison results"))
         clr.setStyleSheet(                                    # Reset's darker grey

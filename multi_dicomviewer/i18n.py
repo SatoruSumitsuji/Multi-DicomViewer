@@ -11,8 +11,11 @@ pass named values: ``t("At most {n} panes can play.", n=4)``.
 
 The active language is chosen by the shell at startup (persisted via
 :mod:`multi_dicomviewer.core.settings`); this module just holds the current
-code and the lazily-loaded tables. Because strings are resolved when a
-widget is built, a language change takes effect on the next launch.
+code and the lazily-loaded tables. ``t()`` reads the current code on every
+call, so switching language is LIVE: the shell calls ``set_language`` then
+walks the persistent widgets' ``retranslate_ui`` to re-apply strings in
+place (no restart). On-demand dialogs / menus are rebuilt on open and pick
+up the new language for free.
 """
 from __future__ import annotations
 
