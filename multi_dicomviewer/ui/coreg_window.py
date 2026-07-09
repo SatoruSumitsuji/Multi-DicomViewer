@@ -26,11 +26,14 @@ pre/post/FU at the same anatomy. The panes are deliberately lightweight
 from __future__ import annotations
 
 import json
+import math
 import os
 
 import numpy as np
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtGui import QColor, QImage, QPainter
 from PyQt6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -42,6 +45,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -298,6 +302,15 @@ class CoregWindow(QMainWindow):
         self._load_btn.clicked.connect(self._load_coreg)
         io_row.addWidget(self._load_btn)
         cv.addLayout(io_row)
+        # Record the co-registration in motion: scrub the master IVUS end to
+        # end, each frame driving the followers + the angio markers, and write
+        # the composite of every pane to an MP4.
+        self._mp4_btn = QPushButton(t("Export MP4…"))
+        self._mp4_btn.setToolTip(
+            t("Scrub the master IVUS start→end and record every pane "
+              "(with the moving angio marker) to an MP4"))
+        self._mp4_btn.clicked.connect(self._export_mp4)
+        cv.addWidget(self._mp4_btn)
         self._cancel_btn = QPushButton(t("Cancel"))
         self._cancel_btn.clicked.connect(self._cancel_placing)
         self._cancel_btn.setVisible(False)
@@ -864,6 +877,146 @@ class CoregWindow(QMainWindow):
         self._drive_markers()
         self._status.setText(
             t("Loaded {n} CoReg point(s).", n=len(self._landmarks)))
+
+    # ------------------------------------------------- MP4 export
+    @staticmethod
+    def _qimage_to_rgb(img: QImage) -> np.ndarray:
+        """QImage → owned contiguous (H, W, 3) uint8 RGB (a real copy, not a
+        view — see the MultiSync note: a view aliases freed pixel memory)."""
+        img = img.convertToFormat(QImage.Format.Format_RGB888)
+        w, h = img.width(), img.height()
+        bpl = img.bytesPerLine()
+        ptr = img.constBits()
+        ptr.setsize(h * bpl)
+        arr = np.frombuffer(ptr, np.uint8).reshape(h, bpl)
+        return np.array(arr[:, :w * 3].reshape(h, w, 3))
+
+    def _compose_coreg_frame(self, cell: int, cols: int) -> np.ndarray:
+        """Grab every pane's canvas (image + guide + moving marker, exactly as
+        shown) and tile them into a cols-wide grid of square *cell* cells."""
+        rows = (len(self.panes) + cols - 1) // cols
+        img = QImage(cell * cols, cell * rows, QImage.Format.Format_RGB888)
+        img.fill(QColor("#000000"))
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        try:
+            for k, pane in enumerate(self.panes):
+                qimg = pane.canvas.grab().toImage()
+                w, h = qimg.width(), qimg.height()
+                if w <= 0 or h <= 0:
+                    continue
+                r, c = divmod(k, cols)
+                tx, ty = c * cell, r * cell
+                scale = min(cell / w, cell / h)
+                dw, dh = w * scale, h * scale
+                p.save()
+                p.setClipRect(tx, ty, cell, cell)
+                p.drawImage(
+                    QRectF(tx + (cell - dw) / 2.0, ty + (cell - dh) / 2.0,
+                           dw, dh), qimg)
+                p.restore()
+        finally:
+            p.end()
+        return self._qimage_to_rgb(img)
+
+    def _export_mp4(self) -> None:
+        """Scrub the master IVUS from its first to last frame; each frame drives
+        the follower IVUS + the angio markers (the live co-registration), and
+        the composite of every pane is streamed to an MP4."""
+        if self._placing:
+            return
+        if self._active_ivus < 0:
+            QMessageBox.information(
+                self, "CoReg", t("Select a master IVUS first."))
+            return
+        master = self.panes[self._active_ivus]
+        if not master.is_ivus or master.total < 1:
+            QMessageBox.information(
+                self, "CoReg", t("The master IVUS has no frames."))
+            return
+
+        from multi_dicomviewer.ui.export_dialog import ExportDialog
+        dlg_cfg = ExportDialog(
+            "mp4", 1, default_fps=15.0, default_bitrate=40, default_crf=10,
+            show_filename_fields=False,
+            title_override=t("Export CoReg MP4"), parent=self)
+        if dlg_cfg.exec() != dlg_cfg.DialogCode.Accepted:
+            return
+        cfg = dlg_cfg.result_settings()
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Export CoReg MP4"), "", t("MP4 video (*.mp4)"))
+        if not path:
+            return
+        if not path.lower().endswith(".mp4"):
+            path += ".mp4"
+
+        cols = _grid_dims(len(self.panes))
+        # Square cell ≈ the largest pane canvas, clamped and made even.
+        big = max((max(p.canvas.width(), p.canvas.height())
+                   for p in self.panes), default=512)
+        cell = max(480, min(int(big), 1024))
+        cell -= cell % 2
+
+        total = master.total
+        prog = QProgressDialog(
+            t("Exporting CoReg MP4…"), t("Cancel"), 0, total, self)
+        prog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        prog.setMinimumDuration(0)
+
+        from multi_dicomviewer.core import export as exporter
+        try:
+            stream = exporter.open_mp4_stream(
+                path, fps=cfg.fps, bitrate_mbps=cfg.bitrate_mbps, crf=cfg.crf)
+        except Exception as e:      # noqa: BLE001
+            prog.close()
+            QMessageBox.critical(
+                self, t("Export CoReg MP4"),
+                t("Encoding failed:\n{e}", e=e))
+            return
+
+        saved = master.cur
+        written, cancelled = 0, False
+        try:
+            for f in range(total):
+                if prog.wasCanceled():
+                    cancelled = True
+                    break
+                master.show_frame(f)
+                self._on_ivus_scrub(master.index)   # sync followers + markers
+                frame = self._compose_coreg_frame(cell, cols)
+                stream.add(frame)
+                written += 1
+                if f % 8 == 0:
+                    prog.setValue(f)
+                    QApplication.processEvents()
+        except Exception as e:      # noqa: BLE001
+            stream.abort()
+            prog.close()
+            self._restore_master(master, saved)
+            QMessageBox.critical(
+                self, t("Export CoReg MP4"),
+                t("Encoding failed:\n{e}", e=e))
+            return
+        prog.close()
+        self._restore_master(master, saved)
+
+        if cancelled or written == 0:
+            stream.abort()
+            return
+        try:
+            stream.close()
+        except Exception as e:      # noqa: BLE001
+            QMessageBox.critical(
+                self, t("Export CoReg MP4"),
+                t("Encoding failed:\n{e}", e=e))
+            return
+        self._status.setText(
+            t("Exported {n} frame(s) to MP4.", n=written))
+
+    def _restore_master(self, master, frame: int) -> None:
+        master.show_frame(frame)
+        self._on_ivus_scrub(master.index)
 
     def _on_ivus_grab(self) -> None:
         # User grabbed an IVUS seekbar (not during placement) → they are
