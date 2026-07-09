@@ -547,7 +547,9 @@ class CoregWindow(QMainWindow):
             self._syncing = False
         for p in self.panes:
             self._apply_rotation(p)
-        self._drive_markers()
+        # Drive the angio marker by the UNIFIED position g (not the master's
+        # clamped frame) so the green point sweeps the WHOLE bar range.
+        self._drive_markers(g)
 
     def _load_series(self, pane_specs) -> None:
         specs = [(s, p, f) for (s, p, f) in (pane_specs or [])
@@ -1310,14 +1312,19 @@ class CoregWindow(QMainWindow):
                    if R in lm["frames"] and pane_idx in lm["fracs"]]
         return coreg.map_frame_to_fraction(anchors, self.panes[R].cur)
 
-    def _drive_markers(self) -> None:
-        """For every angio pane, map the active IVUS's current frame to a
-        point on that view's guide (from the landmarks common to the pair)
-        and push the marker + the anchor foot-points to its canvas."""
+    def _drive_markers(self, frame_override=None) -> None:
+        """For every angio pane, map the active IVUS's frame to a point on that
+        view's guide (from the landmarks common to the pair) and push the
+        marker + the anchor foot-points to its canvas.
+
+        *frame_override* lets the global long-axis seekbar drive the marker by
+        the UNIFIED position (which can run past the master's own range): the
+        fraction extrapolates and clamps to the guide ends, so the marker keeps
+        moving over the WHOLE bar instead of freezing where the master clamps."""
         if self._active_ivus < 0 or self._placing:
             return
         R = self._active_ivus
-        fR = self.panes[R].cur
+        fR = self.panes[R].cur if frame_override is None else frame_override
         for pane in self.panes:
             if pane.is_ivus:
                 continue
