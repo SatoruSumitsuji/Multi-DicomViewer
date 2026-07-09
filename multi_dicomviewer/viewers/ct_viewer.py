@@ -794,8 +794,8 @@ class _Pane:
         self.rot_arrow_mapper.SetInputData(vtkPolyData())
         self.rot_arrow = vtkActor()
         self.rot_arrow.SetMapper(self.rot_arrow_mapper)
-        self.rot_arrow.GetProperty().SetColor(0.15, 1.0, 1.0)   # bright cyan
-        self.rot_arrow.GetProperty().SetLineWidth(2.5)
+        self.rot_arrow.GetProperty().SetColor(1.0, 1.0, 0.0)    # vivid yellow
+        self.rot_arrow.GetProperty().SetLineWidth(1.4)
         self.rot_arrow.SetVisibility(False)
         self.ren.AddActor(self.rot_arrow)
         # Two dashed lines = the other pane's slab-MIP width.
@@ -4223,7 +4223,7 @@ class CTViewer(AbstractViewer):
 
     # ---- centreline hover / drag highlight -----------------------------
     _CROSS_BASE = (1.0, 0.85, 0.0)          # normal crosshair: amber, 50%
-    _CROSS_HI = (0.15, 1.0, 1.0)            # caught line: vivid cyan, opaque
+    _CROSS_HI = (1.0, 1.0, 0.0)             # caught line: vivid yellow, opaque
 
     def _hover_cross(self, which, sx, sy) -> None:
         """Mouse moved over a pane with NO button down: preview whether a press
@@ -4261,7 +4261,7 @@ class CTViewer(AbstractViewer):
         if line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
             pr.SetColor(*self._CROSS_HI)
-            pr.SetLineWidth(2.6)
+            pr.SetLineWidth(1.6)
             pr.SetOpacity(1.0)
             if mode == "rotate":
                 p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(which, line))
@@ -4269,8 +4269,9 @@ class CTViewer(AbstractViewer):
         p.render()
 
     def _rot_arrow_pd(self, which, line) -> vtkPolyData:
-        """A small curved arrow tangent to a circle about the crosshair centre,
-        near the caught line's outer end — the 'this rotates' hint."""
+        """Two small double-headed curved arrows tangent to a circle about the
+        crosshair centre — one on EACH side of the caught line's outer ends —
+        the 'this rotates (either way)' hint. Compact (~¼ the first pass)."""
         th = math.radians(self._cross_ang[which])
         c_, s_ = math.cos(th), math.sin(th)
         base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
@@ -4278,24 +4279,34 @@ class CTViewer(AbstractViewer):
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
         r = 0.60 * ps                                   # arc radius (outer zone)
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(30.0)
-        steps = 12
-        arc = []
-        for i in range(steps + 1):
-            ang = base_ang - span + (2.0 * span) * i / steps
-            arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
-        end, prev = arc[-1], arc[-2]
-        tx, ty = end[0] - prev[0], end[1] - prev[1]
-        tl = math.hypot(tx, ty) or 1.0
-        tx, ty = tx / tl, ty / tl                       # tangent (arc direction)
-        hs = 0.10 * ps
+        span = math.radians(7.5)                        # ¼ of the first pass
+        steps = 8
+        hs = 0.025 * ps                                 # ¼ head size
 
-        def _barb(deg):
-            ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
-            bx, by = (-tx) * ca - (-ty) * sa, (-tx) * sa + (-ty) * ca
-            return [end, (end[0] + bx * hs, end[1] + by * hs)]
+        def _head(tip, nxt):
+            """Two barbs at *tip*, fanned back from the outward tangent tip←nxt."""
+            tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
+            tl = math.hypot(tx, ty) or 1.0
+            tx, ty = tx / tl, ty / tl
+            out = []
+            for deg in (28.0, -28.0):
+                ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+                bx = (-tx) * ca - (-ty) * sa
+                by = (-tx) * sa + (-ty) * ca
+                out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
+            return out
 
-        return _polylines_pd([arc, _barb(28.0), _barb(-28.0)])
+        polylines = []
+        for side in (0.0, math.pi):                     # both ends of the line
+            ca0 = base_ang + side
+            arc = []
+            for i in range(steps + 1):
+                ang = ca0 - span + (2.0 * span) * i / steps
+                arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
+            polylines.append(arc)
+            polylines += _head(arc[-1], arc[-2])        # head at one end …
+            polylines += _head(arc[0], arc[1])          # … and the other
+        return _polylines_pd(polylines)
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
