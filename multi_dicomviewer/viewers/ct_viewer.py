@@ -273,6 +273,27 @@ def _dashed_pd(p0, p1, dash, gap) -> vtkPolyData:
     return pd
 
 
+def _polylines_pd(polylines, z=0.72) -> vtkPolyData:
+    """One polydata holding several connected polylines (each a list of (x, y)
+    output-plane points) at depth *z*. Used for the rotate-hint curved arrow."""
+    pd = vtkPolyData()
+    pts = vtkPoints()
+    lines = vtkCellArray()
+    idx = 0
+    for poly in polylines:
+        n = len(poly)
+        if n < 2:
+            continue
+        lines.InsertNextCell(n)
+        for (x, y) in poly:
+            pts.InsertNextPoint(float(x), float(y), float(z))
+            lines.InsertCellPoint(idx)
+            idx += 1
+    pd.SetPoints(pts)
+    pd.SetLines(lines)
+    return pd
+
+
 def _dashed_multi_pd(segments, z=0.66) -> vtkPolyData:
     """One polydata of faint dotted lines for several 2-D segments
     (major/minor diameter guides). Dash length scales with each
@@ -558,6 +579,9 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._meas_drag = False
         style = vtkInteractorStyleUser()  # neutralise default VTK style
         self.SetInteractorStyle(style)
+        # Track motion with no button down so the crosshair can preview (vivid
+        # highlight + rotate arrow) whether a press would grab the centreline.
+        self.setMouseTracking(True)
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
@@ -620,19 +644,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # idle Measure mode → fall through to the tool / crosshair setup
         self._owner._spin_prev = None        # restart SPIN wheel angle
         # Pressing within the (5%) crosshair grab band grabs the centreline
-        # (reslice move / rotate), overriding the tool — for every tool EXCEPT
-        # the MOVE (pan) tool. Under MOVE the user expects a free camera pan
-        # EVERYWHERE, so grabbing near the centre must NOT hijack into the
-        # axis-locked crossline slide: that quietly shifted the reslice centre /
-        # rotated the crossline and stuck (only a re-centre undid it), which read
-        # as "Move goes 90° wrong near the centreline and stays broken".
-        # Crosshair reslice-editing stays available under the other tools.
-        if self._owner._tool == "MOVE":
-            self._cross = False
-        else:
-            self._cross = self._owner._cross_press(
-                self._which, e.position().x(), e.position().y()
-            )
+        # (reslice move / rotate), overriding the tool — for ALL tools. The
+        # centreline gesture is deliberately ABOVE every tool button: on the
+        # lines, grabbing the centreline always wins. Hover feedback (the vivid
+        # highlight + rotate arrow, see _hover_cross) tells the user, before the
+        # click, whether the press will pan/tool, parallel-move or rotate.
+        self._cross = self._owner._cross_press(
+            self._which, e.position().x(), e.position().y()
+        )
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
@@ -646,6 +665,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # type IS active, the press left _last = None, so the guard below
         # returns and no tool drag happens.
         if self._last is None:
+            # No button down → hover-preview the centreline grab (unless a
+            # measure type is armed, where a click starts a measurement).
+            if not (self._owner._meas_on and self._owner._meas_type):
+                self._owner._hover_cross(
+                    self._which, e.position().x(), e.position().y())
             return
         p = e.position()
         if self._cross:
@@ -668,6 +692,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = None
         self._cross = False
         self._owner._spin_prev = None
+        # End the centreline gesture and drop its highlight (a fresh hover will
+        # re-preview if the cursor is still on a line).
+        self._owner._cross_dragging = None
+        self._owner._set_cross_highlight(self._which, None, None)
+
+    def leaveEvent(self, e):
+        # Cursor left the pane → clear any hover highlight.
+        if self._owner._cross_dragging is None:
+            self._owner._set_cross_highlight(self._which, None, None)
+        super().leaveEvent(e)
 
     def mouseDoubleClickEvent(self, e):
         if self._owner._meas_on:
@@ -751,6 +785,19 @@ class _Pane:
         tri.GetProperty().SetColor(0.0, 0.95, 0.25)   # green: stands out
         self.ren.AddActor(tri)
         self._overlay_actors.append(tri)
+        # Curved rotate-arrow shown beside a caught centreline while hovering /
+        # dragging in the OUTER (rotate) zone — a hint that the gesture rotates
+        # rather than parallel-moves. Empty + hidden until _set_cross_highlight
+        # fills it. NOT added to _overlay_actors (it must stay hidden in the
+        # "Max Image" presentation mode where overlays are toggled off).
+        self.rot_arrow_mapper = vtkPolyDataMapper()
+        self.rot_arrow_mapper.SetInputData(vtkPolyData())
+        self.rot_arrow = vtkActor()
+        self.rot_arrow.SetMapper(self.rot_arrow_mapper)
+        self.rot_arrow.GetProperty().SetColor(0.15, 1.0, 1.0)   # bright cyan
+        self.rot_arrow.GetProperty().SetLineWidth(2.5)
+        self.rot_arrow.SetVisibility(False)
+        self.ren.AddActor(self.rot_arrow)
         # Two dashed lines = the other pane's slab-MIP width.
         self.slab_mappers = []
         for _ in range(2):
@@ -1050,6 +1097,11 @@ class _Pane:
     def set_overlay_visible(self, on: bool) -> None:
         for a in self._overlay_actors:
             a.SetVisibility(bool(on))
+        # The rotate-hint arrow is not in _overlay_actors (so it stays hidden by
+        # default), but if presentation mode turns overlays OFF mid-hover, drop
+        # it too so no stray arrow lingers.
+        if not on:
+            self.rot_arrow.SetVisibility(False)
 
     def render(self):
         # Skip the GL Render while this pane's canvas is not actually on screen
@@ -1379,6 +1431,10 @@ class CTViewer(AbstractViewer):
         self._cross_mode = "rotate"          # "rotate" | "move"
         self._cross_axis = None              # locked move axis (2-D unit)
         self._cross_ppt = (0.0, 0.0)         # prev world point (move mode)
+        # Hover/drag centreline highlight: which pane is mid-drag, and the
+        # (line, mode) currently highlighted per pane (None = normal crosshair).
+        self._cross_dragging = None          # "A"/"B" while a cross gesture runs
+        self._cross_hi = {"A": None, "B": None}   # (line, mode) or None
         # Drawn crosshair rotation per pane (deg); follows the cursor
         # while CrossLine-dragging so the crosshair tracks the drag.
         self._cross_ang = {"A": 0.0, "B": 0.0}
@@ -4077,23 +4133,22 @@ class CTViewer(AbstractViewer):
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
         self._pc[other] = self._center.copy()
 
-    def _cross_press(self, which, sx, sy) -> bool:
-        """Start a CrossLine gesture, overriding the active tool, when the press
-        lands ON the crosshair; else False so the active tool handles the drag.
+    def _cross_zone(self, which, sx, sy):
+        """Classify a screen point (sx, sy) against *which* pane's crosshair.
+
+        Returns ``(caught, line, mode)``: caught=False → off the crosshair (the
+        active tool owns the drag); else line ∈ {"H","V"} (H = the green-▲ line)
+        and mode ∈ {"move","rotate"}. Pure / side-effect-free so it can drive
+        BOTH the press action and the hover highlight.
 
         Distances are measured in NORMALISED screen space — each pane axis
         scaled to [-1, 1] (centre→edge = 1) via VTK WorldToDisplay (so camera
-        roll/zoom are included). The catch band is 10% of the actual screen on
-        EACH side of a crossline (10% left/right of the vertical line, 10%
-        up/down of the horizontal), on both axes regardless of the pane's aspect
-        ratio (vital for side-by-side multi-pane) and at any zoom. (It used to be
-        tied to the fixed FOV self._half, which ballooned to most of a zoomed-in
-        pane and hijacked paging / tool drags.) Of the caught span, the INNER
-        half (near the centre) translates the plane; the OUTER half rotates it.
-        Mirrors the pygfx/Mac viewer."""
+        roll/zoom are included). The catch band is 5%-of-screen on EACH side of
+        a crossline, on both axes regardless of aspect ratio and at any zoom. Of
+        the caught span, the INNER half (near the centre) translates the plane;
+        the OUTER half rotates it. Mirrors the pygfx/Mac viewer."""
         if self._image is None:
-            return False
-        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+            return (False, None, None)
         ccx, ccy = self._cc(which)
         canvas = self.pane[which].canvas
         ren = self.pane[which].ren
@@ -4122,10 +4177,7 @@ class CTViewer(AbstractViewer):
         a = math.radians(self._cross_ang[which])
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
-        # Press point in normalised screen space, relative to the centre.
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 5%-of-
-        # screen catch on each side is therefore 0.10 in these units.
         band = 0.10                           # perpendicular catch = 5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
@@ -4134,18 +4186,30 @@ class CTViewer(AbstractViewer):
         along_v = abs(rx * uv[0] + ry * uv[1])
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
-            return False                      # off the crosshair → tool runs
-        # The ▲ markers sit on the HORIZONTAL crossline (uh) → that is the
-        # green-▲ line. Where the two 5% bands overlap (the central square) the
-        # green-▲ line WINS; otherwise grab whichever line was hit.
-        grab_h = on_h                         # green-▲ (H); True also if both
+            return (False, None, None)
+        # The ▲ markers sit on the HORIZONTAL crossline → green-▲ line. Where the
+        # two bands overlap (central square) the green-▲ line WINS.
+        grab_h = on_h
         along = along_h if grab_h else along_v
-        if along <= mid:
+        mode = "move" if along <= mid else "rotate"
+        return (True, "H" if grab_h else "V", mode)
+
+    def _cross_press(self, which, sx, sy) -> bool:
+        """Start a CrossLine gesture (overriding the tool) when the press lands
+        ON the crosshair; else False so the active tool handles the drag. The
+        caught line/mode also lock the vivid highlight for the whole drag."""
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        if not caught:
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+        ccx, ccy = self._cc(which)
+        a = math.radians(self._cross_ang[which])
+        grab_h = (line == "H")
+        if mode == "move":
             self._cross_mode = "move"
-            # Lock the slide to the grabbed line so the grab is deterministic
-            # (no drag-direction auto-detect): the green-▲ (H) line slides ⟂ to
-            # itself = along uv (→ reslice/repage); the non-▲ (V) line slides
-            # along uh (→ edge-capped centre-line slide). Output-basis vectors.
+            # Lock the slide to the grabbed line so the grab is deterministic:
+            # the green-▲ (H) line slides ⟂ to itself = along uv (parallel move
+            # of the line); the non-▲ (V) line slides along uh. Output basis.
             ouh = np.array([math.cos(a), math.sin(a)])
             ouv = np.array([-math.sin(a), math.cos(a)])
             self._cross_axis = ouv if grab_h else ouh
@@ -4153,7 +4217,85 @@ class CTViewer(AbstractViewer):
         else:
             self._cross_mode = "rotate"
             self._cross_prev = math.atan2(wy - ccy, wx - ccx)
+        self._cross_dragging = which
+        self._set_cross_highlight(which, line, mode)
         return True
+
+    # ---- centreline hover / drag highlight -----------------------------
+    _CROSS_BASE = (1.0, 0.85, 0.0)          # normal crosshair: amber, 50%
+    _CROSS_HI = (0.15, 1.0, 1.0)            # caught line: vivid cyan, opaque
+
+    def _hover_cross(self, which, sx, sy) -> None:
+        """Mouse moved over a pane with NO button down: preview whether a press
+        here would grab the centreline (vivid highlight + rotate arrow) or fall
+        through to the active tool (normal crosshair)."""
+        if self._cross_dragging is not None or self._image is None:
+            return
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        if caught:
+            self._set_cross_highlight(which, line, mode)
+        else:
+            self._set_cross_highlight(which, None, None)
+
+    def _set_cross_highlight(self, which, line, mode) -> None:
+        """Colour *which* pane's crosshair to show the pending/active gesture:
+        the caught line goes vivid cyan (thicker, opaque) and, in the rotate
+        zone, a curved arrow appears beside it; line=None restores the normal
+        amber crosshair. Cheap: only actor properties change, then one render.
+        No-op in Max-Image mode (crosshair actors hidden)."""
+        p = self.pane[which]
+        # In presentation ("Max Image") mode the crosshair is hidden — never
+        # light it up or show the arrow there.
+        if not p.cross[0][1].GetVisibility():
+            line = None
+        new = (line, mode) if line else None
+        if self._cross_hi.get(which) == new:
+            return
+        self._cross_hi[which] = new
+        for _src, act in p.cross:
+            pr = act.GetProperty()
+            pr.SetColor(*self._CROSS_BASE)
+            pr.SetLineWidth(1.0)
+            pr.SetOpacity(0.5)
+        p.rot_arrow.SetVisibility(False)
+        if line is not None:
+            pr = p.cross[0 if line == "H" else 1][1].GetProperty()
+            pr.SetColor(*self._CROSS_HI)
+            pr.SetLineWidth(2.6)
+            pr.SetOpacity(1.0)
+            if mode == "rotate":
+                p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(which, line))
+                p.rot_arrow.SetVisibility(True)
+        p.render()
+
+    def _rot_arrow_pd(self, which, line) -> vtkPolyData:
+        """A small curved arrow tangent to a circle about the crosshair centre,
+        near the caught line's outer end — the 'this rotates' hint."""
+        th = math.radians(self._cross_ang[which])
+        c_, s_ = math.cos(th), math.sin(th)
+        base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
+        ccx, ccy = self._cc(which)
+        ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
+        r = 0.60 * ps                                   # arc radius (outer zone)
+        base_ang = math.atan2(base[1], base[0])
+        span = math.radians(30.0)
+        steps = 12
+        arc = []
+        for i in range(steps + 1):
+            ang = base_ang - span + (2.0 * span) * i / steps
+            arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
+        end, prev = arc[-1], arc[-2]
+        tx, ty = end[0] - prev[0], end[1] - prev[1]
+        tl = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / tl, ty / tl                       # tangent (arc direction)
+        hs = 0.10 * ps
+
+        def _barb(deg):
+            ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+            bx, by = (-tx) * ca - (-ty) * sa, (-tx) * sa + (-ty) * ca
+            return [end, (end[0] + bx * hs, end[1] + by * hs)]
+
+        return _polylines_pd([arc, _barb(28.0), _barb(-28.0)])
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
