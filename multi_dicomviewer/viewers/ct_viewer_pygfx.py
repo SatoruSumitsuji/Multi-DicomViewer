@@ -459,13 +459,21 @@ class _Overlay(QWidget):
             sx, sy = v._world_to_screen(key, ox, oy)
             return QPointF(sx, sy)
 
-        pen = QPen(QColor(255, 217, 0, 128), 1.0)
-        p.setPen(pen)
+        # Hover/drag highlight: the caught line goes vivid (dimmed) yellow and
+        # opaque; the rotate zone also draws small double-headed arrows.
+        hi = v._cross_hi.get(key)
+        hl_line = hi[0] if hi else None
+        base_pen = QPen(QColor(255, 217, 0, 128), 1.0)      # amber, 50%
+        hi_pen = QPen(QColor(204, 204, 0, 255), 1.6)        # yellow, opaque
         # full-extent crosshair lines through the crosshair centre
+        p.setPen(hi_pen if hl_line == "H" else base_pen)
         p.drawLine(S(ccx - half * uh[0], ccy - half * uh[1]),
                    S(ccx + half * uh[0], ccy + half * uh[1]))
+        p.setPen(hi_pen if hl_line == "V" else base_pen)
         p.drawLine(S(ccx - half * uv[0], ccy - half * uv[1]),
                    S(ccx + half * uv[0], ccy + half * uv[1]))
+        if hi is not None and hi[1] == "rotate":
+            self._paint_rot_arrow(p, S, ccx, ccy, v._ps[key], uh, uv, hi[0])
 
         # ▲ markers: the OTHER pane's projection direction, a constant
         # fraction of the viewport from the centre (size tied to ps).
@@ -502,6 +510,38 @@ class _Overlay(QWidget):
                 ox1 = ccx + half * uh[0] + off * uv[0]
                 oy1 = ccy + half * uh[1] + off * uv[1]
                 p.drawLine(S(ox0, oy0), S(ox1, oy1))
+
+    def _paint_rot_arrow(self, p, S, ccx, ccy, ps, uh, uv, line):
+        """Two small double-headed curved arrows on BOTH sides of the caught
+        line's outer ends — the 'rotates either way' hint. Drawn in output
+        coords so it follows the crossline (redrawn each paint at the current
+        angle). Compact + dimmed yellow to match the highlight."""
+        base = uh if line == "H" else uv
+        base_ang = math.atan2(base[1], base[0])
+        r = 0.60 * ps
+        span = math.radians(3.75)
+        steps = 6
+        hs = 0.0125 * ps
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(204, 204, 0, 255), 1.4))
+        for side in (0.0, math.pi):                     # both ends of the line
+            ca0 = base_ang + side
+            arc = []
+            for i in range(steps + 1):
+                ang = ca0 - span + (2.0 * span) * i / steps
+                arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
+            p.drawPolyline(QPolygonF([S(ox, oy) for (ox, oy) in arc]))
+            for tip, nxt in ((arc[-1], arc[-2]), (arc[0], arc[1])):
+                tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
+                tl = math.hypot(tx, ty) or 1.0
+                tx, ty = tx / tl, ty / tl
+                for deg in (28.0, -28.0):
+                    cA = math.cos(math.radians(deg))
+                    sA = math.sin(math.radians(deg))
+                    bx = (-tx) * cA - (-ty) * sA
+                    by = (-tx) * sA + (-ty) * cA
+                    p.drawLine(S(tip[0], tip[1]),
+                               S(tip[0] + bx * hs, tip[1] + by * hs))
 
     # -- measurements (outlines, calipers, handles, labels, results) -------
     def _paint_measures(self, p, key, w, h):
@@ -1047,6 +1087,9 @@ class CTViewer(AbstractViewer):
                   np.array([0.0, 1.0, 0.0])),
         }
         self._cross_ang = {"A": 0.0, "B": 0.0}
+        # Hover/drag centreline highlight: (line 'H'/'V', mode 'move'/'rotate')
+        # or None per pane — drives the vivid-yellow highlight + rotate arrow.
+        self._cross_hi = {"A": None, "B": None}
         self._half = 1.0
         self._ps = {"A": 1.0, "B": 1.0}      # camera half-height (mm) per pane
         self._pan = {"A": np.zeros(2), "B": np.zeros(2)}  # focal offset (u,v)
@@ -1236,6 +1279,7 @@ class CTViewer(AbstractViewer):
         c.add_event_handler(lambda ev, k=key: self._on_down(k, ev), "pointer_down")
         c.add_event_handler(lambda ev, k=key: self._on_move(k, ev), "pointer_move")
         c.add_event_handler(lambda ev, k=key: self._on_up(k, ev), "pointer_up")
+        c.add_event_handler(lambda ev, k=key: self._on_leave(k, ev), "pointer_leave")
         c.add_event_handler(lambda ev, k=key: self._on_wheel(k, ev), "wheel")
         c.add_event_handler(lambda ev, k=key: self._on_dblclick(k, ev), "double_click")
         c.add_event_handler(lambda ev, k=key: self._on_resize(k, ev), "resize")
@@ -1357,6 +1401,7 @@ class CTViewer(AbstractViewer):
             if bool(self._meas_type) or self._center_angle_target is not None:
                 return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
+            self._hover_cross(key, x, y)      # no button → preview centreline grab
             return
         if self._cross_grab:
             self._cross_move(key, x, y)
@@ -1374,6 +1419,10 @@ class CTViewer(AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
+        # End the centreline gesture and drop its highlight.
+        if self._cross_hi.get(key) is not None:
+            self._cross_hi[key] = None
+            self._overlay[key].update()
         # Proactively drop any mouse grab so it can never linger into the next
         # gesture and deaden the toolbar buttons.
         try:
@@ -2945,23 +2994,18 @@ class CTViewer(AbstractViewer):
         self._refresh()
         self._flash_recalc()
 
-    def _cross_press(self, which, sx, sy) -> bool:
-        """True (and arm a MOVE/ROTATE gesture) if the press lands ON the
-        crosshair, else False so the selected tool handles the drag.
+    def _cross_zone(self, which, sx, sy):
+        """Classify (sx, sy) against *which* pane's crosshair. Returns
+        ``(caught, line, mode)`` — caught=False → off the crosshair (tool owns
+        the drag); else line ∈ {"H","V"} (H = green-▲) and mode ∈
+        {"move","rotate"}. Pure, so it drives BOTH press and hover.
 
-        Distances are measured in NORMALISED screen space — each pane axis
-        scaled to [-1, 1] (centre→edge = 1). So the catch band is 10% of the
-        actual screen on EACH side of a crossline (10% left/right of the
-        vertical line, 10% up/down of the horizontal line), on both axes
-        regardless of the pane's aspect ratio (vital for the extreme aspect of
-        side-by-side multi-pane) and at any zoom. (It used to be tied to the
-        fixed volume diagonal self._half, which ballooned to most of a
-        zoomed-in thin-MIP pane and hijacked paging / tool drags.) Of the
-        caught span, the INNER half (near the centre) translates the plane; the
-        OUTER half rotates it."""
+        Distances are in NORMALISED screen space (each pane axis → [-1,1]); the
+        catch band is 5%-of-screen on each side of a crossline, at any aspect /
+        zoom. Of the caught span the INNER half translates the plane, the OUTER
+        half rotates it."""
         if self._vol is None:
-            return False
-        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+            return (False, None, None)
         ccx, ccy = self._cc(which)
         cx, cy = self._screen_center(which)           # crosshair centre, px
         pane = self.pane[which]
@@ -2970,8 +3014,6 @@ class CTViewer(AbstractViewer):
         a = math.radians(self._cross_ang[which])
 
         def _ndir(ux, uy):
-            """Output-basis crossline direction (ux,uy) → unit vector in
-            normalised screen space (carries roll + pixel aspect)."""
             px, py = self._world_to_screen(which, ccx + ux, ccy + uy)
             dx, dy = (px - cx) / hx, (py - cy) / hy
             n = math.hypot(dx, dy) or 1.0
@@ -2979,40 +3021,64 @@ class CTViewer(AbstractViewer):
 
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
-        # Press point in normalised screen space, relative to the centre.
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 5%-of-
-        # screen catch on each side is therefore 0.10 in these units.
         band = 0.10                           # perpendicular catch = 5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
-        # Perpendicular distance to each crossline (|r × û|) + distance ALONG it
-        # from the centre (|r · û|).
         d_to_h = abs(rx * uh[1] - ry * uh[0])
         along_h = abs(rx * uh[0] + ry * uh[1])
         d_to_v = abs(rx * uv[1] - ry * uv[0])
         along_v = abs(rx * uv[0] + ry * uv[1])
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
-            return False                      # off the crosshair → tool runs
-        # The ▲ markers sit on the HORIZONTAL crossline (uh) → that is the
-        # green-▲ line. Where the two 5% bands overlap (the central square) the
-        # green-▲ line WINS; otherwise grab whichever line was hit.
-        grab_h = on_h                         # green-▲ (H); True also if both
+            return (False, None, None)
+        grab_h = on_h                         # green-▲ (H) wins the central square
         along = along_h if grab_h else along_v
-        if along <= mid:
-            self._cross_mode = "move"
-            # Lock the slide to the grabbed line so the grab is deterministic
-            # (no drag-direction auto-detect): the green-▲ (H) line slides ⟂ to
-            # itself = along uv (→ reslice/repage); the non-▲ (V) line slides
-            # along uh (→ edge-capped centre-line slide). Output-basis vectors.
+        mode = "move" if along <= mid else "rotate"
+        return (True, "H" if grab_h else "V", mode)
+
+    def _cross_press(self, which, sx, sy) -> bool:
+        """Arm a MOVE/ROTATE crosshair gesture (above the tool) if the press
+        lands ON the crosshair; else False. Locks the vivid highlight for the
+        whole drag."""
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        if not caught:
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+        ccx, ccy = self._cc(which)
+        a = math.radians(self._cross_ang[which])
+        grab_h = (line == "H")
+        if mode == "move":
+            # Lock the slide to the grabbed line (parallel move of that line):
+            # green-▲ (H) slides ⟂ itself = along uv; the V line slides along uh.
             ouh = np.array([math.cos(a), math.sin(a)])
             ouv = np.array([-math.sin(a), math.cos(a)])
+            self._cross_mode = "move"
             self._cross_axis = ouv if grab_h else ouh
             self._cross_ppt = (wx, wy)
         else:
             self._cross_mode = "rotate"
             self._cross_prev = math.atan2(wy - ccy, wx - ccx)
+        self._cross_hi[which] = (line, mode)
+        self._overlay[which].update()
         return True
+
+    def _hover_cross(self, which, sx, sy) -> None:
+        """Mouse moved over a pane with no button down: preview whether a press
+        would grab the centreline (vivid highlight + rotate arrow) or fall
+        through to the tool (normal amber crosshair)."""
+        if self._cross_grab or self._vol is None or not self._cl_on:
+            return
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        new = (line, mode) if caught else None
+        if self._cross_hi.get(which) != new:
+            self._cross_hi[which] = new
+            self._overlay[which].update()
+
+    def _on_leave(self, key, ev) -> None:
+        # Cursor left the pane → drop any hover highlight (not mid-drag).
+        if not self._cross_grab and self._cross_hi.get(key) is not None:
+            self._cross_hi[key] = None
+            self._overlay[key].update()
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
