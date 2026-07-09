@@ -266,18 +266,31 @@ class CoregWindow(QMainWindow):
         self._pending_fracs: dict[int, float] = {}   # xa_idx -> provisional s
         self._selected_lm: int = -1      # CoSync point selected (blue) / modify
         self._syncing: bool = False      # re-entrancy guard for IVUS↔IVUS sync
+        #: Global long-axis seekbar state (unified pull-back timeline).
+        self._global_flipped = False     # ⇄ reverses distal/proximal
+        self._global_gmin = 0            # master-frame-extended range
+        self._global_gmax = 0
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
+        # Left column: the pane grid + a full-width global long-axis seekbar
+        # under it (spanning the image area, NOT the right control panel).
+        left = QWidget()
+        lcol = QVBoxLayout(left)
+        lcol.setContentsMargins(0, 0, 0, 0)
+        lcol.setSpacing(2)
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._grid_host, 1)
+        lcol.addWidget(self._grid_host, 1)
+        lcol.addWidget(self._build_global_seek())
+        root.addWidget(left, 1)
         root.addWidget(self._build_panel())
 
         self._load_series(pane_specs)
+        self._refresh_global_seek()
 
     # ------------------------------------------------------------- build
     def _build_panel(self) -> QWidget:
@@ -413,6 +426,128 @@ class CoregWindow(QMainWindow):
             if clr is not None:
                 clr.setText(t("Clear"))
         self._refresh_list()          # landmark rows re-render via t()
+        self._global_lbl.setText(t("Long-axis sync"))
+        self._global_flip_btn.setToolTip(t("Flip the distal/proximal direction"))
+
+    # ------------------------------------------- global long-axis seekbar
+    def _build_global_seek(self) -> QWidget:
+        """Full-width seekbar under the pane grid: a UNIFIED pull-back timeline
+        that scrubs every IVUS/OCT together across the combined distal→proximal
+        range (the master's frame axis, extended to cover followers whose
+        pull-back reaches beyond it), so a range whose ends live in different
+        pull-backs is still traversable with one bar. Separate from the Master
+        radio. Hidden with <2 IVUS; greyed until a CoSync point links them."""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(6, 0, 6, 2)
+        self._global_lbl = QLabel(t("Long-axis sync"))
+        self._global_slider = QSlider(Qt.Orientation.Horizontal)
+        self._global_slider.valueChanged.connect(self._on_global_seek)
+        self._global_flip_btn = QPushButton("⇄")
+        self._global_flip_btn.setFixedWidth(32)
+        self._global_flip_btn.setCheckable(True)
+        self._global_flip_btn.setToolTip(t("Flip the distal/proximal direction"))
+        self._global_flip_btn.toggled.connect(self._on_global_flip)
+        row.addWidget(self._global_lbl)
+        row.addWidget(self._global_slider, 1)
+        row.addWidget(self._global_flip_btn)
+        self._global_row = w
+        return w
+
+    def _ivus_panes(self):
+        return [p for p in self.panes if p.is_ivus and p.total > 0]
+
+    def _global_range(self, R):
+        """(gmin, gmax) integer master-frame-extended range covering every
+        IVUS's [0, total-1] mapped into master R's frame axis, or None."""
+        if R < 0 or R >= len(self.panes):
+            return None
+        master = self.panes[R]
+        gmin, gmax = 0.0, float(master.total - 1)
+        for q in self.panes:
+            if q is master or not q.is_ivus or q.total < 1:
+                continue
+            qm = [(lm["frames"][q.index], lm["frames"][R])
+                  for lm in self._landmarks
+                  if q.index in lm.get("frames", {})
+                  and R in lm.get("frames", {})]
+            for qf in (0, q.total - 1):
+                g = coreg.map_between(qm, qf)
+                if g is not None:
+                    gmin, gmax = min(gmin, g), max(gmax, g)
+        if gmax <= gmin:
+            return None
+        return int(math.floor(gmin)), int(math.ceil(gmax))
+
+    def _slider_to_g(self, s):
+        return (self._global_gmax - s if self._global_flipped
+                else self._global_gmin + s)
+
+    def _g_to_slider(self, g):
+        return int(round(self._global_gmax - g if self._global_flipped
+                         else g - self._global_gmin))
+
+    def _refresh_global_seek(self):
+        """Show the bar with ≥2 IVUS; enable + (re)range it once a CoSync point
+        links them; keep the handle on the master's current frame."""
+        if not hasattr(self, "_global_slider"):
+            return
+        self._global_row.setVisible(len(self._ivus_panes()) >= 2)
+        R = self._active_ivus
+        rng = self._global_range(R) if (R >= 0 and self._landmarks) else None
+        on = len(self._ivus_panes()) >= 2 and rng is not None
+        for w in (self._global_slider, self._global_flip_btn, self._global_lbl):
+            w.setEnabled(on)
+        if not on:
+            return
+        self._global_gmin, self._global_gmax = rng
+        self._global_slider.blockSignals(True)
+        self._global_slider.setRange(
+            0, max(1, self._global_gmax - self._global_gmin))
+        self._global_slider.setValue(self._g_to_slider(self.panes[R].cur))
+        self._global_slider.blockSignals(False)
+
+    def _reflect_global(self):
+        """Move the global handle to reflect the master's current frame."""
+        R = self._active_ivus
+        if R < 0 or not self._global_slider.isEnabled():
+            return
+        self._global_slider.blockSignals(True)
+        self._global_slider.setValue(self._g_to_slider(self.panes[R].cur))
+        self._global_slider.blockSignals(False)
+
+    def _on_global_flip(self, checked):
+        self._global_flipped = bool(checked)
+        self._reflect_global()
+
+    def _on_global_seek(self, s):
+        """Drive every IVUS from the unified timeline: the master clamps to its
+        own range while a follower whose pull-back extends further keeps moving
+        (map_between extrapolates), then markers + rotations follow."""
+        if self._syncing or self._placing:
+            return
+        R = self._active_ivus
+        if R < 0:
+            return
+        g = self._slider_to_g(s)
+        self._syncing = True
+        try:
+            self.panes[R].show_frame(int(round(g)))     # clamps to master range
+            for q in self.panes:
+                if q is self.panes[R] or not q.is_ivus or q.total < 1:
+                    continue
+                pairs = [(lm["frames"][R], lm["frames"][q.index])
+                         for lm in self._landmarks
+                         if R in lm.get("frames", {})
+                         and q.index in lm.get("frames", {})]
+                f = coreg.map_between(pairs, g)
+                if f is not None:
+                    q.show_frame(int(round(f)))
+        finally:
+            self._syncing = False
+        for p in self.panes:
+            self._apply_rotation(p)
+        self._drive_markers()
 
     def _load_series(self, pane_specs) -> None:
         specs = [(s, p, f) for (s, p, f) in (pane_specs or [])
@@ -718,6 +853,7 @@ class CoregWindow(QMainWindow):
             h.addWidget(b)
             h.addWidget(info, 1)
             self._lm_box.addWidget(row)
+        self._refresh_global_seek()      # landmark set changed → re-range bar
 
     def _goto_landmark(self, idx: int) -> None:
         """Clicking CoSync-N selects it (blue) and jumps every IVUS that
@@ -1111,6 +1247,7 @@ class CoregWindow(QMainWindow):
     def _set_active_ivus(self, pane_idx: int) -> None:
         self._active_ivus = pane_idx
         self._drive_markers()
+        self._refresh_global_seek()      # master changed → re-range on its axis
 
     def _on_ivus_scrub(self, pane_idx: int) -> None:
         """Scrubbing the MASTER IVUS moves the others in lockstep (once ≥2
@@ -1131,6 +1268,7 @@ class CoregWindow(QMainWindow):
         for p in self.panes:
             self._apply_rotation(p)
         self._drive_markers()
+        self._reflect_global()           # keep the global handle in step
 
     def _apply_rotation(self, pane) -> None:
         """Set *pane*'s IVUS display rotation to the angle interpolated from
