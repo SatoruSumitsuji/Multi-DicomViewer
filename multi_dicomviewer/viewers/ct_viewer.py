@@ -619,13 +619,20 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 return
             # idle Measure mode → fall through to the tool / crosshair setup
         self._owner._spin_prev = None        # restart SPIN wheel angle
-        # Pressing within the (now 5%) crosshair grab band grabs the centreline
-        # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
-        # is small, so SPIN still owns the drag everywhere off the lines; on the
-        # lines, grabbing the centreline takes priority (per request).
-        self._cross = self._owner._cross_press(
-            self._which, e.position().x(), e.position().y()
-        )
+        # Pressing within the (5%) crosshair grab band grabs the centreline
+        # (reslice move / rotate), overriding the tool — for every tool EXCEPT
+        # the MOVE (pan) tool. Under MOVE the user expects a free camera pan
+        # EVERYWHERE, so grabbing near the centre must NOT hijack into the
+        # axis-locked crossline slide: that quietly shifted the reslice centre /
+        # rotated the crossline and stuck (only a re-centre undid it), which read
+        # as "Move goes 90° wrong near the centreline and stays broken".
+        # Crosshair reslice-editing stays available under the other tools.
+        if self._owner._tool == "MOVE":
+            self._cross = False
+        else:
+            self._cross = self._owner._cross_press(
+                self._which, e.position().x(), e.position().y()
+            )
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
