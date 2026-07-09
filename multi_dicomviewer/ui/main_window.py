@@ -1093,6 +1093,16 @@ class MainWindow(QMainWindow):
         if hasattr(self.browser, "retranslate_ui"):
             self.browser.retranslate_ui()
 
+        # Open non-modal tool windows follow the language live too (modal
+        # dialogs can't be reached while the language menu is open, so they
+        # just pick it up next open). Only those that implement retranslate_ui.
+        for attr in ("_coreg_win", "_rupture_win", "_ortho_win",
+                     "_dicomcheck_win", "_dicomfolder_win", "_hist_dialog"):
+            win = getattr(self, attr, None)
+            if (win is not None and hasattr(win, "retranslate_ui")
+                    and win.isVisible()):
+                win.retranslate_ui()
+
         self.update()
 
     def _build_menu(self) -> None:
@@ -1163,13 +1173,10 @@ class MainWindow(QMainWindow):
         vm.addAction(imp_act)
 
         tm = self.menuBar().addMenu(t("&Tools"))
-        self._sync_act = QAction(t("MultiSync IVUS viewer…"), self)
-        self._sync_act.setToolTip(t(
-            "Open the panes' IVUS series in a synchronised viewer "
-            "(only available in the 1×2 / 2×1 / 2×2 layout)"
-        ))
-        self._sync_act.triggered.connect(self._open_multisync)
-        tm.addAction(self._sync_act)
+        # MultiSync-Viewer retired 2026-07-09: its capabilities (multi-IVUS
+        # frame+rotation sync, save/load, MP4 export) are now the IVUS-XA CoReg
+        # tool below (a strict superset). The old window (multisync_window.py)
+        # and _open_multisync are kept on disk but no longer reachable.
         self._rupture_act = QAction(t("Rupture-Predictor…"), self)
         self._rupture_act.triggered.connect(self._open_rupture_predictor)
         tm.addAction(self._rupture_act)
@@ -1225,12 +1232,9 @@ class MainWindow(QMainWindow):
 
     def _sync_layout_gate(self) -> None:
         """Gate Tools menu items by current layout / contents:
-        MultiSync needs 1×2 or 2×2; Orthogonal-View needs at least one
-        VISIBLE pane to hold an XA series with C-arm positioner angles
-        (it works on every visible pane — angio panes are pickable,
-        the rest open view-only)."""
-        if hasattr(self, "_sync_act"):
-            self._sync_act.setEnabled(self._layout_key in _MULTI_PANE)
+        Orthogonal-View needs at least one VISIBLE pane to hold an XA series
+        with C-arm positioner angles (it works on every visible pane — angio
+        panes are pickable, the rest open view-only)."""
         if hasattr(self, "_ortho_act"):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
         if hasattr(self, "_coaxial_act"):
