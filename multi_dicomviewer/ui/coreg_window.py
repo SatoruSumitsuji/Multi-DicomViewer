@@ -130,6 +130,15 @@ class _CoregPane:
         self.nav.addWidget(self.include_cb)
         col.addLayout(self.nav)
 
+    def retranslate_ui(self) -> None:
+        """Re-apply this pane's persistent strings on a live language change."""
+        self.master_radio.setText(t("Master"))
+        self.master_radio.setToolTip(
+            t("Make this the active IVUS — its frame drives the markers"))
+        self.include_cb.setText(t("Include in this point"))
+        self.include_cb.setToolTip(
+            t("While adding a CoReg point, include this IVUS's current frame"))
+
     # ---- loading ----
     def load(self, series: Series | None, plane_index: int = 0,
              start_frame: int = 0) -> None:
@@ -226,6 +235,14 @@ class _CoregPane:
 class CoregWindow(QMainWindow):
     """Standalone IVUS–XA co-registration window."""
 
+    #: Marker-style toggles: (state key, English label, default on).
+    _MARKER_LABELS = (
+        ("guide", "Guide line", True),
+        ("point", "Point", True),
+        ("cutline", "Cut line", False),
+        ("arrow", "Direction arrow", False),
+    )
+
     def __init__(self, pane_specs, parent=None):
         """*pane_specs*: list of ``(Series, plane_index)`` — one per pane to
         create, mirroring the source panes on screen. plane_index picks the
@@ -266,13 +283,13 @@ class CoregWindow(QMainWindow):
         v = QVBoxLayout(panel)
 
         # Guide section — one Trace/Clear row per angio pane (filled later).
-        gbox = QGroupBox(t("Guide line (vessel trace)"))
-        self._guide_box = QVBoxLayout(gbox)
-        v.addWidget(gbox)
+        self._gbox = QGroupBox(t("Guide line (vessel trace)"))
+        self._guide_box = QVBoxLayout(self._gbox)
+        v.addWidget(self._gbox)
 
         # CoReg points section.
-        cbox = QGroupBox(t("CoReg points"))
-        cv = QVBoxLayout(cbox)
+        self._cbox = QGroupBox(t("CoReg points"))
+        cv = QVBoxLayout(self._cbox)
         # Mode toggle: white = click to enter create/modify (goes blue); blue
         # = click to commit (確定). Modifies the selected CoReg point, or
         # creates a new one when none is selected.
@@ -336,23 +353,63 @@ class CoregWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         scroll.setWidget(self._lm_host)
         cv.addWidget(scroll, 1)
-        v.addWidget(cbox, 1)
+        v.addWidget(self._cbox, 1)
 
-        # Marker style toggles.
-        sbox = QGroupBox(t("Marker display"))
-        sv = QVBoxLayout(sbox)
+        # Marker style toggles. Labels kept as English keys so retranslate_ui
+        # can re-apply them on a live language change.
+        self._sbox = QGroupBox(t("Marker display"))
+        sv = QVBoxLayout(self._sbox)
         self._style_cbs: dict[str, QCheckBox] = {}
-        for key, text, on in (("guide", t("Guide line"), True),
-                              ("point", t("Point"), True),
-                              ("cutline", t("Cut line"), False),
-                              ("arrow", t("Direction arrow"), False)):
-            cb = QCheckBox(text)
+        for key, label, on in self._MARKER_LABELS:
+            cb = QCheckBox(t(label))
             cb.setChecked(on)
             cb.toggled.connect(self._apply_style)
             sv.addWidget(cb)
             self._style_cbs[key] = cb
-        v.addWidget(sbox)
+        v.addWidget(self._sbox)
         return panel
+
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent string after a LIVE language change (the
+        shell calls this via its open-tool-window cascade). On-demand file /
+        rename dialogs and the transient status line are left to their next
+        use. The window title is the product name (kept)."""
+        self._gbox.setTitle(t("Guide line (vessel trace)"))
+        self._cbox.setTitle(t("CoReg points"))
+        self._sbox.setTitle(t("Marker display"))
+        self._add_btn.setText(t("Add / edit / commit CoReg point"))
+        self._sort_btn.setText(t("Sort CoReg points"))
+        self._sort_btn.setToolTip(t("Sort by the active IVUS frame order"))
+        self._clear_all_btn.setText(t("Delete all CoReg points"))
+        self._save_btn.setText(t("Save CoReg…"))
+        self._save_btn.setToolTip(
+            t("Save the CoReg points and guide traces to a file"))
+        self._load_btn.setText(t("Load CoReg…"))
+        self._load_btn.setToolTip(
+            t("Load CoReg points / guide traces from a file "
+              "(or import a MultiSync .txt)"))
+        self._mp4_btn.setText(t("Export MP4…"))
+        self._mp4_btn.setToolTip(
+            t("Scrub the master IVUS start→end and record every pane "
+              "(with the moving angio marker) to an MP4"))
+        self._cancel_btn.setText(t("Cancel"))
+        self._exclude_xa_cb.setText(t("Exclude XA (IVUS sync only)"))
+        self._exclude_xa_cb.setToolTip(
+            t("Don't set a position on XA; use this CoReg point only for "
+              "IVUS sync"))
+        for key, label, _on in self._MARKER_LABELS:
+            cb = self._style_cbs.get(key)
+            if cb is not None:
+                cb.setText(t(label))
+        for pane in self.panes:
+            pane.retranslate_ui()
+            trace = getattr(pane, "_trace_btn", None)
+            if trace is not None:
+                trace.setText(t("Trace"))
+            clr = getattr(pane, "_clear_btn", None)
+            if clr is not None:
+                clr.setText(t("Clear"))
+        self._refresh_list()          # landmark rows re-render via t()
 
     def _load_series(self, pane_specs) -> None:
         specs = [(s, p, f) for (s, p, f) in (pane_specs or [])
@@ -408,6 +465,7 @@ class CoregWindow(QMainWindow):
         row.addWidget(clr)
         self._guide_box.addLayout(row)
         pane._trace_btn = trace          # keep for programmatic untoggle
+        pane._clear_btn = clr            # keep for live retranslate
 
     # ------------------------------------------------- guide editing
     def _toggle_trace(self, pane_idx: int, on: bool) -> None:

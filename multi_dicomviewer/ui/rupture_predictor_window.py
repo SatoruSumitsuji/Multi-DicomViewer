@@ -790,7 +790,7 @@ class RupturePredictorWindow(QMainWindow):
         lay.addWidget(self._rate_table)
 
         btns = QHBoxLayout()
-        b_reset = QPushButton("Reset")
+        b_reset = QPushButton(t("Reset"))
         b_reset.clicked.connect(self.reset_all)
         b_zin = QPushButton("＋")
         b_zin.clicked.connect(self.canvas.zoom_in)
