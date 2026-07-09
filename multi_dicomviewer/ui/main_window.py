@@ -1174,7 +1174,7 @@ class MainWindow(QMainWindow):
 
         tm = self.menuBar().addMenu(t("&Tools"))
         # MultiSync-Viewer retired 2026-07-09: its capabilities (multi-IVUS
-        # frame+rotation sync, save/load, MP4 export) are now the IVUS-XA CoReg
+        # frame+rotation sync, save/load, MP4 export) are now the CoSync
         # tool below (a strict superset). The old window (multisync_window.py)
         # and _open_multisync are kept on disk but no longer reachable.
         self._rupture_act = QAction(t("Rupture-Predictor…"), self)
@@ -1198,10 +1198,10 @@ class MainWindow(QMainWindow):
         ))
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
-        self._coreg_act = QAction(t("IVUS-XA CoReg…"), self)
+        self._coreg_act = QAction(t("CoSync…"), self)
         self._coreg_act.setToolTip(t(
             "Co-register IVUS pull-back frames to positions on the angio "
-            "vessel: trace a guide, pin CoReg landmarks, then scrubbing "
+            "vessel: trace a guide, pin CoSync landmarks, then scrubbing "
             "the IVUS drives a marker along the angio "
             "(needs at least one IVUS and one XA series loaded)"
         ))
@@ -1327,16 +1327,16 @@ class MainWindow(QMainWindow):
         self._multisync.raise_()
 
     def _open_coreg(self) -> None:
-        """Launch the IVUS-XA CoReg window, seeded with the IVUS and XA
+        """Launch the CoSync window, seeded with the IVUS and XA
         series currently shown in the panes (IVUS pull-backs + the
         representative angio view[s]). Needs ≥1 IVUS and ≥1 XA."""
         from multi_dicomviewer.ui.coreg_window import CoregWindow
-        # One CoReg pane per shown pane holding an IVUS/XA series, mirroring
+        # One CoSync pane per shown pane holding an IVUS/XA series, mirroring
         # the on-screen arrangement 1:1 (no series_uid de-dup, which dropped
         # a pane when two shown panes shared a UID, e.g. biplane). Each spec
         # is (series, plane_index): for a biplane pane we send exactly the
         # projection(s) actually displayed — Lt→plane 0, Rt→plane 1, and Bi
-        # (both shown) → both planes as two CoReg views.
+        # (both shown) → both planes as two CoSync views.
         specs: list = []
         for pane in self._shown_panes():
             se = self._series_by_uid.get(pane.shown_series_uid())
@@ -1356,7 +1356,7 @@ class MainWindow(QMainWindow):
         has_ivus = any(s.modality == Modality.IVUS for s, _p, _f in specs)
         if not has_ivus:
             QMessageBox.information(
-                self, t("IVUS-XA CoReg"),
+                self, t("CoSync"),
                 t("Show at least one IVUS pull-back in the panes first. "
                   "(XA angio is optional — with no XA this behaves like a "
                   "multi-IVUS sync viewer.)"),
