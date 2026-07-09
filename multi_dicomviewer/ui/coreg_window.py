@@ -1099,7 +1099,9 @@ class CoregWindow(QMainWindow):
 
     def _compose_coreg_frame(self, cell: int, cols: int) -> np.ndarray:
         """Grab every pane's canvas (image + guide + moving marker, exactly as
-        shown) and tile them into a cols-wide grid of square *cell* cells."""
+        shown), CROP off the canvas letterbox so only the image region remains,
+        and tile them into a cols-wide grid of square *cell* cells — so the
+        image fills its cell instead of sitting small inside a double margin."""
         rows = (len(self.panes) + cols - 1) // cols
         img = QImage(cell * cols, cell * rows, QImage.Format.Format_RGB888)
         img.fill(QColor("#000000"))
@@ -1107,7 +1109,23 @@ class CoregWindow(QMainWindow):
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         try:
             for k, pane in enumerate(self.panes):
-                qimg = pane.canvas.grab().toImage()
+                canvas = pane.canvas
+                qimg = canvas.grab().toImage()
+                gw, gh = qimg.width(), qimg.height()
+                if gw <= 0 or gh <= 0:
+                    continue
+                # Crop to the image's draw rect (drops the fit letterbox),
+                # mapping logical widget px → grabbed px (HiDPI-safe).
+                dr = canvas._draw_rect()
+                cw, ch = canvas.width(), canvas.height()
+                if dr.isValid() and cw > 0 and ch > 0:
+                    sx, sy = gw / cw, gh / ch
+                    cx = max(0, int(round(dr.x() * sx)))
+                    cy = max(0, int(round(dr.y() * sy)))
+                    cw2 = min(gw - cx, int(round(dr.width() * sx)))
+                    ch2 = min(gh - cy, int(round(dr.height() * sy)))
+                    if cw2 > 0 and ch2 > 0:
+                        qimg = qimg.copy(cx, cy, cw2, ch2)
                 w, h = qimg.width(), qimg.height()
                 if w <= 0 or h <= 0:
                     continue
