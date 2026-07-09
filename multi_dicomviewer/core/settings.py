@@ -19,7 +19,32 @@ EXPORT_FIELDS_PATH = SETTINGS_DIR / "export_fields.json"
 ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
 IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
 DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
+LANGUAGE_PATH = SETTINGS_DIR / "language.json"
 _SCHEMA_VERSION = 2
+
+
+def load_language(default: str = "en") -> str:
+    """The persisted UI language code (e.g. "en"/"ja"), or *default*."""
+    try:
+        data = json.loads(LANGUAGE_PATH.read_text(encoding="utf-8"))
+        code = data.get("language")
+        if isinstance(code, str) and code:
+            return code
+    except (OSError, ValueError):
+        pass
+    return default
+
+
+def save_language(code: str) -> None:
+    """Best-effort persist of the chosen UI language code."""
+    try:
+        LANGUAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LANGUAGE_PATH.write_text(
+            json.dumps({"language": str(code), "version": 1},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        pass
 
 #: Modalities that get their own persisted tag list. Anything else
 #: falls into "OTHER" so the auto-recall still works for NM/OCT/etc.

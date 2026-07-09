@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.config import DEFAULT_CINE_FPS
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.ecg import ECGTrace, read_ecg
@@ -298,7 +299,7 @@ class _EcgStrip(QWidget):
             p.drawText(6, 15, "ECG")
             p.setPen(QColor("#888"))
             p.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "No ECG"
+                self.rect(), Qt.AlignmentFlag.AlignCenter, t("No ECG")
             )
             return
         pad = self._PAD
@@ -663,21 +664,24 @@ class XAViewer(AbstractViewer):
     def _build_series_nav(self):
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
-        row.addWidget(QLabel("Series:"))
+        self._series_nav_lbl = QLabel(t("Series:"))
+        row.addWidget(self._series_nav_lbl)
+        self._nav_btns: list[QPushButton] = []
         for label, where, tip in (
-            ("⏮ First", "first", "First series (Home)"),
-            ("◀ Prev (A)", "prev", "Previous series — shortcut: A"),
-            ("Next (F) ▶", "next", "Next series — shortcut: F"),
-            ("Last ⏭", "last", "Last series (End)"),
+            ("⏮ First", "first", t("First series (Home)")),
+            ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
+            ("Next (F) ▶", "next", t("Next series — shortcut: F")),
+            ("Last ⏭", "last", t("Last series (End)")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
             b.clicked.connect(lambda _c, w=where: self.series_nav.emit(w))
+            self._nav_btns.append(b)
             row.addWidget(b)
         # Measure toggle right after the Last button (CT-style placement);
         # the sub-bar (4 tool buttons + Clear) lives directly below this
         # row and only appears when Measure is checked.
-        self._meas_btn = QPushButton("📏 Measure")
+        self._meas_btn = QPushButton(t("📏 Measure"))
         self._meas_btn.setCheckable(True)
         self._meas_btn.setMinimumWidth(110)
         self._meas_btn.setStyleSheet(
@@ -685,7 +689,7 @@ class XAViewer(AbstractViewer):
             "QPushButton:checked { background:#1f77b4; color:black; }"
         )
         self._meas_btn.setToolTip(
-            "Toggle the measure bar (Line / Polyline / Ellipse / Polygon)"
+            t("Toggle the measure bar (Line / Polyline / Ellipse / Polygon)")
         )
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
@@ -697,22 +701,22 @@ class XAViewer(AbstractViewer):
         self._zoom_in_btn = QPushButton("🔍+")
         self._zoom_in_btn.setCheckable(True)
         self._zoom_in_btn.setToolTip(
-            "Click-to-zoom IN — then click a point on the image to magnify "
-            "×1.1 centred on it (click again to zoom further)"
+            t("Click-to-zoom IN — then click a point on the image to magnify "
+              "×1.1 centred on it (click again to zoom further)")
         )
         self._zoom_in_btn.clicked.connect(lambda: self._set_zoom_click("in"))
         row.addWidget(self._zoom_in_btn)
 
         self._zoom_reset_btn = QPushButton("🔍1")
-        self._zoom_reset_btn.setToolTip("Reset zoom to the original fit")
+        self._zoom_reset_btn.setToolTip(t("Reset zoom to the original fit"))
         self._zoom_reset_btn.clicked.connect(self._reset_zoom)
         row.addWidget(self._zoom_reset_btn)
 
         self._zoom_out_btn = QPushButton("🔍−")
         self._zoom_out_btn.setCheckable(True)
         self._zoom_out_btn.setToolTip(
-            "Click-to-zoom OUT — then click a point on the image to shrink "
-            "×0.9 centred on it"
+            t("Click-to-zoom OUT — then click a point on the image to shrink "
+              "×0.9 centred on it")
         )
         self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
         row.addWidget(self._zoom_out_btn)
@@ -722,10 +726,10 @@ class XAViewer(AbstractViewer):
         # Flip-H (a left-right mirror), so it is not a separate button.
         self._orient_btns = []
         for label, kind, tip in (
-            ("Rt90°", "rt90", "Rotate the image 90° clockwise"),
-            ("Lt90°", "lt90", "Rotate the image 90° counter-clockwise"),
-            ("Flip-H", "fliph", "Flip horizontally (left-right mirror)"),
-            ("Flip-V", "flipv", "Flip vertically (top-bottom)"),
+            (t("Rt90°"), "rt90", t("Rotate the image 90° clockwise")),
+            (t("Lt90°"), "lt90", t("Rotate the image 90° counter-clockwise")),
+            (t("Flip-H"), "fliph", t("Flip horizontally (left-right mirror)")),
+            (t("Flip-V"), "flipv", t("Flip vertically (top-bottom)")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -743,10 +747,10 @@ class XAViewer(AbstractViewer):
         self._hq_cine_btn.setStyleSheet(
             "QPushButton:checked { background:#1f77b4; color:white; }")
         self._hq_cine_btn.setToolTip(
-            "Smooth Cine: keep frames bilinear-smooth even during cine playback "
-            "(paused frames are already smooth). Default off (fast nearest-"
-            "neighbour cine). This affects motion only — for sharper enlarged "
-            "stills use S-Zoom.")
+            t("Smooth Cine: keep frames bilinear-smooth even during cine playback "
+              "(paused frames are already smooth). Default off (fast nearest-"
+              "neighbour cine). This affects motion only — for sharper enlarged "
+              "stills use S-Zoom."))
         self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
         self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
         row.addWidget(self._hq_cine_btn)
@@ -763,26 +767,26 @@ class XAViewer(AbstractViewer):
         self._smooth_btn.setCheckable(True)
         self._smooth_btn.setStyleSheet(_q_css)
         self._smooth_btn.setToolTip(
-            "Smooth Zoom: high-quality (Lanczos) upscaling — sharper image when "
-            "enlarged (vs the default bilinear). Default off. For fast machines.")
+            t("Smooth Zoom: high-quality (Lanczos) upscaling — sharper image when "
+              "enlarged (vs the default bilinear). Default off. For fast machines."))
         self._smooth_btn.setChecked(bool(self._dq.get("xa_smooth")))
         self._smooth_btn.setEnabled(_have_cv2)
         self._smooth_btn.toggled.connect(self._toggle_smooth)
         row.addWidget(self._smooth_btn)
 
-        self._denoise_btn = QPushButton("Denoise")
+        self._denoise_btn = QPushButton(t("Denoise"))
         self._denoise_btn.setCheckable(True)
         self._denoise_btn.setStyleSheet(_q_css)
         self._denoise_btn.setToolTip(
-            "Edge-preserving noise reduction: calms speckle / quantum noise "
-            "while keeping vessel and catheter edges crisp. Default off.")
+            t("Edge-preserving noise reduction: calms speckle / quantum noise "
+              "while keeping vessel and catheter edges crisp. Default off."))
         self._denoise_btn.setChecked(bool(self._dq.get("xa_denoise")))
         self._denoise_btn.setEnabled(_have_cv2)
         self._denoise_btn.toggled.connect(self._toggle_denoise)
         row.addWidget(self._denoise_btn)
         if not _have_cv2:
             for _b in (self._smooth_btn, self._denoise_btn):
-                _b.setToolTip(_b.toolTip() + "  (OpenCV not available)")
+                _b.setToolTip(_b.toolTip() + t("  (OpenCV not available)"))
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
@@ -794,9 +798,10 @@ class XAViewer(AbstractViewer):
         # DICOM Tags is on the LEFT of the pair (always visible / more useful);
         # Measure History — less critical — sits to its right. The tag-text-size
         # slider is stacked ABOVE the Tags button (shared across modalities).
-        tags_box, self._tag_font_slider, tags_btn = build_tag_font_control(
-            TAG_FONT_PT_DEFAULT
+        tags_box, self._tag_font_slider, self._tags_font_btn = (
+            build_tag_font_control(TAG_FONT_PT_DEFAULT)
         )
+        tags_btn = self._tags_font_btn
         tags_btn.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
@@ -804,10 +809,10 @@ class XAViewer(AbstractViewer):
         # per-viewer copy is kept (for set_overlay_font_pt sync) but hidden.
         tags_box.setVisible(False)
         self._series_nav_right_anchor = tags_box   # left edge of the pair
-        hist_btn = QPushButton("Measure History")
-        hist_btn.setToolTip("Show this study's measurement history")
-        hist_btn.clicked.connect(self.history_requested.emit)
-        row.addWidget(hist_btn)
+        self._hist_btn = QPushButton(t("Measure History"))
+        self._hist_btn.setToolTip(t("Show this study's measurement history"))
+        self._hist_btn.clicked.connect(self.history_requested.emit)
+        row.addWidget(self._hist_btn)
         return row
 
     def set_overlay_font_pt(self, pt: int) -> None:
@@ -839,13 +844,20 @@ class XAViewer(AbstractViewer):
         self.plane_bar = QWidget()
         row = QHBoxLayout(self.plane_bar)
         row.setContentsMargins(2, 0, 2, 0)
-        row.addWidget(QLabel("Plane:"))
+        self._plane_nav_lbl = QLabel(t("Plane:"))
+        row.addWidget(self._plane_nav_lbl)
         self._plane_group = QButtonGroup(self)
         self._plane_group.setExclusive(True)
         self._side_btns: dict[str, QPushButton] = {}
         for key in ("Bi", "Lt", "Rt"):
             btn = QPushButton(key)
             btn.setCheckable(True)
+            # Blue background on the checked button so the pane ALWAYS shows
+            # its current state at a glance: Bi = both planes, Lt = left
+            # only, Rt = right only (the plain checkable look was too subtle).
+            btn.setStyleSheet(
+                "QPushButton:checked { background:#2d7ff0; color:white;"
+                " font-weight:bold; }")
             btn.clicked.connect(lambda _c, k=key: self.set_side(k, True))
             self._plane_group.addButton(btn)
             self._side_btns[key] = btn
@@ -922,8 +934,8 @@ class XAViewer(AbstractViewer):
         self.frame_lbl.setMinimumWidth(70)
         self.frame_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         self.frame_lbl.setToolTip(
-            "Click to reset the playback range to the full range "
-            "(click to reset the Play range to the whole clip)"
+            t("Click to reset the playback range to the full range "
+              "(click to reset the Play range to the whole clip)")
         )
         self.frame_lbl.clicked.connect(self._reset_play_range)
 
@@ -934,8 +946,8 @@ class XAViewer(AbstractViewer):
         # loads, so it adds no clutter for a lone series.
         self.series_lbl = QLabel("")
         self.series_lbl.setToolTip(
-            "Series position in this study (current / total) — "
-            "use First/Prev/Next/Last to move between series"
+            t("Series position in this study (current / total) — "
+              "use First/Prev/Next/Last to move between series")
         )
         # Make the series counter stand out: 1.5× the natural size and bold
         # (fits the max "999/999" comfortably). Remember the ENLARGED size as
@@ -987,7 +999,7 @@ class XAViewer(AbstractViewer):
         toolbar row to this popup, opened from the image right-click ▸ Change
         W/L. A numeric label beside each slider shows the current value."""
         dlg = QDialog(self)
-        dlg.setWindowTitle("Window / Level")
+        dlg.setWindowTitle(t("Window / Level"))
         dlg.setWindowFlag(Qt.WindowType.Tool, True)
         grid = QGridLayout(dlg)
         grid.setContentsMargins(10, 10, 10, 10)
@@ -1013,11 +1025,11 @@ class XAViewer(AbstractViewer):
         self._lvl_val_lbl.setMinimumWidth(52)
         grid.addWidget(self._lvl_val_lbl, 1, 2)
 
-        reset_btn = QPushButton("Reset")
-        reset_btn.setToolTip("Reset W/L to the default setting")
-        reset_btn.clicked.connect(self._reset_wl)
+        self._wl_reset_btn = QPushButton(t("Reset"))
+        self._wl_reset_btn.setToolTip(t("Reset W/L to the default setting"))
+        self._wl_reset_btn.clicked.connect(self._reset_wl)
         grid.addWidget(
-            reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
+            self._wl_reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
         )
 
         self._wl_dialog = dlg
@@ -1037,7 +1049,7 @@ class XAViewer(AbstractViewer):
         """Open the Window/Level popup (image right-click ▸ Change W/L).
         No-op while W/L is disabled (e.g. a colour series has no W/L)."""
         if not self.win_slider.isEnabled():
-            self.readout.setText("This series has no W/L setting")
+            self.readout.setText(t("This series has no W/L setting"))
             return
         self._update_wl_labels()
         self._wl_dialog.show()
@@ -1338,14 +1350,14 @@ class XAViewer(AbstractViewer):
             c.clear_measurements()
 
         kind = (
-            f"biplane: {' + '.join(p.name for p in self._planes)}"
+            f"{t('biplane')}: {' + '.join(p.name for p in self._planes)}"
             if self._is_biplane
-            else "single plane"
+            else t("single plane")
         )
-        cal = "calibrated" if loaded.spacing_mm else "uncalibrated (px)"
-        tone = "color" if self._is_color else "grayscale"
+        cal = t("calibrated") if loaded.spacing_mm else t("uncalibrated (px)")
+        tone = t("color") if self._is_color else t("grayscale")
         self.title_label.setText(
-            f"{title}   |   {n} frame(s)   |   {kind}   "
+            f"{title}   |   {t('{n} frame(s)', n=n)}   |   {kind}   "
             f"|   {tone}   |   {cal}"
         )
 
@@ -1752,7 +1764,7 @@ class XAViewer(AbstractViewer):
             if self._buffered_enough():
                 self._start_cine()
             else:
-                self.frame_lbl.setText("⏳ Buffering…")
+                self.frame_lbl.setText(t("⏳ Buffering…"))
                 self._buffer_timer.start()
         else:
             self._buffer_timer.stop()
@@ -1866,7 +1878,7 @@ class XAViewer(AbstractViewer):
             self._range_by_series[self._loaded_uid] = (lo, hi)
         self._range_marks.set_bounds(lo, hi)
         self.play_range_changed.emit(self._loaded_uid, lo, hi, n)
-        self.readout.setText(f"Play range reset: all {n} frames")
+        self.readout.setText(t("Play range reset: all {n} frames", n=n))
 
     def _on_range_marks_changed(self, start: int, end: int) -> None:
         """A Play-range triangle was dragged. Store the new bounds, pull the
@@ -1881,8 +1893,8 @@ class XAViewer(AbstractViewer):
         n = max((p.volume.shape[0] for p in self._planes), default=0)
         self.play_range_changed.emit(self._loaded_uid, start, end, n)
         self.readout.setText(
-            f"Play range: frames {start + 1}–{end + 1} "
-            f"({end - start + 1} of {n})"
+            t("Play range: frames {a}–{b} ({count} of {n})",
+              a=start + 1, b=end + 1, count=end - start + 1, n=n)
         )
 
     def goto_frame(self, idx: int) -> None:
@@ -1922,7 +1934,8 @@ class XAViewer(AbstractViewer):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(QLabel("Measure:"))
+        self._measure_lbl = QLabel(t("Measure:"))
+        row.addWidget(self._measure_lbl)
         self._meas_btns: dict[str, QPushButton] = {}
         for label, key in (
             ("Line", "line"), ("Polyline", "polyline"),
@@ -1936,31 +1949,34 @@ class XAViewer(AbstractViewer):
             row.addWidget(b)
         # Compare two Ellipse/Polygon: %Area (%PA) and/or radial gap (Thickness)
         # — same flow as the CT viewers. Right of Angle, Clear All Result after.
-        self._cmp_btn = QPushButton("Compare")
+        self._cmp_btn = QPushButton(t("Compare"))
         self._cmp_btn.setCheckable(True)
         self._cmp_btn.setToolTip(
-            "Compare two Ellipse/Polygon: click the two shapes, then pick %PA "
-            "and/or Thickness")
+            t("Compare two Ellipse/Polygon: click the two shapes, then pick %PA "
+              "and/or Thickness"))
         self._cmp_btn.clicked.connect(self._toggle_compare)
         row.addWidget(self._cmp_btn)
         # Hide/Show ALL results (lines + region colours + text) at once, between
         # Compare and Clear All Result. Disabled when there is nothing to hide.
-        self._hideall_btn = QPushButton("Hide All Result")
+        self._hideall_btn = QPushButton(t("Hide All Result"))
         self._hideall_btn.setToolTip(
-            "Hide / Show every measurement line, region colour and result text")
+            t("Hide / Show every measurement line, region colour and result text"))
         self._hideall_btn.setStyleSheet(                      # light grey, black
             "background:#bdbdbd;color:#101010;")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
-        clr = QPushButton("Clear All Result")
-        clr.setToolTip("Clear all measurements and comparison results")
-        clr.setStyleSheet("background:#6e6e6e;color:#d8d8d8;")  # dark grey, white
-        clr.clicked.connect(self._clear_measurements)
-        row.addWidget(clr)
-        row.addWidget(QLabel(
-            "  Left-click = add point /"
-            " right-click finishes Polyline / Polygon"
-        ))
+        self._clearall_btn = QPushButton(t("Clear All Result"))
+        self._clearall_btn.setToolTip(
+            t("Clear all measurements and comparison results"))
+        self._clearall_btn.setStyleSheet(
+            "background:#6e6e6e;color:#d8d8d8;")  # dark grey, white
+        self._clearall_btn.clicked.connect(self._clear_measurements)
+        row.addWidget(self._clearall_btn)
+        self._meas_hint_lbl = QLabel(
+            t("  Left-click = add point /"
+              " right-click finishes Polyline / Polygon")
+        )
+        row.addWidget(self._meas_hint_lbl)
         row.addStretch(1)
         # A canvas that finishes/cancels a Compare un-checks the button; any
         # change to the result set refreshes the Hide/Show-All button.
@@ -1993,7 +2009,7 @@ class XAViewer(AbstractViewer):
                   for c in (self.canvas, self.canvas2))
         hidden = getattr(self.canvas, "_results_hidden", False)
         btn.setEnabled(has)
-        btn.setText("Show All Result" if hidden else "Hide All Result")
+        btn.setText(t("Show All Result") if hidden else t("Hide All Result"))
 
     def _toggle_compare(self):
         on = self._cmp_btn.isChecked()
@@ -2062,3 +2078,167 @@ class XAViewer(AbstractViewer):
     def _reset_zoom(self):
         for c in (self.canvas, self.canvas2):
             c.reset_zoom()
+
+    # ------------------------------------------------------ live language switch
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent, user-facing string this viewer builds so a
+        runtime language switch takes effect without a restart. Mirrors the
+        constructor's ``t()`` calls exactly; two-state labels/tooltips are
+        re-derived from the CURRENT state (never flipped). Safe to call with or
+        without a series loaded — the toolbar may be built lazily, so every ref
+        is guarded."""
+        # ---- top series-nav toolbar ------------------------------------
+        lbl = getattr(self, "_series_nav_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Series:"))
+        nav_btns = getattr(self, "_nav_btns", None)
+        if nav_btns:
+            for b, tip in zip(nav_btns, (
+                t("First series (Home)"),
+                t("Previous series — shortcut: A"),
+                t("Next series — shortcut: F"),
+                t("Last series (End)"),
+            )):
+                b.setToolTip(tip)
+
+        btn = getattr(self, "_meas_btn", None)
+        if btn is not None:
+            btn.setText(t("📏 Measure"))
+            btn.setToolTip(
+                t("Toggle the measure bar (Line / Polyline / Ellipse / Polygon)")
+            )
+        btn = getattr(self, "_zoom_in_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                t("Click-to-zoom IN — then click a point on the image to magnify "
+                  "×1.1 centred on it (click again to zoom further)")
+            )
+        btn = getattr(self, "_zoom_reset_btn", None)
+        if btn is not None:
+            btn.setToolTip(t("Reset zoom to the original fit"))
+        btn = getattr(self, "_zoom_out_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                t("Click-to-zoom OUT — then click a point on the image to shrink "
+                  "×0.9 centred on it")
+            )
+
+        orient_btns = getattr(self, "_orient_btns", None)
+        if orient_btns:
+            for b, (label, tip) in zip(orient_btns, (
+                (t("Rt90°"), t("Rotate the image 90° clockwise")),
+                (t("Lt90°"), t("Rotate the image 90° counter-clockwise")),
+                (t("Flip-H"), t("Flip horizontally (left-right mirror)")),
+                (t("Flip-V"), t("Flip vertically (top-bottom)")),
+            )):
+                b.setText(label)
+                b.setToolTip(tip)
+
+        # S-Cine / S-Zoom / Denoise. The OpenCV-unavailable note is appended
+        # exactly as the constructor does when the codec is missing.
+        have_cv2 = image_quality.available()
+        note = t("  (OpenCV not available)")
+        btn = getattr(self, "_hq_cine_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                t("Smooth Cine: keep frames bilinear-smooth even during cine playback "
+                  "(paused frames are already smooth). Default off (fast nearest-"
+                  "neighbour cine). This affects motion only — for sharper enlarged "
+                  "stills use S-Zoom."))
+        btn = getattr(self, "_smooth_btn", None)
+        if btn is not None:
+            tip = t("Smooth Zoom: high-quality (Lanczos) upscaling — sharper image when "
+                    "enlarged (vs the default bilinear). Default off. For fast machines.")
+            btn.setToolTip(tip + note if not have_cv2 else tip)
+        btn = getattr(self, "_denoise_btn", None)
+        if btn is not None:
+            btn.setText(t("Denoise"))
+            tip = t("Edge-preserving noise reduction: calms speckle / quantum noise "
+                    "while keeping vessel and catheter edges crisp. Default off.")
+            btn.setToolTip(tip + note if not have_cv2 else tip)
+
+        # DICOM-tag overlay font control (build_tag_font_control): the slider
+        # tooltip AND the stacked "DICOM Tags" button (text + tooltip).
+        sl = getattr(self, "_tag_font_slider", None)
+        if sl is not None:
+            sl.setToolTip(t("DICOM tag text size"))
+        btn = getattr(self, "_tags_font_btn", None)
+        if btn is not None:
+            btn.setText(t("DICOM Tags"))
+            btn.setToolTip(t("Choose DICOM tags to overlay on the image"))
+
+        btn = getattr(self, "_hist_btn", None)
+        if btn is not None:
+            btn.setText(t("Measure History"))
+            btn.setToolTip(t("Show this study's measurement history"))
+
+        # ---- Plane bar (biplane only) ----------------------------------
+        lbl = getattr(self, "_plane_nav_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Plane:"))
+
+        # ---- transport (Play + seek) -----------------------------------
+        # Play button text is a two-state toggle: re-render for the state it is
+        # already in (read isChecked, never flip it).
+        btn = getattr(self, "play_btn", None)
+        if btn is not None:
+            btn.setText("⏸ Pause" if btn.isChecked() else "▶ Play")
+        lbl = getattr(self, "frame_lbl", None)
+        if lbl is not None:
+            lbl.setToolTip(
+                t("Click to reset the playback range to the full range "
+                  "(click to reset the Play range to the whole clip)")
+            )
+        lbl = getattr(self, "series_lbl", None)
+        if lbl is not None:
+            lbl.setToolTip(
+                t("Series position in this study (current / total) — "
+                  "use First/Prev/Next/Last to move between series")
+            )
+
+        # ---- Window/Level popup (persistent) ---------------------------
+        dlg = getattr(self, "_wl_dialog", None)
+        if dlg is not None:
+            dlg.setWindowTitle(t("Window / Level"))
+        btn = getattr(self, "_wl_reset_btn", None)
+        if btn is not None:
+            btn.setText(t("Reset"))
+            btn.setToolTip(t("Reset W/L to the default setting"))
+
+        # ---- measure sub-bar -------------------------------------------
+        lbl = getattr(self, "_measure_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Measure:"))
+        btn = getattr(self, "_cmp_btn", None)
+        if btn is not None:
+            btn.setText(t("Compare"))
+            btn.setToolTip(
+                t("Compare two Ellipse/Polygon: click the two shapes, then pick %PA "
+                  "and/or Thickness"))
+        btn = getattr(self, "_hideall_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                t("Hide / Show every measurement line, region colour and result text"))
+        btn = getattr(self, "_clearall_btn", None)
+        if btn is not None:
+            btn.setText(t("Clear All Result"))
+            btn.setToolTip(t("Clear all measurements and comparison results"))
+        lbl = getattr(self, "_meas_hint_lbl", None)
+        if lbl is not None:
+            lbl.setText(
+                t("  Left-click = add point /"
+                  " right-click finishes Polyline / Polygon")
+            )
+        # Two-state Hide/Show-All label: re-derive from the current state.
+        if hasattr(self, "_update_hideall_btn"):
+            self._update_hideall_btn()
+
+        # ---- repaint image canvases so on-image overlays redraw --------
+        for c in (getattr(self, "canvas", None), getattr(self, "canvas2", None)):
+            if c is None:
+                continue
+            rt = getattr(c, "retranslate_ui", None)
+            if callable(rt):
+                rt()
+            c.update()
+        self.update()

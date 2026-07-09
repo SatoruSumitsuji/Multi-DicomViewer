@@ -15,6 +15,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from multi_dicomviewer.i18n import t
+
 
 def _angle_color(deg: float) -> str:
     """Green when near-coaxial, amber mid, red when far off-axis. Purely a
@@ -111,46 +113,48 @@ def _confidence_summary(det: dict) -> dict | None:
             level = 2
         band = None
 
-    band_txt = f"±{band}°" if band is not None else "unknown"
+    band_txt = f"±{band}°" if band is not None else t("unknown")
 
     if level == 0:
         return {
             "level": 0, "color": "#2b8a3e",
-            "headline": "Confidence: High  ✓",
+            "headline": t("Confidence: High  ✓"),
             "band_deg": band,
             "detail": (
-                f"The estimates from the different projection angles agree well "
-                f"(approximate angular uncertainty: {band_txt})."
+                t("The estimates from the different projection angles agree "
+                  "well (approximate angular uncertainty: {band_txt}).")
+                .format(band_txt=band_txt)
             ),
         }
     if level == 1:
         if not have_crosscheck:
-            detail = (
+            detail = t(
                 "Computed from only two projections, so the result could not "
                 "be cross-checked against another direction. The estimate "
                 "becomes unstable when the projection directions are similar. "
                 "If possible, add one more view at a well-separated angle."
             )
         else:
-            detail = (
-                f"The estimate varies by about {band_txt} across projection "
-                f"angles. Strongly foreshortened views or vessel curvature may "
-                f"be contributing. Treat the value as a reference only."
-            )
+            detail = t(
+                "The estimate varies by about {band_txt} across projection "
+                "angles. Strongly foreshortened views or vessel curvature may "
+                "be contributing. Treat the value as a reference only."
+            ).format(band_txt=band_txt)
         return {
             "level": 1, "color": "#e8590c",
-            "headline": "Confidence: Moderate",
+            "headline": t("Confidence: Moderate"),
             "band_deg": band, "detail": detail,
         }
     return {
         "level": 2, "color": "#c92a2a",
-        "headline": "Confidence: Low  ⚠",
+        "headline": t("Confidence: Low  ⚠"),
         "band_deg": band,
         "detail": (
-            f"The estimate varies widely (about {band_txt}) across projection "
-            f"angles. This value may be misleading. We recommend re-deriving it "
-            f"using views where the vessel appears long and straight and the "
-            f"angles are well separated from one another."
+            t("The estimate varies widely (about {band_txt}) across projection "
+              "angles. This value may be misleading. We recommend re-deriving "
+              "it using views where the vessel appears long and straight and "
+              "the angles are well separated from one another.")
+            .format(band_txt=band_txt)
         ),
     }
 
@@ -183,10 +187,13 @@ def _steps_text(label: str, det: dict, gc_det: dict) -> str:
             f"{p['beta']:g}/{p['alpha']:g}°:{p['angle_2d']:.0f}°"
             for p in per_view
         )
-        lines.append(f"per-view 2-D ∠ (as seen): {shown}")
+        lines.append(t("per-view 2-D ∠ (as seen): {shown}").format(shown=shown))
         spread = det.get("spread_2d")
         if spread is not None:
-            lines.append(f"  spread {spread:.0f}°  (small = views agree)")
+            lines.append(
+                t("  spread {spread:.0f}°  (small = views agree)")
+                .format(spread=spread)
+            )
 
     # Reconstruction-stability cues (confidence only — θ above is unchanged):
     #  • pairwise 2-view θ: what each PAIR of views alone would have given,
@@ -203,31 +210,35 @@ def _steps_text(label: str, det: dict, gc_det: dict) -> str:
             f"{a[0]:g}/{a[1]:g}+{b[0]:g}/{b[1]:g}:{p['theta']:.0f}°"
             for p in pw for (a, b) in [p["views"]]
         )
-        lines.append(f"2-view θ per pair: {shown}")
+        lines.append(t("2-view θ per pair: {shown}").format(shown=shown))
         ps = conf.get("pairwise_spread")
         if ps is not None:
-            lines.append(f"  pair spread {ps:.0f}°  (small = robust)")
+            lines.append(
+                t("  pair spread {ps:.0f}°  (small = robust)").format(ps=ps)
+            )
     loo = conf.get("leave_one_out") or []
     shared = conf.get("shared_views") or []
     # Only worth showing when it differs from the pairwise set (>=4 views).
     if loo and len(shared) >= 4 and conf.get("loo_swing") is not None:
         lines.append(
-            f"leave-one-out swing {conf['loo_swing']:.0f}°  "
-            f"(θ change when any one view is dropped)"
+            t("leave-one-out swing {swing:.0f}°  "
+              "(θ change when any one view is dropped)")
+            .format(swing=conf['loo_swing'])
         )
     cg, cv = conf.get("cond_gc"), conf.get("cond_vessel")
     if cg is not None or cv is not None:
         lines.append(
-            f"conditioning κ: {_fmt_kappa(cg)} (GC) / "
-            f"{_fmt_kappa(cv)} ({label})  — ≈1 ideal, large = views alike"
+            t("conditioning κ: {cg} (GC) / "
+              "{cv} ({label})  — ≈1 ideal, large = views alike")
+            .format(cg=_fmt_kappa(cg), cv=_fmt_kappa(cv), label=label)
         )
     # One-line glossary so the technical cues above are self-explanatory.
     if per_view or pw or cg is not None or cv is not None:
         lines.append(
-            "  * spread = disagreement of the estimate across projection "
-            "angles (smaller is more reliable) / κ = geometric diversity of "
-            "the projection directions (closer to 1 is better; large means "
-            "the directions are too similar)"
+            t("  * spread = disagreement of the estimate across projection "
+              "angles (smaller is more reliable) / κ = geometric diversity of "
+              "the projection directions (closer to 1 is better; large means "
+              "the directions are too similar)")
         )
     return "\n".join(lines)
 
@@ -235,7 +246,7 @@ def _steps_text(label: str, det: dict, gc_det: dict) -> str:
 class CoaxialResultDialog(QDialog):
     def __init__(self, result: dict, view_counts: dict, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Coaxial Evaluation")
+        self.setWindowTitle(t("Coaxial Evaluation"))
         self.setMinimumWidth(420)
         # Pin a light background so the dark text below is always legible,
         # regardless of the OS/Qt palette (the previous light-on-dark colours
@@ -250,15 +261,15 @@ class CoaxialResultDialog(QDialog):
         directions = result.get("directions", {})
         warnings = result.get("warnings", [])
 
-        head = QLabel("GC ↔ coronary-proximal angle")
+        head = QLabel(t("GC ↔ coronary-proximal angle"))
         head.setStyleSheet("font-size:14pt; font-weight:bold; color:#111111;")
         col.addWidget(head)
 
         if "GC" in directions:
             sub = QLabel(
-                f"Guiding Catheter reconstructed from "
-                f"{view_counts.get('GC', 0)} views. "
-                f"0° = perfectly coaxial, 90° = perpendicular."
+                t("Guiding Catheter reconstructed from {n} views. "
+                  "0° = perfectly coaxial, 90° = perpendicular.")
+                .format(n=view_counts.get('GC', 0))
             )
             sub.setStyleSheet("color:#333333; font-size:10pt;")
             sub.setWordWrap(True)
@@ -281,7 +292,9 @@ class CoaxialResultDialog(QDialog):
                 )
                 val.setAlignment(Qt.AlignmentFlag.AlignRight
                                  | Qt.AlignmentFlag.AlignVCenter)
-                cnt = QLabel(f"({view_counts.get(label, 0)} views)")
+                cnt = QLabel(
+                    t("({n} views)").format(n=view_counts.get(label, 0))
+                )
                 cnt.setStyleSheet("color:#555555; font-size:9pt;")
                 row.addWidget(name)
                 row.addStretch(1)
@@ -300,9 +313,12 @@ class CoaxialResultDialog(QDialog):
                     band_line = ""
                     if band is not None:
                         band_line = (
-                            f"\n    Expected uncertainty: about ±{band}°"
-                            f" ({deg:.0f}° → roughly "
-                            f"{max(0, deg - band):.0f}–{min(90, deg + band):.0f}°)"
+                            t("\n    Expected uncertainty: about ±{band}°"
+                              " ({deg:.0f}° → roughly "
+                              "{lo:.0f}–{hi:.0f}°)")
+                            .format(band=band, deg=deg,
+                                    lo=max(0, deg - band),
+                                    hi=min(90, deg + band))
                         )
                     rel = QLabel(
                         f"{summary['headline']}\n    {summary['detail']}"
@@ -321,11 +337,12 @@ class CoaxialResultDialog(QDialog):
                 if opt:
                     (b1, a1), (b2, a2) = opt
                     ov = QLabel(
-                        "Optimal GC-target assessment angle:\n"
-                        f"    {_fmt_proj(b1, a1)}\n"
-                        f"    {_fmt_proj(b2, a2)}  (opposite direction)\n"
-                        "    (this projection shows the target lesion without "
-                        "shortening)"
+                        t("Optimal GC-target assessment angle:\n"
+                          "    {v1}\n"
+                          "    {v2}  (opposite direction)\n"
+                          "    (this projection shows the target lesion "
+                          "without shortening)")
+                        .format(v1=_fmt_proj(b1, a1), v2=_fmt_proj(b2, a2))
                     )
                     ov.setStyleSheet(
                         "color:#0b3d91; font-size:10pt; font-weight:bold; "
@@ -334,9 +351,9 @@ class CoaxialResultDialog(QDialog):
                     col.addWidget(ov)
                 elif det and "optimal_view" in det:
                     ov = QLabel(
-                        "Optimal GC-target assessment angle: — "
-                        "(GC and vessel are nearly coaxial, so it is not "
-                        "uniquely defined)"
+                        t("Optimal GC-target assessment angle: — "
+                          "(GC and vessel are nearly coaxial, so it is not "
+                          "uniquely defined)")
                     )
                     ov.setStyleSheet(
                         "color:#555555; font-size:9pt; padding:0 0 2px 14px;"
@@ -356,13 +373,13 @@ class CoaxialResultDialog(QDialog):
                     steps.setWordWrap(True)
                     col.addWidget(steps)
         else:
-            none_lbl = QLabel("No GC-to-vessel angle could be computed.")
+            none_lbl = QLabel(t("No GC-to-vessel angle could be computed."))
             none_lbl.setStyleSheet("color:#b35900; font-size:11pt;")
             none_lbl.setWordWrap(True)
             col.addWidget(none_lbl)
 
         if warnings:
-            wsep = QLabel("⚠  Notes")
+            wsep = QLabel(t("⚠  Notes"))
             wsep.setStyleSheet(
                 "color:#b35900; font-weight:bold; font-size:11pt; "
                 "padding-top:6px;"
@@ -376,7 +393,7 @@ class CoaxialResultDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
-        ok = QPushButton("Close")
+        ok = QPushButton(t("Close"))
         ok.clicked.connect(self.accept)
         btn_row.addWidget(ok)
         col.addLayout(btn_row)

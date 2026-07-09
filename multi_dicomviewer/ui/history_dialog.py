@@ -15,11 +15,13 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
 )
 
+from multi_dicomviewer.i18n import t
+
 
 class MeasureHistoryDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Measure History")
+        self.setWindowTitle(t("Measure History"))
         self.resize(360, 440)
 
         self._header = QLabel("—")
@@ -38,10 +40,12 @@ class MeasureHistoryDialog(QDialog):
     def set_entries(self, title: str, measurements) -> None:
         """Render *measurements* (a list of Measurement) under *title*."""
         measurements = list(measurements or [])
-        self._header.setText(f"{title} — {len(measurements)} item(s)")
+        self._header.setText(
+            t("{title} — {count} item(s)").format(title=title, count=len(measurements))
+        )
         self._list.clear()
         if not measurements:
-            self._list.addItem("(No measurements yet)")
+            self._list.addItem(t("(No measurements yet)"))
             return
         for i, m in enumerate(measurements, 1):
             label = m.label() or "—"

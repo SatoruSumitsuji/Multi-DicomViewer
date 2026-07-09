@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.core.anonymize import ANON_TAG_CATALOG
+from multi_dicomviewer.i18n import t
 
 
 def _tag_label(group: int, element: int) -> str:
@@ -37,16 +38,16 @@ class AnonSettingsDialog(QDialog):
 
     def __init__(self, selected_tags, emptify_private: bool, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Anonymize settings")
+        self.setWindowTitle(t("Anonymize settings"))
         self.setMinimumWidth(460)
         sel = {(int(g), int(e)) for g, e in (selected_tags or ())}
 
         root = QVBoxLayout(self)
-        root.addWidget(QLabel(
+        root.addWidget(QLabel(t(
             "Checked items have their values cleared (the tags remain).\n"
             "This setting applies to both on-screen anonymization (the Anonymous button)\n"
             "and Export (Anon DICOM)."
-        ))
+        )))
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -66,7 +67,7 @@ class AnonSettingsDialog(QDialog):
         root.addWidget(scroll, 1)
 
         self._priv = QCheckBox(
-            "Clear all Private (vendor) tag values"
+            t("Clear all Private (vendor) tag values")
         )
         self._priv.setChecked(bool(emptify_private))
         root.addWidget(self._priv)

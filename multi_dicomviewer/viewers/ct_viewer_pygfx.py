@@ -64,6 +64,7 @@ from PyQt6.QtWidgets import (
 from rendercanvas.pyqt6 import RenderCanvas
 
 from multi_dicomviewer.config import CT_WL_PRESETS
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
@@ -458,13 +459,21 @@ class _Overlay(QWidget):
             sx, sy = v._world_to_screen(key, ox, oy)
             return QPointF(sx, sy)
 
-        pen = QPen(QColor(255, 217, 0, 128), 1.0)
-        p.setPen(pen)
+        # Hover/drag highlight: the caught line goes vivid (dimmed) yellow and
+        # opaque; the rotate zone also draws small double-headed arrows.
+        hi = v._cross_hi.get(key)
+        hl_line = hi[0] if hi else None
+        base_pen = QPen(QColor(255, 217, 0, 128), 1.0)      # amber, 50%
+        hi_pen = QPen(QColor(204, 204, 0, 255), 1.6)        # yellow, opaque
         # full-extent crosshair lines through the crosshair centre
+        p.setPen(hi_pen if hl_line == "H" else base_pen)
         p.drawLine(S(ccx - half * uh[0], ccy - half * uh[1]),
                    S(ccx + half * uh[0], ccy + half * uh[1]))
+        p.setPen(hi_pen if hl_line == "V" else base_pen)
         p.drawLine(S(ccx - half * uv[0], ccy - half * uv[1]),
                    S(ccx + half * uv[0], ccy + half * uv[1]))
+        if hi is not None and hi[1] == "rotate":
+            self._paint_rot_arrow(p, S, ccx, ccy, v._ps[key], uh, uv, hi[0])
 
         # ▲ markers: the OTHER pane's projection direction, a constant
         # fraction of the viewport from the centre (size tied to ps).
@@ -501,6 +510,38 @@ class _Overlay(QWidget):
                 ox1 = ccx + half * uh[0] + off * uv[0]
                 oy1 = ccy + half * uh[1] + off * uv[1]
                 p.drawLine(S(ox0, oy0), S(ox1, oy1))
+
+    def _paint_rot_arrow(self, p, S, ccx, ccy, ps, uh, uv, line):
+        """Two small double-headed curved arrows on BOTH sides of the caught
+        line's outer ends — the 'rotates either way' hint. Drawn in output
+        coords so it follows the crossline (redrawn each paint at the current
+        angle). Compact + dimmed yellow to match the highlight."""
+        base = uh if line == "H" else uv
+        base_ang = math.atan2(base[1], base[0])
+        r = 0.60 * ps
+        span = math.radians(3.75)
+        steps = 6
+        hs = 0.0125 * ps
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(204, 204, 0, 255), 1.4))
+        for side in (0.0, math.pi):                     # both ends of the line
+            ca0 = base_ang + side
+            arc = []
+            for i in range(steps + 1):
+                ang = ca0 - span + (2.0 * span) * i / steps
+                arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
+            p.drawPolyline(QPolygonF([S(ox, oy) for (ox, oy) in arc]))
+            for tip, nxt in ((arc[-1], arc[-2]), (arc[0], arc[1])):
+                tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
+                tl = math.hypot(tx, ty) or 1.0
+                tx, ty = tx / tl, ty / tl
+                for deg in (28.0, -28.0):
+                    cA = math.cos(math.radians(deg))
+                    sA = math.sin(math.radians(deg))
+                    bx = (-tx) * cA - (-ty) * sA
+                    by = (-tx) * sA + (-ty) * cA
+                    p.drawLine(S(tip[0], tip[1]),
+                               S(tip[0] + bx * hs, tip[1] + by * hs))
 
     # -- measurements (outlines, calipers, handles, labels, results) -------
     def _paint_measures(self, p, key, w, h):
@@ -642,8 +683,8 @@ class _Overlay(QWidget):
             p.drawText(QRectF(0, 8, w, 26),
                        int(Qt.AlignmentFlag.AlignHCenter)
                        | int(Qt.AlignmentFlag.AlignTop),
-                       f"Click to select 2 Ellipse/Polygon data to compare"
-                       f"  ({n_sel}/2)")
+                       t("Click to select 2 Ellipse/Polygon data to compare"
+                         "  ({n_sel}/2)", n_sel=n_sel))
         cmps = [] if v._results_hidden else [c for c in v._compares
                                              if c["key"] == key]
         for c in cmps:
@@ -775,9 +816,10 @@ class _AngioAngleDialog(QDialog):
 
     def __init__(self, prim, sec, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Angio Angle")
+        self.setWindowTitle(t("Angio Angle"))
         v = QVBoxLayout(self)
-        v.addWidget(QLabel("対応するアンギオ像の角度に回転します"))
+        v.addWidget(QLabel(t("Rotate to the angle of the corresponding "
+                             "angiography view")))
 
         # Combos sized to their contents (+ the dropdown arrow) so the 3-letter
         # LAO/RAO·CRA/CAU labels aren't clipped on the right.
@@ -796,7 +838,7 @@ class _AngioAngleDialog(QDialog):
         self._lr_val.setRange(0, 180)
         self._lr_val.setSuffix(" °")
         self._lr_val.setValue(abs(int(prim)))
-        r1.addWidget(QLabel("Primary:"))
+        r1.addWidget(QLabel(t("Primary:")))
         r1.addWidget(self._lr, 1)
         r1.addWidget(self._lr_val, 1)
         v.addLayout(r1)
@@ -809,17 +851,17 @@ class _AngioAngleDialog(QDialog):
         self._cc_val.setRange(0, 90)
         self._cc_val.setSuffix(" °")
         self._cc_val.setValue(abs(int(sec)))
-        r2.addWidget(QLabel("Secondary:"))
+        r2.addWidget(QLabel(t("Secondary:")))
         r2.addWidget(self._cc, 1)
         r2.addWidget(self._cc_val, 1)
         v.addLayout(r2)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        ok = QPushButton("OK")
+        ok = QPushButton(t("OK"))
         ok.setDefault(True)
         ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(t("Cancel"))
         cancel.clicked.connect(self.reject)
         btns.addWidget(ok)
         btns.addWidget(cancel)
@@ -838,7 +880,7 @@ class _ColorMapDialog(QDialog):
 
     def __init__(self, bands, opacity, on_change, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("ColorMap Setting")
+        self.setWindowTitle(t("ColorMap Setting"))
         self.resize(560, 420)
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
@@ -853,7 +895,7 @@ class _ColorMapDialog(QDialog):
         scroll.setWidget(self._rows_host)
 
         op_row = QHBoxLayout()
-        op_row.addWidget(QLabel("Opacity"))
+        op_row.addWidget(QLabel(t("Opacity")))
         self._op = QSlider(Qt.Orientation.Horizontal)
         self._op.setRange(0, 100)
         self._op.setValue(int(round(self._opacity * 100)))
@@ -863,11 +905,11 @@ class _ColorMapDialog(QDialog):
         op_row.addWidget(self._op_lbl)
 
         btns = QHBoxLayout()
-        add = QPushButton("Add")
+        add = QPushButton(t("Add"))
         add.clicked.connect(self._add_band)
-        rst = QPushButton("Reset")
+        rst = QPushButton(t("Reset"))
         rst.clicked.connect(self._reset)
-        close = QPushButton("Close")
+        close = QPushButton(t("Close"))
         close.clicked.connect(self.accept)
         btns.addWidget(add)
         btns.addWidget(rst)
@@ -934,24 +976,24 @@ class _ColorMapDialog(QDialog):
         sw.setStyleSheet(f"background:rgb({r},{g},{bl});")
         sw.clicked.connect(lambda _c, i=idx: self._pick_color(i))
         h.addWidget(sw)
-        h.addWidget(QLabel("Min"))
+        h.addWidget(QLabel(t("Min")))
         lo = QSpinBox()
         lo.setRange(-1024, 4096)
         lo.setValue(int(b["lo"]))
         lo.valueChanged.connect(lambda v, i=idx: self._set(i, "lo", v))
         h.addWidget(lo)
-        h.addWidget(QLabel("Max"))
+        h.addWidget(QLabel(t("Max")))
         hi = QSpinBox()
         hi.setRange(-1024, 4096)
         hi.setValue(int(b["hi"]))
         hi.valueChanged.connect(lambda v, i=idx: self._set(i, "hi", v))
         h.addWidget(hi)
-        en = QPushButton("Enabled" if b["on"] else "Disabled")
+        en = QPushButton(t("Enabled") if b["on"] else t("Disabled"))
         en.setCheckable(True)
         en.setChecked(b["on"])
         en.clicked.connect(lambda _c, i=idx: self._toggle(i))
         h.addWidget(en)
-        rm = QPushButton("Remove")
+        rm = QPushButton(t("Remove"))
         rm.clicked.connect(lambda _c, i=idx: self._remove(i))
         h.addWidget(rm)
         return w
@@ -974,7 +1016,7 @@ class _ColorMapDialog(QDialog):
         c0 = self._bands[idx]["rgb"]
         col = QColorDialog.getColor(
             QColor(int(c0[0] * 255), int(c0[1] * 255), int(c0[2] * 255)),
-            self, "Band colour")
+            self, t("Band colour"))
         if col.isValid():
             self._bands[idx]["rgb"] = (col.redF(), col.greenF(), col.blueF())
             self._rebuild()
@@ -1045,6 +1087,9 @@ class CTViewer(AbstractViewer):
                   np.array([0.0, 1.0, 0.0])),
         }
         self._cross_ang = {"A": 0.0, "B": 0.0}
+        # Hover/drag centreline highlight: (line 'H'/'V', mode 'move'/'rotate')
+        # or None per pane — drives the vivid-yellow highlight + rotate arrow.
+        self._cross_hi = {"A": None, "B": None}
         self._half = 1.0
         self._ps = {"A": 1.0, "B": 1.0}      # camera half-height (mm) per pane
         self._pan = {"A": np.zeros(2), "B": np.zeros(2)}  # focal offset (u,v)
@@ -1234,6 +1279,7 @@ class CTViewer(AbstractViewer):
         c.add_event_handler(lambda ev, k=key: self._on_down(k, ev), "pointer_down")
         c.add_event_handler(lambda ev, k=key: self._on_move(k, ev), "pointer_move")
         c.add_event_handler(lambda ev, k=key: self._on_up(k, ev), "pointer_up")
+        c.add_event_handler(lambda ev, k=key: self._on_leave(k, ev), "pointer_leave")
         c.add_event_handler(lambda ev, k=key: self._on_wheel(k, ev), "wheel")
         c.add_event_handler(lambda ev, k=key: self._on_dblclick(k, ev), "double_click")
         c.add_event_handler(lambda ev, k=key: self._on_resize(k, ev), "resize")
@@ -1355,6 +1401,7 @@ class CTViewer(AbstractViewer):
             if bool(self._meas_type) or self._center_angle_target is not None:
                 return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
+            self._hover_cross(key, x, y)      # no button → preview centreline grab
             return
         if self._cross_grab:
             self._cross_move(key, x, y)
@@ -1372,6 +1419,10 @@ class CTViewer(AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
+        # End the centreline gesture and drop its highlight.
+        if self._cross_hi.get(key) is not None:
+            self._cross_hi[key] = None
+            self._overlay[key].update()
         # Proactively drop any mouse grab so it can never linger into the next
         # gesture and deaden the toolbar buttons.
         try:
@@ -1582,6 +1633,159 @@ class CTViewer(AbstractViewer):
         # to the intended plane so the buttons don't wrongly default to "Rt".
         return self._side
 
+    # ---------------------------------------------------- live i18n switch
+    def retranslate_ui(self) -> None:
+        """Re-apply every persistent user-facing string via t() after a live
+        UI-language switch (no restart), mirroring how the constructor built
+        the toolbar / measure bar / seek bar.
+
+        Safe to call whether or not a CT volume is loaded: all controls are
+        guarded (they may be lazily built or None). On-image text drawn in
+        paintEvent, right-click context menus and on-demand dialogs are NOT
+        touched here — the overlays redraw (forced at the end) and the menus /
+        dialogs are rebuilt every time they open.
+        """
+        # -- toolbar / measure-bar section labels ------------------------
+        lbl = getattr(self, "_plane_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Plane:"))
+        lbl = getattr(self, "_slab_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Slab:"))
+        lbl = getattr(self, "_measure_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Measure:"))
+
+        # -- DICOM-tag overlay font control (button text + tooltips) -----
+        if getattr(self, "_tag_font_slider", None) is not None:
+            self._tag_font_slider.setToolTip(t("DICOM tag text size"))
+        if getattr(self, "_tags_btn", None) is not None:
+            self._tags_btn.setText(t("DICOM Tags"))
+            self._tags_btn.setToolTip(
+                t("Choose which DICOM tags overlay the image (key Q shows/hides)"))
+
+        # -- Plane (Bi/Lt/Rt) button tooltips ----------------------------
+        side_tips = {
+            "Bi": t("Show both MPR panes"),
+            "Lt": t("Show only the left MPR pane"),
+            "Rt": t("Show only the right MPR pane"),
+        }
+        for key, b in (getattr(self, "_side_btns", None) or {}).items():
+            if key in side_tips:
+                b.setHelpToolTip(side_tips[key])
+
+        # -- 3D / 2D display-mode button tooltips ------------------------
+        mode_tips = {
+            "3D": t("3-D MPR reconstruction (dual oblique reslice)"),
+            "2D": t("Show native acquisition slices one at a time (paging)"),
+        }
+        for key, b in (getattr(self, "_mode_btns", None) or {}).items():
+            if key in mode_tips:
+                b.setHelpToolTip(mode_tips[key])
+
+        # -- ReCalc / Measure / CenterLine / HQ-Img tooltips -------------
+        b = getattr(self, "_recalc_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Re-derive the OTHER pane from the selected pane's green-▲ "
+                "centre line — fixes a mirrored / wrong companion after "
+                "complex rotations"))
+        b = getattr(self, "_meas_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Measure on the image (Line / Polyline / Ellipse / Polygon "
+                "/ Angle)"))
+        b = getattr(self, "_cl_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t("Show/hide crosshair & slab lines"))
+        b = getattr(self, "_hires_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Full-quality images: keep MPR sharp even while dragging / "
+                "zooming / rotating (turns OFF the coarse interactive "
+                "preview). Smoother on a fast Mac; heavier on a slow one."))
+
+        # -- Setting / Measure History / DICOM-tag button ----------------
+        b = getattr(self, "_setting_btn", None)
+        if b is not None:
+            b.setText(t("Setting"))
+            b.setHelpToolTip(t(
+                "HU colour-map settings (band colour, HU range, opacity)"))
+        b = getattr(self, "_hist_btn", None)
+        if b is not None:
+            b.setText(t("Measure History"))
+            b.setHelpToolTip(t("Show this study's measurement history"))
+        b = getattr(self, "_tags_btn", None)
+        if b is not None:
+            b.setToolTip(t(
+                "Choose which DICOM tags overlay the image (key Q "
+                "shows/hides)"))
+
+        # -- 2-D image-transform (rotate / flip) tooltips ----------------
+        t2d_tips = [
+            t("Rotate the image 90° clockwise"),
+            t("Rotate the image 90° counter-clockwise"),
+            t("Flip horizontally (left-right mirror)"),
+            t("Flip vertically (top-bottom)"),
+        ]
+        for b, tip in zip(getattr(self, "_t2d_btns", None) or [], t2d_tips):
+            b.setHelpToolTip(tip)
+
+        # -- bottom 2-D seek bar -----------------------------------------
+        lbl = getattr(self, "_seek_frame_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Frame:"))
+        lbl = getattr(self, "_seek_series_cap", None)
+        if lbl is not None:
+            lbl.setText(t("Series:"))
+        lbl = getattr(self, "_seek_series_lbl", None)
+        if lbl is not None:
+            lbl.setToolTip(t(
+                "Series position in this study (current / total)"))
+
+        # -- measure bar -------------------------------------------------
+        b = getattr(self, "_cmp_btn", None)
+        if b is not None:
+            b.setText(t("Compare"))
+            b.setHelpToolTip(t(
+                "Compare two Polygon/Ellipse: click the two shapes — shows "
+                "%Area difference and a radial gap colour map "
+                "(<5 / 5–7 / 7–9 / >9 mm)"))
+        b = getattr(self, "_hideall_btn", None)
+        if b is not None:
+            b.setHelpToolTip(t(
+                "Hide / Show every measurement line, region colour and "
+                "result text"))
+        b = getattr(self, "_clr_btn", None)
+        if b is not None:
+            b.setText(t("Clear All Result"))
+            b.setHelpToolTip(t(
+                "Clear all measurements and comparison results"))
+        lbl = getattr(self, "_cmp_hint", None)
+        if lbl is not None:
+            lbl.setText(t("  Left-click = add point /"
+                          " right-click finishes Polyline / Polygon"))
+
+        # Two-state toggle label (Hide All Result / Show All Result):
+        # re-derive from the CURRENT state via its helper (never flip).
+        if hasattr(self, "_update_hideall_btn"):
+            self._update_hideall_btn()
+
+        # Force on-image text (paintEvent overlays) + child widgets to
+        # repaint so the DICOM-tag / readout text picks up the new language,
+        # and cheaply re-render the current slice (self-guards vol=None).
+        self.update()
+        for ov in (getattr(self, "_overlay", None) or {}).values():
+            ov.update()
+        for name in ("_measure_bar", "_seek_wrap"):
+            w = getattr(self, name, None)
+            if w is not None:
+                w.update()
+        try:
+            self._refresh()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         # Two rows so the (now longer, shortcut-labelled) controls don't grow
@@ -1596,12 +1800,13 @@ class CTViewer(AbstractViewer):
         row2.setContentsMargins(0, 0, 0, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
-        row.addWidget(QLabel("Plane:"))
+        self._plane_lbl = QLabel(t("Plane:"))
+        row.addWidget(self._plane_lbl)
         self._side_btns: dict[str, QPushButton] = {}
         for key, tip in (
-            ("Bi", "Show both MPR panes"),
-            ("Lt", "Show only the left MPR pane"),
-            ("Rt", "Show only the right MPR pane"),
+            ("Bi", t("Show both MPR panes")),
+            ("Lt", t("Show only the left MPR pane")),
+            ("Rt", t("Show only the right MPR pane")),
         ):
             b = FitButton(key)
             b.setCheckable(True)
@@ -1622,8 +1827,8 @@ class CTViewer(AbstractViewer):
         )
         self._mode_btns: dict[str, QPushButton] = {}
         for key, tip in (
-            ("3D", "3-D MPR reconstruction (dual oblique reslice)"),
-            ("2D", "Show native acquisition slices one at a time (paging)"),
+            ("3D", t("3-D MPR reconstruction (dual oblique reslice)")),
+            ("2D", t("Show native acquisition slices one at a time (paging)")),
         ):
             b = FitButton(key)
             b.setCheckable(True)
@@ -1649,9 +1854,9 @@ class CTViewer(AbstractViewer):
         # companion that drifted after complex rotations) without a full Reset.
         self._recalc_btn = recalc = FitButton("ReCalc")
         recalc.setStyleSheet("QPushButton { background:#8a8a8a; color:#101010; }")
-        recalc.setHelpToolTip(
+        recalc.setHelpToolTip(t(
             "Re-derive the OTHER pane from the selected pane's green-▲ centre "
-            "line — fixes a mirrored / wrong companion after complex rotations")
+            "line — fixes a mirrored / wrong companion after complex rotations"))
         recalc.clicked.connect(self._recalc_companion)
         row.addWidget(recalc)
 
@@ -1664,12 +1869,13 @@ class CTViewer(AbstractViewer):
         self._meas_btn.setCheckable(True)
         self._meas_btn.setStyleSheet(            # blue when in Measure mode (= IVUS)
             "QPushButton:checked { background:#1f77b4; color:white; }")
-        self._meas_btn.setHelpToolTip(
-            "Measure on the image (Line / Polyline / Ellipse / Polygon / Angle)")
+        self._meas_btn.setHelpToolTip(t(
+            "Measure on the image (Line / Polyline / Ellipse / Polygon / Angle)"))
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
-        row.addWidget(QLabel("Slab:"))
+        self._slab_lbl = QLabel(t("Slab:"))
+        row.addWidget(self._slab_lbl)
         self._slab_spin = QDoubleSpinBox()
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
@@ -1680,7 +1886,7 @@ class CTViewer(AbstractViewer):
         self._cl_btn = FitButton("CenterLine")
         self._cl_btn.setCheckable(True)
         self._cl_btn.setChecked(True)
-        self._cl_btn.setHelpToolTip("Show/hide crosshair & slab lines")
+        self._cl_btn.setHelpToolTip(t("Show/hide crosshair & slab lines"))
         self._cl_btn.clicked.connect(self._toggle_centerline)
         row.addWidget(self._cl_btn)
 
@@ -1694,19 +1900,19 @@ class CTViewer(AbstractViewer):
         self._hires_btn.setChecked(self._lod_off)
         self._hires_btn.setStyleSheet(
             "QPushButton:checked { background:#1f77b4; color:white; }")
-        self._hires_btn.setHelpToolTip(
+        self._hires_btn.setHelpToolTip(t(
             "Full-quality images: keep MPR sharp even while dragging / zooming "
             "/ rotating (turns OFF the coarse interactive preview). Smoother on "
-            "a fast Mac; heavier on a slow one.")
+            "a fast Mac; heavier on a slow one."))
         self._hires_btn.toggled.connect(self._toggle_hires)
         # Placed at the very LEFT of this row (before the "Plane:" label) so the
         # full-quality toggle is the first, most prominent control on the strip.
         row.insertWidget(0, self._hires_btn)
         row.insertSpacing(1, 8)
 
-        setting = FitButton("Setting")
-        setting.setHelpToolTip(
-            "HU colour-map settings (band colour, HU range, opacity)")
+        self._setting_btn = setting = FitButton(t("Setting"))
+        setting.setHelpToolTip(t(
+            "HU colour-map settings (band colour, HU range, opacity)"))
         setting.setStyleSheet(_sr_qss)
         setting.clicked.connect(self._open_setting)
         row.addWidget(setting)
@@ -1724,8 +1930,9 @@ class CTViewer(AbstractViewer):
         tags_box, self._tag_font_slider, tags = build_tag_font_control(
             TAG_FONT_PT_DEFAULT
         )
-        tags.setToolTip(
-            "Choose which DICOM tags overlay the image (key Q shows/hides)")
+        self._tags_btn = tags
+        tags.setToolTip(t(
+            "Choose which DICOM tags overlay the image (key Q shows/hides)"))
         tags.clicked.connect(self.tags_requested.emit)
         self._tag_font_slider.valueChanged.connect(self.overlay_font_changed.emit)
         row.addWidget(tags_box)
@@ -1733,8 +1940,8 @@ class CTViewer(AbstractViewer):
         # per-viewer copy (kept only for set_overlay_font_pt slider sync).
         tags_box.setVisible(False)
 
-        hist = FitButton("Measure History")
-        hist.setHelpToolTip("Show this study's measurement history")
+        self._hist_btn = hist = FitButton(t("Measure History"))
+        hist.setHelpToolTip(t("Show this study's measurement history"))
         hist.clicked.connect(self.history_requested.emit)
         row.addWidget(hist)
         row.addStretch(1)
@@ -1756,10 +1963,10 @@ class CTViewer(AbstractViewer):
         row2.addSpacing(12)
         self._t2d_btns = []
         for label, kind, tip in (
-            ("Rt90°", "rt90", "Rotate the image 90° clockwise"),
-            ("Lt90°", "lt90", "Rotate the image 90° counter-clockwise"),
-            ("Flip-H", "fliph", "Flip horizontally (left-right mirror)"),
-            ("Flip-V", "flipv", "Flip vertically (top-bottom)"),
+            ("Rt90°", "rt90", t("Rotate the image 90° clockwise")),
+            ("Lt90°", "lt90", t("Rotate the image 90° counter-clockwise")),
+            ("Flip-H", "fliph", t("Flip horizontally (left-right mirror)")),
+            ("Flip-V", "flipv", t("Flip vertically (top-bottom)")),
         ):
             b = FitButton(label)
             b.setHelpToolTip(tip)
@@ -1937,7 +2144,7 @@ class CTViewer(AbstractViewer):
             lbl.setFont(f)
             return lbl
 
-        self._seek_frame_lbl = _big(QLabel("Frame:"))
+        self._seek_frame_lbl = _big(QLabel(t("Frame:")))
         row.addWidget(self._seek_frame_lbl)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
         self._seek_slider.setMinimum(0)
@@ -1957,12 +2164,12 @@ class CTViewer(AbstractViewer):
         # volume. A "Series:" caption (mirroring "Frame:") keeps it apart from
         # the adjacent slice "N / total". Fed by the shell via
         # set_series_position.
-        self._seek_series_cap = _big(QLabel("Series:"))
+        self._seek_series_cap = _big(QLabel(t("Series:")))
         row.addWidget(self._seek_series_cap)
         self._seek_series_lbl = _big(QLabel(""))
         self._seek_series_lbl.setMinimumWidth(66)
-        self._seek_series_lbl.setToolTip(
-            "Series position in this study (current / total)")
+        self._seek_series_lbl.setToolTip(t(
+            "Series position in this study (current / total)"))
         row.addWidget(self._seek_series_lbl)
         self._seek_wrap.setVisible(False)
         if getattr(self, "_ct_compact", False):
@@ -2787,23 +2994,18 @@ class CTViewer(AbstractViewer):
         self._refresh()
         self._flash_recalc()
 
-    def _cross_press(self, which, sx, sy) -> bool:
-        """True (and arm a MOVE/ROTATE gesture) if the press lands ON the
-        crosshair, else False so the selected tool handles the drag.
+    def _cross_zone(self, which, sx, sy):
+        """Classify (sx, sy) against *which* pane's crosshair. Returns
+        ``(caught, line, mode)`` — caught=False → off the crosshair (tool owns
+        the drag); else line ∈ {"H","V"} (H = green-▲) and mode ∈
+        {"move","rotate"}. Pure, so it drives BOTH press and hover.
 
-        Distances are measured in NORMALISED screen space — each pane axis
-        scaled to [-1, 1] (centre→edge = 1). So the catch band is 10% of the
-        actual screen on EACH side of a crossline (10% left/right of the
-        vertical line, 10% up/down of the horizontal line), on both axes
-        regardless of the pane's aspect ratio (vital for the extreme aspect of
-        side-by-side multi-pane) and at any zoom. (It used to be tied to the
-        fixed volume diagonal self._half, which ballooned to most of a
-        zoomed-in thin-MIP pane and hijacked paging / tool drags.) Of the
-        caught span, the INNER half (near the centre) translates the plane; the
-        OUTER half rotates it."""
+        Distances are in NORMALISED screen space (each pane axis → [-1,1]); the
+        catch band is 5%-of-screen on each side of a crossline, at any aspect /
+        zoom. Of the caught span the INNER half translates the plane, the OUTER
+        half rotates it."""
         if self._vol is None:
-            return False
-        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+            return (False, None, None)
         ccx, ccy = self._cc(which)
         cx, cy = self._screen_center(which)           # crosshair centre, px
         pane = self.pane[which]
@@ -2812,8 +3014,6 @@ class CTViewer(AbstractViewer):
         a = math.radians(self._cross_ang[which])
 
         def _ndir(ux, uy):
-            """Output-basis crossline direction (ux,uy) → unit vector in
-            normalised screen space (carries roll + pixel aspect)."""
             px, py = self._world_to_screen(which, ccx + ux, ccy + uy)
             dx, dy = (px - cx) / hx, (py - cy) / hy
             n = math.hypot(dx, dy) or 1.0
@@ -2821,40 +3021,64 @@ class CTViewer(AbstractViewer):
 
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
-        # Press point in normalised screen space, relative to the centre.
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        # [-1,1] per axis → centre-to-edge = 1.0, full screen = 2.0. A 5%-of-
-        # screen catch on each side is therefore 0.10 in these units.
         band = 0.10                           # perpendicular catch = 5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
-        # Perpendicular distance to each crossline (|r × û|) + distance ALONG it
-        # from the centre (|r · û|).
         d_to_h = abs(rx * uh[1] - ry * uh[0])
         along_h = abs(rx * uh[0] + ry * uh[1])
         d_to_v = abs(rx * uv[1] - ry * uv[0])
         along_v = abs(rx * uv[0] + ry * uv[1])
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
-            return False                      # off the crosshair → tool runs
-        # The ▲ markers sit on the HORIZONTAL crossline (uh) → that is the
-        # green-▲ line. Where the two 5% bands overlap (the central square) the
-        # green-▲ line WINS; otherwise grab whichever line was hit.
-        grab_h = on_h                         # green-▲ (H); True also if both
+            return (False, None, None)
+        grab_h = on_h                         # green-▲ (H) wins the central square
         along = along_h if grab_h else along_v
-        if along <= mid:
-            self._cross_mode = "move"
-            # Lock the slide to the grabbed line so the grab is deterministic
-            # (no drag-direction auto-detect): the green-▲ (H) line slides ⟂ to
-            # itself = along uv (→ reslice/repage); the non-▲ (V) line slides
-            # along uh (→ edge-capped centre-line slide). Output-basis vectors.
+        mode = "move" if along <= mid else "rotate"
+        return (True, "H" if grab_h else "V", mode)
+
+    def _cross_press(self, which, sx, sy) -> bool:
+        """Arm a MOVE/ROTATE crosshair gesture (above the tool) if the press
+        lands ON the crosshair; else False. Locks the vivid highlight for the
+        whole drag."""
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        if not caught:
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
+        ccx, ccy = self._cc(which)
+        a = math.radians(self._cross_ang[which])
+        grab_h = (line == "H")
+        if mode == "move":
+            # Lock the slide to the grabbed line (parallel move of that line):
+            # green-▲ (H) slides ⟂ itself = along uv; the V line slides along uh.
             ouh = np.array([math.cos(a), math.sin(a)])
             ouv = np.array([-math.sin(a), math.cos(a)])
+            self._cross_mode = "move"
             self._cross_axis = ouv if grab_h else ouh
             self._cross_ppt = (wx, wy)
         else:
             self._cross_mode = "rotate"
             self._cross_prev = math.atan2(wy - ccy, wx - ccx)
+        self._cross_hi[which] = (line, mode)
+        self._overlay[which].update()
         return True
+
+    def _hover_cross(self, which, sx, sy) -> None:
+        """Mouse moved over a pane with no button down: preview whether a press
+        would grab the centreline (vivid highlight + rotate arrow) or fall
+        through to the tool (normal amber crosshair)."""
+        if self._cross_grab or self._vol is None or not self._cl_on:
+            return
+        caught, line, mode = self._cross_zone(which, sx, sy)
+        new = (line, mode) if caught else None
+        if self._cross_hi.get(which) != new:
+            self._cross_hi[which] = new
+            self._overlay[which].update()
+
+    def _on_leave(self, key, ev) -> None:
+        # Cursor left the pane → drop any hover highlight (not mid-drag).
+        if not self._cross_grab and self._cross_hi.get(key) is not None:
+            self._cross_hi[key] = None
+            self._overlay[key].update()
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
@@ -3121,7 +3345,8 @@ class CTViewer(AbstractViewer):
         bar = QWidget()
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 2, 6, 2)
-        row.addWidget(QLabel("Measure:"))
+        self._measure_lbl = QLabel(t("Measure:"))
+        row.addWidget(self._measure_lbl)
         self._meas_btns = {}
         for label, key in (("Line", "line"), ("Polyline", "polyline"),
                            ("Ellipse", "ellipse"), ("Polygon", "polygon"),
@@ -3134,35 +3359,35 @@ class CTViewer(AbstractViewer):
             row.addWidget(b)
         # Compare two Polygon/Ellipse: %Area difference + radial gap colour map.
         # Placed right of Angle, with Clear All Result to its right.
-        self._cmp_btn = FitButton("Compare")
+        self._cmp_btn = FitButton(t("Compare"))
         self._cmp_btn.setMinimumWidth(min(self._cmp_btn.sizeHint().width(), 64))
         self._cmp_btn.setCheckable(True)
-        self._cmp_btn.setHelpToolTip(
+        self._cmp_btn.setHelpToolTip(t(
             "Compare two Polygon/Ellipse: click the two shapes — shows %Area "
-            "difference and a radial gap colour map (<5 / 5–7 / 7–9 / >9 mm)")
+            "difference and a radial gap colour map (<5 / 5–7 / 7–9 / >9 mm)"))
         self._cmp_btn.clicked.connect(self._toggle_compare)
         row.addWidget(self._cmp_btn)
         # Hide/Show ALL results (lines + region colours + text) at once, between
         # Compare and Clear All Result. Same grey as ReCalc; disabled when there
         # is nothing to hide.
-        self._hideall_btn = FitButton("Hide All Result")
+        self._hideall_btn = FitButton(t("Hide All Result"))
         self._hideall_btn.setMinimumWidth(
             min(self._hideall_btn.sizeHint().width(), 64))
-        self._hideall_btn.setHelpToolTip(
-            "Hide / Show every measurement line, region colour and result text")
+        self._hideall_btn.setHelpToolTip(t(
+            "Hide / Show every measurement line, region colour and result text"))
         self._hideall_btn.setStyleSheet(                     # light grey, black text
             "QPushButton { background:#bdbdbd; color:#101010; }")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
-        clr = FitButton("Clear All Result")
+        self._clr_btn = clr = FitButton(t("Clear All Result"))
         clr.setMinimumWidth(min(clr.sizeHint().width(), 56))
-        clr.setHelpToolTip("Clear all measurements and comparison results")
+        clr.setHelpToolTip(t("Clear all measurements and comparison results"))
         clr.setStyleSheet(                                    # Reset's darker grey
             "QPushButton { background:#6e6e6e; color:#d8d8d8; }")
         clr.clicked.connect(self._measure_clear)
         row.addWidget(clr)
-        self._cmp_hint = QLabel("  Left-click = add point /"
-                                " right-click finishes Polyline / Polygon")
+        self._cmp_hint = QLabel(t("  Left-click = add point /"
+                                  " right-click finishes Polyline / Polygon"))
         row.addWidget(self._cmp_hint)
         row.addStretch(1)
         self._update_hideall_btn()
@@ -3192,8 +3417,8 @@ class CTViewer(AbstractViewer):
         has = (any(self._measures[k] for k in ("A", "B"))
                or bool(self._compares))
         btn.setEnabled(has)
-        btn.setText("Show All Result" if self._results_hidden
-                    else "Hide All Result")
+        btn.setText(t("Show All Result") if self._results_hidden
+                    else t("Hide All Result"))
 
     def _toggle_measure(self):
         self._meas_on = self._meas_btn.isChecked()
@@ -3377,8 +3602,8 @@ class CTViewer(AbstractViewer):
         # preserved across recompute via the "fill_custom" flag.
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
-        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction(t("Show") if target.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(QCursor.pos())
         if chosen is vis_act:
             target["hidden"] = not target.get("hidden", False)
@@ -3702,7 +3927,7 @@ class CTViewer(AbstractViewer):
         if not (0 <= ca_mi < len(self._measures[which])):
             return
         menu = QMenu(self)
-        del_ca = menu.addAction("Delete Center Angle")
+        del_ca = menu.addAction(t("Delete Center Angle"))
         try:
             chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
                 QPoint(int(sx), int(sy))))
@@ -3737,7 +3962,7 @@ class CTViewer(AbstractViewer):
         menu = QMenu(self)
         del_pt = del_res = None
         if m["type"] in ("polyline", "polygon"):
-            del_pt = menu.addAction("Delete point")
+            del_pt = menu.addAction(t("Delete point"))
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
         # Change Color / Change Transparency — on every result type (incl.
@@ -3745,11 +3970,11 @@ class CTViewer(AbstractViewer):
         from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
-            del_res = menu.addAction("Delete result")
+            del_res = menu.addAction(t("Delete result"))
         else:
-            del_res = menu.addAction("Delete")
+            del_res = menu.addAction(t("Delete"))
         try:
             chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
                 QPoint(int(sx), int(sy))))
@@ -3778,15 +4003,15 @@ class CTViewer(AbstractViewer):
         from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         m = self._measures[which][mi]
         menu = QMenu(self)
-        add_pt = menu.addAction("Add point")
+        add_pt = menu.addAction(t("Add point"))
         spline_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
-                "UnSpline" if m.get("smooth") else "Spline")
+                t("UnSpline") if m.get("smooth") else t("Spline"))
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
-            center_angle_act = menu.addAction("Center Angle")
-        color_menu = menu.addMenu("Change Color")
+            center_angle_act = menu.addAction(t("Center Angle"))
+        color_menu = menu.addMenu(t("Change Color"))
         color_actions = []
         for name, hexcol in COLOR_CHOICES:
             a = color_menu.addAction(name)
@@ -3795,8 +4020,8 @@ class CTViewer(AbstractViewer):
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         try:
             chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
                 QPoint(int(sx), int(sy))))

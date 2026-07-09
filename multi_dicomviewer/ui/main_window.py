@@ -17,6 +17,7 @@ import traceback
 from PyQt6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
+    QActionGroup,
     QColor,
     QDrag,
     QDragEnterEvent,
@@ -53,7 +54,10 @@ from multi_dicomviewer.config import (
     APP_VERSION,
     BLOCK_CT,
     BLOCK_CT_MESSAGE,
+    build_string,
 )
+from multi_dicomviewer import i18n
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import anonymize, dicom_io, settings
 from multi_dicomviewer.core.dicom_tags import (
     default_overlay_keywords,
@@ -103,8 +107,8 @@ def _ct_viewer():
         hint = ("pip install -r requirements-mac.txt" if sys.platform == "darwin"
                 else "pip install vtk")
         raise RuntimeError(
-            "CT viewer unavailable — its render backend failed to import:\n"
-            f"{_CT_IMPORT_ERROR}\n\n{hint}"
+            t("CT viewer unavailable — its render backend failed to import:\n"
+              "{err}\n\n{hint}", err=_CT_IMPORT_ERROR, hint=hint)
         )
     return _CTViewer()
 
@@ -383,11 +387,14 @@ class _Placeholder(QWidget):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
         lay = QVBoxLayout(self)
-        label = QLabel(text)
-        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        label.setWordWrap(True)
-        label.setStyleSheet("color:#888; font-size:13px;")
-        lay.addWidget(label)
+        self._label = QLabel(text)
+        self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet("color:#888; font-size:13px;")
+        lay.addWidget(self._label)
+
+    def set_text(self, text: str) -> None:
+        self._label.setText(text)
 
 
 class ViewerPane(QFrame):
@@ -430,7 +437,7 @@ class ViewerPane(QFrame):
         # layout) so a new series can be dropped in.
         self._title = _DragTitle(self)
         self._title.setToolTip(
-            "Drag and drop onto another pane to swap their positions"
+            t("Drag and drop onto another pane to swap their positions")
         )
         self._title.setStyleSheet(
             "padding:2px 6px; color:#ccc; background:transparent;"
@@ -439,7 +446,7 @@ class ViewerPane(QFrame):
         # still maximises it, and "Layout 1×1" is in the top bar.)
         self._close_btn = QPushButton("✕")
         self._close_btn.setToolTip(
-            "Close this pane's image (keeps the layout; returns to drop-waiting state)"
+            t("Close this pane's image (keeps the layout; returns to drop-waiting state)")
         )
         self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._close_btn.setFixedWidth(26)
@@ -458,9 +465,9 @@ class ViewerPane(QFrame):
         _tb.addWidget(self._close_btn)
 
         self._idle = _Placeholder(
-            f"Pane {index + 1}\n\n"
-            "Drag & drop a series from the Info panel,\n"
-            "or a DICOM folder, here"
+            t("Pane {n}\n\n"
+              "Drag & drop a series from the Info panel,\n"
+              "or a DICOM folder, here", n=index + 1)
         )
         self._stack = QStackedWidget()
         self._stack.addWidget(self._idle)
@@ -485,16 +492,37 @@ class ViewerPane(QFrame):
 
     # ---------------------------------------------------------- appearance
     def _idle_title(self) -> str:
-        return f"● Pane {self.index + 1}{_PANE_SEP}empty"
+        return "● " + t("Pane {n}", n=self.index + 1) + _PANE_SEP + t("empty")
 
     def _set_pane_title(self, body: str) -> None:
         """Set the top-band title to "● Pane N - <body>" (or just "● Pane N"
         when body is empty)."""
         body = (body or "").strip()
+        head = "● " + t("Pane {n}", n=self.index + 1)
         self._title.setText(
-            f"● Pane {self.index + 1}{_PANE_SEP}{body}" if body
-            else f"● Pane {self.index + 1}"
+            f"{head}{_PANE_SEP}{body}" if body else head
         )
+
+    def retranslate_ui(self) -> None:
+        """Re-apply this pane's persistent strings after a live language
+        change, and cascade to every cached viewer."""
+        self._title.setToolTip(
+            t("Drag and drop onto another pane to swap their positions")
+        )
+        self._close_btn.setToolTip(
+            t("Close this pane's image (keeps the layout; returns to "
+              "drop-waiting state)")
+        )
+        self._idle.set_text(
+            t("Pane {n}\n\n"
+              "Drag & drop a series from the Info panel,\n"
+              "or a DICOM folder, here", n=self.index + 1)
+        )
+        if self._cur_viewer is None:
+            self._title.setText(self._idle_title())
+        for v in self._viewers.values():
+            if v is not None and hasattr(v, "retranslate_ui"):
+                v.retranslate_ui()
 
     def set_active(self, on: bool) -> None:
         self._active_on = on
@@ -583,11 +611,11 @@ class ViewerPane(QFrame):
         if viewer is None:
             mod = loaded.modality.value
             self._show_message(
-                f"{mod} viewer is not implemented.\n"
-                "(Supported: XA, CT, IVUS. OCT/OFDI/NM planned.)"
+                t("{mod} viewer is not implemented.\n"
+                  "(Supported: XA, CT, IVUS. OCT/OFDI/NM planned.)", mod=mod)
             )
             self._cur_viewer = None
-            self._set_pane_title(f"{mod} (unsupported)")
+            self._set_pane_title(t("{mod} (unsupported)", mod=mod))
             return
         viewer.load_series(loaded, title)
         self._stack.setCurrentWidget(viewer)
@@ -644,9 +672,9 @@ class ViewerPane(QFrame):
         self._cur_viewer = None
         self._shown_uid = None
         self._idle.findChild(QLabel).setText(
-            f"Pane {self.index + 1}\n\n"
-            "Drag & drop a series from the Info panel,\n"
-            "or a DICOM folder, here"
+            t("Pane {n}\n\n"
+              "Drag & drop a series from the Info panel,\n"
+              "or a DICOM folder, here", n=self.index + 1)
         )
         self._stack.setCurrentWidget(self._idle)
         self._title.setText(self._idle_title())
@@ -769,7 +797,11 @@ class ViewerPane(QFrame):
 class MainWindow(QMainWindow):
     def __init__(self, initial_folder: str | None = None):
         super().__init__()
-        self.setWindowTitle(f"{APP_NAME}  v{APP_VERSION}")
+        # Resolve the UI language FIRST — before any dock / layout-bar / pane /
+        # menu is constructed — because each string is translated when its
+        # widget is created. (A language change still applies on next launch.)
+        i18n.set_language(settings.load_language())
+        self.setWindowTitle(f"{APP_NAME}  {build_string()}")
         self.resize(1500, 950)
         self.setAcceptDrops(True)  # drop a DICOM folder anywhere on the window
         self._patients = {}
@@ -826,11 +858,12 @@ class MainWindow(QMainWindow):
         # --- study browser dock ---
         self.browser = StudyPanel()
         self.browser.series_chosen.connect(self._on_series_chosen)
+        self.browser.paths_dropped.connect(self._on_paths_dropped)
         self.browser.study_clicked.connect(self._on_study_clicked)
         self.browser.delete_requested.connect(self._delete_node)
         self.browser.delete_all_requested.connect(self._delete_all_nodes)
         self.browser.export_requested.connect(self._on_export_requested)
-        dock = QDockWidget("Studies", self)
+        dock = QDockWidget(t("Studies"), self)
         dock.setWidget(self.browser)
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -882,8 +915,11 @@ class MainWindow(QMainWindow):
             pane.activated.connect(self._set_active_pane)
             pane.series_dropped.connect(self._on_series_dropped)
             pane.study_dropped.connect(self._on_study_dropped)
-            pane.folder_dropped.connect(self._load_folder)
-            pane.files_dropped.connect(self._load_files)
+            # Folder/file dropped ON a pane → import AND open into THAT pane.
+            pane.folder_dropped.connect(
+                lambda d, p=pane: self._load_folder(d, p))
+            pane.files_dropped.connect(
+                lambda paths, p=pane: self._load_files(paths, p))
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
             pane.pane_cleared.connect(self._on_pane_cleared)
@@ -947,54 +983,172 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_shortcuts()
         self._apply_layout(self._layout_key)
-        self.statusBar().showMessage("Open a DICOM folder to begin.")
+        self.statusBar().showMessage(t("Open a DICOM folder to begin."))
 
         if initial_folder and os.path.isdir(initial_folder):
             self._load_folder(initial_folder)
 
     # ------------------------------------------------------------------ menu
-    def _build_menu(self) -> None:
-        m = self.menuBar().addMenu("&File")
+    def _build_language_menu(self) -> None:
+        """Language menu: pick the UI language. Items are shown in each
+        language's own native name; the current one is checked. The change is
+        persisted and applied LIVE (see retranslate_ui) — no restart."""
+        lm = self.menuBar().addMenu(t("&Language"))
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        cur = i18n.get_language()
+        for code, name in i18n.enabled_languages().items():
+            act = QAction(name, self, checkable=True)
+            act.setChecked(code == cur)
+            act.triggered.connect(lambda _c=False, cc=code: self._set_language(cc))
+            group.addAction(act)
+            lm.addAction(act)
 
-        open_act = QAction("&Open DICOM folder…", self)
+    def _set_language(self, code: str) -> None:
+        if code == i18n.get_language():
+            return
+        settings.save_language(code)
+        i18n.set_language(code)
+        # Live switch: re-apply every persistent string in place (dialogs and
+        # right-click menus are rebuilt on open, so they pick up the new
+        # language for free; on-image overlays re-evaluate t() on repaint).
+        self.retranslate_ui()
+
+    def _rebuild_menu(self) -> None:
+        """Tear the menu bar down and build it fresh in the current language.
+        The menu's checkable actions carry state (Anonymize, Hide overlay), so
+        it is rebuilt rather than text-patched; that state is restored after."""
+        mb = self.menuBar()
+        for top in mb.actions():
+            menu = top.menu()
+            if menu is None:
+                continue
+            for a in menu.actions():
+                # Drop shortcuts BEFORE the replacements are created so Qt
+                # never sees two actions claiming the same key.
+                a.setShortcut(QKeySequence())
+                a.setShortcuts([])
+                a.setParent(None)
+                a.deleteLater()
+            menu.setParent(None)
+            menu.deleteLater()
+        mb.clear()
+        self._build_menu()
+        # Restore checkable state without re-firing the toggles.
+        for act, state in (
+            (self._anon_act, self._anon),
+            (self._hide_overlay_act, self._overlay_hidden),
+        ):
+            act.blockSignals(True)
+            act.setChecked(state)
+            act.blockSignals(False)
+
+    def retranslate_ui(self) -> None:
+        """Apply the active language to every PERSISTENT widget in place, so a
+        language change takes effect immediately (no restart). On-demand
+        dialogs / windows and right-click menus are constructed fresh each time
+        they open, so they need nothing here; on-image overlays re-evaluate
+        t() on their next repaint (forced below)."""
+        self._rebuild_menu()
+        self.setWindowTitle(f"{APP_NAME}  {build_string()}")
+        self._studies_dock.setWindowTitle(t("Studies"))
+
+        # Top layout bar.
+        self._info_btn.setText(
+            t("◀ Hide Studies") if self._studies_dock.isVisible()
+            else t("Show Studies ▶")
+        )
+        self._info_btn.setHelpToolTip(
+            t("Show/hide the left Info window (study tree)")
+        )
+        self._layout_btn.setText(self._layout_btn_text())
+        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._clear_all_btn.setText(t("✕ Clear All"))
+        self._clear_all_btn.setHelpToolTip(
+            t("Clear the image from every pane (same as each pane's ✕). "
+              "The layout and the studies list are kept.")
+        )
+        self._hide_btns_btn.setText(t("Hide Buttons (Max Image)"))
+        self._hide_btns_btn.setHelpToolTip(
+            t("Hide every pane's toolbars/title to maximise the image "
+              "(for presentation). Use Show Buttons to bring them back.")
+        )
+        self._show_btns_btn.setText(t("Show Buttons"))
+        self._show_btns_btn.setHelpToolTip(t("Restore every pane's toolbars."))
+        self._tags_btn.setText(t("DICOM Info"))
+        self._tags_btn.setHelpToolTip(
+            t("Left-click: show/hide DICOM info on the image\n"
+              "Right-click: choose which tag data to show")
+        )
+        self._tagsz_lbl.setText(t("Tag size:"))
+        self._tag_font_slider.setToolTip(t("DICOM tag text size (all panes)"))
+
+        # Panes (placeholders, tooltips) + every cached viewer.
+        for pane in self._panes:
+            pane.retranslate_ui()
+        # Re-derive the "● Pane N — <series>" titles of loaded panes.
+        self._refresh_pane_titles()
+
+        # Study tree / thumbnail browser.
+        if hasattr(self.browser, "retranslate_ui"):
+            self.browser.retranslate_ui()
+
+        # Open non-modal tool windows follow the language live too (modal
+        # dialogs can't be reached while the language menu is open, so they
+        # just pick it up next open). Only those that implement retranslate_ui.
+        for attr in ("_coreg_win", "_rupture_win", "_ortho_win",
+                     "_dicomcheck_win", "_dicomfolder_win", "_hist_dialog"):
+            win = getattr(self, attr, None)
+            if (win is not None and hasattr(win, "retranslate_ui")
+                    and win.isVisible()):
+                win.retranslate_ui()
+
+        self.update()
+
+    def _build_menu(self) -> None:
+        m = self.menuBar().addMenu(t("&File"))
+
+        open_act = QAction(t("&Open DICOM folder…"), self)
         open_act.setShortcut("Ctrl+O")
         open_act.triggered.connect(self._choose_folder)
         m.addAction(open_act)
 
-        open_file_act = QAction("Open DICOM &file…", self)
+        open_file_act = QAction(t("Open DICOM &file…"), self)
         open_file_act.setShortcut("Ctrl+Shift+O")
         open_file_act.setToolTip(
-            "Open one or more individual DICOM files (not the whole folder)"
+            t("Open one or more individual DICOM files (not the whole folder)")
         )
         open_file_act.triggered.connect(self._choose_files)
         m.addAction(open_file_act)
 
-        clear_act = QAction("&Clear viewers", self)
+        clear_act = QAction(t("&Clear viewers"), self)
         clear_act.triggered.connect(self._clear_all)
         m.addAction(clear_act)
 
         m.addSeparator()
-        quit_act = QAction("&Quit", self)
+        quit_act = QAction(t("&Quit"), self)
         quit_act.setShortcut("Ctrl+Q")
         quit_act.triggered.connect(self.close)
         m.addAction(quit_act)
 
-        vm = self.menuBar().addMenu("&View")
-        self._anon_act = QAction("&Anonymize", self)
+        self._build_language_menu()
+
+        vm = self.menuBar().addMenu(t("&View"))
+        self._anon_act = QAction(t("&Anonymize"), self)
         self._anon_act.setCheckable(True)
         self._anon_act.setShortcut("Ctrl+Shift+A")
-        self._anon_act.setToolTip(
+        self._anon_act.setToolTip(t(
             "Mask patient/case info on all on-screen displays "
             "(files unchanged)"
-        )
+        ))
         self._anon_act.toggled.connect(self._set_anonymized)
         vm.addAction(self._anon_act)
 
-        tags_act = QAction("DICOM tag overlay items…", self)
+        tags_act = QAction(t("DICOM tag overlay items…"), self)
         tags_act.triggered.connect(self._tags_for_active_pane)
         vm.addAction(tags_act)
 
-        self._hide_overlay_act = QAction("Hide DICOM overlay", self)
+        self._hide_overlay_act = QAction(t("Hide DICOM overlay"), self)
         self._hide_overlay_act.setCheckable(True)
         # Q is the quick single-key toggle (shown in the menu); Ctrl+H
         # kept so the old shortcut still works. (D used to do this — it
@@ -1003,81 +1157,84 @@ class MainWindow(QMainWindow):
         self._hide_overlay_act.setShortcuts(
             [QKeySequence("Q"), QKeySequence("Ctrl+H")]
         )
-        self._hide_overlay_act.setToolTip(
+        self._hide_overlay_act.setToolTip(t(
             "Show/hide the DICOM tag text drawn on the image (Q)"
-        )
+        ))
         self._hide_overlay_act.toggled.connect(self._toggle_overlay_hidden)
         vm.addAction(self._hide_overlay_act)
 
         vm.addSeparator()
-        exp_act = QAction("Export DICOM tag overlay settings…", self)
+        exp_act = QAction(t("Export DICOM tag overlay settings…"), self)
         exp_act.triggered.connect(self._export_tag_conditions)
         vm.addAction(exp_act)
 
-        imp_act = QAction("Import DICOM tag overlay settings…", self)
+        imp_act = QAction(t("Import DICOM tag overlay settings…"), self)
         imp_act.triggered.connect(self._import_tag_conditions)
         vm.addAction(imp_act)
 
-        tm = self.menuBar().addMenu("&Tools")
-        self._sync_act = QAction("MultiSync IVUS viewer…", self)
-        self._sync_act.setToolTip(
-            "Open the panes' IVUS series in a synchronised viewer "
-            "(only available in the 1×2 / 2×1 / 2×2 layout)"
-        )
-        self._sync_act.triggered.connect(self._open_multisync)
-        tm.addAction(self._sync_act)
-        self._rupture_act = QAction("Rupture-Predictor…", self)
+        tm = self.menuBar().addMenu(t("&Tools"))
+        # MultiSync-Viewer retired 2026-07-09: its capabilities (multi-IVUS
+        # frame+rotation sync, save/load, MP4 export) are now the CoSync
+        # tool below (a strict superset). The old window (multisync_window.py)
+        # and _open_multisync are kept on disk but no longer reachable.
+        self._rupture_act = QAction(t("Rupture-Predictor…"), self)
         self._rupture_act.triggered.connect(self._open_rupture_predictor)
         tm.addAction(self._rupture_act)
-        self._ortho_act = QAction("Orthogonal-View…", self)
-        self._ortho_act.setToolTip(
+        self._ortho_act = QAction(t("Orthogonal-View…"), self)
+        self._ortho_act.setToolTip(t(
             "Pick a vector on the active XA image and get the two C-arm "
             "angles whose view is orthogonal to it "
             "(available whenever the active pane shows an XA series "
             "with C-arm positioner angles)"
-        )
+        ))
         self._ortho_act.triggered.connect(self._open_orthogonal_view)
         tm.addAction(self._ortho_act)
-        self._coaxial_act = QAction("Coaxial Eval…", self)
-        self._coaxial_act.setToolTip(
+        self._coaxial_act = QAction(t("Coaxial Eval…"), self)
+        self._coaxial_act.setToolTip(t(
             "Draw a labelled Line (GC / proxLAD / …) on the same vessel in "
             "2+ angio views, then compute the 3-D GC-to-vessel angle "
             "(available whenever a visible pane shows an XA series with "
             "C-arm positioner angles)"
-        )
+        ))
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
+        self._coreg_act = QAction(t("CoSync…"), self)
+        self._coreg_act.setToolTip(t(
+            "Co-register IVUS pull-back frames to positions on the angio "
+            "vessel: trace a guide, pin CoSync landmarks, then scrubbing "
+            "the IVUS drives a marker along the angio "
+            "(needs at least one IVUS and one XA series loaded)"
+        ))
+        self._coreg_act.triggered.connect(self._open_coreg)
+        tm.addAction(self._coreg_act)
 
         tm.addSeparator()
-        self._dicomcheck_act = QAction("DicomCheck…", self)
-        self._dicomcheck_act.setToolTip(
+        self._dicomcheck_act = QAction(t("DicomCheck…"), self)
+        self._dicomcheck_act.setToolTip(t(
             "Scan a folder and delete non-DICOM files (and empty folders)"
-        )
+        ))
         self._dicomcheck_act.triggered.connect(self._open_dicom_check)
         tm.addAction(self._dicomcheck_act)
-        self._dicomfolder_act = QAction("DicomFolder…", self)
-        self._dicomfolder_act.setToolTip(
+        self._dicomfolder_act = QAction(t("DicomFolder…"), self)
+        self._dicomfolder_act.setToolTip(t(
             "Organize DICOM files into sub-folders by date / modality / study"
-        )
+        ))
         self._dicomfolder_act.triggered.connect(self._open_dicom_folder)
         tm.addAction(self._dicomfolder_act)
-        self._bintag_act = QAction("Export binary DICOM tag…", self)
-        self._bintag_act.setToolTip(
+        self._bintag_act = QAction(t("Export binary DICOM tag…"), self)
+        self._bintag_act.setToolTip(t(
             "Write a binary VR tag (OB/OW/UN — shown as <binary>) to text "
             "as hex / Base64 / Latin-1"
-        )
+        ))
         self._bintag_act.triggered.connect(self._open_bintag_export)
         tm.addAction(self._bintag_act)
         self._sync_layout_gate()
 
     def _sync_layout_gate(self) -> None:
         """Gate Tools menu items by current layout / contents:
-        MultiSync needs 1×2 or 2×2; Orthogonal-View needs at least one
-        VISIBLE pane to hold an XA series with C-arm positioner angles
-        (it works on every visible pane — angio panes are pickable,
-        the rest open view-only)."""
-        if hasattr(self, "_sync_act"):
-            self._sync_act.setEnabled(self._layout_key in _MULTI_PANE)
+        Orthogonal-View needs at least one VISIBLE pane to hold an XA series
+        with C-arm positioner angles (it works on every visible pane — angio
+        panes are pickable, the rest open view-only)."""
         if hasattr(self, "_ortho_act"):
             self._ortho_act.setEnabled(self._any_visible_pane_has_angles())
         if hasattr(self, "_coaxial_act"):
@@ -1129,9 +1286,9 @@ class MainWindow(QMainWindow):
         ]
         if not ivus:
             QMessageBox.information(
-                self, "MultiSync",
-                "No IVUS series are loaded. Open a folder with IVUS "
-                "pull-backs first.",
+                self, t("MultiSync"),
+                t("No IVUS series are loaded. Open a folder with IVUS "
+                  "pull-backs first."),
             )
             return
         # Pre-fill each slot from the matching pane (in display order);
@@ -1168,6 +1325,46 @@ class MainWindow(QMainWindow):
         # room without the user resizing first.
         self._multisync.showMaximized()
         self._multisync.raise_()
+
+    def _open_coreg(self) -> None:
+        """Launch the CoSync window, seeded with the IVUS and XA
+        series currently shown in the panes (IVUS pull-backs + the
+        representative angio view[s]). Needs ≥1 IVUS and ≥1 XA."""
+        from multi_dicomviewer.ui.coreg_window import CoregWindow
+        # One CoSync pane per shown pane holding an IVUS/XA series, mirroring
+        # the on-screen arrangement 1:1 (no series_uid de-dup, which dropped
+        # a pane when two shown panes shared a UID, e.g. biplane). Each spec
+        # is (series, plane_index): for a biplane pane we send exactly the
+        # projection(s) actually displayed — Lt→plane 0, Rt→plane 1, and Bi
+        # (both shown) → both planes as two CoSync views.
+        specs: list = []
+        for pane in self._shown_panes():
+            se = self._series_by_uid.get(pane.shown_series_uid())
+            if se is None or se.modality not in (Modality.IVUS, Modality.XA):
+                continue
+            v = pane.current_viewer()
+            fr = int(getattr(v, "_frame", 0))    # keep the frame on screen now
+            side = v.current_side() if hasattr(v, "current_side") else None
+            if side == "Bi":
+                specs.append((se, 0, fr))
+                specs.append((se, 1, fr))
+            elif side == "Rt":
+                specs.append((se, 1, fr))
+            else:                                # "Lt", single-plane, or none
+                specs.append((se, 0, fr))
+        specs = specs[:6]
+        has_ivus = any(s.modality == Modality.IVUS for s, _p, _f in specs)
+        if not has_ivus:
+            QMessageBox.information(
+                self, t("CoSync"),
+                t("Show at least one IVUS pull-back in the panes first. "
+                  "(XA angio is optional — with no XA this behaves like a "
+                  "multi-IVUS sync viewer.)"),
+            )
+            return
+        self._coreg_win = CoregWindow(specs, parent=self)
+        self._coreg_win.showMaximized()
+        self._coreg_win.raise_()
 
     def _open_dicom_check(self) -> None:
         """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
@@ -1349,7 +1546,8 @@ class MainWindow(QMainWindow):
             if progress is not None:
                 progress(
                     k, burst_total,
-                    f"Encoding IVUS frame {k + 1} / {burst_total}…"
+                    t("Encoding IVUS frame {k} / {total}…",
+                      k=k + 1, total=burst_total)
                 )
                 if getattr(progress, "cancelled", False):
                     return None, None
@@ -1362,7 +1560,7 @@ class MainWindow(QMainWindow):
                 continue
             frames.append(self._rp_upscaled_data_url(qimg))
         if progress is not None:
-            progress(burst_total, burst_total, "Frames ready.")
+            progress(burst_total, burst_total, t("Frames ready."))
         if not frames:
             return None, None
         return frames, cur - start
@@ -1479,7 +1677,7 @@ class MainWindow(QMainWindow):
             v = pane.current_viewer()
             if v is None:
                 continue
-            pane_label = f"Pane {self._panes.index(pane) + 1}"
+            pane_label = t("Pane {n}", n=self._panes.index(pane) + 1)
             if _is_xa(v):
                 panels.extend(self._ortho_panels_from_xa_viewer(
                     v, pane_label
@@ -1491,9 +1689,9 @@ class MainWindow(QMainWindow):
         # pointless. The layout-bar gate normally already prevents this.
         if not any(p["pickable"] for p in panels):
             QMessageBox.information(
-                self, "Orthogonal-View",
-                "No visible pane shows an XA series with C-arm "
-                "positioner angles.",
+                self, t("Orthogonal-View"),
+                t("No visible pane shows an XA series with C-arm "
+                  "positioner angles."),
             )
             return
 
@@ -1572,11 +1770,11 @@ class MainWindow(QMainWindow):
 
         if not all_lines:
             QMessageBox.information(
-                self, "Coaxial Eval",
-                "No vessel-labelled lines found.\n\n"
-                "Draw a Line on the same vessel in 2+ angio views, then "
-                "right-click each line ▸ Vessel type ▸ pick GC / proxLAD / "
-                "etc. before running Coaxial Eval.",
+                self, t("Coaxial Eval"),
+                t("No vessel-labelled lines found.\n\n"
+                  "Draw a Line on the same vessel in 2+ angio views, then "
+                  "right-click each line ▸ Vessel type ▸ pick GC / proxLAD / "
+                  "etc. before running Coaxial Eval."),
             )
             return
 
@@ -1650,8 +1848,8 @@ class MainWindow(QMainWindow):
             qimg = self._active_display_image()
             if qimg is None:
                 QMessageBox.warning(
-                    self, "Rupture-Predictor",
-                    "The active pane has no image displayed.")
+                    self, t("Rupture-Predictor"),
+                    t("The active pane has no image displayed."))
                 return
             self._rupture_win = RupturePredictorWindow(
                 qimage=qimg, calib=calib, parent=self)
@@ -1660,12 +1858,13 @@ class MainWindow(QMainWindow):
                 plane=plane, frame_index=frame_index, calib=calib, parent=self)
         self._rupture_win.showMaximized()
         self._rupture_win.raise_()
-        parts = ["IVUS frame stepper" if plane is not None
-                 else "displayed image"]
+        parts = [t("IVUS frame stepper") if plane is not None
+                 else t("displayed image")]
         if calib is not None:
-            parts.append("DICOM calibration (CH/CV step skipped)")
+            parts.append(t("DICOM calibration (CH/CV step skipped)"))
         self.statusBar().showMessage(
-            "Rupture-Predictor opened with " + " + ".join(parts) + ".")
+            t("Rupture-Predictor opened with {parts}.",
+              parts=" + ".join(parts)))
 
     def _open_rupture_predictor_browser(self) -> None:
         """Legacy browser Rupture-Predictor (HTML hand-off). Retained as a
@@ -1685,7 +1884,7 @@ class MainWindow(QMainWindow):
         src = self._bundled_resource("Rupture-Predictor.html")
         if not os.path.exists(src):
             QMessageBox.warning(
-                self, "Rupture-Predictor", f"Not found:\n{src}",
+                self, t("Rupture-Predictor"), t("Not found:\n{src}", src=src),
             )
             return
         handoff: dict = {}
@@ -1726,8 +1925,8 @@ class MainWindow(QMainWindow):
             # seconds — show a progress dialog so the user knows we
             # didn't just freeze the app.
             prog = QProgressDialog(
-                "Preparing IVUS frames for Rupture-Predictor…",
-                "Cancel", 0, 1, self,
+                t("Preparing IVUS frames for Rupture-Predictor…"),
+                t("Cancel"), 0, 1, self,
             )
             prog.setWindowModality(Qt.WindowModality.ApplicationModal)
             prog.setMinimumDuration(0)
@@ -1753,7 +1952,7 @@ class MainWindow(QMainWindow):
             if _cb.cancelled:
                 prog.close()
                 return
-            prog.setLabelText("Writing Rupture-Predictor session HTML…")
+            prog.setLabelText(t("Writing Rupture-Predictor session HTML…"))
             QApplication.processEvents()
             # We hold prog open until after the HTML write below.
             self._rupture_progress = prog
@@ -1788,7 +1987,7 @@ class MainWindow(QMainWindow):
             if prog is not None:
                 prog.close()
                 self._rupture_progress = None
-            QMessageBox.warning(self, "Rupture-Predictor", str(exc))
+            QMessageBox.warning(self, t("Rupture-Predictor"), str(exc))
             self._launch_browser_maximized(pathlib.Path(src).as_uri())
             return
         self._launch_browser_maximized(pathlib.Path(tmp).as_uri())
@@ -1799,13 +1998,15 @@ class MainWindow(QMainWindow):
             self._rupture_progress = None
         parts = []
         if "frames" in handoff:
-            parts.append(f"IVUS frame burst ({len(handoff['frames'])} frames)")
+            parts.append(t("IVUS frame burst ({n} frames)",
+                           n=len(handoff['frames'])))
         elif "image" in handoff:
-            parts.append("displayed image")
+            parts.append(t("displayed image"))
         if "hpxmm" in handoff:
-            parts.append("DICOM calibration (CH/CV step skipped)")
+            parts.append(t("DICOM calibration (CH/CV step skipped)"))
         self.statusBar().showMessage(
-            "Rupture-Predictor opened with " + " + ".join(parts) + "."
+            t("Rupture-Predictor opened with {parts}.",
+              parts=" + ".join(parts))
         )
 
     # --------------------------------------------------------- screen layout
@@ -1814,9 +2015,9 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 3, 6, 3)
 
-        self._info_btn = FitButton("◀ Hide Studies")
+        self._info_btn = FitButton(t("◀ Hide Studies"))
         self._info_btn.setHelpToolTip(
-            "Show/hide the left Info window (study tree)"
+            t("Show/hide the left Info window (study tree)")
         )
         self._info_btn.clicked.connect(self._toggle_info)
         row.addWidget(self._info_btn)
@@ -1826,7 +2027,7 @@ class MainWindow(QMainWindow):
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip("Choose the pane layout from a grid")
+        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
         # This menu-button renders square on macOS; give it the same light-grey
         # rounded border as the pane buttons so the top bar matches.
         self._layout_btn.setStyleSheet(
@@ -1847,10 +2048,10 @@ class MainWindow(QMainWindow):
         # layout is kept; the studies list is untouched. The leading ✕ matches
         # the per-pane close glyph and, because FitButton elides from the right,
         # stays visible (Clear's intent still readable) when the bar is narrow.
-        self._clear_all_btn = FitButton("✕ Clear All")
+        self._clear_all_btn = FitButton(t("✕ Clear All"))
         self._clear_all_btn.setHelpToolTip(
-            "Clear the image from every pane (same as each pane's ✕). "
-            "The layout and the studies list are kept."
+            t("Clear the image from every pane (same as each pane's ✕). "
+              "The layout and the studies list are kept.")
         )
         self._clear_all_btn.clicked.connect(self._clear_all)
         row.addSpacing(8)
@@ -1860,15 +2061,15 @@ class MainWindow(QMainWindow):
         # "Max Image" toggle pair: Hide Buttons strips every pane down to just
         # the image (and the title bar) for presentation; Show Buttons brings
         # the toolbars back. Applies to ALL panes at once.
-        self._hide_btns_btn = FitButton("Hide Buttons (Max Image)")
+        self._hide_btns_btn = FitButton(t("Hide Buttons (Max Image)"))
         self._hide_btns_btn.setHelpToolTip(
-            "Hide every pane's toolbars/title to maximise the image "
-            "(for presentation). Use Show Buttons to bring them back."
+            t("Hide every pane's toolbars/title to maximise the image "
+              "(for presentation). Use Show Buttons to bring them back.")
         )
         self._hide_btns_btn.clicked.connect(lambda: self._set_chrome_hidden(True))
         row.addWidget(self._hide_btns_btn)
-        self._show_btns_btn = FitButton("Show Buttons")
-        self._show_btns_btn.setHelpToolTip("Restore every pane's toolbars.")
+        self._show_btns_btn = FitButton(t("Show Buttons"))
+        self._show_btns_btn.setHelpToolTip(t("Restore every pane's toolbars."))
         self._show_btns_btn.clicked.connect(
             lambda: self._set_chrome_hidden(False)
         )
@@ -1882,12 +2083,12 @@ class MainWindow(QMainWindow):
         #   left-click  → show/hide the on-image DICOM text;
         #   right-click → choose which tags to overlay (active pane's modality).
         # The tag-size slider sits to its right.
-        self._tags_btn = FitButton("DICOM Info")
+        self._tags_btn = FitButton(t("DICOM Info"))
         self._tags_btn.setCheckable(True)
         self._tags_btn.setChecked(not self._overlay_hidden)
         self._tags_btn.setHelpToolTip(
-            "Left-click: show/hide DICOM info on the image\n"
-            "Right-click: choose which tag data to show"
+            t("Left-click: show/hide DICOM info on the image\n"
+              "Right-click: choose which tag data to show")
         )
         # Connect AFTER setChecked so the initial state doesn't fire the toggle.
         self._tags_btn.toggled.connect(self._set_overlay_shown)
@@ -1898,9 +2099,9 @@ class MainWindow(QMainWindow):
             lambda _p: self._open_tag_dialog_active()
         )
         row.addWidget(self._tags_btn)
-        _tagsz_lbl = QLabel("Tag size:")
-        _tagsz_lbl.setMinimumWidth(0)        # may clip when the bar is squeezed
-        row.addWidget(_tagsz_lbl)
+        self._tagsz_lbl = QLabel(t("Tag size:"))
+        self._tagsz_lbl.setMinimumWidth(0)   # may clip when the bar is squeezed
+        row.addWidget(self._tagsz_lbl)
         self._tag_font_slider = QSlider(Qt.Orientation.Horizontal)
         self._tag_font_slider.setRange(TAG_FONT_PT_MIN, TAG_FONT_PT_MAX)
         self._tag_font_slider.setValue(int(self._tag_font_pt))
@@ -1908,7 +2109,7 @@ class MainWindow(QMainWindow):
         # enough (e.g. at 1920×1080 / 150% scaling) to free the Studies dock.
         self._tag_font_slider.setMinimumWidth(40)
         self._tag_font_slider.setMaximumWidth(110)
-        self._tag_font_slider.setToolTip("DICOM tag text size (all panes)")
+        self._tag_font_slider.setToolTip(t("DICOM tag text size (all panes)"))
         self._tag_font_slider.valueChanged.connect(self._set_tag_font_pt)
         row.addWidget(self._tag_font_slider)
 
@@ -1939,7 +2140,9 @@ class MainWindow(QMainWindow):
     def _toggle_info(self, *_a) -> None:
         vis = not self._studies_dock.isVisible()
         self._studies_dock.setVisible(vis)
-        self._info_btn.setText("◀ Hide Studies" if vis else "Show Studies ▶")
+        self._info_btn.setText(
+            t("◀ Hide Studies") if vis else t("Show Studies ▶")
+        )
 
     def closeEvent(self, e):  # noqa: N802 (Qt override)
         # Finalize each VTK CT render window while its native window is still
@@ -1973,7 +2176,7 @@ class MainWindow(QMainWindow):
     def _layout_btn_text(self) -> str:
         # setMenu() adds the native dropdown arrow, so the text itself stays
         # plain: "Layout  2×3".
-        return f"Layout  {self._layout_key.replace('x', '×')}"
+        return f"{t('Layout')}  {self._layout_key.replace('x', '×')}"
 
     def _on_layout_picked(self, rows: int, cols: int) -> None:
         """A cell was chosen in the visual grid picker → apply that R×C layout
@@ -2226,12 +2429,12 @@ class MainWindow(QMainWindow):
         v = self._xa()
         if v is None or getattr(v, "handles_modality", "") != "IVUS":
             self.statusBar().showMessage(
-                "Long-axis view is IVUS-only."
+                t("Long-axis view is IVUS-only.")
             )
             return
         if not getattr(v, "_la_allowed", True):
             self.statusBar().showMessage(
-                "Long-axis view is available only in single-pane (1x1) layout."
+                t("Long-axis view is available only in single-pane (1x1) layout.")
             )
             return
         v.toggle_long_axis()
@@ -2348,7 +2551,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------- data load
     def _choose_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Open DICOM folder")
+        folder = QFileDialog.getExistingDirectory(self, t("Open DICOM folder"))
         if folder:
             self._load_folder(folder)
 
@@ -2356,7 +2559,7 @@ class MainWindow(QMainWindow):
         # "All files" is the default filter because DICOM files very often have
         # no extension (e.g. "STUDY.1"); the .dcm convenience filter is second.
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Open DICOM file(s)", getattr(self, "_last_dir", "") or "",
+            self, t("Open DICOM file(s)"), getattr(self, "_last_dir", "") or "",
             "All files (*);;DICOM files (*.dcm *.DCM *.ima *.IMA *.dicom)",
         )
         paths = [p for p in paths if p]
@@ -2385,24 +2588,40 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
             self._load_files(files)
 
-    def _load_folder(self, folder: str) -> None:
+    def _load_folder(self, folder: str, open_in_pane=None) -> None:
         self._last_dir = folder              # seeds the DicomCheck/Folder tools
         self._load_index(
-            f"Scanning {folder} …",
+            t("Scanning {folder} …", folder=folder),
             lambda prog: dicom_io.scan_folder(folder, prog),
+            open_in_pane=open_in_pane,
         )
 
-    def _load_files(self, paths: list[str]) -> None:
+    def _load_files(self, paths: list[str], open_in_pane=None) -> None:
         n = len(paths)
         self._load_index(
-            f"Loading {n} file(s) …",
+            t("Loading {n} file(s) …", n=n),
             lambda prog: dicom_io.index_files(paths, prog),
+            open_in_pane=open_in_pane,
         )
 
-    def _load_index(self, status_msg: str, scan_fn) -> None:
+    def _on_paths_dropped(self, paths) -> None:
+        """Folder/file dropped ONTO the tree → import into the tree only; no
+        pane is opened (drag a series onto a pane to display it)."""
+        paths = [p for p in (paths or []) if p]
+        dirs = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if os.path.isfile(p)]
+        if dirs:
+            self._load_folder(dirs[0])
+        elif files:
+            self._load_files(files)
+
+    def _load_index(self, status_msg: str, scan_fn, open_in_pane=None) -> None:
         """Run *scan_fn(progress)* under a modal progress dialog, then merge
-        the resulting patients into the tree and auto-open a series. Shared by
-        folder drops (scan_folder) and file drops (index_files)."""
+        the resulting patients into the tree. *open_in_pane* opens the freshly
+        imported series into that pane (folder/file dropped ON a pane); when
+        None the import just populates the tree — nothing is loaded into a
+        pane (File▸Open, window/tree drops). Shared by folder drops
+        (scan_folder) and file drops (index_files)."""
         self.statusBar().showMessage(status_msg)
         # Bring the app to the front (drop often comes from Explorer).
         if self.isMinimized():
@@ -2410,8 +2629,8 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-        dlg = QProgressDialog("Loading DICOM…", None, 0, 0, self)
-        dlg.setWindowTitle("Scanning")
+        dlg = QProgressDialog(t("Loading DICOM…"), None, 0, 0, self)
+        dlg.setWindowTitle(t("Scanning"))
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(300)   # don't flash for tiny folders
         dlg.setAutoClose(True)
@@ -2428,7 +2647,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             dlg.reset()
             dlg.close()
-            QMessageBox.critical(self, "Scan failed", str(exc))
+            QMessageBox.critical(self, t("Scan failed"), str(exc))
             return
         # reset() — not just setValue(max) — cancels the minimumDuration
         # force-show timer and hides the dialog. For a fast/empty scan the timer
@@ -2448,10 +2667,11 @@ class MainWindow(QMainWindow):
         # say so plainly and stop — don't leave a spinner up or re-open some
         # unrelated already-loaded series.
         if not new_uids:
-            self.statusBar().showMessage("No displayable DICOM files were found.")
+            self.statusBar().showMessage(
+                t("No displayable DICOM files were found."))
             QMessageBox.information(
-                self, "No DICOM files",
-                "The dropped folder/file(s) contained no displayable DICOM.",
+                self, t("No DICOM files"),
+                t("The dropped folder/file(s) contained no displayable DICOM."),
             )
             return
         # Accumulate: a new folder adds its studies; previously loaded
@@ -2462,14 +2682,19 @@ class MainWindow(QMainWindow):
         n_ser = self._reindex_series_maps()
         n_pat = len(self._patients)
         self.statusBar().showMessage(
-            f"{n_pat} patient(s), {n_ser} series (total). "
-            "⚹ marks patients with both CT and XA. "
-            "Drag & drop a series onto a pane to display."
+            t("{n_pat} patient(s), {n_ser} series (total). "
+              "⚹ marks patients with both CT and XA. "
+              "Drag & drop a series onto a pane to display.",
+              n_pat=n_pat, n_ser=n_ser)
         )
         # Auto-open a series from the just-loaded folder into the active pane.
         # When the folder has CT, prefer the "main" CT series (see
         # _initial_ct_target); otherwise fall back to the first series in the
         # browser's display order.
+        # Only open into a pane when the drop landed ON a pane; otherwise the
+        # import just populates the tree (drag a series onto a pane to show).
+        if open_in_pane is None:
+            return
         ordered = self.browser.ordered_series()
         new_series = [se for se in ordered if se.series_uid in new_uids]
         target = self._initial_ct_target(new_series)
@@ -2477,7 +2702,7 @@ class MainWindow(QMainWindow):
             target = (self._initial_noncT_target(new_series)
                       or (ordered[0] if ordered else None))
         if target is not None:
-            self.browser.select_series(target)
+            self._open_series(target, open_in_pane)
 
     @staticmethod
     def _initial_noncT_target(candidates: list) -> "Series | None":
@@ -2602,7 +2827,7 @@ class MainWindow(QMainWindow):
         series = self._series_by_uid.get(uid) if uid else None
         if series is None:
             self.statusBar().showMessage(
-                "Export: could not identify the displayed series."
+                t("Export: could not identify the displayed series.")
             )
             return
         if plane_path:
@@ -2672,23 +2897,23 @@ class MainWindow(QMainWindow):
         # a reason to cancel. DICOM/MP4 still need at least one field.
         if not cfg.fields and fmt != "csv":
             self.statusBar().showMessage(
-                "Export cancelled — no filename fields were ticked."
+                t("Export cancelled — no filename fields were ticked.")
             )
             return
 
         out_dir = QFileDialog.getExistingDirectory(
-            self, "Choose output folder for export"
+            self, t("Choose output folder for export")
         )
         if not out_dir:
             return
 
         title = {
-            "dicom": "Exporting DICOM…",
-            "mp4": "Exporting MP4…",
-            "csv": "Exporting CSV…",
-            "anon-dicom": "Exporting Anon DICOM…",
+            "dicom": t("Exporting DICOM…"),
+            "mp4": t("Exporting MP4…"),
+            "csv": t("Exporting CSV…"),
+            "anon-dicom": t("Exporting Anon DICOM…"),
         }[fmt]
-        prog = QProgressDialog(title, "Cancel", 0, 1, self)
+        prog = QProgressDialog(title, t("Cancel"), 0, 1, self)
         prog.setWindowModality(Qt.WindowModality.ApplicationModal)
         prog.setMinimumDuration(0)
         prog.setAutoClose(False)
@@ -2755,22 +2980,23 @@ class MainWindow(QMainWindow):
                 )
         except RuntimeError as e:
             if cancelled["yes"]:
-                self.statusBar().showMessage("Export cancelled.")
+                self.statusBar().showMessage(t("Export cancelled."))
                 prog.close()
                 return
             prog.close()
-            QMessageBox.critical(self, "Export failed", str(e))
+            QMessageBox.critical(self, t("Export failed"), str(e))
             return
         except Exception as e:
             prog.close()
-            QMessageBox.critical(self, "Export failed", str(e))
+            QMessageBox.critical(self, t("Export failed"), str(e))
             return
         prog.close()
-        unit = "folder" if fmt in ("dicom", "anon-dicom") else "file"
-        self.statusBar().showMessage(
-            f"Exported {len(written)} {unit}"
-            f"{'s' if len(written) != 1 else ''} to {out_dir}"
-        )
+        n = len(written)
+        if fmt in ("dicom", "anon-dicom"):
+            msg = t("Exported {n} folder(s) to {dir}", n=n, dir=out_dir)
+        else:
+            msg = t("Exported {n} file(s) to {dir}", n=n, dir=out_dir)
+        self.statusBar().showMessage(msg)
 
     def _delete_node(self, kind: str, key: str, label: str) -> None:
         """Right-click ▸ delete: drop a patient/study/series from the list
@@ -2791,7 +3017,7 @@ class MainWindow(QMainWindow):
             self._cur_xa = None
         self.browser.populate(self._patients)  # keeps expand state
         self.statusBar().showMessage(
-            f"Deleted ({len(removed)} series removed from the list)"
+            t("Deleted ({n} series removed from the list)", n=len(removed))
         )
 
     def _delete_all_nodes(self) -> None:
@@ -2799,7 +3025,8 @@ class MainWindow(QMainWindow):
         empty every pane). Files on disk are untouched — reloading the folder
         restores them — but it clears everything, so confirm first."""
         if not self._patients:
-            self.statusBar().showMessage("Nothing to delete — the list is empty.")
+            self.statusBar().showMessage(
+                t("Nothing to delete — the list is empty."))
             return
         n_series = sum(
             len(st.series)
@@ -2807,10 +3034,10 @@ class MainWindow(QMainWindow):
             for st in p.studies.values()
         )
         reply = QMessageBox.question(
-            self, "Delete All",
-            f"Remove all {n_series} series from the list?\n\n"
-            "The image files on disk are NOT deleted (reloading the folder "
-            "restores them).",
+            self, t("Delete All"),
+            t("Remove all {n} series from the list?\n\n"
+              "The image files on disk are NOT deleted (reloading the folder "
+              "restores them).", n=n_series),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -2829,7 +3056,7 @@ class MainWindow(QMainWindow):
         self._sync_xa_shortcuts()
         self._sync_layout_gate()
         self.statusBar().showMessage(
-            f"Deleted all ({n_series} series removed from the list)"
+            t("Deleted all ({n} series removed from the list)", n=n_series)
         )
 
     def _on_series_chosen(self, series: Series) -> None:
@@ -2913,7 +3140,7 @@ class MainWindow(QMainWindow):
         literal placeholders "Name" and "Date" are shown instead (the
         series/instance numbers are not PHI and stay)."""
         if self._anon:
-            name, date = "Name", "Date"
+            name, date = t("Name"), t("Date")
         else:
             patient, study = self._series_patient_study(series)
             name = self._clean_name(patient.name) if patient is not None else ""
@@ -2930,9 +3157,9 @@ class MainWindow(QMainWindow):
         # the user explicitly and abort the load before any disk read /
         # viewer construction touches VTK.
         if BLOCK_CT and series.modality == Modality.CT:
-            QMessageBox.information(self, "Unsupported data", BLOCK_CT_MESSAGE)
+            QMessageBox.information(self, t("Unsupported data"), BLOCK_CT_MESSAGE)
             self.statusBar().showMessage(
-                "CT data cannot be loaded in this build."
+                t("CT data cannot be loaded in this build.")
             )
             return
         # Fast-path: this exact series is already loaded in this pane's
@@ -2966,9 +3193,9 @@ class MainWindow(QMainWindow):
             self._update_cine_series_pos(pane)
             if pane is self._active:
                 self._follow_active_pane()
-            self.statusBar().showMessage(f"Resumed {series.label}")
+            self.statusBar().showMessage(t("Resumed {label}", label=series.label))
             return
-        self.statusBar().showMessage(f"Loading {series.label} …")
+        self.statusBar().showMessage(t("Loading {label} …", label=series.label))
         # Cut the OUTGOING series's background prefetch BEFORE reading
         # any new files so disk / CPU bandwidth is freed for the new
         # load instead of contending with the old decode. Only on the
@@ -2985,10 +3212,10 @@ class MainWindow(QMainWindow):
         # several seconds to read off disk and decode frame 0, and the
         # user previously had no way to tell the UI from a freeze.
         is_ct = series.modality == Modality.CT
-        title = ("Loading CT" if is_ct
-                 else f"Loading {series.kind or 'DICOM'}")
-        initial_msg = ("Reading CT slices…" if is_ct
-                       else "Reading DICOM file…")
+        title = (t("Loading CT") if is_ct
+                 else t("Loading {kind}", kind=series.kind or 'DICOM'))
+        initial_msg = (t("Reading CT slices…") if is_ct
+                       else t("Reading DICOM file…"))
         dlg = QProgressDialog(initial_msg, None, 0, 0, self)
         dlg.setWindowTitle(title)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -3016,15 +3243,15 @@ class MainWindow(QMainWindow):
                 dlg.close()
             traceback.print_exc()
             QMessageBox.critical(
-                self, "Load failed", f"{series.label}\n\n{exc}"
+                self, t("Load failed"), f"{series.label}\n\n{exc}"
             )
-            self.statusBar().showMessage("Load failed.")
+            self.statusBar().showMessage(t("Load failed."))
             return
 
         if dlg is not None:
             # The VTK pipeline build has no fine-grained progress, so show
             # an indeterminate "constructing" bar for that last phase.
-            dlg.setLabelText("Constructing 3D view…")
+            dlg.setLabelText(t("Constructing 3D view…"))
             dlg.setMaximum(0)            # 0,0 -> busy/indeterminate bar
             dlg.setValue(0)
             QApplication.processEvents()
@@ -3066,7 +3293,7 @@ class MainWindow(QMainWindow):
         # Keep an open history window pointed at the now-current study.
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
             self._refresh_history_dialog()
-        self.statusBar().showMessage(f"Loaded {series.label}")
+        self.statusBar().showMessage(t("Loaded {label}", label=series.label))
 
     def _clear_all(self) -> None:
         for pane in self._panes:
@@ -3077,7 +3304,7 @@ class MainWindow(QMainWindow):
         self._follow_active_pane()
         self._sync_xa_shortcuts()
         self._sync_layout_gate()
-        self.statusBar().showMessage("Viewers cleared.")
+        self.statusBar().showMessage(t("Viewers cleared."))
 
     # ------------------------------------- per-viewer signal/option wiring
     def _wire_viewer(self, viewer) -> None:
@@ -3133,9 +3360,9 @@ class MainWindow(QMainWindow):
                 others += 1
         if others >= _PLAY_CAP:
             QMessageBox.information(
-                self, "Playback limit",
-                f"At most {_PLAY_CAP} data can play at once.\n"
-                "Stop one of the playing data to play another.",
+                self, t("Playback limit"),
+                t("At most {n} data can play at once.\n"
+                  "Stop one of the playing data to play another.", n=_PLAY_CAP),
             )
             return False
         return True
@@ -3188,8 +3415,8 @@ class MainWindow(QMainWindow):
         v = self._active.current_viewer() if self._active is not None else None
         if v is None:
             QMessageBox.information(
-                self, "DICOM Tags",
-                "Load a series first, then choose overlay items.",
+                self, t("DICOM Tags"),
+                t("Load a series first, then choose overlay items."),
             )
             return
         self._open_tag_dialog(v)
@@ -3255,7 +3482,7 @@ class MainWindow(QMainWindow):
             if hasattr(v, "set_overlay_hidden"):
                 v.set_overlay_hidden(self._overlay_hidden)
         self.statusBar().showMessage(
-            "DICOM overlay: hidden" if hidden else "DICOM overlay: shown"
+            t("DICOM overlay: hidden") if hidden else t("DICOM overlay: shown")
         )
 
     def _set_overlay_shown(self, show: bool) -> None:
@@ -3308,9 +3535,9 @@ class MainWindow(QMainWindow):
         # change is immediate (the title is otherwise only built on open).
         self._refresh_pane_titles()
         self.statusBar().showMessage(
-            "Anonymize: ON (case info masked on screen)"
+            t("Anonymize: ON (case info masked on screen)")
             if on
-            else "Anonymize: OFF"
+            else t("Anonymize: OFF")
         )
 
     def _refresh_pane_titles(self) -> None:
@@ -3344,8 +3571,8 @@ class MainWindow(QMainWindow):
             if hasattr(v, "set_tag_keywords"):
                 v.set_tag_keywords(self._effective_kw(v))
         self.statusBar().showMessage(
-            f"Anonymize settings updated: {len(tags)} tag(s)"
-            + (" + private" if emptify_private else "")
+            t("Anonymize settings updated: {n} tag(s)", n=len(tags))
+            + (t(" + private") if emptify_private else "")
         )
 
     def _fit_studies_dock_width(self, width: int) -> None:
@@ -3355,7 +3582,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText("◀ Hide Studies")
+            self._info_btn.setText(t("◀ Hide Studies"))
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still won't shrink the central area below its own minimum.
         cap = max(300, self.width() - 120)
@@ -3369,7 +3596,7 @@ class MainWindow(QMainWindow):
         dock = self._studies_dock
         if not dock.isVisible():
             dock.setVisible(True)
-            self._info_btn.setText("◀ Hide Studies")
+            self._info_btn.setText(t("◀ Hide Studies"))
         # Leave only a small slice for the panes so the Tree can get large;
         # resizeDocks still clamps to the central area's own minimum width.
         cap = max(dock.minimumWidth(), self.width() - 120)
@@ -3385,8 +3612,8 @@ class MainWindow(QMainWindow):
         if header is None:
             QMessageBox.information(
                 self,
-                "DICOM Tags",
-                "Load a series first, then choose overlay items.",
+                t("DICOM Tags"),
+                t("Load a series first, then choose overlay items."),
             )
             return
         mod = self._modality_of(viewer)
@@ -3417,7 +3644,7 @@ class MainWindow(QMainWindow):
     def _export_tag_conditions(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export DICOM tag overlay settings",
+            t("Export DICOM tag overlay settings"),
             "tag_conditions.json",
             "JSON (*.json)",
         )
@@ -3428,19 +3655,20 @@ class MainWindow(QMainWindow):
                 path, self._tag_keywords_by_modality
             )
         except OSError as exc:
-            QMessageBox.critical(self, "Export failed", str(exc))
+            QMessageBox.critical(self, t("Export failed"), str(exc))
             return
         total = sum(
             len(v) for v in self._tag_keywords_by_modality.values()
         )
         self.statusBar().showMessage(
-            f"Exported overlay settings ({total} items across modalities)"
+            t("Exported overlay settings ({n} items across modalities)",
+              n=total)
         )
 
     def _import_tag_conditions(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import DICOM tag overlay settings",
+            t("Import DICOM tag overlay settings"),
             "",
             "JSON (*.json)",
         )
@@ -3449,7 +3677,7 @@ class MainWindow(QMainWindow):
         try:
             imported = settings.import_tag_keywords(path)
         except (OSError, ValueError) as exc:
-            QMessageBox.critical(self, "Import failed", str(exc))
+            QMessageBox.critical(self, t("Import failed"), str(exc))
             return
         # Imported conditions become the new persisted defaults — accept
         # either a legacy single list (applied to every modality) or a
@@ -3467,7 +3695,7 @@ class MainWindow(QMainWindow):
         )
         kws = by_mod.get("XA", [])
         self.statusBar().showMessage(
-            f"Imported overlay settings ({len(kws)} items)"
+            t("Imported overlay settings ({n} items)", n=len(kws))
         )
 
     def _tags_for_active_pane(self) -> None:
@@ -3485,8 +3713,8 @@ class MainWindow(QMainWindow):
                 return
         QMessageBox.information(
             self,
-            "DICOM Tags",
-            "Load a series first, then choose overlay items.",
+            t("DICOM Tags"),
+            t("Load a series first, then choose overlay items."),
         )
 
     # ----------------------------------------------- measurement history
@@ -3507,4 +3735,4 @@ class MainWindow(QMainWindow):
     def _refresh_history_dialog(self) -> None:
         uid = self._cur_study_uid or "—"
         hist = self._measure_history.get(uid, [])
-        self._hist_dialog.set_entries("Study Measurement History", hist)
+        self._hist_dialog.set_entries(t("Study Measurement History"), hist)

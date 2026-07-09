@@ -17,6 +17,7 @@ from pydicom.filebase import DicomBytesIO
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
+from multi_dicomviewer.i18n import t
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QButtonGroup,
@@ -300,7 +301,8 @@ class _OrganizeWorker(QThread):
         if self._with_dicomdir:
             for n, (dest_dir, names) in enumerate(folder_files.items(), 1):
                 self.stage.emit(
-                    f"Building DICOMDIR… {n}/{len(folder_files)}")
+                    t("Building DICOMDIR… {n}/{total}",
+                      n=n, total=len(folder_files)))
                 try:
                     if _write_folder_dicomdir(dest_dir, names):
                         ndd += 1
@@ -314,7 +316,7 @@ class _OrganizeWorker(QThread):
 class DicomFolderWindow(QMainWindow):
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("DicomFolder — organize DICOM files")
+        self.setWindowTitle(t("DicomFolder — organize DICOM files"))
         self.resize(950, 720)
         self.setAcceptDrops(True)                  # drop a folder = source
         self._files: list[dict] = []
@@ -329,40 +331,40 @@ class DicomFolderWindow(QMainWindow):
 
         # ---- source / target pickers
         srow = QHBoxLayout()
-        self._src_btn = QPushButton("Select source folder…")
+        self._src_btn = QPushButton(t("Select source folder…"))
         self._src_btn.clicked.connect(self._pick_source)
         srow.addWidget(self._src_btn)
-        self._src_lbl = QLabel("(none)")
+        self._src_lbl = QLabel(t("(none)"))
         self._src_lbl.setStyleSheet("color:#555;")
         srow.addWidget(self._src_lbl, 1)
         root.addLayout(srow)
 
         trow = QHBoxLayout()
-        self._tgt_btn = QPushButton("Select output folder…")
+        self._tgt_btn = QPushButton(t("Select output folder…"))
         self._tgt_btn.clicked.connect(self._pick_target)
         trow.addWidget(self._tgt_btn)
-        self._same_btn = QPushButton("Same as source")
+        self._same_btn = QPushButton(t("Same as source"))
         self._same_btn.clicked.connect(
             lambda: self._set_target(self._source) if self._source else None)
         trow.addWidget(self._same_btn)
-        self._parent_btn = QPushButton("Parent of source")
+        self._parent_btn = QPushButton(t("Parent of source"))
         self._parent_btn.clicked.connect(self._target_parent)
         trow.addWidget(self._parent_btn)
-        self._tgt_lbl = QLabel("(none)")
+        self._tgt_lbl = QLabel(t("(none)"))
         self._tgt_lbl.setStyleSheet("color:#555;")
         trow.addWidget(self._tgt_lbl, 1)
         root.addLayout(trow)
 
         # ---- group-by + mode options
         orow = QHBoxLayout()
-        orow.addWidget(QLabel("Group by:"))
+        orow.addWidget(QLabel(t("Group by:")))
         self._group_grp = QButtonGroup(self)
         self._radios: dict[str, QRadioButton] = {}
         for key, text in (
-            (_BY_COMBINED, "Modality + date"),
-            (_BY_DATE, "Study date"),
-            (_BY_MOD, "Modality"),
-            (_BY_UID, "Study UID"),
+            (_BY_COMBINED, t("Modality + date")),
+            (_BY_DATE, t("Study date")),
+            (_BY_MOD, t("Modality")),
+            (_BY_UID, t("Study UID")),
         ):
             rb = QRadioButton(text)
             self._group_grp.addButton(rb)
@@ -372,13 +374,13 @@ class DicomFolderWindow(QMainWindow):
         # Existing DICOMDIR index files are always ignored. "With DICOMDIR" on
         # -> generate a fresh DICOMDIR inside each output folder (indexing that
         # folder's files). Off (default) -> no DICOMDIR is created.
-        self._with_dicomdir_cb = QCheckBox("With DICOMDIR")
+        self._with_dicomdir_cb = QCheckBox(t("With DICOMDIR"))
         self._with_dicomdir_cb.setToolTip(
-            "On: create a new DICOMDIR in each output folder.\n"
-            "Off: don't create any DICOMDIR.\n"
-            "(Existing DICOMDIR files in the source are always ignored.)")
+            t("On: create a new DICOMDIR in each output folder.\n"
+              "Off: don't create any DICOMDIR.\n"
+              "(Existing DICOMDIR files in the source are always ignored.)"))
         orow.addWidget(self._with_dicomdir_cb)
-        self._sep_cb = QCheckBox("Separate XA single-frame (XA@STILL)")
+        self._sep_cb = QCheckBox(t("Separate XA single-frame (XA@STILL)"))
         self._sep_cb.setChecked(True)
         orow.addWidget(self._sep_cb)
         orow.addStretch(1)
@@ -388,10 +390,10 @@ class DicomFolderWindow(QMainWindow):
         self._sep_cb.toggled.connect(self._regroup)
 
         mrow = QHBoxLayout()
-        mrow.addWidget(QLabel("Action:"))
+        mrow.addWidget(QLabel(t("Action:")))
         self._mode_grp = QButtonGroup(self)
-        self._copy_rb = QRadioButton("Copy")
-        self._move_rb = QRadioButton("Move")
+        self._copy_rb = QRadioButton(t("Copy"))
+        self._move_rb = QRadioButton(t("Move"))
         self._copy_rb.setChecked(True)
         for rb in (self._copy_rb, self._move_rb):
             self._mode_grp.addButton(rb)
@@ -401,7 +403,8 @@ class DicomFolderWindow(QMainWindow):
 
         # ---- group tree (folder-name column editable)
         self._tree = QTreeWidget()
-        self._tree.setHeaderLabels(["Group", "Files", "Folder name (editable)"])
+        self._tree.setHeaderLabels(
+            [t("Group"), t("Files"), t("Folder name (editable)")])
         self._tree.setColumnWidth(0, 420)
         self._tree.setColumnWidth(1, 70)
         self._tree.itemChanged.connect(self._on_name_edited)
@@ -418,9 +421,9 @@ class DicomFolderWindow(QMainWindow):
         # Red warning shown (left of the button) while no output folder is set.
         # Kept at the button's ORIGINAL text size (per request), so capture that
         # before enlarging the button.
-        self._go_btn = QPushButton("Sort Files")
+        self._go_btn = QPushButton(t("Sort Files"))
         _base_font = QFont(self._go_btn.font())
-        self._no_out_lbl = QLabel("Output folder is not selected")
+        self._no_out_lbl = QLabel(t("Output folder is not selected"))
         self._no_out_lbl.setFont(_base_font)
         self._no_out_lbl.setStyleSheet("color:#d00;")
         brow.addWidget(self._no_out_lbl)
@@ -433,7 +436,7 @@ class DicomFolderWindow(QMainWindow):
         brow.addWidget(self._go_btn)
         # "Clear Selection" (right of Sort Files): reset source/output folders
         # and the scanned groups back to the initial empty state.
-        self._clear_btn = QPushButton("Clear Selection")
+        self._clear_btn = QPushButton(t("Clear Selection"))
         self._clear_btn.setFont(_go_font)
         self._clear_btn.clicked.connect(self._clear)
         brow.addWidget(self._clear_btn)
@@ -465,7 +468,7 @@ class DicomFolderWindow(QMainWindow):
         self._files = []
         self._name_map = {}
         self._tree.clear()
-        self._src_lbl.setText("(none)")
+        self._src_lbl.setText(t("(none)"))
         self._src_lbl.setStyleSheet("color:#555;")
         self._stat_lbl.setText("")
         self._bar.setVisible(False)
@@ -501,7 +504,7 @@ class DicomFolderWindow(QMainWindow):
     # ----------------------------------------------------------- source
     def _pick_source(self) -> None:
         d = QFileDialog.getExistingDirectory(
-            self, "Select source folder", self._source or "")
+            self, t("Select source folder"), self._source or "")
         if d:
             self._set_source_and_scan(d)
 
@@ -522,7 +525,7 @@ class DicomFolderWindow(QMainWindow):
         self._bar.setRange(0, 0)
         self._worker = _ScanWorker(d)
         self._worker.counting.connect(
-            lambda: self._stat_lbl.setText("Counting files…"))
+            lambda: self._stat_lbl.setText(t("Counting files…")))
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_scan_done)
         self._worker.start()
@@ -530,14 +533,15 @@ class DicomFolderWindow(QMainWindow):
     def _on_progress(self, done: int, total: int) -> None:
         self._bar.setRange(0, max(1, total))
         self._bar.setValue(done)
-        self._stat_lbl.setText(f"Scanning… {done}/{total}")
+        self._stat_lbl.setText(t("Scanning… {done}/{total}",
+                                 done=done, total=total))
 
     def _on_scan_done(self, files: list[dict]) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
         self._files = files
         if not files:
-            self._stat_lbl.setText("No DICOM files found.")
+            self._stat_lbl.setText(t("No DICOM files found."))
             return
         self._regroup()
         self._update_go()
@@ -545,7 +549,7 @@ class DicomFolderWindow(QMainWindow):
     # ----------------------------------------------------------- target
     def _pick_target(self) -> None:
         d = QFileDialog.getExistingDirectory(
-            self, "Select output folder", self._source or "")
+            self, t("Select output folder"), self._source or "")
         if d:
             self._set_target(d)
 
@@ -564,10 +568,10 @@ class DicomFolderWindow(QMainWindow):
             self._tgt_lbl.setText(self._target)
             self._tgt_lbl.setStyleSheet("color:#555;")
         elif self._source:
-            self._tgt_lbl.setText("(none)")
+            self._tgt_lbl.setText(t("(none)"))
             self._tgt_lbl.setStyleSheet("color:#d00; font-weight:bold;")
         else:
-            self._tgt_lbl.setText("(none)")
+            self._tgt_lbl.setText(t("(none)"))
             self._tgt_lbl.setStyleSheet("color:#555;")
 
     def _target_parent(self) -> None:
@@ -631,10 +635,11 @@ class DicomFolderWindow(QMainWindow):
                 leaf.setText(2, f"{f['patientName']} · {_human(f['size'])}")
             if len(g["files"]) > 50:
                 more = QTreeWidgetItem(item)
-                more.setText(0, f"… {len(g['files']) - 50} more")
+                more.setText(0, t("… {n} more", n=len(g['files']) - 50))
         self._tree.blockSignals(False)
         self._stat_lbl.setText(
-            f"{len(self._files)} DICOM file(s) in {len(groups)} group(s).")
+            t("{files} DICOM file(s) in {groups} group(s).",
+              files=len(self._files), groups=len(groups)))
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
@@ -651,11 +656,11 @@ class DicomFolderWindow(QMainWindow):
         if not self._files or not self._target:
             return
         move = self._move_rb.isChecked()
-        verb = "Move" if move else "Copy"
+        verb = t("Move") if move else t("Copy")
         if QMessageBox.question(
-            self, "Organize",
-            f"{verb} {len(self._files)} file(s) into sub-folders of\n"
-            f"{self._target}?",
+            self, t("Organize"),
+            t("{verb} {n} file(s) into sub-folders of\n{path}?",
+              verb=verb, n=len(self._files), path=self._target),
         ) != QMessageBox.StandardButton.Yes:
             return
         self._set_busy(True)
@@ -666,8 +671,10 @@ class DicomFolderWindow(QMainWindow):
             self._group_by(), self._sep_cb.isChecked(), dict(self._name_map),
             self._with_dicomdir_cb.isChecked())
         self._worker.progress.connect(
-            lambda d, t: (self._bar.setValue(d),
-                          self._stat_lbl.setText(f"{verb} … {d}/{t}")))
+            lambda d, tot: (self._bar.setValue(d),
+                            self._stat_lbl.setText(
+                                t("{verb} … {done}/{total}",
+                                  verb=verb, done=d, total=tot))))
         self._worker.stage.connect(self._stat_lbl.setText)
         self._worker.done.connect(lambda ok, fail, ndd, err:
                                   self._on_organized(ok, fail, ndd, err, move))
@@ -677,12 +684,13 @@ class DicomFolderWindow(QMainWindow):
                       moved: bool) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
-        msg = f"{'Moved' if moved else 'Copied'} {ok} file(s)."
+        msg = (t("Moved {n} file(s).", n=ok) if moved
+               else t("Copied {n} file(s).", n=ok))
         if ndd:                                      # fresh DICOMDIRs generated
-            msg += f"\nCreated {ndd} DICOMDIR(s)."
+            msg += t("\nCreated {n} DICOMDIR(s).", n=ndd)
         if fail:
-            msg += f"\n{fail} failed: {err}"
-        QMessageBox.information(self, "DicomFolder", msg)
+            msg += t("\n{n} failed: {err}", n=fail, err=err)
+        QMessageBox.information(self, t("DicomFolder"), msg)
         if moved:                                    # sources are gone — rescan
             if self._source:
                 self._scan(self._source)

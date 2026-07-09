@@ -23,6 +23,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import QMenu, QWidget
 
+from multi_dicomviewer.i18n import t
 from multi_dicomviewer.core import image_quality
 from multi_dicomviewer.core import measure_geom as G
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
@@ -140,6 +141,27 @@ class ImageCanvas(QWidget):
     #: Emitted whenever the set of measurements / comparisons changes (add,
     #: delete, clear) so the host can refresh its "Hide/Show All Result" button.
     results_changed = pyqtSignal()
+
+    #: IVUS–XA CoReg (dedicated window only). The guide control vertices
+    #: changed (add / drag / delete) — carries the new list of (x, y) image
+    #: points; the controller re-smooths via core.coreg and pushes the curve
+    #: back with set_coreg_guide.
+    coreg_guide_changed = pyqtSignal(object)
+    #: Guide tracing finished (double- or right-click) so the controller can
+    #: leave trace mode.
+    coreg_guide_finished = pyqtSignal()
+    #: The on-guide marker was slid (anchor-set mode) — carries the new
+    #: arc-length fraction s in [0, 1]; the controller stores it as this
+    #: view's provisional anchor for the CoReg point being set.
+    coreg_slider_moved = pyqtSignal(float)
+    #: Review mode (guide fixed): an amber anchor dot was clicked — carries
+    #: its index among this view's anchors; the controller jumps the IVUS to
+    #: that landmark's frame (so the green marker moves onto the dot).
+    coreg_anchor_clicked = pyqtSignal(int)
+    #: Review mode: the green marker was dragged along the guide — carries
+    #: the new fraction s; the controller maps it back to an IVUS frame and
+    #: scrubs the IVUS (reverse driving).
+    coreg_marker_dragged = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -271,6 +293,46 @@ class ImageCanvas(QWidget):
         # Cache for the Lanczos-upscaled QImage: (target_w, target_h, QImage).
         # Invalidated whenever the frame, orientation, or a toggle changes.
         self._lanczos_cache: tuple[int, int, QImage] | None = None
+        # IVUS–XA co-registration overlay (drawn only in the CoReg window).
+        # All positions are IMAGE-pixel coords so they ride the vessel
+        # through zoom/pan (mapped via _image_to_widget_f), exactly like
+        # the measurement / IVUS-centre overlays. The CoReg controller
+        # pushes these; the pure geometry lives in core/coreg.py.
+        self.coreg_show: bool = False
+        self.coreg_edit: bool = False            # trace/anchor edit mode
+        #: Dense smooth guide curve (image coords) from coreg.smooth_curve.
+        self.coreg_guide_pts: list[tuple[float, float]] = []
+        #: The user-clicked guide control vertices (image coords) — shown
+        #: as draggable handles while editing.
+        self.coreg_vertices: list[tuple[float, float]] = []
+        #: Anchor foot points on the guide (image coords) — one per CoReg
+        #: landmark set on THIS view.
+        self.coreg_anchor_pts: list[tuple[float, float]] = []
+        #: Current marker point (image coords) for the live IVUS frame, or
+        #: None when the view has too few anchors (guide-only).
+        self.coreg_marker_pt: tuple[float, float] | None = None
+        #: Marker appearance — kept as a dict so the look is changeable
+        #: later without touching the paint code (default = faint guide +
+        #: a point on it). Keys: guide / anchors / point / cutline / arrow.
+        self.coreg_style: dict = {
+            "guide": True, "anchors": True, "point": True,
+            "cutline": False, "arrow": False,
+        }
+        #: CoReg editing sub-mode: "" review (marker driven by the IVUS
+        #: scrub), "trace" (click to add guide vertices), "anchor" (drag the
+        #: on-guide marker to a landmark, then the panel commits it).
+        self.coreg_mode: str = ""
+        self._coreg_drag_vertex: int = -1
+        self._coreg_hover_vertex: int = -1          # trace: vertex under cursor
+        self._coreg_dragging_slider: bool = False
+        self._coreg_dragging_marker: bool = False   # review: drag green marker
+        # Free (continuous) display rotation — MultiSync-style drag-to-rotate,
+        # used for IVUS panes in the CoReg window to align the cross-section.
+        # Purely a paint-time rotation of the image about the widget centre;
+        # opt-in (default off) so it never affects the overlay-bearing panes.
+        self._free_rot: float = 0.0                 # degrees
+        self._free_rot_on: bool = False
+        self._free_rot_drag: float | None = None
 
     # ---------------------------------------------------------------- public
     def set_hq_cine(self, on: bool) -> None:
@@ -880,8 +942,8 @@ class ImageCanvas(QWidget):
         # _recompute_compares preserves it via the "fill_custom" flag.
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, target.get("transp", 50))
-        vis_act = menu.addAction("Show" if target.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        vis_act = menu.addAction(t("Show") if target.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(QCursor.pos())
         if chosen is vis_act:
             target["hidden"] = not target.get("hidden", False)
@@ -949,7 +1011,7 @@ class ImageCanvas(QWidget):
         menu = QMenu(self)
         del_pt = del_res = None
         if m["type"] in ("polyline", "polygon"):
-            del_pt = menu.addAction("Delete point")
+            del_pt = menu.addAction(t("Delete point"))
             # Don't let the user shrink below 2 vertices (Line minimum).
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
@@ -957,11 +1019,11 @@ class ImageCanvas(QWidget):
         # (incl. Line/Angle, which are most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
-            del_res = menu.addAction("Delete result")
+            del_res = menu.addAction(t("Delete result"))
         else:
-            del_res = menu.addAction("Delete")
+            del_res = menu.addAction(t("Delete"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if del_pt is not None and chosen is del_pt:
             self._delete_point(mi, vi)
@@ -986,7 +1048,7 @@ class ImageCanvas(QWidget):
     def _outline_menu(self, mi, sx, sy):
         m = self.measures[mi]
         menu = QMenu(self)
-        add_pt = menu.addAction("Add point")
+        add_pt = menu.addAction(t("Add point"))
         spline_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
@@ -994,15 +1056,15 @@ class ImageCanvas(QWidget):
             )
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
-            center_angle_act = menu.addAction("Center Angle")
+            center_angle_act = menu.addAction(t("Center Angle"))
         # Vessel type — tag a Line as the Guiding Catheter or a coronary
         # proximal segment, so the Coaxial-Eval tool can pick it up. Only
         # meaningful for straight lines; a "(none)" entry clears the tag.
         vessel_actions: list[tuple] = []
         if m["type"] == "line":
-            vessel_menu = menu.addMenu("Vessel type")
+            vessel_menu = menu.addMenu(t("Vessel type"))
             cur = m.get("vessel")
-            none_act = vessel_menu.addAction("(none)")
+            none_act = vessel_menu.addAction(t("(none)"))
             none_act.setCheckable(True)
             none_act.setChecked(cur is None)
             vessel_actions.append((none_act, None))
@@ -1013,7 +1075,7 @@ class ImageCanvas(QWidget):
                 a.setChecked(cur == label)
                 vessel_actions.append((a, label))
         # Change Color — 16-colour submenu (each item carries a swatch).
-        color_menu = menu.addMenu("Change Color")
+        color_menu = menu.addMenu(t("Change Color"))
         color_actions: list[tuple] = []
         for name, hexcol in COLOR_CHOICES:
             a = color_menu.addAction(name)
@@ -1021,8 +1083,8 @@ class ImageCanvas(QWidget):
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction("Show" if m.get("hidden") else "Hide")
-        del_act = menu.addAction("Delete")
+        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if chosen is add_pt:
             self._add_point_at(mi, sx, sy)
@@ -1240,6 +1302,73 @@ class ImageCanvas(QWidget):
                 and self._zoom_click in ("in", "out")):
             self._apply_zoom(1.1 if self._zoom_click == "in" else 0.9, sx, sy)
             return
+        # Free display rotation (IVUS panes): left-drag rotates the image
+        # about the centre. Pan (Ctrl / middle) already returned above.
+        if self._free_rot_on and e.button() == Qt.MouseButton.LeftButton:
+            self._free_rot_drag = self._free_rot_angle(sx, sy)
+            return
+        # IVUS–XA CoReg editing on an angio view: trace the guide, or slide
+        # the on-guide marker to a landmark. Gated by the sub-mode so it is
+        # inert during review and never competes with measurements.
+        if self.coreg_show and self.coreg_edit and self.coreg_mode:
+            if e.button() == Qt.MouseButton.LeftButton:
+                if self.coreg_mode == "trace":
+                    vi = self._coreg_hit_vertex(sx, sy)
+                    if vi >= 0:                      # grab a vertex to move it
+                        self._coreg_drag_vertex = vi
+                        return
+                    img = self._widget_to_image(QPoint(int(sx), int(sy)))
+                    if img is not None:
+                        self.coreg_vertices.append(
+                            (float(img[0]), float(img[1])))
+                        self.coreg_guide_changed.emit(list(self.coreg_vertices))
+                        self.update()
+                    return
+                if self.coreg_mode == "anchor" and self.coreg_guide_pts:
+                    self._coreg_dragging_slider = True
+                    self._coreg_slide_to(sx, sy)
+                    return
+            if e.button() == Qt.MouseButton.RightButton:
+                if self.coreg_mode == "trace":
+                    vi = self._coreg_hit_vertex(sx, sy)
+                    gpos = self.mapToGlobal(QPoint(int(sx), int(sy)))
+                    if vi >= 0:                      # on a vertex → delete it
+                        menu = QMenu(self)
+                        act = menu.addAction(t("Delete point"))
+                        if menu.exec(gpos) is act:
+                            del self.coreg_vertices[vi]
+                            self._coreg_hover_vertex = -1
+                            self.coreg_guide_changed.emit(
+                                list(self.coreg_vertices))
+                            self.update()
+                        return
+                    if self._coreg_hit_line(sx, sy):  # on the line → insert
+                        menu = QMenu(self)
+                        act = menu.addAction(t("Add point"))
+                        if menu.exec(gpos) is act:
+                            ix, iy = self._widget_to_image_f(sx, sy)
+                            self._coreg_insert_vertex((float(ix), float(iy)))
+                            self.coreg_guide_changed.emit(
+                                list(self.coreg_vertices))
+                            self.update()
+                        return
+                    # Right-click away from the line/vertices = finish tracing.
+                    self.coreg_guide_finished.emit()
+                    return
+        # CoReg review interactions (guide fixed, not editing): click an
+        # amber anchor to jump the IVUS onto it; drag the green marker to
+        # scrub the IVUS in reverse.
+        if (self.coreg_show and not self.coreg_mode
+                and e.button() == Qt.MouseButton.LeftButton):
+            if (self.coreg_marker_pt is not None
+                    and self._coreg_hit_marker(sx, sy)):
+                self._coreg_dragging_marker = True
+                self._coreg_slide_marker_to(sx, sy)
+                return
+            ai = self._coreg_hit_anchor(sx, sy)
+            if ai >= 0:
+                self.coreg_anchor_clicked.emit(ai)
+                return
         # IVUS long-axis rotation-centre marker takes priority over
         # everything else when the feature is on AND the click landed
         # near the marker. Left = start dragging it; right = Reset
@@ -1287,7 +1416,7 @@ class ImageCanvas(QWidget):
             ca_mi = self._ca_hit(sx, sy)
             if ca_mi is not None:
                 menu = QMenu(self)
-                del_ca = menu.addAction("Delete Center Angle")
+                del_ca = menu.addAction(t("Delete Center Angle"))
                 chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
                 if chosen is del_ca:
                     self.measures[ca_mi].pop("center_angle", None)
@@ -1383,6 +1512,37 @@ class ImageCanvas(QWidget):
             self._clamp_pan()
             self.update()
             return
+        if self._free_rot_drag is not None:
+            now = self._free_rot_angle(sx, sy)
+            self._free_rot = (self._free_rot
+                              + (now - self._free_rot_drag)) % 360.0
+            self._free_rot_drag = now
+            self.update()
+            return
+        if (self.coreg_mode == "trace" and self._coreg_drag_vertex < 0
+                and not self._coreg_dragging_slider):
+            # Button-less hover: highlight the vertex under the cursor (red)
+            # so the user sees it can be grabbed / right-clicked to delete.
+            vi = self._coreg_hit_vertex(sx, sy)
+            if vi != self._coreg_hover_vertex:
+                self._coreg_hover_vertex = vi
+                self.update()
+            return
+        if self._coreg_drag_vertex >= 0:
+            img = self._widget_to_image(QPoint(int(sx), int(sy)))
+            if img is not None and 0 <= self._coreg_drag_vertex < len(
+                    self.coreg_vertices):
+                self.coreg_vertices[self._coreg_drag_vertex] = (
+                    float(img[0]), float(img[1]))
+                self.coreg_guide_changed.emit(list(self.coreg_vertices))
+                self.update()
+            return
+        if self._coreg_dragging_slider:
+            self._coreg_slide_to(sx, sy)
+            return
+        if self._coreg_dragging_marker:
+            self._coreg_slide_marker_to(sx, sy)
+            return
         if self._ivus_dragging_center:
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is not None:
@@ -1436,6 +1596,19 @@ class ImageCanvas(QWidget):
                 else Qt.CursorShape.ArrowCursor
             )
             return
+        if self._coreg_drag_vertex >= 0:
+            self._coreg_drag_vertex = -1
+            self.update()
+            return
+        if self._coreg_dragging_slider:
+            self._coreg_dragging_slider = False
+            return
+        if self._coreg_dragging_marker:
+            self._coreg_dragging_marker = False
+            return
+        if self._free_rot_drag is not None:
+            self._free_rot_drag = None
+            return
         if self._ivus_dragging_center:
             self._ivus_dragging_center = False
             return
@@ -1463,8 +1636,8 @@ class ImageCanvas(QWidget):
         The actual edit is performed by the viewer (single source of truth
         for the per-frame centres array)."""
         menu = QMenu(self)
-        a_one = menu.addAction("Remove this point")
-        a_all = menu.addAction("Remove all points")
+        a_one = menu.addAction(t("Remove this point"))
+        a_all = menu.addAction(t("Remove all points"))
         chosen = menu.exec(self.mapToGlobal(QPoint(int(sx), int(sy))))
         if chosen is a_one:
             self.ivus_center_reset.emit("frame")
@@ -1472,6 +1645,11 @@ class ImageCanvas(QWidget):
             self.ivus_center_reset.emit("all")
 
     def mouseDoubleClickEvent(self, _e):
+        if (self.coreg_show and self.coreg_edit
+                and self.coreg_mode == "trace"
+                and len(self.coreg_vertices) >= 2):
+            self.coreg_guide_finished.emit()
+            return
         if self._draft and self._draft["type"] in ("polyline", "polygon") \
                 and len(self._draft["pts"]) >= 2:
             self._commit_draft()
@@ -1567,7 +1745,19 @@ class ImageCanvas(QWidget):
                     used_lanczos = True
         if not used_lanczos and allow_heavy:
             p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        p.drawImage(r, qimg)
+        if self._free_rot:
+            # Rotate the displayed image about the draw-rect centre (the
+            # overlays below stay unrotated, which is fine: free rotation is
+            # only enabled on the overlay-free IVUS panes).
+            c = r.center()
+            p.save()
+            p.translate(c.x(), c.y())
+            p.rotate(self._free_rot)
+            p.translate(-c.x(), -c.y())
+            p.drawImage(r, qimg)
+            p.restore()
+        else:
+            p.drawImage(r, qimg)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # Rebuilt as labels are drawn below; clear so a deleted measure's
         # stale rect can't linger for the next drag hit-test.
@@ -1752,6 +1942,11 @@ class ImageCanvas(QWidget):
                 and self._img_size != (0, 0)):
             self._paint_ivus_long_axis(p)
 
+        # IVUS–XA co-registration overlay (guide curve + anchors + marker),
+        # drawn on top of everything in the dedicated CoReg window.
+        if self.coreg_show and self._img_size != (0, 0):
+            self._paint_coreg(p)
+
     def _paint_ivus_long_axis(self, p: QPainter) -> None:
         """Draw the IVUS long-axis guide on the cross-section, MPR-style:
 
@@ -1834,6 +2029,272 @@ class ImageCanvas(QWidget):
         p.setPen(QPen(QColor(255, 255, 255), 1))
         p.drawLine(wp.x() - 10, wp.y(), wp.x() + 10, wp.y())
         p.drawLine(wp.x(), wp.y() - 10, wp.x(), wp.y() + 10)
+
+    # ----------------------------------------------------- CoReg overlay
+    def set_coreg_visible(self, on: bool) -> None:
+        on = bool(on)
+        if on != self.coreg_show:
+            self.coreg_show = on
+            self.update()
+
+    def set_coreg_edit(self, on: bool) -> None:
+        on = bool(on)
+        if on != self.coreg_edit:
+            self.coreg_edit = on
+            self.update()
+
+    def set_coreg_guide(self, vertices, curve) -> None:
+        """Push the guide: *vertices* are the user-clicked control points
+        and *curve* the dense smoothed polyline (both image coords). Pass
+        empty lists to clear."""
+        self.coreg_vertices = [tuple(v) for v in (vertices or [])]
+        self.coreg_guide_pts = [tuple(q) for q in (curve or [])]
+        self.update()
+
+    def set_coreg_anchors(self, pts) -> None:
+        self.coreg_anchor_pts = [tuple(q) for q in (pts or [])]
+        self.update()
+
+    def set_coreg_marker(self, pt) -> None:
+        self.coreg_marker_pt = None if pt is None else tuple(pt)
+        self.update()
+
+    def set_coreg_style(self, style: dict) -> None:
+        if style:
+            self.coreg_style.update(style)
+            self.update()
+
+    def set_free_rotation_enabled(self, on: bool) -> None:
+        """Enable MultiSync-style drag-to-rotate of the displayed image
+        (IVUS panes in the CoReg window)."""
+        self._free_rot_on = bool(on)
+
+    def set_free_rotation(self, deg: float) -> None:
+        self._free_rot = float(deg) % 360.0
+        self.update()
+
+    def free_rotation(self) -> float:
+        return self._free_rot
+
+    def _free_rot_angle(self, sx: float, sy: float) -> float:
+        return math.degrees(math.atan2(sy - self.height() / 2.0,
+                                       sx - self.width() / 2.0))
+
+    def set_coreg_mode(self, mode: str) -> None:
+        """Editing sub-mode: "trace" (add guide vertices), "anchor" (slide
+        the on-guide marker), or "" (review — marker driven by the IVUS
+        scrub, no mouse editing)."""
+        mode = mode if mode in ("trace", "anchor") else ""
+        if mode != self.coreg_mode:
+            self.coreg_mode = mode
+            self._coreg_hover_vertex = -1
+            # Hover feedback (vertex turns red) needs button-less move events.
+            self.setMouseTracking(mode == "trace")
+            self.setCursor(Qt.CursorShape.CrossCursor if mode
+                           else Qt.CursorShape.ArrowCursor)
+            self.update()
+
+    def _coreg_hit_vertex(self, sx: float, sy: float,
+                          radius: float = 10.0) -> int:
+        """Index of the guide control vertex within *radius* widget px of
+        (sx, sy), or -1. Nearest wins when several overlap."""
+        best_i, best_d = -1, radius
+        for i, q in enumerate(self.coreg_vertices):
+            w = self._image_to_widget(q)
+            d = math.hypot(sx - w.x(), sy - w.y())
+            if d <= best_d:
+                best_i, best_d = i, d
+        return best_i
+
+    def _coreg_hit_line(self, sx: float, sy: float,
+                        tol: float = 8.0) -> bool:
+        """True when (sx, sy) is within *tol* widget px of the smooth guide
+        curve — the target for the right-click 'add point' menu."""
+        pts = self.coreg_guide_pts
+        if len(pts) < 2:
+            return False
+        wpts = [self._image_to_widget(q) for q in pts]
+        for a, b in zip(wpts, wpts[1:]):
+            dx, dy = b.x() - a.x(), b.y() - a.y()
+            l2 = dx * dx + dy * dy
+            if l2 <= 0:
+                continue
+            t = max(0.0, min(1.0, ((sx - a.x()) * dx + (sy - a.y()) * dy) / l2))
+            px, py = a.x() + t * dx, a.y() + t * dy
+            if math.hypot(sx - px, sy - py) <= tol:
+                return True
+        return False
+
+    def _coreg_insert_vertex(self, img) -> None:
+        """Insert control vertex *img* into the nearest edge of the control
+        polyline, so a right-click 'add point' splits the line where clicked
+        rather than appending at the end."""
+        vs = self.coreg_vertices
+        if len(vs) < 2:
+            vs.append(tuple(img))
+            return
+        best_i, best_d = len(vs), float("inf")
+        for i in range(1, len(vs)):
+            a, b = vs[i - 1], vs[i]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            l2 = dx * dx + dy * dy
+            t = 0.0 if l2 <= 0 else max(0.0, min(
+                1.0, ((img[0] - a[0]) * dx + (img[1] - a[1]) * dy) / l2))
+            px, py = a[0] + t * dx, a[1] + t * dy
+            d = (img[0] - px) ** 2 + (img[1] - py) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+        vs.insert(best_i, tuple(img))
+
+    def _coreg_slide_to(self, sx: float, sy: float) -> None:
+        """Move the on-guide marker to the point on the guide nearest the
+        cursor and emit its arc-length fraction (anchor-set mode)."""
+        from multi_dicomviewer.core import coreg as _cr
+        img = self._widget_to_image_f(sx, sy)
+        s, _d = _cr.project_fraction(self.coreg_guide_pts, img)
+        self.coreg_marker_pt = _cr.point_at_fraction(self.coreg_guide_pts, s)
+        self.update()
+        self.coreg_slider_moved.emit(float(s))
+
+    def _coreg_hit_marker(self, sx: float, sy: float,
+                          radius: float = 12.0) -> bool:
+        """True when (sx, sy) is within *radius* px of the green marker."""
+        if self.coreg_marker_pt is None:
+            return False
+        w = self._image_to_widget(self.coreg_marker_pt)
+        return math.hypot(sx - w.x(), sy - w.y()) <= radius
+
+    def _coreg_hit_anchor(self, sx: float, sy: float,
+                          radius: float = 10.0) -> int:
+        """Index of the amber anchor dot within *radius* px of (sx, sy), or
+        -1. Nearest wins when several overlap."""
+        best_i, best_d = -1, radius
+        for i, q in enumerate(self.coreg_anchor_pts):
+            w = self._image_to_widget(q)
+            d = math.hypot(sx - w.x(), sy - w.y())
+            if d <= best_d:
+                best_i, best_d = i, d
+        return best_i
+
+    def _coreg_slide_marker_to(self, sx: float, sy: float) -> None:
+        """Review-mode reverse drive: project the cursor onto the guide and
+        emit the fraction. The marker itself is NOT moved here — the
+        controller maps the fraction to an IVUS frame and re-drives the
+        marker, so its position always reflects a real frame."""
+        from multi_dicomviewer.core import coreg as _cr
+        img = self._widget_to_image_f(sx, sy)
+        s, _d = _cr.project_fraction(self.coreg_guide_pts, img)
+        self.coreg_marker_dragged.emit(float(s))
+
+    def _coreg_tangent_at(self, pt):
+        """Unit tangent (image coords) of the guide near *pt*, pointing in
+        the +arc-length (pull-back forward) direction, or None. Used for
+        the optional cut-line / arrow marker styles."""
+        pts = self.coreg_guide_pts
+        if len(pts) < 2:
+            return None
+        best_i, best_d = 0, float("inf")
+        for i in range(1, len(pts)):
+            a, b = pts[i - 1], pts[i]
+            abx, aby = b[0] - a[0], b[1] - a[1]
+            seg2 = abx * abx + aby * aby
+            t = 0.0 if seg2 <= 0 else max(0.0, min(
+                1.0, ((pt[0] - a[0]) * abx + (pt[1] - a[1]) * aby) / seg2))
+            fx, fy = a[0] + t * abx, a[1] + t * aby
+            d = (pt[0] - fx) ** 2 + (pt[1] - fy) ** 2
+            if d < best_d:
+                best_d, best_i = d, i
+        a, b = pts[best_i - 1], pts[best_i]
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        n = math.hypot(dx, dy)
+        return None if n < 1e-9 else (dx / n, dy / n)
+
+    def _paint_coreg(self, p: QPainter) -> None:
+        """Draw the co-registration overlay on this angio view: the faint
+        smooth guide curve, the anchor dots, and the current marker point
+        (whichever elements ``coreg_style`` enables). Positions are image
+        coords mapped through _image_to_widget_f, so the marks ride the
+        vessel through zoom/pan."""
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        style = self.coreg_style
+        # Guide curve (faint cyan), under the anchors/marker.
+        if style.get("guide", True) and len(self.coreg_guide_pts) >= 2:
+            p.setPen(QPen(QColor(80, 200, 255, 140), 1.6))
+            wpts = [self._image_to_widget(q) for q in self.coreg_guide_pts]
+            for a, b in zip(wpts, wpts[1:]):
+                p.drawLine(a, b)
+        # Control-vertex handles — only while tracing (hidden during CoReg
+        # point setting and review). The hovered or dragged vertex is red to
+        # signal it can be repositioned / deleted.
+        if self.coreg_mode == "trace" and self.coreg_vertices:
+            for i, q in enumerate(self.coreg_vertices):
+                w = self._image_to_widget(q)
+                if i in (self._coreg_hover_vertex, self._coreg_drag_vertex):
+                    p.setPen(QPen(QColor(0, 0, 0, 180), 2))
+                    p.setBrush(QColor(235, 40, 40, 240))
+                    p.drawEllipse(w, 5, 5)
+                else:
+                    p.setPen(QPen(QColor(255, 255, 255, 230), 1.4))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawRect(w.x() - 4, w.y() - 4, 8, 8)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        # While tracing the guide is a pure edit mode: hide the CoReg anchor
+        # dots and the current-section marker so they don't clutter the line
+        # being drawn (they return once trace is switched off).
+        if self.coreg_mode == "trace":
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            return
+        # Anchor dots (amber rings), a touch larger while editing.
+        if self.coreg_anchor_pts and (
+                self.coreg_edit or style.get("anchors", True)):
+            rad = 6 if self.coreg_edit else 4
+            for q in self.coreg_anchor_pts:
+                w = self._image_to_widget(q)
+                p.setPen(QPen(QColor(0, 0, 0, 180), 3))
+                p.setBrush(QColor(255, 190, 40, 235))
+                p.drawEllipse(w, rad, rad)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        # Current marker point (+ optional cut line / direction arrow).
+        mk = self.coreg_marker_pt
+        if mk is not None:
+            tang = None
+            if style.get("cutline") or style.get("arrow"):
+                tang = self._coreg_tangent_at(mk)
+            w_img, h_img = self._img_size
+            base = 0.03 * min(w_img, h_img) if w_img and h_img else 6.0
+            if style.get("cutline") and tang is not None:
+                px, py = -tang[1], tang[0]           # perpendicular (image)
+                e1 = self._image_to_widget_f(
+                    (mk[0] - base * px, mk[1] - base * py))
+                e2 = self._image_to_widget_f(
+                    (mk[0] + base * px, mk[1] + base * py))
+                p.setPen(QPen(QColor(60, 255, 120, 235), 2.0))
+                p.drawLine(int(round(e1[0])), int(round(e1[1])),
+                           int(round(e2[0])), int(round(e2[1])))
+            if style.get("arrow") and tang is not None:
+                tip = self._image_to_widget_f(
+                    (mk[0] + 1.8 * base * tang[0], mk[1] + 1.8 * base * tang[1]))
+                wc0 = self._image_to_widget_f(mk)
+                p.setPen(QPen(QColor(60, 255, 120, 235), 2.0))
+                p.drawLine(int(round(wc0[0])), int(round(wc0[1])),
+                           int(round(tip[0])), int(round(tip[1])))
+            if style.get("point", True):
+                wc = self._image_to_widget_f(mk)
+                wp = QPoint(int(round(wc[0])), int(round(wc[1])))
+                if self.coreg_mode == "anchor":
+                    # Unconfirmed (being placed): green RING, hollow centre.
+                    p.setPen(QPen(QColor(40, 230, 100, 245), 2.5))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(wp, 7, 7)
+                else:
+                    # Confirmed: solid green dot.
+                    p.setPen(QPen(QColor(0, 0, 0, 200), 3))
+                    p.setBrush(QColor(60, 255, 120, 240))
+                    p.drawEllipse(wp, 6, 6)
+                p.setPen(QPen(QColor(255, 255, 255), 1))
+                p.drawLine(wp.x() - 9, wp.y(), wp.x() + 9, wp.y())
+                p.drawLine(wp.x(), wp.y() - 9, wp.x(), wp.y() + 9)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_hint(self, p: QPainter, text: str) -> None:
         """Status hint centred at the top of the canvas — used while
@@ -1935,8 +2396,8 @@ class ImageCanvas(QWidget):
             p.drawText(QRect(0, 6, self.width(), 26),
                        int(Qt.AlignmentFlag.AlignHCenter)
                        | int(Qt.AlignmentFlag.AlignTop),
-                       "Click to select 2 Ellipse/Polygon data to compare"
-                       f"  ({n}/2)")
+                       t("Click to select 2 Ellipse/Polygon data to "
+                         "compare  ({n}/2)", n=n))
 
         # "Hide/Show All Result" hides every region fill + legend at once.
         compares = [] if self._results_hidden else self._compares
