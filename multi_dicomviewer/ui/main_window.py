@@ -187,6 +187,11 @@ class LayoutGridPicker(QWidget):
         self._cols = cols
         self._hover = (1, 1)        # (R, C) currently highlighted
         self._current = (1, 1)      # the layout actually in effect
+        #: 0-based (row, col) of the pane shown in the CURRENT 1×1 layout, so
+        #: the picker can highlight that exact cell (not always the top-left)
+        #: while it rests on 1×1 — telling you which pane is on screen. None
+        #: outside 1×1 or when unknown.
+        self._solo: tuple | None = None
         #: 0-based (row, col) cells whose backing pane currently holds data.
         #: Drives the bright-vs-dark grey so you can see how big a layout you
         #: must open to reveal every loaded pane.
@@ -208,6 +213,13 @@ class LayoutGridPicker(QWidget):
     def set_occupancy(self, occupied) -> None:
         """*occupied* = iterable of 0-based (row, col) cells that hold data."""
         self._occupied = set(occupied)
+        self.update()
+
+    def set_solo(self, cell) -> None:
+        """0-based (row, col) of the pane shown in the current 1×1 layout (or
+        None). Highlighted in place of the top-left cell while the picker rests
+        on 1×1, so you can see which pane is currently full-screen."""
+        self._solo = tuple(cell) if cell is not None else None
         self.update()
 
     def _cell_rect(self, r: int, c: int) -> QRect:
@@ -253,9 +265,16 @@ class LayoutGridPicker(QWidget):
         off_data = QColor("#8a8a8a")    # outside the block, pane HAS data
         off_empty = QColor("#3a3a3a")   # outside the block, pane is empty
         edge = QColor("#1f1f1f")
+        # While the picker rests on the current 1×1 layout (no hover yet),
+        # highlight the ACTUAL on-screen pane's cell instead of the top-left
+        # one, so you can tell which pane is full-screen. As soon as the user
+        # hovers to pick a new size, _hover changes and normal top-left-anchored
+        # block highlighting resumes.
+        solo = (self._solo if (self._solo is not None
+                and self._hover == self._current == (1, 1)) else None)
         for r in range(self._rows):
             for c in range(self._cols):
-                sel = (r < hr and c < hc)
+                sel = ((r, c) == solo) if solo is not None else (r < hr and c < hc)
                 if sel:
                     brush = on
                 else:
@@ -2190,9 +2209,15 @@ class MainWindow(QMainWindow):
 
     def _refresh_layout_picker(self) -> None:
         """Before the picker pops up: highlight the current layout and shade
-        each cell by whether its pane holds data."""
+        each cell by whether its pane holds data. In 1×1 also tell the picker
+        WHICH pane is on screen (its master-grid cell) so it highlights that
+        cell rather than always the top-left one."""
         self._layout_picker.set_current(*_LAYOUTS[self._layout_key][:2])
         self._layout_picker.set_occupancy(self._pane_occupancy())
+        solo = None
+        if self._layout_key == "1x1" and self._active in self._order:
+            solo = divmod(self._order.index(self._active), _MAX_GRID_COLS)
+        self._layout_picker.set_solo(solo)
 
     def _layout_btn_text(self) -> str:
         # setMenu() adds the native dropdown arrow, so the text itself stays
