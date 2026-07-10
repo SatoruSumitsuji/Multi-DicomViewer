@@ -1103,7 +1103,12 @@ class CoregWindow(QMainWindow):
         and tile them into a cols-wide grid of square *cell* cells — so the
         image fills its cell instead of sitting small inside a double margin."""
         rows = (len(self.panes) + cols - 1) // cols
-        img = QImage(cell * cols, cell * rows, QImage.Format.Format_RGB888)
+        # A black gutter between cells so the tiles don't run together (kept
+        # even so the frame stays yuv420p-friendly).
+        gap = (cell // 12) & ~1
+        W = cols * cell + (cols - 1) * gap
+        H = rows * cell + (rows - 1) * gap
+        img = QImage(W, H, QImage.Format.Format_RGB888)
         img.fill(QColor("#000000"))
         p = QPainter(img)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
@@ -1130,7 +1135,7 @@ class CoregWindow(QMainWindow):
                 if w <= 0 or h <= 0:
                     continue
                 r, c = divmod(k, cols)
-                tx, ty = c * cell, r * cell
+                tx, ty = c * (cell + gap), r * (cell + gap)
                 scale = min(cell / w, cell / h)
                 dw, dh = w * scale, h * scale
                 p.save()
