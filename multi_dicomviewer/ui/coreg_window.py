@@ -41,8 +41,8 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -265,6 +265,7 @@ class CoregWindow(QMainWindow):
         self._placing: bool = False      # adding/modifying a CoSync point
         self._pending_fracs: dict[int, float] = {}   # xa_idx -> provisional s
         self._selected_lm: int = -1      # CoSync point selected (blue) / modify
+        self._renaming: int = -1         # landmark idx being renamed inline
         self._syncing: bool = False      # re-entrancy guard for IVUS↔IVUS sync
         #: Global long-axis seekbar state (unified pull-back timeline).
         self._global_flipped = False     # ⇄ reverses distal/proximal
@@ -841,16 +842,32 @@ class CoregWindow(QMainWindow):
             x.setFixedWidth(26)
             x.setToolTip(t("Delete this CoSync point"))
             x.clicked.connect(lambda _c, i=n - 1: self._delete_landmark(i))
+            info = QLabel(self._landmark_info(lm))   # black, button-size text
+            info.setStyleSheet("QLabel { color:black; }")
+            if (n - 1) == self._renaming:
+                # Inline rename: a line edit takes the button's place (≤10 chars).
+                ed = QLineEdit(lm.get("name", ""))
+                ed.setMaxLength(10)
+                ed.setFixedWidth(100)
+                ed.returnPressed.connect(
+                    lambda e=ed, i=n - 1: self._commit_rename(i, e.text()))
+                ed.editingFinished.connect(
+                    lambda e=ed, i=n - 1: self._commit_rename(i, e.text()))
+                h.addWidget(x)
+                h.addWidget(ed)
+                h.addWidget(info, 1)
+                self._lm_box.addWidget(row)
+                ed.selectAll()
+                ed.setFocus()
+                continue
             b = QPushButton(lm.get("name") or f"CoSync-{n}")   # jump / rename
-            b.setFixedWidth(78)
+            b.setFixedWidth(100)         # wider: fits a 10-char name
             b.setToolTip(self._landmark_tip(lm) + t("\n(right-click to rename)"))
             b.clicked.connect(lambda _c, i=n - 1: self._goto_landmark(i))
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(
                 lambda _pos, i=n - 1: self._rename_landmark(i))
             self._style_blue(b, (n - 1) == self._selected_lm)
-            info = QLabel(self._landmark_info(lm))   # black, button-size text
-            info.setStyleSheet("QLabel { color:black; }")
             h.addWidget(x)
             h.addWidget(b)
             h.addWidget(info, 1)
@@ -878,16 +895,22 @@ class CoregWindow(QMainWindow):
         self._refresh_list()
 
     def _rename_landmark(self, idx: int) -> None:
-        """Right-click a CoSync button → give it a short name (≤8 chars) like
-        R1os / LCX / LAD / D9a instead of CoSync-N. Blank clears it."""
+        """Right-click a CoSync button → edit its short name (≤10 chars) INLINE,
+        in the button's own place (R1os / LCX / LAD / D9a…). Blank clears it."""
         if not (0 <= idx < len(self._landmarks)):
             return
-        cur = self._landmarks[idx].get("name", "")
-        text, ok = QInputDialog.getText(
-            self, t("Rename"), t("Name (up to 8 characters):"), text=cur)
-        if ok:
-            self._landmarks[idx]["name"] = text.strip()[:8]
-            self._refresh_list()
+        self._renaming = idx
+        self._refresh_list()
+
+    def _commit_rename(self, idx: int, text: str) -> None:
+        """Store the inline-edited name and drop back to the button. Guarded so
+        the returnPressed + editingFinished pair (and the refresh's focus loss)
+        commit only once."""
+        if self._renaming != idx or not (0 <= idx < len(self._landmarks)):
+            return
+        self._renaming = -1
+        self._landmarks[idx]["name"] = text.strip()[:10]
+        self._refresh_list()
 
     def _delete_landmark(self, idx: int) -> None:
         if not (0 <= idx < len(self._landmarks)):
@@ -897,6 +920,7 @@ class CoregWindow(QMainWindow):
             self._selected_lm = -1
         elif self._selected_lm > idx:
             self._selected_lm -= 1
+        self._renaming = -1
         self._refresh_list()
         self._drive_markers()
 
@@ -913,6 +937,7 @@ class CoregWindow(QMainWindow):
 
         self._landmarks.sort(key=key)
         self._selected_lm = -1
+        self._renaming = -1
         self._refresh_list()
 
     def _clear_all_landmarks(self) -> None:
@@ -923,6 +948,7 @@ class CoregWindow(QMainWindow):
         ) == QMessageBox.StandardButton.Yes:
             self._landmarks.clear()
             self._selected_lm = -1
+            self._renaming = -1
             self._refresh_list()
             self._drive_markers()
 
@@ -1067,6 +1093,7 @@ class CoregWindow(QMainWindow):
         redraw. Guide curves are re-derived from vertices here."""
         self._landmarks = landmarks
         self._selected_lm = -1
+        self._renaming = -1
         # Guides: keep only those whose pane still exists and is an angio pane.
         valid = {p.index for p in self.panes if not p.is_ivus}
         for i in list(self._guides):
@@ -1103,11 +1130,13 @@ class CoregWindow(QMainWindow):
         and tile them into a cols-wide grid of square *cell* cells — so the
         image fills its cell instead of sitting small inside a double margin."""
         rows = (len(self.panes) + cols - 1) // cols
-        # A black gutter between cells so the tiles don't run together (kept
-        # even so the frame stays yuv420p-friendly).
-        gap = (cell // 12) & ~1
-        W = cols * cell + (cols - 1) * gap
-        H = rows * cell + (rows - 1) * gap
+        # Black gutters between cells so the tiles don't run together. The
+        # horizontal (column) gutter is 3× the vertical one — the left/right
+        # halves read as clearly separated. Kept even for yuv420p.
+        gap_y = (cell // 12) & ~1
+        gap_x = (gap_y * 3) & ~1
+        W = cols * cell + (cols - 1) * gap_x
+        H = rows * cell + (rows - 1) * gap_y
         img = QImage(W, H, QImage.Format.Format_RGB888)
         img.fill(QColor("#000000"))
         p = QPainter(img)
@@ -1135,7 +1164,7 @@ class CoregWindow(QMainWindow):
                 if w <= 0 or h <= 0:
                     continue
                 r, c = divmod(k, cols)
-                tx, ty = c * (cell + gap), r * (cell + gap)
+                tx, ty = c * (cell + gap_x), r * (cell + gap_y)
                 scale = min(cell / w, cell / h)
                 dw, dh = w * scale, h * scale
                 p.save()
