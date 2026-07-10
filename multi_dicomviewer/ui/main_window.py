@@ -1063,6 +1063,11 @@ class MainWindow(QMainWindow):
         )
         self._layout_btn.setText(self._layout_btn_text())
         self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._pane_step_btn.setText(t("Pane →"))
+        self._pane_step_btn.setHelpToolTip(
+            t("Move the selected pane to the next one (left→right, then next "
+              "row); wraps around from the last back to the first.")
+        )
         self._clear_all_btn.setText(t("✕ Clear All"))
         self._clear_all_btn.setHelpToolTip(
             t("Clear the image from every pane (same as each pane's ✕). "
@@ -2044,6 +2049,19 @@ class MainWindow(QMainWindow):
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
+        # "Pane →": step the ACTIVE (selected) pane to the next on-screen pane
+        # in reading order (left→right, then the next row's left), wrapping from
+        # the last back to the first — a keyboard-free way to move the selection
+        # without clicking each pane. No-op in the single-pane (1×1) layout.
+        self._pane_step_btn = FitButton(t("Pane →"))
+        self._pane_step_btn.setHelpToolTip(
+            t("Move the selected pane to the next one (left→right, then next "
+              "row); wraps around from the last back to the first.")
+        )
+        self._pane_step_btn.clicked.connect(self._cycle_active_pane)
+        row.addSpacing(8)
+        row.addWidget(self._pane_step_btn)
+
         # "Clear All": empty every pane at once (same as each pane's ✕). The
         # layout is kept; the studies list is untouched. The leading ✕ matches
         # the per-pane close glyph and, because FitButton elides from the right,
@@ -2282,6 +2300,21 @@ class MainWindow(QMainWindow):
         i, j = self._order.index(src), self._order.index(dest)
         self._order[i], self._order[j] = self._order[j], self._order[i]
         self._apply_layout(self._layout_key)
+
+    def _cycle_active_pane(self) -> None:
+        """"Pane →" button: advance the active pane to the next on-screen pane
+        in reading order (left→right, then next row), wrapping the last back to
+        the first. Cycles over _shown_panes() (already in reading order), so it
+        respects the current layout's visible sub-block. No-op when ≤1 pane is
+        visible (e.g. the 1×1 layout)."""
+        shown = self._shown_panes()
+        if len(shown) <= 1:
+            return
+        try:
+            i = shown.index(self._active)
+        except ValueError:
+            i = -1
+        self._set_active_pane(shown[(i + 1) % len(shown)])
 
     def _set_active_pane(self, pane: ViewerPane) -> None:
         self._active = pane

@@ -625,5 +625,7 @@
   "📋 Tree": "📋 树",
   "📏 Measure": "📏 测量",
   "🖼 Thumbnails": "🖼 缩略图",
-  "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "重置方向：撤销 Rt90°/Lt90°/Flip 和自由旋转，回到最初加载的视图"
+  "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "重置方向：撤销 Rt90°/Lt90°/Flip 和自由旋转，回到最初加载的视图",
+  "Pane →": "窗格 →",
+  "Move the selected pane to the next one (left→right, then next row); wraps around from the last back to the first.": "将所选窗格移到下一个（从左到右，然后到下一行的左端）；到最后会循环回到第一个。"
 }
