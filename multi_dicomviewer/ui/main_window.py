@@ -1066,7 +1066,8 @@ class MainWindow(QMainWindow):
         self._pane_step_btn.setText(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
             t("Move the selected pane to the next one (left→right, then next "
-              "row); wraps around from the last back to the first.")
+              "row); wraps around from the last back to the first. In the 1×1 "
+              "layout it flips the fullscreen view to the next loaded pane.")
         )
         self._clear_all_btn.setText(t("✕ Clear All"))
         self._clear_all_btn.setHelpToolTip(
@@ -2052,11 +2053,13 @@ class MainWindow(QMainWindow):
         # "Pane →": step the ACTIVE (selected) pane to the next on-screen pane
         # in reading order (left→right, then the next row's left), wrapping from
         # the last back to the first — a keyboard-free way to move the selection
-        # without clicking each pane. No-op in the single-pane (1×1) layout.
+        # without clicking each pane. In the single-pane 1×1 layout it instead
+        # flips the fullscreen view to the next loaded pane.
         self._pane_step_btn = FitButton(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
             t("Move the selected pane to the next one (left→right, then next "
-              "row); wraps around from the last back to the first.")
+              "row); wraps around from the last back to the first. In the 1×1 "
+              "layout it flips the fullscreen view to the next loaded pane.")
         )
         self._pane_step_btn.clicked.connect(self._cycle_active_pane)
         row.addSpacing(8)
@@ -2302,11 +2305,27 @@ class MainWindow(QMainWindow):
         self._apply_layout(self._layout_key)
 
     def _cycle_active_pane(self) -> None:
-        """"Pane →" button: advance the active pane to the next on-screen pane
-        in reading order (left→right, then next row), wrapping the last back to
-        the first. Cycles over _shown_panes() (already in reading order), so it
-        respects the current layout's visible sub-block. No-op when ≤1 pane is
-        visible (e.g. the 1×1 layout)."""
+        """"Pane →" button: advance to the next pane, wrapping the last back to
+        the first (endless loop).
+
+        In a multi-pane grid it moves the active-pane highlight through the
+        on-screen cells in reading order (left→right, then the next row's left),
+        cycling over _shown_panes() (already in reading order).
+
+        In the single-pane 1×1 layout there is only one cell, so instead it
+        flips the FULLSCREEN view to the next pane that holds an image (a
+        "next image" flipper) — otherwise the button would do nothing there."""
+        if self._layout_key == "1x1":
+            loaded = [p for p in self._order if p.has_data()]
+            if len(loaded) <= 1:
+                return
+            try:
+                i = loaded.index(self._active)
+            except ValueError:
+                i = -1
+            self._set_active_pane(loaded[(i + 1) % len(loaded)])
+            self._apply_layout("1x1")     # re-render so the new pane fills 1×1
+            return
         shown = self._shown_panes()
         if len(shown) <= 1:
             return
