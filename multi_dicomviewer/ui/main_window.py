@@ -1084,9 +1084,9 @@ class MainWindow(QMainWindow):
         self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
         self._pane_step_btn.setText(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
-            t("Move the selected pane to the next one (left→right, then next "
-              "row); wraps around from the last back to the first. In the 1×1 "
-              "layout it flips the fullscreen view to the next loaded pane.")
+            t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
+              "around from the last back to the first. Available only in the "
+              "1×1 layout.")
         )
         self._clear_all_btn.setText(t("✕ Clear All"))
         self._clear_all_btn.setHelpToolTip(
@@ -2069,18 +2069,20 @@ class MainWindow(QMainWindow):
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
-        # "Pane →": step the ACTIVE (selected) pane to the next on-screen pane
-        # in reading order (left→right, then the next row's left), wrapping from
-        # the last back to the first — a keyboard-free way to move the selection
-        # without clicking each pane. In the single-pane 1×1 layout it instead
-        # flips the fullscreen view to the next loaded pane.
+        # "Pane →": flip the fullscreen 1×1 view to the next loaded pane, in
+        # reading order (left→right, then the next row's left), wrapping from the
+        # last back to the first — a keyboard-free way to page through the
+        # loaded images one at a time. Only meaningful in 1×1, so it is greyed
+        # out in every multi-pane layout (see _apply_layout).
         self._pane_step_btn = FitButton(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
-            t("Move the selected pane to the next one (left→right, then next "
-              "row); wraps around from the last back to the first. In the 1×1 "
-              "layout it flips the fullscreen view to the next loaded pane.")
+            t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
+              "around from the last back to the first. Available only in the "
+              "1×1 layout.")
         )
         self._pane_step_btn.clicked.connect(self._cycle_active_pane)
+        self._pane_step_btn.setEnabled(getattr(self, "_layout_key", "1x1")
+                                       == "1x1")
         row.addSpacing(8)
         row.addWidget(self._pane_step_btn)
 
@@ -2305,6 +2307,10 @@ class MainWindow(QMainWindow):
         # heaviest op / main freeze source. Disable it everywhere but 1x1
         # (force-hides any open strip).
         self._sync_long_axis_gate()
+        # "Pane →" flips the fullscreen 1×1 view to the next loaded pane, so it
+        # only makes sense in 1×1 — grey it out in every multi-pane layout.
+        if hasattr(self, "_pane_step_btn"):
+            self._pane_step_btn.setEnabled(self._layout_key == "1x1")
         # Bi/Lt/Rt is per-pane (each viewer's own "Plane:" bar), so a grid
         # change never overrides any pane's plane choice — a pane left on
         # "Bi" keeps showing both planes here too (just smaller).
