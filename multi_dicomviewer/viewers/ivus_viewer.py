@@ -246,7 +246,13 @@ class IVUSViewer(XAViewer):
         # Right-click on a long-axis keyframe ▼/▲ → remove that manual centre.
         self.long_axis.keyframe_remove.connect(self._on_la_keyframe_remove)
         # Hook the cross-section canvases for the rotation-centre marker.
+        # Also enable CoSync-style free drag-rotation of the cross-section: an
+        # empty left-drag on the image body spins it about the centre (lowest
+        # priority — never steals the centre-marker/cut-line or a measurement;
+        # suppressed while the long-axis centre marker is shown). "Reset" (in
+        # the orientation toolbar row) undoes it along with Rt90/Lt90/Flip.
         for c in (self.canvas, self.canvas2):
+            c.set_free_rotation_enabled(True)
             c.ivus_center_changed.connect(self._on_center_dragged)
             c.ivus_center_reset.connect(self._on_center_reset)
             # Dragging the yellow cut line on the cross-section re-angles

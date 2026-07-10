@@ -624,5 +624,6 @@
   "✕ Delete All": "✕ 全部删除",
   "📋 Tree": "📋 树",
   "📏 Measure": "📏 测量",
-  "🖼 Thumbnails": "🖼 缩略图"
+  "🖼 Thumbnails": "🖼 缩略图",
+  "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "重置方向：撤销 Rt90°/Lt90°/Flip 和自由旋转，回到最初加载的视图"
 }

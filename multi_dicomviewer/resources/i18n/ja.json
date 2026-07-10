@@ -624,5 +624,6 @@
   "✕ Delete All": "✕ すべて削除",
   "📋 Tree": "📋 ツリー",
   "📏 Measure": "📏 計測",
-  "🖼 Thumbnails": "🖼 サムネイル"
+  "🖼 Thumbnails": "🖼 サムネイル",
+  "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "向きをリセット：Rt90°/Lt90°/Flip と自由回転を取り消し、読み込み時の表示に戻します"
 }

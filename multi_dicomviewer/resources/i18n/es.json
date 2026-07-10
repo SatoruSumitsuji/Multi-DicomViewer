@@ -624,5 +624,6 @@
   "✕ Delete All": "✕ Eliminar todo",
   "📋 Tree": "📋 Árbol",
   "📏 Measure": "📏 Medir",
-  "🖼 Thumbnails": "🖼 Miniaturas"
+  "🖼 Thumbnails": "🖼 Miniaturas",
+  "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "Restablecer orientación: deshace Rt90°/Lt90°/Flip y la rotación libre, volviendo a la vista cargada originalmente"
 }

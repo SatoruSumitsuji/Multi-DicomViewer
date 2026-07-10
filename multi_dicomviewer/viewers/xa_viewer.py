@@ -737,6 +737,15 @@ class XAViewer(AbstractViewer):
             self._orient_btns.append(b)
             row.addWidget(b)
 
+        # "Reset" — undo every display transform (Rt90/Lt90/Flip-H/Flip-V and
+        # the IVUS free drag-rotation) back to the originally-loaded orientation.
+        self._reset_orient_btn = QPushButton(t("Reset"))
+        self._reset_orient_btn.setToolTip(
+            t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
+              "back to the originally-loaded view"))
+        self._reset_orient_btn.clicked.connect(self._reset_transform)
+        row.addWidget(self._reset_orient_btn)
+
         # High-quality cine: keep frames bilinear-smooth even during playback
         # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
         # for fast machines). Persisted across restarts.
@@ -1140,6 +1149,14 @@ class XAViewer(AbstractViewer):
         for c in (self.canvas, self.canvas2):
             c.apply_orient(kind)
 
+    def _reset_transform(self) -> None:
+        """"Reset" button: undo every display transform — the 90°/flip
+        orientation AND the IVUS free drag-rotation — restoring the
+        originally-loaded view. Applied to both canvases."""
+        for c in (self.canvas, self.canvas2):
+            c.reset_orient()
+            c.set_free_rotation(0.0)
+
     def _toggle_hq_cine(self, on: bool) -> None:
         """High-quality cine toggle: smooth frames during playback on both
         canvases, and persist the choice across restarts."""
@@ -1258,9 +1275,10 @@ class XAViewer(AbstractViewer):
                 and getattr(self, "_loaded_uid", "") == new_uid):
             return
         # A genuinely new series starts in its native orientation (clear any
-        # Rt90/flip left over from the previously shown image).
+        # Rt90/flip AND free drag-rotation left over from the previous image).
         for c in (self.canvas, self.canvas2):
             c.reset_orient()
+            c.set_free_rotation(0.0)
         # Switching to a DIFFERENT series within the same viewer: save
         # the frame we were on for the outgoing series so a later
         # return to it picks up at that frame, not frame 0.
@@ -2133,6 +2151,12 @@ class XAViewer(AbstractViewer):
             )):
                 b.setText(label)
                 b.setToolTip(tip)
+        btn = getattr(self, "_reset_orient_btn", None)
+        if btn is not None:
+            btn.setText(t("Reset"))
+            btn.setToolTip(
+                t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
+                  "back to the originally-loaded view"))
 
         # S-Cine / S-Zoom / Denoise. The OpenCV-unavailable note is appended
         # exactly as the constructor does when the codec is missing.
