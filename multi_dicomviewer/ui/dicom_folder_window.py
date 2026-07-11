@@ -68,6 +68,16 @@ def _human(n: float) -> str:
     return f"{n:.1f} PB"
 
 
+def _fmt_time(raw: str) -> str:
+    """DICOM TM (``HHMMSS[.ffffff]``) → ``HH:MM:SS`` for display. Fixed width,
+    so a plain string sort of this column is also chronological. Unparseable
+    values are shown as-is."""
+    digits = (raw or "").strip().split(".")[0]
+    if len(digits) >= 6 and digits[:6].isdigit():
+        return f"{digits[0:2]}:{digits[2:4]}:{digits[4:6]}"
+    return (raw or "").strip()
+
+
 #: SOP Class UID of a DICOMDIR (Media Storage Directory Storage). Any file with
 #: this class is an index, not image data — always ignored during the sort,
 #: whatever its filename (covers renamed copies like "..._DICOMDIR" too).
@@ -103,6 +113,16 @@ def _read_tags(path: str) -> dict | None:
         nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
     except (TypeError, ValueError):
         nframes = 1
+
+    def num(name: str):
+        """Integer tag value, or None when absent / non-numeric (so the file
+        row sorts numerically and blanks group together)."""
+        v = getattr(ds, name, None)
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
     return {
         "raw_date": raw_date if raw_date != "Unknown" else "Unknown",
         "studyDate": disp_date,
@@ -110,6 +130,9 @@ def _read_tags(path: str) -> dict | None:
         "studyInstanceUID": s("StudyInstanceUID"),
         "patientName": decode_text(ds, "PatientName", "") or "Unknown",
         "numberOfFrames": nframes,
+        "seriesNumber": num("SeriesNumber"),
+        "acquisitionNumber": num("AcquisitionNumber"),
+        "acquisitionTime": s("AcquisitionTime", ""),
     }
 
 
@@ -401,12 +424,21 @@ class DicomFolderWindow(QMainWindow):
         mrow.addStretch(1)
         root.addLayout(mrow)
 
-        # ---- group tree (folder-name column editable)
+        # ---- group tree (folder-name column editable). Expanding a group lists
+        # its files with per-file Acq #, Acq Time and Series # columns; every
+        # column is sortable (click a header) — files sort within their group.
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels(
-            [t("Group"), t("Files"), t("Folder name (editable)")])
-        self._tree.setColumnWidth(0, 420)
-        self._tree.setColumnWidth(1, 70)
+            [t("Group"), t("Files"), t("Folder name (editable)"),
+             t("Acq #"), t("Acq Time"), t("Series #")])
+        self._tree.setColumnWidth(0, 380)
+        self._tree.setColumnWidth(1, 60)
+        self._tree.setColumnWidth(2, 200)
+        self._tree.setColumnWidth(3, 70)
+        self._tree.setColumnWidth(4, 90)
+        self._tree.setColumnWidth(5, 80)
+        self._tree.setSortingEnabled(True)
+        self._tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         self._tree.itemChanged.connect(self._on_name_edited)
         root.addWidget(self._tree, 1)
 
@@ -614,6 +646,9 @@ class DicomFolderWindow(QMainWindow):
             g["patients"].add(f["patientName"])
             g["mods"].add(f["modality"])
 
+        # Populate with sorting OFF (fast, and the group insertion order below is
+        # kept) then switch it back on so the header stays click-sortable.
+        self._tree.setSortingEnabled(False)
         self._tree.blockSignals(True)
         self._tree.clear()
         for key in sorted(groups):
@@ -628,15 +663,26 @@ class DicomFolderWindow(QMainWindow):
             item.setText(2, g["default"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
             item.setData(0, Qt.ItemDataRole.UserRole, key)
-            for f in g["files"][:50]:
+            # File rows — every file, so a header-click sort covers the whole
+            # group (no truncation). Acq #/Series # carry their INTEGER value so
+            # the column sorts numerically (10 after 2, not before); Acq Time is
+            # fixed-width HH:MM:SS so a string sort is chronological too.
+            for f in g["files"]:
                 leaf = QTreeWidgetItem(item)
                 leaf.setText(0, f["name"])
-                leaf.setText(1, "")
                 leaf.setText(2, f"{f['patientName']} · {_human(f['size'])}")
-            if len(g["files"]) > 50:
-                more = QTreeWidgetItem(item)
-                more.setText(0, t("… {n} more", n=len(g['files']) - 50))
+                if f.get("acquisitionNumber") is not None:
+                    leaf.setData(3, Qt.ItemDataRole.DisplayRole,
+                                 f["acquisitionNumber"])
+                leaf.setTextAlignment(3, Qt.AlignmentFlag.AlignRight)
+                leaf.setText(4, _fmt_time(f.get("acquisitionTime", "")))
+                leaf.setTextAlignment(4, Qt.AlignmentFlag.AlignRight)
+                if f.get("seriesNumber") is not None:
+                    leaf.setData(5, Qt.ItemDataRole.DisplayRole,
+                                 f["seriesNumber"])
+                leaf.setTextAlignment(5, Qt.AlignmentFlag.AlignRight)
         self._tree.blockSignals(False)
+        self._tree.setSortingEnabled(True)
         self._stat_lbl.setText(
             t("{files} DICOM file(s) in {groups} group(s).",
               files=len(self._files), groups=len(groups)))

@@ -627,5 +627,8 @@
   "🖼 Thumbnails": "🖼 缩略图",
   "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "重置方向：撤销 Rt90°/Lt90°/Flip 和自由旋转，回到最初加载的视图",
   "Pane →": "窗格 →",
-  "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "将全屏（1×1）视图切换到下一个已加载的窗格（到最后会循环回到第一个）。仅在 1×1 布局下可用。"
+  "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "将全屏（1×1）视图切换到下一个已加载的窗格（到最后会循环回到第一个）。仅在 1×1 布局下可用。",
+  "Acq #": "采集号",
+  "Acq Time": "采集时间",
+  "Series #": "序列号"
 }
