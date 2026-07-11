@@ -627,5 +627,8 @@
   "🖼 Thumbnails": "🖼 Miniaturas",
   "Reset orientation: undo Rt90°/Lt90°/Flip and free rotation back to the originally-loaded view": "Restablecer orientación: deshace Rt90°/Lt90°/Flip y la rotación libre, volviendo a la vista cargada originalmente",
   "Pane →": "Panel →",
-  "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "Cambia la vista de pantalla completa (1×1) al siguiente panel cargado; del último vuelve al primero en bucle. Solo disponible en el diseño 1×1."
+  "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "Cambia la vista de pantalla completa (1×1) al siguiente panel cargado; del último vuelve al primero en bucle. Solo disponible en el diseño 1×1.",
+  "Acq #": "Nº adq.",
+  "Acq Time": "Hora adq.",
+  "Series #": "Nº serie"
 }
