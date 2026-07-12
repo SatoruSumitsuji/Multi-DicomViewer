@@ -11,19 +11,27 @@ from __future__ import annotations
 import os
 import shutil
 
+import numpy as np
 import pydicom
 from pydicom.fileset import FileSet
 from pydicom.filebase import DicomBytesIO
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 from multi_dicomviewer.core import settings
-from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
+from multi_dicomviewer.core.dicom_io import (
+    _decode_frame,
+    _normalize_charset,
+    _to_float,
+    decode_text,
+)
 from multi_dicomviewer.i18n import t
-from PyQt6.QtGui import QFont
+from multi_dicomviewer.viewers.image_canvas import to_qimage
+from PyQt6.QtGui import QFont, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
     QCheckBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -33,6 +41,8 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -79,6 +89,149 @@ def _fmt_time(raw: str) -> str:
     if len(digits) >= 6 and digits[:6].isdigit():
         return f"{digits[0:2]}:{digits[2:4]}:{digits[4:6]}"
     return (raw or "").strip()
+
+
+#: FIGURE SPACE (U+2007) — same advance width as a digit in most UI fonts, so
+#: right-justifying the number with it lines the unit up column-for-column even
+#: in a proportional font (a normal space is narrower and would drift).
+_FIGSP = " "
+
+
+def _size_aligned(n: float) -> str:
+    """Human size with the UNIT start aligned across rows, e.g. ``"  12.3 MB"``
+    / ``" 512.0 KB"``. The numeric part (always ``N.N``) is figure-space padded
+    to a fixed width so the space+unit begin at the same character position."""
+    unit = "B"
+    val = float(n)
+    for u in ("B", "KB", "MB", "GB", "TB", "PB"):
+        unit = u
+        if val < 1024 or u == "PB":
+            break
+        val /= 1024.0
+    return f"{f'{val:.1f}'.rjust(7, _FIGSP)} {unit}"
+
+
+def _preview_qimage(path: str):
+    """Decode a DICOM file's first frame to a display QImage. Returns
+    ``(QImage|None, frame_count)``. Grayscale is auto-windowed (CT uses a
+    soft-tissue HU window; everything else min–max), colour is shown as-is."""
+    try:
+        ds = pydicom.dcmread(path, force=True)
+        px = _decode_frame(ds, 0)
+    except Exception:
+        return None, 1
+    try:
+        nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
+    except (TypeError, ValueError):
+        nframes = 1
+    if px.ndim == 3:                                 # already display RGB uint8
+        return to_qimage(np.ascontiguousarray(px[..., :3].astype(np.uint8))), \
+            nframes
+    px = px.astype(np.float32)
+    if str(getattr(ds, "Modality", "")).upper() == "CT":
+        px = px * _to_float(getattr(ds, "RescaleSlope", 1.0), 1.0) + \
+            _to_float(getattr(ds, "RescaleIntercept", 0.0), 0.0)
+        lo, hi = -100.0, 700.0
+    else:
+        lo, hi = float(px.min()), float(px.max())
+    out = np.clip((px - lo) / max(hi - lo, 1e-6), 0.0, 1.0) * 255.0
+    if str(getattr(ds, "PhotometricInterpretation", "")).upper() == "MONOCHROME1":
+        out = 255.0 - out                            # MONOCHROME1: min = white
+    return to_qimage(out.astype(np.uint8)), nframes
+
+
+class _RightPadDelegate(QStyledItemDelegate):
+    """Adds a fixed right-hand margin to a column's cells so right-aligned
+    numbers don't butt against the next column (Files / Acq # / Acq Time /
+    Series #). Purely visual — the underlying value (and its numeric sort) is
+    untouched."""
+
+    def __init__(self, pad: int, parent=None):
+        super().__init__(parent)
+        self._pad = int(pad)
+
+    def paint(self, painter, option, index):         # noqa: N802 (Qt override)
+        option.rect = option.rect.adjusted(0, 0, -self._pad, 0)
+        super().paint(painter, option, index)
+
+    def sizeHint(self, option, index):               # noqa: N802 (Qt override)
+        s = super().sizeHint(option, index)
+        s.setWidth(s.width() + self._pad)
+        return s
+
+
+class _FilePreviewDialog(QDialog):
+    """Popup image viewer for the DicomFolder table: shows one file's first
+    frame with First / Prev / Next / Last buttons to step through the other
+    files in the SAME folder (in the table's current display order)."""
+
+    def __init__(self, paths: list, labels: list, start: int = 0, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("Image preview"))
+        self.resize(720, 660)
+        self._paths = paths
+        self._labels = labels
+        self._i = max(0, min(start, len(paths) - 1))
+        self._pix: QPixmap | None = None
+
+        v = QVBoxLayout(self)
+        self._title = QLabel("")
+        self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(self._title)
+        self._img = QLabel("")
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setMinimumSize(360, 360)
+        self._img.setStyleSheet("background:#000; color:#aaa;")
+        v.addWidget(self._img, 1)
+
+        nav = QHBoxLayout()
+        self._first_btn = QPushButton(t("⏮ First"))
+        self._prev_btn = QPushButton(t("◀ Prev"))
+        self._next_btn = QPushButton(t("Next ▶"))
+        self._last_btn = QPushButton(t("Last ⏭"))
+        self._first_btn.clicked.connect(lambda: self._go(0))
+        self._prev_btn.clicked.connect(lambda: self._go(self._i - 1))
+        self._next_btn.clicked.connect(lambda: self._go(self._i + 1))
+        self._last_btn.clicked.connect(lambda: self._go(len(self._paths) - 1))
+        for b in (self._first_btn, self._prev_btn,
+                  self._next_btn, self._last_btn):
+            nav.addWidget(b)
+        v.addLayout(nav)
+        self._load()
+
+    def _go(self, i: int) -> None:
+        i = max(0, min(i, len(self._paths) - 1))
+        if i != self._i:
+            self._i = i
+            self._load()
+
+    def _load(self) -> None:
+        qimg, nframes = _preview_qimage(self._paths[self._i])
+        if qimg is None:
+            self._pix = None
+            self._img.setText(t("(cannot display this file)"))
+        else:
+            self._pix = QPixmap.fromImage(qimg)
+            self._render()
+        extra = t("  ·  {n} frames (showing #1)", n=nframes) if nframes > 1 else ""
+        self._title.setText(
+            f"{self._labels[self._i]}   "
+            f"({self._i + 1}/{len(self._paths)}){extra}")
+        self._first_btn.setEnabled(self._i > 0)
+        self._prev_btn.setEnabled(self._i > 0)
+        self._next_btn.setEnabled(self._i < len(self._paths) - 1)
+        self._last_btn.setEnabled(self._i < len(self._paths) - 1)
+
+    def _render(self) -> None:
+        if self._pix is None:
+            return
+        self._img.setPixmap(self._pix.scaled(
+            self._img.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, e):                         # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        self._render()
 
 
 #: SOP Class UID of a DICOMDIR (Media Storage Directory Storage). Any file with
@@ -494,6 +647,16 @@ class DicomFolderWindow(QMainWindow):
                          "between output folders."))
         _hint.setStyleSheet("color:#555;")
         erow.addWidget(_hint)
+        # "Show the file": preview the selected file's image in a popup, with
+        # First/Prev/Next/Last to page through the other files in that folder.
+        self._show_btn = QPushButton(t("Show the file"))
+        self._show_btn.setToolTip(
+            t("Preview the selected file's image; step through the folder's "
+              "files with First/Prev/Next/Last."))
+        self._show_btn.clicked.connect(self._show_file)
+        self._show_btn.setEnabled(False)
+        erow.addSpacing(12)
+        erow.addWidget(self._show_btn)
         erow.addStretch(1)
         root.addLayout(erow)
 
@@ -511,8 +674,14 @@ class DicomFolderWindow(QMainWindow):
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self._tree.files_dropped.connect(self._on_files_dropped)
         self._tree.setHeaderLabels(
-            [t("Group"), t("Files"), t("Folder name (editable)"),
+            [t("Group"), t("Files"), t("Folder name (editable) / Size"),
              t("Acq #"), t("Acq Time"), t("Series #")])
+        # A uniform right margin on the right-aligned numeric columns (Files,
+        # Acq #, Acq Time, Series #) so their values don't butt against the next
+        # column. ~1.5× the old 3-space Files margin.
+        self._pad_delegate = _RightPadDelegate(18, self._tree)
+        for _c in (1, 3, 4, 5):
+            self._tree.setItemDelegateForColumn(_c, self._pad_delegate)
         self._tree.setColumnWidth(0, 380)
         self._tree.setColumnWidth(1, 60)
         self._tree.setColumnWidth(2, 200)
@@ -584,7 +753,7 @@ class DicomFolderWindow(QMainWindow):
     def _set_busy(self, busy: bool) -> None:
         for w in (self._src_btn, self._tgt_btn, self._same_btn,
                   self._parent_btn, self._go_btn, self._clear_btn,
-                  self._new_folder_btn):
+                  self._new_folder_btn, self._show_btn):
             w.setEnabled(not busy)
 
     def _clear(self) -> None:
@@ -724,8 +893,9 @@ class DicomFolderWindow(QMainWindow):
         self._no_out_lbl.setVisible(bool(self._source) and not has_target)
         # Nothing to clear until a source folder is picked.
         self._clear_btn.setEnabled(bool(self._source))
-        # New Folder needs a scanned set to add folders to / drag files from.
+        # New Folder / Show the file need a scanned set to act on.
         self._new_folder_btn.setEnabled(bool(self._files))
+        self._show_btn.setEnabled(bool(self._files))
 
     # ----------------------------------------------------------- grouping
     def _regroup(self) -> None:
@@ -778,9 +948,9 @@ class DicomFolderWindow(QMainWindow):
             # its (editable) name — the key is just an internal id there.
             head = g["name"] if g["manual"] else key
             item.setText(0, f"{head}   [{mods} | {npt} pt]")
-            # Trailing spaces = a right margin so the right-aligned count doesn't
-            # butt up against the editable "Folder name" column next to it.
-            item.setText(1, f"{len(files)}   ")
+            # File count — numeric (sorts right) + right-aligned; the right
+            # margin comes from _RightPadDelegate now, not trailing spaces.
+            item.setData(1, Qt.ItemDataRole.DisplayRole, len(files))
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
             item.setText(2, g["name"])
             # Group rows: editable name + drop target, but not draggable.
@@ -797,7 +967,8 @@ class DicomFolderWindow(QMainWindow):
                 f = self._files[idx]
                 leaf = QTreeWidgetItem(item)
                 leaf.setText(0, f["name"])
-                leaf.setText(2, f"{f['patientName']} · {_human(f['size'])}")
+                # Under "… / Size": the file size, unit-aligned across rows.
+                leaf.setText(2, _size_aligned(f["size"]))
                 if f.get("acquisitionNumber") is not None:
                     leaf.setData(3, Qt.ItemDataRole.DisplayRole,
                                  f["acquisitionNumber"])
@@ -849,6 +1020,41 @@ class DicomFolderWindow(QMainWindow):
         if item is not None:
             self._tree.setCurrentItem(item)
             self._tree.editItem(item, 2)             # inline-rename the folder
+
+    def _show_file(self) -> None:
+        """"Show the file": preview the selected file's image in a popup that
+        can page through the other files in the SAME folder (in the table's
+        current display order). If a folder row is selected, start at its first
+        file; with nothing selected, use the first folder."""
+        if not self._files:
+            return
+        cur = self._tree.currentItem()
+        start_leaf = None
+        if cur is None:
+            grp = self._tree.topLevelItem(0)
+        elif cur.parent() is None:                   # a folder row
+            grp = cur
+        else:                                        # a file row
+            grp = cur.parent()
+            start_leaf = cur
+        if grp is None:
+            return
+        paths, labels, start = [], [], 0
+        for r in range(grp.childCount()):
+            leaf = grp.child(r)
+            idx = leaf.data(0, Qt.ItemDataRole.UserRole)
+            if not isinstance(idx, int):
+                continue
+            if leaf is start_leaf:
+                start = len(paths)
+            paths.append(self._files[idx]["path"])
+            labels.append(self._files[idx]["name"])
+        if not paths:
+            QMessageBox.information(
+                self, t("Show the file"),
+                t("This folder has no files to preview."))
+            return
+        _FilePreviewDialog(paths, labels, start, self).exec()
 
     def _on_sort_changed(self, column: int, order) -> None:
         """Header clicked → remember the sort so a fresh (re)group keeps it and
