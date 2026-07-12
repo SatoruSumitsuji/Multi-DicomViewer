@@ -698,8 +698,10 @@ class DicomFolderWindow(QMainWindow):
 
     def _on_sort_changed(self, column: int, order) -> None:
         """Header clicked → remember the sort so a fresh (re)group keeps it and
-        it survives an app restart."""
-        self._sort = (int(column), int(order))
+        it survives an app restart. *order* arrives as a ``Qt.SortOrder`` enum
+        (not int) from the signal, so read its ``.value`` (0=Asc, 1=Desc)."""
+        order_int = getattr(order, "value", order)
+        self._sort = (int(column), int(order_int))
         settings.save_dicomfolder_sort(*self._sort)
 
     def _on_name_edited(self, item, col) -> None:
