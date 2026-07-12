@@ -630,5 +630,8 @@
   "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "将全屏（1×1）视图切换到下一个已加载的窗格（到最后会循环回到第一个）。仅在 1×1 布局下可用。",
   "Acq #": "采集号",
   "Acq Time": "采集时间",
-  "Series #": "序列号"
+  "Series #": "序列号",
+  "New Folder": "新建文件夹",
+  "Create a new (empty) output folder, then rename it and drag files onto it.": "创建一个新的（空）输出文件夹，然后重命名并将文件拖入其中。",
+  "Tip: drag file rows onto a folder to move them between output folders.": "提示：将文件行拖到某个文件夹上，即可在输出文件夹之间移动。"
 }

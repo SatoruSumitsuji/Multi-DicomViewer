@@ -630,5 +630,8 @@
   "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "Cambia la vista de pantalla completa (1×1) al siguiente panel cargado; del último vuelve al primero en bucle. Solo disponible en el diseño 1×1.",
   "Acq #": "Nº adq.",
   "Acq Time": "Hora adq.",
-  "Series #": "Nº serie"
+  "Series #": "Nº serie",
+  "New Folder": "Nueva carpeta",
+  "Create a new (empty) output folder, then rename it and drag files onto it.": "Crea una carpeta de salida nueva (vacía); luego renómbrala y arrastra archivos a ella.",
+  "Tip: drag file rows onto a folder to move them between output folders.": "Consejo: arrastra filas de archivo sobre una carpeta para moverlas entre carpetas de salida."
 }

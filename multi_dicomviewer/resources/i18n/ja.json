@@ -630,5 +630,8 @@
   "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "全画面（1×1）表示を次の読み込み済みペインへ切り替えます（最後まで来たら最初に戻ってループ）。1×1レイアウトのときのみ使用できます。",
   "Acq #": "収集番号",
   "Acq Time": "収集時刻",
-  "Series #": "シリーズ番号"
+  "Series #": "シリーズ番号",
+  "New Folder": "新規フォルダ",
+  "Create a new (empty) output folder, then rename it and drag files onto it.": "新しい（空の）出力フォルダを作成し、名前を変更してファイルをドラッグして入れます。",
+  "Tip: drag file rows onto a folder to move them between output folders.": "ヒント：ファイル行をフォルダにドラッグすると、出力フォルダ間で移動できます。"
 }
