@@ -21,6 +21,7 @@ from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
 from multi_dicomviewer.i18n import t
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QFileDialog,
@@ -278,15 +279,14 @@ class _OrganizeWorker(QThread):
     stage = pyqtSignal(str)                          # transient status text
     done = pyqtSignal(int, int, int, str)           # ok, fail, dicomdirs, error
 
-    def __init__(self, files, target, move, group_by, separate, name_map,
-                 with_dicomdir=False):
+    def __init__(self, assignments, target, move, with_dicomdir=False):
         super().__init__()
-        self._files = files
+        # assignments: list of (file_dict, destination-subfolder-name). The
+        # subfolder already reflects any manual folder rename / drag-move done
+        # in the table, so the worker no longer recomputes the grouping.
+        self._assignments = assignments
         self._target = target
         self._move = move
-        self._group_by = group_by
-        self._separate = separate
-        self._name_map = name_map
         self._with_dicomdir = with_dicomdir
 
     def run(self) -> None:
@@ -298,13 +298,10 @@ class _OrganizeWorker(QThread):
         # them numbered and collision-free.
         counters: dict = {}
         folder_files: dict = {}                     # dest_dir -> [flat names]
-        total = len(self._files)
-        for i, f in enumerate(self._files):
+        total = len(self._assignments)
+        for i, (f, sub) in enumerate(self._assignments):
             try:
-                key, default_sub = _group_of(
-                    f, self._group_by, self._separate)
-                sub = _safe(self._name_map.get(key, default_sub))
-                dest_dir = os.path.join(self._target, sub)
+                dest_dir = os.path.join(self._target, _safe(sub))
                 os.makedirs(dest_dir, exist_ok=True)
                 name = _flat_name(dest_dir, f["modality"], counters)
                 dest = os.path.join(dest_dir, name)
@@ -338,6 +335,53 @@ class _OrganizeWorker(QThread):
         self.done.emit(ok, fail, ndd, err)
 
 
+class _GroupTree(QTreeWidget):
+    """Group tree that lets the user drag file rows onto another group row to
+    reassign which output folder they land in. Qt's own row-move is suppressed
+    (we never call ``super().dropEvent``); instead ``files_dropped`` fires with
+    the target group key + the dragged files' indices and the window re-renders
+    from its own model. External folder drops (source ≠ this tree) are passed
+    through so the window's whole-window drop handler still catches them."""
+
+    files_dropped = pyqtSignal(str, list)            # (target key, [file idx])
+
+    def dragEnterEvent(self, ev):                    # noqa: N802 (Qt override)
+        if ev.source() is self:
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()                              # let the window handle it
+
+    def dragMoveEvent(self, ev):                     # noqa: N802 (Qt override)
+        if ev.source() is self:
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+    def dropEvent(self, ev):                         # noqa: N802 (Qt override)
+        if ev.source() is not self:
+            ev.ignore()
+            return
+        target = self.itemAt(ev.position().toPoint())
+        if target is None:
+            ev.ignore()
+            return
+        # A drop anywhere on a group row (or on one of its file rows) targets
+        # that group.
+        grp = target if target.parent() is None else target.parent()
+        key = grp.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(key, str):
+            ev.ignore()
+            return
+        idxs = [it.data(0, Qt.ItemDataRole.UserRole)
+                for it in self.selectedItems()
+                if isinstance(it.data(0, Qt.ItemDataRole.UserRole), int)]
+        if idxs:
+            self.files_dropped.emit(key, idxs)
+            ev.acceptProposedAction()
+        else:
+            ev.ignore()
+
+
 class DicomFolderWindow(QMainWindow):
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
@@ -347,7 +391,17 @@ class DicomFolderWindow(QMainWindow):
         self._files: list[dict] = []
         self._source: str | None = start_dir
         self._target: str | None = None
-        self._name_map: dict[str, str] = {}
+        # Output-folder model (editable in the table before sorting):
+        #   _groups:     group key -> {"name": output folder, "manual": bool,
+        #                              "order": int} — includes both the auto
+        #                groups AND user-created ("New Folder") ones.
+        #   _file_group: file index (into _files) -> its current group key.
+        # Drag-drop reassigns _file_group; "New Folder" adds to _groups; the
+        # editable name column renames _groups[key]["name"].
+        self._groups: dict[str, dict] = {}
+        self._file_group: dict[int, str] = {}
+        self._next_new = 1                           # id for new-folder keys
+        self._item_by_key: dict[str, object] = {}    # key -> its group row
         self._worker: QThread | None = None
 
         central = QWidget()
@@ -426,10 +480,36 @@ class DicomFolderWindow(QMainWindow):
         mrow.addStretch(1)
         root.addLayout(mrow)
 
+        # ---- folder-editing row: create a new (empty) output folder, plus a
+        # hint that files can be dragged between folders in the table.
+        erow = QHBoxLayout()
+        self._new_folder_btn = QPushButton(t("New Folder"))
+        self._new_folder_btn.setToolTip(
+            t("Create a new (empty) output folder, then rename it and drag "
+              "files onto it."))
+        self._new_folder_btn.clicked.connect(self._new_folder)
+        self._new_folder_btn.setEnabled(False)
+        erow.addWidget(self._new_folder_btn)
+        _hint = QLabel(t("Tip: drag file rows onto a folder to move them "
+                         "between output folders."))
+        _hint.setStyleSheet("color:#555;")
+        erow.addWidget(_hint)
+        erow.addStretch(1)
+        root.addLayout(erow)
+
         # ---- group tree (folder-name column editable). Expanding a group lists
         # its files with per-file Acq #, Acq Time and Series # columns; every
         # column is sortable (click a header) — files sort within their group.
-        self._tree = QTreeWidget()
+        # File rows can be dragged onto another folder row to reassign them.
+        self._tree = _GroupTree()
+        self._tree.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
+        self._tree.setDragEnabled(True)
+        self._tree.setAcceptDrops(True)
+        self._tree.viewport().setAcceptDrops(True)
+        self._tree.setDropIndicatorShown(True)
+        self._tree.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self._tree.files_dropped.connect(self._on_files_dropped)
         self._tree.setHeaderLabels(
             [t("Group"), t("Files"), t("Folder name (editable)"),
              t("Acq #"), t("Acq Time"), t("Series #")])
@@ -503,7 +583,8 @@ class DicomFolderWindow(QMainWindow):
 
     def _set_busy(self, busy: bool) -> None:
         for w in (self._src_btn, self._tgt_btn, self._same_btn,
-                  self._parent_btn, self._go_btn, self._clear_btn):
+                  self._parent_btn, self._go_btn, self._clear_btn,
+                  self._new_folder_btn):
             w.setEnabled(not busy)
 
     def _clear(self) -> None:
@@ -514,7 +595,10 @@ class DicomFolderWindow(QMainWindow):
         self._source = None
         self._target = None
         self._files = []
-        self._name_map = {}
+        self._groups = {}
+        self._file_group = {}
+        self._item_by_key = {}
+        self._next_new = 1
         self._tree.clear()
         self._src_lbl.setText(t("(none)"))
         self._src_lbl.setStyleSheet("color:#555;")
@@ -590,6 +674,7 @@ class DicomFolderWindow(QMainWindow):
         self._files = files
         if not files:
             self._stat_lbl.setText(t("No DICOM files found."))
+            self._update_go()
             return
         self._regroup()
         self._update_go()
@@ -639,51 +724,77 @@ class DicomFolderWindow(QMainWindow):
         self._no_out_lbl.setVisible(bool(self._source) and not has_target)
         # Nothing to clear until a source folder is picked.
         self._clear_btn.setEnabled(bool(self._source))
+        # New Folder needs a scanned set to add folders to / drag files from.
+        self._new_folder_btn.setEnabled(bool(self._files))
 
     # ----------------------------------------------------------- grouping
     def _regroup(self) -> None:
+        """Recompute the auto-grouping from the current basis and render it.
+        This resets any manual folder edits (new folders / drag-moves), same as
+        the folder-name map used to reset — changing the grouping basis is a
+        fresh start."""
         if not self._files:
             return
-        self._name_map = {}                          # reset on basis change
         group_by = self._group_by()
         separate = self._sep_cb.isChecked()
         self._sep_cb.setEnabled(group_by == _BY_COMBINED)
-
         # Existing DICOMDIRs were dropped at scan time, so every file here is
-        # real image data. Counts and the tree never include DICOMDIR (the
-        # "With DICOMDIR" option generates fresh ones after sorting).
-        groups: dict[str, dict] = {}
-        for f in self._files:
+        # real image data. Build key→folder-name (auto) + file→key assignment.
+        self._groups = {}
+        self._file_group = {}
+        self._next_new = 1
+        order = 0
+        for idx, f in enumerate(self._files):
             key, default_sub = _group_of(f, group_by, separate)
-            g = groups.setdefault(
-                key, {"default": default_sub, "files": [],
-                      "patients": set(), "mods": set()})
-            g["files"].append(f)
-            g["patients"].add(f["patientName"])
-            g["mods"].add(f["modality"])
+            if key not in self._groups:
+                self._groups[key] = {"name": default_sub, "manual": False,
+                                     "order": order}
+                order += 1
+            self._file_group[idx] = key
+        self._rebuild_tree()
 
-        # Populate with sorting OFF (fast, and the group insertion order below is
-        # kept) then switch it back on so the header stays click-sortable.
+    def _rebuild_tree(self) -> None:
+        """Render _groups + _file_group into the tree WITHOUT recomputing the
+        assignment — called after the auto-regroup and after every manual edit
+        (drag-move, new folder, rename)."""
+        gfiles: dict[str, list[int]] = {k: [] for k in self._groups}
+        for idx, key in self._file_group.items():
+            gfiles.setdefault(key, []).append(idx)
+
+        # Populate with sorting OFF (fast, order preserved) then switch it back
+        # on so the header stays click-sortable.
         self._tree.setSortingEnabled(False)
         self._tree.blockSignals(True)
         self._tree.clear()
-        for key in sorted(groups):
-            g = groups[key]
+        self._item_by_key = {}
+        for key in sorted(self._groups, key=lambda k: self._groups[k]["order"]):
+            g = self._groups[key]
+            idxs = gfiles.get(key, [])
+            files = [self._files[i] for i in idxs]
+            mods = ", ".join(sorted({f["modality"] for f in files})) or "—"
+            npt = len({f["patientName"] for f in files})
             item = QTreeWidgetItem(self._tree)
-            mods = ", ".join(sorted(g["mods"]))
-            item.setText(0, f"{key}   [{mods} | {len(g['patients'])} pt]")
+            # Auto groups show their descriptive key; a user "New Folder" shows
+            # its (editable) name — the key is just an internal id there.
+            head = g["name"] if g["manual"] else key
+            item.setText(0, f"{head}   [{mods} | {npt} pt]")
             # Trailing spaces = a right margin so the right-aligned count doesn't
             # butt up against the editable "Folder name" column next to it.
-            item.setText(1, f"{len(g['files'])}   ")
+            item.setText(1, f"{len(files)}   ")
             item.setTextAlignment(1, Qt.AlignmentFlag.AlignRight)
-            item.setText(2, g["default"])
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
+            item.setText(2, g["name"])
+            # Group rows: editable name + drop target, but not draggable.
+            item.setFlags((item.flags() | Qt.ItemFlag.ItemIsEditable
+                           | Qt.ItemFlag.ItemIsDropEnabled)
+                          & ~Qt.ItemFlag.ItemIsDragEnabled)
             item.setData(0, Qt.ItemDataRole.UserRole, key)
+            self._item_by_key[key] = item
             # File rows — every file, so a header-click sort covers the whole
             # group (no truncation). Acq #/Series # carry their INTEGER value so
             # the column sorts numerically (10 after 2, not before); Acq Time is
             # fixed-width HH:MM:SS so a string sort is chronological too.
-            for f in g["files"]:
+            for idx in idxs:
+                f = self._files[idx]
                 leaf = QTreeWidgetItem(item)
                 leaf.setText(0, f["name"])
                 leaf.setText(2, f"{f['patientName']} · {_human(f['size'])}")
@@ -697,14 +808,47 @@ class DicomFolderWindow(QMainWindow):
                     leaf.setData(5, Qt.ItemDataRole.DisplayRole,
                                  f["seriesNumber"])
                 leaf.setTextAlignment(5, Qt.AlignmentFlag.AlignRight)
+                # File rows: draggable, not a drop target, not editable. UserRole
+                # carries the file index so a drop knows what moved.
+                leaf.setFlags((leaf.flags() | Qt.ItemFlag.ItemIsDragEnabled)
+                              & ~(Qt.ItemFlag.ItemIsDropEnabled
+                                  | Qt.ItemFlag.ItemIsEditable))
+                leaf.setData(0, Qt.ItemDataRole.UserRole, idx)
         self._tree.blockSignals(False)
         self._tree.setSortingEnabled(True)
-        # Re-apply the remembered sort so freshly-grouped files show in the
-        # user's chosen order (not just the Group-column default).
+        # Re-apply the remembered sort so files show in the user's chosen order.
         self._tree.sortByColumn(self._sort[0], Qt.SortOrder(self._sort[1]))
         self._stat_lbl.setText(
             t("{files} DICOM file(s) in {groups} group(s).",
-              files=len(self._files), groups=len(groups)))
+              files=len(self._files), groups=len(self._groups)))
+
+    def _on_files_dropped(self, key: str, idxs: list) -> None:
+        """Drag-drop: reassign the dropped files to group *key* and re-render."""
+        if key not in self._groups:
+            return
+        changed = False
+        for i in idxs:
+            if 0 <= i < len(self._files) and self._file_group.get(i) != key:
+                self._file_group[i] = key
+                changed = True
+        if changed:
+            self._rebuild_tree()
+
+    def _new_folder(self) -> None:
+        """"New Folder": add an empty output folder and start renaming it. Files
+        can then be dragged onto it."""
+        if not self._files:
+            return
+        key = f"__new_{self._next_new}"
+        self._next_new += 1
+        order = 1 + max((g["order"] for g in self._groups.values()), default=-1)
+        self._groups[key] = {"name": t("New Folder"), "manual": True,
+                             "order": order}
+        self._rebuild_tree()
+        item = self._item_by_key.get(key)
+        if item is not None:
+            self._tree.setCurrentItem(item)
+            self._tree.editItem(item, 2)             # inline-rename the folder
 
     def _on_sort_changed(self, column: int, order) -> None:
         """Header clicked → remember the sort so a fresh (re)group keeps it and
@@ -718,11 +862,19 @@ class DicomFolderWindow(QMainWindow):
         if col != 2:
             return
         key = item.data(0, Qt.ItemDataRole.UserRole)
-        if key is None:                              # only top-level group rows
+        # Only a top-level group row (str key) carries an editable folder name;
+        # file rows store an int index and are not editable.
+        if not isinstance(key, str) or key not in self._groups:
             return
         val = item.text(2).strip()
         if val:
-            self._name_map[key] = val
+            self._groups[key]["name"] = val
+            # A user folder shows its name in the Group column too — keep that in
+            # sync (auto groups show their key there, which renaming doesn't
+            # affect). setText(0) re-emits itemChanged for col 0, ignored above.
+            if self._groups[key]["manual"]:
+                _head, sep, rest = item.text(0).partition("   [")
+                item.setText(0, f"{val}{sep}{rest}")
 
     # ----------------------------------------------------------- organize
     def _organize(self) -> None:
@@ -739,9 +891,18 @@ class DicomFolderWindow(QMainWindow):
         self._set_busy(True)
         self._bar.setVisible(True)
         self._bar.setRange(0, len(self._files))
+        # Each file's destination = its assigned group's (possibly renamed /
+        # newly-created) folder name, reflecting every drag-move done in the
+        # table.
+        assignments = []
+        for idx, f in enumerate(self._files):
+            key = self._file_group.get(idx)
+            g = self._groups.get(key)
+            sub = g["name"] if g else _group_of(
+                f, self._group_by(), self._sep_cb.isChecked())[1]
+            assignments.append((f, sub))
         self._worker = _OrganizeWorker(
-            list(self._files), self._target, move,
-            self._group_by(), self._sep_cb.isChecked(), dict(self._name_map),
+            assignments, self._target, move,
             self._with_dicomdir_cb.isChecked())
         self._worker.progress.connect(
             lambda d, tot: (self._bar.setValue(d),
