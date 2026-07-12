@@ -16,6 +16,7 @@ from pydicom.fileset import FileSet
 from pydicom.filebase import DicomBytesIO
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
+from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.dicom_io import _normalize_charset, decode_text
 from multi_dicomviewer.i18n import t
 from PyQt6.QtGui import QFont
@@ -438,7 +439,12 @@ class DicomFolderWindow(QMainWindow):
         self._tree.setColumnWidth(4, 90)
         self._tree.setColumnWidth(5, 80)
         self._tree.setSortingEnabled(True)
-        self._tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
+        # Restore the sort column + order from the last session (defaults to the
+        # Group column, ascending) and persist any change the user makes.
+        _col, _order = settings.load_dicomfolder_sort()
+        self._sort = (_col, _order)
+        self._tree.sortByColumn(_col, Qt.SortOrder(_order))
+        self._tree.header().sortIndicatorChanged.connect(self._on_sort_changed)
         self._tree.itemChanged.connect(self._on_name_edited)
         root.addWidget(self._tree, 1)
 
@@ -683,9 +689,18 @@ class DicomFolderWindow(QMainWindow):
                 leaf.setTextAlignment(5, Qt.AlignmentFlag.AlignRight)
         self._tree.blockSignals(False)
         self._tree.setSortingEnabled(True)
+        # Re-apply the remembered sort so freshly-grouped files show in the
+        # user's chosen order (not just the Group-column default).
+        self._tree.sortByColumn(self._sort[0], Qt.SortOrder(self._sort[1]))
         self._stat_lbl.setText(
             t("{files} DICOM file(s) in {groups} group(s).",
               files=len(self._files), groups=len(groups)))
+
+    def _on_sort_changed(self, column: int, order) -> None:
+        """Header clicked → remember the sort so a fresh (re)group keeps it and
+        it survives an app restart."""
+        self._sort = (int(column), int(order))
+        settings.save_dicomfolder_sort(*self._sort)
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
