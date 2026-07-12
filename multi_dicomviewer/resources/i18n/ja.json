@@ -633,5 +633,12 @@
   "Series #": "シリーズ番号",
   "New Folder": "新規フォルダ",
   "Create a new (empty) output folder, then rename it and drag files onto it.": "新しい（空の）出力フォルダを作成し、名前を変更してファイルをドラッグして入れます。",
-  "Tip: drag file rows onto a folder to move them between output folders.": "ヒント：ファイル行をフォルダにドラッグすると、出力フォルダ間で移動できます。"
+  "Tip: drag file rows onto a folder to move them between output folders.": "ヒント：ファイル行をフォルダにドラッグすると、出力フォルダ間で移動できます。",
+  "Show the file": "画像を表示",
+  "Image preview": "画像プレビュー",
+  "Folder name (editable) / Size": "フォルダ名（編集可）／サイズ",
+  "(cannot display this file)": "（このファイルは表示できません）",
+  "  ·  {n} frames (showing #1)": "  ·  {n} フレーム（#1 を表示）",
+  "This folder has no files to preview.": "このフォルダにプレビューできるファイルがありません。",
+  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "選択したファイルの画像をプレビュー表示します。First/Prev/Next/Last でフォルダ内のファイルを移動できます。"
 }

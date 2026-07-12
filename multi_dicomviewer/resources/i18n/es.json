@@ -633,5 +633,12 @@
   "Series #": "Nº serie",
   "New Folder": "Nueva carpeta",
   "Create a new (empty) output folder, then rename it and drag files onto it.": "Crea una carpeta de salida nueva (vacía); luego renómbrala y arrastra archivos a ella.",
-  "Tip: drag file rows onto a folder to move them between output folders.": "Consejo: arrastra filas de archivo sobre una carpeta para moverlas entre carpetas de salida."
+  "Tip: drag file rows onto a folder to move them between output folders.": "Consejo: arrastra filas de archivo sobre una carpeta para moverlas entre carpetas de salida.",
+  "Show the file": "Mostrar el archivo",
+  "Image preview": "Vista previa de imagen",
+  "Folder name (editable) / Size": "Nombre de carpeta (editable) / Tamaño",
+  "(cannot display this file)": "(no se puede mostrar este archivo)",
+  "  ·  {n} frames (showing #1)": "  ·  {n} fotogramas (mostrando #1)",
+  "This folder has no files to preview.": "Esta carpeta no tiene archivos para previsualizar.",
+  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "Previsualiza la imagen del archivo seleccionado; recorre los archivos de la carpeta con First/Prev/Next/Last."
 }

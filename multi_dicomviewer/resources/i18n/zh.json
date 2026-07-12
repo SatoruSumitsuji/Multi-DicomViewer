@@ -633,5 +633,12 @@
   "Series #": "序列号",
   "New Folder": "新建文件夹",
   "Create a new (empty) output folder, then rename it and drag files onto it.": "创建一个新的（空）输出文件夹，然后重命名并将文件拖入其中。",
-  "Tip: drag file rows onto a folder to move them between output folders.": "提示：将文件行拖到某个文件夹上，即可在输出文件夹之间移动。"
+  "Tip: drag file rows onto a folder to move them between output folders.": "提示：将文件行拖到某个文件夹上，即可在输出文件夹之间移动。",
+  "Show the file": "显示图像",
+  "Image preview": "图像预览",
+  "Folder name (editable) / Size": "文件夹名称（可编辑）/ 大小",
+  "(cannot display this file)": "（无法显示此文件）",
+  "  ·  {n} frames (showing #1)": "  ·  {n} 帧（显示 #1）",
+  "This folder has no files to preview.": "该文件夹没有可预览的文件。",
+  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "预览所选文件的图像；用 First/Prev/Next/Last 在该文件夹的文件之间切换。"
 }
