@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QHeaderView,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -438,6 +439,15 @@ class DicomFolderWindow(QMainWindow):
         self._tree.setColumnWidth(3, 70)
         self._tree.setColumnWidth(4, 90)
         self._tree.setColumnWidth(5, 80)
+        # Make the (wide, elidable) Group column absorb window resizing instead
+        # of the last section. Otherwise the default stretch-last-section shrinks
+        # the Series # column as the window narrows and its numbers vanish while
+        # the roomy Group column keeps empty space. Now Group flexes and the
+        # fixed-width Acq #/Acq Time/Series # columns always show their data.
+        hdr = self._tree.header()
+        hdr.setStretchLastSection(False)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setMinimumSectionSize(40)
         self._tree.setSortingEnabled(True)
         # Restore the sort column + order from the last session (defaults to the
         # Group column, ascending) and persist any change the user makes.
