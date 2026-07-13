@@ -640,5 +640,6 @@
   "(cannot display this file)": "(no se puede mostrar este archivo)",
   "  ·  {n} frames (showing #1)": "  ·  {n} fotogramas (mostrando #1)",
   "This folder has no files to preview.": "Esta carpeta no tiene archivos para previsualizar.",
-  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "Previsualiza la imagen del archivo seleccionado; recorre los archivos de la carpeta con First/Prev/Next/Last."
+  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "Previsualiza la imagen del archivo seleccionado; recorre los archivos de la carpeta con First/Prev/Next/Last.",
+  "  ·  cine, {n} frames": "  ·  cine, {n} fotogramas"
 }

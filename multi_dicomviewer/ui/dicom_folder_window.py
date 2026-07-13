@@ -15,7 +15,7 @@ import numpy as np
 import pydicom
 from pydicom.fileset import FileSet
 from pydicom.filebase import DicomBytesIO
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.dicom_io import (
@@ -26,7 +26,7 @@ from multi_dicomviewer.core.dicom_io import (
 )
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.image_canvas import to_qimage
-from PyQt6.QtGui import QFont, QPixmap
+from PyQt6.QtGui import QBrush, QColor, QFont, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSlider,
     QStyleOptionViewItem,
     QStyledItemDelegate,
     QTreeWidget,
@@ -69,16 +70,6 @@ def _is_dicom(path: str) -> bool:
             return fh.read(4) == b"DICM"
     except OSError:
         return False
-
-
-def _human(n: float) -> str:
-    if n < 1024:
-        return f"{int(n)} B"
-    for unit in ("KB", "MB", "GB", "TB"):
-        n /= 1024.0
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-    return f"{n:.1f} PB"
 
 
 def _fmt_time(raw: str) -> str:
@@ -111,33 +102,76 @@ def _size_aligned(n: float) -> str:
     return f"{f'{val:.1f}'.rjust(7, _FIGSP)} {unit}"
 
 
-def _preview_qimage(path: str):
-    """Decode a DICOM file's first frame to a display QImage. Returns
-    ``(QImage|None, frame_count)``. Grayscale is auto-windowed (CT uses a
-    soft-tissue HU window; everything else min–max), colour is shown as-is."""
-    try:
-        ds = pydicom.dcmread(path, force=True)
-        px = _decode_frame(ds, 0)
-    except Exception:
-        return None, 1
-    try:
-        nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
-    except (TypeError, ValueError):
-        nframes = 1
-    if px.ndim == 3:                                 # already display RGB uint8
-        return to_qimage(np.ascontiguousarray(px[..., :3].astype(np.uint8))), \
-            nframes
-    px = px.astype(np.float32)
-    if str(getattr(ds, "Modality", "")).upper() == "CT":
-        px = px * _to_float(getattr(ds, "RescaleSlope", 1.0), 1.0) + \
-            _to_float(getattr(ds, "RescaleIntercept", 0.0), 0.0)
-        lo, hi = -100.0, 700.0
-    else:
-        lo, hi = float(px.min()), float(px.max())
-    out = np.clip((px - lo) / max(hi - lo, 1e-6), 0.0, 1.0) * 255.0
-    if str(getattr(ds, "PhotometricInterpretation", "")).upper() == "MONOCHROME1":
-        out = 255.0 - out                            # MONOCHROME1: min = white
-    return to_qimage(out.astype(np.uint8)), nframes
+class _Clip:
+    """A decoded DICOM file for the preview popup — renders any frame to a
+    QImage. Grayscale is auto-windowed once from frame 0 (CT: soft-tissue HU;
+    else min–max) so a cine doesn't flicker; colour is shown as-is. Multi-frame
+    files play as a cine at their own rate."""
+
+    def __init__(self, path: str):
+        self.ok = False
+        self.nframes = 1
+        self._ds = None
+        self._ct = False
+        self._mono1 = False
+        self._lo, self._hi = 0.0, 1.0
+        self._slope, self._inter = 1.0, 0.0
+        try:
+            self._ds = pydicom.dcmread(path, force=True)
+        except Exception:
+            return
+        ds = self._ds
+        try:
+            self.nframes = int(getattr(ds, "NumberOfFrames", 1) or 1)
+        except (TypeError, ValueError):
+            self.nframes = 1
+        try:
+            px0 = _decode_frame(ds, 0)
+        except Exception:
+            return
+        if px0.ndim != 3:                            # grayscale → fix a window
+            px0 = px0.astype(np.float32)
+            if str(getattr(ds, "Modality", "")).upper() == "CT":
+                self._ct = True
+                self._slope = _to_float(getattr(ds, "RescaleSlope", 1.0), 1.0)
+                self._inter = _to_float(getattr(ds, "RescaleIntercept", 0.0),
+                                        0.0)
+                self._lo, self._hi = -100.0, 700.0
+            else:
+                self._lo, self._hi = float(px0.min()), float(px0.max())
+            self._mono1 = (str(getattr(ds, "PhotometricInterpretation", ""))
+                           .upper() == "MONOCHROME1")
+        self.ok = True
+
+    def fps(self) -> float:
+        ds = self._ds
+        r = _to_float(getattr(ds, "CineRate", None), None)
+        if r and r > 0:
+            return float(r)
+        ft = _to_float(getattr(ds, "FrameTime", None), None)   # ms/frame
+        if ft and ft > 0:
+            return 1000.0 / float(ft)
+        return 15.0
+
+    def frame(self, i: int):
+        """Frame *i* as a QImage (None on failure)."""
+        if not self.ok:
+            return None
+        i = max(0, min(int(i), self.nframes - 1))
+        try:
+            px = _decode_frame(self._ds, i)
+        except Exception:
+            return None
+        if px.ndim == 3:
+            return to_qimage(np.ascontiguousarray(px[..., :3].astype(np.uint8)))
+        px = px.astype(np.float32)
+        if self._ct:
+            px = px * self._slope + self._inter
+        out = np.clip((px - self._lo) / max(self._hi - self._lo, 1e-6),
+                      0.0, 1.0) * 255.0
+        if self._mono1:
+            out = 255.0 - out
+        return to_qimage(out.astype(np.uint8))
 
 
 class _RightPadDelegate(QStyledItemDelegate):
@@ -161,18 +195,27 @@ class _RightPadDelegate(QStyledItemDelegate):
 
 
 class _FilePreviewDialog(QDialog):
-    """Popup image viewer for the DicomFolder table: shows one file's first
-    frame with First / Prev / Next / Last buttons to step through the other
-    files in the SAME folder (in the table's current display order)."""
+    """Popup image viewer for the DicomFolder table. Shows one file at a time
+    with First / Prev / Next / Last to step through the other files in the SAME
+    folder (table display order). Multi-frame files PLAY as a cine (auto-start,
+    with a Play/Pause toggle + a frame slider to scrub). *on_show(idx)* is
+    called with each shown file's index so the caller can highlight it."""
 
-    def __init__(self, paths: list, labels: list, start: int = 0, parent=None):
+    def __init__(self, paths: list, labels: list, indices: list,
+                 start: int = 0, on_show=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("Image preview"))
-        self.resize(720, 660)
+        self.resize(720, 700)
         self._paths = paths
         self._labels = labels
+        self._indices = indices
+        self._on_show = on_show
         self._i = max(0, min(start, len(paths) - 1))
+        self._clip: _Clip | None = None
+        self._frame = 0
         self._pix: QPixmap | None = None
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._advance)
 
         v = QVBoxLayout(self)
         self._title = QLabel("")
@@ -183,6 +226,20 @@ class _FilePreviewDialog(QDialog):
         self._img.setMinimumSize(360, 360)
         self._img.setStyleSheet("background:#000; color:#aaa;")
         v.addWidget(self._img, 1)
+
+        # Cine row: Play/Pause + a frame scrubber (shown only for multi-frame).
+        crow = QHBoxLayout()
+        self._play_btn = QPushButton(t("⏸ Pause"))
+        self._play_btn.setFixedWidth(96)
+        self._play_btn.clicked.connect(self._toggle_play)
+        crow.addWidget(self._play_btn)
+        self._frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self._frame_slider.valueChanged.connect(self._on_scrub)
+        crow.addWidget(self._frame_slider, 1)
+        self._frame_lbl = QLabel("")
+        crow.addWidget(self._frame_lbl)
+        self._cine_row = crow
+        v.addLayout(crow)
 
         nav = QHBoxLayout()
         self._first_btn = QPushButton(t("⏮ First"))
@@ -206,21 +263,50 @@ class _FilePreviewDialog(QDialog):
             self._load()
 
     def _load(self) -> None:
-        qimg, nframes = _preview_qimage(self._paths[self._i])
-        if qimg is None:
-            self._pix = None
-            self._img.setText(t("(cannot display this file)"))
-        else:
-            self._pix = QPixmap.fromImage(qimg)
-            self._render()
-        extra = t("  ·  {n} frames (showing #1)", n=nframes) if nframes > 1 else ""
+        self._timer.stop()
+        self._clip = _Clip(self._paths[self._i])
+        self._frame = 0
+        nframes = self._clip.nframes if self._clip.ok else 1
+        multi = self._clip.ok and nframes > 1
+        # Cine controls only for multi-frame files.
+        self._play_btn.setVisible(multi)
+        self._frame_slider.setVisible(multi)
+        self._frame_lbl.setVisible(multi)
+        if multi:
+            self._frame_slider.blockSignals(True)
+            self._frame_slider.setRange(0, nframes - 1)
+            self._frame_slider.setValue(0)
+            self._frame_slider.blockSignals(False)
+        self._render_frame()
+        # Title + file-nav buttons.
         self._title.setText(
-            f"{self._labels[self._i]}   "
-            f"({self._i + 1}/{len(self._paths)}){extra}")
+            f"{self._labels[self._i]}   ({self._i + 1}/{len(self._paths)})"
+            + (t("  ·  cine, {n} frames", n=nframes) if multi else ""))
         self._first_btn.setEnabled(self._i > 0)
         self._prev_btn.setEnabled(self._i > 0)
         self._next_btn.setEnabled(self._i < len(self._paths) - 1)
         self._last_btn.setEnabled(self._i < len(self._paths) - 1)
+        # Tell the caller which file is on screen (→ grey-highlight its row).
+        if self._on_show is not None and 0 <= self._i < len(self._indices):
+            self._on_show(self._indices[self._i])
+        # Auto-play a cine.
+        if multi:
+            self._start_play(True)
+
+    def _render_frame(self) -> None:
+        if self._clip is None or not self._clip.ok:
+            self._pix = None
+            self._img.setText(t("(cannot display this file)"))
+            return
+        qimg = self._clip.frame(self._frame)
+        if qimg is None:
+            self._pix = None
+            self._img.setText(t("(cannot display this file)"))
+            return
+        self._pix = QPixmap.fromImage(qimg)
+        self._render()
+        if self._clip.nframes > 1:
+            self._frame_lbl.setText(f"{self._frame + 1}/{self._clip.nframes}")
 
     def _render(self) -> None:
         if self._pix is None:
@@ -229,9 +315,40 @@ class _FilePreviewDialog(QDialog):
             self._img.size(), Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation))
 
+    # -------------------------------------------------------------- cine
+    def _advance(self) -> None:
+        if self._clip is None or self._clip.nframes <= 1:
+            return
+        self._frame = (self._frame + 1) % self._clip.nframes
+        self._frame_slider.blockSignals(True)
+        self._frame_slider.setValue(self._frame)
+        self._frame_slider.blockSignals(False)
+        self._render_frame()
+
+    def _start_play(self, on: bool) -> None:
+        if on and self._clip is not None and self._clip.nframes > 1:
+            fps = max(1.0, min(60.0, self._clip.fps()))
+            self._timer.start(int(1000.0 / fps))
+            self._play_btn.setText(t("⏸ Pause"))
+        else:
+            self._timer.stop()
+            self._play_btn.setText(t("▶ Play"))
+
+    def _toggle_play(self) -> None:
+        self._start_play(not self._timer.isActive())
+
+    def _on_scrub(self, value: int) -> None:
+        self._start_play(False)                      # scrubbing pauses playback
+        self._frame = int(value)
+        self._render_frame()
+
     def resizeEvent(self, e):                         # noqa: N802 (Qt override)
         super().resizeEvent(e)
         self._render()
+
+    def closeEvent(self, e):                          # noqa: N802 (Qt override)
+        self._timer.stop()
+        super().closeEvent(e)
 
 
 #: SOP Class UID of a DICOMDIR (Media Storage Directory Storage). Any file with
@@ -555,6 +672,8 @@ class DicomFolderWindow(QMainWindow):
         self._file_group: dict[int, str] = {}
         self._next_new = 1                           # id for new-folder keys
         self._item_by_key: dict[str, object] = {}    # key -> its group row
+        self._leaf_by_index: dict[int, object] = {}  # file idx -> its file row
+        self._preview_leaf = None                    # grey-highlighted row
         self._worker: QThread | None = None
 
         central = QWidget()
@@ -688,14 +807,16 @@ class DicomFolderWindow(QMainWindow):
         self._tree.setColumnWidth(3, 70)
         self._tree.setColumnWidth(4, 90)
         self._tree.setColumnWidth(5, 80)
-        # Make the (wide, elidable) Group column absorb window resizing instead
-        # of the last section. Otherwise the default stretch-last-section shrinks
-        # the Series # column as the window narrows and its numbers vanish while
-        # the roomy Group column keeps empty space. Now Group flexes and the
-        # fixed-width Acq #/Acq Time/Series # columns always show their data.
+        # Column resizing: the Group column is user-resizable (Interactive), and
+        # the Folder name / Size column absorbs window resizing (Stretch) instead
+        # of the last section — otherwise the default stretch-last-section shrinks
+        # the Series # column as the window narrows and its numbers vanish. This
+        # keeps Group draggable AND the fixed-width Acq #/Acq Time/Series # always
+        # showing their data.
         hdr = self._tree.header()
         hdr.setStretchLastSection(False)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         hdr.setMinimumSectionSize(40)
         self._tree.setSortingEnabled(True)
         # Restore the sort column + order from the last session (defaults to the
@@ -767,6 +888,8 @@ class DicomFolderWindow(QMainWindow):
         self._groups = {}
         self._file_group = {}
         self._item_by_key = {}
+        self._leaf_by_index = {}
+        self._preview_leaf = None
         self._next_new = 1
         self._tree.clear()
         self._src_lbl.setText(t("(none)"))
@@ -937,6 +1060,8 @@ class DicomFolderWindow(QMainWindow):
         self._tree.blockSignals(True)
         self._tree.clear()
         self._item_by_key = {}
+        self._leaf_by_index = {}                     # file idx -> its row
+        self._preview_leaf = None                    # grey-highlighted row
         for key in sorted(self._groups, key=lambda k: self._groups[k]["order"]):
             g = self._groups[key]
             idxs = gfiles.get(key, [])
@@ -985,6 +1110,7 @@ class DicomFolderWindow(QMainWindow):
                               & ~(Qt.ItemFlag.ItemIsDropEnabled
                                   | Qt.ItemFlag.ItemIsEditable))
                 leaf.setData(0, Qt.ItemDataRole.UserRole, idx)
+                self._leaf_by_index[idx] = leaf
         self._tree.blockSignals(False)
         self._tree.setSortingEnabled(True)
         # Re-apply the remembered sort so files show in the user's chosen order.
@@ -1039,7 +1165,7 @@ class DicomFolderWindow(QMainWindow):
             start_leaf = cur
         if grp is None:
             return
-        paths, labels, start = [], [], 0
+        paths, labels, indices, start = [], [], [], 0
         for r in range(grp.childCount()):
             leaf = grp.child(r)
             idx = leaf.data(0, Qt.ItemDataRole.UserRole)
@@ -1049,12 +1175,33 @@ class DicomFolderWindow(QMainWindow):
                 start = len(paths)
             paths.append(self._files[idx]["path"])
             labels.append(self._files[idx]["name"])
+            indices.append(idx)
         if not paths:
             QMessageBox.information(
                 self, t("Show the file"),
                 t("This folder has no files to preview."))
             return
-        _FilePreviewDialog(paths, labels, start, self).exec()
+        dlg = _FilePreviewDialog(paths, labels, indices, start,
+                                 on_show=self._highlight_preview, parent=self)
+        try:
+            dlg.exec()
+        finally:
+            self._highlight_preview(None)            # clear the grey row
+
+    def _highlight_preview(self, idx) -> None:
+        """Grey the row of the file currently shown in the preview popup (or
+        clear it when *idx* is None) so it's obvious which file is on screen."""
+        prev = self._preview_leaf
+        if prev is not None:
+            for c in range(self._tree.columnCount()):
+                prev.setBackground(c, QBrush())      # reset to default
+        leaf = self._leaf_by_index.get(idx) if idx is not None else None
+        self._preview_leaf = leaf
+        if leaf is not None:
+            grey = QBrush(QColor(200, 200, 200))
+            for c in range(self._tree.columnCount()):
+                leaf.setBackground(c, grey)
+            self._tree.scrollToItem(leaf)
 
     def _on_sort_changed(self, column: int, order) -> None:
         """Header clicked → remember the sort so a fresh (re)group keeps it and
