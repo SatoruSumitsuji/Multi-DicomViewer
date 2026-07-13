@@ -292,13 +292,28 @@ class IVUSViewer(XAViewer):
             lambda _p: self._clear_angle_keys())
         ivus_row.addWidget(self._angle_set_btn)
 
+        # "Reset" (right of Angle Set, normal gap): drop every angle keyframe
+        # and return the cross-section rotation to 0°.
+        self._angle_reset_btn = QPushButton(t("Reset"))
+        self._angle_reset_btn.setToolTip(
+            t("Clear all angle keyframes and reset the rotation to 0°."))
+        self._angle_reset_btn.clicked.connect(self._on_angle_reset)
+        ivus_row.addWidget(self._angle_reset_btn)
+        # 3× the default button gap before Long View (measured: gap = layout
+        # spacing + addSpacing, so 2× spacing → 3× total).
+        _gap = ivus_row.spacing()
+        if _gap < 0:
+            _gap = 6
+        ivus_row.addSpacing(2 * _gap)
+
         # "Long View" toggle. Mirrors the V shortcut so the check state always
-        # matches _la_visible.
+        # matches _la_visible. Width follows the label (no fixed minimum).
         self._long_view_btn = QPushButton(t("Long View"))
         self._long_view_btn.setCheckable(True)
-        self._long_view_btn.setMinimumWidth(110)
+        # Tight horizontal padding so the button hugs the "Long View" label
+        # (its width is otherwise bounded only by the bold text).
         self._long_view_btn.setStyleSheet(
-            "QPushButton { font-weight: bold; }"
+            "QPushButton { font-weight: bold; padding:2px 6px; }"
             "QPushButton:checked { background:#1f77b4; color:white; }"
         )
         self._long_view_btn.setToolTip(
@@ -419,6 +434,11 @@ class IVUSViewer(XAViewer):
                   "interpolated between keyframes (shortest path); the "
                   "first/last keys are held to frame 1 / the last frame. "
                   "Right-click to clear all keys."))
+        btn = getattr(self, "_angle_reset_btn", None)
+        if btn is not None:
+            btn.setText(t("Reset"))
+            btn.setToolTip(
+                t("Clear all angle keyframes and reset the rotation to 0°."))
         # Re-render the angle-keyframe summary label in the new language.
         if getattr(self, "_angle_kf", None) is not None:
             self._refresh_angle_marks()
@@ -703,6 +723,15 @@ class IVUSViewer(XAViewer):
             return
         self._angle_kf.clear()
         self._refresh_angle_marks()
+
+    def _on_angle_reset(self) -> None:
+        """"Reset" (next to Angle Set): clear every angle keyframe and return
+        the cross-section rotation to 0° (does not touch the 90°/flip
+        orientation — that has its own Reset in the toolbar)."""
+        self._angle_kf.clear()
+        self._refresh_angle_marks()
+        for c in (self.canvas, self.canvas2):
+            c.set_free_rotation(0.0)
 
     def _on_angle_mark_clicked(self, frame: int) -> None:
         """Click a seek-bar angle marker → jump to that keyframe's frame so the

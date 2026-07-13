@@ -644,5 +644,6 @@
   "  ·  cine, {n} frames": "  ·  cine, {n} fotogramas",
   "Angle Set": "Fijar ángulo",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "Fija el ángulo de rotación del fotograma actual. Los ángulos se interpolan entre claves (camino más corto); las claves primera/última se mantienen hasta el fotograma 1 / el último. Clic derecho para borrar todas.",
-  "Angle keyframes — {list}": "Claves de ángulo — {list}"
+  "Angle keyframes — {list}": "Claves de ángulo — {list}",
+  "Clear all angle keyframes and reset the rotation to 0°.": "Borra todas las claves de ángulo y restablece la rotación a 0°."
 }

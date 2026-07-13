@@ -644,5 +644,6 @@
   "  ·  cine, {n} frames": "  ·  电影，{n} 帧",
   "Angle Set": "角度设定",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "将当前帧的旋转角度设为关键帧。角度在关键帧之间按最短路径插值；首/末关键帧分别保持到第1帧/最后一帧。右键清除所有关键帧。",
-  "Angle keyframes — {list}": "角度关键帧 — {list}"
+  "Angle keyframes — {list}": "角度关键帧 — {list}",
+  "Clear all angle keyframes and reset the rotation to 0°.": "清除所有角度关键帧并将旋转重置为0°。"
 }
