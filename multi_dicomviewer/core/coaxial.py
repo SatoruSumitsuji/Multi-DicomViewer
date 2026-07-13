@@ -34,6 +34,7 @@ These satisfy ``u_right x v_down = beam`` (a right-handed image triad).
 from __future__ import annotations
 
 import math
+from itertools import combinations
 
 import numpy as np
 
@@ -420,6 +421,50 @@ def coaxial_confidence(gc_obs, vessel_obs) -> dict:
     return out
 
 
+def subset_angles(gc_obs, vessel_obs) -> dict:
+    """GC↔vessel 3-D angle reconstructed from EVERY subset (size ≥ 2) of the
+    views that carry BOTH a GC and a vessel line — a transparent breakdown so
+    the reader can see how each image-combination's angle compares (and whether
+    the all-image value is representative).
+
+    Returns:
+        ``views``  : ordered ``[(beta, alpha), ...]`` — the image numbering
+                     1..N used by the ``idx`` tuples below (same stable
+                     (beta, alpha) order as the confidence cues).
+        ``combos`` : list of ``{idx, size, theta, best_sep}`` for each subset,
+                     size ascending then lexicographic. ``idx`` is the 1-based
+                     image numbers; ``theta`` is the angle in degrees, or
+                     ``None`` when the subset's most-separated view pair is
+                     below :data:`MIN_VIEW_SEPARATION_DEG` (too parallel to
+                     reconstruct — the UI shows "N/A").
+    """
+    gc_by = {_view_key(o): o for o in gc_obs}
+    ve_by = {_view_key(o): o for o in vessel_obs}
+    shared = sorted(k for k in ve_by if k in gc_by)
+    views = [(k[0], k[1]) for k in shared]
+    combos = []
+    n = len(shared)
+    for size in range(2, n + 1):
+        for idx in combinations(range(n), size):
+            ks = [shared[i] for i in idx]
+            gco = [gc_by[k] for k in ks]
+            veo = [ve_by[k] for k in ks]
+            best_sep = best_view_separation_deg(gco)
+            theta = None
+            if best_sep >= MIN_VIEW_SEPARATION_DEG:
+                try:
+                    theta = _theta_from_obs(gco, veo)
+                except ValueError:
+                    theta = None
+            combos.append({
+                "idx": tuple(i + 1 for i in idx),   # 1-based image numbers
+                "size": size,
+                "theta": theta,
+                "best_sep": best_sep,
+            })
+    return {"views": views, "combos": combos}
+
+
 def compute_coaxial_angles(labeled_lines):
     """High-level entry: GC-to-each-vessel angles from labelled lines.
 
@@ -569,6 +614,12 @@ def compute_coaxial_angles(labeled_lines):
             # Reconstruction-stability cues (pairwise 2-view angles,
             # leave-one-out swing, conditioning). 3-D answer unchanged.
             details[label]["confidence"] = coaxial_confidence(
+                by_label[GC], by_label[label]
+            )
+            # Full per-image-combination breakdown (2..N views), each labelled
+            # by C-arm angulation, with N/A for combinations too parallel to
+            # solve. The all-image entry is the headline angle above.
+            details[label]["subsets"] = subset_angles(
                 by_label[GC], by_label[label]
             )
     elif directions:

@@ -47,6 +47,42 @@ def _fmt_proj(beta: float, alpha: float) -> str:
     return f"{lr} / {cc}"
 
 
+def _subset_text(label: str, det: dict) -> str | None:
+    """Per-image-combination angle table. Numbers each image by its C-arm
+    angulation (LAO/RAO · CRA/CAU), then lists the GC↔vessel angle for every
+    combination of 2+ images, grouped by combination size. Combinations whose
+    views are too parallel to reconstruct show "N/A". The all-image row is the
+    headline (final) angle."""
+    sub = det.get("subsets") if det else None
+    if not sub or not sub.get("views") or not sub.get("combos"):
+        return None
+    views = sub["views"]
+    lines = [t("Images:")]
+    for i, (b, a) in enumerate(views, 1):
+        lines.append(f"  {i}) {_fmt_proj(b, a)}")
+    lines.append("")
+    lines.append(
+        t("GC ↔ {label} angle by image combination:").format(label=label))
+    last_size = None
+    row: list[str] = []
+    for c in sub["combos"]:
+        if c["size"] != last_size and row:
+            lines.append("  " + "    ".join(row))
+            row = []
+        last_size = c["size"]
+        key = "-".join(str(i) for i in c["idx"])
+        val = t("N/A") if c.get("theta") is None else f"{c['theta']:.0f}°"
+        row.append(f"{key}: {val}")
+    if row:
+        lines.append("  " + "    ".join(row))
+    n = len(views)
+    if n >= 2:
+        final_key = "-".join(str(i) for i in range(1, n + 1))
+        lines.append(
+            t("  ({key} = all images = final result)").format(key=final_key))
+    return "\n".join(lines)
+
+
 def _fmt_kappa(k) -> str:
     """Conditioning number for display: '∞' when the views collapse to one
     direction, '—' when unavailable, else 1-decimal."""
@@ -330,6 +366,19 @@ class CoaxialResultDialog(QDialog):
                     )
                     rel.setWordWrap(True)
                     col.addWidget(rel)
+
+                # Per-image-combination angle table (numbered by C-arm
+                # angulation; N/A for combinations too parallel to solve). The
+                # clearest view of how the all-image (final) angle was reached.
+                combo_txt = _subset_text(label, det) if det else None
+                if combo_txt:
+                    combo = QLabel(combo_txt)
+                    combo.setStyleSheet(
+                        "color:#111111; font-size:9pt; "
+                        "font-family:'Consolas','Menlo',monospace; "
+                        "padding:2px 0 4px 14px;"
+                    )
+                    col.addWidget(combo)
 
                 # GC-Target評価最適角度 — the two opposite C-arm angulations
                 # whose projection shows this angle without foreshortening.
