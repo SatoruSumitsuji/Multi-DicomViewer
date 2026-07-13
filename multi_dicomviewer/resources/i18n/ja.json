@@ -658,5 +658,9 @@
   "Angle Set exported.": "角度セットをエクスポートしました。",
   "Drag over the grid to show any block of panes (not just the top-left).": "グリッド上をドラッグして、任意のペインのブロックを表示（左上に限りません）。",
   "Move {n} file(s) to": "{n} 件のファイルの移動先",
-  "Vessel Type": "血管の種類"
+  "Vessel Type": "血管の種類",
+  "Images:": "画像:",
+  "GC ↔ {label} angle by image combination:": "GC ↔ {label} 角度（画像の組み合わせ別）:",
+  "N/A": "N/A",
+  "  ({key} = all images = final result)": "  （{key} = 全画像 = 最終結果）"
 }

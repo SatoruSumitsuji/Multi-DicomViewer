@@ -658,5 +658,9 @@
   "Angle Set exported.": "Conjunto de ángulos exportado.",
   "Drag over the grid to show any block of panes (not just the top-left).": "Arrastra sobre la cuadrícula para mostrar cualquier bloque de paneles (no solo la esquina superior izquierda).",
   "Move {n} file(s) to": "Mover {n} archivo(s) a",
-  "Vessel Type": "Tipo de vaso"
+  "Vessel Type": "Tipo de vaso",
+  "Images:": "Imágenes:",
+  "GC ↔ {label} angle by image combination:": "Ángulo GC ↔ {label} por combinación de imágenes:",
+  "N/A": "N/A",
+  "  ({key} = all images = final result)": "  ({key} = todas las imágenes = resultado final)"
 }

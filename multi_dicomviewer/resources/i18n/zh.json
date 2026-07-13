@@ -658,5 +658,9 @@
   "Angle Set exported.": "已导出角度集。",
   "Drag over the grid to show any block of panes (not just the top-left).": "在网格上拖动以显示任意窗格块（不限于左上角）。",
   "Move {n} file(s) to": "将 {n} 个文件移动到",
-  "Vessel Type": "血管类型"
+  "Vessel Type": "血管类型",
+  "Images:": "图像:",
+  "GC ↔ {label} angle by image combination:": "GC ↔ {label} 角度（按图像组合）:",
+  "N/A": "N/A",
+  "  ({key} = all images = final result)": "  （{key} = 所有图像 = 最终结果）"
 }
