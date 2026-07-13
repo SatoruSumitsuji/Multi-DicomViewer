@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
+    QWidget,
 )
 
 from multi_dicomviewer.i18n import t
@@ -292,7 +295,22 @@ class CoaxialResultDialog(QDialog):
         # were unreadable on the default light-gray dialog background).
         self.setStyleSheet("QDialog { background:#f5f5f5; }")
 
-        col = QVBoxLayout(self)
+        # Scrollable content: with 6 images × several vessels the expanded
+        # Detail can be far taller than the screen, so the result body lives in
+        # a scroll area and the Detail/Close buttons stay fixed at the bottom.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content = QWidget()
+        content.setStyleSheet("background:#f5f5f5;")
+        scroll.setWidget(content)
+        outer.addWidget(scroll, 1)
+        self._content = content
+
+        col = QVBoxLayout(content)
         col.setContentsMargins(16, 14, 16, 14)
         col.setSpacing(8)
 
@@ -451,7 +469,10 @@ class CoaxialResultDialog(QDialog):
                 wl.setWordWrap(True)
                 col.addWidget(wl)
 
+        # Buttons live OUTSIDE the scroll area so they stay fixed at the bottom
+        # (always reachable no matter how tall / scrolled the content is).
         btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(16, 8, 16, 12)
         btn_row.addStretch(1)
         # "Detail" reveals the hidden black breakdown (combination table +
         # reconstruction steps). Absent when there is nothing to reveal.
@@ -463,11 +484,27 @@ class CoaxialResultDialog(QDialog):
         ok = QPushButton(t("Close"))
         ok.clicked.connect(self.accept)
         btn_row.addWidget(ok)
-        col.addLayout(btn_row)
+        outer.addLayout(btn_row)
+
+        # Open at a sensible size, capped to the screen so a big result never
+        # exceeds the display — the scroll area takes over past that.
+        avail = None
+        scr = QApplication.primaryScreen()
+        if scr is not None:
+            avail = scr.availableGeometry()
+        self._max_h = int(avail.height() * 0.88) if avail is not None else 760
+        max_w = int(avail.width() * 0.9) if avail is not None else 900
+        hint = content.sizeHint()
+        self._dlg_w = min(max(480, hint.width() + 40), max_w)
+        self.resize(self._dlg_w, min(hint.height() + 72, self._max_h))
 
     def _toggle_detail(self, on: bool) -> None:
-        """Show/hide the black technical breakdown; resize the dialog to fit."""
+        """Show/hide the black technical breakdown, then grow/shrink the dialog
+        toward the (now taller/shorter) content — capped to the screen, past
+        which the scroll area takes over. Width is kept steady."""
         for w in self._detail_widgets:
             w.setVisible(on)
         self._detail_btn.setText(t("Hide Detail") if on else t("Detail"))
-        self.adjustSize()
+        self._content.adjustSize()
+        self.resize(self._dlg_w,
+                    min(self._content.sizeHint().height() + 72, self._max_h))
