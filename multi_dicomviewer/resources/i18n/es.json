@@ -657,5 +657,6 @@
   "Export Angle Set": "Exportar conjunto de ángulos",
   "IVUS Angle Set (*.ivangle.json)": "Conjunto de ángulos IVUS (*.ivangle.json)",
   "Angle Set exported.": "Conjunto de ángulos exportado.",
-  "Drag over the grid to show any block of panes (not just the top-left).": "Arrastra sobre la cuadrícula para mostrar cualquier bloque de paneles (no solo la esquina superior izquierda)."
+  "Drag over the grid to show any block of panes (not just the top-left).": "Arrastra sobre la cuadrícula para mostrar cualquier bloque de paneles (no solo la esquina superior izquierda).",
+  "Move {n} file(s) to": "Mover {n} archivo(s) a"
 }

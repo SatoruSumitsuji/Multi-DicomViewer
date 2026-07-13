@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QHeaderView,
     QProgressBar,
@@ -614,6 +615,10 @@ class _GroupTree(QTreeWidget):
     through so the window's whole-window drop handler still catches them."""
 
     files_dropped = pyqtSignal(str, list)            # (target key, [file idx])
+    #: right-click on file row(s) → ([file idx], global QPoint) so the window
+    #: can offer "move to another folder" (works when the target is scrolled
+    #: off-screen and a drag can't reach it).
+    files_menu_requested = pyqtSignal(list, object)
 
     def dragEnterEvent(self, ev):                    # noqa: N802 (Qt override)
         if ev.source() is self:
@@ -623,9 +628,29 @@ class _GroupTree(QTreeWidget):
 
     def dragMoveEvent(self, ev):                     # noqa: N802 (Qt override)
         if ev.source() is self:
+            # Let the base class arm edge auto-scroll (so a drag can reach a
+            # target row that's scrolled off-screen), then accept anywhere —
+            # we resolve the target group ourselves on drop.
+            super().dragMoveEvent(ev)
             ev.acceptProposedAction()
         else:
             ev.ignore()
+
+    def contextMenuEvent(self, e):                   # noqa: N802 (Qt override)
+        item = self.itemAt(e.pos())
+        if item is None:
+            return
+        if not isinstance(item.data(0, Qt.ItemDataRole.UserRole), int):
+            return                                   # group row — no move menu
+        # Selection-aware: right-click on a selected row acts on the whole
+        # selection; on an unselected row, just that one.
+        sel = self.selectedItems()
+        rows = ([it for it in sel
+                 if isinstance(it.data(0, Qt.ItemDataRole.UserRole), int)]
+                if item in sel else [item])
+        idxs = [it.data(0, Qt.ItemDataRole.UserRole) for it in rows]
+        if idxs:
+            self.files_menu_requested.emit(idxs, e.globalPos())
 
     def dropEvent(self, ev):                         # noqa: N802 (Qt override)
         if ev.source() is not self:
@@ -791,7 +816,9 @@ class DicomFolderWindow(QMainWindow):
         self._tree.viewport().setAcceptDrops(True)
         self._tree.setDropIndicatorShown(True)
         self._tree.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        self._tree.setAutoScroll(True)               # edge auto-scroll on drag
         self._tree.files_dropped.connect(self._on_files_dropped)
+        self._tree.files_menu_requested.connect(self._on_files_menu)
         self._tree.setHeaderLabels(
             [t("Group"), t("Files"), t("Folder name (editable) / Size"),
              t("Acq #"), t("Acq Time"), t("Series #")])
@@ -1136,6 +1163,33 @@ class DicomFolderWindow(QMainWindow):
                 changed = True
         if changed:
             self._rebuild_tree()
+
+    def _on_files_menu(self, idxs: list, gpos) -> None:
+        """Right-click on file row(s) → "Move to" menu listing every OTHER
+        folder. Lets you move files when the target folder is scrolled off-
+        screen and a drag can't reach it. Moving many files at once is fine."""
+        if not idxs:
+            return
+        cur_keys = {self._file_group.get(i) for i in idxs}
+        menu = QMenu(self)
+        menu.addSection(t("Move {n} file(s) to", n=len(idxs)))
+        added = 0
+        for key in sorted(self._groups, key=lambda k: self._groups[k]["order"]):
+            # Skip the folder when EVERY selected file is already in it (moving
+            # there would be a no-op — "自分以外のフォルダ").
+            if cur_keys == {key}:
+                continue
+            g = self._groups[key]
+            label = g["name"] if g["manual"] else key
+            n_here = sum(1 for v in self._file_group.values() if v == key)
+            act = menu.addAction(f"{label}  ({n_here})")
+            act.setData(key)
+            added += 1
+        if not added:
+            return
+        chosen = menu.exec(gpos)
+        if chosen is not None and chosen.data() in self._groups:
+            self._on_files_dropped(chosen.data(), idxs)
 
     def _new_folder(self) -> None:
         """"New Folder": add an empty output folder and start renaming it. Files
