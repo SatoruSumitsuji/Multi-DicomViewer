@@ -578,7 +578,6 @@
   "Unrecognised CoSync file.": "認識できないCoSyncファイルです。",
   "Unsupported data": "未対応のデータ",
   "Value": "値",
-  "Vessel type": "血管の種類",
   "View only — no C-arm positioner angles in this image's DICOM header": "表示のみ — この画像のDICOMヘッダにC-armポジショナー角度がありません",
   "Viewers cleared.": "ビューをクリアしました。",
   "Virtual balloon diameter: {v:.2f} mm": "仮想バルーン径: {v:.2f} mm",
@@ -658,5 +657,6 @@
   "IVUS Angle Set (*.ivangle.json)": "IVUS 角度セット (*.ivangle.json)",
   "Angle Set exported.": "角度セットをエクスポートしました。",
   "Drag over the grid to show any block of panes (not just the top-left).": "グリッド上をドラッグして、任意のペインのブロックを表示（左上に限りません）。",
-  "Move {n} file(s) to": "{n} 件のファイルの移動先"
+  "Move {n} file(s) to": "{n} 件のファイルの移動先",
+  "Vessel Type": "血管の種類"
 }

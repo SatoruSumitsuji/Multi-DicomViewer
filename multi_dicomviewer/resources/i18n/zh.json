@@ -578,7 +578,6 @@
   "Unrecognised CoSync file.": "无法识别的 CoSync 文件。",
   "Unsupported data": "不支持的数据",
   "Value": "值",
-  "Vessel type": "血管类型",
   "View only — no C-arm positioner angles in this image's DICOM header": "仅供查看——此图像的 DICOM 头中无 C-arm 定位角度",
   "Viewers cleared.": "已清空查看器。",
   "Virtual balloon diameter: {v:.2f} mm": "虚拟球囊直径：{v:.2f} mm",
@@ -658,5 +657,6 @@
   "IVUS Angle Set (*.ivangle.json)": "IVUS 角度集 (*.ivangle.json)",
   "Angle Set exported.": "已导出角度集。",
   "Drag over the grid to show any block of panes (not just the top-left).": "在网格上拖动以显示任意窗格块（不限于左上角）。",
-  "Move {n} file(s) to": "将 {n} 个文件移动到"
+  "Move {n} file(s) to": "将 {n} 个文件移动到",
+  "Vessel Type": "血管类型"
 }
