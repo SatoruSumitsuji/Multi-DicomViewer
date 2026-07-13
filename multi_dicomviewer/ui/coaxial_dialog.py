@@ -10,8 +10,10 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -317,6 +319,9 @@ class CoaxialResultDialog(QDialog):
         angles = result.get("angles", {})
         directions = result.get("directions", {})
         warnings = result.get("warnings", [])
+        # Kept for "Export" (which always includes the Detail breakdown).
+        self._result = result
+        self._view_counts = view_counts
         # The "black" technical breakdown (per-image combination table + the
         # 3-D reconstruction steps) is hidden by default and revealed by the
         # "Detail" button; every such widget is collected here.
@@ -473,6 +478,13 @@ class CoaxialResultDialog(QDialog):
         # (always reachable no matter how tall / scrolled the content is).
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(16, 8, 16, 12)
+        # "Export" writes the full report (always including the Detail
+        # breakdown) to a text file.
+        exp = QPushButton(t("Export…"))
+        exp.setToolTip(t("Save the full result — including the Detail "
+                         "breakdown — to a text file."))
+        exp.clicked.connect(self._on_export)
+        btn_row.addWidget(exp)
         btn_row.addStretch(1)
         # "Detail" reveals the hidden black breakdown (combination table +
         # reconstruction steps). Absent when there is nothing to reveal.
@@ -508,3 +520,68 @@ class CoaxialResultDialog(QDialog):
         self._content.adjustSize()
         self.resize(self._dlg_w,
                     min(self._content.sizeHint().height() + 72, self._max_h))
+
+    def _report_text(self) -> str:
+        """The full result as plain text — angle + reliability + optimal view
+        for each vessel, THEN the Detail breakdown (per-image combination table
+        + 3-D reconstruction steps), plus any warnings. Always complete,
+        regardless of whether Detail is expanded on screen."""
+        res = self._result
+        vc = self._view_counts
+        angles = res.get("angles", {})
+        details = res.get("details", {})
+        directions = res.get("directions", {})
+        out: list[str] = [t("Coaxial Evaluation"), "=" * 40]
+        if "GC" in directions:
+            out.append(
+                t("Guiding Catheter reconstructed from {n} views. "
+                  "0° = perfectly coaxial, 90° = perpendicular.")
+                .format(n=vc.get("GC", 0)))
+        out.append("")
+        for label in ("LM", "proxLAD", "proxLCX", "proxRCA"):
+            if label not in angles:
+                continue
+            det = details.get(label, {})
+            out.append(f"GC ↔ {label}: {angles[label]:.0f}°   "
+                       + t("({n} views)").format(n=vc.get(label, 0)))
+            summary = _confidence_summary(det)
+            if summary:
+                out.append(f"  {summary['headline']} — {summary['detail']}")
+            opt = det.get("optimal_view")
+            if opt:
+                (b1, a1), (b2, a2) = opt
+                out.append(t("Optimal GC-target assessment angle:"))
+                out.append(f"    {_fmt_proj(b1, a1)}")
+                out.append(f"    {_fmt_proj(b2, a2)}  "
+                           + t("(opposite direction)"))
+            elif "optimal_view" in det:
+                out.append(t("Optimal GC-target assessment angle: — "
+                             "(GC and vessel are nearly coaxial, so it is not "
+                             "uniquely defined)"))
+            combo = _subset_text(label, det)
+            if combo:
+                out.append(combo)
+            out.append(_steps_text(label, det, details.get("GC", {})))
+            out.append("")
+        warnings = res.get("warnings", [])
+        if warnings:
+            out.append(t("Notes"))
+            for w in warnings:
+                out.append("- " + w)
+        return "\n".join(out)
+
+    def _on_export(self) -> None:
+        """Save the full report (Detail included) to a text file."""
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Export Coaxial Evaluation"), "coaxial_evaluation.txt",
+            t("Text file (*.txt)"))
+        if not path:
+            return
+        if not path.lower().endswith(".txt"):
+            path += ".txt"
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self._report_text())
+        except OSError as exc:
+            QMessageBox.warning(
+                self, t("Export Coaxial Evaluation"), str(exc))

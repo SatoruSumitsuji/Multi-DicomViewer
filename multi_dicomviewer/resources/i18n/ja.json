@@ -29,7 +29,7 @@
   "(empty)": "（空）",
   "(no Positioner angle in DICOM header)": "(DICOMヘッダにPositioner角度がありません)",
   "(none)": "(なし)",
-  "(opposite direction)": "(反対方向)",
+  "(opposite direction)": "（反対方向）",
   "(this projection shows the true angle without foreshortening)": "（この投影で短縮なく実角度が観察できます）",
   "({n} views)": "（{n}方向）",
   "* spread = disagreement of the estimate across projection angles (smaller is more reliable) / κ = geometric diversity of the projection directions (closer to 1 is better; large means the directions are too similar)": "※ spread/ばらつき = 撮影方向ごとの推定の食い違い（小さいほど信頼可）／ κ = 撮影方向の幾何的多様性（1に近いほど良、大きいと方向が似すぎ）",
@@ -373,7 +373,7 @@
   "Open a DICOM folder to begin.": "DICOM フォルダを開いて開始してください。",
   "Open one or more individual DICOM files (not the whole folder)": "個々のDICOMファイルを開く（フォルダ全体ではない）",
   "Open the panes' IVUS series in a synchronised viewer (only available in the 1×2 / 2×1 / 2×2 layout)": "ペインのIVUS系列を同期ビューアで開く（1×2 / 2×1 / 2×2 レイアウトでのみ利用可）",
-  "Optimal GC-target assessment angle:": "GC-Target評価最適角度:",
+  "Optimal GC-target assessment angle:": "GC-ターゲット評価の最適角度:",
   "Optimal GC-target assessment angle:\n    {v1}\n    {v2}  (opposite direction)\n    (this projection shows the target lesion without shortening)": "GC-ターゲット評価最適角度:\n    {v1}\n    {v2}  （反対方向）\n    （この投影では対象病変が短縮せずに描出されます）",
   "Optimal GC-target assessment angle: — (GC and vessel are nearly coaxial, so it is not uniquely defined)": "GC-ターゲット評価最適角度: —（GCと血管がほぼ同軸のため、一意に定まりません）",
   "Organize": "整理",
@@ -664,5 +664,11 @@
   "N/A": "N/A",
   "  ({key} = all images = final result)": "  （{key} = 全画像 = 最終結果）",
   "Detail": "詳細",
-  "Hide Detail": "詳細を隠す"
+  "Hide Detail": "詳細を隠す",
+  "Export…": "エクスポート…",
+  "Save the full result — including the Detail breakdown — to a text file.": "結果全体（Detail の詳細も含む）をテキストファイルに保存します。",
+  "Export Coaxial Evaluation": "Coaxial Evaluation をエクスポート",
+  "Text file (*.txt)": "テキストファイル (*.txt)",
+  "Notes": "注記",
+  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "ドラッグズーム — 画像上で矩形をドラッグすると、その範囲が画面いっぱいに拡大されます"
 }
