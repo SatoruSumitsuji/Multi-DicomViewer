@@ -641,5 +641,8 @@
   "  ·  {n} frames (showing #1)": "  ·  {n} fotogramas (mostrando #1)",
   "This folder has no files to preview.": "Esta carpeta no tiene archivos para previsualizar.",
   "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "Previsualiza la imagen del archivo seleccionado; recorre los archivos de la carpeta con First/Prev/Next/Last.",
-  "  ·  cine, {n} frames": "  ·  cine, {n} fotogramas"
+  "  ·  cine, {n} frames": "  ·  cine, {n} fotogramas",
+  "Angle Set": "Fijar ángulo",
+  "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "Fija el ángulo de rotación del fotograma actual. Los ángulos se interpolan entre claves (camino más corto); las claves primera/última se mantienen hasta el fotograma 1 / el último. Clic derecho para borrar todas.",
+  "Angle keyframes — {list}": "Claves de ángulo — {list}"
 }

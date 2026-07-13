@@ -641,5 +641,8 @@
   "  ·  {n} frames (showing #1)": "  ·  {n} 帧（显示 #1）",
   "This folder has no files to preview.": "该文件夹没有可预览的文件。",
   "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "预览所选文件的图像；用 First/Prev/Next/Last 在该文件夹的文件之间切换。",
-  "  ·  cine, {n} frames": "  ·  电影，{n} 帧"
+  "  ·  cine, {n} frames": "  ·  电影，{n} 帧",
+  "Angle Set": "角度设定",
+  "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "将当前帧的旋转角度设为关键帧。角度在关键帧之间按最短路径插值；首/末关键帧分别保持到第1帧/最后一帧。右键清除所有关键帧。",
+  "Angle keyframes — {list}": "角度关键帧 — {list}"
 }
