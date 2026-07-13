@@ -20,7 +20,35 @@ ANON_PROFILE_PATH = SETTINGS_DIR / "anon_profile.json"
 IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
 DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
 LANGUAGE_PATH = SETTINGS_DIR / "language.json"
+DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
 _SCHEMA_VERSION = 2
+
+
+def load_dicomfolder_sort(default=(0, 0)) -> tuple[int, int]:
+    """The persisted DicomFolder file-list sort as ``(column, order)`` — order
+    is a ``Qt.SortOrder`` int (0 = ascending, 1 = descending). Falls back to
+    *default* (Group column, ascending)."""
+    try:
+        data = json.loads(DICOMFOLDER_SORT_PATH.read_text(encoding="utf-8"))
+        col = int(data.get("column"))
+        order = int(data.get("order"))
+        if col >= 0 and order in (0, 1):
+            return col, order
+    except (OSError, ValueError, TypeError):
+        pass
+    return default
+
+
+def save_dicomfolder_sort(column: int, order: int) -> None:
+    """Best-effort persist of the DicomFolder sort column + order."""
+    try:
+        DICOMFOLDER_SORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DICOMFOLDER_SORT_PATH.write_text(
+            json.dumps({"column": int(column), "order": int(order),
+                        "version": 1}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        pass
 
 
 def load_language(default: str = "en") -> str:

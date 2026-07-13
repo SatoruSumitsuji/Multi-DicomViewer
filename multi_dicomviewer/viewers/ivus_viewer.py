@@ -14,19 +14,23 @@ navigates within whichever modality the active cine pane shows.
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
+    QMessageBox,
     QProgressDialog,
     QPushButton,
     QScrollArea,
     QSplitter,
 )
 
+from multi_dicomviewer.core import coreg
 from multi_dicomviewer.core.dicom_io import apply_color_mode_to_planes
 from multi_dicomviewer.core.image_export import export_image_as, safe_basename
 from multi_dicomviewer.core.settings import load_ivus_color, save_ivus_color
@@ -35,7 +39,7 @@ from multi_dicomviewer.viewers.long_axis_canvas import (
     LongAxisCanvas, build_long_axis,
 )
 from multi_dicomviewer.viewers.xa_viewer import (
-    XAViewer, _Prefetcher, apply_window,
+    XAViewer, _AutoHideLabel, _Prefetcher, apply_window,
 )
 
 
@@ -146,11 +150,23 @@ class _LongAxisScroll(QScrollArea):
 class IVUSViewer(XAViewer):
     handles_modality = "IVUS"
 
+    #: Export the angle keyframes — (series_uid, payload dict). The shell
+    #: reuses the normal export filename-tag picker to name the file.
+    angle_export_requested = pyqtSignal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # %PlaqueArea is now done through the shared "Compare" flow (pick two
         # Ellipse/Polygon, choose %PA / Thickness) — same as the CT viewers —
         # so there is no longer an IVUS-specific auto-%PA mode to enable here.
+
+        # Per-frame image-rotation keyframes (CoSync-style). {frame: angle°}
+        # per series (keyed by SeriesInstanceUID so switching series back
+        # restores them). When set, each shown frame's angle is interpolated
+        # (shortest ≤180° path, held constant before the first / after the last
+        # keyframe) instead of one angle for the whole pull-back.
+        self._angle_kf_by_uid: dict[str, dict[int, float]] = {}
+        self._angle_kf: dict[int, float] = {}
 
         # Long-axis state ----------------------------------------------
         # Per-plane rotation-centre array, lazily populated on series
@@ -246,7 +262,13 @@ class IVUSViewer(XAViewer):
         # Right-click on a long-axis keyframe ▼/▲ → remove that manual centre.
         self.long_axis.keyframe_remove.connect(self._on_la_keyframe_remove)
         # Hook the cross-section canvases for the rotation-centre marker.
+        # Also enable CoSync-style free drag-rotation of the cross-section: an
+        # empty left-drag on the image body spins it about the centre (lowest
+        # priority — never steals the centre-marker/cut-line or a measurement;
+        # suppressed while the long-axis centre marker is shown). "Reset" (in
+        # the orientation toolbar row) undoes it along with Rt90/Lt90/Flip.
         for c in (self.canvas, self.canvas2):
+            c.set_free_rotation_enabled(True)
             c.ivus_center_changed.connect(self._on_center_dragged)
             c.ivus_center_reset.connect(self._on_center_reset)
             # Dragging the yellow cut line on the cross-section re-angles
@@ -262,13 +284,59 @@ class IVUSViewer(XAViewer):
         ivus_row = QHBoxLayout()
         ivus_row.setContentsMargins(4, 0, 4, 0)
 
+        # "Angle Set" (left of Long View): rotate the cross-section to the angle
+        # you want at THIS frame, then click to key it. The seek bar marks each
+        # keyframe and the angle is interpolated between them (CoSync-style).
+        self._angle_set_btn = QPushButton(t("Angle Set"))
+        self._angle_set_btn.setToolTip(
+            t("Key the current frame's rotation angle. Angles are interpolated "
+              "between keyframes (shortest path); the first/last keys are held "
+              "to frame 1 / the last frame. Right-click to clear all keys."))
+        self._angle_set_btn.clicked.connect(self._on_angle_set)
+        self._angle_set_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._angle_set_btn.customContextMenuRequested.connect(
+            lambda _p: self._clear_angle_keys())
+        ivus_row.addWidget(self._angle_set_btn)
+
+        # "Reset" (right of Angle Set, normal gap): drop every angle keyframe
+        # and return the cross-section rotation to 0°.
+        self._angle_reset_btn = QPushButton(t("Reset"))
+        self._angle_reset_btn.setToolTip(
+            t("Clear all angle keyframes and reset the rotation to 0°."))
+        self._angle_reset_btn.clicked.connect(self._on_angle_reset)
+        ivus_row.addWidget(self._angle_reset_btn)
+
+        # "Export" / "Import" the angle keyframes. Export routes through the
+        # shell so the filename reuses the same DICOM-tag picker as the other
+        # exports; Import reads a saved file straight back.
+        self._angle_export_btn = QPushButton(t("Export"))
+        self._angle_export_btn.setToolTip(
+            t("Save the angle keyframes to a file (filename tags chosen like "
+              "the other exports)."))
+        self._angle_export_btn.clicked.connect(self._on_angle_export_clicked)
+        ivus_row.addWidget(self._angle_export_btn)
+        self._angle_import_btn = QPushButton(t("Import"))
+        self._angle_import_btn.setToolTip(
+            t("Load angle keyframes from a previously exported file."))
+        self._angle_import_btn.clicked.connect(self._on_angle_import)
+        ivus_row.addWidget(self._angle_import_btn)
+
+        # 3× the default button gap between the Angle-Set group and Long View
+        # (measured: gap = layout spacing + addSpacing, so 2× spacing → 3× total).
+        _gap = ivus_row.spacing()
+        if _gap < 0:
+            _gap = 6
+        ivus_row.addSpacing(2 * _gap)
+
         # "Long View" toggle. Mirrors the V shortcut so the check state always
-        # matches _la_visible.
+        # matches _la_visible. Width follows the label (no fixed minimum).
         self._long_view_btn = QPushButton(t("Long View"))
         self._long_view_btn.setCheckable(True)
-        self._long_view_btn.setMinimumWidth(110)
+        # Tight horizontal padding so the button hugs the "Long View" label
+        # (its width is otherwise bounded only by the bold text).
         self._long_view_btn.setStyleSheet(
-            "QPushButton { font-weight: bold; }"
+            "QPushButton { font-weight: bold; padding:2px 6px; }"
             "QPushButton:checked { background:#1f77b4; color:white; }"
         )
         self._long_view_btn.setToolTip(
@@ -327,6 +395,21 @@ class IVUSViewer(XAViewer):
         # Insert as the second item of the viewer's main column (index 1),
         # directly under the inherited series-nav row (index 0).
         self.layout().insertLayout(1, ivus_row)
+        # Angle-keyframe summary, shown BELOW the seek bar in the same teal as
+        # the readout (auto-hides when there are no keys). Placed just above the
+        # readout so both sit under the transport strip.
+        self._angle_info = _AutoHideLabel("")
+        self._angle_info.setStyleSheet("color:#27e0c0; padding:2px 6px;")
+        self._angle_info.setVisible(False)
+        self.layout().insertWidget(
+            self.layout().indexOf(self.readout), self._angle_info)
+        # Seek-bar angle markers are interactive: click → jump to that key's
+        # frame (then rotate + Angle Set to update it); right-click → Delete.
+        if hasattr(self, "_range_marks"):
+            self._range_marks.angle_mark_clicked.connect(
+                self._on_angle_mark_clicked)
+            self._range_marks.angle_mark_delete.connect(
+                self._on_angle_mark_delete)
         # Buttons start disabled — they enable once a series is loaded
         # with at least one keyframe (see _refresh_keyframe_markers).
         for b in (self._prev_key_btn, self._next_key_btn,
@@ -364,6 +447,35 @@ class IVUSViewer(XAViewer):
         sup = getattr(super(), "retranslate_ui", None)
         if callable(sup):
             sup()
+
+        # "Angle Set" button.
+        btn = getattr(self, "_angle_set_btn", None)
+        if btn is not None:
+            btn.setText(t("Angle Set"))
+            btn.setToolTip(
+                t("Key the current frame's rotation angle. Angles are "
+                  "interpolated between keyframes (shortest path); the "
+                  "first/last keys are held to frame 1 / the last frame. "
+                  "Right-click to clear all keys."))
+        btn = getattr(self, "_angle_reset_btn", None)
+        if btn is not None:
+            btn.setText(t("Reset"))
+            btn.setToolTip(
+                t("Clear all angle keyframes and reset the rotation to 0°."))
+        btn = getattr(self, "_angle_export_btn", None)
+        if btn is not None:
+            btn.setText(t("Export"))
+            btn.setToolTip(
+                t("Save the angle keyframes to a file (filename tags chosen "
+                  "like the other exports)."))
+        btn = getattr(self, "_angle_import_btn", None)
+        if btn is not None:
+            btn.setText(t("Import"))
+            btn.setToolTip(
+                t("Load angle keyframes from a previously exported file."))
+        # Re-render the angle-keyframe summary label in the new language.
+        if getattr(self, "_angle_kf", None) is not None:
+            self._refresh_angle_marks()
 
         # "Long View" toggle. Text is state-independent; the tooltip depends on
         # whether the long-axis is currently allowed (see set_long_axis_allowed).
@@ -432,6 +544,7 @@ class IVUSViewer(XAViewer):
         strip and the per-frame rotation-centre marker on the cross-
         section canvas. Keeps the Long View button's check state in
         sync with the visibility so V and the button never disagree."""
+        self._on_user_interaction()
         # Disallowed in multi-pane (see set_long_axis_allowed): never turn ON.
         if not self._la_visible and not self._la_allowed:
             return
@@ -483,6 +596,13 @@ class IVUSViewer(XAViewer):
         if self._la_visible:
             self._refresh_center_marker()
             self._rebuild_long_axis()
+        # Restore this series' per-frame angle keyframes (empty for a series
+        # never keyed) and apply the interpolated angle to the shown frame.
+        uid = getattr(self, "_loaded_uid", "")
+        self._angle_kf = self._angle_kf_by_uid.setdefault(uid, {}) if uid \
+            else {}
+        self._refresh_angle_marks()
+        self._apply_frame_angle()
         # Restore this series' remembered colour choice (default grayscale).
         self._sync_color_toggle()
 
@@ -598,12 +718,141 @@ class IVUSViewer(XAViewer):
                 return
 
     def _render(self):
+        # Drive the per-frame rotation BEFORE the base render so the shown
+        # frame is already at its interpolated angle.
+        self._apply_frame_angle()
         super()._render()
         # Cursor on the long-axis follows the cine; the strip itself
         # only rebuilds on rotation / centre / W-L changes.
         if self._la_visible:
             self.long_axis.set_current_frame(self._frame)
             self._refresh_center_marker()
+
+    # ==================================================== per-frame rotation
+    def _apply_frame_angle(self) -> None:
+        """If angle keyframes exist, set the cross-section's rotation to the
+        value interpolated at the current frame (shortest ≤180° path, held
+        constant outside the keyed range). No keyframes → leave rotation as-is
+        (a single manual angle then still applies to every frame, as before)."""
+        if not self._angle_kf:
+            return
+        pairs = list(self._angle_kf.items())
+        ang = coreg.map_rotation(pairs, self._frame)
+        if ang is not None:
+            self.canvas.set_free_rotation(ang)
+
+    def _on_angle_set(self) -> None:
+        """"Angle Set": key the current frame at the cross-section's current
+        rotation angle (overwrites any existing key on that frame)."""
+        if not self._planes:
+            return
+        self._angle_kf[int(self._frame)] = float(self.canvas.free_rotation())
+        self._refresh_angle_marks()
+        self._apply_frame_angle()
+
+    def _clear_angle_keys(self) -> None:
+        """Right-click on "Angle Set" → drop every angle keyframe for this
+        series (rotation stays at its current value)."""
+        if not self._angle_kf:
+            return
+        self._angle_kf.clear()
+        self._refresh_angle_marks()
+
+    def _on_angle_reset(self) -> None:
+        """"Reset" (next to Angle Set): clear every angle keyframe and return
+        the cross-section rotation to 0° (does not touch the 90°/flip
+        orientation — that has its own Reset in the toolbar)."""
+        self._angle_kf.clear()
+        self._refresh_angle_marks()
+        for c in (self.canvas, self.canvas2):
+            c.set_free_rotation(0.0)
+
+    def _on_angle_export_clicked(self) -> None:
+        """"Export": hand the angle keyframes to the shell, which shows the
+        usual filename-tag picker and writes the file."""
+        if not self._angle_kf:
+            self.readout.setText(t("No angle keyframes to export."))
+            return
+        uid = getattr(self, "_loaded_uid", "") or ""
+        payload = {
+            "format": "MDV-IVUS-Angles",
+            "version": 1,
+            "series_uid": uid,
+            "keyframes": {str(f): self._angle_kf[f]
+                          for f in sorted(self._angle_kf)},
+        }
+        self.angle_export_requested.emit(uid, payload)
+
+    def _on_angle_import(self) -> None:
+        """"Import": load angle keyframes from a previously exported file and
+        apply them to the current series."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("Import Angle Set"), "",
+            t("IVUS Angle Set (*.json);;All files (*)"))
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Import Angle Set"), str(exc))
+            return
+        if not isinstance(data, dict) or data.get("format") != "MDV-IVUS-Angles":
+            QMessageBox.warning(
+                self, t("Import Angle Set"),
+                t("This is not an IVUS Angle Set file."))
+            return
+        kf: dict[int, float] = {}
+        for k, v in (data.get("keyframes") or {}).items():
+            try:
+                kf[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        self._angle_kf.clear()
+        self._angle_kf.update(kf)
+        self._refresh_angle_marks()
+        self._apply_frame_angle()
+        self.readout.setText(t("Imported {n} angle keyframe(s).", n=len(kf)))
+
+    def _on_angle_mark_clicked(self, frame: int) -> None:
+        """Click a seek-bar angle marker → jump to that keyframe's frame so the
+        user can rotate and re-key it (Angle Set overwrites that frame)."""
+        self.frame_slider.setValue(int(frame))
+
+    def _on_angle_mark_delete(self, frame: int) -> None:
+        """Right-click ▸ Delete on a seek-bar angle marker → drop that key and
+        re-apply the (now re-interpolated) angle to the shown frame."""
+        if int(frame) in self._angle_kf:
+            del self._angle_kf[int(frame)]
+            self._refresh_angle_marks()
+            self._apply_frame_angle()
+
+    def _refresh_angle_marks(self) -> None:
+        """Sync the seek-bar keyframe triangles and the below-seekbar summary
+        label to the current angle keyframes."""
+        frames = sorted(self._angle_kf)
+        last = max(self.frame_slider.maximum(), 0)
+        if hasattr(self, "_range_marks"):
+            self._range_marks.set_angle_marks(frames, 0, last)
+        if frames:
+            parts = ", ".join(
+                f"F{f + 1}: {round(self._angle_kf[f])}°" for f in frames)
+            self._angle_info.setText(t("Angle keyframes — {list}", list=parts))
+        else:
+            self._angle_info.setText("")
+
+    def _reset_transform(self) -> None:
+        """Reset also drops the per-frame angle keyframes (back to a single,
+        un-rotated view)."""
+        self._angle_kf.clear()
+        self._refresh_angle_marks()
+        super()._reset_transform()
+
+    def _on_user_interaction(self) -> None:
+        """Dismiss the transient 'no colour information' readout on any
+        transport / measure / zoom / orientation action (see XAViewer)."""
+        if self.readout.text() == t("This IVUS has no color information"):
+            self.readout.setText("")
 
     def _wl_changed(self):
         super()._wl_changed()

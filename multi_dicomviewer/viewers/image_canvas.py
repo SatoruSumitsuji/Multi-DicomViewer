@@ -1302,11 +1302,6 @@ class ImageCanvas(QWidget):
                 and self._zoom_click in ("in", "out")):
             self._apply_zoom(1.1 if self._zoom_click == "in" else 0.9, sx, sy)
             return
-        # Free display rotation (IVUS panes): left-drag rotates the image
-        # about the centre. Pan (Ctrl / middle) already returned above.
-        if self._free_rot_on and e.button() == Qt.MouseButton.LeftButton:
-            self._free_rot_drag = self._free_rot_angle(sx, sy)
-            return
         # IVUS–XA CoReg editing on an angio view: trace the guide, or slide
         # the on-guide marker to a landmark. Gated by the sub-mode so it is
         # inert during review and never competes with measurements.
@@ -1483,6 +1478,18 @@ class ImageCanvas(QWidget):
         if li is not None:
             self._drag_label = li
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            return
+
+        # Free display rotation (IVUS + CoSync panes): an EMPTY left-drag on
+        # the image body rotates the image about the centre, MultiSync/CoSync-
+        # style. Kept at the LOWEST priority so it never steals a measurement,
+        # a handle/label edit, or the long-axis centre/cut-line gestures (all
+        # handled above). Suppressed while a measure tool is armed (so drawing
+        # wins) and while the long-axis centre marker is shown (its overlays
+        # don't rotate, so a free spin there would visually mismatch).
+        if (self._free_rot_on and not self.meas_type
+                and not self.ivus_show_center):
+            self._free_rot_drag = self._free_rot_angle(sx, sy)
             return
 
         if not self.meas_type:
