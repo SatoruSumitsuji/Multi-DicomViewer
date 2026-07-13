@@ -656,5 +656,6 @@
   "Imported {n} angle keyframe(s).": "已导入 {n} 个角度关键帧。",
   "Export Angle Set": "导出角度集",
   "IVUS Angle Set (*.ivangle.json)": "IVUS 角度集 (*.ivangle.json)",
-  "Angle Set exported.": "已导出角度集。"
+  "Angle Set exported.": "已导出角度集。",
+  "Drag over the grid to show any block of panes (not just the top-left).": "在网格上拖动以显示任意窗格块（不限于左上角）。"
 }

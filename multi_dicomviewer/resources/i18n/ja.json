@@ -656,5 +656,6 @@
   "Imported {n} angle keyframe(s).": "{n} 個の角度キーフレームをインポートしました。",
   "Export Angle Set": "角度セットをエクスポート",
   "IVUS Angle Set (*.ivangle.json)": "IVUS 角度セット (*.ivangle.json)",
-  "Angle Set exported.": "角度セットをエクスポートしました。"
+  "Angle Set exported.": "角度セットをエクスポートしました。",
+  "Drag over the grid to show any block of panes (not just the top-left).": "グリッド上をドラッグして、任意のペインのブロックを表示（左上に限りません）。"
 }
