@@ -644,5 +644,6 @@
   "  ·  cine, {n} frames": "  ·  シネ、{n} フレーム",
   "Angle Set": "角度設定",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "現在のフレームの回転角度をキー登録します。角度はキーフレーム間で按分（最短経路）され、最初/最後のキーはフレーム1/最終フレームまで保持されます。右クリックで全キー消去。",
-  "Angle keyframes — {list}": "角度キーフレーム — {list}"
+  "Angle keyframes — {list}": "角度キーフレーム — {list}",
+  "Clear all angle keyframes and reset the rotation to 0°.": "角度キーフレームをすべて消去し、回転を0°に戻します。"
 }
