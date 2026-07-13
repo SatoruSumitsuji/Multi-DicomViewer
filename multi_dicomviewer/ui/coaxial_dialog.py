@@ -296,6 +296,10 @@ class CoaxialResultDialog(QDialog):
         angles = result.get("angles", {})
         directions = result.get("directions", {})
         warnings = result.get("warnings", [])
+        # The "black" technical breakdown (per-image combination table + the
+        # 3-D reconstruction steps) is hidden by default and revealed by the
+        # "Detail" button; every such widget is collected here.
+        self._detail_widgets: list = []
 
         head = QLabel(t("GC ↔ coronary-proximal angle"))
         head.setStyleSheet("font-size:14pt; font-weight:bold; color:#111111;")
@@ -367,19 +371,6 @@ class CoaxialResultDialog(QDialog):
                     rel.setWordWrap(True)
                     col.addWidget(rel)
 
-                # Per-image-combination angle table (numbered by C-arm
-                # angulation; N/A for combinations too parallel to solve). The
-                # clearest view of how the all-image (final) angle was reached.
-                combo_txt = _subset_text(label, det) if det else None
-                if combo_txt:
-                    combo = QLabel(combo_txt)
-                    combo.setStyleSheet(
-                        "color:#111111; font-size:9pt; "
-                        "font-family:'Consolas','Menlo',monospace; "
-                        "padding:2px 0 4px 14px;"
-                    )
-                    col.addWidget(combo)
-
                 # GC-Target評価最適角度 — the two opposite C-arm angulations
                 # whose projection shows this angle without foreshortening.
                 opt = det.get("optimal_view") if det else None
@@ -409,6 +400,21 @@ class CoaxialResultDialog(QDialog):
                     )
                     col.addWidget(ov)
 
+                # ---- "Detail" (hidden by default) — the black technical
+                # breakdown: the per-image-combination angle table, then the
+                # 3-D reconstruction steps.
+                combo_txt = _subset_text(label, det) if det else None
+                if combo_txt:
+                    combo = QLabel(combo_txt)
+                    combo.setStyleSheet(
+                        "color:#111111; font-size:9pt; "
+                        "font-family:'Consolas','Menlo',monospace; "
+                        "padding:2px 0 4px 14px;"
+                    )
+                    combo.setVisible(False)
+                    self._detail_widgets.append(combo)
+                    col.addWidget(combo)
+
                 if det:
                     steps = QLabel(
                         _steps_text(label, det, result.get("details", {})
@@ -420,6 +426,8 @@ class CoaxialResultDialog(QDialog):
                         "padding:0 0 4px 14px;"
                     )
                     steps.setWordWrap(True)
+                    steps.setVisible(False)
+                    self._detail_widgets.append(steps)
                     col.addWidget(steps)
         else:
             none_lbl = QLabel(t("No GC-to-vessel angle could be computed."))
@@ -442,7 +450,21 @@ class CoaxialResultDialog(QDialog):
 
         btn_row = QHBoxLayout()
         btn_row.addStretch(1)
+        # "Detail" reveals the hidden black breakdown (combination table +
+        # reconstruction steps). Absent when there is nothing to reveal.
+        if self._detail_widgets:
+            self._detail_btn = QPushButton(t("Detail"))
+            self._detail_btn.setCheckable(True)
+            self._detail_btn.toggled.connect(self._toggle_detail)
+            btn_row.addWidget(self._detail_btn)
         ok = QPushButton(t("Close"))
         ok.clicked.connect(self.accept)
         btn_row.addWidget(ok)
         col.addLayout(btn_row)
+
+    def _toggle_detail(self, on: bool) -> None:
+        """Show/hide the black technical breakdown; resize the dialog to fit."""
+        for w in self._detail_widgets:
+            w.setVisible(on)
+        self._detail_btn.setText(t("Hide Detail") if on else t("Detail"))
+        self.adjustSize()

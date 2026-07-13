@@ -662,5 +662,7 @@
   "Images:": "Imágenes:",
   "GC ↔ {label} angle by image combination:": "Ángulo GC ↔ {label} por combinación de imágenes:",
   "N/A": "N/A",
-  "  ({key} = all images = final result)": "  ({key} = todas las imágenes = resultado final)"
+  "  ({key} = all images = final result)": "  ({key} = todas las imágenes = resultado final)",
+  "Detail": "Detalle",
+  "Hide Detail": "Ocultar detalle"
 }

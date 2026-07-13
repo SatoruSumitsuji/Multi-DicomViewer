@@ -662,5 +662,7 @@
   "Images:": "图像:",
   "GC ↔ {label} angle by image combination:": "GC ↔ {label} 角度（按图像组合）:",
   "N/A": "N/A",
-  "  ({key} = all images = final result)": "  （{key} = 所有图像 = 最终结果）"
+  "  ({key} = all images = final result)": "  （{key} = 所有图像 = 最终结果）",
+  "Detail": "详情",
+  "Hide Detail": "隐藏详情"
 }
