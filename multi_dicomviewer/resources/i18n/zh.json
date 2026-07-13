@@ -640,5 +640,6 @@
   "(cannot display this file)": "（无法显示此文件）",
   "  ·  {n} frames (showing #1)": "  ·  {n} 帧（显示 #1）",
   "This folder has no files to preview.": "该文件夹没有可预览的文件。",
-  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "预览所选文件的图像；用 First/Prev/Next/Last 在该文件夹的文件之间切换。"
+  "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "预览所选文件的图像；用 First/Prev/Next/Last 在该文件夹的文件之间切换。",
+  "  ·  cine, {n} frames": "  ·  电影，{n} 帧"
 }
