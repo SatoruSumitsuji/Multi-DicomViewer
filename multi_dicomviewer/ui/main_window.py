@@ -168,13 +168,14 @@ PANE_MIME = "application/x-mdv-pane"
 
 
 class LayoutGridPicker(QWidget):
-    """Office-"insert table"-style visual layout chooser. Hover (or drag) over
-    a ROWS×COLS grid of cells: the top-left R×C block highlights and a "R×C"
-    caption updates; click (or release) picks that grid layout. Replaces the
-    discrete 1×2 / 2×1 / … buttons that were easy to mix up."""
+    """Office-"insert table"-style visual layout chooser over a ROWS×COLS grid.
+    DRAG to select ANY contiguous rectangle of cells (not just the top-left
+    block): press a corner, drag to the opposite corner, release to pick. A
+    single click picks that one cell. The "R×C" caption tracks the selection.
+    Cells with a loaded pane are shaded brighter so you can see where to drag."""
 
-    #: emitted with (rows, cols) when the user picks a cell
-    picked = pyqtSignal(int, int)
+    #: emitted with the 0-based inclusive rectangle (r0, c0, r1, c1) picked
+    picked = pyqtSignal(int, int, int, int)
 
     _CELL = 22
     _GAP = 4
@@ -185,16 +186,15 @@ class LayoutGridPicker(QWidget):
         super().__init__(parent)
         self._rows = rows
         self._cols = cols
-        self._hover = (1, 1)        # (R, C) currently highlighted
-        self._current = (1, 1)      # the layout actually in effect
-        #: 0-based (row, col) of the pane shown in the CURRENT 1×1 layout, so
-        #: the picker can highlight that exact cell (not always the top-left)
-        #: while it rests on 1×1 — telling you which pane is on screen. None
-        #: outside 1×1 or when unknown.
-        self._solo: tuple | None = None
+        #: 0-based (row, col) drag anchor (None = not dragging) and the cell the
+        #: cursor is over (None = not hovering). Both feed the highlight rect.
+        self._anchor: tuple | None = None
+        self._cur: tuple | None = None
+        #: The layout currently in effect, as a 0-based inclusive rectangle —
+        #: highlighted while the picker rests (no hover/drag) so you can see the
+        #: on-screen arrangement, including a 1×1's specific pane cell.
+        self._current_rect = (0, 0, 0, 0)
         #: 0-based (row, col) cells whose backing pane currently holds data.
-        #: Drives the bright-vs-dark grey so you can see how big a layout you
-        #: must open to reveal every loaded pane.
         self._occupied: set = set()
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -205,21 +205,14 @@ class LayoutGridPicker(QWidget):
              + (self._rows - 1) * self._GAP + self._CAPTION_H)
         return QSize(w, h)
 
-    def set_current(self, rows: int, cols: int) -> None:
-        self._current = (rows, cols)
-        self._hover = (rows, cols)
+    def set_current_rect(self, r0: int, c0: int, r1: int, c1: int) -> None:
+        """The applied layout's 0-based inclusive master-grid rectangle."""
+        self._current_rect = (r0, c0, r1, c1)
         self.update()
 
     def set_occupancy(self, occupied) -> None:
         """*occupied* = iterable of 0-based (row, col) cells that hold data."""
         self._occupied = set(occupied)
-        self.update()
-
-    def set_solo(self, cell) -> None:
-        """0-based (row, col) of the pane shown in the current 1×1 layout (or
-        None). Highlighted in place of the top-left cell while the picker rests
-        on 1×1, so you can see which pane is currently full-screen."""
-        self._solo = tuple(cell) if cell is not None else None
         self.update()
 
     def _cell_rect(self, r: int, c: int) -> QRect:
@@ -228,57 +221,71 @@ class LayoutGridPicker(QWidget):
         return QRect(x, y, self._CELL, self._CELL)
 
     def _cell_at(self, x: float, y: float):
+        """0-based (row, col) under (x, y), or None."""
         for r in range(self._rows):
             for c in range(self._cols):
                 if self._cell_rect(r, c).adjusted(
                         -self._GAP // 2, -self._GAP // 2,
                         self._GAP // 2, self._GAP // 2).contains(int(x), int(y)):
-                    return r + 1, c + 1
+                    return r, c
         return None
 
-    def mouseMoveEvent(self, e):
-        hit = self._cell_at(e.position().x(), e.position().y())
-        if hit and hit != self._hover:
-            self._hover = hit
-            self.update()
+    @staticmethod
+    def _norm(a, b):
+        """Two 0-based cells → inclusive rectangle (r0, c0, r1, c1)."""
+        return (min(a[0], b[0]), min(a[1], b[1]),
+                max(a[0], b[0]), max(a[1], b[1]))
 
-    def leaveEvent(self, _e):
-        self._hover = self._current
-        self.update()
+    def _hi_rect(self):
+        """The rectangle to highlight right now: the live drag, else the hovered
+        single cell, else the applied layout."""
+        if self._anchor is not None and self._cur is not None:
+            return self._norm(self._anchor, self._cur)
+        if self._cur is not None:
+            return (self._cur[0], self._cur[1], self._cur[0], self._cur[1])
+        return self._current_rect
 
     def mousePressEvent(self, e):
         hit = self._cell_at(e.position().x(), e.position().y())
-        if hit:
-            self._hover = hit
+        if hit is not None:
+            self._anchor = self._cur = hit
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        hit = self._cell_at(e.position().x(), e.position().y())
+        if hit is not None and hit != self._cur:
+            self._cur = hit
             self.update()
 
     def mouseReleaseEvent(self, e):
-        hit = self._cell_at(e.position().x(), e.position().y()) or self._hover
-        self.picked.emit(hit[0], hit[1])
+        if self._anchor is None:
+            return
+        hit = self._cell_at(e.position().x(), e.position().y()) or self._cur \
+            or self._anchor
+        r0, c0, r1, c1 = self._norm(self._anchor, hit)
+        self._anchor = None
+        self.update()
+        self.picked.emit(r0, c0, r1, c1)
+
+    def leaveEvent(self, _e):
+        if self._anchor is None:                    # keep the drag rect while held
+            self._cur = None
+            self.update()
 
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#2b2b2b"))
-        hr, hc = self._hover
-        on = QColor("#4a90d9")          # in the hovered R×C block (would apply)
-        off_data = QColor("#8a8a8a")    # outside the block, pane HAS data
-        off_empty = QColor("#3a3a3a")   # outside the block, pane is empty
+        r0, c0, r1, c1 = self._hi_rect()
+        on = QColor("#4a90d9")          # inside the selection (would apply)
+        off_data = QColor("#8a8a8a")    # outside, pane HAS data
+        off_empty = QColor("#3a3a3a")   # outside, pane is empty
         edge = QColor("#1f1f1f")
-        # While the picker rests on the current 1×1 layout (no hover yet),
-        # highlight the ACTUAL on-screen pane's cell instead of the top-left
-        # one, so you can tell which pane is full-screen. As soon as the user
-        # hovers to pick a new size, _hover changes and normal top-left-anchored
-        # block highlighting resumes.
-        solo = (self._solo if (self._solo is not None
-                and self._hover == self._current == (1, 1)) else None)
         for r in range(self._rows):
             for c in range(self._cols):
-                sel = ((r, c) == solo) if solo is not None else (r < hr and c < hc)
-                if sel:
-                    brush = on
-                else:
-                    brush = off_data if (r, c) in self._occupied else off_empty
+                sel = r0 <= r <= r1 and c0 <= c <= c1
+                brush = on if sel else (
+                    off_data if (r, c) in self._occupied else off_empty)
                 p.setPen(QPen(edge, 1))
                 p.setBrush(brush)
                 p.drawRoundedRect(self._cell_rect(r, c), 3, 3)
@@ -288,7 +295,7 @@ class LayoutGridPicker(QWidget):
             QRect(0, self.height() - self._CAPTION_H,
                   self.width(), self._CAPTION_H),
             Qt.AlignmentFlag.AlignCenter,
-            f"{hr}×{hc}",
+            f"{r1 - r0 + 1}×{c1 - c0 + 1}",
         )
 
 
@@ -913,6 +920,10 @@ class MainWindow(QMainWindow):
 
         # --- configurable viewer grid ---
         self._layout_key = "1x1"
+        #: Master-grid cell indices currently shown, in reading order — the
+        #: selected (possibly non-top-left) rectangle. Set by _apply_layout;
+        #: unused in the special 1×1 layout (which shows the active pane).
+        self._layout_cells = [0]
         #: "Max Image" (toolbars hidden) state, shared across every pane.
         self._chrome_hidden = False
         # Bi / Lt / Rt is per-pane now (each viewer stores its own plane
@@ -1081,7 +1092,7 @@ class MainWindow(QMainWindow):
             t("Show/hide the left Info window (study tree)")
         )
         self._layout_btn.setText(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
         self._pane_step_btn.setText(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
             t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
@@ -2052,7 +2063,7 @@ class MainWindow(QMainWindow):
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
         # This menu-button renders square on macOS; give it the same light-grey
         # rounded border as the pane buttons so the top bar matches.
         self._layout_btn.setStyleSheet(
@@ -2200,37 +2211,56 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def _shown_panes(self) -> list:
-        """Panes currently on screen, in display (reading) order. 1×1 shows
-        the active pane; every other layout shows a fixed sub-block of the
-        canonical 2×3 arrangement (``_LAYOUT_CELLS``), so each pane keeps its
-        on-screen position no matter which layout you switch from."""
+        """Panes currently on screen, in display (reading) order. 1×1 shows the
+        active pane; every other layout shows the selected master-grid rectangle
+        (``self._layout_cells``), so each pane keeps its on-screen position no
+        matter which layout you switch from."""
         if self._layout_key == "1x1":
             a = self._active if self._active is not None else self._order[0]
             return [a]
-        return [self._order[i] for i in _LAYOUT_CELLS[self._layout_key]]
+        return [self._order[i] for i in self._layout_cells]
+
+    def _current_layout_rect(self):
+        """The applied layout as a 0-based inclusive master-grid rectangle. For
+        1×1 it is the active pane's cell; otherwise the bounding rect of the
+        shown cells."""
+        if self._layout_key == "1x1":
+            if self._active in self._order:
+                r, c = divmod(self._order.index(self._active), _MAX_GRID_COLS)
+            else:
+                r = c = 0
+            return (r, c, r, c)
+        rc = [divmod(i, _MAX_GRID_COLS) for i in self._layout_cells]
+        rows = [x[0] for x in rc]
+        cols = [x[1] for x in rc]
+        return (min(rows), min(cols), max(rows), max(cols))
 
     def _refresh_layout_picker(self) -> None:
-        """Before the picker pops up: highlight the current layout and shade
-        each cell by whether its pane holds data. In 1×1 also tell the picker
-        WHICH pane is on screen (its master-grid cell) so it highlights that
-        cell rather than always the top-left one."""
-        self._layout_picker.set_current(*_LAYOUTS[self._layout_key][:2])
+        """Before the picker pops up: highlight the current layout rectangle and
+        shade each cell by whether its pane holds data."""
         self._layout_picker.set_occupancy(self._pane_occupancy())
-        solo = None
-        if self._layout_key == "1x1" and self._active in self._order:
-            solo = divmod(self._order.index(self._active), _MAX_GRID_COLS)
-        self._layout_picker.set_solo(solo)
+        self._layout_picker.set_current_rect(*self._current_layout_rect())
 
     def _layout_btn_text(self) -> str:
         # setMenu() adds the native dropdown arrow, so the text itself stays
         # plain: "Layout  2×3".
         return f"{t('Layout')}  {self._layout_key.replace('x', '×')}"
 
-    def _on_layout_picked(self, rows: int, cols: int) -> None:
-        """A cell was chosen in the visual grid picker → apply that R×C layout
-        and dismiss the popup."""
+    def _on_layout_picked(self, r0: int, c0: int, r1: int, c1: int) -> None:
+        """A rectangle was dragged in the visual grid picker → show exactly that
+        (possibly non-top-left) block of master cells. A single cell → 1×1 of
+        that pane."""
         self._layout_menu.hide()
-        self._apply_layout(f"{rows}x{cols}")
+        rows, cols = r1 - r0 + 1, c1 - c0 + 1
+        if rows == 1 and cols == 1:
+            cell = r0 * _MAX_GRID_COLS + c0
+            if 0 <= cell < len(self._order):
+                self._set_active_pane(self._order[cell])
+            self._apply_layout("1x1")
+            return
+        cells = [rr * _MAX_GRID_COLS + cc
+                 for rr in range(r0, r1 + 1) for cc in range(c0, c1 + 1)]
+        self._apply_layout(f"{rows}x{cols}", cells)
 
     def _maximize_pane(self, pane: ViewerPane) -> None:
         """1×1 button / double-click on a pane → show only that pane (1×1).
@@ -2249,9 +2279,13 @@ class MainWindow(QMainWindow):
                 occ.add(divmod(idx, _MAX_GRID_COLS))
         return occ
 
-    def _apply_layout(self, key: str) -> None:
+    def _apply_layout(self, key: str, cells=None) -> None:
         self._layout_key = key
         rows, cols, count = _LAYOUTS[key]
+        # Which master cells to show: the passed rectangle, or the top-left
+        # R×C block (default / backward-compatible).
+        self._layout_cells = list(cells) if cells is not None \
+            else list(_LAYOUT_CELLS[key])
         if hasattr(self, "_layout_btn"):
             self._layout_btn.setText(self._layout_btn_text())
 
@@ -2269,9 +2303,9 @@ class MainWindow(QMainWindow):
             shown.setVisible(True)
             shown.set_full_bleed(True)
         else:
-            # Place the canonical 2×3 cells this layout maps to (so e.g. 2×2
-            # always shows the 2×3's left+middle columns, both rows).
-            for i, cell_idx in enumerate(_LAYOUT_CELLS[key]):
+            # Place the selected master cells (the chosen rectangle) into a
+            # rows×cols grid, preserving their reading-order positions.
+            for i, cell_idx in enumerate(self._layout_cells):
                 r, c = divmod(i, cols)
                 pane = self._order[cell_idx]
                 self._grid.addWidget(pane, r, c)
@@ -2333,7 +2367,7 @@ class MainWindow(QMainWindow):
         dest = self._panes[dest_index]
         i, j = self._order.index(src), self._order.index(dest)
         self._order[i], self._order[j] = self._order[j], self._order[i]
-        self._apply_layout(self._layout_key)
+        self._apply_layout(self._layout_key, self._layout_cells)
 
     def _cycle_active_pane(self) -> None:
         """"Pane →" button: advance to the next pane, wrapping the last back to

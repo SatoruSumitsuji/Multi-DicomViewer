@@ -656,5 +656,6 @@
   "Imported {n} angle keyframe(s).": "Se importaron {n} claves de ángulo.",
   "Export Angle Set": "Exportar conjunto de ángulos",
   "IVUS Angle Set (*.ivangle.json)": "Conjunto de ángulos IVUS (*.ivangle.json)",
-  "Angle Set exported.": "Conjunto de ángulos exportado."
+  "Angle Set exported.": "Conjunto de ángulos exportado.",
+  "Drag over the grid to show any block of panes (not just the top-left).": "Arrastra sobre la cuadrícula para mostrar cualquier bloque de paneles (no solo la esquina superior izquierda)."
 }
