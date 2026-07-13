@@ -645,5 +645,16 @@
   "Angle Set": "Fijar ángulo",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "Fija el ángulo de rotación del fotograma actual. Los ángulos se interpolan entre claves (camino más corto); las claves primera/última se mantienen hasta el fotograma 1 / el último. Clic derecho para borrar todas.",
   "Angle keyframes — {list}": "Claves de ángulo — {list}",
-  "Clear all angle keyframes and reset the rotation to 0°.": "Borra todas las claves de ángulo y restablece la rotación a 0°."
+  "Clear all angle keyframes and reset the rotation to 0°.": "Borra todas las claves de ángulo y restablece la rotación a 0°.",
+  "Import": "Importar",
+  "Save the angle keyframes to a file (filename tags chosen like the other exports).": "Guarda las claves de ángulo en un archivo (las etiquetas del nombre se eligen como en las otras exportaciones).",
+  "Load angle keyframes from a previously exported file.": "Carga las claves de ángulo desde un archivo exportado previamente.",
+  "No angle keyframes to export.": "No hay claves de ángulo para exportar.",
+  "Import Angle Set": "Importar conjunto de ángulos",
+  "IVUS Angle Set (*.json);;All files (*)": "Conjunto de ángulos IVUS (*.json);;Todos los archivos (*)",
+  "This is not an IVUS Angle Set file.": "No es un archivo de conjunto de ángulos IVUS.",
+  "Imported {n} angle keyframe(s).": "Se importaron {n} claves de ángulo.",
+  "Export Angle Set": "Exportar conjunto de ángulos",
+  "IVUS Angle Set (*.ivangle.json)": "Conjunto de ángulos IVUS (*.ivangle.json)",
+  "Angle Set exported.": "Conjunto de ángulos exportado."
 }

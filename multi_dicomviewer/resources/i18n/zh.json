@@ -645,5 +645,16 @@
   "Angle Set": "角度设定",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "将当前帧的旋转角度设为关键帧。角度在关键帧之间按最短路径插值；首/末关键帧分别保持到第1帧/最后一帧。右键清除所有关键帧。",
   "Angle keyframes — {list}": "角度关键帧 — {list}",
-  "Clear all angle keyframes and reset the rotation to 0°.": "清除所有角度关键帧并将旋转重置为0°。"
+  "Clear all angle keyframes and reset the rotation to 0°.": "清除所有角度关键帧并将旋转重置为0°。",
+  "Import": "导入",
+  "Save the angle keyframes to a file (filename tags chosen like the other exports).": "将角度关键帧保存到文件（文件名标签的选择与其他导出相同）。",
+  "Load angle keyframes from a previously exported file.": "从先前导出的文件加载角度关键帧。",
+  "No angle keyframes to export.": "没有可导出的角度关键帧。",
+  "Import Angle Set": "导入角度集",
+  "IVUS Angle Set (*.json);;All files (*)": "IVUS 角度集 (*.json);;所有文件 (*)",
+  "This is not an IVUS Angle Set file.": "这不是 IVUS 角度集文件。",
+  "Imported {n} angle keyframe(s).": "已导入 {n} 个角度关键帧。",
+  "Export Angle Set": "导出角度集",
+  "IVUS Angle Set (*.ivangle.json)": "IVUS 角度集 (*.ivangle.json)",
+  "Angle Set exported.": "已导出角度集。"
 }

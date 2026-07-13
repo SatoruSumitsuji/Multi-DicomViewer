@@ -2920,6 +2920,63 @@ class MainWindow(QMainWindow):
             target = series
         self._on_export_requested(fmt, [target])
 
+    def _on_angle_export(self, uid: str, payload: object) -> None:
+        """IVUS "Export" of angle keyframes: reuse the export filename-tag
+        picker (same dialog + per-modality memory as image export) to name the
+        file, then write *payload* (a small JSON dict) to a user-chosen path."""
+        import json
+        import pydicom
+        from multi_dicomviewer.core import export as exporter
+        from multi_dicomviewer.ui.export_dialog import (
+            DEFAULT_FIELDS,
+            ExportDialog,
+        )
+        series = self._series_by_uid.get(uid) if uid else None
+        if series is None:
+            self.statusBar().showMessage(
+                t("Export: could not identify the displayed series."))
+            return
+        export_mod = self._series_modality_key(series)
+        tag_idents = list(self._tag_keywords_by_modality.get(export_mod, []))
+        dicom_tags = self._label_dicom_tags(series, tag_idents)
+        initial = list(
+            self._export_fields_by_modality.get(export_mod) or []
+        ) or list(DEFAULT_FIELDS)
+        dlg = ExportDialog(
+            "csv", 1, dicom_tags=dicom_tags, initial_fields=initial,
+            title_override=t("Export Angle Set"), parent=self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        cfg = dlg.result_settings()
+        self._export_fields_by_modality[export_mod] = list(cfg.fields)
+        try:
+            settings.save_export_fields_by_modality(
+                self._export_fields_by_modality)
+        except Exception:
+            pass
+        # Default filename from the picked tags (same builder as image export).
+        base = "angle"
+        try:
+            ds = pydicom.dcmread(series.files[0], stop_before_pixels=True,
+                                 force=True)
+            base = exporter.build_filename(cfg.fields, series, ds) or base
+        except Exception:
+            pass
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Export Angle Set"), f"{base}.ivangle.json",
+            t("IVUS Angle Set (*.ivangle.json)"))
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".ivangle.json"
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=1)
+        except OSError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(t("Angle Set exported."))
+
     def _on_export_requested(self, fmt: str, series_list: list) -> None:
         """Right-click ▸ Export (DICOM)/(MP4)/(CSV): show the filename-
         fields dialog, ask for an output folder, run the export with a
@@ -3410,6 +3467,10 @@ class MainWindow(QMainWindow):
         # clicked plane.
         if hasattr(viewer, "plane_export_requested"):
             viewer.plane_export_requested.connect(self._on_plane_export)
+        # IVUS "Export" of angle keyframes → reuse the export filename-tag
+        # picker, then write the small JSON file.
+        if hasattr(viewer, "angle_export_requested"):
+            viewer.angle_export_requested.connect(self._on_angle_export)
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))

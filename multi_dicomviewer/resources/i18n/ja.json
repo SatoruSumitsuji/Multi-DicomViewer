@@ -645,5 +645,16 @@
   "Angle Set": "角度設定",
   "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "現在のフレームの回転角度をキー登録します。角度はキーフレーム間で按分（最短経路）され、最初/最後のキーはフレーム1/最終フレームまで保持されます。右クリックで全キー消去。",
   "Angle keyframes — {list}": "角度キーフレーム — {list}",
-  "Clear all angle keyframes and reset the rotation to 0°.": "角度キーフレームをすべて消去し、回転を0°に戻します。"
+  "Clear all angle keyframes and reset the rotation to 0°.": "角度キーフレームをすべて消去し、回転を0°に戻します。",
+  "Import": "インポート",
+  "Save the angle keyframes to a file (filename tags chosen like the other exports).": "角度キーフレームをファイルに保存します（ファイル名のタグは他のエクスポートと同様に選択）。",
+  "Load angle keyframes from a previously exported file.": "以前エクスポートしたファイルから角度キーフレームを読み込みます。",
+  "No angle keyframes to export.": "エクスポートする角度キーフレームがありません。",
+  "Import Angle Set": "角度セットをインポート",
+  "IVUS Angle Set (*.json);;All files (*)": "IVUS 角度セット (*.json);;すべてのファイル (*)",
+  "This is not an IVUS Angle Set file.": "IVUS 角度セットファイルではありません。",
+  "Imported {n} angle keyframe(s).": "{n} 個の角度キーフレームをインポートしました。",
+  "Export Angle Set": "角度セットをエクスポート",
+  "IVUS Angle Set (*.ivangle.json)": "IVUS 角度セット (*.ivangle.json)",
+  "Angle Set exported.": "角度セットをエクスポートしました。"
 }
