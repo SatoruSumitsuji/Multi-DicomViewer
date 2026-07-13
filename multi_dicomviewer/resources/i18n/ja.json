@@ -641,5 +641,8 @@
   "  ·  {n} frames (showing #1)": "  ·  {n} フレーム（#1 を表示）",
   "This folder has no files to preview.": "このフォルダにプレビューできるファイルがありません。",
   "Preview the selected file's image; step through the folder's files with First/Prev/Next/Last.": "選択したファイルの画像をプレビュー表示します。First/Prev/Next/Last でフォルダ内のファイルを移動できます。",
-  "  ·  cine, {n} frames": "  ·  シネ、{n} フレーム"
+  "  ·  cine, {n} frames": "  ·  シネ、{n} フレーム",
+  "Angle Set": "角度設定",
+  "Key the current frame's rotation angle. Angles are interpolated between keyframes (shortest path); the first/last keys are held to frame 1 / the last frame. Right-click to clear all keys.": "現在のフレームの回転角度をキー登録します。角度はキーフレーム間で按分（最短経路）され、最初/最後のキーはフレーム1/最終フレームまで保持されます。右クリックで全キー消去。",
+  "Angle keyframes — {list}": "角度キーフレーム — {list}"
 }
