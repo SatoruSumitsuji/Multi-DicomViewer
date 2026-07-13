@@ -63,10 +63,13 @@ def _subset_text(label: str, det: dict) -> str | None:
     lines.append("")
     lines.append(
         t("GC ↔ {label} angle by image combination:").format(label=label))
+    # One line per combination SIZE, but wrap long groups so a big image count
+    # (e.g. 6 images → 15 two-image combos) doesn't make one very wide line.
+    max_per_line = 6
     last_size = None
     row: list[str] = []
     for c in sub["combos"]:
-        if c["size"] != last_size and row:
+        if row and (c["size"] != last_size or len(row) >= max_per_line):
             lines.append("  " + "    ".join(row))
             row = []
         last_size = c["size"]
