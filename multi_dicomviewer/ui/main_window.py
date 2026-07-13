@@ -1789,13 +1789,13 @@ class MainWindow(QMainWindow):
         from multi_dicomviewer.core import coaxial
         from multi_dicomviewer.ui.coaxial_dialog import CoaxialResultDialog
 
-        if self._layout_key == "1x1":
-            visible_panes = (
-                [self._active] if self._active is not None else []
-            )
-        else:
-            _, _, count = _LAYOUTS[self._layout_key]
-            visible_panes = [p for p in self._order[:count] if p.isVisible()]
+        # Scan EVERY pane currently on screen (in reading order). Using
+        # _shown_panes() — not self._order[:count] — is essential: the shown
+        # panes are the selected layout rectangle (e.g. a 2×1 shows cells 0 & 3,
+        # not 0 & 1), so the old slice missed the lower pane and only the top
+        # biplane's two images were collected. Each biplane pane contributes
+        # both its canvases (frontal + lateral).
+        visible_panes = self._shown_panes()
 
         all_lines = []
         for pane in visible_panes:
