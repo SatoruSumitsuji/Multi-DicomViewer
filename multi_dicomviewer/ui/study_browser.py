@@ -48,7 +48,7 @@ _ID_ROLE = Qt.ItemDataRole.UserRole + 1
 
 #: thumbnail size-slider bounds; previews are decoded at _THUMB_GEN_PX so
 #: the grid stays sharp anywhere in this range.
-_THUMB_MIN_PX = 60   # was 80; ~75% so more thumbnails fit for gap-scanning
+_THUMB_MIN_PX = 40   # was 60/80; smaller floor fits a ~10x10 grid for overview
 _THUMB_MAX_PX = 280
 _THUMB_GEN_PX = 280
 

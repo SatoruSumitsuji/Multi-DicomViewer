@@ -1054,6 +1054,10 @@ class DicomFolderWindow(QMainWindow):
         for idx, key in self._file_group.items():
             gfiles.setdefault(key, []).append(idx)
 
+        # Remember which folders were expanded so a rebuild (e.g. after a
+        # drag-move) doesn't collapse everything the user had open.
+        expanded = {k for k, it in self._item_by_key.items() if it.isExpanded()}
+
         # Populate with sorting OFF (fast, order preserved) then switch it back
         # on so the header stays click-sortable.
         self._tree.setSortingEnabled(False)
@@ -1111,6 +1115,8 @@ class DicomFolderWindow(QMainWindow):
                                   | Qt.ItemFlag.ItemIsEditable))
                 leaf.setData(0, Qt.ItemDataRole.UserRole, idx)
                 self._leaf_by_index[idx] = leaf
+            # Restore this folder's prior expanded/collapsed state.
+            item.setExpanded(key in expanded)
         self._tree.blockSignals(False)
         self._tree.setSortingEnabled(True)
         # Re-apply the remembered sort so files show in the user's chosen order.
