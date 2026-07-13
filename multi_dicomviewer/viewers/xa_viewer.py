@@ -798,6 +798,18 @@ class XAViewer(AbstractViewer):
         self._zoom_out_btn.clicked.connect(lambda: self._set_zoom_click("out"))
         row.addWidget(self._zoom_out_btn)
 
+        # Rubber-band zoom: drag a dotted rectangle over the image and that
+        # region is magnified to fill the view. Sticky (each drag zooms);
+        # mutually exclusive with click-to-zoom and the measure tools.
+        self._zoom_rect_btn = QPushButton("🔍⬚")
+        self._zoom_rect_btn.setCheckable(True)
+        self._zoom_rect_btn.setToolTip(
+            t("Drag-zoom — drag a rectangle over the image to magnify that "
+              "region to fill the view")
+        )
+        self._zoom_rect_btn.clicked.connect(self._set_zoom_rect)
+        row.addWidget(self._zoom_rect_btn)
+
         # 2-D image transforms (rotate 90° / flip), right of the zoom buttons.
         # Useful mainly for static Secondary-Capture (SC) images. "Mirror" ==
         # Flip-H (a left-right mirror), so it is not a separate button.
@@ -2131,6 +2143,7 @@ class XAViewer(AbstractViewer):
         self._measure_bar.setVisible(on)
         if on:
             self._clear_zoom_click()
+            self._clear_zoom_rect()
         if not on:
             for c in (self.canvas, self.canvas2):
                 c.set_measure_type("")
@@ -2142,8 +2155,9 @@ class XAViewer(AbstractViewer):
 
     def _set_measure_type(self, key: str):
         self._on_user_interaction()
-        # Choosing a drawing tool cancels any active click-to-zoom mode.
+        # Choosing a drawing tool cancels any active click-to-zoom / drag-zoom.
         self._clear_zoom_click()
+        self._clear_zoom_rect()
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
             b.setStyleSheet(
@@ -2162,9 +2176,11 @@ class XAViewer(AbstractViewer):
         other = self._zoom_out_btn if mode == "in" else self._zoom_in_btn
         new_mode = mode if btn.isChecked() else ""
         other.setChecked(False)
-        if new_mode and self._meas_btn.isChecked():
-            self._meas_btn.setChecked(False)
-            self._toggle_measure()
+        if new_mode:
+            self._clear_zoom_rect()          # click-zoom cancels drag-zoom
+            if self._meas_btn.isChecked():
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
         self._style_zoom_btns()
         for c in (self.canvas, self.canvas2):
             c.set_zoom_click_mode(new_mode)
@@ -2176,8 +2192,34 @@ class XAViewer(AbstractViewer):
         for c in (self.canvas, self.canvas2):
             c.set_zoom_click_mode("")
 
+    def _set_zoom_rect(self):
+        """Toggle rubber-band (drag) zoom. Enabling it cancels click-to-zoom
+        and the measure tools; each drag magnifies the boxed region."""
+        self._on_user_interaction()
+        on = self._zoom_rect_btn.isChecked()
+        if on:
+            self._clear_zoom_click()
+            if self._meas_btn.isChecked():
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+        self._style_zoom_btns()
+        for c in (self.canvas, self.canvas2):
+            c.set_zoom_rect_mode(on)
+
+    def _clear_zoom_rect(self):
+        btn = getattr(self, "_zoom_rect_btn", None)
+        if btn is not None:
+            btn.setChecked(False)
+            self._style_zoom_btns()
+        for c in (self.canvas, self.canvas2):
+            c.set_zoom_rect_mode(False)
+
     def _style_zoom_btns(self):
-        for b in (self._zoom_in_btn, self._zoom_out_btn):
+        btns = [self._zoom_in_btn, self._zoom_out_btn]
+        rb = getattr(self, "_zoom_rect_btn", None)
+        if rb is not None:
+            btns.append(rb)
+        for b in btns:
             b.setStyleSheet(
                 "background:#1f77b4;color:black;" if b.isChecked() else ""
             )
@@ -2229,6 +2271,12 @@ class XAViewer(AbstractViewer):
             btn.setToolTip(
                 t("Click-to-zoom OUT — then click a point on the image to shrink "
                   "×0.9 centred on it")
+            )
+        btn = getattr(self, "_zoom_rect_btn", None)
+        if btn is not None:
+            btn.setToolTip(
+                t("Drag-zoom — drag a rectangle over the image to magnify that "
+                  "region to fill the view")
             )
 
         orient_btns = getattr(self, "_orient_btns", None)

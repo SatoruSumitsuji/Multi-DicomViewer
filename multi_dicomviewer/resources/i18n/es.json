@@ -664,5 +664,11 @@
   "N/A": "N/A",
   "  ({key} = all images = final result)": "  ({key} = todas las imágenes = resultado final)",
   "Detail": "Detalle",
-  "Hide Detail": "Ocultar detalle"
+  "Hide Detail": "Ocultar detalle",
+  "Export…": "Exportar…",
+  "Save the full result — including the Detail breakdown — to a text file.": "Guarda el resultado completo (incluido el desglose de Detalle) en un archivo de texto.",
+  "Export Coaxial Evaluation": "Exportar Coaxial Evaluation",
+  "Text file (*.txt)": "Archivo de texto (*.txt)",
+  "Notes": "Notas",
+  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "Zoom por arrastre — arrastra un rectángulo sobre la imagen para ampliar esa región hasta llenar la vista"
 }

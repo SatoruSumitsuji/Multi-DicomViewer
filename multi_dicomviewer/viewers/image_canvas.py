@@ -223,6 +223,12 @@ class ImageCanvas(QWidget):
         # "out" → 0.9×. Independent of the measure tool (they're made
         # mutually exclusive by the viewer).
         self._zoom_click: str = ""
+        # Rubber-band zoom mode (toolbar 🔍▢ button): drag a rectangle and the
+        # image zooms so that region fills the view. _zoom_rect_from/_to hold
+        # the live drag in widget pixels (None = not dragging).
+        self._zoom_rect: bool = False
+        self._zoom_rect_from: tuple[float, float] | None = None
+        self._zoom_rect_to: tuple[float, float] | None = None
         # C-arm (PositionerPrimary, Secondary) angles of whatever plane is
         # CURRENTLY shown on this canvas, set by the XA viewer on every
         # render. Stamped into a measurement when it is committed so the
@@ -490,6 +496,38 @@ class ImageCanvas(QWidget):
                 Qt.CursorShape.CrossCursor if self.meas_type
                 else Qt.CursorShape.ArrowCursor
             )
+
+    def set_zoom_rect_mode(self, on: bool) -> None:
+        """Enable rubber-band zoom: drag a rectangle and the image zooms so
+        that region fills the view. Mutually exclusive with click-to-zoom and
+        the measure tools (the viewer clears those when this turns on)."""
+        self._zoom_rect = bool(on)
+        self._zoom_rect_from = self._zoom_rect_to = None
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if self._zoom_rect
+            else (Qt.CursorShape.CrossCursor if self.meas_type
+                  else Qt.CursorShape.ArrowCursor))
+        self.update()
+
+    def zoom_to_rect(self, x0: float, y0: float, x1: float, y1: float) -> None:
+        """Zoom + pan so the widget-pixel rectangle (x0,y0)-(x1,y1) fills the
+        view (aspect preserved, centred). Tiny drags are ignored so a stray
+        click doesn't jump the zoom."""
+        rx, ry = min(x0, x1), min(y0, y1)
+        rw, rh = abs(x1 - x0), abs(y1 - y0)
+        cw, ch = self.width(), self.height()
+        if rw < 8 or rh < 8 or cw <= 0 or ch <= 0:
+            return
+        factor = min(cw / rw, ch / rh)
+        new_zoom = max(0.25, min(8.0, self._zoom * factor))
+        # Image point at the drag rectangle's centre → move it to view centre.
+        cimg = self._widget_to_image_f(rx + rw / 2.0, ry + rh / 2.0)
+        self._zoom = new_zoom
+        after = self._image_to_widget_f(cimg)
+        self._pan[0] += cw / 2.0 - after[0]
+        self._pan[1] += ch / 2.0 - after[1]
+        self._clamp_pan()
+        self.update()
 
     def wheelEvent(self, e):
         """Mouse wheel zooms toward the cursor — natural counterpart to the
@@ -1325,6 +1363,13 @@ class ImageCanvas(QWidget):
                 and self._zoom_click in ("in", "out")):
             self._apply_zoom(1.1 if self._zoom_click == "in" else 0.9, sx, sy)
             return
+        # Rubber-band zoom mode: a left-drag rectangle zooms that region to
+        # fill the view (applied on release).
+        if self._zoom_rect and e.button() == Qt.MouseButton.LeftButton:
+            self._zoom_rect_from = (sx, sy)
+            self._zoom_rect_to = (sx, sy)
+            self.update()
+            return
         # IVUS–XA CoReg editing on an angio view: trace the guide, or slide
         # the on-guide marker to a landmark. Gated by the sub-mode so it is
         # inert during review and never competes with measurements.
@@ -1542,6 +1587,10 @@ class ImageCanvas(QWidget):
             self._clamp_pan()
             self.update()
             return
+        if self._zoom_rect_from is not None:
+            self._zoom_rect_to = (sx, sy)
+            self.update()
+            return
         if self._free_rot_drag is not None:
             now = self._free_rot_angle(sx, sy)
             self._free_rot = (self._free_rot
@@ -1625,6 +1674,13 @@ class ImageCanvas(QWidget):
                 Qt.CursorShape.CrossCursor if self.meas_type
                 else Qt.CursorShape.ArrowCursor
             )
+            return
+        if self._zoom_rect_from is not None:
+            a, b = self._zoom_rect_from, self._zoom_rect_to
+            self._zoom_rect_from = self._zoom_rect_to = None
+            if a is not None and b is not None:
+                self.zoom_to_rect(a[0], a[1], b[0], b[1])
+            self.update()
             return
         if self._coreg_drag_vertex >= 0:
             self._coreg_drag_vertex = -1
@@ -1976,6 +2032,18 @@ class ImageCanvas(QWidget):
         # drawn on top of everything in the dedicated CoReg window.
         if self.coreg_show and self._img_size != (0, 0):
             self._paint_coreg(p)
+
+        # Rubber-band zoom rectangle (dotted) while dragging — on top of all.
+        if self._zoom_rect_from is not None and self._zoom_rect_to is not None:
+            a, b = self._zoom_rect_from, self._zoom_rect_to
+            rb = QRect(int(min(a[0], b[0])), int(min(a[1], b[1])),
+                       int(abs(b[0] - a[0])), int(abs(b[1] - a[1])))
+            p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(255, 255, 255), 1, Qt.PenStyle.DashLine))
+            p.drawRect(rb)
+            p.setPen(QPen(QColor(30, 111, 208), 1, Qt.PenStyle.DashLine))
+            p.drawRect(rb.adjusted(1, 1, -1, -1))
 
     def _paint_ivus_long_axis(self, p: QPainter) -> None:
         """Draw the IVUS long-axis guide on the cross-section, MPR-style:

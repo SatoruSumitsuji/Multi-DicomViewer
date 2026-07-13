@@ -29,7 +29,7 @@
   "(empty)": "（空）",
   "(no Positioner angle in DICOM header)": "（DICOM 头中无定位器角度）",
   "(none)": "（无）",
-  "(opposite direction)": "（反方向）",
+  "(opposite direction)": "（相反方向）",
   "(this projection shows the true angle without foreshortening)": "（此投影显示真实角度，无透视缩短）",
   "({n} views)": "（{n} 个视角）",
   "* spread = disagreement of the estimate across projection angles (smaller is more reliable) / κ = geometric diversity of the projection directions (closer to 1 is better; large means the directions are too similar)": "* spread = 估计值在各投影角度间的离散度（越小越可靠）/ κ = 投影方向的几何多样性（越接近 1 越好；数值大表示方向过于相似）",
@@ -373,7 +373,7 @@
   "Open a DICOM folder to begin.": "打开一个 DICOM 文件夹以开始。",
   "Open one or more individual DICOM files (not the whole folder)": "打开一个或多个单独的 DICOM 文件（而非整个文件夹）",
   "Open the panes' IVUS series in a synchronised viewer (only available in the 1×2 / 2×1 / 2×2 layout)": "在同步查看器中打开各窗格的 IVUS 序列（仅在 1×2 / 2×1 / 2×2 布局下可用）",
-  "Optimal GC-target assessment angle:": "最佳 GC-目标评估角：",
+  "Optimal GC-target assessment angle:": "GC-目标评估最佳角度:",
   "Optimal GC-target assessment angle:\n    {v1}\n    {v2}  (opposite direction)\n    (this projection shows the target lesion without shortening)": "最佳 GC-目标评估角：\n    {v1}\n    {v2}  （相反方向）\n    （该投影可无缩短地显示目标病变）",
   "Optimal GC-target assessment angle: — (GC and vessel are nearly coaxial, so it is not uniquely defined)": "最佳 GC-目标评估角： — （GC 与血管近乎同轴，因此无法唯一确定）",
   "Organize": "整理",
@@ -664,5 +664,11 @@
   "N/A": "N/A",
   "  ({key} = all images = final result)": "  （{key} = 所有图像 = 最终结果）",
   "Detail": "详情",
-  "Hide Detail": "隐藏详情"
+  "Hide Detail": "隐藏详情",
+  "Export…": "导出…",
+  "Save the full result — including the Detail breakdown — to a text file.": "将完整结果（含 Detail 明细）保存到文本文件。",
+  "Export Coaxial Evaluation": "导出 Coaxial Evaluation",
+  "Text file (*.txt)": "文本文件 (*.txt)",
+  "Notes": "注意事项",
+  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "拖动缩放 — 在图像上拖出矩形，将该区域放大填满视图"
 }
