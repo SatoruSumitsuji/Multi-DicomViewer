@@ -168,13 +168,14 @@ PANE_MIME = "application/x-mdv-pane"
 
 
 class LayoutGridPicker(QWidget):
-    """Office-"insert table"-style visual layout chooser. Hover (or drag) over
-    a ROWS×COLS grid of cells: the top-left R×C block highlights and a "R×C"
-    caption updates; click (or release) picks that grid layout. Replaces the
-    discrete 1×2 / 2×1 / … buttons that were easy to mix up."""
+    """Office-"insert table"-style visual layout chooser over a ROWS×COLS grid.
+    DRAG to select ANY contiguous rectangle of cells (not just the top-left
+    block): press a corner, drag to the opposite corner, release to pick. A
+    single click picks that one cell. The "R×C" caption tracks the selection.
+    Cells with a loaded pane are shaded brighter so you can see where to drag."""
 
-    #: emitted with (rows, cols) when the user picks a cell
-    picked = pyqtSignal(int, int)
+    #: emitted with the 0-based inclusive rectangle (r0, c0, r1, c1) picked
+    picked = pyqtSignal(int, int, int, int)
 
     _CELL = 22
     _GAP = 4
@@ -185,11 +186,15 @@ class LayoutGridPicker(QWidget):
         super().__init__(parent)
         self._rows = rows
         self._cols = cols
-        self._hover = (1, 1)        # (R, C) currently highlighted
-        self._current = (1, 1)      # the layout actually in effect
+        #: 0-based (row, col) drag anchor (None = not dragging) and the cell the
+        #: cursor is over (None = not hovering). Both feed the highlight rect.
+        self._anchor: tuple | None = None
+        self._cur: tuple | None = None
+        #: The layout currently in effect, as a 0-based inclusive rectangle —
+        #: highlighted while the picker rests (no hover/drag) so you can see the
+        #: on-screen arrangement, including a 1×1's specific pane cell.
+        self._current_rect = (0, 0, 0, 0)
         #: 0-based (row, col) cells whose backing pane currently holds data.
-        #: Drives the bright-vs-dark grey so you can see how big a layout you
-        #: must open to reveal every loaded pane.
         self._occupied: set = set()
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -200,9 +205,9 @@ class LayoutGridPicker(QWidget):
              + (self._rows - 1) * self._GAP + self._CAPTION_H)
         return QSize(w, h)
 
-    def set_current(self, rows: int, cols: int) -> None:
-        self._current = (rows, cols)
-        self._hover = (rows, cols)
+    def set_current_rect(self, r0: int, c0: int, r1: int, c1: int) -> None:
+        """The applied layout's 0-based inclusive master-grid rectangle."""
+        self._current_rect = (r0, c0, r1, c1)
         self.update()
 
     def set_occupancy(self, occupied) -> None:
@@ -216,50 +221,71 @@ class LayoutGridPicker(QWidget):
         return QRect(x, y, self._CELL, self._CELL)
 
     def _cell_at(self, x: float, y: float):
+        """0-based (row, col) under (x, y), or None."""
         for r in range(self._rows):
             for c in range(self._cols):
                 if self._cell_rect(r, c).adjusted(
                         -self._GAP // 2, -self._GAP // 2,
                         self._GAP // 2, self._GAP // 2).contains(int(x), int(y)):
-                    return r + 1, c + 1
+                    return r, c
         return None
 
-    def mouseMoveEvent(self, e):
-        hit = self._cell_at(e.position().x(), e.position().y())
-        if hit and hit != self._hover:
-            self._hover = hit
-            self.update()
+    @staticmethod
+    def _norm(a, b):
+        """Two 0-based cells → inclusive rectangle (r0, c0, r1, c1)."""
+        return (min(a[0], b[0]), min(a[1], b[1]),
+                max(a[0], b[0]), max(a[1], b[1]))
 
-    def leaveEvent(self, _e):
-        self._hover = self._current
-        self.update()
+    def _hi_rect(self):
+        """The rectangle to highlight right now: the live drag, else the hovered
+        single cell, else the applied layout."""
+        if self._anchor is not None and self._cur is not None:
+            return self._norm(self._anchor, self._cur)
+        if self._cur is not None:
+            return (self._cur[0], self._cur[1], self._cur[0], self._cur[1])
+        return self._current_rect
 
     def mousePressEvent(self, e):
         hit = self._cell_at(e.position().x(), e.position().y())
-        if hit:
-            self._hover = hit
+        if hit is not None:
+            self._anchor = self._cur = hit
+            self.update()
+
+    def mouseMoveEvent(self, e):
+        hit = self._cell_at(e.position().x(), e.position().y())
+        if hit is not None and hit != self._cur:
+            self._cur = hit
             self.update()
 
     def mouseReleaseEvent(self, e):
-        hit = self._cell_at(e.position().x(), e.position().y()) or self._hover
-        self.picked.emit(hit[0], hit[1])
+        if self._anchor is None:
+            return
+        hit = self._cell_at(e.position().x(), e.position().y()) or self._cur \
+            or self._anchor
+        r0, c0, r1, c1 = self._norm(self._anchor, hit)
+        self._anchor = None
+        self.update()
+        self.picked.emit(r0, c0, r1, c1)
+
+    def leaveEvent(self, _e):
+        if self._anchor is None:                    # keep the drag rect while held
+            self._cur = None
+            self.update()
 
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#2b2b2b"))
-        hr, hc = self._hover
-        on = QColor("#4a90d9")          # in the hovered R×C block (would apply)
-        off_data = QColor("#8a8a8a")    # outside the block, pane HAS data
-        off_empty = QColor("#3a3a3a")   # outside the block, pane is empty
+        r0, c0, r1, c1 = self._hi_rect()
+        on = QColor("#4a90d9")          # inside the selection (would apply)
+        off_data = QColor("#8a8a8a")    # outside, pane HAS data
+        off_empty = QColor("#3a3a3a")   # outside, pane is empty
         edge = QColor("#1f1f1f")
         for r in range(self._rows):
             for c in range(self._cols):
-                sel = (r < hr and c < hc)
-                if sel:
-                    brush = on
-                else:
-                    brush = off_data if (r, c) in self._occupied else off_empty
+                sel = r0 <= r <= r1 and c0 <= c <= c1
+                brush = on if sel else (
+                    off_data if (r, c) in self._occupied else off_empty)
                 p.setPen(QPen(edge, 1))
                 p.setBrush(brush)
                 p.drawRoundedRect(self._cell_rect(r, c), 3, 3)
@@ -269,7 +295,7 @@ class LayoutGridPicker(QWidget):
             QRect(0, self.height() - self._CAPTION_H,
                   self.width(), self._CAPTION_H),
             Qt.AlignmentFlag.AlignCenter,
-            f"{hr}×{hc}",
+            f"{r1 - r0 + 1}×{c1 - c0 + 1}",
         )
 
 
@@ -894,6 +920,10 @@ class MainWindow(QMainWindow):
 
         # --- configurable viewer grid ---
         self._layout_key = "1x1"
+        #: Master-grid cell indices currently shown, in reading order — the
+        #: selected (possibly non-top-left) rectangle. Set by _apply_layout;
+        #: unused in the special 1×1 layout (which shows the active pane).
+        self._layout_cells = [0]
         #: "Max Image" (toolbars hidden) state, shared across every pane.
         self._chrome_hidden = False
         # Bi / Lt / Rt is per-pane now (each viewer stores its own plane
@@ -1062,7 +1092,13 @@ class MainWindow(QMainWindow):
             t("Show/hide the left Info window (study tree)")
         )
         self._layout_btn.setText(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
+        self._pane_step_btn.setText(t("Pane →"))
+        self._pane_step_btn.setHelpToolTip(
+            t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
+              "around from the last back to the first. Available only in the "
+              "1×1 layout.")
+        )
         self._clear_all_btn.setText(t("✕ Clear All"))
         self._clear_all_btn.setHelpToolTip(
             t("Clear the image from every pane (same as each pane's ✕). "
@@ -2027,7 +2063,7 @@ class MainWindow(QMainWindow):
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
         self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Choose the pane layout from a grid"))
+        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
         # This menu-button renders square on macOS; give it the same light-grey
         # rounded border as the pane buttons so the top bar matches.
         self._layout_btn.setStyleSheet(
@@ -2043,6 +2079,23 @@ class MainWindow(QMainWindow):
         self._layout_btn.setMenu(self._layout_menu)
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
+
+        # "Pane →": flip the fullscreen 1×1 view to the next loaded pane, in
+        # reading order (left→right, then the next row's left), wrapping from the
+        # last back to the first — a keyboard-free way to page through the
+        # loaded images one at a time. Only meaningful in 1×1, so it is greyed
+        # out in every multi-pane layout (see _apply_layout).
+        self._pane_step_btn = FitButton(t("Pane →"))
+        self._pane_step_btn.setHelpToolTip(
+            t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
+              "around from the last back to the first. Available only in the "
+              "1×1 layout.")
+        )
+        self._pane_step_btn.clicked.connect(self._cycle_active_pane)
+        self._pane_step_btn.setEnabled(getattr(self, "_layout_key", "1x1")
+                                       == "1x1")
+        row.addSpacing(8)
+        row.addWidget(self._pane_step_btn)
 
         # "Clear All": empty every pane at once (same as each pane's ✕). The
         # layout is kept; the studies list is untouched. The leading ✕ matches
@@ -2158,31 +2211,56 @@ class MainWindow(QMainWindow):
         super().closeEvent(e)
 
     def _shown_panes(self) -> list:
-        """Panes currently on screen, in display (reading) order. 1×1 shows
-        the active pane; every other layout shows a fixed sub-block of the
-        canonical 2×3 arrangement (``_LAYOUT_CELLS``), so each pane keeps its
-        on-screen position no matter which layout you switch from."""
+        """Panes currently on screen, in display (reading) order. 1×1 shows the
+        active pane; every other layout shows the selected master-grid rectangle
+        (``self._layout_cells``), so each pane keeps its on-screen position no
+        matter which layout you switch from."""
         if self._layout_key == "1x1":
             a = self._active if self._active is not None else self._order[0]
             return [a]
-        return [self._order[i] for i in _LAYOUT_CELLS[self._layout_key]]
+        return [self._order[i] for i in self._layout_cells]
+
+    def _current_layout_rect(self):
+        """The applied layout as a 0-based inclusive master-grid rectangle. For
+        1×1 it is the active pane's cell; otherwise the bounding rect of the
+        shown cells."""
+        if self._layout_key == "1x1":
+            if self._active in self._order:
+                r, c = divmod(self._order.index(self._active), _MAX_GRID_COLS)
+            else:
+                r = c = 0
+            return (r, c, r, c)
+        rc = [divmod(i, _MAX_GRID_COLS) for i in self._layout_cells]
+        rows = [x[0] for x in rc]
+        cols = [x[1] for x in rc]
+        return (min(rows), min(cols), max(rows), max(cols))
 
     def _refresh_layout_picker(self) -> None:
-        """Before the picker pops up: highlight the current layout and shade
-        each cell by whether its pane holds data."""
-        self._layout_picker.set_current(*_LAYOUTS[self._layout_key][:2])
+        """Before the picker pops up: highlight the current layout rectangle and
+        shade each cell by whether its pane holds data."""
         self._layout_picker.set_occupancy(self._pane_occupancy())
+        self._layout_picker.set_current_rect(*self._current_layout_rect())
 
     def _layout_btn_text(self) -> str:
         # setMenu() adds the native dropdown arrow, so the text itself stays
         # plain: "Layout  2×3".
         return f"{t('Layout')}  {self._layout_key.replace('x', '×')}"
 
-    def _on_layout_picked(self, rows: int, cols: int) -> None:
-        """A cell was chosen in the visual grid picker → apply that R×C layout
-        and dismiss the popup."""
+    def _on_layout_picked(self, r0: int, c0: int, r1: int, c1: int) -> None:
+        """A rectangle was dragged in the visual grid picker → show exactly that
+        (possibly non-top-left) block of master cells. A single cell → 1×1 of
+        that pane."""
         self._layout_menu.hide()
-        self._apply_layout(f"{rows}x{cols}")
+        rows, cols = r1 - r0 + 1, c1 - c0 + 1
+        if rows == 1 and cols == 1:
+            cell = r0 * _MAX_GRID_COLS + c0
+            if 0 <= cell < len(self._order):
+                self._set_active_pane(self._order[cell])
+            self._apply_layout("1x1")
+            return
+        cells = [rr * _MAX_GRID_COLS + cc
+                 for rr in range(r0, r1 + 1) for cc in range(c0, c1 + 1)]
+        self._apply_layout(f"{rows}x{cols}", cells)
 
     def _maximize_pane(self, pane: ViewerPane) -> None:
         """1×1 button / double-click on a pane → show only that pane (1×1).
@@ -2201,9 +2279,13 @@ class MainWindow(QMainWindow):
                 occ.add(divmod(idx, _MAX_GRID_COLS))
         return occ
 
-    def _apply_layout(self, key: str) -> None:
+    def _apply_layout(self, key: str, cells=None) -> None:
         self._layout_key = key
         rows, cols, count = _LAYOUTS[key]
+        # Which master cells to show: the passed rectangle, or the top-left
+        # R×C block (default / backward-compatible).
+        self._layout_cells = list(cells) if cells is not None \
+            else list(_LAYOUT_CELLS[key])
         if hasattr(self, "_layout_btn"):
             self._layout_btn.setText(self._layout_btn_text())
 
@@ -2221,9 +2303,9 @@ class MainWindow(QMainWindow):
             shown.setVisible(True)
             shown.set_full_bleed(True)
         else:
-            # Place the canonical 2×3 cells this layout maps to (so e.g. 2×2
-            # always shows the 2×3's left+middle columns, both rows).
-            for i, cell_idx in enumerate(_LAYOUT_CELLS[key]):
+            # Place the selected master cells (the chosen rectangle) into a
+            # rows×cols grid, preserving their reading-order positions.
+            for i, cell_idx in enumerate(self._layout_cells):
                 r, c = divmod(i, cols)
                 pane = self._order[cell_idx]
                 self._grid.addWidget(pane, r, c)
@@ -2259,6 +2341,10 @@ class MainWindow(QMainWindow):
         # heaviest op / main freeze source. Disable it everywhere but 1x1
         # (force-hides any open strip).
         self._sync_long_axis_gate()
+        # "Pane →" flips the fullscreen 1×1 view to the next loaded pane, so it
+        # only makes sense in 1×1 — grey it out in every multi-pane layout.
+        if hasattr(self, "_pane_step_btn"):
+            self._pane_step_btn.setEnabled(self._layout_key == "1x1")
         # Bi/Lt/Rt is per-pane (each viewer's own "Plane:" bar), so a grid
         # change never overrides any pane's plane choice — a pane left on
         # "Bi" keeps showing both planes here too (just smaller).
@@ -2281,7 +2367,38 @@ class MainWindow(QMainWindow):
         dest = self._panes[dest_index]
         i, j = self._order.index(src), self._order.index(dest)
         self._order[i], self._order[j] = self._order[j], self._order[i]
-        self._apply_layout(self._layout_key)
+        self._apply_layout(self._layout_key, self._layout_cells)
+
+    def _cycle_active_pane(self) -> None:
+        """"Pane →" button: advance to the next pane, wrapping the last back to
+        the first (endless loop).
+
+        In a multi-pane grid it moves the active-pane highlight through the
+        on-screen cells in reading order (left→right, then the next row's left),
+        cycling over _shown_panes() (already in reading order).
+
+        In the single-pane 1×1 layout there is only one cell, so instead it
+        flips the FULLSCREEN view to the next pane that holds an image (a
+        "next image" flipper) — otherwise the button would do nothing there."""
+        if self._layout_key == "1x1":
+            loaded = [p for p in self._order if p.has_data()]
+            if len(loaded) <= 1:
+                return
+            try:
+                i = loaded.index(self._active)
+            except ValueError:
+                i = -1
+            self._set_active_pane(loaded[(i + 1) % len(loaded)])
+            self._apply_layout("1x1")     # re-render so the new pane fills 1×1
+            return
+        shown = self._shown_panes()
+        if len(shown) <= 1:
+            return
+        try:
+            i = shown.index(self._active)
+        except ValueError:
+            i = -1
+        self._set_active_pane(shown[(i + 1) % len(shown)])
 
     def _set_active_pane(self, pane: ViewerPane) -> None:
         self._active = pane
@@ -2837,6 +2954,63 @@ class MainWindow(QMainWindow):
             target = series
         self._on_export_requested(fmt, [target])
 
+    def _on_angle_export(self, uid: str, payload: object) -> None:
+        """IVUS "Export" of angle keyframes: reuse the export filename-tag
+        picker (same dialog + per-modality memory as image export) to name the
+        file, then write *payload* (a small JSON dict) to a user-chosen path."""
+        import json
+        import pydicom
+        from multi_dicomviewer.core import export as exporter
+        from multi_dicomviewer.ui.export_dialog import (
+            DEFAULT_FIELDS,
+            ExportDialog,
+        )
+        series = self._series_by_uid.get(uid) if uid else None
+        if series is None:
+            self.statusBar().showMessage(
+                t("Export: could not identify the displayed series."))
+            return
+        export_mod = self._series_modality_key(series)
+        tag_idents = list(self._tag_keywords_by_modality.get(export_mod, []))
+        dicom_tags = self._label_dicom_tags(series, tag_idents)
+        initial = list(
+            self._export_fields_by_modality.get(export_mod) or []
+        ) or list(DEFAULT_FIELDS)
+        dlg = ExportDialog(
+            "csv", 1, dicom_tags=dicom_tags, initial_fields=initial,
+            title_override=t("Export Angle Set"), parent=self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        cfg = dlg.result_settings()
+        self._export_fields_by_modality[export_mod] = list(cfg.fields)
+        try:
+            settings.save_export_fields_by_modality(
+                self._export_fields_by_modality)
+        except Exception:
+            pass
+        # Default filename from the picked tags (same builder as image export).
+        base = "angle"
+        try:
+            ds = pydicom.dcmread(series.files[0], stop_before_pixels=True,
+                                 force=True)
+            base = exporter.build_filename(cfg.fields, series, ds) or base
+        except Exception:
+            pass
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Export Angle Set"), f"{base}.ivangle.json",
+            t("IVUS Angle Set (*.ivangle.json)"))
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".ivangle.json"
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, ensure_ascii=False, indent=1)
+        except OSError as exc:
+            self.statusBar().showMessage(str(exc))
+            return
+        self.statusBar().showMessage(t("Angle Set exported."))
+
     def _on_export_requested(self, fmt: str, series_list: list) -> None:
         """Right-click ▸ Export (DICOM)/(MP4)/(CSV): show the filename-
         fields dialog, ask for an output folder, run the export with a
@@ -3327,6 +3501,10 @@ class MainWindow(QMainWindow):
         # clicked plane.
         if hasattr(viewer, "plane_export_requested"):
             viewer.plane_export_requested.connect(self._on_plane_export)
+        # IVUS "Export" of angle keyframes → reuse the export filename-tag
+        # picker, then write the small JSON file.
+        if hasattr(viewer, "angle_export_requested"):
+            viewer.angle_export_requested.connect(self._on_angle_export)
         if hasattr(viewer, "set_tag_keywords"):
             viewer.set_anonymized(self._anon)
             viewer.set_tag_keywords(self._effective_kw(viewer))

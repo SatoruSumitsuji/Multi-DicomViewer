@@ -41,8 +41,8 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
     QProgressDialog,
@@ -179,7 +179,10 @@ class _CoregPane:
                  if self.total > 0 else 0)
         self.cur = start
         self.slider.blockSignals(True)
-        self.slider.setEnabled(self.total > 1)
+        # IVUS panes scrub freely (they drive CoSync); an ANGIO pane is a still
+        # — its seekbar is greyed out and only re-enabled while its Trace is on
+        # (see _toggle_trace), so the shown angio frame stays fixed after trace.
+        self.slider.setEnabled(self.total > 1 and self.is_ivus)
         self.slider.setRange(0, max(0, self.total - 1))
         self.slider.setValue(start)
         self.slider.blockSignals(False)
@@ -262,19 +265,33 @@ class CoregWindow(QMainWindow):
         self._placing: bool = False      # adding/modifying a CoSync point
         self._pending_fracs: dict[int, float] = {}   # xa_idx -> provisional s
         self._selected_lm: int = -1      # CoSync point selected (blue) / modify
+        self._renaming: int = -1         # landmark idx being renamed inline
         self._syncing: bool = False      # re-entrancy guard for IVUS↔IVUS sync
+        #: Global long-axis seekbar state (unified pull-back timeline).
+        self._global_flipped = False     # ⇄ reverses distal/proximal
+        self._global_gmin = 0            # master-frame-extended range
+        self._global_gmax = 0
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
 
+        # Left column: the pane grid + a full-width global long-axis seekbar
+        # under it (spanning the image area, NOT the right control panel).
+        left = QWidget()
+        lcol = QVBoxLayout(left)
+        lcol.setContentsMargins(0, 0, 0, 0)
+        lcol.setSpacing(2)
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
         self._grid.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(self._grid_host, 1)
+        lcol.addWidget(self._grid_host, 1)
+        lcol.addWidget(self._build_global_seek())
+        root.addWidget(left, 1)
         root.addWidget(self._build_panel())
 
         self._load_series(pane_specs)
+        self._refresh_global_seek()
 
     # ------------------------------------------------------------- build
     def _build_panel(self) -> QWidget:
@@ -410,6 +427,130 @@ class CoregWindow(QMainWindow):
             if clr is not None:
                 clr.setText(t("Clear"))
         self._refresh_list()          # landmark rows re-render via t()
+        self._global_lbl.setText(t("Long-axis sync"))
+        self._global_flip_btn.setToolTip(t("Flip the distal/proximal direction"))
+
+    # ------------------------------------------- global long-axis seekbar
+    def _build_global_seek(self) -> QWidget:
+        """Full-width seekbar under the pane grid: a UNIFIED pull-back timeline
+        that scrubs every IVUS/OCT together across the combined distal→proximal
+        range (the master's frame axis, extended to cover followers whose
+        pull-back reaches beyond it), so a range whose ends live in different
+        pull-backs is still traversable with one bar. Separate from the Master
+        radio. Hidden with <2 IVUS; greyed until a CoSync point links them."""
+        w = QWidget()
+        row = QHBoxLayout(w)
+        row.setContentsMargins(6, 0, 6, 2)
+        self._global_lbl = QLabel(t("Long-axis sync"))
+        self._global_slider = QSlider(Qt.Orientation.Horizontal)
+        self._global_slider.valueChanged.connect(self._on_global_seek)
+        self._global_flip_btn = QPushButton("⇄")
+        self._global_flip_btn.setFixedWidth(32)
+        self._global_flip_btn.setCheckable(True)
+        self._global_flip_btn.setToolTip(t("Flip the distal/proximal direction"))
+        self._global_flip_btn.toggled.connect(self._on_global_flip)
+        row.addWidget(self._global_lbl)
+        row.addWidget(self._global_slider, 1)
+        row.addWidget(self._global_flip_btn)
+        self._global_row = w
+        return w
+
+    def _ivus_panes(self):
+        return [p for p in self.panes if p.is_ivus and p.total > 0]
+
+    def _global_range(self, R):
+        """(gmin, gmax) integer master-frame-extended range covering every
+        IVUS's [0, total-1] mapped into master R's frame axis, or None."""
+        if R < 0 or R >= len(self.panes):
+            return None
+        master = self.panes[R]
+        gmin, gmax = 0.0, float(master.total - 1)
+        for q in self.panes:
+            if q is master or not q.is_ivus or q.total < 1:
+                continue
+            qm = [(lm["frames"][q.index], lm["frames"][R])
+                  for lm in self._landmarks
+                  if q.index in lm.get("frames", {})
+                  and R in lm.get("frames", {})]
+            for qf in (0, q.total - 1):
+                g = coreg.map_between(qm, qf)
+                if g is not None:
+                    gmin, gmax = min(gmin, g), max(gmax, g)
+        if gmax <= gmin:
+            return None
+        return int(math.floor(gmin)), int(math.ceil(gmax))
+
+    def _slider_to_g(self, s):
+        return (self._global_gmax - s if self._global_flipped
+                else self._global_gmin + s)
+
+    def _g_to_slider(self, g):
+        return int(round(self._global_gmax - g if self._global_flipped
+                         else g - self._global_gmin))
+
+    def _refresh_global_seek(self):
+        """Show the bar with ≥2 IVUS; enable + (re)range it once a CoSync point
+        links them; keep the handle on the master's current frame."""
+        if not hasattr(self, "_global_slider"):
+            return
+        self._global_row.setVisible(len(self._ivus_panes()) >= 2)
+        R = self._active_ivus
+        rng = self._global_range(R) if (R >= 0 and self._landmarks) else None
+        on = len(self._ivus_panes()) >= 2 and rng is not None
+        for w in (self._global_slider, self._global_flip_btn, self._global_lbl):
+            w.setEnabled(on)
+        if not on:
+            return
+        self._global_gmin, self._global_gmax = rng
+        self._global_slider.blockSignals(True)
+        self._global_slider.setRange(
+            0, max(1, self._global_gmax - self._global_gmin))
+        self._global_slider.setValue(self._g_to_slider(self.panes[R].cur))
+        self._global_slider.blockSignals(False)
+
+    def _reflect_global(self):
+        """Move the global handle to reflect the master's current frame."""
+        R = self._active_ivus
+        if R < 0 or not self._global_slider.isEnabled():
+            return
+        self._global_slider.blockSignals(True)
+        self._global_slider.setValue(self._g_to_slider(self.panes[R].cur))
+        self._global_slider.blockSignals(False)
+
+    def _on_global_flip(self, checked):
+        self._global_flipped = bool(checked)
+        self._reflect_global()
+
+    def _on_global_seek(self, s):
+        """Drive every IVUS from the unified timeline: the master clamps to its
+        own range while a follower whose pull-back extends further keeps moving
+        (map_between extrapolates), then markers + rotations follow."""
+        if self._syncing or self._placing:
+            return
+        R = self._active_ivus
+        if R < 0:
+            return
+        g = self._slider_to_g(s)
+        self._syncing = True
+        try:
+            self.panes[R].show_frame(int(round(g)))     # clamps to master range
+            for q in self.panes:
+                if q is self.panes[R] or not q.is_ivus or q.total < 1:
+                    continue
+                pairs = [(lm["frames"][R], lm["frames"][q.index])
+                         for lm in self._landmarks
+                         if R in lm.get("frames", {})
+                         and q.index in lm.get("frames", {})]
+                f = coreg.map_between(pairs, g)
+                if f is not None:
+                    q.show_frame(int(round(f)))
+        finally:
+            self._syncing = False
+        for p in self.panes:
+            self._apply_rotation(p)
+        # Drive the angio marker by the UNIFIED position g (not the master's
+        # clamped frame) so the green point sweeps the WHOLE bar range.
+        self._drive_markers(g)
 
     def _load_series(self, pane_specs) -> None:
         specs = [(s, p, f) for (s, p, f) in (pane_specs or [])
@@ -482,6 +623,9 @@ class CoregWindow(QMainWindow):
                 pane.show_frame(int(g["frame"]))
             pane.canvas.set_coreg_edit(True)
             pane.canvas.set_coreg_mode("trace")
+            # Trace ON → let this angio pane's seekbar move so the user can pick
+            # the frame the guide is drawn on.
+            pane.slider.setEnabled(pane.total > 1)
             self._status.setText(t(
                 "Click to add a vertex, double-click to commit. Once a vertex "
                 "turns red, drag to move it / right-click to delete it. "
@@ -491,6 +635,8 @@ class CoregWindow(QMainWindow):
                 self._tracing = -1
             pane.canvas.set_coreg_mode("")
             pane.canvas.set_coreg_edit(False)
+            # Trace finished → the angio is a still again; grey out its seekbar.
+            pane.slider.setEnabled(False)
             self._status.setText("")
         self._update_coreg_controls_enabled()
 
@@ -696,20 +842,37 @@ class CoregWindow(QMainWindow):
             x.setFixedWidth(26)
             x.setToolTip(t("Delete this CoSync point"))
             x.clicked.connect(lambda _c, i=n - 1: self._delete_landmark(i))
+            info = QLabel(self._landmark_info(lm))   # black, button-size text
+            info.setStyleSheet("QLabel { color:black; }")
+            if (n - 1) == self._renaming:
+                # Inline rename: a line edit takes the button's place (≤10 chars).
+                ed = QLineEdit(lm.get("name", ""))
+                ed.setMaxLength(10)
+                ed.setFixedWidth(100)
+                ed.returnPressed.connect(
+                    lambda e=ed, i=n - 1: self._commit_rename(i, e.text()))
+                ed.editingFinished.connect(
+                    lambda e=ed, i=n - 1: self._commit_rename(i, e.text()))
+                h.addWidget(x)
+                h.addWidget(ed)
+                h.addWidget(info, 1)
+                self._lm_box.addWidget(row)
+                ed.selectAll()
+                ed.setFocus()
+                continue
             b = QPushButton(lm.get("name") or f"CoSync-{n}")   # jump / rename
-            b.setFixedWidth(78)
+            b.setFixedWidth(100)         # wider: fits a 10-char name
             b.setToolTip(self._landmark_tip(lm) + t("\n(right-click to rename)"))
             b.clicked.connect(lambda _c, i=n - 1: self._goto_landmark(i))
             b.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             b.customContextMenuRequested.connect(
                 lambda _pos, i=n - 1: self._rename_landmark(i))
             self._style_blue(b, (n - 1) == self._selected_lm)
-            info = QLabel(self._landmark_info(lm))   # black, button-size text
-            info.setStyleSheet("QLabel { color:black; }")
             h.addWidget(x)
             h.addWidget(b)
             h.addWidget(info, 1)
             self._lm_box.addWidget(row)
+        self._refresh_global_seek()      # landmark set changed → re-range bar
 
     def _goto_landmark(self, idx: int) -> None:
         """Clicking CoSync-N selects it (blue) and jumps every IVUS that
@@ -732,16 +895,22 @@ class CoregWindow(QMainWindow):
         self._refresh_list()
 
     def _rename_landmark(self, idx: int) -> None:
-        """Right-click a CoSync button → give it a short name (≤8 chars) like
-        R1os / LCX / LAD / D9a instead of CoSync-N. Blank clears it."""
+        """Right-click a CoSync button → edit its short name (≤10 chars) INLINE,
+        in the button's own place (R1os / LCX / LAD / D9a…). Blank clears it."""
         if not (0 <= idx < len(self._landmarks)):
             return
-        cur = self._landmarks[idx].get("name", "")
-        text, ok = QInputDialog.getText(
-            self, t("Rename"), t("Name (up to 8 characters):"), text=cur)
-        if ok:
-            self._landmarks[idx]["name"] = text.strip()[:8]
-            self._refresh_list()
+        self._renaming = idx
+        self._refresh_list()
+
+    def _commit_rename(self, idx: int, text: str) -> None:
+        """Store the inline-edited name and drop back to the button. Guarded so
+        the returnPressed + editingFinished pair (and the refresh's focus loss)
+        commit only once."""
+        if self._renaming != idx or not (0 <= idx < len(self._landmarks)):
+            return
+        self._renaming = -1
+        self._landmarks[idx]["name"] = text.strip()[:10]
+        self._refresh_list()
 
     def _delete_landmark(self, idx: int) -> None:
         if not (0 <= idx < len(self._landmarks)):
@@ -751,6 +920,7 @@ class CoregWindow(QMainWindow):
             self._selected_lm = -1
         elif self._selected_lm > idx:
             self._selected_lm -= 1
+        self._renaming = -1
         self._refresh_list()
         self._drive_markers()
 
@@ -767,6 +937,7 @@ class CoregWindow(QMainWindow):
 
         self._landmarks.sort(key=key)
         self._selected_lm = -1
+        self._renaming = -1
         self._refresh_list()
 
     def _clear_all_landmarks(self) -> None:
@@ -777,6 +948,7 @@ class CoregWindow(QMainWindow):
         ) == QMessageBox.StandardButton.Yes:
             self._landmarks.clear()
             self._selected_lm = -1
+            self._renaming = -1
             self._refresh_list()
             self._drive_markers()
 
@@ -921,6 +1093,7 @@ class CoregWindow(QMainWindow):
         redraw. Guide curves are re-derived from vertices here."""
         self._landmarks = landmarks
         self._selected_lm = -1
+        self._renaming = -1
         # Guides: keep only those whose pane still exists and is an angio pane.
         valid = {p.index for p in self.panes if not p.is_ivus}
         for i in list(self._guides):
@@ -953,20 +1126,45 @@ class CoregWindow(QMainWindow):
 
     def _compose_coreg_frame(self, cell: int, cols: int) -> np.ndarray:
         """Grab every pane's canvas (image + guide + moving marker, exactly as
-        shown) and tile them into a cols-wide grid of square *cell* cells."""
+        shown), CROP off the canvas letterbox so only the image region remains,
+        and tile them into a cols-wide grid of square *cell* cells — so the
+        image fills its cell instead of sitting small inside a double margin."""
         rows = (len(self.panes) + cols - 1) // cols
-        img = QImage(cell * cols, cell * rows, QImage.Format.Format_RGB888)
+        # Black gutters between cells so the tiles don't run together. The
+        # horizontal (column) gutter is 3× the vertical one — the left/right
+        # halves read as clearly separated. Kept even for yuv420p.
+        gap_y = (cell // 12) & ~1
+        gap_x = (gap_y * 3) & ~1
+        W = cols * cell + (cols - 1) * gap_x
+        H = rows * cell + (rows - 1) * gap_y
+        img = QImage(W, H, QImage.Format.Format_RGB888)
         img.fill(QColor("#000000"))
         p = QPainter(img)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         try:
             for k, pane in enumerate(self.panes):
-                qimg = pane.canvas.grab().toImage()
+                canvas = pane.canvas
+                qimg = canvas.grab().toImage()
+                gw, gh = qimg.width(), qimg.height()
+                if gw <= 0 or gh <= 0:
+                    continue
+                # Crop to the image's draw rect (drops the fit letterbox),
+                # mapping logical widget px → grabbed px (HiDPI-safe).
+                dr = canvas._draw_rect()
+                cw, ch = canvas.width(), canvas.height()
+                if dr.isValid() and cw > 0 and ch > 0:
+                    sx, sy = gw / cw, gh / ch
+                    cx = max(0, int(round(dr.x() * sx)))
+                    cy = max(0, int(round(dr.y() * sy)))
+                    cw2 = min(gw - cx, int(round(dr.width() * sx)))
+                    ch2 = min(gh - cy, int(round(dr.height() * sy)))
+                    if cw2 > 0 and ch2 > 0:
+                        qimg = qimg.copy(cx, cy, cw2, ch2)
                 w, h = qimg.width(), qimg.height()
                 if w <= 0 or h <= 0:
                     continue
                 r, c = divmod(k, cols)
-                tx, ty = c * cell, r * cell
+                tx, ty = c * (cell + gap_x), r * (cell + gap_y)
                 scale = min(cell / w, cell / h)
                 dw, dh = w * scale, h * scale
                 p.save()
@@ -1103,6 +1301,7 @@ class CoregWindow(QMainWindow):
     def _set_active_ivus(self, pane_idx: int) -> None:
         self._active_ivus = pane_idx
         self._drive_markers()
+        self._refresh_global_seek()      # master changed → re-range on its axis
 
     def _on_ivus_scrub(self, pane_idx: int) -> None:
         """Scrubbing the MASTER IVUS moves the others in lockstep (once ≥2
@@ -1123,6 +1322,7 @@ class CoregWindow(QMainWindow):
         for p in self.panes:
             self._apply_rotation(p)
         self._drive_markers()
+        self._reflect_global()           # keep the global handle in step
 
     def _apply_rotation(self, pane) -> None:
         """Set *pane*'s IVUS display rotation to the angle interpolated from
@@ -1164,14 +1364,19 @@ class CoregWindow(QMainWindow):
                    if R in lm["frames"] and pane_idx in lm["fracs"]]
         return coreg.map_frame_to_fraction(anchors, self.panes[R].cur)
 
-    def _drive_markers(self) -> None:
-        """For every angio pane, map the active IVUS's current frame to a
-        point on that view's guide (from the landmarks common to the pair)
-        and push the marker + the anchor foot-points to its canvas."""
+    def _drive_markers(self, frame_override=None) -> None:
+        """For every angio pane, map the active IVUS's frame to a point on that
+        view's guide (from the landmarks common to the pair) and push the
+        marker + the anchor foot-points to its canvas.
+
+        *frame_override* lets the global long-axis seekbar drive the marker by
+        the UNIFIED position (which can run past the master's own range): the
+        fraction extrapolates and clamps to the guide ends, so the marker keeps
+        moving over the WHOLE bar instead of freezing where the master clamps."""
         if self._active_ivus < 0 or self._placing:
             return
         R = self._active_ivus
-        fR = self.panes[R].cur
+        fR = self.panes[R].cur if frame_override is None else frame_override
         for pane in self.panes:
             if pane.is_ivus:
                 continue

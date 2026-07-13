@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSlider,
     QStyle,
@@ -116,6 +117,8 @@ class _RangeMarks(QWidget):
     export is unaffected (always full series, by design)."""
 
     range_changed = pyqtSignal(int, int)   # (start, end), 0-based frame idx
+    angle_mark_clicked = pyqtSignal(int)   # click a ▽/▲ → jump to that frame
+    angle_mark_delete = pyqtSignal(int)    # right-click ▸ Delete that keyframe
 
     _TRI_HW = 6        # triangle half-width, px
     _TRI_H = 11        # triangle height, px (drawn bottom-anchored on the strip)
@@ -137,12 +140,30 @@ class _RangeMarks(QWidget):
         self._start = 0
         self._end = 0
         self._drag: str | None = None      # "start" | "end" | None
+        # IVUS angle keyframes: hollow ▽ markers at each keyed frame (▲ ON TOP
+        # when the keyframe sits on the first/last frame, where the solid Play-
+        # range ▽ already is). Empty for XA (no such feature).
+        self._angle_frames: list[int] = []
+        self._amin = 0
+        self._amax = 0
+        self._top_band = 0                 # extra height reserved for ▲ markers
         # Strip = triangle height + a little top grab room (toward the image).
         self.setFixedHeight(self._TRI_H + self._GRAB_TOP_PAD)
         self.setMouseTracking(True)
 
     def set_bounds(self, start: int, end: int) -> None:
         self._start, self._end = int(start), int(end)
+        self.update()
+
+    def set_angle_marks(self, frames, fmin: int, fmax: int) -> None:
+        """IVUS angle keyframes to mark. *frames* = keyed frame indices;
+        *fmin*/*fmax* = the series' first/last frame (a keyframe on either is
+        drawn ON TOP so it clears the solid Play-range triangle there). While
+        any keyframe exists the strip grows a top band for the ▲ markers."""
+        self._angle_frames = sorted({int(f) for f in frames})
+        self._amin, self._amax = int(fmin), int(fmax)
+        self._top_band = (self._TRI_H + 3) if self._angle_frames else 0
+        self.setFixedHeight(self._top_band + self._TRI_H + self._GRAB_TOP_PAD)
         self.update()
 
     # -- value <-> pixel mapping (mirrors the slider's own geometry) ----
@@ -184,11 +205,13 @@ class _RangeMarks(QWidget):
             return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(_SEEK_DOT_BLUE))
+        blue = QColor(_SEEK_DOT_BLUE)
         h = self.height()
         w = self._TRI_HW
         base_y = h - self._TRI_H        # bottom-anchored: apex sits at h-1
+        # Solid Play-range ▽ markers.
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(blue)
         for val in (self._start, self._end):
             cx = self._value_x(val)
             p.drawPolygon(QPolygon([
@@ -196,15 +219,67 @@ class _RangeMarks(QWidget):
                 QPoint(int(round(cx + w)), base_y),
                 QPoint(int(round(cx)), h - 1),
             ]))
+        # Hollow angle-keyframe markers: ▽ at the bottom for interior frames,
+        # ▲ in the top band for a keyframe on the first/last frame (so it clears
+        # the solid range triangle sitting there).
+        if self._angle_frames:
+            p.setPen(QPen(blue, 1.4))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for f in self._angle_frames:
+                cx = self._value_x(f)
+                if f in (self._amin, self._amax) and self._top_band:
+                    p.drawPolygon(QPolygon([          # ▲ on top
+                        QPoint(int(round(cx - w)), self._TRI_H),
+                        QPoint(int(round(cx + w)), self._TRI_H),
+                        QPoint(int(round(cx)), 0),
+                    ]))
+                else:
+                    p.drawPolygon(QPolygon([          # ▽ at bottom
+                        QPoint(int(round(cx - w)), base_y),
+                        QPoint(int(round(cx + w)), base_y),
+                        QPoint(int(round(cx)), h - 1),
+                    ]))
 
     def resizeEvent(self, _e) -> None:
         self.update()
+
+    def _angle_hit(self, x: float, y: float):
+        """Frame of the angle-keyframe marker under (x, y), or None. First/last
+        keys live as ▲ in the top band; interior keys as ▽ at the bottom, so the
+        y band disambiguates a first/last key from the solid range ▽ beneath."""
+        if not self._angle_frames:
+            return None
+        base_y = self.height() - self._TRI_H
+        for f in self._angle_frames:
+            if abs(x - self._value_x(f)) > self._TRI_HW + 2:
+                continue
+            if f in (self._amin, self._amax) and self._top_band:
+                if y <= self._TRI_H + 2:            # ▲ on top
+                    return f
+            elif y >= base_y - 2:                   # ▽ at bottom
+                return f
+        return None
 
     def mousePressEvent(self, e) -> None:
         sl = self._slider
         if sl.maximum() <= sl.minimum():
             return
         x = e.position().x()
+        # Angle-keyframe markers take priority: left-click jumps to that frame,
+        # right-click offers Delete. Only fall through to the Play-range drag
+        # when the press isn't on an angle marker.
+        f = self._angle_hit(x, e.position().y())
+        if f is not None:
+            if e.button() == Qt.MouseButton.RightButton:
+                menu = QMenu(self)
+                act = menu.addAction(t("Delete"))
+                if menu.exec(e.globalPosition().toPoint()) is act:
+                    self.angle_mark_delete.emit(int(f))
+            else:
+                self.angle_mark_clicked.emit(int(f))
+            return
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
         ds = abs(x - self._value_x(self._start))
         de = abs(x - self._value_x(self._end))
         # Only grab when the press is within a triangle's horizontal reach
@@ -675,7 +750,9 @@ class XAViewer(AbstractViewer):
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
-            b.clicked.connect(lambda _c, w=where: self.series_nav.emit(w))
+            b.clicked.connect(
+                lambda _c, w=where: (self._on_user_interaction(),
+                                     self.series_nav.emit(w)))
             self._nav_btns.append(b)
             row.addWidget(b)
         # Measure toggle right after the Last button (CT-style placement);
@@ -736,6 +813,15 @@ class XAViewer(AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._image_transform(k))
             self._orient_btns.append(b)
             row.addWidget(b)
+
+        # "Reset" — undo every display transform (Rt90/Lt90/Flip-H/Flip-V and
+        # the IVUS free drag-rotation) back to the originally-loaded orientation.
+        self._reset_orient_btn = QPushButton(t("Reset"))
+        self._reset_orient_btn.setToolTip(
+            t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
+              "back to the originally-loaded view"))
+        self._reset_orient_btn.clicked.connect(self._reset_transform)
+        row.addWidget(self._reset_orient_btn)
 
         # High-quality cine: keep frames bilinear-smooth even during playback
         # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
@@ -1133,12 +1219,27 @@ class XAViewer(AbstractViewer):
         for c in (self.canvas, self.canvas2):
             c.clear_measurements()
 
+    def _on_user_interaction(self) -> None:
+        """Hook called from the transport / measure / zoom / orientation entry
+        points on any user action. Base no-op; the IVUS viewer overrides it to
+        dismiss its transient 'no colour information' readout."""
+
     # -------------------------------------------- 2-D image transforms (SC)
     def _image_transform(self, kind: str) -> None:
         """Rotate 90° / flip the shown image(s). Applied to both canvases so a
         biplane pair stays consistent; for single-plane SC only canvas matters."""
+        self._on_user_interaction()
         for c in (self.canvas, self.canvas2):
             c.apply_orient(kind)
+
+    def _reset_transform(self) -> None:
+        """"Reset" button: undo every display transform — the 90°/flip
+        orientation AND the IVUS free drag-rotation — restoring the
+        originally-loaded view. Applied to both canvases."""
+        self._on_user_interaction()
+        for c in (self.canvas, self.canvas2):
+            c.reset_orient()
+            c.set_free_rotation(0.0)
 
     def _toggle_hq_cine(self, on: bool) -> None:
         """High-quality cine toggle: smooth frames during playback on both
@@ -1258,9 +1359,10 @@ class XAViewer(AbstractViewer):
                 and getattr(self, "_loaded_uid", "") == new_uid):
             return
         # A genuinely new series starts in its native orientation (clear any
-        # Rt90/flip left over from the previously shown image).
+        # Rt90/flip AND free drag-rotation left over from the previous image).
         for c in (self.canvas, self.canvas2):
             c.reset_orient()
+            c.set_free_rotation(0.0)
         # Switching to a DIFFERENT series within the same viewer: save
         # the frame we were on for the outgoing series so a later
         # return to it picks up at that frame, not frame 0.
@@ -1740,6 +1842,7 @@ class XAViewer(AbstractViewer):
         return self.play_btn.isChecked()
 
     def _toggle_play(self, on: bool):
+        self._on_user_interaction()
         n = max((p.volume.shape[0] for p in self._planes), default=0)
         if n < 2:
             self.play_btn.setChecked(False)
@@ -1798,6 +1901,7 @@ class XAViewer(AbstractViewer):
     def _on_seek_begin(self) -> None:
         """Seek handle pressed — switch the cross-section to fast upscaling so
         scrubbing a long pull-back stays smooth (see _render)."""
+        self._on_user_interaction()
         self._seeking = True
 
     def _on_seek_end(self) -> None:
@@ -2022,6 +2126,7 @@ class XAViewer(AbstractViewer):
             c.set_compare_mode(False)
 
     def _toggle_measure(self):
+        self._on_user_interaction()
         on = self._meas_btn.isChecked()
         self._measure_bar.setVisible(on)
         if on:
@@ -2036,6 +2141,7 @@ class XAViewer(AbstractViewer):
                 b.setStyleSheet("")
 
     def _set_measure_type(self, key: str):
+        self._on_user_interaction()
         # Choosing a drawing tool cancels any active click-to-zoom mode.
         self._clear_zoom_click()
         for k, b in self._meas_btns.items():
@@ -2051,6 +2157,7 @@ class XAViewer(AbstractViewer):
         """Toggle the 🔍+ / 🔍− click-to-zoom mode. Re-clicking the active
         button turns it off; switching modes turns the other off; enabling
         either cancels the measure tools."""
+        self._on_user_interaction()
         btn = self._zoom_in_btn if mode == "in" else self._zoom_out_btn
         other = self._zoom_out_btn if mode == "in" else self._zoom_in_btn
         new_mode = mode if btn.isChecked() else ""
@@ -2076,6 +2183,7 @@ class XAViewer(AbstractViewer):
             )
 
     def _reset_zoom(self):
+        self._on_user_interaction()
         for c in (self.canvas, self.canvas2):
             c.reset_zoom()
 
@@ -2133,6 +2241,12 @@ class XAViewer(AbstractViewer):
             )):
                 b.setText(label)
                 b.setToolTip(tip)
+        btn = getattr(self, "_reset_orient_btn", None)
+        if btn is not None:
+            btn.setText(t("Reset"))
+            btn.setToolTip(
+                t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
+                  "back to the originally-loaded view"))
 
         # S-Cine / S-Zoom / Denoise. The OpenCV-unavailable note is appended
         # exactly as the constructor does when the codec is missing.
