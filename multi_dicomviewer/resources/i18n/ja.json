@@ -662,5 +662,7 @@
   "Images:": "画像:",
   "GC ↔ {label} angle by image combination:": "GC ↔ {label} 角度（画像の組み合わせ別）:",
   "N/A": "N/A",
-  "  ({key} = all images = final result)": "  （{key} = 全画像 = 最終結果）"
+  "  ({key} = all images = final result)": "  （{key} = 全画像 = 最終結果）",
+  "Detail": "詳細",
+  "Hide Detail": "詳細を隠す"
 }
