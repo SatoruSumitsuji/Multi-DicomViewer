@@ -1015,6 +1015,22 @@ class ImageCanvas(QWidget):
             # Don't let the user shrink below 2 vertices (Line minimum).
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        # Vessel Type — also offered here (not just on the line body) so a
+        # right-click on a Line's END HANDLE still tags it for Coaxial-Eval.
+        vessel_actions: list[tuple] = []
+        if m["type"] == "line":
+            vessel_menu = menu.addMenu(t("Vessel Type"))
+            cur = m.get("vessel")
+            none_act = vessel_menu.addAction(t("(none)"))
+            none_act.setCheckable(True)
+            none_act.setChecked(cur is None)
+            vessel_actions.append((none_act, None))
+            vessel_menu.addSeparator()
+            for label in VESSEL_LABELS:
+                a = vessel_menu.addAction(label)
+                a.setCheckable(True)
+                a.setChecked(cur == label)
+                vessel_actions.append((a, label))
         # Change Color / Change Transparency — available on every result type
         # (incl. Line/Angle, which are most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
@@ -1034,6 +1050,13 @@ class ImageCanvas(QWidget):
             self._recompute_compares()      # drop/refresh affected comparisons
             self.results_changed.emit()
         else:
+            for act, label in vessel_actions:
+                if chosen is act:
+                    if label is None:
+                        m.pop("vessel", None)
+                    else:
+                        m["vessel"] = label
+                    break
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
@@ -1062,7 +1085,7 @@ class ImageCanvas(QWidget):
         # meaningful for straight lines; a "(none)" entry clears the tag.
         vessel_actions: list[tuple] = []
         if m["type"] == "line":
-            vessel_menu = menu.addMenu(t("Vessel type"))
+            vessel_menu = menu.addMenu(t("Vessel Type"))
             cur = m.get("vessel")
             none_act = vessel_menu.addAction(t("(none)"))
             none_act.setCheckable(True)

@@ -578,7 +578,6 @@
   "Unrecognised CoSync file.": "Archivo CoSync no reconocido.",
   "Unsupported data": "Datos no admitidos",
   "Value": "Valor",
-  "Vessel type": "Tipo de vaso",
   "View only — no C-arm positioner angles in this image's DICOM header": "Solo visualización — sin ángulos del posicionador del C-arm en el encabezado DICOM de esta imagen",
   "Viewers cleared.": "Visores vaciados.",
   "Virtual balloon diameter: {v:.2f} mm": "Diámetro del balón virtual: {v:.2f} mm",
@@ -658,5 +657,6 @@
   "IVUS Angle Set (*.ivangle.json)": "Conjunto de ángulos IVUS (*.ivangle.json)",
   "Angle Set exported.": "Conjunto de ángulos exportado.",
   "Drag over the grid to show any block of panes (not just the top-left).": "Arrastra sobre la cuadrícula para mostrar cualquier bloque de paneles (no solo la esquina superior izquierda).",
-  "Move {n} file(s) to": "Mover {n} archivo(s) a"
+  "Move {n} file(s) to": "Mover {n} archivo(s) a",
+  "Vessel Type": "Tipo de vaso"
 }
