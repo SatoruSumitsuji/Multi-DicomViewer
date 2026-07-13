@@ -365,6 +365,13 @@ class IVUSViewer(XAViewer):
         self._angle_info.setVisible(False)
         self.layout().insertWidget(
             self.layout().indexOf(self.readout), self._angle_info)
+        # Seek-bar angle markers are interactive: click → jump to that key's
+        # frame (then rotate + Angle Set to update it); right-click → Delete.
+        if hasattr(self, "_range_marks"):
+            self._range_marks.angle_mark_clicked.connect(
+                self._on_angle_mark_clicked)
+            self._range_marks.angle_mark_delete.connect(
+                self._on_angle_mark_delete)
         # Buttons start disabled — they enable once a series is loaded
         # with at least one keyframe (see _refresh_keyframe_markers).
         for b in (self._prev_key_btn, self._next_key_btn,
@@ -696,6 +703,19 @@ class IVUSViewer(XAViewer):
             return
         self._angle_kf.clear()
         self._refresh_angle_marks()
+
+    def _on_angle_mark_clicked(self, frame: int) -> None:
+        """Click a seek-bar angle marker → jump to that keyframe's frame so the
+        user can rotate and re-key it (Angle Set overwrites that frame)."""
+        self.frame_slider.setValue(int(frame))
+
+    def _on_angle_mark_delete(self, frame: int) -> None:
+        """Right-click ▸ Delete on a seek-bar angle marker → drop that key and
+        re-apply the (now re-interpolated) angle to the shown frame."""
+        if int(frame) in self._angle_kf:
+            del self._angle_kf[int(frame)]
+            self._refresh_angle_marks()
+            self._apply_frame_angle()
 
     def _refresh_angle_marks(self) -> None:
         """Sync the seek-bar keyframe triangles and the below-seekbar summary

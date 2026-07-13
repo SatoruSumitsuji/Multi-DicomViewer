@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QPushButton,
     QSlider,
     QStyle,
@@ -116,6 +117,8 @@ class _RangeMarks(QWidget):
     export is unaffected (always full series, by design)."""
 
     range_changed = pyqtSignal(int, int)   # (start, end), 0-based frame idx
+    angle_mark_clicked = pyqtSignal(int)   # click a ▽/▲ → jump to that frame
+    angle_mark_delete = pyqtSignal(int)    # right-click ▸ Delete that keyframe
 
     _TRI_HW = 6        # triangle half-width, px
     _TRI_H = 11        # triangle height, px (drawn bottom-anchored on the strip)
@@ -240,11 +243,43 @@ class _RangeMarks(QWidget):
     def resizeEvent(self, _e) -> None:
         self.update()
 
+    def _angle_hit(self, x: float, y: float):
+        """Frame of the angle-keyframe marker under (x, y), or None. First/last
+        keys live as ▲ in the top band; interior keys as ▽ at the bottom, so the
+        y band disambiguates a first/last key from the solid range ▽ beneath."""
+        if not self._angle_frames:
+            return None
+        base_y = self.height() - self._TRI_H
+        for f in self._angle_frames:
+            if abs(x - self._value_x(f)) > self._TRI_HW + 2:
+                continue
+            if f in (self._amin, self._amax) and self._top_band:
+                if y <= self._TRI_H + 2:            # ▲ on top
+                    return f
+            elif y >= base_y - 2:                   # ▽ at bottom
+                return f
+        return None
+
     def mousePressEvent(self, e) -> None:
         sl = self._slider
         if sl.maximum() <= sl.minimum():
             return
         x = e.position().x()
+        # Angle-keyframe markers take priority: left-click jumps to that frame,
+        # right-click offers Delete. Only fall through to the Play-range drag
+        # when the press isn't on an angle marker.
+        f = self._angle_hit(x, e.position().y())
+        if f is not None:
+            if e.button() == Qt.MouseButton.RightButton:
+                menu = QMenu(self)
+                act = menu.addAction(t("Delete"))
+                if menu.exec(e.globalPosition().toPoint()) is act:
+                    self.angle_mark_delete.emit(int(f))
+            else:
+                self.angle_mark_clicked.emit(int(f))
+            return
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
         ds = abs(x - self._value_x(self._start))
         de = abs(x - self._value_x(self._end))
         # Only grab when the press is within a triangle's horizontal reach
