@@ -14,13 +14,16 @@ navigates within whichever modality the active cine pane shows.
 """
 from __future__ import annotations
 
+import json
 import math
 
 import numpy as np
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
 from PyQt6.QtWidgets import (
     QApplication,
+    QFileDialog,
     QHBoxLayout,
+    QMessageBox,
     QProgressDialog,
     QPushButton,
     QScrollArea,
@@ -146,6 +149,10 @@ class _LongAxisScroll(QScrollArea):
 
 class IVUSViewer(XAViewer):
     handles_modality = "IVUS"
+
+    #: Export the angle keyframes — (series_uid, payload dict). The shell
+    #: reuses the normal export filename-tag picker to name the file.
+    angle_export_requested = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -299,8 +306,24 @@ class IVUSViewer(XAViewer):
             t("Clear all angle keyframes and reset the rotation to 0°."))
         self._angle_reset_btn.clicked.connect(self._on_angle_reset)
         ivus_row.addWidget(self._angle_reset_btn)
-        # 3× the default button gap before Long View (measured: gap = layout
-        # spacing + addSpacing, so 2× spacing → 3× total).
+
+        # "Export" / "Import" the angle keyframes. Export routes through the
+        # shell so the filename reuses the same DICOM-tag picker as the other
+        # exports; Import reads a saved file straight back.
+        self._angle_export_btn = QPushButton(t("Export"))
+        self._angle_export_btn.setToolTip(
+            t("Save the angle keyframes to a file (filename tags chosen like "
+              "the other exports)."))
+        self._angle_export_btn.clicked.connect(self._on_angle_export_clicked)
+        ivus_row.addWidget(self._angle_export_btn)
+        self._angle_import_btn = QPushButton(t("Import"))
+        self._angle_import_btn.setToolTip(
+            t("Load angle keyframes from a previously exported file."))
+        self._angle_import_btn.clicked.connect(self._on_angle_import)
+        ivus_row.addWidget(self._angle_import_btn)
+
+        # 3× the default button gap between the Angle-Set group and Long View
+        # (measured: gap = layout spacing + addSpacing, so 2× spacing → 3× total).
         _gap = ivus_row.spacing()
         if _gap < 0:
             _gap = 6
@@ -439,6 +462,17 @@ class IVUSViewer(XAViewer):
             btn.setText(t("Reset"))
             btn.setToolTip(
                 t("Clear all angle keyframes and reset the rotation to 0°."))
+        btn = getattr(self, "_angle_export_btn", None)
+        if btn is not None:
+            btn.setText(t("Export"))
+            btn.setToolTip(
+                t("Save the angle keyframes to a file (filename tags chosen "
+                  "like the other exports)."))
+        btn = getattr(self, "_angle_import_btn", None)
+        if btn is not None:
+            btn.setText(t("Import"))
+            btn.setToolTip(
+                t("Load angle keyframes from a previously exported file."))
         # Re-render the angle-keyframe summary label in the new language.
         if getattr(self, "_angle_kf", None) is not None:
             self._refresh_angle_marks()
@@ -732,6 +766,53 @@ class IVUSViewer(XAViewer):
         self._refresh_angle_marks()
         for c in (self.canvas, self.canvas2):
             c.set_free_rotation(0.0)
+
+    def _on_angle_export_clicked(self) -> None:
+        """"Export": hand the angle keyframes to the shell, which shows the
+        usual filename-tag picker and writes the file."""
+        if not self._angle_kf:
+            self.readout.setText(t("No angle keyframes to export."))
+            return
+        uid = getattr(self, "_loaded_uid", "") or ""
+        payload = {
+            "format": "MDV-IVUS-Angles",
+            "version": 1,
+            "series_uid": uid,
+            "keyframes": {str(f): self._angle_kf[f]
+                          for f in sorted(self._angle_kf)},
+        }
+        self.angle_export_requested.emit(uid, payload)
+
+    def _on_angle_import(self) -> None:
+        """"Import": load angle keyframes from a previously exported file and
+        apply them to the current series."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, t("Import Angle Set"), "",
+            t("IVUS Angle Set (*.json);;All files (*)"))
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Import Angle Set"), str(exc))
+            return
+        if not isinstance(data, dict) or data.get("format") != "MDV-IVUS-Angles":
+            QMessageBox.warning(
+                self, t("Import Angle Set"),
+                t("This is not an IVUS Angle Set file."))
+            return
+        kf: dict[int, float] = {}
+        for k, v in (data.get("keyframes") or {}).items():
+            try:
+                kf[int(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        self._angle_kf.clear()
+        self._angle_kf.update(kf)
+        self._refresh_angle_marks()
+        self._apply_frame_angle()
+        self.readout.setText(t("Imported {n} angle keyframe(s).", n=len(kf)))
 
     def _on_angle_mark_clicked(self, frame: int) -> None:
         """Click a seek-bar angle marker → jump to that keyframe's frame so the
