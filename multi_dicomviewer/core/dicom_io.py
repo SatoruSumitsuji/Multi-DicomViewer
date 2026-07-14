@@ -329,6 +329,42 @@ def index_files(
     return _build_tree(all_files, progress)
 
 
+def index_paths(
+    paths: list[str], progress: Optional[Callable[[int, int], None]] = None
+) -> dict[str, Patient]:
+    """Index a MIXED drop of folders and/or files in ONE pass.
+
+    Each directory is expanded recursively (as :func:`scan_folder` does) and
+    each plain file is taken as-is (as :func:`index_files` does), so dropping
+    several folders at once imports all of them together.
+
+    Doing it as a single :func:`_build_tree` — rather than one scan per folder
+    — matters: the tree is keyed by UID, so a study split across two of the
+    dropped folders fuses into one node, and the cross-folder duplicate/biplane
+    repair passes see the whole set. It also gives one honest progress total.
+
+    The same file reached twice (e.g. a parent folder AND its child were both
+    dropped) is indexed once.
+    """
+    all_files: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str) -> None:
+        key = os.path.normcase(os.path.abspath(p))
+        if key not in seen:
+            seen.add(key)
+            all_files.append(p)
+
+    for p in paths:
+        if os.path.isdir(p):
+            for dp, _d, files in os.walk(p):
+                for fn in files:
+                    _add(os.path.join(dp, fn))
+        elif os.path.isfile(p):
+            _add(p)
+    return _build_tree(all_files, progress)
+
+
 def _build_tree(
     all_files: list[str],
     progress: Optional[Callable[[int, int], None]] = None,

@@ -430,8 +430,7 @@ class ViewerPane(QFrame):
     activated = pyqtSignal(object)            # this pane was clicked/used
     series_dropped = pyqtSignal(object, str)  # (pane, series_uid)
     study_dropped = pyqtSignal(object, str, str)  # (pane, study_uid, kind)
-    folder_dropped = pyqtSignal(str)          # a DICOM folder was dropped
-    files_dropped = pyqtSignal(list)          # individual DICOM file(s) dropped
+    paths_dropped = pyqtSignal(list)          # DICOM folder(s) and/or file(s)
     viewer_ready = pyqtSignal(object)         # a viewer was just created
     pane_move_requested = pyqtSignal(int, int)  # (src index, dest index)
     pane_cleared = pyqtSignal(object)         # the ✕ emptied this pane
@@ -757,18 +756,15 @@ class ViewerPane(QFrame):
             return True
         # DICOM folder(s)/file(s) dropped onto the pane. A FOLDER drop loads
         # the whole folder; a FILE drop loads ONLY the dropped file(s) — not
-        # the rest of their containing folder.
+        # the rest of their containing folder. Dropping SEVERAL folders spreads
+        # them across panes from here on (see MainWindow._spread_panes).
         paths = [u.toLocalFile() for u in md.urls()]
         paths = [p for p in paths if p]
         if paths:
             # Make this the active pane first so the first series auto-opens
             # here, not in some other pane.
             self.activated.emit(self)
-            dirs = [p for p in paths if os.path.isdir(p)]
-            if dirs:
-                self.folder_dropped.emit(dirs[0])
-            else:
-                self.files_dropped.emit(paths)
+            self.paths_dropped.emit(paths)
             return True
         return False
 
@@ -945,11 +941,10 @@ class MainWindow(QMainWindow):
             pane.activated.connect(self._set_active_pane)
             pane.series_dropped.connect(self._on_series_dropped)
             pane.study_dropped.connect(self._on_study_dropped)
-            # Folder/file dropped ON a pane → import AND open into THAT pane.
-            pane.folder_dropped.connect(
-                lambda d, p=pane: self._load_folder(d, p))
-            pane.files_dropped.connect(
-                lambda paths, p=pane: self._load_files(paths, p))
+            # Folder/file dropped ON a pane → import AND open into THAT pane
+            # (several folders → one per pane, from this one on).
+            pane.paths_dropped.connect(
+                lambda paths, p=pane: self._load_paths(paths, p))
             pane.viewer_ready.connect(self._wire_viewer)
             pane.pane_move_requested.connect(self._swap_panes)
             pane.pane_cleared.connect(self._on_pane_cleared)
@@ -2691,19 +2686,14 @@ class MainWindow(QMainWindow):
 
     def dropEvent(self, event: QDropEvent) -> None:
         # A FOLDER drop loads the whole folder; a FILE drop loads ONLY the
-        # dropped file(s) — not the rest of their containing folder.
+        # dropped file(s) — not the rest of their containing folder. Dropping
+        # SEVERAL folders imports all of them.
         paths = [u.toLocalFile() for u in event.mimeData().urls()]
         paths = [p for p in paths if p]
         if not paths:
             return
-        dirs = [p for p in paths if os.path.isdir(p)]
-        files = [p for p in paths if os.path.isfile(p)]
-        if dirs:
-            event.acceptProposedAction()
-            self._load_folder(dirs[0])
-        elif files:
-            event.acceptProposedAction()
-            self._load_files(files)
+        event.acceptProposedAction()
+        self._load_paths(paths)
 
     def _load_folder(self, folder: str, open_in_pane=None) -> None:
         self._last_dir = folder              # seeds the DicomCheck/Folder tools
@@ -2721,18 +2711,39 @@ class MainWindow(QMainWindow):
             open_in_pane=open_in_pane,
         )
 
-    def _on_paths_dropped(self, paths) -> None:
-        """Folder/file dropped ONTO the tree → import into the tree only; no
-        pane is opened (drag a series onto a pane to display it)."""
+    def _load_paths(self, paths: list[str], open_in_pane=None) -> None:
+        """Import a drop of ANY mix of folders and files — several folders at
+        once included. Folders expand recursively; plain files do not."""
         paths = [p for p in (paths or []) if p]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
+        if not dirs and not files:
+            return
         if dirs:
-            self._load_folder(dirs[0])
-        elif files:
-            self._load_files(files)
+            # Seeds the DicomCheck/Folder tools; the first dropped folder is
+            # the best guess at "where the user is working".
+            self._last_dir = dirs[0]
+        if dirs and not files:
+            msg = (t("Scanning {folder} …", folder=dirs[0]) if len(dirs) == 1
+                   else t("Scanning {n} folders …", n=len(dirs)))
+        elif files and not dirs:
+            msg = t("Loading {n} file(s) …", n=len(files))
+        else:
+            msg = t("Scanning {n} folders …", n=len(dirs))
+        self._load_index(
+            msg,
+            lambda prog: dicom_io.index_paths(dirs + files, prog),
+            open_in_pane=open_in_pane,
+            spread_roots=dirs if len(dirs) > 1 else None,
+        )
 
-    def _load_index(self, status_msg: str, scan_fn, open_in_pane=None) -> None:
+    def _on_paths_dropped(self, paths) -> None:
+        """Folder/file dropped ONTO the tree → import into the tree only; no
+        pane is opened (drag a series onto a pane to display it)."""
+        self._load_paths(paths)
+
+    def _load_index(self, status_msg: str, scan_fn, open_in_pane=None,
+                    spread_roots=None) -> None:
         """Run *scan_fn(progress)* under a modal progress dialog, then merge
         the resulting patients into the tree. *open_in_pane* opens the freshly
         imported series into that pane (folder/file dropped ON a pane); when
@@ -2814,12 +2825,115 @@ class MainWindow(QMainWindow):
             return
         ordered = self.browser.ordered_series()
         new_series = [se for se in ordered if se.series_uid in new_uids]
+        # SEVERAL folders dropped on a pane → one folder per pane, laid out
+        # from the dropped pane on (the drop itself says "show these side by
+        # side"). A single folder keeps the classic one-pane behaviour.
+        if spread_roots and len(spread_roots) > 1:
+            self._spread_folders(spread_roots, new_series, open_in_pane)
+            return
         target = self._initial_ct_target(new_series)
         if target is None:
             target = (self._initial_noncT_target(new_series)
                       or (ordered[0] if ordered else None))
         if target is not None:
             self._open_series(target, open_in_pane)
+
+    # ------------------------------------------- multi-folder drop onto a pane
+    @staticmethod
+    def _series_root(series, roots_norm: list[str]) -> "int | None":
+        """Index of the dropped root *series* came from — the LONGEST matching
+        path prefix, so dropping a parent AND its child assigns each series to
+        the most specific one. None when it belongs to no dropped root."""
+        files = getattr(series, "files", None) or []
+        if not files:
+            return None
+        f = os.path.normcase(os.path.abspath(files[0]))
+        best = None
+        for i, root in enumerate(roots_norm):
+            if f == root or f.startswith(root + os.sep):
+                if best is None or len(root) > len(roots_norm[best]):
+                    best = i
+        return best
+
+    def _fit_panes(self, n: int, drop_pane) -> list:
+        """*n* panes to fill, starting at *drop_pane* in reading order, growing
+        the layout when the current one is too small.
+
+        Preference order:
+          1. the layout as-is, when it already has n panes at/after the drop;
+          2. the smallest master block that CONTAINS the dropped pane and still
+             has n cells at/after it (squarer beats longer: 4 → 2×2, not 4×1);
+          3. the smallest block that fits n at all, filled from the top-left —
+             the fallback when the drop landed too late in the grid (e.g. the
+             bottom-right pane) to fit n folders after it.
+        """
+        shown = self._shown_panes()
+        try:
+            start = shown.index(drop_pane)
+        except ValueError:
+            start = 0
+        if len(shown) - start >= n:
+            return shown[start:start + n]
+
+        # Squarest-then-widest layout that fits, smallest first.
+        keys = sorted(_LAYOUTS, key=lambda k: (_LAYOUTS[k][2],
+                                               abs(_LAYOUTS[k][0] - _LAYOUTS[k][1]),
+                                               _LAYOUTS[k][0]))
+        drop_cell = (self._order.index(drop_pane)
+                     if drop_pane in self._order else 0)
+        for key in keys:
+            cells = _LAYOUT_CELLS[key]
+            if drop_cell not in cells:
+                continue
+            i = cells.index(drop_cell)
+            if len(cells) - i < n:
+                continue
+            self._apply_layout(key, list(cells))
+            return [self._order[c] for c in cells[i:i + n]]
+        for key in keys:
+            cells = _LAYOUT_CELLS[key]
+            if len(cells) >= n:
+                self._apply_layout(key, list(cells))
+                return [self._order[c] for c in cells[:n]]
+        return shown[start:start + n]
+
+    def _spread_folders(self, roots: list[str], new_series: list,
+                        drop_pane) -> None:
+        """Open ONE series per dropped folder, into consecutive panes from
+        *drop_pane*. Folders keep their drop order; every folder is in the tree
+        regardless, so any that don't fit on screen are still one drag away."""
+        roots_norm = [os.path.normcase(os.path.abspath(r)) for r in roots]
+        by_root: dict[int, list] = {}
+        for se in new_series:                      # already in display order
+            i = self._series_root(se, roots_norm)
+            if i is not None:
+                by_root.setdefault(i, []).append(se)
+
+        targets = []
+        for i in range(len(roots)):
+            cand = by_root.get(i) or []
+            tgt = (self._initial_ct_target(cand)
+                   or self._initial_noncT_target(cand))
+            if tgt is not None:
+                targets.append(tgt)
+        if not targets:
+            return
+
+        dropped = len(targets)
+        targets = targets[:len(self._order)]       # never exceed the master grid
+        panes = self._fit_panes(len(targets), drop_pane)
+        for series, pane in zip(targets, panes):
+            self._open_series(series, pane)
+        if panes:
+            self._set_active_pane(panes[0])
+
+        shown_n = min(len(targets), len(panes))
+        if dropped > shown_n:
+            self.statusBar().showMessage(
+                t("Showing {shown} of {total} folders — the rest are in the "
+                  "list on the left; drag one onto a pane to display it.",
+                  shown=shown_n, total=dropped)
+            )
 
     @staticmethod
     def _initial_noncT_target(candidates: list) -> "Series | None":
