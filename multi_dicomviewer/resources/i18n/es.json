@@ -670,5 +670,7 @@
   "Export Coaxial Evaluation": "Exportar Coaxial Evaluation",
   "Text file (*.txt)": "Archivo de texto (*.txt)",
   "Notes": "Notas",
-  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "Zoom por arrastre — arrastra un rectángulo sobre la imagen para ampliar esa región hasta llenar la vista"
+  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "Zoom por arrastre — arrastra un rectángulo sobre la imagen para ampliar esa región hasta llenar la vista",
+  "Scanning {n} folders …": "Escaneando {n} carpetas …",
+  "Showing {shown} of {total} folders — the rest are in the list on the left; drag one onto a pane to display it.": "Mostrando {shown} de {total} carpetas — el resto está en la lista de la izquierda; arrastre una a un panel para mostrarla."
 }

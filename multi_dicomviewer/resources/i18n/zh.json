@@ -670,5 +670,7 @@
   "Export Coaxial Evaluation": "导出 Coaxial Evaluation",
   "Text file (*.txt)": "文本文件 (*.txt)",
   "Notes": "注意事项",
-  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "拖动缩放 — 在图像上拖出矩形，将该区域放大填满视图"
+  "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "拖动缩放 — 在图像上拖出矩形，将该区域放大填满视图",
+  "Scanning {n} folders …": "正在扫描 {n} 个文件夹 …",
+  "Showing {shown} of {total} folders — the rest are in the list on the left; drag one onto a pane to display it.": "已显示 {total} 个文件夹中的 {shown} 个 — 其余在左侧列表中；将其拖到窗格即可显示。"
 }
