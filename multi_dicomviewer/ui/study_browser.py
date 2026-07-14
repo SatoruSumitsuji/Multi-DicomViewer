@@ -59,6 +59,25 @@ SERIES_MIME = "application/x-mdv-series-uid"
 STUDY_MIME = "application/x-mdv-study"
 
 
+def _popup_parent(widget):
+    """The top-level window to parent a popup (context menu) to.
+
+    NOT the clicked widget. This browser lives inside the Studies QDockWidget,
+    and loading a CT series creates the VTK render widget, which demands a
+    native window; Qt's enforceNativeChildren() then makes every child of each
+    ancestor native too — the dock included. The dock is now a native window
+    that is NOT top-level, so Qt refuses it as a popup's transient parent:
+
+        QWidgetWindow(0x…, name="QDockWidgetClassWindow")
+            must be a top level window.
+
+    The popup still shows, but with no transient parent it is no longer tied to
+    the main window for stacking. Parenting to window() (the QMainWindow, or the
+    dock itself while floating — both top-level) is both correct and silent.
+    """
+    return widget.window()
+
+
 class FitButton(QPushButton):
     """A push button that stays readable when the toolbar is dragged narrow.
 
@@ -772,7 +791,7 @@ class StudyBrowser(QTreeWidget):
             kind, key, label = "study", f"{idk[1]}\x1f{idk[2]}", item.text(0)
         else:
             return
-        menu = QMenu(self)
+        menu = QMenu(_popup_parent(self))
         sel_series = self._selected_series()
         # Export actions: visible whenever at least one Series is in the
         # selection (right-click on a series row, or on any row while
@@ -1080,7 +1099,7 @@ class _ThumbList(QListWidget):
         item = self.itemAt(pos)
         se = item.data(_ROLE) if item is not None else None
         on_series = isinstance(se, Series)
-        menu = QMenu(self)
+        menu = QMenu(_popup_parent(self))
 
         if on_series:
             # Mirror the Tree's behaviour: a right-click on an unselected
