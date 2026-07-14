@@ -12,7 +12,25 @@ from PyInstaller.utils.hooks import (
     collect_dynamic_libs,
     collect_submodules,
 )
+import pathlib
+import re
 import sys
+
+# --- Version for the macOS bundle's Info.plist. Read from the single source
+#     of truth (config.APP_VERSION) rather than hard-coding it here, so a
+#     release bump can't leave the .app's "Get Info" version stale. ---
+def _app_version(default="0.0.0"):
+    try:
+        src = pathlib.Path("multi_dicomviewer/config.py").read_text(encoding="utf-8")
+        m = re.search(r'^APP_VERSION\s*=\s*"([^"]+)"', src, re.M)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return default
+
+
+APP_VERSION = _app_version()
 
 # --- CT render backend differs per OS: VTK on Windows/Linux, pygfx + wgpu
 #     (Metal) on macOS. Collect whichever is actually installed for THIS
@@ -64,6 +82,14 @@ datas = (
     + [(
         "multi_dicomviewer/resources/Rupture-Predictor.html",
         "multi_dicomviewer/resources",
+    )]
+    # i18n tables. i18n.enabled_languages() offers a language ONLY if its
+    # table file exists, so leaving these out of the bundle silently
+    # degrades the packaged app to English-only. Glob, so a new
+    # resources/i18n/<code>.json ships without touching this spec.
+    + [(
+        "multi_dicomviewer/resources/i18n/*.json",
+        "multi_dicomviewer/resources/i18n",
     )]
 )
 binaries = (
@@ -163,7 +189,7 @@ if sys.platform == "darwin":
         bundle_identifier="org.research.multi-dicomviewer",
         info_plist={
             "NSHighResolutionCapable": "True",
-            "CFBundleShortVersionString": "1.6.0",
-            "CFBundleVersion": "1.6.0",
+            "CFBundleShortVersionString": APP_VERSION,
+            "CFBundleVersion": APP_VERSION,
         },
     )
