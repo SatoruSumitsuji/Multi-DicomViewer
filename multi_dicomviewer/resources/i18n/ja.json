@@ -171,6 +171,7 @@
   "Delete this CoReg point": "このCoReg点を削除",
   "Delete this CoSync point": "このCoSync点を削除",
   "Delete {n} file(s)? This cannot be undone.\nEmpty folders left behind will also be removed.": "{n}件のファイルを削除しますか？この操作は元に戻せません。\n残された空フォルダも削除されます。",
+  "Delete {n} selected (remove from list)": "選択した {n} 件を削除（一覧から除去）",
   "Delete {n} series (remove from list)": "{n}件のシリーズを削除（一覧から除去）",
   "Deleted ({n} series removed from the list)": "削除しました（{n} シリーズを一覧から削除）",
   "Deleted all ({n} series removed from the list)": "すべて削除しました（{n} シリーズを一覧から削除）",

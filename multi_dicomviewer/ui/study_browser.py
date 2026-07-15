@@ -768,6 +768,34 @@ class StudyBrowser(QTreeWidget):
                 seen.add(data.series_uid)
         return out
 
+    def _selected_delete_targets(self, kind: str, key: str,
+                                 label: str) -> list[tuple]:
+        """(kind, key, label) for EVERY deletable row in the current
+        multi-selection — series, study and patient nodes alike, deduped, in
+        tree order — so Ctrl/Shift-selected rows delete together. Falls back
+        to the right-clicked node alone when the selection holds none."""
+        out: list[tuple] = []
+        seen: set[tuple] = set()
+        for it in self.selectedItems():
+            data = it.data(0, _ROLE)
+            idk = it.data(0, _ID_ROLE)
+            if isinstance(data, Series):
+                trip = ("series", data.series_uid, data.label)
+            elif idk and idk[0] == "P":
+                trip = ("patient", idk[1], it.text(0))
+            elif idk and idk[0] == "S":
+                trip = ("study", f"{idk[1]}\x1f{idk[2]}", it.text(0))
+            else:
+                continue
+            if trip[:2] not in seen:
+                seen.add(trip[:2])
+                out.append(trip)
+        return out or [(kind, key, label)]
+
+    def _emit_delete_targets(self, targets: list[tuple]) -> None:
+        for k, key, label in targets:
+            self.delete_requested.emit(k, key, label)
+
     def _context_menu(self, pos) -> None:
         item = self.itemAt(pos)
         if item is None:
@@ -903,14 +931,18 @@ class StudyBrowser(QTreeWidget):
             ))
             act_close.triggered.connect(lambda: self._close_series_list(item))
             menu.addAction(act_close)
-            # Delete — remove the whole study node from the list.
-            act_del = QAction(t("Delete (remove)"), self)
+            # Delete — remove the whole study node (or every selected
+            # node when several rows are Ctrl/Shift-selected) from the list.
+            targets = self._selected_delete_targets(kind, key, label)
+            act_del = QAction(
+                t("Delete {n} selected (remove from list)", n=len(targets))
+                if len(targets) > 1 else t("Delete (remove)"), self)
             act_del.setToolTip(t(
                 "Remove this study (all its series) from the list. Files "
                 "are not deleted; reload the folder to restore."
             ))
             act_del.triggered.connect(
-                lambda: self.delete_requested.emit(kind, key, label)
+                lambda _=False, ts=targets: self._emit_delete_targets(ts)
             )
             menu.addAction(act_del)
         else:
@@ -922,13 +954,17 @@ class StudyBrowser(QTreeWidget):
             act_close.triggered.connect(lambda: self._close_series_list(item))
             menu.addAction(act_close)
             menu.addSeparator()
-            act = QAction(t("Delete (remove from list)"), self)
+            # Delete every Ctrl/Shift-selected row, not just the clicked one.
+            targets = self._selected_delete_targets(kind, key, label)
+            act = QAction(
+                t("Delete {n} selected (remove from list)", n=len(targets))
+                if len(targets) > 1 else t("Delete (remove from list)"), self)
             act.setToolTip(t(
                 "Files are not deleted; just removed from the list so they "
                 "can no longer be viewed."
             ))
             act.triggered.connect(
-                lambda: self.delete_requested.emit(kind, key, label)
+                lambda _=False, ts=targets: self._emit_delete_targets(ts)
             )
             menu.addAction(act)
         menu.exec(self.viewport().mapToGlobal(pos))

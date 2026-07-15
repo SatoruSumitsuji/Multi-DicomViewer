@@ -757,13 +757,20 @@ class DicomFolderWindow(QMainWindow):
               "(Existing DICOMDIR files in the source are always ignored.)"))
         orow.addWidget(self._with_dicomdir_cb)
         self._sep_cb = QCheckBox(t("Separate XA single-frame (XA@STILL)"))
-        self._sep_cb.setChecked(True)
         orow.addWidget(self._sep_cb)
         orow.addStretch(1)
         root.addLayout(orow)
+        # Both checkboxes remember their last state across sessions. Restore
+        # BEFORE connecting the toggled handlers so restoring doesn't regroup
+        # an (empty) table or rewrite the file with what was just read.
+        _opts = settings.load_dicomfolder_options()
+        self._with_dicomdir_cb.setChecked(_opts["with_dicomdir"])
+        self._sep_cb.setChecked(_opts["separate_xa_still"])
         for rb in self._radios.values():
             rb.toggled.connect(self._regroup)
         self._sep_cb.toggled.connect(self._regroup)
+        self._with_dicomdir_cb.toggled.connect(self._save_options)
+        self._sep_cb.toggled.connect(self._save_options)
 
         mrow = QHBoxLayout()
         mrow.addWidget(QLabel(t("Action:")))
@@ -1270,6 +1277,14 @@ class DicomFolderWindow(QMainWindow):
         order_int = getattr(order, "value", order)
         self._sort = (int(column), int(order_int))
         settings.save_dicomfolder_sort(*self._sort)
+
+    def _save_options(self) -> None:
+        """Persist the option checkboxes so "With DICOMDIR" and "Separate XA
+        single-frame" reopen in their last state."""
+        settings.save_dicomfolder_options({
+            "with_dicomdir": self._with_dicomdir_cb.isChecked(),
+            "separate_xa_still": self._sep_cb.isChecked(),
+        })
 
     def _on_name_edited(self, item, col) -> None:
         if col != 2:
