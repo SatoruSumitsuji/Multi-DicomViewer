@@ -15,6 +15,7 @@ class Modality(str, Enum):
     XA = "XA"          # X-ray angiography (invasive cath cine)
     CT = "CT"          # cardiac CT (CCTA)
     IVUS = "IVUS"      # intravascular ultrasound (pull-back cine)
+    SR = "SR"          # structured report (dose report etc. — no pixels)
     OTHER = "OTHER"
 
     @classmethod
@@ -26,6 +27,8 @@ class Modality(str, Enum):
             return cls.CT
         if v == "IVUS":
             return cls.IVUS
+        if v == "SR":
+            return cls.SR
         return cls.OTHER
 
 

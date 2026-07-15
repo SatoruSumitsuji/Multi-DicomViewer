@@ -76,6 +76,7 @@ from multi_dicomviewer.ui.tag_font import (
     TAG_FONT_PT_DEFAULT, TAG_FONT_PT_MAX, TAG_FONT_PT_MIN,
 )
 from multi_dicomviewer.viewers.ivus_viewer import IVUSViewer
+from multi_dicomviewer.viewers.sr_viewer import SRViewer
 from multi_dicomviewer.viewers.xa_viewer import XAViewer
 
 # CT's render backend is heavy and slow to import (VTK on Windows/Linux —
@@ -122,6 +123,7 @@ _VIEWER_FACTORY = {
     Modality.XA: XAViewer,
     Modality.CT: _ct_viewer,
     Modality.IVUS: IVUSViewer,
+    Modality.SR: SRViewer,      # structured reports (dose report etc.)
     Modality.OTHER: XAViewer,
 }
 

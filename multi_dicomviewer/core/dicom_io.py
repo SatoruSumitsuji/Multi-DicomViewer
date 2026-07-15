@@ -561,8 +561,11 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                 # cine (load_series routes them to load_secondary_capture), not
                 # as N separate single-image rows.
                 _kind = (se.dicom_modality or "").upper()
+                # SR stays splittable: each report file is its own row (it
+                # was in the OTHER bucket before Modality.SR existed).
                 _splittable = (
-                    se.modality in (Modality.XA, Modality.IVUS, Modality.OTHER)
+                    se.modality in (Modality.XA, Modality.IVUS,
+                                    Modality.SR, Modality.OTHER)
                     and _kind not in ("MR", "NM")
                 )
                 _min_files = 3 if se.modality == Modality.XA else 2
@@ -1814,10 +1817,38 @@ def load_secondary_capture(
     )
 
 
+def load_sr(
+    series: Series,
+    progress: Optional[Callable[[str, int, int], None]] = None,
+) -> LoadedSeries:
+    """Open a Structured Report series (dose report etc.). SR files carry no
+    pixel data, so this reads the FULL dataset (the content tree is all
+    header) and hands it to the SR viewer via LoadedSeries.header; volume is
+    a dummy 1-voxel array no consumer reads."""
+    if progress:
+        progress("Reading DICOM file…", 0, 1)
+    ds = pydicom.dcmread(series.files[0], force=True)
+    repair_dataset_text(ds)
+    if progress:
+        progress("", 1, 1)
+    return LoadedSeries(
+        modality=Modality.SR,
+        volume=np.zeros((1, 1, 1), dtype=np.float32),
+        spacing_mm=None,
+        cine_fps=None,
+        window=None,
+        level=None,
+        header=ds,
+        series_uid=series.series_uid,
+    )
+
+
 def load_series(
     series: Series,
     progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> LoadedSeries:
+    if series.modality == Modality.SR:
+        return load_sr(series, progress)
     if series.modality == Modality.CT:
         # Secondary Capture (reports / electronic film / 3-D snapshots) are
         # tagged CT but are not HU data — show them in the image viewer with
