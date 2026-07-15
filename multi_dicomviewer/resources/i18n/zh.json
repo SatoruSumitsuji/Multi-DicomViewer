@@ -171,6 +171,7 @@
   "Delete this CoReg point": "删除此 CoReg 点",
   "Delete this CoSync point": "删除此 CoSync 点",
   "Delete {n} file(s)? This cannot be undone.\nEmpty folders left behind will also be removed.": "删除 {n} 个文件？此操作无法撤销。\n遗留的空文件夹也将被移除。",
+  "Delete {n} selected (remove from list)": "删除所选 {n} 项（从列表中移除）",
   "Delete {n} series (remove from list)": "删除 {n} 个序列（从列表中移除）",
   "Deleted ({n} series removed from the list)": "已删除（{n} 个序列已从列表中移除）",
   "Deleted all ({n} series removed from the list)": "已全部删除（{n} 个序列已从列表中移除）",

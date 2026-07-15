@@ -171,6 +171,7 @@
   "Delete this CoReg point": "Eliminar este punto de CoReg",
   "Delete this CoSync point": "Eliminar este punto de CoSync",
   "Delete {n} file(s)? This cannot be undone.\nEmpty folders left behind will also be removed.": "¿Eliminar {n} archivo(s)? Esto no se puede deshacer.\nLas carpetas vacías que queden también se eliminarán.",
+  "Delete {n} selected (remove from list)": "Eliminar {n} seleccionados (quitar de la lista)",
   "Delete {n} series (remove from list)": "Eliminar {n} series (quitar de la lista)",
   "Deleted ({n} series removed from the list)": "Eliminado ({n} series quitadas de la lista)",
   "Deleted all ({n} series removed from the list)": "Todo eliminado ({n} series quitadas de la lista)",

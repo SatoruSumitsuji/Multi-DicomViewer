@@ -21,6 +21,7 @@ IVUS_COLOR_PATH = SETTINGS_DIR / "ivus_color.json"
 DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
 LANGUAGE_PATH = SETTINGS_DIR / "language.json"
 DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
+DICOMFOLDER_OPTIONS_PATH = SETTINGS_DIR / "dicomfolder_options.json"
 _SCHEMA_VERSION = 2
 
 
@@ -47,6 +48,43 @@ def save_dicomfolder_sort(column: int, order: int) -> None:
             json.dumps({"column": int(column), "order": int(order),
                         "version": 1}, ensure_ascii=False, indent=2),
             encoding="utf-8")
+    except OSError:
+        pass
+
+
+#: DicomFolder output-option checkboxes. Defaults match the pre-persistence
+#: behaviour (no DICOMDIR, XA@STILL split on) so a fresh install is unchanged.
+_DICOMFOLDER_OPTION_DEFAULTS = {
+    "with_dicomdir": False,
+    "separate_xa_still": True,
+}
+
+
+def load_dicomfolder_options() -> dict:
+    """The persisted DicomFolder option checkboxes ("With DICOMDIR",
+    "Separate XA single-frame"), falling back to the defaults for any
+    missing/unreadable key."""
+    out = dict(_DICOMFOLDER_OPTION_DEFAULTS)
+    try:
+        data = json.loads(DICOMFOLDER_OPTIONS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k in _DICOMFOLDER_OPTION_DEFAULTS:
+                if isinstance(data.get(k), bool):
+                    out[k] = data[k]
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def save_dicomfolder_options(options: dict) -> None:
+    """Best-effort persist of the DicomFolder option checkboxes."""
+    try:
+        out = {k: bool(options.get(k, _DICOMFOLDER_OPTION_DEFAULTS[k]))
+               for k in _DICOMFOLDER_OPTION_DEFAULTS}
+        out["version"] = 1
+        DICOMFOLDER_OPTIONS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DICOMFOLDER_OPTIONS_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
         pass
 
