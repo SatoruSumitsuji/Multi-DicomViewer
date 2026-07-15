@@ -81,7 +81,7 @@ Gatekeeper passes it on a normal double-click — even offline.
 > **Old unsigned builds only (before v1.5.0).** If you are running a much older
 > download that Gatekeeper still blocks, clear its quarantine flag once with the
 > command below, then open it normally. **You do not need this for v1.5.0+
-> (including v2.0.2).**
+> (including v2.0.3).**
 >
 > ```bash
 > { find /Applications ~/Applications ~/Downloads -maxdepth 2 -name "Multi-DicomViewer.app" -print; mdfind -name "Multi-DicomViewer.app"; } | sort -u | while read -r p; do xattr -dr com.apple.quarantine "$p"; done
