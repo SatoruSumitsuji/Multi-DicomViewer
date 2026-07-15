@@ -834,16 +834,16 @@ class DicomFolderWindow(QMainWindow):
         self._tree.setColumnWidth(3, 70)
         self._tree.setColumnWidth(4, 90)
         self._tree.setColumnWidth(5, 80)
-        # Column resizing: the Group column is user-resizable (Interactive), and
-        # the Folder name / Size column absorbs window resizing (Stretch) instead
-        # of the last section — otherwise the default stretch-last-section shrinks
-        # the Series # column as the window narrows and its numbers vanish. This
-        # keeps Group draggable AND the fixed-width Acq #/Acq Time/Series # always
-        # showing their data.
+        # Column resizing: EVERY column is user-resizable (Interactive), including
+        # "Folder name (editable) / Size" — it was Stretch before, which pins it to
+        # the remaining space and blocks manual dragging. We also keep
+        # stretch-last-section OFF: letting the last section (Series #) absorb the
+        # slack would shrink it as the window narrows until its numbers vanish. So
+        # no column auto-stretches — widths are fully under the user's control and
+        # a horizontal scrollbar covers any overflow.
         hdr = self._tree.header()
         hdr.setStretchLastSection(False)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         hdr.setMinimumSectionSize(40)
         self._tree.setSortingEnabled(True)
         # Restore the sort column + order from the last session (defaults to the
