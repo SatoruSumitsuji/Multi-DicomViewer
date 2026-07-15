@@ -125,10 +125,10 @@ _VIEWER_FACTORY = {
     Modality.OTHER: XAViewer,
 }
 
-#: Max grid the visual layout picker offers (rows × cols). 4×3 = up to 12 panes.
-_MAX_GRID_ROWS = 4
-_MAX_GRID_COLS = 3
-#: layout key "RxC" -> (rows, cols, pane-count). Every R∈1..4, C∈1..3 combo is a
+#: Max grid the visual layout picker offers (rows × cols). 6×6 = up to 36 panes.
+_MAX_GRID_ROWS = 6
+_MAX_GRID_COLS = 6
+#: layout key "RxC" -> (rows, cols, pane-count). Every R∈1..6, C∈1..6 combo is a
 #: valid layout, chosen from the visual grid picker (no more 1×2-vs-2×1 button
 #: confusion). Panes fill left-to-right, top-to-bottom.
 _LAYOUTS = {
@@ -156,7 +156,7 @@ _PLAY_CAP = 4
 #: Separator between fields in a pane's top-band title (kept short — a long
 #: em-dash read too wide). e.g. "● Pane 1 - YAMADA TARO - 20260615 - 3/12".
 _PANE_SEP = " - "
-#: Enough panes for the largest layout (2×3 = 6).
+#: Enough panes for the largest layout (6×6 = 36).
 _MAX_PANES = max(c for _r, _c, c in _LAYOUTS.values())
 #: Grid dimensions of the largest layout — used to reset stretch on every
 #: row/col when shrinking back to a smaller grid.
