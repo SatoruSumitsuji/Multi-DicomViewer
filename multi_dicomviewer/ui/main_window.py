@@ -506,9 +506,9 @@ class ViewerPane(QFrame):
         self._box.addWidget(self._stack, 1)
         self._active_on = False
         self._full_bleed = False
-        #: "Hide Buttons (Max Image)" state for this pane — hides the title
-        #: bar AND the current viewer's toolbars. Stored so it re-applies when
-        #: the pane swaps to another modality's cached viewer.
+        #: "Hide Buttons (Max Image)" state for this pane — hides the current
+        #: viewer's toolbars (the title bar stays). Stored so it re-applies
+        #: when the pane swaps to another modality's cached viewer.
         self._chrome_visible = True
         #: Compact transport (half-height) — on in multi-row layouts.
         self._compact = False
@@ -559,17 +559,17 @@ class ViewerPane(QFrame):
         """1×1 mode: hide the title bar and drop the border/margins so the
         viewer fills the entire central frame."""
         self._full_bleed = on
-        # Title bar hidden in 1×1 OR while "Max Image" is on.
-        self._title_bar.setVisible(not on and self._chrome_visible)
+        # Title bar hidden only in 1×1 full-bleed ("Max Image" keeps it).
+        self._title_bar.setVisible(not on)
         m = 0 if on else 1
         self._box.setContentsMargins(m, m, m, m)
         self._refresh_border()
 
     def set_chrome_visible(self, visible: bool) -> None:
-        """Show / hide this pane's chrome (title bar + the current viewer's
-        toolbars) for the shell-wide "Max Image" toggle."""
+        """Show / hide the current viewer's toolbars for the shell-wide
+        "Max Image" toggle. The title bar (top band) stays visible so the
+        pane number / patient name remain readable."""
         self._chrome_visible = visible
-        self._title_bar.setVisible(visible and not self._full_bleed)
         v = self._cur_viewer
         if v is not None:
             set_viewer_chrome_visible(v, visible)
