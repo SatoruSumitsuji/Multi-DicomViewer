@@ -1069,8 +1069,11 @@ class CTViewer(AbstractViewer):
         self._page_accum = 0.0               # 2-D drag-paging pixel accumulator
         self._side = "Bi"                    # last 3-D Plane choice (Bi/Lt/Rt)
         # 2-D display in-plane axes (output right = U, up = V); rotated/flipped
-        # by the Rt90/Lt90/Flip buttons. N stays +z (the paging axis).
-        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        # by the Rt90/Lt90/Flip buttons. Default V = -y so the stored slice is
+        # shown in raster order (pixel row 0 at the TOP, like any 2-D DICOM
+        # viewer): the camera puts +V up, while DICOM rows grow downward.
+        # V = +y (the old default) showed every native slice upside-down.
+        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
         self._dims = (1.0, 1.0, 1.0)         # sx, sy, sz mm
         self._bounds = (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
         self._diag = 1.0
@@ -2064,6 +2067,7 @@ class CTViewer(AbstractViewer):
         disabled. Default mode is chosen per series on load."""
         if mode not in ("3D", "2D") or self._vol is None:
             return
+        prev = getattr(self, "_mode", None)
         self._mode = mode
         for k, b in self._mode_btns.items():
             b.setChecked(k == mode)
@@ -2101,6 +2105,13 @@ class CTViewer(AbstractViewer):
         else:
             self._frames["A"].setVisible(self._side != "Rt")
             self._frames["B"].setVisible(self._side != "Lt")
+            # Rebuild the anatomical (pbasis) frames when coming from 2-D:
+            # pane A still carries the raster 2-D axes, which are NOT the
+            # anatomical axial view (upside-down for a standard series) and
+            # must not leak into the MPR. (Re-clicking "3D" while already in
+            # 3-D keeps the user's oblique rotations.)
+            if prev == "2D":
+                self._init_frames()
             self._thick = {"A": 0.0, "B": 5.0}
             self._cl_on = self._cl_btn.isChecked()
             self._refresh_side_buttons()
@@ -2252,13 +2263,14 @@ class CTViewer(AbstractViewer):
     # ------------------------------------------------- 2-D image transforms
     def _apply_2d_axes(self):
         """Set pane A's in-plane display axes (U, V) from the 2-D rotate/flip
-        state, keeping the slice normal at +z (the plane the GPU cuts). A flip
-        makes cross(U, V) = -z, so the per-pane camera views the slice from the
-        other side — i.e. mirrored — while the cut plane stays the same slice."""
+        state. N = U×V (the actual viewing normal — the camera already views
+        from the cross(U,V) side, and the LAO/CRA angle text reads this N);
+        the cut plane is the same native slice either way, and 2-D paging
+        moves along absolute z (_page2d), not along N."""
         u, v = self._axes2d
-        ez = np.array([0.0, 0.0, 1.0])
-        self._frame["A"] = (np.asarray(u, float).copy(),
-                            np.asarray(v, float).copy(), ez)
+        u = np.asarray(u, float).copy()
+        v = np.asarray(v, float).copy()
+        self._frame["A"] = (u, v, np.cross(u, v))
 
     def _2d_transform(self, kind):
         """Rotate the 2-D image 90° (rt90/lt90) or flip it (fliph/flipv).
@@ -2376,7 +2388,7 @@ class CTViewer(AbstractViewer):
         self._lvl = self._lvl0 = float(loaded.level or 200.0)
         self._thick = {"A": 0.0, "B": 5.0}
         # Reset any 2-D rotate/flip to the native orientation for the new series.
-        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0]))
+        self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
 
         b = self._bounds
         self._center = np.array([(b[0] + b[1]) / 2, (b[2] + b[3]) / 2,
@@ -2453,17 +2465,19 @@ class CTViewer(AbstractViewer):
           * Pane B — frontal/coronal companion: screen-right = patient LEFT,
             screen-up = SUPERIOR.
 
-        native=True restores the raw volume-axis frames (used by the 2-D lock,
-        which pages the acquired slices as-is)."""
+        native=True gives the raw volume-axis frames (used by the 2-D lock,
+        which pages the acquired slices as-is). V = -y so the stored slice
+        shows in raster order (pixel row 0 at the top — DICOM rows grow
+        downward while the camera puts +V up); these equal the pbasis frames
+        for an identity basis, so the pb-None fallback behaves like a
+        standard axial supine volume."""
         pb = getattr(self, "_pbasis", None)
         if native or pb is None:
             self._frame = {
-                "A": (np.array([1.0, 0.0, 0.0]),
-                      np.array([0.0, 1.0, 0.0]),
-                      np.array([0.0, 0.0, 1.0])),
-                "B": (np.array([1.0, 0.0, 0.0]),
-                      np.array([0.0, 0.0, 1.0]),
-                      np.array([0.0, 1.0, 0.0])),
+                "A": self._ortho(np.array([1.0, 0.0, 0.0]),
+                                 np.array([0.0, -1.0, 0.0])),
+                "B": self._ortho(np.array([1.0, 0.0, 0.0]),
+                                 np.array([0.0, 0.0, 1.0])),
             }
         else:
             # patient = pbasis @ volume  →  volume = inv(pbasis) @ patient.
@@ -4174,7 +4188,7 @@ class CTViewer(AbstractViewer):
             self._thick = {"A": 0.0, "B": 5.0}
             # Restore the native 2-D orientation (clear any rotate/flip).
             self._axes2d = (np.array([1.0, 0.0, 0.0]),
-                            np.array([0.0, 1.0, 0.0]))
+                            np.array([0.0, -1.0, 0.0]))
             self._sync_slab_spin()
             self._view_initial = True
             # Re-apply the current mode (re-locks 2-D / restores dual MPR) and
