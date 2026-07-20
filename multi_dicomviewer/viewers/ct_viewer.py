@@ -146,6 +146,7 @@ from multi_dicomviewer.core.measure_geom import (
     smooth_closed as _smooth_closed,
     smooth_open as _smooth_open,
 )
+from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.ui.study_browser import FitButton
@@ -1380,6 +1381,11 @@ class CTViewer(AbstractViewer):
         self._anon = False
         self._tool = "PAGING"
         self._mode = "3D"                    # "3D" MPR | "2D" native slices
+        # Curved-MPR / short-axis reformat state. None = off; when active it
+        # holds the centreline + per-sample short-axis frames and drives pane
+        # A as a cross-section scroller (see _enter_cpr / _refresh). Pane B
+        # keeps its normal MPR so the trace stays visible as a map.
+        self._cpr = None
         self._slice2d = 0                    # current slice index in 2-D mode
         self._page_accum = 0.0               # 2-D drag-paging pixel accumulator
         self._side = "Bi"                    # last 3-D Plane choice (Bi/Lt/Rt)
@@ -1481,6 +1487,7 @@ class CTViewer(AbstractViewer):
         lay.addLayout(imgrow, 1)
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_seek_bar())
+        lay.addWidget(self._build_cpr_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -1582,6 +1589,38 @@ class CTViewer(AbstractViewer):
         # even after setVisible(True) until an ancestor is shown). Fall back
         # to the intended plane so the buttons don't wrongly default to "Rt".
         return self._side
+
+    # --------------------------------------------- curved-MPR scrubber bar
+    def _build_cpr_bar(self) -> QWidget:
+        """A bottom scrubber for short-axis (CPR) mode: scroll the cross-
+        section along the traced vessel, plus an Exit button. Hidden unless
+        CPR is active. Survives 'Max Image' so scrolling stays usable."""
+        self._cpr_wrap = QWidget()
+        self._cpr_wrap._mdv_keep_on_max = True
+        row = QHBoxLayout(self._cpr_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        cap = QLabel(t("Short-axis:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        self._cpr_cap = cap
+        row.addWidget(cap)
+        self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
+        self._cpr_slider.setMinimum(0)
+        self._cpr_slider.setMaximum(0)
+        self._cpr_slider.setMinimumHeight(26)
+        self._cpr_slider.setStyleSheet(_SEEK_SLIDER_QSS)
+        self._cpr_slider.valueChanged.connect(self._cpr_set_index)
+        row.addWidget(self._cpr_slider, 1)
+        self._cpr_lbl = QLabel("")
+        self._cpr_lbl.setMinimumWidth(170)
+        fl = self._cpr_lbl.font(); fl.setBold(True); self._cpr_lbl.setFont(fl)
+        row.addWidget(self._cpr_lbl)
+        self._cpr_exit_btn = FitButton(t("Exit CPR"))
+        self._cpr_exit_btn.setHelpToolTip(
+            t("Leave short-axis mode and restore the normal MPR"))
+        self._cpr_exit_btn.clicked.connect(self._exit_cpr)
+        row.addWidget(self._cpr_exit_btn)
+        self._cpr_wrap.setVisible(False)
+        return self._cpr_wrap
 
     # -------------------------------------------- plane bar (below the image)
     def _build_plane_bar(self) -> QWidget:
@@ -3024,10 +3063,17 @@ class CTViewer(AbstractViewer):
         menu = QMenu(self)
         add_pt = menu.addAction(t("Add point"))
         spline_act = None
+        cpr_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
                 t("UnSpline") if m.get("smooth") else t("Spline")
             )
+            # Curved-MPR: build a centreline from this trace and scroll the
+            # short-axis (perpendicular) cross-sections in the other pane —
+            # only meaningful in 3-D MPR (the default slab view the user
+            # traces on) and with ≥2 points.
+            if self._mode == "3D" and len(m["pts"]) >= 2:
+                cpr_act = menu.addAction(t("Short-axis MPR (CPR)"))
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
@@ -3048,6 +3094,9 @@ class CTViewer(AbstractViewer):
         )
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
+        elif cpr_act is not None and chosen is cpr_act:
+            self._enter_cpr(which, mi)
+            return                               # _enter_cpr redraws itself
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
         elif center_angle_act is not None and chosen is center_angle_act:
@@ -3213,6 +3262,8 @@ class CTViewer(AbstractViewer):
         self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._play2d_resume = False              # next Play starts at Frame 1
         self._set_play2d_speed(1.0)              # back to 1× for a new series
+        self._cpr = None                         # drop any short-axis session
+        self._cpr_wrap.setVisible(False)
 
         b = self._bounds
         self._center = np.array(
@@ -3243,6 +3294,8 @@ class CTViewer(AbstractViewer):
     def clear(self) -> None:
         self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._play2d_resume = False              # next Play starts at Frame 1
+        self._cpr = None                         # drop any short-axis session
+        self._cpr_wrap.setVisible(False)
         self._image = None
         self._header = None
         for key in ("A", "B"):
@@ -3386,6 +3439,88 @@ class CTViewer(AbstractViewer):
             self._cmap_btn.setChecked(True)
         self._refresh()
 
+    # ------------------------------------------------ curved-MPR / short-axis
+    def _enter_cpr(self, which, mi):
+        """Turn the polyline *mi* on pane *which* into a vessel centreline and
+        put pane A into short-axis (cross-section) scroll mode.
+
+        The trace is a 2-D outline in pane *which*'s reslice plane; lift each
+        point to 3-D volume mm (origin + x·u + y·v) and hand it to CenterLine.
+        Pane A then reslices the plane ⟂ the vessel tangent at the scrubbed
+        arc-length index; pane *which* keeps its slab MPR so the trace stays
+        visible as a map."""
+        m = self._measures[which][mi]
+        pts2d = self._outline(m)                  # honours the Spline toggle
+        if len(pts2d) < 2:
+            return
+        u, v, nrm = self._axes_for(which)
+        o = self._pc[which]
+        ctrl = [o + float(x) * u + float(y) * v for (x, y) in pts2d]
+        step = max(1e-3, min(self._dims))
+        cl = CenterLine.from_points(ctrl, step_mm=step)
+        if cl.n < 2:
+            return
+        fu, fv = cl.frames(ref_up=nrm)            # short-axis axes ⟂ tangent
+        self._cpr = {
+            "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
+            "half": 25.0,                         # ±25 mm cross-section FOV
+            "src": which,                         # pane the trace lives on
+        }
+        # Show both panes: A = cross-section, the traced pane = map.
+        self.set_side("Bi")
+        self.pane["A"].set_overlay_visible(False)   # no crosshair on the disc
+        self._cpr_sync_bar()
+        self._refresh(reset_cam=True)
+
+    def _exit_cpr(self):
+        """Leave short-axis mode and restore pane A's normal MPR."""
+        if self._cpr is None:
+            return
+        self._cpr = None
+        self._cpr_wrap.setVisible(False)
+        self.pane["A"].set_overlay_visible(self._cl_btn.isChecked())
+        self._init_frames()                       # rebuild pane A's MPR frame
+        self._refresh(reset_cam=True)
+
+    def _cpr_set_index(self, i):
+        """Scroll to cross-section *i* along the vessel."""
+        c = self._cpr
+        if c is None:
+            return
+        c["idx"] = int(min(max(int(i), 0), c["cl"].n - 1))
+        self._cpr_sync_bar()
+        self._refresh()
+
+    def _cpr_matrix(self):
+        """Reslice matrix for pane A in short-axis mode: axes (u, v, tangent)
+        at the current sample, origin = that centreline point (volume mm)."""
+        c = self._cpr
+        i = c["idx"]
+        u = c["u"][i]; v = c["v"][i]; nrm = c["cl"].tangents[i]
+        o = c["cl"].points[i]
+        mtx = vtkMatrix4x4()
+        for r in range(3):
+            mtx.SetElement(r, 0, float(u[r]))
+            mtx.SetElement(r, 1, float(v[r]))
+            mtx.SetElement(r, 2, float(nrm[r]))
+            mtx.SetElement(r, 3, float(o[r]))
+        return mtx
+
+    def _cpr_sync_bar(self):
+        c = self._cpr
+        if c is None:
+            return
+        cl = c["cl"]
+        self._cpr_wrap.setVisible(True)
+        self._cpr_slider.blockSignals(True)
+        self._cpr_slider.setMaximum(cl.n - 1)
+        self._cpr_slider.setValue(c["idx"])
+        self._cpr_slider.blockSignals(False)
+        pos_mm = float(cl.arclen[c["idx"]])
+        self._cpr_lbl.setText(
+            f"{c['idx'] + 1} / {cl.n}   ({pos_mm:.1f} / {cl.length_mm:.1f} mm)"
+        )
+
     def _refresh(self, reset_cam=False):
         if self._image is None:
             return
@@ -3393,6 +3528,33 @@ class CTViewer(AbstractViewer):
         half, n = self._half, self._npx
         for key in ("A", "B"):
             p = self.pane[key]
+            # Pane A in short-axis (CPR) mode: reslice the cross-section plane
+            # with a tight FOV instead of the normal MPR matrix.
+            if self._cpr is not None and key == "A":
+                hcpr = self._cpr["half"]
+                ncpr = max(64, int(2 * hcpr / step) + 1)
+                p.reslice.SetResliceAxes(self._cpr_matrix())
+                p.reslice.SetOutputSpacing(step, step, step)
+                p.reslice.SetOutputOrigin(-hcpr, -hcpr, 0.0)
+                p.reslice.SetOutputExtent(0, ncpr - 1, 0, ncpr - 1, 0, 0)
+                p.reslice.SetSlabNumberOfSlices(1)
+                p.reslice.Modified()
+                p.colors.SetLookupTable(self._lut())
+                p.colors.Modified()
+                if reset_cam:
+                    self._fit_cpr_pane()
+                # No crosshair / C-arm angle on a cross-section; label the
+                # pane and its arc-length position instead.
+                c = self._cpr
+                p.info.SetText(0, f"WW {self._win:.0f}  WL {self._lvl:.0f}")
+                p.info.SetText(
+                    1, "A  |  " + t("Short-axis {i}/{n}",
+                                    i=c["idx"] + 1, n=c["cl"].n))
+                p.angle.SetInput("")
+                for _ha in p.angle_halo:
+                    _ha.SetInput("")
+                p.render()
+                continue
             p.reslice.SetResliceAxes(self._matrix(key))
             p.reslice.SetOutputSpacing(step, step, step)
             p.reslice.SetOutputOrigin(-half, -half, 0.0)
@@ -3441,6 +3603,19 @@ class CTViewer(AbstractViewer):
         # "fit by height" and "fit by width (converted via aspect ratio)".
         ps = max(hv, hu * ph / pw)
         cam.SetParallelScale(max(1e-3, ps))
+        p.render()
+
+    def _fit_cpr_pane(self):
+        """Fit pane A's camera to the short-axis FOV (±half mm, centred)."""
+        p = self.pane["A"]
+        p.reslice.Update()
+        cam = p.ren.GetActiveCamera()
+        cam.SetViewUp(0.0, 1.0, 0.0)
+        fz = cam.GetFocalPoint()[2]
+        pz = cam.GetPosition()[2]
+        cam.SetFocalPoint(0.0, 0.0, fz)
+        cam.SetPosition(0.0, 0.0, pz)
+        cam.SetParallelScale(max(1e-3, self._cpr["half"]))
         p.render()
 
     def _content_half_on_plane(self, key):
@@ -3709,6 +3884,10 @@ class CTViewer(AbstractViewer):
         controls are disabled. Default mode is chosen per series on load."""
         if mode not in ("3D", "2D") or self._image is None:
             return
+        # A Plane/2D/3D switch leaves short-axis mode (it repurposes pane A).
+        if self._cpr is not None:
+            self._cpr = None
+            self._cpr_wrap.setVisible(False)
         prev = getattr(self, "_mode", None)
         self._mode = mode
         for k, b in self._mode_btns.items():
