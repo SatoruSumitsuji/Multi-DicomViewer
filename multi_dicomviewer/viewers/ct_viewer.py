@@ -625,7 +625,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
-        if self._owner._meas_on:
+        # Shift while measuring temporarily runs the SELECTED tool instead of
+        # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
+        # off the slab; Move/Zoom just help you look) — so you can reorient the
+        # plane mid-trace without leaving Measure. Falls through to the same
+        # tool path idle-Measure uses.
+        _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        if self._owner._meas_on and not _shift:
             self._cross = False
             self._meas_drag = False
             # Left-click MEASURES while a type is selected or a Center-Angle
@@ -2583,6 +2589,19 @@ class CTViewer(AbstractViewer):
             p.meas_labels.append(ta)
 
     def _redraw_geom(self, key):
+        # A vessel-trace polyline stores absolute 3-D control points; re-derive
+        # its 2-D outline from them on the CURRENT plane so the trace follows
+        # the anatomy when the plane is rotated / paged (a plain 2-D measure has
+        # no pts3d and is untouched). 3-D MPR only.
+        if self._mode == "3D":
+            for m in self._measures[key]:
+                p3 = m.get("pts3d")
+                if p3 and m["type"] == "polyline" and len(p3) == len(m["pts"]):
+                    m["pts"] = [self._world3d_to_out(key, P) for P in p3]
+            d = self._draft
+            if (d is not None and d.get("pane") == key and d.get("pts3d")
+                    and len(d["pts3d"]) == len(d["pts"])):
+                d["pts"] = [self._world3d_to_out(key, P) for P in d["pts3d"]]
         p = self.pane[key]
         # Scale the measurement line widths by the render-window DPR so they
         # render at the intended on-screen thickness on scaled displays.
@@ -2783,6 +2802,11 @@ class CTViewer(AbstractViewer):
             d = {"type": self._meas_type, "pane": which, "pts": []}
             self._draft = d
         d["pts"].append(w)
+        # Capture the absolute 3-D position of each polyline vertex (a vessel
+        # trace may cross rotated / paged planes). Only polylines in 3-D MPR —
+        # the plane doesn't move in 2-D native mode.
+        if d["type"] == "polyline" and self._mode == "3D":
+            d.setdefault("pts3d", []).append(self._out_to_world3d(which, *w))
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
             self._commit_draft()
         elif d["type"] == "angle" and len(d["pts"]) >= 3:
@@ -2804,6 +2828,10 @@ class CTViewer(AbstractViewer):
             self._resnap_center_angle(m)
         else:
             m["pts"][e["vi"]] = w
+            # Keep the absolute 3-D trace in step: the dragged vertex moves on
+            # the CURRENT plane, so its new 3-D is that 2-D point lifted here.
+            if m.get("pts3d") and 0 <= e["vi"] < len(m["pts3d"]):
+                m["pts3d"][e["vi"]] = self._out_to_world3d(e["key"], *w)
             self._resnap_center_angle(m)
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
@@ -2871,9 +2899,14 @@ class CTViewer(AbstractViewer):
         else:
             pts = list(d["pts"])
         self._meas_seq += 1
-        self._measures[d["pane"]].append(
-            {"id": self._meas_seq, "type": d["type"], "pts": pts}
-        )
+        rec = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        # Carry the absolute 3-D trace (vessel centreline control points) so a
+        # later Short-axis MPR uses the real geometry regardless of how the
+        # plane was moved while tracing.
+        if d["type"] == "polyline" and d.get("pts3d") \
+                and len(d["pts3d"]) == len(pts):
+            rec["pts3d"] = list(d["pts3d"])
+        self._measures[d["pane"]].append(rec)
         self._redraw_meas(d["pane"])
         # File it under the current study's shared Measure History. The
         # pre-formatted metrics string is the label; points/kind travel
@@ -3168,6 +3201,10 @@ class CTViewer(AbstractViewer):
                 best_d, best_i = d, i
         pts.insert(best_i + 1, pt)
         m["pts"] = pts
+        # Insert the matching 3-D control point (the click lifted on this plane)
+        # so the vessel trace keeps pts3d aligned with pts.
+        if m.get("pts3d") and len(m["pts3d"]) == len(pts) - 1:
+            m["pts3d"].insert(best_i + 1, self._out_to_world3d(which, wx, wy))
         self._resnap_center_angle(m)
 
     def _delete_point(self, which, mi, vi):
@@ -3178,8 +3215,12 @@ class CTViewer(AbstractViewer):
         if len(pts) <= 2 or not (0 <= vi < len(pts)):
             return
         del pts[vi]
+        p3 = m.get("pts3d")
+        if p3 and 0 <= vi < len(p3):
+            del p3[vi]
         if len(pts) == 2:
             m["type"] = "line"
+            m.pop("pts3d", None)               # a Line is a plain 2-D measure
         m["pts"] = pts
         self._resnap_center_angle(m)
 
@@ -3401,6 +3442,23 @@ class CTViewer(AbstractViewer):
             m.SetElement(r, 3, float(o[r]))
         return m
 
+    # ---- 2-D output point  <->  absolute 3-D volume point ----
+    # A measure point is stored as (wx, wy) in a pane's reslice OUTPUT frame,
+    # which only makes sense while that pane keeps one cutting plane. For a
+    # vessel trace the plane is rotated / paged between clicks, so each point
+    # is ALSO captured as an absolute 3-D volume coordinate (pts3d) using the
+    # frame live at that click; the 2-D pts are re-derived from pts3d on every
+    # redraw so the trace stays anchored to the anatomy as the plane moves.
+    def _out_to_world3d(self, which, wx, wy):
+        u, v, _n = self._axes_for(which)
+        o = self._pc[which]
+        return o + float(wx) * u + float(wy) * v
+
+    def _world3d_to_out(self, which, P):
+        u, v, _n = self._axes_for(which)
+        d = np.asarray(P, dtype=float) - self._pc[which]
+        return (float(np.dot(d, u)), float(np.dot(d, v)))
+
     def _cc(self, key):
         """Crosshair centre for a pane = C projected into its plane,
         relative to that pane's reslice centre (output coords, mm)."""
@@ -3450,12 +3508,19 @@ class CTViewer(AbstractViewer):
         arc-length index; pane *which* keeps its slab MPR so the trace stays
         visible as a map."""
         m = self._measures[which][mi]
-        pts2d = self._outline(m)                  # honours the Spline toggle
-        if len(pts2d) < 2:
-            return
         u, v, nrm = self._axes_for(which)
-        o = self._pc[which]
-        ctrl = [o + float(x) * u + float(y) * v for (x, y) in pts2d]
+        p3 = m.get("pts3d")
+        if p3 and len(p3) >= 2:
+            # Absolute 3-D control points captured while tracing (correct even
+            # if the plane was rotated / paged between clicks).
+            ctrl = [np.asarray(P, dtype=float) for P in p3]
+        else:
+            # Fallback: a flat trace on this one plane (older / 2-D-lifted).
+            pts2d = self._outline(m)              # honours the Spline toggle
+            if len(pts2d) < 2:
+                return
+            o = self._pc[which]
+            ctrl = [o + float(x) * u + float(y) * v for (x, y) in pts2d]
         step = max(1e-3, min(self._dims))
         cl = CenterLine.from_points(ctrl, step_mm=step)
         if cl.n < 2:
