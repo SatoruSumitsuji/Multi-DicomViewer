@@ -3157,6 +3157,7 @@ class CTViewer(AbstractViewer):
         self._thick = {"A": 0.0, "B": 5.0}
         # Reset any 2-D rotate/flip to the native orientation for the new series.
         self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
+        self._play2d_btn.setChecked(False)       # stop any running auto-page
 
         b = self._bounds
         self._center = np.array(
@@ -3185,6 +3186,7 @@ class CTViewer(AbstractViewer):
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
     def clear(self) -> None:
+        self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._image = None
         self._header = None
         for key in ("A", "B"):
@@ -3523,11 +3525,17 @@ class CTViewer(AbstractViewer):
         """The readout's (primary, secondary) C-arm angles as signed ints
         (LAO + / RAO −, CRA + / CAU −), or None when the frame is degenerate.
         Shared by the readout text and the right-click angle dialog."""
-        n = np.asarray(self._frame[key][2], dtype=np.float64)
+        u = np.asarray(self._frame[key][0], dtype=np.float64)
+        v = np.asarray(self._frame[key][1], dtype=np.float64)
+        # Patient-space viewing normal = cross of the MAPPED in-plane axes.
+        # (pbasis @ n would flip the sign when the volume is stored along
+        # −x/−y — a left-handed pbasis, e.g. a coronal/sagittal stack sorted
+        # A→P / R→L — misreporting the viewed side by 180°.)
+        n = np.cross(self._pbasis @ u, self._pbasis @ v)   # -> patient LPS
         nrm = float(np.linalg.norm(n))
         if nrm < 1e-9:
             return None
-        n = self._pbasis @ (n / nrm)                 # -> patient LPS
+        n = n / nrm
         nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
         # NOTE: the old code folded ±N into the anterior hemisphere here. That
         # made a fully-reversed view (e.g. spinning the cross-line 180° so the
@@ -3557,12 +3565,18 @@ class CTViewer(AbstractViewer):
             inv = np.linalg.inv(np.asarray(self._pbasis, dtype=np.float64))
         except np.linalg.LinAlgError:
             inv = np.eye(3)
-        n = _norm(inv @ n_pat)                       # normal in volume coords
-        sup = _norm(inv @ np.array([0.0, 0.0, 1.0]))  # patient superior
-        if abs(float(np.dot(sup, n))) > 0.999:       # looking down the SI axis
-            sup = _norm(inv @ np.array([0.0, -1.0, 0.0]))  # fall back: anterior
-        u = _norm(np.cross(sup, n))                  # screen-right
-        v = np.cross(n, u)                           # screen-up (u×v = n)
+        sup_pat = np.array([0.0, 0.0, 1.0])          # patient superior
+        if abs(float(np.dot(sup_pat, n_pat))) > 0.999:   # looking down SI axis
+            sup_pat = np.array([0.0, -1.0, 0.0])     # fall back: anterior
+        # Build the screen axes in PATIENT space and map EACH into volume
+        # coords. (Mapping only the normal via inv loses a sign for a
+        # left-handed pbasis — see _angio_angle_vals — so the pane would
+        # show the opposite side to the angle requested.)
+        u_pat = _norm(np.cross(sup_pat, n_pat))      # screen-right
+        v_pat = np.cross(n_pat, u_pat)               # screen-up
+        u = _norm(inv @ u_pat)
+        v = _norm(inv @ v_pat)
+        n = np.cross(u, v)                           # volume coords (u×v = n)
         return (u, v, n)
 
     def _set_angio_angle(self, which, prim_deg, sec_deg):
@@ -3731,6 +3745,23 @@ class CTViewer(AbstractViewer):
             lbl.setFont(f)
             return lbl
 
+        # "Play" auto-pages through the native slices head → feet (the
+        # conventional CT paging direction), looping back to the head end.
+        # Fixed 10 slices/s — CT slices carry no cine rate to honour.
+        self._play2d_btn = QPushButton("▶ Play")
+        self._play2d_btn.setCheckable(True)
+        _pf = self._play2d_btn.font()
+        _pf.setPointSizeF(self._seek_base_pt * 1.55)
+        _pf.setBold(True)
+        self._play2d_btn.setFont(_pf)
+        self._play2d_btn.setToolTip(
+            t("Auto-page through the slices head → feet (loops; click again "
+              "to stop)"))
+        self._play2d_btn.toggled.connect(self._toggle_play2d)
+        row.addWidget(self._play2d_btn)
+        self._play2d_timer = QTimer(self)
+        self._play2d_timer.setInterval(100)      # 10 slices/s
+        self._play2d_timer.timeout.connect(self._play2d_tick)
         self._seek_frame_lbl = _big(QLabel(t("Frame:")))
         row.addWidget(self._seek_frame_lbl)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
@@ -3738,6 +3769,11 @@ class CTViewer(AbstractViewer):
         self._seek_slider.setMaximum(0)
         self._seek_slider.setMinimumHeight(26)   # room for the 20px disc handle
         self._seek_slider.setStyleSheet(_SEEK_SLIDER_QSS)
+        # The volume's slice index ascends toward the head (load_ct sorts by
+        # IPP z), but conventional CT paging runs head → feet, so the slider
+        # is inverted: left end = head (Frame 1), right end = feet.
+        self._seek_slider.setInvertedAppearance(True)
+        self._seek_slider.setInvertedControls(True)
         self._seek_slider.valueChanged.connect(self._on_seek)
         row.addWidget(self._seek_slider, 1)
         self._seek_lbl = _big(QLabel("1 / 1"))
@@ -3807,6 +3843,10 @@ class CTViewer(AbstractViewer):
         self._seek_slider.setStyleSheet(
             _SEEK_SLIDER_QSS_COMPACT if on else _SEEK_SLIDER_QSS
         )
+        pf = self._play2d_btn.font()
+        pf.setPointSizeF(base * (1.0 if on else 1.55))
+        pf.setBold(not on)
+        self._play2d_btn.setFont(pf)
 
     def _on_seek(self, val):
         """Scrubber moved → jump to that native slice (2-D mode)."""
@@ -3821,12 +3861,16 @@ class CTViewer(AbstractViewer):
         self._clamp_center()
         self._view_initial = False
         self._refresh()
-        self._seek_lbl.setText(f"{self._slice2d + 1} / {nz}")
+        # Counted from the head end (Frame 1 = most cranial slice), matching
+        # the inverted slider direction.
+        self._seek_lbl.setText(f"{nz - self._slice2d} / {nz}")
 
     def _sync_seek(self):
         """Show/refresh the scrubber to match the current mode and slice."""
         nz = self._image.GetDimensions()[2] if self._image is not None else 1
         show = (self._mode == "2D" and nz > 1)
+        if not show:
+            self._play2d_btn.setChecked(False)   # stops the auto-page timer
         self._seek_wrap.setVisible(show)
         if not show:
             return
@@ -3834,7 +3878,35 @@ class CTViewer(AbstractViewer):
         self._seek_slider.setMaximum(nz - 1)
         self._seek_slider.setValue(self._slice2d)
         self._seek_slider.blockSignals(False)
-        self._seek_lbl.setText(f"{self._slice2d + 1} / {nz}")
+        self._seek_lbl.setText(f"{nz - self._slice2d} / {nz}")
+
+    def _toggle_play2d(self, on):
+        """Start/stop auto-paging (head → feet, looping) in 2-D mode."""
+        if on:
+            nz = (self._image.GetDimensions()[2]
+                  if self._image is not None else 1)
+            if self._mode != "2D" or nz <= 1:
+                self._play2d_btn.setChecked(False)
+                return
+            self._play2d_btn.setText("⏸ Pause")
+            self._play2d_timer.start()
+        else:
+            self._play2d_btn.setText("▶ Play")
+            self._play2d_timer.stop()
+
+    def _play2d_tick(self):
+        """One auto-page step toward the feet (the volume index ascends
+        toward the head, so head → feet = descending index), looping back to
+        the head end after the last slice."""
+        if self._mode != "2D" or self._image is None:
+            self._play2d_btn.setChecked(False)
+            return
+        nz = self._image.GetDimensions()[2]
+        nxt = self._slice2d - 1
+        if nxt < 0:
+            nxt = nz - 1
+        # Drive through the slider so the handle follows (fires _on_seek).
+        self._seek_slider.setValue(nxt)
 
     # ------------------------------------------------- 2-D image transforms
     def _apply_2d_axes(self):
