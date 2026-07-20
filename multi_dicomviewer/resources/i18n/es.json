@@ -56,7 +56,7 @@
   "Anonymize: ON (case info masked on screen)": "Anonimizar: ON (información del caso oculta en pantalla)",
   "Anonymous": "Anónimo",
   "At most {N} panes can play at once.": "Como máximo {N} paneles pueden reproducirse a la vez.",
-  "Auto-page through the slices head → feet (loops; click again to stop)": "Avance automático por los cortes de cabeza → pies (en bucle; clic de nuevo para detener)",
+  "Auto-page through the slices head → feet (loops; click again to stop). Keys: D = play / ×2 speed, S = stop": "Avance automático por los cortes de cabeza → pies (en bucle; clic de nuevo para detener). Teclas: D = reproducir / velocidad ×2, S = detener",
   "At most {n} data can play at once.\nStop one of the playing data to play another.": "Como máximo {n} datos pueden reproducirse a la vez.\nDetenga uno de los datos en reproducción para reproducir otro.",
   "Back": "Atrás",
   "Balloon diameter (mm):": "Diámetro del balón (mm):",

@@ -1026,6 +1026,9 @@ class _ColorMapDialog(QDialog):
 # --------------------------------------------------------------- viewer
 class CTViewer(AbstractViewer):
     handles_modality = "CT"
+    #: emitted by the series-navigation buttons ("first"/"prev"/"next"/"last")
+    #: — the shell steps through this study's CT series (angio-style F/A nav)
+    series_nav = pyqtSignal(str)
     tags_requested = pyqtSignal()
     #: emitted when the tag-text-size slider moves (shell broadcasts the pt)
     overlay_font_changed = pyqtSignal(int)
@@ -1203,11 +1206,17 @@ class CTViewer(AbstractViewer):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(2, 2, 2, 2)
+        # Built BEFORE the toolbar (whose _set_tool touches the mode/side
+        # buttons) but placed BELOW the image — angio-style: the top row
+        # hosts Series First/Prev/Next/Last, the Plane/3D/2D switch sits
+        # under the image.
+        plane_bar = self._build_plane_bar()
         lay.addWidget(self._build_toolbar())
         self._measure_bar = self._build_measure_bar()
         self._measure_bar.setVisible(False)
         lay.addWidget(self._measure_bar)
         lay.addLayout(imgrow, 1)
+        lay.addWidget(plane_bar)
         lay.addWidget(self._build_seek_bar())
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -1224,11 +1233,20 @@ class CTViewer(AbstractViewer):
         # viewer (WidgetWithChildrenShortcut) so they only act while a CT pane
         # has focus. Q (tag overlay show/hide) is the shell's app-wide action.
         for seq, tool in (("Z", "ZOOM"), ("V", "MOVE"), ("R", "ROTATE"),
-                          ("S", "SPIN"), ("G", "PAGING"), ("T", "THICK"),
+                          ("G", "PAGING"), ("T", "THICK"),
                           ("W", "WL")):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda t=tool: self._set_tool(t))
+        # S is dual-purpose: Spin tool in 3-D, STOP the auto-page in 2-D
+        # (Spin is MPR-only, so there is no conflict). D = play / ×2 toggle
+        # in 2-D (angio cine-key parity); no 3-D action.
+        sc_s = QShortcut(QKeySequence("S"), self)
+        sc_s.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_s.activated.connect(self._key_s)
+        sc_d = QShortcut(QKeySequence("D"), self)
+        sc_d.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_d.activated.connect(self._key_d)
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
@@ -1649,6 +1667,17 @@ class CTViewer(AbstractViewer):
         dialogs are rebuilt every time they open.
         """
         # -- toolbar / measure-bar section labels ------------------------
+        lbl = getattr(self, "_series_nav_lbl", None)
+        if lbl is not None:
+            lbl.setText(t("Series:"))
+        nav_tips = (
+            t("First series (Home)"),
+            t("Previous series — shortcut: A"),
+            t("Next series — shortcut: F"),
+            t("Last series (End)"),
+        )
+        for b, tip in zip(getattr(self, "_nav_btns", []) or [], nav_tips):
+            b.setHelpToolTip(tip)
         lbl = getattr(self, "_plane_lbl", None)
         if lbl is not None:
             lbl.setText(t("Plane:"))
@@ -1790,17 +1819,15 @@ class CTViewer(AbstractViewer):
             pass
 
     # ------------------------------------------------------------ toolbar
-    def _build_toolbar(self):
-        # Two rows so the (now longer, shortcut-labelled) controls don't grow
-        # the strip too wide: row 1 = view/plane/measure controls, row 2 = the
-        # interaction tools (each captioned with its keyboard shortcut).
-        col = QVBoxLayout()
-        col.setContentsMargins(4, 2, 4, 2)
-        col.setSpacing(2)
-        row = QHBoxLayout()
-        row.setContentsMargins(0, 0, 0, 0)
-        row2 = QHBoxLayout()
-        row2.setContentsMargins(0, 0, 0, 0)
+    # -------------------------------------------- plane bar (below the image)
+    def _build_plane_bar(self) -> QWidget:
+        """Plane (Bi/Lt/Rt) + 3D/2D mode switch in a slim bar BELOW the image
+        — angio-style layout: the top toolbar row hosts the Series
+        First/Prev/Next/Last navigation instead. Hidden by "Max Image"
+        together with the other toolbars (not flagged _mdv_keep_on_max)."""
+        bar = QWidget()
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(8, 0, 8, 0)
 
         # In-pane Plane switch: Bi (both MPR panes) / Lt (left) / Rt (right).
         self._plane_lbl = QLabel(t("Plane:"))
@@ -1840,6 +1867,41 @@ class CTViewer(AbstractViewer):
             b.setStyleSheet(_mode_css)
             b.clicked.connect(lambda _c, k=key: self._set_mode(k))
             self._mode_btns[key] = b
+            row.addWidget(b)
+        row.addStretch(1)
+        for b in bar.findChildren(QPushButton):
+            b.setMinimumWidth(min(b.sizeHint().width(), 56))
+        return bar
+
+    def _build_toolbar(self):
+        # Two rows so the (now longer, shortcut-labelled) controls don't grow
+        # the strip too wide: row 1 = view/plane/measure controls, row 2 = the
+        # interaction tools (each captioned with its keyboard shortcut).
+        col = QVBoxLayout()
+        col.setContentsMargins(4, 2, 4, 2)
+        col.setSpacing(2)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row2 = QHBoxLayout()
+        row2.setContentsMargins(0, 0, 0, 0)
+
+        # Series navigation (angio-style): First/Prev/Next/Last step through
+        # this study's CT series (the list behind the "Series: x/y" counter).
+        # Icons sit LEFT of the text so narrow multi-pane layouts still show
+        # which button is which (a right-side icon is the first thing elided).
+        self._series_nav_lbl = QLabel(t("Series:"))
+        row.addWidget(self._series_nav_lbl)
+        self._nav_btns: list[QPushButton] = []
+        for label, where, tip in (
+            ("⏮ First", "first", t("First series (Home)")),
+            ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
+            ("▶ Next (F)", "next", t("Next series — shortcut: F")),
+            ("⏭ Last", "last", t("Last series (End)")),
+        ):
+            b = FitButton(label)
+            b.setHelpToolTip(tip)
+            b.clicked.connect(lambda _c, w=where: self.series_nav.emit(w))
+            self._nav_btns.append(b)
             row.addWidget(b)
         row.addSpacing(8)
 
@@ -2166,12 +2228,17 @@ class CTViewer(AbstractViewer):
         self._play2d_btn.setFont(_pf)
         self._play2d_btn.setToolTip(
             t("Auto-page through the slices head → feet (loops; click again "
-              "to stop)"))
+              "to stop). Keys: D = play / ×2 speed, S = stop"))
         self._play2d_btn.toggled.connect(self._toggle_play2d)
         row.addWidget(self._play2d_btn)
+        self._play2d_speed = 1.0                 # ×2 via the D key
         self._play2d_timer = QTimer(self)
         self._play2d_timer.setInterval(100)      # 10 slices/s
         self._play2d_timer.timeout.connect(self._play2d_tick)
+        #: True after a manual Pause → the next Play RESUMES from the current
+        #: slice instead of rewinding to Frame 1. Cleared by forced stops
+        #: (mode switch, new series, clear).
+        self._play2d_resume = False
         self._seek_frame_lbl = _big(QLabel(t("Frame:")))
         row.addWidget(self._seek_frame_lbl)
         self._seek_slider = QSlider(Qt.Orientation.Horizontal)
@@ -2281,6 +2348,7 @@ class CTViewer(AbstractViewer):
         show = (self._mode == "2D" and nz > 1)
         if not show:
             self._play2d_btn.setChecked(False)   # stops the auto-page timer
+            self._play2d_resume = False          # next Play starts at Frame 1
         self._seek_wrap.setVisible(show)
         if not show:
             return
@@ -2291,17 +2359,27 @@ class CTViewer(AbstractViewer):
         self._seek_lbl.setText(f"{nz - self._slice2d} / {nz}")
 
     def _toggle_play2d(self, on):
-        """Start/stop auto-paging (head → feet, looping) in 2-D mode."""
+        """Start/stop auto-paging (head → feet, looping) in 2-D mode.
+        A fresh Play REWINDS to Frame 1 (the head end) first — the mid-stack
+        slice shown on load is only the initial preview, not the start
+        point. After a manual Pause, Play resumes from the paused slice."""
         if on:
             nz = self._vol.shape[0] if self._vol is not None else 1
             if self._mode != "2D" or nz <= 1:
                 self._play2d_btn.setChecked(False)
                 return
-            self._play2d_btn.setText("⏸ Pause")
+            self._play2d_btn.setText(
+                "⏸ Pause ×2" if self._play2d_speed >= 1.5 else "⏸ Pause")
+            if not self._play2d_resume:
+                self._seek_slider.setValue(nz - 1)   # Frame 1 (fires _on_seek)
             self._play2d_timer.start()
         else:
             self._play2d_btn.setText("▶ Play")
             self._play2d_timer.stop()
+            # Reaching here means playback WAS running (toggled only fires on
+            # a state change) — treat as a manual Pause; the forced-stop
+            # sites reset this right after their setChecked(False).
+            self._play2d_resume = True
 
     def _play2d_tick(self):
         """One auto-page step toward the feet (the volume index ascends
@@ -2316,6 +2394,38 @@ class CTViewer(AbstractViewer):
             nxt = nz - 1
         # Drive through the slider so the handle follows (fires _on_seek).
         self._seek_slider.setValue(nxt)
+
+    def _play2d_speed_toggle(self):
+        """D (2-D mode): stopped → play at 1×; playing 1× → 2×; 2× → 1× —
+        the same cine key the angio viewer uses."""
+        if self._mode != "2D" or self._vol is None:
+            return
+        if not self._play2d_btn.isChecked():
+            self._set_play2d_speed(1.0)
+            self._play2d_btn.setChecked(True)    # fresh/resume rules apply
+            return
+        self._set_play2d_speed(2.0 if self._play2d_speed < 1.5 else 1.0)
+
+    def _set_play2d_speed(self, speed: float) -> None:
+        """Apply the auto-page speed (1× = 10 slices/s) and mirror it in the
+        Pause label while playing."""
+        self._play2d_speed = float(speed)
+        self._play2d_timer.setInterval(int(round(100 / self._play2d_speed)))
+        if self._play2d_btn.isChecked():
+            self._play2d_btn.setText(
+                "⏸ Pause ×2" if self._play2d_speed >= 1.5 else "⏸ Pause")
+
+    def _key_s(self):
+        """S: STOP the 2-D auto-page; Spin tool in 3-D (MPR-only)."""
+        if self._mode == "2D":
+            self._play2d_btn.setChecked(False)
+        else:
+            self._set_tool("SPIN")
+
+    def _key_d(self):
+        """D: 2-D play / ×2 speed toggle (no 3-D action)."""
+        if self._mode == "2D":
+            self._play2d_speed_toggle()
 
     # ------------------------------------------------- 2-D image transforms
     def _apply_2d_axes(self):
@@ -2447,6 +2557,8 @@ class CTViewer(AbstractViewer):
         # Reset any 2-D rotate/flip to the native orientation for the new series.
         self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
         self._play2d_btn.setChecked(False)       # stop any running auto-page
+        self._play2d_resume = False              # next Play starts at Frame 1
+        self._set_play2d_speed(1.0)              # back to 1× for a new series
 
         b = self._bounds
         self._center = np.array([(b[0] + b[1]) / 2, (b[2] + b[3]) / 2,
@@ -2471,6 +2583,7 @@ class CTViewer(AbstractViewer):
 
     def clear(self) -> None:
         self._play2d_btn.setChecked(False)       # stop any running auto-page
+        self._play2d_resume = False              # next Play starts at Frame 1
         self._cancel_lod()
         self._lod_pending = False
         self._vol = None

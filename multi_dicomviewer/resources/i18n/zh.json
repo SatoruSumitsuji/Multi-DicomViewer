@@ -56,7 +56,7 @@
   "Anonymize: ON (case info masked on screen)": "匿名化：开（屏幕上病例信息已隐去）",
   "Anonymous": "匿名",
   "At most {N} panes can play at once.": "最多可同时播放 {N} 个窗格。",
-  "Auto-page through the slices head → feet (loops; click again to stop)": "自动逐层播放切片（头侧→足侧，循环；再次点击停止）",
+  "Auto-page through the slices head → feet (loops; click again to stop). Keys: D = play / ×2 speed, S = stop": "自动逐层播放切片（头侧→足侧，循环；再次点击停止）。按键：D = 播放/2倍速，S = 停止",
   "At most {n} data can play at once.\nStop one of the playing data to play another.": "最多可同时播放 {n} 个数据。\n停止其中一个正在播放的数据以播放另一个。",
   "Back": "返回",
   "Balloon diameter (mm):": "球囊直径（mm）：",
