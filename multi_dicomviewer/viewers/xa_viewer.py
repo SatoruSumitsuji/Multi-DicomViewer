@@ -595,6 +595,10 @@ class XAViewer(AbstractViewer):
         self._fps = DEFAULT_CINE_FPS
         # Cine speed multiplier toggled by D (1.0 = 1×, 2.0 = 2×).
         self._play_speed: float = 1.0
+        #: True after a manual Pause/Stop → the next Play RESUMES from the
+        #: current frame; False (fresh series / never played) → Play starts
+        #: from the Play-range start. CT-2D-style transport semantics.
+        self._play_resume = False
         # ECG strip (W key): the trace read from this series' DICOM, the
         # per-frame time step used to drive the cursor, and visibility.
         #: User's ON/OFF choice — PERSISTS across series (Next/Prev) until the
@@ -742,11 +746,14 @@ class XAViewer(AbstractViewer):
         self._series_nav_lbl = QLabel(t("Series:"))
         row.addWidget(self._series_nav_lbl)
         self._nav_btns: list[QPushButton] = []
+        # Icons sit LEFT of the text on every button: in narrow multi-pane
+        # layouts the label elides from the right, so a right-side ▶/⏭ was
+        # the first thing to disappear — leaving four look-alike buttons.
         for label, where, tip in (
             ("⏮ First", "first", t("First series (Home)")),
             ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
-            ("Next (F) ▶", "next", t("Next series — shortcut: F")),
-            ("Last ⏭", "last", t("Last series (End)")),
+            ("▶ Next (F)", "next", t("Next series — shortcut: F")),
+            ("⏭ Last", "last", t("Last series (End)")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -1388,9 +1395,11 @@ class XAViewer(AbstractViewer):
         self._buffer_timer.stop()
         self._planes = list(loaded.xa_planes or [])
         self._header = loaded.header
-        # Remembered frame for the incoming series (clamped below once
-        # we know its length); fresh series default to 0.
-        self._frame = self._frame_by_series.get(new_uid, 0)
+        # Remembered frame for the incoming series (clamped below once we
+        # know its length); a NEVER-visited series starts on its MIDDLE
+        # frame (CT-2D-style initial preview — applied once n is known).
+        remembered = self._frame_by_series.get(new_uid)
+        self._frame = remembered if remembered is not None else 0
         self._active = 0
         # A freshly loaded biplane series defaults to "Bi" (both planes);
         # single-plane series ignore this (_dual gates on _is_biplane).
@@ -1429,6 +1438,11 @@ class XAViewer(AbstractViewer):
         self._refresh_wl_lut()
 
         n = max(p.volume.shape[0] for p in self._planes)
+        if remembered is None and not self.play_btn.isChecked():
+            # First open of this series (and not mid-playback of a series
+            # switch): show the MIDDLE frame as the initial preview. Play
+            # rewinds to the Play-range start anyway (see _toggle_play).
+            self._frame = n // 2
         # Clamp the remembered frame index to the new series' length.
         self._frame = max(0, min(self._frame, n - 1))
         self.frame_slider.blockSignals(True)
@@ -1442,6 +1456,10 @@ class XAViewer(AbstractViewer):
         if single and self.play_btn.isChecked():
             self.play_btn.setChecked(False)
         self.play_btn.setEnabled(not single)
+        # A newly loaded series always starts playback from the Play-range
+        # start; "resume from Pause" only applies within one series. (Set
+        # AFTER the setChecked above, whose toggled handler flips it True.)
+        self._play_resume = False
         # Grey the seek handle's inner dot when there's nothing to play, so it
         # no longer looks like an active control next to the greyed Play button.
         self._seek_playable = not single
@@ -1869,6 +1887,11 @@ class XAViewer(AbstractViewer):
             return
         self.play_btn.setText("⏸ Pause" if on else "▶ Play")
         if on:
+            if not self._play_resume and self._frame != self._range_start:
+                # Fresh play (not a resume after Pause): start from the
+                # Play-range start, CT-2D-style — the mid-clip frame shown
+                # on first open is only the initial preview.
+                self.frame_slider.setValue(self._range_start)
             # Snap into the Play range before looping so a handle parked
             # outside [start, end] doesn't crawl up to it one frame at a time.
             if self._frame < self._range_start or self._frame > self._range_end:
@@ -1882,6 +1905,10 @@ class XAViewer(AbstractViewer):
                 self.frame_lbl.setText(t("⏳ Buffering…"))
                 self._buffer_timer.start()
         else:
+            # A manual Pause/Stop: the next Play resumes from this frame.
+            # Forced stops that must NOT resume (new series) reset this in
+            # load_series after their setChecked(False).
+            self._play_resume = True
             self._buffer_timer.stop()
             self._timer.stop()
             if self._planes:

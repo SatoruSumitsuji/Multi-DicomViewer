@@ -411,6 +411,13 @@ def _is_cine(viewer) -> bool:
     return getattr(viewer, "handles_modality", "") in ("XA", "IVUS")
 
 
+def _is_ct(viewer) -> bool:
+    """True for the CT viewer — it has its own Series First/Prev/Next/Last
+    row and shares the F/A/Home/End navigation keys with the cine viewers
+    (but none of the cine transport keys, which CT uses for its tools)."""
+    return getattr(viewer, "handles_modality", "") == "CT"
+
+
 class _Placeholder(QWidget):
     def __init__(self, text: str, parent=None):
         super().__init__(parent)
@@ -2437,12 +2444,23 @@ class MainWindow(QMainWindow):
         # would otherwise swallow S / T / R / D / W / V before a focused
         # CT pane sees them — keep them enabled only while the active
         # pane is showing a cine viewer (see _sync_xa_shortcuts).
+        # Series-navigation keys work on BOTH cine and CT panes (gated
+        # separately in _sync_xa_shortcuts; _nav_active routes to the
+        # active pane's kind). F and A are free on CT (its tool keys are
+        # Z/V/R/S/G/T/W + C).
+        self._nav_shortcuts = []
+        for key, fn in (
+            ("F", lambda: self._nav_active("next")),
+            ("A", lambda: self._nav_active("prev")),
+            ("Home", lambda: self._nav_active("first")),
+            ("End", lambda: self._nav_active("last")),
+        ):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(fn)
+            self._nav_shortcuts.append(sc)
         self._xa_shortcuts = []
         for key, fn in (
-            ("F", lambda: self._nav_xa("next")),
-            ("A", lambda: self._nav_xa("prev")),
-            ("Home", lambda: self._nav_xa("first")),
-            ("End", lambda: self._nav_xa("last")),
             # Cine transport layout (user spec):
             #   T, R = step +1 frame   (R duplicates T for two-handed use)
             #   E    = step -1 frame
@@ -2468,9 +2486,14 @@ class MainWindow(QMainWindow):
         self._sync_xa_shortcuts()
 
     def _sync_xa_shortcuts(self) -> None:
-        on = _is_cine(self._active.current_viewer())
+        v = self._active.current_viewer()
+        on = _is_cine(v)
         for sc in getattr(self, "_xa_shortcuts", []):
             sc.setEnabled(on)
+        # F/A/Home/End also navigate CT panes (CT never sees these letters
+        # for tools, so enabling them app-wide is safe there too).
+        for sc in getattr(self, "_nav_shortcuts", []):
+            sc.setEnabled(on or _is_ct(v))
         # Orthogonal-View depends on the active viewer being XA — refresh
         # its gate whenever the active pane / viewer changes.
         self._sync_layout_gate()
@@ -2482,6 +2505,16 @@ class MainWindow(QMainWindow):
             return self._active
         for p in self._panes:
             if p.isVisible() and _is_cine(p.current_viewer()):
+                return p
+        return None
+
+    def _ct_pane(self) -> ViewerPane | None:
+        """Pane currently showing a CT — the active one if it is, else the
+        first visible one that is (mirrors _xa_pane)."""
+        if _is_ct(self._active.current_viewer()):
+            return self._active
+        for p in self._panes:
+            if p.isVisible() and _is_ct(p.current_viewer()):
                 return p
         return None
 
@@ -2559,15 +2592,28 @@ class MainWindow(QMainWindow):
             return
         (v.zoom_in if zoom_in else v.zoom_out)()
 
+    def _nav_active(self, where: str) -> None:
+        """F/A/Home/End: navigate by the ACTIVE pane's kind — a CT pane
+        steps through the study's CT series, otherwise the cine list."""
+        if _is_ct(self._active.current_viewer()):
+            self._nav_ct(where)
+        else:
+            self._nav_xa(where)
+
     def _nav_xa(self, where: str) -> None:
-        # Step within the SAME modality as the cine pane (XA among XA,
-        # IVUS among IVUS, NM among NM, …), inside that pane (don't
-        # hijack a CT pane). The navigation key comes from the SERIES
-        # currently shown — not the viewer's handles_modality, because
-        # non-canonical modalities (NM/OCT/OFD) all fall back to the
-        # XAViewer with handles_modality="XA" and would otherwise step
-        # through XA series instead of their own kind.
-        xp = self._xa_pane()
+        self._nav_pane_series(self._xa_pane(), where)
+
+    def _nav_ct(self, where: str) -> None:
+        self._nav_pane_series(self._ct_pane(), where)
+
+    def _nav_pane_series(self, xp, where: str) -> None:
+        # Step within the SAME modality as the pane (XA among XA, IVUS
+        # among IVUS, CT among CT, NM among NM, …), inside that pane.
+        # The navigation key comes from the SERIES currently shown — not
+        # the viewer's handles_modality, because non-canonical modalities
+        # (NM/OCT/OFD) all fall back to the XAViewer with
+        # handles_modality="XA" and would otherwise step through XA series
+        # instead of their own kind.
         if xp is None:
             return
         cur_series = self._series_by_uid.get(xp.shown_series_uid())
@@ -3600,9 +3646,11 @@ class MainWindow(QMainWindow):
     def _wire_viewer(self, viewer) -> None:
         """Connect a freshly built viewer's signals and push current
         display options onto it."""
-        # First/Prev/Next/Last cross-series nav: XA and IVUS cine viewers.
-        if _is_cine(viewer) and hasattr(viewer, "series_nav"):
-            viewer.series_nav.connect(self._nav_xa)
+        # First/Prev/Next/Last cross-series nav: cine viewers step the cine
+        # list, the CT viewer steps the study's CT series.
+        if hasattr(viewer, "series_nav"):
+            viewer.series_nav.connect(
+                self._nav_xa if _is_cine(viewer) else self._nav_ct)
         # Measuring / history are modality-agnostic (XA and IVUS both).
         if hasattr(viewer, "measurement_added"):
             viewer.measurement_added.connect(self._record_measurement)
