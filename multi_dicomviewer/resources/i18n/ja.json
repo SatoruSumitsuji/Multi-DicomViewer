@@ -536,6 +536,8 @@
   "Short-axis:": "短軸:",
   "Short-axis {i}/{n}": "短軸 {i}/{n}",
   "Exit CPR": "短軸MPR解除",
+  "Snap trace to lumen": "トレースをルーメンにスナップ",
+  "Auto-snap to lumen": "ルーメンに自動スナップ",
   "Leave short-axis mode and restore the normal MPR": "短軸MPRを解除して通常のMPR表示に戻します",
   "Spline": "スプライン",
   "Stop one of the playing panes to play another.": "別の画面を再生するには、再生中のいずれかを停止してください。",

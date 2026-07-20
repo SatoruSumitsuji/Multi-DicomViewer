@@ -988,6 +988,19 @@ class _Pane:
         if hasattr(mpe.GetProperty(), "SetRenderPointsAsSpheres"):
             mpe.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(mpe)
+        # Vessel-trace vertices that lie OFF the current cutting plane: drawn
+        # at 50% opacity as a depth cue (they sit in front of / behind the
+        # shown slice). Same yellow, half alpha.
+        self.meas_pts_off_mapper = vtkPolyDataMapper()
+        self.meas_pts_off_mapper.SetInputData(vtkPolyData())
+        mpo = vtkActor()
+        mpo.SetMapper(self.meas_pts_off_mapper)
+        mpo.GetProperty().SetColor(1.0, 0.85, 0.0)
+        mpo.GetProperty().SetPointSize(10.0)
+        mpo.GetProperty().SetOpacity(0.5)             # off-plane = 50%
+        if hasattr(mpo.GetProperty(), "SetRenderPointsAsSpheres"):
+            mpo.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(mpo)
         self.meas_labels = []                 # number billboards
 
         self.info = vtkCornerAnnotation()
@@ -1392,6 +1405,11 @@ class CTViewer(AbstractViewer):
         # A as a cross-section scroller (see _enter_cpr / _refresh). Pane B
         # keeps its normal MPR so the trace stays visible as a map.
         self._cpr = None
+        self._vol = None                     # (z,y,x) HU volume for lumen snap
+        # Auto-snap a traced vertex to the brightest (contrast lumen) point
+        # along the plane normal, near the click — the MIP shows WHERE the
+        # vessel is bright, snap recovers its DEPTH. Toggle in the trace menu.
+        self._snap_lumen = True
         self._slice2d = 0                    # current slice index in 2-D mode
         self._page_accum = 0.0               # 2-D drag-paging pixel accumulator
         self._side = "Bi"                    # last 3-D Plane choice (Bi/Lt/Rt)
@@ -2619,6 +2637,9 @@ class CTViewer(AbstractViewer):
         # The one vertex currently being dragged lives in *edit_pts*
         # (drawn green by a second points mapper); the rest stay yellow.
         edit_pts = []
+        off_pts = []                 # trace vertices off the current plane (50%)
+        _, _, _pn = self._axes_for(key)          # this plane's normal
+        _po = self._pc[key]
         e = self._edit
         edit_mi = e["mi"] if (e and e["key"] == key) else -1
         edit_vi = e["vi"] if (e and e["key"] == key) else -1
@@ -2641,9 +2662,17 @@ class CTViewer(AbstractViewer):
                                    ca0["pts"][2], ca0["pts"][1])
                 if len(arc) >= 2:
                     arc_lines.append(arc)
+            # Off-plane depth cue: a trace vertex whose 3-D point is > 1 mm off
+            # this plane (along its normal) is drawn faint (50%). Only for a
+            # 3-D trace (pts3d present); plain measures are all on-plane.
+            p3 = m.get("pts3d") if m["type"] == "polyline" else None
             for vi, q in enumerate(self._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     edit_pts.append(q)
+                elif (p3 is not None and vi < len(p3)
+                      and abs(float(np.dot(np.asarray(p3[vi], float) - _po,
+                                           _pn))) > 1.0):
+                    off_pts.append(q)
                 else:
                     handles.append(q)
             labels.append((str(m["id"]), self._anchor(m)))
@@ -2704,6 +2733,7 @@ class CTViewer(AbstractViewer):
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
         p.meas_pts_edit_mapper.SetInputData(_points_pd(edit_pts))
+        p.meas_pts_off_mapper.SetInputData(_points_pd(off_pts))
         self._rebuild_labels(p, labels)
         p.render()
 
@@ -2804,9 +2834,15 @@ class CTViewer(AbstractViewer):
         d["pts"].append(w)
         # Capture the absolute 3-D position of each polyline vertex (a vessel
         # trace may cross rotated / paged planes). Only polylines in 3-D MPR —
-        # the plane doesn't move in 2-D native mode.
+        # the plane doesn't move in 2-D native mode. Optionally snap the depth
+        # to the contrast lumen along the plane normal (the MIP hid the depth).
         if d["type"] == "polyline" and self._mode == "3D":
-            d.setdefault("pts3d", []).append(self._out_to_world3d(which, *w))
+            P = self._out_to_world3d(which, *w)
+            if self._snap_lumen:
+                _, _, nrm = self._axes_for(which)
+                P = self._snap_to_lumen(P, nrm)
+                d["pts"][-1] = self._world3d_to_out(which, P)   # keep 2-D in step
+            d.setdefault("pts3d", []).append(P)
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
             self._commit_draft()
         elif d["type"] == "angle" and len(d["pts"]) >= 3:
@@ -2829,9 +2865,15 @@ class CTViewer(AbstractViewer):
         else:
             m["pts"][e["vi"]] = w
             # Keep the absolute 3-D trace in step: the dragged vertex moves on
-            # the CURRENT plane, so its new 3-D is that 2-D point lifted here.
+            # the CURRENT plane, so its new 3-D is that 2-D point lifted here
+            # (then snapped to the lumen along the normal, if enabled).
             if m.get("pts3d") and 0 <= e["vi"] < len(m["pts3d"]):
-                m["pts3d"][e["vi"]] = self._out_to_world3d(e["key"], *w)
+                P = self._out_to_world3d(e["key"], *w)
+                if self._snap_lumen:
+                    _, _, nrm = self._axes_for(e["key"])
+                    P = self._snap_to_lumen(P, nrm)
+                    m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
+                m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
@@ -3107,6 +3149,15 @@ class CTViewer(AbstractViewer):
             # traces on) and with ≥2 points.
             if self._mode == "3D" and len(m["pts"]) >= 2:
                 cpr_act = menu.addAction(t("Short-axis MPR (CPR)"))
+        # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
+        # checkable auto-snap toggle for future clicks.
+        snap_now_act = snap_auto_act = None
+        if m["type"] == "polyline" and self._mode == "3D" \
+                and m.get("pts3d"):
+            snap_now_act = menu.addAction(t("Snap trace to lumen"))
+            snap_auto_act = menu.addAction(t("Auto-snap to lumen"))
+            snap_auto_act.setCheckable(True)
+            snap_auto_act.setChecked(self._snap_lumen)
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
@@ -3130,6 +3181,10 @@ class CTViewer(AbstractViewer):
         elif cpr_act is not None and chosen is cpr_act:
             self._enter_cpr(which, mi)
             return                               # _enter_cpr redraws itself
+        elif snap_now_act is not None and chosen is snap_now_act:
+            self._snap_trace(which, mi)
+        elif snap_auto_act is not None and chosen is snap_auto_act:
+            self._snap_lumen = snap_auto_act.isChecked()
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
         elif center_angle_act is not None and chosen is center_angle_act:
@@ -3206,6 +3261,18 @@ class CTViewer(AbstractViewer):
         if m.get("pts3d") and len(m["pts3d"]) == len(pts) - 1:
             m["pts3d"].insert(best_i + 1, self._out_to_world3d(which, wx, wy))
         self._resnap_center_angle(m)
+
+    def _snap_trace(self, which, mi):
+        """Re-snap every vertex of a 3-D trace to the contrast lumen along the
+        CURRENT plane normal (orient the plane roughly along the vessel first
+        for the best axis). Redraws the trace afterwards."""
+        m = self._measures[which][mi]
+        p3 = m.get("pts3d")
+        if not p3:
+            return
+        _, _, nrm = self._axes_for(which)
+        m["pts3d"] = [self._snap_to_lumen(P, nrm) for P in p3]
+        self._redraw_meas(which)
 
     def _delete_point(self, which, mi, vi):
         m = self._measures[which][mi]
@@ -3285,6 +3352,7 @@ class CTViewer(AbstractViewer):
         sr, sc = loaded.spacing_mm or (1.0, 1.0)
         sz = loaded.slice_mm or 1.0
         self._dims = (float(sc), float(sr), float(sz))   # x, y, z mm
+        self._vol = np.asarray(vol)                      # (z,y,x) for lumen snap
         self._image = numpy_to_vtk_image(vol, sc, sr, sz)
         self._bounds = self._image.GetBounds()
         self._header = loaded.header
@@ -3337,6 +3405,7 @@ class CTViewer(AbstractViewer):
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cpr = None                         # drop any short-axis session
         self._cpr_wrap.setVisible(False)
+        self._vol = None
         self._image = None
         self._header = None
         for key in ("A", "B"):
@@ -3458,6 +3527,87 @@ class CTViewer(AbstractViewer):
         u, v, _n = self._axes_for(which)
         d = np.asarray(P, dtype=float) - self._pc[which]
         return (float(np.dot(d, u)), float(np.dot(d, v)))
+
+    # ---- lumen (high-HU) snapping for vessel tracing ----
+    def _hu_along(self, P, n, ds):
+        """Trilinear HU samples of the volume at P + d·n for each d in *ds*
+        (world mm). Out-of-volume samples read as very low HU so they never
+        win the brightest-peak search."""
+        if self._vol is None:
+            return None
+        sx, sy, sz = self._dims
+        pts = np.asarray(P, float)[None, :] + np.asarray(ds, float)[:, None] * n
+        # world mm -> fractional voxel index (origin 0, vol is (z,y,x))
+        fx = pts[:, 0] / sx
+        fy = pts[:, 1] / sy
+        fz = pts[:, 2] / sz
+        nz, ny, nx = self._vol.shape
+        inb = ((fx >= 0) & (fx <= nx - 1) & (fy >= 0) & (fy <= ny - 1)
+               & (fz >= 0) & (fz <= nz - 1))
+        out = np.full(len(ds), -2000.0)
+        if not inb.any():
+            return out
+        x0 = np.clip(np.floor(fx).astype(int), 0, nx - 2)
+        y0 = np.clip(np.floor(fy).astype(int), 0, ny - 2)
+        z0 = np.clip(np.floor(fz).astype(int), 0, nz - 2)
+        tx, ty, tz = fx - x0, fy - y0, fz - z0
+        V = self._vol
+        val = np.zeros(len(ds))
+        for dz in (0, 1):
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    w = ((tx if dx else 1 - tx) * (ty if dy else 1 - ty)
+                         * (tz if dz else 1 - tz))
+                    val += w * V[z0 + dz, y0 + dy, x0 + dx]
+        out[inb] = val[inb]
+        return out
+
+    def _snap_to_lumen(self, P, n, reach=8.0, floor_hu=150.0):
+        """Move P along ±*reach* mm of the plane normal *n* to the centre of
+        the nearest contrast-bright (lumen) run — the depth the slab MIP hid.
+
+        Picks the brightest run whose centre is closest to the click (so it
+        can't jump to a distant bright structure), then returns its intensity-
+        weighted centroid. No-op (returns P) if nothing rises above *floor_hu*
+        or the volume isn't available."""
+        n = np.asarray(n, float)
+        nn = float(np.linalg.norm(n))
+        if self._vol is None or nn < 1e-9:
+            return np.asarray(P, float)
+        n = n / nn
+        step = max(0.25, min(self._dims) * 0.5)
+        ds = np.arange(-reach, reach + step, step)
+        hu = self._hu_along(P, n, ds)
+        if hu is None:
+            return np.asarray(P, float)
+        peak = float(hu.max())
+        if peak < floor_hu:
+            return np.asarray(P, float)          # no lumen in reach → leave it
+        thr = max(floor_hu, 0.5 * peak)
+        bright = hu >= thr
+        # contiguous bright runs; choose the one nearest d=0 (the click)
+        best = None
+        i = 0
+        N = len(ds)
+        while i < N:
+            if not bright[i]:
+                i += 1
+                continue
+            j = i
+            while j < N and bright[j]:
+                j += 1
+            centre = 0.5 * (ds[i] + ds[j - 1])
+            if best is None or abs(centre) < abs(best[2]):
+                best = (i, j, centre)
+            i = j
+        if best is None:
+            return np.asarray(P, float)
+        i, j, _c = best
+        w = hu[i:j] - thr
+        wsum = float(w.sum())
+        d_star = float(np.dot(w, ds[i:j]) / wsum) if wsum > 1e-9 \
+            else float(ds[(i + j) // 2])
+        return np.asarray(P, float) + d_star * n
 
     def _cc(self, key):
         """Crosshair centre for a pane = C projected into its plane,
