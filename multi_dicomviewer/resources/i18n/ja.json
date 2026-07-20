@@ -56,6 +56,7 @@
   "Anonymize: ON (case info masked on screen)": "匿名化: ON（症例情報を画面上でマスク）",
   "Anonymous": "匿名化",
   "At most {N} panes can play at once.": "同時に再生できるのは最大 {N} 画面までです。",
+  "Auto-page through the slices head → feet (loops; click again to stop)": "スライスを頭側→尾側へ自動送り（末尾でループ・もう一度クリックで停止）",
   "At most {n} data can play at once.\nStop one of the playing data to play another.": "同時に再生できるのは最大 {n} 件までです。\n別のものを再生するには、再生中のいずれかを停止してください。",
   "Back": "戻る",
   "Balloon diameter (mm):": "バルーン径 (mm):",

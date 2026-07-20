@@ -1558,14 +1558,68 @@ def load_ct(
     if not slices:
         raise ValueError("CT series has no pixel data")
 
-    def sort_key(d):
-        ipp = getattr(d, "ImagePositionPatient", None)
-        z = _to_float(ipp[2]) if ipp is not None else None
-        if z is not None:
-            return z
-        return _to_float(getattr(d, "InstanceNumber", 0), 0.0)
+    # ---- order the stack ---------------------------------------------------
+    # Sort along the slice axis: IPP projected onto the canonical stack
+    # direction, NOT raw IPP z. A z-only key (the old behaviour) works for
+    # axial stacks but coronal/sagittal slices all share one z, so those fell
+    # back to folder order — scrambled for Windows-copy names like
+    # "x (10).dcm" (string-sorts before "x (2).dcm").
+    # The direction is canonicalised per dominant patient axis so the 2-D
+    # scrubber (Frame 1 = LAST volume slice) starts at the conventional end:
+    #   axial    +z → Frame 1 = most cranial   (paging head → feet)
+    #   coronal  -y → Frame 1 = most anterior  (paging A → P)
+    #   sagittal -x → Frame 1 = patient right  (paging R → L)
+    # Axial series order exactly as before (ascending z, whatever the IOP
+    # sign). The dominant axis is a MAJORITY vote across slices so a stray
+    # scout/localizer with a different IOP can't hijack the sort axis.
+    axes = []
+    for d in slices:
+        iop = getattr(d, "ImageOrientationPatient", None)
+        if iop is None or len(iop) < 6:
+            continue
+        cc = [_to_float(v) for v in iop[:6]]
+        if None in cc:
+            continue
+        n = np.cross(np.asarray(cc[0:3], np.float64),
+                     np.asarray(cc[3:6], np.float64))
+        if np.linalg.norm(n) > 1e-6:
+            axes.append(int(np.argmax(np.abs(n))))
+    stack_dir = None
+    if axes:
+        ax = max(set(axes), key=axes.count)
+        stack_dir = np.zeros(3)
+        stack_dir[ax] = 1.0 if ax == 2 else -1.0
 
-    slices.sort(key=sort_key)
+    def _stack_pos(d):
+        ipp = getattr(d, "ImagePositionPatient", None)
+        if stack_dir is None or ipp is None or len(ipp) < 3:
+            return None
+        v = [_to_float(ipp[k]) for k in range(3)]
+        if None in v:
+            return None
+        return float(np.dot(np.asarray(v, np.float64), stack_dir))
+
+    pos = [_stack_pos(d) for d in slices]
+    ino = [_to_float(getattr(d, "InstanceNumber", None)) for d in slices]
+    if all(p is not None for p in pos):
+        # Ties (non-spatial stacks — e.g. rotation/MIP frames all stored at
+        # one position) fall back to REVERSE InstanceNumber so Frame 1 (= the
+        # last volume slice in the 2-D scrubber) is the device's first image.
+        order = sorted(range(len(slices)),
+                       key=lambda i: (pos[i], -(ino[i] or 0.0)))
+        slices = [slices[i] for i in order]
+    elif all(i is not None for i in ino):
+        # No usable geometry: device order (reversed for the same Frame-1
+        # reason as above).
+        slices.sort(key=lambda d: _to_float(d.InstanceNumber, 0.0) or 0.0,
+                    reverse=True)
+    else:
+        # Last resort: natural filename order ("x (2)" before "x (10)").
+        def _natural(d):
+            name = os.path.basename(getattr(d, "filename", "") or "")
+            return [int(s) if s.isdigit() else s.lower()
+                    for s in re.split(r"(\d+)", name)]
+        slices.sort(key=_natural, reverse=True)
 
     # Defensive: a CT series occasionally contains a scout/localizer
     # slice (or an accidentally-packed second acquisition) with a
@@ -1628,15 +1682,23 @@ def load_ct(
         if r is not None and c is not None:
             spacing = (r, c)
 
-    # Inter-slice spacing (z): median |Δ ImagePositionPatient_z|, else
-    # SliceThickness, else 1.0. Needed so oblique MPR/MIP is not distorted.
+    # Inter-slice spacing: median |Δ position along the stack axis| (the same
+    # IPP projection the sort used — raw IPP z would read 0 for coronal /
+    # sagittal stacks), else SliceThickness, else 1.0. Needed so oblique
+    # MPR/MIP is not distorted.
     def _zpos(d):
         ipp = getattr(d, "ImagePositionPatient", None)
         if ipp is not None and len(ipp) >= 3:
             return _to_float(ipp[2])
         return None
 
-    zvals = [z for z in (_zpos(d) for d in slices) if z is not None]
+    # (recomputed here from the post-filter slices, not reused from `pos`,
+    # which still included any dropped non-dominant-shape slices)
+    pvals = [p for p in (_stack_pos(d) for d in slices) if p is not None]
+    if len(pvals) == len(slices):
+        zvals = pvals
+    else:
+        zvals = [z for z in (_zpos(d) for d in slices) if z is not None]
     slice_mm = None
     if len(zvals) >= 2:
         diffs = np.diff(np.sort(np.asarray(zvals, dtype=np.float64)))
