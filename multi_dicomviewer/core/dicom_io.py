@@ -1558,6 +1558,38 @@ def load_ct(
     if not slices:
         raise ValueError("CT series has no pixel data")
 
+    # ---- drop duplicate instances -----------------------------------------
+    # Some exports write the WHOLE study twice (seen: a 560-slice cardiac CT
+    # stored as 1120 files — every SOPInstanceUID present twice, byte-for-
+    # byte identical). Stacking both copies doubles each z position, so the
+    # volume packs 2× the slices at the true spacing and the coronal/sagittal
+    # MPR comes out stretched ~2× along the body axis.
+    #
+    # Key on SOPInstanceUID, which DICOM guarantees is unique per image
+    # object: a repeated UID is, by definition, the same image copied — so
+    # this can only remove genuine duplicates. Two REAL cardiac phases
+    # (diastole / systole) are different reconstructions with DIFFERENT
+    # SOPInstanceUIDs (and usually different SeriesInstanceUIDs → separate
+    # series here), so they are never touched. Slices with no UID are kept
+    # as-is (nothing to match on).
+    seen_uid: set[str] = set()
+    deduped = []
+    for d in slices:
+        uid = str(getattr(d, "SOPInstanceUID", "") or "")
+        if uid:
+            if uid in seen_uid:
+                continue
+            seen_uid.add(uid)
+        deduped.append(d)
+    n_dup = len(slices) - len(deduped)
+    if n_dup:
+        _warn(
+            f"[load_ct] '{series.description or series.series_uid}': "
+            f"dropped {n_dup} duplicate slice(s) with a repeated "
+            f"SOPInstanceUID (kept {len(deduped)} unique of {len(slices)})\n"
+        )
+        slices = deduped
+
     # ---- order the stack ---------------------------------------------------
     # Sort along the slice axis: IPP projected onto the canonical stack
     # direction, NOT raw IPP z. A z-only key (the old behaviour) works for
