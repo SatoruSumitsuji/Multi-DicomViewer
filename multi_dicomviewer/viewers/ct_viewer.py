@@ -3892,11 +3892,17 @@ class CTViewer(AbstractViewer):
         n = int(c["cl"].n)
         gs = np.linspace(-half, half, px)
         gu, gv = np.meshgrid(gs, gs)
+        # Bake the Rt90/Flip (T) orientation into the stack, but NOT the
+        # continuous rotation — that is carried as the CoSync free-rotation
+        # (below) so the rotation 按分 can drive it and it isn't applied twice.
+        T = c["T"]
+        bu = T[0, 0] * c["u0"] + T[0, 1] * c["v0"]
+        bv = T[1, 0] * c["u0"] + T[1, 1] * c["v0"]
         frames = np.empty((n, px, px), np.float32)
         for i in range(n):
             o = np.asarray(c["cl"].points[i], float)
-            u = c["u"][i]
-            vv = c["v"][i]
+            u = bu[i]
+            vv = bv[i]
             P = (o[None, None, :] + gu[..., None] * u[None, None, :]
                  + gv[..., None] * vv[None, None, :])
             frames[i] = self._sample_vol_grid(P)
@@ -4110,22 +4116,16 @@ class CTViewer(AbstractViewer):
         self._cpr_marker_pts = []
         if p3:
             o, u, vv, n = self._cpr_frame()
-            # Always show EVERY control point (projected onto this cross-section)
-            # so a pseudo-centre is always grabbable — no more appearing /
-            # disappearing as you scroll. Draw only those that land inside the
-            # cross-section FOV (others are simply off-screen); the nearest one
-            # along the vessel is shown even so, so there is never a gap.
-            half = float(self._cpr["half"])
+            # Show exactly ONE dot: the control point nearest this cross-section
+            # (along the vessel), at its in-plane offset. Always visible (never a
+            # gap) and unambiguous — scroll to a pseudo-centre, then drag it.
             dns = [abs(float(np.dot(np.asarray(P, float) - o, n))) for P in p3]
-            near = int(np.argmin(dns)) if dns else -1
-            for ci, P in enumerate(p3):
-                P = np.asarray(P, float)
-                du = float(np.dot(P - o, u))
-                dv = float(np.dot(P - o, vv))
-                if ci != near and (abs(du) > half or abs(dv) > half):
-                    continue                             # off-screen, skip
-                pts.append((du, dv))
-                self._cpr_marker_pts.append((ci, (du, dv)))
+            near = int(np.argmin(dns))
+            P = np.asarray(p3[near], float)
+            du = float(np.dot(P - o, u))
+            dv = float(np.dot(P - o, vv))
+            pts.append((du, dv))
+            self._cpr_marker_pts.append((near, (du, dv)))
         p.meas_pts_mapper.SetInputData(_points_pd(pts))
         p.meas_pts_off_mapper.SetInputData(vtkPolyData())
         p.meas_pts_edit_mapper.SetInputData(vtkPolyData())
