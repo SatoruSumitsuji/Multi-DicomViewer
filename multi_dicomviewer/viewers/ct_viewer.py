@@ -2147,8 +2147,10 @@ class CTViewer(AbstractViewer):
         is2d = getattr(self, "_mode", "3D") == "2D"
         for n, b in self._tool_btns.items():
             active = (n == getattr(self, "_tool", None))
-            b.setEnabled(not measuring
-                         and not (is2d and n in _MPR_ONLY_TOOLS))
+            # Keep the tools clickable WHILE measuring so the user can pick which
+            # tool a Shift+drag uses (the shortcut keys already switch them); the
+            # dimmed-red styling below still signals "hold Shift to use it here".
+            b.setEnabled(not (is2d and n in _MPR_ONLY_TOOLS))
             if measuring:
                 b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
                                 else "color:#9a9a9a;")

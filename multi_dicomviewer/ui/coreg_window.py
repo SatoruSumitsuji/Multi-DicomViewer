@@ -31,7 +31,7 @@ import os
 
 import numpy as np
 from PyQt6.QtCore import Qt, QRectF
-from PyQt6.QtGui import QColor, QImage, QPainter
+from PyQt6.QtGui import QColor, QImage, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -123,15 +123,35 @@ class _CoregPane:
         self.master_radio.setToolTip(
             t("Make this the active IVUS — its frame drives the markers"))
         self.master_radio.toggled.connect(self._on_master_toggled)
+        # Drag-mode toggles (IVUS-like panes): Zoom / WL, right of Master. The
+        # default drag Spins (rotates) the cross-section; these switch what a
+        # drag does. Applied to the WHOLE image (all frames), not a sync point.
+        self.zoom_btn = QPushButton(t("Zoom"))
+        self.zoom_btn.setCheckable(True)
+        self.zoom_btn.setToolTip(t("Drag to zoom the image (Z)"))
+        self.zoom_btn.setVisible(False)
+        self.zoom_btn.clicked.connect(
+            lambda: self.owner._set_drag_mode(
+                "zoom" if self.zoom_btn.isChecked() else "rotate"))
+        self.wl_btn = QPushButton(t("WL"))
+        self.wl_btn.setCheckable(True)
+        self.wl_btn.setToolTip(t("Drag to change window/level (W)"))
+        self.wl_btn.setVisible(False)
+        self.wl_btn.clicked.connect(
+            lambda: self.owner._set_drag_mode(
+                "wl" if self.wl_btn.isChecked() else "rotate"))
         self.include_cb = QCheckBox(t("Include in this point"))
         self.include_cb.setChecked(True)
         self.include_cb.setToolTip(
             t("While adding a CoSync point, include this IVUS's current frame"))
         self.include_cb.setVisible(False)
         self.nav.addWidget(self.master_radio)
+        self.nav.addWidget(self.zoom_btn)
+        self.nav.addWidget(self.wl_btn)
         self.nav.addStretch(1)
         self.nav.addWidget(self.include_cb)
         col.addLayout(self.nav)
+        self.canvas.wl_dragged.connect(self._on_wl_drag)
 
     def retranslate_ui(self) -> None:
         """Re-apply this pane's persistent strings on a live language change."""
@@ -170,6 +190,8 @@ class _CoregPane:
         self._init_wl(loaded)
         self.canvas.spacing_mm = dicom_io.series_spacing_mm(series)
         self.master_radio.setVisible(self.is_ivus)
+        self.zoom_btn.setVisible(self.is_ivus)
+        self.wl_btn.setVisible(self.is_ivus)
         # Angio panes carry the CoSync overlay; IVUS panes do not but get
         # MultiSync-style drag-to-rotate of the cross-section.
         self.canvas.set_coreg_visible(not self.is_ivus)
@@ -205,6 +227,8 @@ class _CoregPane:
         self.is_ivus = True                       # a master/driver like IVUS
         self.canvas.spacing_mm = spec.get("spacing_mm")
         self.master_radio.setVisible(True)
+        self.zoom_btn.setVisible(True)            # Zoom / WL drag modes
+        self.wl_btn.setVisible(True)
         self.canvas.set_coreg_visible(False)      # no guide overlay
         self.canvas.set_free_rotation_enabled(True)   # rotation 按分, IVUS-style
         self.title.setText(spec.get("label", "CT short-axis"))
@@ -266,6 +290,15 @@ class _CoregPane:
         if self.is_ivus:
             self.owner._on_ivus_grab()
 
+    def _on_wl_drag(self, dx: float, dy: float) -> None:
+        """W/L-mode drag: horizontal = window width, vertical = level (drag up
+        raises it). Applies to the WHOLE image (all frames re-window)."""
+        span = 512.0
+        rng = max(1.0, abs(self.window)) + 1.0
+        self.window = max(1.0, self.window + dx * (rng / span))
+        self.level = self.level - dy * (rng / span)
+        self.show_frame(self.cur)
+
 
 class CoregWindow(QMainWindow):
     """Standalone IVUS–XA co-registration window."""
@@ -299,6 +332,8 @@ class CoregWindow(QMainWindow):
         self._selected_lm: int = -1      # CoSync point selected (blue) / modify
         self._renaming: int = -1         # landmark idx being renamed inline
         self._syncing: bool = False      # re-entrancy guard for IVUS↔IVUS sync
+        #: What a free-drag on an IVUS-like pane does: rotate / zoom / wl.
+        self._drag_mode: str = "rotate"
         #: Global long-axis seekbar state (unified pull-back timeline).
         self._global_flipped = False     # ⇄ reverses distal/proximal
         self._global_gmin = 0            # master-frame-extended range
@@ -324,6 +359,27 @@ class CoregWindow(QMainWindow):
 
         self._load_series(pane_specs)
         self._refresh_global_seek()
+
+        # Z / W toggle the drag mode (Zoom / WL) on the IVUS-like panes, so a
+        # drag zooms or windows the image instead of spinning it.
+        for key, mode in (("Z", "zoom"), ("W", "wl")):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(lambda m=mode: self._toggle_drag_mode(m))
+
+    def _set_drag_mode(self, mode: str) -> None:
+        """Set what a free-drag does on every IVUS-like pane (rotate / zoom /
+        wl) and sync the Zoom/WL button states."""
+        self._drag_mode = mode if mode in ("rotate", "zoom", "wl") else "rotate"
+        for p in self.panes:
+            if p.is_ivus:
+                p.canvas.set_drag_mode(self._drag_mode)
+                p.zoom_btn.setChecked(self._drag_mode == "zoom")
+                p.wl_btn.setChecked(self._drag_mode == "wl")
+
+    def _toggle_drag_mode(self, mode: str) -> None:
+        """Z / W: toggle into *mode*, or back to rotate if already in it."""
+        self._set_drag_mode("rotate" if self._drag_mode == mode else mode)
 
     # ------------------------------------------------------------- build
     def _build_panel(self) -> QWidget:

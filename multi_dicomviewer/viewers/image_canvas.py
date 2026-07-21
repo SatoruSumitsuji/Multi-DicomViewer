@@ -120,6 +120,9 @@ class ImageCanvas(QWidget):
     #: opens its small Window/Level popup. The canvas doesn't own the W/L
     #: state, so it just forwards the request.
     wl_change_requested = pyqtSignal()
+    #: Free-drag in W/L mode → (dx, dy) screen-pixel delta; the host adjusts
+    #: window/level (used by the CoReg CT-short-axis / IVUS panes).
+    wl_dragged = pyqtSignal(float, float)
     #: Right-click on empty image area while NO measure tool is active →
     #: request a still-image export. Carries the chosen format key
     #: ('png'/'jpeg'/'tiff'); the viewer captures this canvas and saves it
@@ -339,6 +342,10 @@ class ImageCanvas(QWidget):
         self._free_rot: float = 0.0                 # degrees
         self._free_rot_on: bool = False
         self._free_rot_drag: float | None = None
+        # When free-drag is enabled (IVUS-like panes), the drag can Rotate
+        # (default), Zoom, or adjust W/L — the CoReg window toggles this.
+        self._drag_mode: str = "rotate"             # "rotate" | "zoom" | "wl"
+        self._manual_last: tuple[float, float] | None = None
 
     # ---------------------------------------------------------------- public
     def set_hq_cine(self, on: bool) -> None:
@@ -1557,7 +1564,10 @@ class ImageCanvas(QWidget):
         # don't rotate, so a free spin there would visually mismatch).
         if (self._free_rot_on and not self.meas_type
                 and not self.ivus_show_center):
-            self._free_rot_drag = self._free_rot_angle(sx, sy)
+            if self._drag_mode == "rotate":
+                self._free_rot_drag = self._free_rot_angle(sx, sy)
+            else:                                   # zoom / wl
+                self._manual_last = (sx, sy)
             return
 
         if not self.meas_type:
@@ -1597,6 +1607,17 @@ class ImageCanvas(QWidget):
                               + (now - self._free_rot_drag)) % 360.0
             self._free_rot_drag = now
             self.update()
+            return
+        if self._manual_last is not None:            # zoom / wl drag
+            dx = sx - self._manual_last[0]
+            dy = sy - self._manual_last[1]
+            self._manual_last = (sx, sy)
+            if self._drag_mode == "zoom":
+                # drag up = zoom in (like the CT viewer): dy<0 → factor>1.
+                self._apply_zoom(1.0 - dy * 0.005,
+                                 self.width() / 2.0, self.height() / 2.0)
+            elif self._drag_mode == "wl":
+                self.wl_dragged.emit(float(dx), float(dy))
             return
         if (self.coreg_mode == "trace" and self._coreg_drag_vertex < 0
                 and not self._coreg_dragging_slider):
@@ -1694,6 +1715,9 @@ class ImageCanvas(QWidget):
             return
         if self._free_rot_drag is not None:
             self._free_rot_drag = None
+            return
+        if self._manual_last is not None:
+            self._manual_last = None
             return
         if self._ivus_dragging_center:
             self._ivus_dragging_center = False
@@ -2166,6 +2190,13 @@ class ImageCanvas(QWidget):
         """Enable MultiSync-style drag-to-rotate of the displayed image
         (IVUS panes in the CoReg window)."""
         self._free_rot_on = bool(on)
+
+    def set_drag_mode(self, mode: str) -> None:
+        """What a free-drag does on an IVUS-like pane: 'rotate' (default),
+        'zoom', or 'wl' (window/level via the wl_dragged signal)."""
+        self._drag_mode = mode if mode in ("rotate", "zoom", "wl") else "rotate"
+        self._free_rot_drag = None
+        self._manual_last = None
 
     def set_free_rotation(self, deg: float) -> None:
         self._free_rot = float(deg) % 360.0
