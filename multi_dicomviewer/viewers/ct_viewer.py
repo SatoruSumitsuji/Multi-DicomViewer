@@ -3726,6 +3726,12 @@ class CTViewer(AbstractViewer):
         if cl.n < 2:
             return
         fu, fv = cl.frames(ref_up=nrm)            # short-axis axes ⟂ tangent
+        # Look at each cross-section FROM the first control point TOWARD the
+        # last (proximal→distal — the usual tracing order). The RMF gives
+        # u×v = +tangent (an upstream view = mirror image); flip u so
+        # u×v = −tangent, i.e. the viewer sits on the proximal side and the
+        # short-axis is non-mirrored.
+        fu = -fu
         self._cpr = {
             "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
             "half": 25.0,                         # ±25 mm cross-section FOV
@@ -4006,6 +4012,7 @@ class CTViewer(AbstractViewer):
         if cl.n < 2:
             return
         fu, fv = cl.frames(ref_up=c["ref_up"])
+        fu = -fu                                  # view first→last (un-mirror)
         c["cl"], c["u"], c["v"] = cl, fu, fv
         c["idx"] = min(c["idx"], cl.n - 1)
         self._cpr_sync_bar()
