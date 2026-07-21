@@ -695,6 +695,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
     def mouseReleaseEvent(self, e):
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_release()
+        # Commit an intersection recentre: the point held under the cursor
+        # during the drag now jumps to the image centre (the background was
+        # fixed while dragging). Done on RELEASE only.
+        if self._cross and self._owner._cross_mode == "center":
+            self._owner._recenter(
+                self._which, e.position().x(), e.position().y())
         self._meas_drag = False
         self._last = None
         self._cross = False
@@ -4910,11 +4916,18 @@ class CTViewer(AbstractViewer):
         return _polylines_pd(polylines)
 
     def _cross_move(self, which, sx, sy):
-        # Intersection drag: recentre the view on the cursor point continuously
-        # — the crosshair centre follows the drag and is kept in the middle of
-        # the screen (both panes), exactly like double-clicking the drag point.
+        # Intersection drag: the crosshair centre FOLLOWS the cursor while the
+        # background image stays put (only _center moves, not _pc / the camera).
+        # The actual recentre — moving that point to the middle of the screen —
+        # happens on RELEASE (see _PaneCanvas.mouseReleaseEvent → _recenter).
         if self._cross_mode == "center":
-            self._recenter(which, sx, sy)
+            wx, wy = self._disp_to_world(which, sx, sy)
+            m = self._matrix(which)
+            vol = m.MultiplyPoint((wx, wy, 0.0, 1.0))
+            self._center = np.array([vol[0], vol[1], vol[2]])
+            self._clamp_center()
+            self._view_initial = False
+            self._refresh()                # crosshair moves; images unchanged
             return
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, n = self._frame[which]
