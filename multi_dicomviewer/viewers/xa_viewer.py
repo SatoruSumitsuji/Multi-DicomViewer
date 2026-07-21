@@ -599,7 +599,7 @@ class XAViewer(AbstractViewer):
         #: current frame; False (fresh series / never played) → Play starts
         #: from the Play-range start. CT-2D-style transport semantics.
         self._play_resume = False
-        # ECG strip (W key): the trace read from this series' DICOM, the
+        # ECG strip (V key): the trace read from this series' DICOM, the
         # per-frame time step used to drive the cursor, and visibility.
         #: User's ON/OFF choice — PERSISTS across series (Next/Prev) until the
         #: user toggles it. When ON, the strip stays shown on every series; a
@@ -632,7 +632,7 @@ class XAViewer(AbstractViewer):
         layout.addWidget(self._measure_bar)
         layout.addWidget(self.title_label)
         layout.addWidget(self._canvas_area, 1)
-        # ECG strip sits directly under the angio image (hidden until W
+        # ECG strip sits directly under the angio image (hidden until V
         # toggles it on, and only on series that carry an ECG waveform).
         layout.addWidget(self._ecg_strip)
         layout.addWidget(self._build_plane_bar())
@@ -1495,7 +1495,7 @@ class XAViewer(AbstractViewer):
 
         self._relayout()
         self._refresh_overlay()
-        # Read this series' ECG (if any) and prime the strip — hidden until W.
+        # Read this series' ECG (if any) and prime the strip — hidden until V.
         self._read_ecg_for_series()
 
         # Warm the rest of the cine in the background for smooth playback;
@@ -1613,7 +1613,7 @@ class XAViewer(AbstractViewer):
             self._start_cine_timer()
 
     def toggle_ecg(self) -> None:
-        """W: turn the ECG strip ON/OFF. The choice PERSISTS across series
+        """V: turn the ECG strip ON/OFF. The choice PERSISTS across series
         (Next/Prev) until toggled again. When ON the strip stays visible on
         every series — showing that series' ECG, or 'No ECG' if it has none."""
         self._ecg_on = not self._ecg_on
