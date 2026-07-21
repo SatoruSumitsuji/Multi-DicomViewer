@@ -186,9 +186,10 @@ h2 { string-set: none; }
 <li>ポップアップの <strong>W</strong>（幅）・<strong>L</strong>（レベル）スライダーで濃淡を調整。つまみは「白丸＋小さい青ドット」。</li>
 <li>カラー画像（RGB シネ）では W/L は無効です。</li>
 </ul>
-<h3 id="6-4-心電図ecg表示--w-キー">6-4. 心電図（ECG）表示 — <code>V</code> キー</h3>
+<h3 id="6-4-心電図ecg表示--w-キー">6-4. 心電図（ECG）表示 — <code>V</code> キー（アンギオ）</h3>
 <ul>
-<li><code>V</code> キーで、画像の下に <strong>心電図波形ストリップ</strong>を表示/非表示。</li>
+<li>アンギオ（XA）表示中に <code>V</code> キーで、画像の下に <strong>心電図波形ストリップ</strong>を表示/非表示。</li>
+<li>（IVUS 表示中は <code>V</code> は長軸表示の切り替えになります。モダリティで自動的に切り分けられ、競合しません。）</li>
 <li>DICOM の Waveform Sequence または レガシー Curve Data から波形を読み取り、<strong>再生フレームに同期した黄色いカーソル</strong>が動きます。</li>
 <li>波形を含まないシリーズでは表示されず、「心電図データはありません」と通知します。</li>
 </ul>
@@ -209,9 +210,9 @@ h2 { string-set: none; }
 <li><strong>DICOM Tags…</strong>: 画像に重ねる DICOM タグ項目を選択。上のスライダーで文字サイズ調整（全ビューワ共通）。</li>
 <li><code>Q</code> キーでオーバーレイの表示/非表示。</li>
 </ul>
-<h3 id="6-8-ivus-長軸ロングアクシス-v-キー">6-8. IVUS 長軸（ロングアクシス）— <code>L</code> キー</h3>
+<h3 id="6-8-ivus-長軸ロングアクシス-v-キー">6-8. IVUS 長軸（ロングアクシス）— <code>V</code> キー（IVUS）</h3>
 <ul>
-<li><code>L</code> キー、または <strong>Long View</strong> ボタンで、断面像の下に<strong>長軸（縦切り）画像</strong>を表示。</li>
+<li>IVUS 表示中に <code>V</code> キー、または <strong>Long View</strong> ボタンで、断面像の下に<strong>長軸（縦切り）画像</strong>を表示。</li>
 <li><strong>通常の横方向ドラッグ</strong>で長軸画像の<strong>幅のみ</strong>を拡大/縮小（高さは枠に自動フィット）。</li>
 <li><strong>Shift+縦方向ドラッグ</strong>で回転（カテーテル軸まわり）。</li>
 <li>断面像上の<strong>回転中心マーカー</strong>をドラッグして、各フレームの中心を指定（キーフレーム）。</li>
@@ -387,11 +388,7 @@ h2 { string-set: none; }
 </tr>
 <tr>
 <td><code>V</code></td>
-<td>心電図ストリップ 表示/非表示</td>
-</tr>
-<tr>
-<td><code>L</code></td>
-<td>IVUS 長軸 表示/非表示（IVUS のみ）</td>
+<td>心電図 表示/非表示（アンギオ）／ IVUS 長軸 表示/非表示（IVUS）</td>
 </tr>
 <tr>
 <td><code>Z</code> / <code>Shift+Z</code></td>
