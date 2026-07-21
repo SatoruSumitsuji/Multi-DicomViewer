@@ -515,6 +515,7 @@ class XAViewer(AbstractViewer):
         super().__init__(parent)
         self._planes: list[XAPlane] = []
         self._frame = 0
+        self._reversed = False    # frame order flipped (distal↔proximal)
         self._loaded_uid = ""     # SeriesInstanceUID of the loaded series
         #: per-series remembered frame index, so navigating between
         #: series and back resumes at the LAST frame the user saw
@@ -998,6 +999,15 @@ class XAViewer(AbstractViewer):
         # scale it down (multi-row layouts) and back without drift.
         self._play_base_pt = self.play_btn.font().pointSizeF()
 
+        # Reverse the frame order (distal↔proximal) — for IVUS/OCT whose
+        # pull-back runs the other way, or to match a reversed CT short-axis.
+        self.reverse_btn = QPushButton(t("Reverse"))
+        self.reverse_btn.setCheckable(True)
+        self.reverse_btn.setToolTip(t(
+            "Reverse the play/scroll direction (distal↔proximal) — for "
+            "IVUS/OCT where the pull-back runs the other way."))
+        self.reverse_btn.toggled.connect(self._toggle_reverse)
+
         self.frame_slider = QSlider(Qt.Orientation.Horizontal)
         self.frame_slider.setMinimum(0)
         self.frame_slider.valueChanged.connect(self._seek)
@@ -1084,6 +1094,7 @@ class XAViewer(AbstractViewer):
         self._fps_base_pt = self.fps_spin.font().pointSizeF()
 
         row.addWidget(self.play_btn)
+        row.addWidget(self.reverse_btn)
         row.addLayout(seek_col, 1)
         row.addWidget(self.frame_lbl)
         row.addWidget(self.series_lbl)
@@ -1412,6 +1423,12 @@ class XAViewer(AbstractViewer):
         self._stop_prefetch()
         self._buffer_timer.stop()
         self._planes = list(loaded.xa_planes or [])
+        # A freshly loaded series starts forward; reset the Reverse toggle
+        # silently (don't fire _toggle_reverse — the planes are already fwd).
+        self._reversed = False
+        self.reverse_btn.blockSignals(True)
+        self.reverse_btn.setChecked(False)
+        self.reverse_btn.blockSignals(False)
         self._header = loaded.header
         # Remembered frame for the incoming series (clamped below once we
         # know its length); a NEVER-visited series starts on its MIDDLE
@@ -2036,6 +2053,40 @@ class XAViewer(AbstractViewer):
         """True when the current frame is already decoded on every shown plane
         — so rendering it won't block-decode on the UI thread."""
         return all(p.is_ready(self._frame) for p in self._shown_planes())
+
+    def _toggle_reverse(self, on: bool) -> None:
+        """Reverse the whole cine's frame order in place (distal↔proximal), so
+        play / seek / CoSync all run the other way. The physically-shown frame
+        is kept, and the Play range is mirrored. No-op with no multi-frame
+        cine."""
+        self._reversed = bool(on)
+        if not self._planes:
+            return
+        n = max((p.total_frames for p in self._planes), default=0)
+        if n <= 1:
+            return
+        self._stop_prefetch()                     # pause background decode
+        for p in self._planes:
+            p.reverse()
+        self._frame = n - 1 - self._frame         # keep the same frame on screen
+        self._range_start, self._range_end = (n - 1 - self._range_end,
+                                              n - 1 - self._range_start)
+        if self._loaded_uid:
+            self._range_by_series[self._loaded_uid] = (self._range_start,
+                                                       self._range_end)
+        self._range_marks.set_bounds(self._range_start, self._range_end)
+        self.frame_slider.blockSignals(True)
+        self.frame_slider.setValue(self._frame)
+        self.frame_slider.blockSignals(False)
+        self.play_range_changed.emit(self._loaded_uid, self._range_start,
+                                     self._range_end, n)
+        self._render()
+        # Restart the background prefetch over the reversed frames.
+        self._prefetch = _Prefetcher(
+            self._planes, lambda: self._timer.isActive(), self)
+        self._prefetch.start()
+        if not self._suspend_frame_signal:
+            self.frame_changed.emit(self._frame)
 
     def _reset_play_range(self) -> None:
         """One-click reset of the Play range back to the whole clip — fired
