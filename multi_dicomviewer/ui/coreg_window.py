@@ -250,7 +250,7 @@ class _CoregPane:
 
     # ---- events ----
     def _on_slider(self, value: int) -> None:
-        if self.plane is None:
+        if self.plane is None and self._stack is None:
             return
         self.show_frame(int(value))
         if self.is_ivus:
