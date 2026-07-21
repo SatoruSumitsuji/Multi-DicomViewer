@@ -1681,6 +1681,15 @@ class CTViewer(AbstractViewer):
         f = cap.font(); f.setBold(True); cap.setFont(f)
         self._cpr_cap = cap
         row.addWidget(cap)
+        # Reverse the scroll direction (distal→proximal) to match an IVUS
+        # pull-back; the cross-section content is unchanged.
+        self._cpr_rev_btn = FitButton(t("Reverse"))
+        self._cpr_rev_btn.setCheckable(True)
+        self._cpr_rev_btn.setHelpToolTip(
+            t("Reverse the scroll order to distal→proximal (match an IVUS "
+              "pull-back). Cross-section content is unchanged."))
+        self._cpr_rev_btn.clicked.connect(self._cpr_toggle_reverse)
+        row.addWidget(self._cpr_rev_btn)
         self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
         self._cpr_slider.setMinimum(0)
         self._cpr_slider.setMaximum(0)
@@ -3770,6 +3779,7 @@ class CTViewer(AbstractViewer):
             "u0": fu.copy(), "v0": fv.copy(),     # base frame (pre-transform)
             "T": np.eye(2),                       # Rt90/Flip display transform
             "rot": 0.0,                           # continuous in-plane rotation°
+            "reversed": False,                    # scroll distal→proximal (IVUS)
             "half": 25.0,                         # ±25 mm cross-section FOV
             "src": which,                         # pane the trace lives on
             "src_mi": mi,                         # index of the trace measure
@@ -3780,6 +3790,7 @@ class CTViewer(AbstractViewer):
         self.pane["A"].set_overlay_visible(False)   # no crosshair on the disc
         for b in self._t2d_btns:                    # Rt90/Lt90/Flip work on CPR
             b.setEnabled(True)
+        self._cpr_rev_btn.setChecked(False)         # fresh: proximal→distal
         self._cpr_sync_bar()
         self._refresh(reset_cam=True)
 
@@ -3795,45 +3806,56 @@ class CTViewer(AbstractViewer):
         self._init_frames()                       # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
 
-    def _cpr_set_index(self, i):
-        """Scroll to cross-section *i* along the vessel (from the scrubber)."""
+    def _cpr_disp(self, idx):
+        """Map a real centreline sample index ↔ the DISPLAYED scrub position
+        (reversed = distal→proximal, to match an IVUS pull-back). Involution."""
+        c = self._cpr
+        n = c["cl"].n
+        return (n - 1 - int(idx)) if c.get("reversed") else int(idx)
+
+    def _cpr_set_index(self, d):
+        """Scroll to DISPLAY position *d* (from the scrubber); maps to the real
+        centreline index via the reverse flag."""
         c = self._cpr
         if c is None:
             return
-        i = int(min(max(int(i), 0), c["cl"].n - 1))
-        changed = (i != c["idx"])
-        c["idx"] = i
+        d = int(min(max(int(d), 0), c["cl"].n - 1))
+        idx = self._cpr_disp(d)                   # display → real index
+        changed = (idx != c["idx"])
+        c["idx"] = idx
         self._cpr_sync_bar()
         self._refresh()
         if changed:
-            self.cpr_index_changed.emit(i)       # CoSync: broadcast the scrub
+            self.cpr_index_changed.emit(d)        # CoSync: broadcast display pos
 
     # ---- CoSync interface (short-axis as a synchronisable scrub source) ----
     def cpr_active(self) -> bool:
         return self._cpr is not None
 
     def cpr_sync_state(self):
-        """(index, count, rotation°) of the short-axis scrub, or None when the
-        short-axis isn't active. Lets the shell treat it like a cine frame."""
+        """(display index, count, rotation°) of the short-axis scrub, or None
+        when inactive. The DISPLAY index honours the reverse flag so CoSync
+        frame numbers run distal→proximal like an IVUS."""
         c = self._cpr
         if c is None:
             return None
-        return (int(c["idx"]), int(c["cl"].n), float(c.get("rot", 0.0)))
+        return (self._cpr_disp(c["idx"]), int(c["cl"].n), float(c.get("rot", 0.0)))
 
-    def set_cpr_index(self, i: int, *, silent: bool = False) -> None:
-        """CoSync driver: move the short-axis to sample *i* without echoing the
-        signal back (silent) so linked panes don't feedback-loop."""
+    def set_cpr_index(self, d: int, *, silent: bool = False) -> None:
+        """CoSync driver: move to DISPLAY position *d* (mapped via the reverse
+        flag) without echoing the signal back (silent) to avoid feedback."""
         c = self._cpr
         if c is None:
             return
-        i = int(min(max(int(i), 0), c["cl"].n - 1))
-        if i == c["idx"]:
+        d = int(min(max(int(d), 0), c["cl"].n - 1))
+        idx = self._cpr_disp(d)
+        if idx == c["idx"]:
             return
-        c["idx"] = i
+        c["idx"] = idx
         self._cpr_sync_bar()
         self._refresh()
         if not silent:
-            self.cpr_index_changed.emit(i)
+            self.cpr_index_changed.emit(d)
 
     def set_cpr_rotation(self, deg: float, *, silent: bool = False) -> None:
         """Rotate the short-axis cross-section in-plane to *deg* (the CoSync
@@ -3906,16 +3928,29 @@ class CTViewer(AbstractViewer):
             P = (o[None, None, :] + gu[..., None] * u[None, None, :]
                  + gv[..., None] * vv[None, None, :])
             frames[i] = self._sample_vol_grid(P)
+        if c.get("reversed"):                     # distal→proximal, like IVUS
+            frames = frames[::-1].copy()
         return {
             "kind": "ct_cpr",
             "frames": frames,
             "window": float(self._win),
             "level": float(self._lvl),
             "spacing_mm": (2.0 * half) / max(1, px - 1),
-            "start": int(c["idx"]),
+            "start": self._cpr_disp(c["idx"]),
             "rotation": float(c.get("rot", 0.0)),
             "label": t("CT short-axis"),
         }
+
+    def _cpr_toggle_reverse(self):
+        """Reverse the short-axis scroll direction (distal→proximal, to match an
+        IVUS pull-back). Only the traversal order flips — each cross-section's
+        content is unchanged."""
+        if self._cpr is None:
+            return
+        self._cpr["reversed"] = self._cpr_rev_btn.isChecked()
+        self._cpr_sync_bar()
+        # broadcast the new display position so a linked CoSync stays in step
+        self.cpr_index_changed.emit(self._cpr_disp(self._cpr["idx"]))
 
     def _cpr_matrix(self):
         """Reslice matrix for pane A in short-axis mode: axes (u, v, tangent)
@@ -3937,14 +3972,15 @@ class CTViewer(AbstractViewer):
         if c is None:
             return
         cl = c["cl"]
+        d = self._cpr_disp(c["idx"])              # scrubber = display position
         self._cpr_wrap.setVisible(True)
         self._cpr_slider.blockSignals(True)
         self._cpr_slider.setMaximum(cl.n - 1)
-        self._cpr_slider.setValue(c["idx"])
+        self._cpr_slider.setValue(d)
         self._cpr_slider.blockSignals(False)
         pos_mm = float(cl.arclen[c["idx"]])
         self._cpr_lbl.setText(
-            f"{c['idx'] + 1} / {cl.n}   ({pos_mm:.1f} / {cl.length_mm:.1f} mm)"
+            f"{d + 1} / {cl.n}   ({pos_mm:.1f} / {cl.length_mm:.1f} mm)"
         )
 
     def _refresh(self, reset_cam=False):

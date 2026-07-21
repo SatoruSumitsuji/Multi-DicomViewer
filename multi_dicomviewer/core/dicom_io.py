@@ -857,6 +857,17 @@ class XAPlane:
         self._ready = np.zeros(total_frames, dtype=bool)
         self._ready[0] = True
 
+    def reverse(self) -> None:
+        """Reverse the frame order in place (distal↔proximal). The caller MUST
+        have stopped the background prefetch first — this swaps the shared
+        volume / ready / lazy-file arrays under the plane lock so any late
+        decode stays consistent."""
+        with self._lock:
+            self.volume = self.volume[::-1].copy()
+            if self.frame_files is not None:
+                self.frame_files = list(reversed(self.frame_files))
+            self._ready = self._ready[::-1].copy()
+
     def frame(self, i: int) -> np.ndarray:
         """Return frame *i* (float32 gray or uint8 RGB), decoding it on
         first access and caching into the shared volume."""
