@@ -586,6 +586,15 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
+        # Short-axis (CPR) pane: a left-press on a control-point marker grabs it
+        # to fine-tune the pseudo-centre in the cross-section (highest priority).
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._cpr is not None and self._which == "A"
+                and self._owner._cpr_grab(e.position().x(), e.position().y())):
+            self._last = e.position()
+            self._cross = False
+            self._meas_drag = False
+            return
         # Compare-select mode: a left-click picks the two shapes to compare
         # (no drag: clear _last so a move can't pan/rotate the image).
         if (e.button() == Qt.MouseButton.LeftButton
@@ -662,6 +671,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
+        # Dragging a CPR control-point marker (short-axis fine-tune).
+        if self._owner._cpr_drag is not None and self._which == "A":
+            self._owner._cpr_drag_move(e.position().x(), e.position().y())
+            return
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_drag(
                 self._which, e.position().x(), e.position().y()
@@ -693,6 +706,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if self._owner._cpr_drag is not None:
+            self._owner._cpr_drag_end()          # rebuild centreline on release
+            self._last = None
+            return
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_release()
         # Commit an intersection recentre: the point held under the cursor
@@ -1415,6 +1432,8 @@ class CTViewer(AbstractViewer):
         # A as a cross-section scroller (see _enter_cpr / _refresh). Pane B
         # keeps its normal MPR so the trace stays visible as a map.
         self._cpr = None
+        self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
+        self._cpr_drag = None                # control index being dragged
         self._vol = None                     # (z,y,x) HU volume for lumen snap
         # Auto-snap a traced vertex to the brightest (contrast lumen) point
         # along the plane normal, near the click — the MIP shows WHERE the
@@ -2086,6 +2105,12 @@ class CTViewer(AbstractViewer):
             self.pane[k].set_overlay_visible(on)
             self.pane[k].render()
         self._style_cl()
+        # In CPR the crosshair / ▲ on pane A are drawn by _draw_cpr_overlay
+        # (sized to the CPR zoom), not the normal per-render _update_cross — so
+        # redraw them here when the CenterLine toggle flips on.
+        if self._cpr is not None:
+            self._draw_cpr_overlay()
+            self.pane["A"].render()
 
     # ------------------------------------------------------- Measure
     def _build_measure_bar(self) -> QWidget:
@@ -3705,6 +3730,8 @@ class CTViewer(AbstractViewer):
             "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
             "half": 25.0,                         # ±25 mm cross-section FOV
             "src": which,                         # pane the trace lives on
+            "src_mi": mi,                         # index of the trace measure
+            "ref_up": np.asarray(nrm, float),     # RMF seed (kept for rebuilds)
         }
         # Show both panes: A = cross-section, the traced pane = map.
         self.set_side("Bi")
@@ -3793,6 +3820,11 @@ class CTViewer(AbstractViewer):
                 p.angle.SetInput("")
                 for _ha in p.angle_halo:
                     _ha.SetInput("")
+                # CenterLine overlay in the cross-section: a centred crosshair
+                # and a ▲ sized to the CPR zoom (the normal _update_cross is
+                # skipped here, which is why the ▲ used to keep its huge pre-CPR
+                # world size). Also draws the editable control-point markers.
+                self._draw_cpr_overlay()
                 p.render()
                 continue
             p.reslice.SetResliceAxes(self._matrix(key))
@@ -3821,6 +3853,20 @@ class CTViewer(AbstractViewer):
             self._update_cross(key)
             self._update_info(key, title_only=False)
             p.render()
+        # Anatomy-anchored traces (pts3d) re-project on ANY view change —
+        # rotate / spin / page / move / recentre — not only on measure edits,
+        # so the pseudo-centre points AND their lines follow the image even
+        # after Measure is turned off. Cheap guard: only runs when such a trace
+        # exists (a plain measure has no pts3d).
+        if self._mode == "3D" and any(
+                m.get("pts3d") for kk in ("A", "B")
+                for m in self._measures[kk]):
+            for kk in ("A", "B"):
+                # In CPR, pane A is the cross-section (its overlay is the
+                # control-point markers, drawn separately) — don't overwrite it.
+                if self._cpr is not None and kk == "A":
+                    continue
+                self._redraw_geom(kk)
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
@@ -3844,6 +3890,126 @@ class CTViewer(AbstractViewer):
         ps = max(hv, hu * ph / pw)
         cam.SetParallelScale(max(1e-3, ps))
         p.render()
+
+    def _draw_cpr_overlay(self):
+        """Short-axis (CPR) pane overlay: a CENTRED crosshair and a ▲ sized to
+        the CPR zoom (the normal per-render _update_cross is skipped for the
+        CPR pane, so without this the ▲ kept its huge pre-CPR world size).
+        Drawn only while CenterLine is on; also refreshes the editable
+        control-point markers."""
+        p = self.pane["A"]
+        if p.cross and p.cross[0][1].GetVisibility():    # CenterLine on
+            h = self._half
+            zc = 0.5
+            for (src, _a), (p0, p1) in zip(
+                    p.cross,
+                    (((-h, 0.0), (h, 0.0)), ((0.0, -h), (0.0, h)))):
+                src.SetPoint1(p0[0], p0[1], zc)
+                src.SetPoint2(p1[0], p1[1], zc)
+                src.Modified()
+            ps = p.ren.GetActiveCamera().GetParallelScale()
+            sz = 0.024 * ps                              # same on-screen size…
+            d = 0.255 * ps                               # …as the normal panes
+            z = zc + 0.1
+            p.tri_mapper.SetInputData(_tris_pd([
+                ((a, -sz, z), (a - 0.6 * sz, 0.0, z), (a + 0.6 * sz, 0.0, z))
+                for a in (d, -d)
+            ]))
+            for mp in p.slab_mappers:                    # no slab in a section
+                mp.SetInputData(vtkPolyData())
+        self._draw_cpr_ctrl_markers()
+
+    def _cpr_ctrl_pts3d(self):
+        """The trace's 3-D control points (pseudo-centre points), or None."""
+        c = self._cpr
+        if c is None:
+            return None
+        src, mi = c.get("src"), c.get("src_mi")
+        if src is None or mi is None or not (0 <= mi < len(self._measures[src])):
+            return None
+        return self._measures[src][mi].get("pts3d")
+
+    def _cpr_frame(self):
+        """(origin, u, v, tangent) of the current cross-section."""
+        c = self._cpr
+        i = c["idx"]
+        return (np.asarray(c["cl"].points[i], float), c["u"][i], c["v"][i],
+                np.asarray(c["cl"].tangents[i], float))
+
+    def _draw_cpr_ctrl_markers(self):
+        """Show the control points near the current cross-section as draggable
+        dots at their in-plane offset from the centreline, so the user can see
+        and fine-tune how each pseudo-centre sits versus the lumen."""
+        p = self.pane["A"]
+        p3 = self._cpr_ctrl_pts3d()
+        pts = []
+        self._cpr_marker_pts = []
+        if p3:
+            o, u, vv, n = self._cpr_frame()
+            reach = 6.0                                  # ± mm along the vessel
+            for ci, P in enumerate(p3):
+                P = np.asarray(P, float)
+                if abs(float(np.dot(P - o, n))) > reach:
+                    continue
+                du = float(np.dot(P - o, u))
+                dv = float(np.dot(P - o, vv))
+                pts.append((du, dv))
+                self._cpr_marker_pts.append((ci, (du, dv)))
+        p.meas_pts_mapper.SetInputData(_points_pd(pts))
+        p.meas_pts_off_mapper.SetInputData(vtkPolyData())
+        p.meas_pts_edit_mapper.SetInputData(vtkPolyData())
+
+    def _cpr_grab(self, sx, sy) -> bool:
+        """A press on the CPR pane near a control-point marker starts a drag."""
+        if self._cpr is None or not self._cpr_marker_pts:
+            return False
+        for ci, (du, dv) in self._cpr_marker_pts:
+            mx, my = self._world_to_qt("A", du, dv)
+            if (mx - sx) ** 2 + (my - sy) ** 2 <= 14.0 ** 2:
+                self._cpr_drag = ci
+                return True
+        return False
+
+    def _cpr_drag_move(self, sx, sy):
+        """Move the grabbed control point IN the cross-section plane (its along-
+        vessel position is preserved); the trace on the map pane follows live."""
+        if self._cpr_drag is None:
+            return
+        p3 = self._cpr_ctrl_pts3d()
+        ci = self._cpr_drag
+        if not p3 or not (0 <= ci < len(p3)):
+            return
+        o, u, vv, n = self._cpr_frame()
+        du, dv = self._disp_to_world("A", sx, sy)
+        dn = float(np.dot(np.asarray(p3[ci], float) - o, n))   # keep depth
+        p3[ci] = o + du * u + dv * vv + dn * n
+        self._draw_cpr_ctrl_markers()
+        self.pane["A"].render()
+        self._redraw_meas(self._cpr["src"])        # map-pane trace follows
+
+    def _cpr_drag_end(self):
+        """Release: rebuild the centreline from the adjusted control points."""
+        if self._cpr_drag is None:
+            return
+        self._cpr_drag = None
+        self._cpr_rebuild()
+
+    def _cpr_rebuild(self):
+        """Recompute the centreline / short-axis frames from the (edited)
+        control points, keeping the current scroll index."""
+        c = self._cpr
+        p3 = self._cpr_ctrl_pts3d()
+        if not p3 or len(p3) < 2:
+            return
+        cl = CenterLine.from_points([np.asarray(P, float) for P in p3],
+                                    step_mm=max(1e-3, min(self._dims)))
+        if cl.n < 2:
+            return
+        fu, fv = cl.frames(ref_up=c["ref_up"])
+        c["cl"], c["u"], c["v"] = cl, fu, fv
+        c["idx"] = min(c["idx"], cl.n - 1)
+        self._cpr_sync_bar()
+        self._refresh()
 
     def _fit_cpr_pane(self):
         """Fit pane A's camera to the short-axis FOV (±half mm, centred)."""
