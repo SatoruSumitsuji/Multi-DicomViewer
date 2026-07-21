@@ -4768,8 +4768,14 @@ class CTViewer(AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return (False, None, None)
-        # The ▲ markers sit on the HORIZONTAL crossline → green-▲ line. Where the
-        # two bands overlap (central square) the green-▲ line WINS.
+        # The central square (BOTH bands overlap = the crossline INTERSECTION):
+        # dragging here recentres — the grabbed point moves to the crosshair
+        # centre AND to the middle of the screen (a live version of the double-
+        # click recentre). The lines themselves (only one band) keep their
+        # move / rotate behaviour and do NOT pan the view.
+        if on_h and on_v:
+            return (True, "C", "center")
+        # The ▲ markers sit on the HORIZONTAL crossline → green-▲ line.
         grab_h = on_h
         along = along_h if grab_h else along_v
         mode = "move" if along <= mid else "rotate"
@@ -4782,6 +4788,13 @@ class CTViewer(AbstractViewer):
         caught, line, mode = self._cross_zone(which, sx, sy)
         if not caught:
             return False
+        # Intersection grab → live recentre (handled in _cross_move); no
+        # per-line gesture state needed.
+        if mode == "center":
+            self._cross_mode = "center"
+            self._cross_dragging = which
+            self._set_cross_highlight(which, line, mode)
+            return True
         wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
         ccx, ccy = self._cc(which)
         a = math.radians(self._cross_ang[which])
@@ -4839,7 +4852,14 @@ class CTViewer(AbstractViewer):
             pr.SetLineWidth(1.0)
             pr.SetOpacity(0.5)
         p.rot_arrow.SetVisibility(False)
-        if line is not None:
+        if line == "C":
+            # Intersection (recentre) zone: light up BOTH crosslines, no arrow.
+            for _src, act in p.cross:
+                pr = act.GetProperty()
+                pr.SetColor(*self._CROSS_HI)
+                pr.SetLineWidth(1.6)
+                pr.SetOpacity(1.0)
+        elif line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
             pr.SetColor(*self._CROSS_HI)
             pr.SetLineWidth(1.6)
@@ -4890,6 +4910,12 @@ class CTViewer(AbstractViewer):
         return _polylines_pd(polylines)
 
     def _cross_move(self, which, sx, sy):
+        # Intersection drag: recentre the view on the cursor point continuously
+        # — the crosshair centre follows the drag and is kept in the middle of
+        # the screen (both panes), exactly like double-clicking the drag point.
+        if self._cross_mode == "center":
+            self._recenter(which, sx, sy)
+            return
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, n = self._frame[which]
         other = "B" if which == "A" else "A"
