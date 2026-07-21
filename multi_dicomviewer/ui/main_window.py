@@ -2467,15 +2467,17 @@ class MainWindow(QMainWindow):
             #   D    = play / 2× toggle (cycles 1×→2×→1× on the second
             #          press, starts at 1× when stopped)
             #   S    = stop
-            #   W    = ECG waveform show/hide
-            #   V    = IVUS long-axis show/hide (IVUS only — no-op on XA)
+            #   W    = Window/Level (open the W/L popup)
+            #   V    = ECG show/hide on XA · IVUS long-axis show/hide on IVUS
+            #          (context-split by the active pane's modality — the two
+            #          never collide, and long-axis exists only on IVUS)
             ("T", lambda: self._xa_step(+1)),
             ("R", lambda: self._xa_step(+1)),
             ("E", lambda: self._xa_step(-1)),
             ("D", lambda: self._xa_play_speed_toggle()),
             ("S", lambda: self._xa_stop()),
-            ("W", lambda: self._xa_toggle_ecg()),
-            ("V", lambda: self._ivus_toggle_long_axis()),
+            ("W", lambda: self._xa_wl()),
+            ("V", lambda: self._xa_v_key()),
             ("Z", lambda: self._xa_zoom(True)),
             ("Shift+Z", lambda: self._xa_zoom(False)),
         ):
@@ -2560,8 +2562,30 @@ class MainWindow(QMainWindow):
         v.stop()
         v.play_btn.setChecked(False)
 
+    def _xa_wl(self) -> None:
+        """W = open the Window/Level popup for the active cine pane (same
+        popup as the image right-click ▸ Change W/L)."""
+        v = self._xa()
+        if v is not None and hasattr(v, "show_wl_dialog"):
+            v.show_wl_dialog()
+
+    def _xa_v_key(self) -> None:
+        """V = ECG strip on an XA pane, IVUS long-axis on an IVUS pane.
+
+        The two features never overlap — long-axis exists only in the IVUS
+        viewer and ECG is an XA feature — so one key can serve both, split by
+        the active cine pane's modality (handles_modality). This keeps V a
+        left-hand key for both and frees us from a right-hand key."""
+        v = self._xa()
+        if v is None:
+            return
+        if getattr(v, "handles_modality", "") == "IVUS":
+            self._ivus_toggle_long_axis()
+        else:
+            self._xa_toggle_ecg()
+
     def _xa_toggle_ecg(self) -> None:
-        """W = toggle the ECG waveform strip. The strip itself is built
+        """V (on an XA pane) = toggle the ECG waveform strip. The strip is built
         per series from the DICOM WaveformSequence when present; on a
         series without ECG the button just stays hidden with a status
         message."""
@@ -2571,8 +2595,9 @@ class MainWindow(QMainWindow):
         v.toggle_ecg()
 
     def _ivus_toggle_long_axis(self) -> None:
-        """V = toggle the IVUS long-axis (longitudinal) view. No-op on
-        XA — the long-axis only makes sense for an IVUS pull-back."""
+        """V (on an IVUS pane) = toggle the IVUS long-axis (longitudinal)
+        view. No-op on XA — the long-axis only makes sense for an IVUS
+        pull-back (V does ECG there instead, via _xa_v_key)."""
         v = self._xa()
         if v is None or getattr(v, "handles_modality", "") != "IVUS":
             self.statusBar().showMessage(
