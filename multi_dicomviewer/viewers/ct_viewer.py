@@ -3973,6 +3973,17 @@ class CTViewer(AbstractViewer):
                 p.angle.SetInput("")
                 for _ha in p.angle_halo:
                     _ha.SetInput("")
+                # DICOM-tag overlay honours the current keywords / anon state
+                # here too (the normal _update_info is skipped for the CPR pane,
+                # so Q / DICOM-info would otherwise leave stale tags on screen).
+                _head = wrap_lines_to_chars(
+                    overlay_lines(self._header, self._tag_keywords,
+                                  anonymized=self._anon),
+                    self._wrap_budget("A"))
+                _tt = "\n".join(_head)
+                p.tagact.SetInput(_tt)
+                for _ha in p.tagact_halo:
+                    _ha.SetInput(_tt)
                 # CenterLine overlay in the cross-section: a centred crosshair
                 # and a ▲ sized to the CPR zoom (the normal _update_cross is
                 # skipped here, which is why the ▲ used to keep its huge pre-CPR
@@ -4099,13 +4110,20 @@ class CTViewer(AbstractViewer):
         self._cpr_marker_pts = []
         if p3:
             o, u, vv, n = self._cpr_frame()
-            reach = 6.0                                  # ± mm along the vessel
+            # Always show EVERY control point (projected onto this cross-section)
+            # so a pseudo-centre is always grabbable — no more appearing /
+            # disappearing as you scroll. Draw only those that land inside the
+            # cross-section FOV (others are simply off-screen); the nearest one
+            # along the vessel is shown even so, so there is never a gap.
+            half = float(self._cpr["half"])
+            dns = [abs(float(np.dot(np.asarray(P, float) - o, n))) for P in p3]
+            near = int(np.argmin(dns)) if dns else -1
             for ci, P in enumerate(p3):
                 P = np.asarray(P, float)
-                if abs(float(np.dot(P - o, n))) > reach:
-                    continue
                 du = float(np.dot(P - o, u))
                 dv = float(np.dot(P - o, vv))
+                if ci != near and (abs(du) > half or abs(dv) > half):
+                    continue                             # off-screen, skip
                 pts.append((du, dv))
                 self._cpr_marker_pts.append((ci, (du, dv)))
         p.meas_pts_mapper.SetInputData(_points_pd(pts))
