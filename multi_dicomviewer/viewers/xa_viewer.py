@@ -599,6 +599,8 @@ class XAViewer(AbstractViewer):
         #: current frame; False (fresh series / never played) → Play starts
         #: from the Play-range start. CT-2D-style transport semantics.
         self._play_resume = False
+        #: Windowing mode (W key): left-drag on the image changes W/L, CT-style.
+        self._windowing = False
         # ECG strip (V key): the trace read from this series' DICOM, the
         # per-frame time step used to drive the cursor, and visibility.
         #: User's ON/OFF choice — PERSISTS across series (Next/Prev) until the
@@ -667,6 +669,8 @@ class XAViewer(AbstractViewer):
         # Right-click ▸ Change W/L on either canvas opens the W/L popup.
         self.canvas.wl_change_requested.connect(self.show_wl_dialog)
         self.canvas2.wl_change_requested.connect(self.show_wl_dialog)
+        self.canvas.wl_dragged.connect(self._on_wl_drag)
+        self.canvas2.wl_dragged.connect(self._on_wl_drag)
         self.canvas.export_requested.connect(self._on_export_image)
         self.canvas2.export_requested.connect(self._on_export_image)
         self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
@@ -2072,6 +2076,51 @@ class XAViewer(AbstractViewer):
         self._refresh_wl_lut()
         self._render()
 
+    def toggle_windowing(self) -> None:
+        """W = toggle Windowing mode: a left-drag on the image changes window
+        width / level, CT-style (drag right = wider window, drag up = higher
+        level). Mutually exclusive with the measure / zoom tools. No-op on a
+        colour series (no W/L)."""
+        if not self.win_slider.isEnabled():
+            self.readout.setText(t("This series has no W/L setting"))
+            return
+        self._windowing = not self._windowing
+        if self._windowing:
+            if self._meas_btn.isChecked():
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._clear_zoom_click()
+            self._clear_zoom_rect()
+        for c in (self.canvas, self.canvas2):
+            c.set_windowing_mode(self._windowing)
+        self.readout.setText(
+            t("Windowing: ON — drag the image to change W/L")
+            if self._windowing else t("Windowing: OFF"))
+
+    def _clear_windowing(self) -> None:
+        """Leave Windowing mode (called when a measure / zoom tool is armed)."""
+        if not self._windowing:
+            return
+        self._windowing = False
+        for c in (self.canvas, self.canvas2):
+            c.set_windowing_mode(False)
+
+    def _on_wl_drag(self, dx: float, dy: float) -> None:
+        """Map a Windowing-mode image drag to W/L: horizontal = window width,
+        vertical = level (drag up raises it). A full pane-width drag spans
+        roughly the whole slider range."""
+        if not self.win_slider.isEnabled():
+            return
+        wspan = max(1, self.win_slider.maximum() - self.win_slider.minimum())
+        lspan = max(1, self.lvl_slider.maximum() - self.lvl_slider.minimum())
+        new_w = self._window + dx * (wspan / 512.0)
+        new_l = self._level - dy * (lspan / 512.0)
+        for s, val in ((self.win_slider, new_w), (self.lvl_slider, new_l)):
+            s.blockSignals(True)
+            s.setValue(int(round(val)))          # clamps to the slider range
+            s.blockSignals(False)
+        self._wl_changed()
+
     # -------------------------------------------------- measure toolbar
     def _build_measure_bar(self) -> QWidget:
         bar = QWidget()
@@ -2171,6 +2220,7 @@ class XAViewer(AbstractViewer):
         if on:
             self._clear_zoom_click()
             self._clear_zoom_rect()
+            self._clear_windowing()
         if not on:
             for c in (self.canvas, self.canvas2):
                 c.set_measure_type("")
@@ -2205,6 +2255,7 @@ class XAViewer(AbstractViewer):
         other.setChecked(False)
         if new_mode:
             self._clear_zoom_rect()          # click-zoom cancels drag-zoom
+            self._clear_windowing()
             if self._meas_btn.isChecked():
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
@@ -2226,6 +2277,7 @@ class XAViewer(AbstractViewer):
         on = self._zoom_rect_btn.isChecked()
         if on:
             self._clear_zoom_click()
+            self._clear_windowing()
             if self._meas_btn.isChecked():
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
