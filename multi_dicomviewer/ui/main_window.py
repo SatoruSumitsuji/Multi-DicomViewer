@@ -2563,12 +2563,11 @@ class MainWindow(QMainWindow):
         v.play_btn.setChecked(False)
 
     def _xa_wl(self) -> None:
-        """W = toggle Windowing mode on the active cine pane: a left-drag on
-        the image changes window width / level, CT-style. (The W/L popup is
-        still available from the image right-click ▸ Change W/L.)"""
+        """W = open the Window/Level popup for the active cine pane (same
+        popup as the image right-click ▸ Change W/L)."""
         v = self._xa()
-        if v is not None and hasattr(v, "toggle_windowing"):
-            v.toggle_windowing()
+        if v is not None and hasattr(v, "show_wl_dialog"):
+            v.show_wl_dialog()
 
     def _xa_v_key(self) -> None:
         """V = ECG strip on an XA pane, IVUS long-axis on an IVUS pane.

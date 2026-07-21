@@ -573,8 +573,6 @@
   "This build does not support CT data. (The Mac build has no CT viewer.)": "このアプリはCTデータに対応していません。（Mac版はCTビューワーを搭載していません）",
   "This series has no W/L adjustment.": "このシリーズに W/L 調整はありません。",
   "This series has no W/L setting": "このシリーズには W/L 設定がありません",
-  "Windowing: ON — drag the image to change W/L": "Windowing: ON — 画像をドラッグして W/L 変更",
-  "Windowing: OFF": "Windowing: OFF",
   "This setting applies to both on-screen anonymization (the Anonymous button) and Export (Anon DICOM).": "この設定は「画面表示の匿名化（Anonymousボタン）」と「Export (Anon DICOM)」の両方に適用されます。",
   "Thumbnail size": "サムネイルサイズ",
   "Tick what to put in each output filename. Components missing for a given series (e.g. no angle on a CT) are skipped.": "各出力ファイル名に含める項目にチェックを入れてください。対象シリーズに存在しない項目（例: CTに角度がない）はスキップされます。",
