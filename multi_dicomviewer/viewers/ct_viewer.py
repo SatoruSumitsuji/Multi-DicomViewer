@@ -3850,6 +3850,67 @@ class CTViewer(AbstractViewer):
         if not silent:
             self.cpr_rotation_changed.emit(deg)
 
+    def _sample_vol_grid(self, P):
+        """Trilinear-sample the HU volume at world points *P* (…,3 array).
+        Out-of-volume samples read −1000 HU (air). Shared by the CoSync stack
+        renderer."""
+        sx, sy, sz = self._dims
+        fx = P[..., 0] / sx
+        fy = P[..., 1] / sy
+        fz = P[..., 2] / sz
+        nz, ny, nx = self._vol.shape
+        inb = ((fx >= 0) & (fx <= nx - 1) & (fy >= 0) & (fy <= ny - 1)
+               & (fz >= 0) & (fz <= nz - 1))
+        x0 = np.clip(np.floor(fx).astype(int), 0, nx - 2)
+        y0 = np.clip(np.floor(fy).astype(int), 0, ny - 2)
+        z0 = np.clip(np.floor(fz).astype(int), 0, nz - 2)
+        tx, ty, tz = fx - x0, fy - y0, fz - z0
+        V = self._vol
+        out = np.zeros(P.shape[:-1], np.float32)
+        for dz in (0, 1):
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    w = ((tx if dx else 1 - tx) * (ty if dy else 1 - ty)
+                         * (tz if dz else 1 - tz))
+                    out += w * V[z0 + dz, y0 + dy, x0 + dx]
+        out[~inb] = -1000.0
+        return out
+
+    def cpr_cosync_spec(self, px: int = 96):
+        """Render the short-axis stack as a synthetic 'pull-back' for CoSync.
+
+        Returns a dict the shell hands to the CoSync window so the Stretch-MPR
+        joins the multi-pane landmark grid exactly like an IVUS pull-back:
+          frames  : (n, px, px) float32 HU cross-sections along the vessel
+          window/level, spacing_mm (per display pixel), start (current index),
+          rotation° and label.
+        None when the short-axis isn't active."""
+        c = self._cpr
+        if c is None or self._vol is None:
+            return None
+        half = float(c["half"])
+        n = int(c["cl"].n)
+        gs = np.linspace(-half, half, px)
+        gu, gv = np.meshgrid(gs, gs)
+        frames = np.empty((n, px, px), np.float32)
+        for i in range(n):
+            o = np.asarray(c["cl"].points[i], float)
+            u = c["u"][i]
+            vv = c["v"][i]
+            P = (o[None, None, :] + gu[..., None] * u[None, None, :]
+                 + gv[..., None] * vv[None, None, :])
+            frames[i] = self._sample_vol_grid(P)
+        return {
+            "kind": "ct_cpr",
+            "frames": frames,
+            "window": float(self._win),
+            "level": float(self._lvl),
+            "spacing_mm": (2.0 * half) / max(1, px - 1),
+            "start": int(c["idx"]),
+            "rotation": float(c.get("rot", 0.0)),
+            "label": t("CT short-axis"),
+        }
+
     def _cpr_matrix(self):
         """Reslice matrix for pane A in short-axis mode: axes (u, v, tangent)
         at the current sample, origin = that centreline point (volume mm)."""
