@@ -595,6 +595,15 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
+        # Otherwise a left-drag on the short-axis rotates the cross-section
+        # in-plane (like turning an IVUS frame) — feeds the CoSync rotation.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._cpr is not None and self._which == "A"):
+            self._owner._cpr_rot_start(e.position().x(), e.position().y())
+            self._last = e.position()
+            self._cross = False
+            self._meas_drag = False
+            return
         # Compare-select mode: a left-click picks the two shapes to compare
         # (no drag: clear _last so a move can't pan/rotate the image).
         if (e.button() == Qt.MouseButton.LeftButton
@@ -675,6 +684,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._owner._cpr_drag is not None and self._which == "A":
             self._owner._cpr_drag_move(e.position().x(), e.position().y())
             return
+        # Rotating the short-axis cross-section (dial drag).
+        if self._owner._cpr_rot_prev is not None and self._which == "A":
+            self._owner._cpr_rot_move(e.position().x(), e.position().y())
+            return
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_drag(
                 self._which, e.position().x(), e.position().y()
@@ -708,6 +721,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
     def mouseReleaseEvent(self, e):
         if self._owner._cpr_drag is not None:
             self._owner._cpr_drag_end()          # rebuild centreline on release
+            self._last = None
+            return
+        if self._owner._cpr_rot_prev is not None:
+            self._owner._cpr_rot_end()
             self._last = None
             return
         if self._owner._meas_on and self._meas_drag:
@@ -1391,6 +1408,13 @@ class CTViewer(AbstractViewer):
     #: emitted by the series-navigation buttons ("first"/"prev"/"next"/"last")
     #: — the shell steps through this study's CT series (angio-style F/A nav)
     series_nav = pyqtSignal(str)
+    #: CPR short-axis scrub position changed (arc-length sample index) — the CT
+    #: analogue of a cine's frame_changed, so the shell can CoSync it against an
+    #: IVUS pull-back / another short-axis.
+    cpr_index_changed = pyqtSignal(int)
+    #: CPR short-axis in-plane rotation changed (degrees) — the analogue of the
+    #: IVUS cross-section rotation, for the CoSync rotation interpolation (按分).
+    cpr_rotation_changed = pyqtSignal(float)
     tags_requested = pyqtSignal()
     #: emitted when the tag-text-size slider moves (shell broadcasts the pt to
     #: every viewer so the overlay size matches across modalities)
@@ -1434,6 +1458,7 @@ class CTViewer(AbstractViewer):
         self._cpr = None
         self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
         self._cpr_drag = None                # control index being dragged
+        self._cpr_rot_prev = None            # cursor angle while rotating (rad)
         self._vol = None                     # (z,y,x) HU volume for lumen snap
         # Auto-snap a traced vertex to the brightest (contrast lumen) point
         # along the plane normal, near the click — the MIP shows WHERE the
@@ -3744,6 +3769,7 @@ class CTViewer(AbstractViewer):
             "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
             "u0": fu.copy(), "v0": fv.copy(),     # base frame (pre-transform)
             "T": np.eye(2),                       # Rt90/Flip display transform
+            "rot": 0.0,                           # continuous in-plane rotation°
             "half": 25.0,                         # ±25 mm cross-section FOV
             "src": which,                         # pane the trace lives on
             "src_mi": mi,                         # index of the trace measure
@@ -3770,13 +3796,59 @@ class CTViewer(AbstractViewer):
         self._refresh(reset_cam=True)
 
     def _cpr_set_index(self, i):
-        """Scroll to cross-section *i* along the vessel."""
+        """Scroll to cross-section *i* along the vessel (from the scrubber)."""
         c = self._cpr
         if c is None:
             return
-        c["idx"] = int(min(max(int(i), 0), c["cl"].n - 1))
+        i = int(min(max(int(i), 0), c["cl"].n - 1))
+        changed = (i != c["idx"])
+        c["idx"] = i
         self._cpr_sync_bar()
         self._refresh()
+        if changed:
+            self.cpr_index_changed.emit(i)       # CoSync: broadcast the scrub
+
+    # ---- CoSync interface (short-axis as a synchronisable scrub source) ----
+    def cpr_active(self) -> bool:
+        return self._cpr is not None
+
+    def cpr_sync_state(self):
+        """(index, count, rotation°) of the short-axis scrub, or None when the
+        short-axis isn't active. Lets the shell treat it like a cine frame."""
+        c = self._cpr
+        if c is None:
+            return None
+        return (int(c["idx"]), int(c["cl"].n), float(c.get("rot", 0.0)))
+
+    def set_cpr_index(self, i: int, *, silent: bool = False) -> None:
+        """CoSync driver: move the short-axis to sample *i* without echoing the
+        signal back (silent) so linked panes don't feedback-loop."""
+        c = self._cpr
+        if c is None:
+            return
+        i = int(min(max(int(i), 0), c["cl"].n - 1))
+        if i == c["idx"]:
+            return
+        c["idx"] = i
+        self._cpr_sync_bar()
+        self._refresh()
+        if not silent:
+            self.cpr_index_changed.emit(i)
+
+    def set_cpr_rotation(self, deg: float, *, silent: bool = False) -> None:
+        """Rotate the short-axis cross-section in-plane to *deg* (the CoSync
+        rotation 按分 drives this); rebuilds the display frame."""
+        c = self._cpr
+        if c is None:
+            return
+        deg = float(deg)
+        if abs(deg - c.get("rot", 0.0)) < 1e-6:
+            return
+        c["rot"] = deg
+        self._cpr_apply_xform()
+        self._refresh()
+        if not silent:
+            self.cpr_rotation_changed.emit(deg)
 
     def _cpr_matrix(self):
         """Reslice matrix for pane A in short-axis mode: axes (u, v, tangent)
@@ -4013,6 +4085,25 @@ class CTViewer(AbstractViewer):
             return
         self._cpr_drag = None
         self._cpr_rebuild()
+
+    # ---- manual short-axis rotation (drag the section like a dial) ----
+    def _cpr_cursor_angle(self, sx, sy) -> float:
+        c = self.pane["A"].canvas
+        return math.atan2(sy - c.height() / 2.0, sx - c.width() / 2.0)
+
+    def _cpr_rot_start(self, sx, sy):
+        self._cpr_rot_prev = self._cpr_cursor_angle(sx, sy)
+
+    def _cpr_rot_move(self, sx, sy):
+        if self._cpr is None or self._cpr_rot_prev is None:
+            return
+        ang = self._cpr_cursor_angle(sx, sy)
+        d = math.degrees(ang - self._cpr_rot_prev)
+        self._cpr_rot_prev = ang
+        self.set_cpr_rotation(self._cpr.get("rot", 0.0) + d)
+
+    def _cpr_rot_end(self):
+        self._cpr_rot_prev = None
 
     def _cpr_rebuild(self):
         """Recompute the centreline / short-axis frames from the (edited)
@@ -4629,12 +4720,18 @@ class CTViewer(AbstractViewer):
     }
 
     def _cpr_apply_xform(self):
-        """Rebuild the CPR display axes u, v from the base frame (u0, v0) and
-        the cumulative Rt90/Flip transform T."""
+        """Rebuild the CPR display axes u, v from the base frame (u0, v0), the
+        cumulative Rt90/Flip transform T, and the continuous rotation `rot`
+        (applied last, in-plane about the tangent) — the IVUS-style rotation
+        used by the CoSync 按分."""
         c = self._cpr
         T = c["T"]
-        c["u"] = T[0, 0] * c["u0"] + T[0, 1] * c["v0"]
-        c["v"] = T[1, 0] * c["u0"] + T[1, 1] * c["v0"]
+        bu = T[0, 0] * c["u0"] + T[0, 1] * c["v0"]
+        bv = T[1, 0] * c["u0"] + T[1, 1] * c["v0"]
+        th = math.radians(c.get("rot", 0.0))
+        ct, st = math.cos(th), math.sin(th)
+        c["u"] = ct * bu + st * bv
+        c["v"] = -st * bu + ct * bv
 
     def _2d_transform(self, kind):
         """Rotate the 2-D image 90° (rt90/lt90) or flip it (fliph/flipv).
