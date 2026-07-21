@@ -513,11 +513,12 @@ def _placeholder_image() -> vtkImageData:
     return img
 
 
-def _gray_lut(width: float, level: float) -> vtkLookupTable:
+def _gray_lut(width: float, level: float, invert: bool = False) -> vtkLookupTable:
     lut = vtkLookupTable()
     lut.SetHueRange(0.0, 0.0)
     lut.SetSaturationRange(0.0, 0.0)
-    lut.SetValueRange(0.0, 1.0)
+    # invert = black↔white negative (low HU → white, high HU → black).
+    lut.SetValueRange(1.0, 0.0) if invert else lut.SetValueRange(0.0, 1.0)
     lut.SetTableRange(level - width / 2.0, level + width / 2.0)
     lut.Build()
     return lut
@@ -595,14 +596,21 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
-        # Otherwise a left-drag on the short-axis rotates the cross-section
-        # in-plane (like turning an IVUS frame) — feeds the CoSync rotation.
+        # Otherwise a left-drag on the short-axis is dispatched by the SELECTED
+        # tool so the toolbar works here too: Rotate/Spin turn the cross-section
+        # (feeds the CoSync rotation), Paging scrolls the pull-back, and
+        # WL/Zoom/Move fall through to the normal _drag (window-level, camera
+        # zoom / pan all act on this pane).
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._owner._cpr is not None and self._which == "A"):
-            self._owner._cpr_rot_start(e.position().x(), e.position().y())
-            self._last = e.position()
             self._cross = False
             self._meas_drag = False
+            self._last = e.position()
+            self._cpr_page_anchor = e.position().y()
+            if self._owner._tool in ("ROTATE", "SPIN"):
+                self._owner._cpr_rot_start(
+                    e.position().x(), e.position().y())
+            # PAGING scrolls; WL / ZOOM / MOVE / THICK → _drag (mouseMoveEvent)
             return
         # Compare-select mode: a left-click picks the two shapes to compare
         # (no drag: clear _last so a move can't pan/rotate the image).
@@ -680,13 +688,28 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
-        # Dragging a CPR control-point marker (short-axis fine-tune).
-        if self._owner._cpr_drag is not None and self._which == "A":
-            self._owner._cpr_drag_move(e.position().x(), e.position().y())
-            return
-        # Rotating the short-axis cross-section (dial drag).
-        if self._owner._cpr_rot_prev is not None and self._which == "A":
-            self._owner._cpr_rot_move(e.position().x(), e.position().y())
+        # Short-axis (CPR) pane, left-drag in progress → dispatch by tool.
+        if (self._owner._cpr is not None and self._which == "A"
+                and self._last is not None):
+            if self._owner._cpr_drag is not None:        # moving a control point
+                self._owner._cpr_drag_move(
+                    e.position().x(), e.position().y())
+                return
+            _tool = self._owner._tool
+            if _tool in ("ROTATE", "SPIN"):
+                self._owner._cpr_rot_move(e.position().x(), e.position().y())
+                return
+            if _tool == "PAGING":
+                self._owner._cpr_page_drag(
+                    e.position().y() - self._cpr_page_anchor)
+                self._cpr_page_anchor = e.position().y()
+                return
+            # WL / ZOOM / MOVE / THICK → the normal tool drag on this pane.
+            p = e.position()
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._owner._drag(self._which, p.x() - self._last.x(),
+                              p.y() - self._last.y(), shift, p.x(), p.y())
+            self._last = p
             return
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_drag(
@@ -1498,6 +1521,7 @@ class CTViewer(AbstractViewer):
         self._win0, self._lvl0 = 800.0, 200.0
         self._thick = {"A": 0.0, "B": 5.0}   # slab mm per pane
         self._color = False
+        self._invert = False                 # grayscale black↔white negative
         self._bands = [dict(b) for b in _DEFAULT_BANDS]
         self._opacity = 0.25
         self._cmap_dlg = None
@@ -1920,6 +1944,13 @@ class CTViewer(AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
             self._t2d_btns.append(b)
             row2.addWidget(b)
+        # Grayscale invert (black↔white negative) — right of Flip-V.
+        self._invert_btn = FitButton(t("WB reverse"))
+        self._invert_btn.setCheckable(True)
+        self._invert_btn.setHelpToolTip(
+            t("Invert grayscale (black↔white negative)"))
+        self._invert_btn.clicked.connect(self._toggle_invert)
+        row2.addWidget(self._invert_btn)
         row2.addStretch(1)
 
         col.addLayout(row)
@@ -3708,12 +3739,21 @@ class CTViewer(AbstractViewer):
         delta = self._center - self._pc[key]
         return float(np.dot(delta, u)), float(np.dot(delta, v))
 
+    def _toggle_invert(self):
+        """WB reverse: invert the grayscale (black↔white). Applies to every
+        pane, including the short-axis (all use the gray LUT)."""
+        self._invert = self._invert_btn.isChecked()
+        for k in ("A", "B"):
+            self.pane[k].colors.SetLookupTable(self._lut())
+            self.pane[k].colors.Modified()
+        self._refresh()
+
     def _lut(self):
         if self._color:
             return _band_lut(
                 self._bands, self._opacity, self._win, self._lvl
             )
-        return _gray_lut(self._win, self._lvl)
+        return _gray_lut(self._win, self._lvl, invert=self._invert)
 
     def _open_setting(self):
         if self._cmap_dlg is None:
@@ -4224,6 +4264,22 @@ class CTViewer(AbstractViewer):
 
     def _cpr_rot_end(self):
         self._cpr_rot_prev = None
+
+    def _cpr_page_drag(self, dy):
+        """Paging tool on the short-axis: drag up = advance the pull-back
+        (~6 px per cross-section), like the 2-D paging drag."""
+        if self._cpr is None:
+            return
+        self._cpr_page_accum = getattr(self, "_cpr_page_accum", 0.0) - dy
+        step = 6.0
+        d = self._cpr_disp(self._cpr["idx"])     # current display position
+        while self._cpr_page_accum >= step:
+            self._cpr_page_accum -= step
+            d += 1
+        while self._cpr_page_accum <= -step:
+            self._cpr_page_accum += step
+            d -= 1
+        self._cpr_set_index(d)
 
     def _cpr_rebuild(self):
         """Recompute the centreline / short-axis frames from the (edited)
