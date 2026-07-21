@@ -438,6 +438,7 @@
   "Required Data:": "必要なデータ:",
   "Reset": "リセット",
   "Reset W/L to the default setting": "W/L を既定の設定にリセット",
+  "Reset W/L to each series' own default (also clears the sticky W/L applied across images)": "各シリーズ本来の既定 W/L に戻す（全画像へ適用中の固定 W/L も解除）",
   "Reset W/L to the load-time default": "W/L を読み込み時の初期設定に戻す",
   "Reset all points": "すべての点をリセット",
   "Reset zoom to the original fit": "ズームを元のフィットに戻す",

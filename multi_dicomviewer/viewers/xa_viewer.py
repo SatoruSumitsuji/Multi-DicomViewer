@@ -530,6 +530,12 @@ class XAViewer(AbstractViewer):
         self._want_dual = False   # set by the shell (XA-only + biplane)
         self._window = 1.0
         self._level = 0.5
+        #: Manual W/L "override": once the user drags the popup sliders, that
+        #: (window, level) is applied to EVERY series/image loaded afterwards
+        #: (clamped to each one's range) — the same W/L stays until the popup's
+        #: Reset clears it, when each series reverts to its own default. None =
+        #: no override (use each series' own default).
+        self._wl_override: tuple[float, float] | None = None
         # Load-time W/L baseline — what "Reset" in the W/L popup restores.
         self._window_init = 1.0
         self._level_init = 0.5
@@ -599,7 +605,7 @@ class XAViewer(AbstractViewer):
         #: current frame; False (fresh series / never played) → Play starts
         #: from the Play-range start. CT-2D-style transport semantics.
         self._play_resume = False
-        # ECG strip (W key): the trace read from this series' DICOM, the
+        # ECG strip (V key): the trace read from this series' DICOM, the
         # per-frame time step used to drive the cursor, and visibility.
         #: User's ON/OFF choice — PERSISTS across series (Next/Prev) until the
         #: user toggles it. When ON, the strip stays shown on every series; a
@@ -632,7 +638,7 @@ class XAViewer(AbstractViewer):
         layout.addWidget(self._measure_bar)
         layout.addWidget(self.title_label)
         layout.addWidget(self._canvas_area, 1)
-        # ECG strip sits directly under the angio image (hidden until W
+        # ECG strip sits directly under the angio image (hidden until V
         # toggles it on, and only on series that carry an ECG waveform).
         layout.addWidget(self._ecg_strip)
         layout.addWidget(self._build_plane_bar())
@@ -1131,7 +1137,9 @@ class XAViewer(AbstractViewer):
         grid.addWidget(self._lvl_val_lbl, 1, 2)
 
         self._wl_reset_btn = QPushButton(t("Reset"))
-        self._wl_reset_btn.setToolTip(t("Reset W/L to the default setting"))
+        self._wl_reset_btn.setToolTip(
+            t("Reset W/L to each series' own default (also clears the sticky "
+              "W/L applied across images)"))
         self._wl_reset_btn.clicked.connect(self._reset_wl)
         grid.addWidget(
             self._wl_reset_btn, 2, 1, 1, 2, Qt.AlignmentFlag.AlignRight
@@ -1140,15 +1148,25 @@ class XAViewer(AbstractViewer):
         self._wl_dialog = dlg
 
     def _reset_wl(self) -> None:
-        """Restore W/L to this series' load-time baseline (popup ▸ Reset)."""
+        """Reset (popup ▸ Reset): drop the sticky override and restore THIS
+        series' load-time baseline. From now on each series shows its own
+        default W/L again until the user changes it."""
         if not self.win_slider.isEnabled():
             return
-        # setValue fires _wl_changed (which re-renders + refreshes labels);
-        # if a value is already at the baseline its signal won't fire, but the
-        # state is then already correct, so an explicit label refresh covers it.
-        self.win_slider.setValue(int(self._window_init))
-        self.lvl_slider.setValue(int(self._level_init))
+        self._wl_override = None                 # stop applying the sticky W/L
+        # Set the baseline without re-arming the override (block signals, then
+        # apply once). A programmatic setValue that re-fired _wl_changed would
+        # otherwise immediately re-create the override we just cleared.
+        for s, val in ((self.win_slider, self._window_init),
+                       (self.lvl_slider, self._level_init)):
+            s.blockSignals(True)
+            s.setValue(int(val))
+            s.blockSignals(False)
+        self._window = float(self.win_slider.value())
+        self._level = float(self.lvl_slider.value())
         self._update_wl_labels()
+        self._refresh_wl_lut()
+        self._render()
 
     def show_wl_dialog(self) -> None:
         """Open the Window/Level popup (image right-click ▸ Change W/L).
@@ -1429,8 +1447,21 @@ class XAViewer(AbstractViewer):
             vmax = float(stacked.max())
             span = max(vmax - vmin, 1.0)
             self.win_slider.setRange(1, int(span * 2))
-            self.win_slider.setValue(int(self._window))
             self.lvl_slider.setRange(int(vmin - span), int(vmax + span))
+            # Sticky override: if the user has set a custom W/L, apply it here
+            # (clamped to this series' slider range) instead of the series'
+            # own default — so the same W/L carries across every image until
+            # Reset. _window_init/_level_init keep the SERIES default so Reset
+            # still restores it.
+            if self._wl_override is not None:
+                ow, ol = self._wl_override
+                self._window = float(min(max(int(round(ow)),
+                                             self.win_slider.minimum()),
+                                         self.win_slider.maximum()))
+                self._level = float(min(max(int(round(ol)),
+                                            self.lvl_slider.minimum()),
+                                        self.lvl_slider.maximum()))
+            self.win_slider.setValue(int(self._window))
             self.lvl_slider.setValue(int(self._level))
         for s in (self.win_slider, self.lvl_slider):
             s.blockSignals(False)
@@ -1495,7 +1526,7 @@ class XAViewer(AbstractViewer):
 
         self._relayout()
         self._refresh_overlay()
-        # Read this series' ECG (if any) and prime the strip — hidden until W.
+        # Read this series' ECG (if any) and prime the strip — hidden until V.
         self._read_ecg_for_series()
 
         # Warm the rest of the cine in the background for smooth playback;
@@ -1613,7 +1644,7 @@ class XAViewer(AbstractViewer):
             self._start_cine_timer()
 
     def toggle_ecg(self) -> None:
-        """W: turn the ECG strip ON/OFF. The choice PERSISTS across series
+        """V: turn the ECG strip ON/OFF. The choice PERSISTS across series
         (Next/Prev) until toggled again. When ON the strip stays visible on
         every series — showing that series' ECG, or 'No ECG' if it has none."""
         self._ecg_on = not self._ecg_on
@@ -2068,6 +2099,10 @@ class XAViewer(AbstractViewer):
     def _wl_changed(self):
         self._window = float(self.win_slider.value())
         self._level = float(self.lvl_slider.value())
+        # A user W/L change becomes the sticky override applied to every series
+        # loaded afterwards, until Reset. (Programmatic slider sets during load
+        # block signals, so this only fires on a real user drag.)
+        self._wl_override = (self._window, self._level)
         self._update_wl_labels()
         self._refresh_wl_lut()
         self._render()
