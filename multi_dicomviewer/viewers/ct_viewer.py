@@ -2780,6 +2780,14 @@ class CTViewer(AbstractViewer):
         p.meas_arc_mapper.SetInputData(
             _colored_multi_pd(arc_lines, [(255, 140, 0)] * len(arc_lines))
         )
+        # CPR: on the MAP pane, mark where the short-axis is currently cut
+        # (the scrubbed centreline point projected onto this plane) — the CT
+        # analogue of the IVUS pull-back position marker. Drawn green via the
+        # edit-points actor (no vertex is being edited on the map pane in CPR).
+        if self._cpr is not None and key == self._cpr.get("src"):
+            i = self._cpr["idx"]
+            edit_pts.append(
+                self._world3d_to_out(key, self._cpr["cl"].points[i]))
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
         p.meas_pts_edit_mapper.SetInputData(_points_pd(edit_pts))
@@ -3734,6 +3742,8 @@ class CTViewer(AbstractViewer):
         fu = -fu
         self._cpr = {
             "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
+            "u0": fu.copy(), "v0": fv.copy(),     # base frame (pre-transform)
+            "T": np.eye(2),                       # Rt90/Flip display transform
             "half": 25.0,                         # ±25 mm cross-section FOV
             "src": which,                         # pane the trace lives on
             "src_mi": mi,                         # index of the trace measure
@@ -3742,6 +3752,8 @@ class CTViewer(AbstractViewer):
         # Show both panes: A = cross-section, the traced pane = map.
         self.set_side("Bi")
         self.pane["A"].set_overlay_visible(False)   # no crosshair on the disc
+        for b in self._t2d_btns:                    # Rt90/Lt90/Flip work on CPR
+            b.setEnabled(True)
         self._cpr_sync_bar()
         self._refresh(reset_cam=True)
 
@@ -3752,6 +3764,8 @@ class CTViewer(AbstractViewer):
         self._cpr = None
         self._cpr_wrap.setVisible(False)
         self.pane["A"].set_overlay_visible(self._cl_btn.isChecked())
+        for b in self._t2d_btns:                  # 2-D-only again once out of CPR
+            b.setEnabled(self._mode == "2D")
         self._init_frames()                       # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
 
@@ -4013,8 +4027,9 @@ class CTViewer(AbstractViewer):
             return
         fu, fv = cl.frames(ref_up=c["ref_up"])
         fu = -fu                                  # view first→last (un-mirror)
-        c["cl"], c["u"], c["v"] = cl, fu, fv
+        c["cl"], c["u0"], c["v0"] = cl, fu, fv
         c["idx"] = min(c["idx"], cl.n - 1)
+        self._cpr_apply_xform()                   # re-apply Rt90/Flip → u, v
         self._cpr_sync_bar()
         self._refresh()
 
@@ -4604,9 +4619,36 @@ class CTViewer(AbstractViewer):
         v = np.asarray(v, float).copy()
         self._frame["A"] = (u, v, np.cross(u, v))
 
+    #: Rt90/Lt90/Flip transforms as 2×2 matrices acting on the (u, v) frame
+    #: — u' = M·(u,v). Same visual result as the 2-D-mode _axes2d swaps.
+    _XFORM_2X2 = {
+        "rt90": np.array([[0.0, 1.0], [-1.0, 0.0]]),    # (u,v) → (v, -u)
+        "lt90": np.array([[0.0, -1.0], [1.0, 0.0]]),    # (u,v) → (-v, u)
+        "fliph": np.array([[-1.0, 0.0], [0.0, 1.0]]),   # (u,v) → (-u, v)
+        "flipv": np.array([[1.0, 0.0], [0.0, -1.0]]),   # (u,v) → (u, -v)
+    }
+
+    def _cpr_apply_xform(self):
+        """Rebuild the CPR display axes u, v from the base frame (u0, v0) and
+        the cumulative Rt90/Flip transform T."""
+        c = self._cpr
+        T = c["T"]
+        c["u"] = T[0, 0] * c["u0"] + T[0, 1] * c["v0"]
+        c["v"] = T[1, 0] * c["u0"] + T[1, 1] * c["v0"]
+
     def _2d_transform(self, kind):
         """Rotate the 2-D image 90° (rt90/lt90) or flip it (fliph/flipv).
-        Applied incrementally to the current display axes (composable)."""
+        Applied incrementally to the current display axes (composable).
+        Works on the CPR short-axis too (transforms the whole stack)."""
+        if self._cpr is not None:
+            M = self._XFORM_2X2.get(kind)
+            if M is None:
+                return
+            self._cpr["T"] = M @ self._cpr["T"]
+            self._cpr_apply_xform()
+            self._view_initial = False
+            self._refresh(reset_cam=True)
+            return
         if self._mode != "2D" or self._image is None:
             return
         u, v = self._axes2d
