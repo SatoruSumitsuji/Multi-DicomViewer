@@ -89,6 +89,9 @@ class _CoregPane:
         self.level = 0.5
         self.is_color = False
         self.is_ivus = False
+        #: For a CT short-axis pane: the pre-rendered (n, H, W) HU cross-section
+        #: stack (a synthetic pull-back). None for a normal series pane.
+        self._stack = None
 
         self.frame = QFrame()
         self.frame.setFrameShape(QFrame.Shape.Box)
@@ -188,6 +191,35 @@ class _CoregPane:
         self.slider.blockSignals(False)
         self.show_frame(start)
 
+    def load_stack(self, spec: dict) -> None:
+        """Load a CT short-axis stack (from CTViewer.cpr_cosync_spec) as an
+        IVUS-like driver pane: it scrubs the synthetic pull-back and joins the
+        landmark grid + rotation 按分 exactly like an IVUS."""
+        self.series = None
+        self.plane = None
+        self._stack = spec["frames"]
+        self.total = int(len(self._stack))
+        self.window = float(spec.get("window") or 1.0)
+        self.level = float(spec.get("level") or 0.0)
+        self.is_color = False
+        self.is_ivus = True                       # a master/driver like IVUS
+        self.canvas.spacing_mm = spec.get("spacing_mm")
+        self.master_radio.setVisible(True)
+        self.canvas.set_coreg_visible(False)      # no guide overlay
+        self.canvas.set_free_rotation_enabled(True)   # rotation 按分, IVUS-style
+        self.title.setText(spec.get("label", "CT short-axis"))
+        start = max(0, min(int(spec.get("start", 0)), self.total - 1))
+        self.cur = start
+        self.slider.blockSignals(True)
+        self.slider.setEnabled(self.total > 1)
+        self.slider.setRange(0, max(0, self.total - 1))
+        self.slider.setValue(start)
+        self.slider.blockSignals(False)
+        rot = float(spec.get("rotation") or 0.0)
+        if rot:
+            self.canvas.set_free_rotation(rot)
+        self.show_frame(start)
+
     def _init_wl(self, loaded) -> None:
         """Default window/level: the loaded values when present, else the
         first frame's value range (mirrors what the IVUS viewer does)."""
@@ -200,13 +232,13 @@ class _CoregPane:
             self.level = (vmax + vmin) / 2.0
 
     def _display_frame(self, idx: int) -> np.ndarray:
-        f = self.plane.frame(idx)
+        f = self._stack[idx] if self._stack is not None else self.plane.frame(idx)
         if self.is_color:
             return f
         return apply_window(f, self.window, self.level)
 
     def show_frame(self, idx: int) -> None:
-        if self.plane is None:
+        if self.plane is None and self._stack is None:
             return
         idx = max(0, min(int(idx), self.total - 1))
         self.cur = idx
@@ -553,13 +585,20 @@ class CoregWindow(QMainWindow):
         self._drive_markers(g)
 
     def _load_series(self, pane_specs) -> None:
-        specs = [(s, p, f) for (s, p, f) in (pane_specs or [])
-                 if s is not None][:6]
+        # A spec is either a (Series, plane, start) tuple or a CT short-axis
+        # dict {"kind": "ct_cpr", ...} from CTViewer.cpr_cosync_spec.
+        specs = [s for s in (pane_specs or [])
+                 if s is not None
+                 and (isinstance(s, dict) or s[0] is not None)][:6]
         cols = _grid_dims(len(specs))
-        for i, (se, pidx, start) in enumerate(specs):
+        for i, spec in enumerate(specs):
             pane = _CoregPane(i, self)
             self.panes.append(pane)
             self._grid.addWidget(pane.frame, i // cols, i % cols)
+            if isinstance(spec, dict):            # CT short-axis stack pane
+                pane.load_stack(spec)
+                continue
+            se, pidx, start = spec
             pane.load(se, pidx, start)
             if not pane.is_ivus:
                 self._wire_angio(pane)

@@ -1392,8 +1392,23 @@ class MainWindow(QMainWindow):
                 specs.append((se, 1, fr))
             else:                                # "Lt", single-plane, or none
                 specs.append((se, 0, fr))
+        # Include any CT pane currently in short-axis (Stretch MPR) mode as a
+        # synthetic pull-back — it joins the CoSync grid like an IVUS and can
+        # be landmark-synced against the real IVUS / other short-axes.
+        cpr_specs = []
+        for pane in self._shown_panes():
+            v = pane.current_viewer()
+            if getattr(v, "handles_modality", "") == "CT" \
+                    and hasattr(v, "cpr_active") and v.cpr_active():
+                spec = v.cpr_cosync_spec()
+                if spec is not None:
+                    cpr_specs.append(spec)
         specs = specs[:6]
-        has_ivus = any(s.modality == Modality.IVUS for s, _p, _f in specs)
+        # A CT short-axis is a driver too (is_ivus in the CoSync window), so it
+        # satisfies the "need a pull-back" requirement.
+        has_ivus = (any(s.modality == Modality.IVUS for s, _p, _f in specs)
+                    or bool(cpr_specs))
+        specs = (specs + cpr_specs)[:6]
         if not has_ivus:
             QMessageBox.information(
                 self, t("CoSync"),
