@@ -717,7 +717,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         super().leaveEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        if self._owner._meas_on:
+        _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # Shift+double-click recentres even while Measuring (the trace follows
+        # the moved image, see _recenter → _redraw_meas). A plain double-click
+        # in Measure mode still finishes the polyline draft.
+        if self._owner._meas_on and not _shift:
             self._owner._measure_finish_draft()
             return
         self._owner._recenter(self._which, e.position().x(), e.position().y())
@@ -2657,8 +2661,26 @@ class CTViewer(AbstractViewer):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
             a4 = transp_to_alpha(m.get("transp", 0))   # Change Transparency
-            polylines.append(self._outline(m))
-            outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
+            # Off-plane depth cue for a 3-D trace: a vertex whose 3-D point is
+            # > 1 mm off this plane (along its normal) is "off-plane".
+            p3 = m.get("pts3d") if m["type"] == "polyline" else None
+            off_flag = None
+            if p3 is not None and len(p3) == len(m["pts"]):
+                off_flag = [abs(float(np.dot(np.asarray(P, float) - _po,
+                                             _pn))) > 1.0 for P in p3]
+            if off_flag is not None and not m.get("smooth"):
+                # Draw the outline as PER-SEGMENT cells so the off-plane parts
+                # of the LINE (not just the point dots) fade to 50%. A trace is
+                # normally un-splined; a smooth trace keeps one line alpha.
+                verts = list(m["pts"])
+                half_a = max(1, a4 // 2)
+                for i in range(len(verts) - 1):
+                    polylines.append([verts[i], verts[i + 1]])
+                    seg_a = half_a if (off_flag[i] or off_flag[i + 1]) else a4
+                    outline_colors.append((rgb[0], rgb[1], rgb[2], seg_a))
+            else:
+                polylines.append(self._outline(m))
+                outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
             # Solid orange arc on the outline between the two endpoints, passing
             # through the selector — only shown once all 3 points are placed
             # (drawn over the outline via the same solid-line mapper).
@@ -2668,16 +2690,13 @@ class CTViewer(AbstractViewer):
                                    ca0["pts"][2], ca0["pts"][1])
                 if len(arc) >= 2:
                     arc_lines.append(arc)
-            # Off-plane depth cue: a trace vertex whose 3-D point is > 1 mm off
-            # this plane (along its normal) is drawn faint (50%). Only for a
-            # 3-D trace (pts3d present); plain measures are all on-plane.
-            p3 = m.get("pts3d") if m["type"] == "polyline" else None
+            # Off-plane point dots: a trace vertex > 1 mm off this plane is
+            # drawn faint (50%) via the separate off-plane points actor.
             for vi, q in enumerate(self._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     edit_pts.append(q)
-                elif (p3 is not None and vi < len(p3)
-                      and abs(float(np.dot(np.asarray(p3[vi], float) - _po,
-                                           _pn))) > 1.0):
+                elif (off_flag is not None and vi < len(off_flag)
+                      and off_flag[vi]):
                     off_pts.append(q)
                 else:
                     handles.append(q)
@@ -4695,6 +4714,11 @@ class CTViewer(AbstractViewer):
         for k in ("A", "B"):
             self._center_camera(k)
         self._refresh()
+        # Re-project any anatomy-anchored trace (pts3d) onto the moved planes so
+        # the pseudo-centre points / lines travel WITH the image instead of
+        # staying frozen on screen.
+        for k in ("A", "B"):
+            self._redraw_meas(k)
 
     def _couple_companion(self, which, crossdir) -> None:
         """Re-derive the OTHER pane as the plane ⟂ to *which* that contains the
