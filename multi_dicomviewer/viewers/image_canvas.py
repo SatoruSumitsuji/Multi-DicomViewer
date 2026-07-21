@@ -120,6 +120,11 @@ class ImageCanvas(QWidget):
     #: opens its small Window/Level popup. The canvas doesn't own the W/L
     #: state, so it just forwards the request.
     wl_change_requested = pyqtSignal()
+    #: Left-drag while in Windowing mode (W key) → (dx, dy) screen-pixel delta.
+    #: The host (XA/IVUS viewer) maps it to window width / level, CT-style
+    #: (drag right = wider window, drag up = higher level). The canvas doesn't
+    #: own the W/L state, so it just forwards the drag.
+    wl_dragged = pyqtSignal(float, float)
     #: Right-click on empty image area while NO measure tool is active →
     #: request a still-image export. Carries the chosen format key
     #: ('png'/'jpeg'/'tiff'); the viewer captures this canvas and saves it
@@ -229,6 +234,10 @@ class ImageCanvas(QWidget):
         self._zoom_rect: bool = False
         self._zoom_rect_from: tuple[float, float] | None = None
         self._zoom_rect_to: tuple[float, float] | None = None
+        # Windowing (W key): left-drag adjusts W/L, CT-style. _wl_anchor holds
+        # the last drag position (None = not dragging); _windowing arms it.
+        self._windowing: bool = False
+        self._wl_anchor: tuple[float, float] | None = None
         # C-arm (PositionerPrimary, Secondary) angles of whatever plane is
         # CURRENTLY shown on this canvas, set by the XA viewer on every
         # render. Stamped into a measurement when it is committed so the
@@ -491,6 +500,20 @@ class ImageCanvas(QWidget):
         self._zoom_click = mode if mode in ("in", "out") else ""
         if self._zoom_click:
             self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setCursor(
+                Qt.CursorShape.CrossCursor if self.meas_type
+                else Qt.CursorShape.ArrowCursor
+            )
+
+    def set_windowing_mode(self, on: bool) -> None:
+        """Enable Windowing (W key): a left-drag adjusts window width / level
+        CT-style. Mutually exclusive with the measure / zoom modes (the viewer
+        turns those off). The cursor becomes a size-all while active."""
+        self._windowing = bool(on)
+        self._wl_anchor = None
+        if self._windowing:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
         else:
             self.setCursor(
                 Qt.CursorShape.CrossCursor if self.meas_type
@@ -1363,6 +1386,11 @@ class ImageCanvas(QWidget):
                 and self._zoom_click in ("in", "out")):
             self._apply_zoom(1.1 if self._zoom_click == "in" else 0.9, sx, sy)
             return
+        # Windowing mode (W key): a left-drag adjusts W/L, CT-style. High
+        # priority so it can't be stolen by a measure/rotate gesture.
+        if self._windowing and e.button() == Qt.MouseButton.LeftButton:
+            self._wl_anchor = (sx, sy)
+            return
         # Rubber-band zoom mode: a left-drag rectangle zooms that region to
         # fill the view (applied on release).
         if self._zoom_rect and e.button() == Qt.MouseButton.LeftButton:
@@ -1591,6 +1619,12 @@ class ImageCanvas(QWidget):
             self._zoom_rect_to = (sx, sy)
             self.update()
             return
+        if self._wl_anchor is not None:
+            dx = sx - self._wl_anchor[0]
+            dy = sy - self._wl_anchor[1]
+            self._wl_anchor = (sx, sy)
+            self.wl_dragged.emit(float(dx), float(dy))
+            return
         if self._free_rot_drag is not None:
             now = self._free_rot_angle(sx, sy)
             self._free_rot = (self._free_rot
@@ -1667,6 +1701,9 @@ class ImageCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, _e):
+        if self._wl_anchor is not None:
+            self._wl_anchor = None
+            return
         if self._panning:
             self._panning = False
             self._pan_anchor = None
