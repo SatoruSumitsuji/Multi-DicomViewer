@@ -3912,8 +3912,13 @@ class CTViewer(AbstractViewer):
             return None
         half = float(c["half"])
         n = int(c["cl"].n)
-        gs = np.linspace(-half, half, px)
-        gu, gv = np.meshgrid(gs, gs)
+        # Match the CT pane's on-screen orientation: u runs left→right (columns
+        # −half→+half); v runs bottom→top in the VTK pane, so as image ROWS
+        # (top-down in a QImage) it must go +half→−half — otherwise the CoSync
+        # image comes out flipped vs the pane.
+        gs_u = np.linspace(-half, half, px)
+        gs_v = np.linspace(half, -half, px)
+        gu, gv = np.meshgrid(gs_u, gs_v)
         # Bake the Rt90/Flip (T) orientation into the stack, but NOT the
         # continuous rotation — that is carried as the CoSync free-rotation
         # (below) so the rotation 按分 can drive it and it isn't applied twice.
