@@ -539,6 +539,8 @@
   "Exit CPR": "短軸MPR解除",
   "Reverse": "逆順",
   "WB reverse": "白黒反転",
+  "Drag to zoom the image (Z)": "ドラッグで画像を拡大縮小（Z）",
+  "Drag to change window/level (W)": "ドラッグでウィンドウ/レベル変更（W）",
   "Invert grayscale (black↔white negative)": "白黒反転（ネガ表示）",
   "Reverse the scroll order to distal→proximal (match an IVUS pull-back). Cross-section content is unchanged.": "スクロール順を遠位→近位に反転（IVUSプルバックに合わせる）。断面の内容は変わりません。",
   "Reverse the play/scroll direction (distal↔proximal) — for IVUS/OCT where the pull-back runs the other way.": "再生・スクロール方向を反転（遠位↔近位）。プルバックが逆向きのIVUS/OCT用。",
