@@ -4765,7 +4765,7 @@ class CTViewer(AbstractViewer):
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
-        band = 0.10                           # perpendicular catch = 5% screen/side
+        band = 0.05                           # perpendicular catch = 2.5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
         along_h = abs(rx * uh[0] + ry * uh[1])
