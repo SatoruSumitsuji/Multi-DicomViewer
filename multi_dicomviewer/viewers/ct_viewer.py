@@ -3849,63 +3849,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._init_frames()                       # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
 
-    def _cpr_set_index(self, d):
-        """Scroll to DISPLAY position *d* (from the scrubber); maps to the real
-        centreline index via the reverse flag."""
-        c = self._cpr
-        if c is None:
-            return
-        d = int(min(max(int(d), 0), c["cl"].n - 1))
-        idx = self._cpr_disp(d)                   # display → real index
-        changed = (idx != c["idx"])
-        c["idx"] = idx
-        self._cpr_sync_bar()
-        self._refresh()
-        if changed:
-            self.cpr_index_changed.emit(d)        # CoSync: broadcast display pos
-
-    # ---- CoSync interface (short-axis as a synchronisable scrub source) ----
-    def set_cpr_index(self, d: int, *, silent: bool = False) -> None:
-        """CoSync driver: move to DISPLAY position *d* (mapped via the reverse
-        flag) without echoing the signal back (silent) to avoid feedback."""
-        c = self._cpr
-        if c is None:
-            return
-        d = int(min(max(int(d), 0), c["cl"].n - 1))
-        idx = self._cpr_disp(d)
-        if idx == c["idx"]:
-            return
-        c["idx"] = idx
-        self._cpr_sync_bar()
-        self._refresh()
-        if not silent:
-            self.cpr_index_changed.emit(d)
-
-    def set_cpr_rotation(self, deg: float, *, silent: bool = False) -> None:
-        """Rotate the short-axis cross-section in-plane to *deg* (the CoSync
-        rotation 按分 drives this); rebuilds the display frame."""
-        c = self._cpr
-        if c is None:
-            return
-        deg = float(deg)
-        if abs(deg - c.get("rot", 0.0)) < 1e-6:
-            return
-        c["rot"] = deg
-        self._cpr_apply_xform()
-        self._refresh()
-        if not silent:
-            self.cpr_rotation_changed.emit(deg)
-
-    def _cpr_toggle_reverse(self):
-        """Reverse the short-axis scroll direction (distal→proximal, to match an
-        IVUS pull-back). Only the traversal order flips — each cross-section's
-        content is unchanged."""
-        if self._cpr is None:
-            return
-        self._cpr["reversed"] = self._cpr_rev_btn.isChecked()
-        self._cpr_sync_bar()
-        # broadcast the new display position so a linked CoSync stays in step
-        self.cpr_index_changed.emit(self._cpr_disp(self._cpr["idx"]))
+    # ---- CoSync interface + scrub/rotate/reverse/paging/rebuild:
+    #      shared, in CPRMixin (viewers/cpr_mixin.py). ----
 
     def _cpr_matrix(self):
         """Reslice matrix for pane A in short-axis mode: axes (u, v, tangent)
@@ -4132,66 +4077,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self.pane["A"].render()
         self._redraw_meas(self._cpr["src"])        # map-pane trace follows
 
-    def _cpr_drag_end(self):
-        """Release: rebuild the centreline from the adjusted control points."""
-        if self._cpr_drag is None:
-            return
-        self._cpr_drag = None
-        self._cpr_rebuild()
-
-    # ---- manual short-axis rotation (drag the section like a dial) ----
-    def _cpr_cursor_angle(self, sx, sy) -> float:
-        c = self.pane["A"].canvas
-        return math.atan2(sy - c.height() / 2.0, sx - c.width() / 2.0)
-
-    def _cpr_rot_start(self, sx, sy):
-        self._cpr_rot_prev = self._cpr_cursor_angle(sx, sy)
-
-    def _cpr_rot_move(self, sx, sy):
-        if self._cpr is None or self._cpr_rot_prev is None:
-            return
-        ang = self._cpr_cursor_angle(sx, sy)
-        d = math.degrees(ang - self._cpr_rot_prev)
-        self._cpr_rot_prev = ang
-        self.set_cpr_rotation(self._cpr.get("rot", 0.0) + d)
-
-    def _cpr_rot_end(self):
-        self._cpr_rot_prev = None
-
-    def _cpr_page_drag(self, dy):
-        """Paging tool on the short-axis: drag up = advance the pull-back
-        (~6 px per cross-section), like the 2-D paging drag."""
-        if self._cpr is None:
-            return
-        self._cpr_page_accum = getattr(self, "_cpr_page_accum", 0.0) - dy
-        step = 6.0
-        d = self._cpr_disp(self._cpr["idx"])     # current display position
-        while self._cpr_page_accum >= step:
-            self._cpr_page_accum -= step
-            d += 1
-        while self._cpr_page_accum <= -step:
-            self._cpr_page_accum += step
-            d -= 1
-        self._cpr_set_index(d)
-
-    def _cpr_rebuild(self):
-        """Recompute the centreline / short-axis frames from the (edited)
-        control points, keeping the current scroll index."""
-        c = self._cpr
-        p3 = self._cpr_ctrl_pts3d()
-        if not p3 or len(p3) < 2:
-            return
-        cl = CenterLine.from_points([np.asarray(P, float) for P in p3],
-                                    step_mm=max(1e-3, min(self._dims)))
-        if cl.n < 2:
-            return
-        fu, fv = cl.frames(ref_up=c["ref_up"])
-        fu = -fu                                  # view first→last (un-mirror)
-        c["cl"], c["u0"], c["v0"] = cl, fu, fv
-        c["idx"] = min(c["idx"], cl.n - 1)
-        self._cpr_apply_xform()                   # re-apply Rt90/Flip → u, v
-        self._cpr_sync_bar()
-        self._refresh()
+    # ---- _cpr_drag_end / _cpr_cursor_angle / _cpr_rot_* / _cpr_page_drag /
+    #      _cpr_rebuild: shared, in CPRMixin (viewers/cpr_mixin.py). ----
 
     def _fit_cpr_pane(self):
         """Fit pane A's camera to the short-axis FOV (±half mm, centred)."""
