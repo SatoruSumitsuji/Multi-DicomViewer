@@ -1562,13 +1562,15 @@ class ImageCanvas(QWidget):
         # handled above). Suppressed while a measure tool is armed (so drawing
         # wins) and while the long-axis centre marker is shown (its overlays
         # don't rotate, so a free spin there would visually mismatch).
-        if (self._free_rot_on and not self.meas_type
-                and not self.ivus_show_center):
-            if self._drag_mode == "rotate":
-                self._free_rot_drag = self._free_rot_angle(sx, sy)
-            else:                                   # zoom / wl
+        if not self.meas_type and not self.ivus_show_center:
+            if self._drag_mode in ("zoom", "wl"):
+                # Zoom / WL drag works on ANY pane (IVUS + angio), even where
+                # free rotation is disabled — an empty drag zooms or windows.
                 self._manual_last = (sx, sy)
-            return
+                return
+            if self._free_rot_on:                   # rotate (IVUS-like only)
+                self._free_rot_drag = self._free_rot_angle(sx, sy)
+                return
 
         if not self.meas_type:
             return
