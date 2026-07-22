@@ -674,6 +674,8 @@ class XAViewer(AbstractViewer):
         # Right-click ▸ Change W/L on either canvas opens the W/L popup.
         self.canvas.wl_change_requested.connect(self.show_wl_dialog)
         self.canvas2.wl_change_requested.connect(self.show_wl_dialog)
+        self.canvas.wl_dragged.connect(self._on_wl_drag)
+        self.canvas2.wl_dragged.connect(self._on_wl_drag)
         self.canvas.export_requested.connect(self._on_export_image)
         self.canvas2.export_requested.connect(self._on_export_image)
         self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
@@ -899,6 +901,29 @@ class XAViewer(AbstractViewer):
         if not _have_cv2:
             for _b in (self._smooth_btn, self._denoise_btn):
                 _b.setToolTip(_b.toolTip() + t("  (OpenCV not available)"))
+
+        # Drag-to-adjust modes (right of Denoise): while Zoom is armed a left-
+        # drag on the image zooms it; while W/L is armed a left-drag changes
+        # window (horizontal) / level (vertical). Mutually exclusive with each
+        # other and with the measure / click-zoom / rect-zoom modes. No OpenCV
+        # needed (unlike S-Zoom / Denoise).
+        _mode_css = "QPushButton:checked { background:#1f77b4; color:black; }"
+        self._drag_zoom_btn = QPushButton(t("Zoom"))
+        self._drag_zoom_btn.setCheckable(True)
+        self._drag_zoom_btn.setStyleSheet(_mode_css)
+        self._drag_zoom_btn.setToolTip(
+            t("Zoom mode: drag up/down on the image to zoom in/out."))
+        self._drag_zoom_btn.clicked.connect(self._toggle_drag_zoom)
+        row.addWidget(self._drag_zoom_btn)
+
+        self._drag_wl_btn = QPushButton(t("W/L"))
+        self._drag_wl_btn.setCheckable(True)
+        self._drag_wl_btn.setStyleSheet(_mode_css)
+        self._drag_wl_btn.setToolTip(
+            t("W/L mode: drag on the image to change window (left/right) and "
+              "level (up/down)."))
+        self._drag_wl_btn.clicked.connect(self._toggle_drag_wl)
+        row.addWidget(self._drag_wl_btn)
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
@@ -2257,6 +2282,7 @@ class XAViewer(AbstractViewer):
         if on:
             self._clear_zoom_click()
             self._clear_zoom_rect()
+            self._clear_drag_modes()
         if not on:
             for c in (self.canvas, self.canvas2):
                 c.set_measure_type("")
@@ -2271,6 +2297,7 @@ class XAViewer(AbstractViewer):
         # Choosing a drawing tool cancels any active click-to-zoom / drag-zoom.
         self._clear_zoom_click()
         self._clear_zoom_rect()
+        self._clear_drag_modes()
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
             b.setStyleSheet(
@@ -2291,6 +2318,7 @@ class XAViewer(AbstractViewer):
         other.setChecked(False)
         if new_mode:
             self._clear_zoom_rect()          # click-zoom cancels drag-zoom
+            self._clear_drag_modes()
             if self._meas_btn.isChecked():
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
@@ -2312,6 +2340,7 @@ class XAViewer(AbstractViewer):
         on = self._zoom_rect_btn.isChecked()
         if on:
             self._clear_zoom_click()
+            self._clear_drag_modes()
             if self._meas_btn.isChecked():
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
@@ -2341,6 +2370,84 @@ class XAViewer(AbstractViewer):
         self._on_user_interaction()
         for c in (self.canvas, self.canvas2):
             c.reset_zoom()
+
+    # -------------------------------------------------- drag zoom / W-L
+    def _toggle_drag_zoom(self):
+        """Arm/disarm drag-to-zoom (a left-drag on the image zooms). Turning it
+        on cancels W/L-drag, click-zoom, rect-zoom and the measure tools."""
+        self._on_user_interaction()
+        if self._drag_zoom_btn.isChecked():
+            self._drag_wl_btn.setChecked(False)
+            self._clear_zoom_click()
+            self._clear_zoom_rect()
+            if self._meas_btn.isChecked():
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+        self._apply_drag_mode()
+
+    def _toggle_drag_wl(self):
+        """Arm/disarm drag-to-W/L (a left-drag changes window/level). Turning it
+        on cancels Zoom-drag, click-zoom, rect-zoom and the measure tools."""
+        self._on_user_interaction()
+        if self._drag_wl_btn.isChecked():
+            self._drag_zoom_btn.setChecked(False)
+            self._clear_zoom_click()
+            self._clear_zoom_rect()
+            if self._meas_btn.isChecked():
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+        self._apply_drag_mode()
+
+    def _apply_drag_mode(self):
+        """Push the armed drag mode (zoom / wl / none) onto both canvases and
+        restyle the buttons."""
+        mode = ("zoom" if self._drag_zoom_btn.isChecked()
+                else "wl" if self._drag_wl_btn.isChecked() else "rotate")
+        for c in (self.canvas, self.canvas2):
+            c.set_drag_mode(mode)
+        self._style_drag_btns()
+
+    def _style_drag_btns(self):
+        for b in (getattr(self, "_drag_zoom_btn", None),
+                  getattr(self, "_drag_wl_btn", None)):
+            if b is not None:
+                b.setStyleSheet(
+                    "background:#1f77b4;color:black;" if b.isChecked()
+                    else "QPushButton:checked { background:#1f77b4; color:black; }")
+
+    def _clear_drag_modes(self):
+        """Turn off both drag modes (called when another mouse mode takes over)."""
+        for b in (getattr(self, "_drag_zoom_btn", None),
+                  getattr(self, "_drag_wl_btn", None)):
+            if b is not None:
+                b.setChecked(False)
+        self._style_drag_btns()
+        for c in (self.canvas, self.canvas2):
+            c.set_drag_mode("rotate")
+
+    def _on_wl_drag(self, dx: float, dy: float):
+        """W/L-mode drag: horizontal = window width, vertical = level (drag up
+        raises it). Mirrors slider changes so the popup stays in sync and the
+        change becomes the sticky override (applied to later series until
+        Reset), matching a manual slider edit."""
+        if not self.win_slider.isEnabled():
+            return
+        span = 512.0
+        rng = max(1.0, abs(self._window)) + 1.0
+        step = rng / span
+        new_w = self._window + dx * step
+        new_l = self._level - dy * step
+        for s, val in ((self.win_slider, new_w), (self.lvl_slider, new_l)):
+            v = int(round(max(s.minimum(), min(s.maximum(), val))))
+            s.blockSignals(True)
+            s.setValue(v)
+            s.blockSignals(False)
+        self._window = float(self.win_slider.value())
+        self._level = float(self.lvl_slider.value())
+        self._wl_override = (self._window, self._level)
+        self._update_wl_labels()
+        self._refresh_wl_lut()
+        self._render()
 
     # ------------------------------------------------------ live language switch
     def retranslate_ui(self) -> None:
@@ -2431,6 +2538,17 @@ class XAViewer(AbstractViewer):
             tip = t("Edge-preserving noise reduction: calms speckle / quantum noise "
                     "while keeping vessel and catheter edges crisp. Default off.")
             btn.setToolTip(tip + note if not have_cv2 else tip)
+
+        btn = getattr(self, "_drag_zoom_btn", None)
+        if btn is not None:
+            btn.setText(t("Zoom"))
+            btn.setToolTip(t("Zoom mode: drag up/down on the image to zoom in/out."))
+        btn = getattr(self, "_drag_wl_btn", None)
+        if btn is not None:
+            btn.setText(t("W/L"))
+            btn.setToolTip(
+                t("W/L mode: drag on the image to change window (left/right) and "
+                  "level (up/down)."))
 
         # DICOM-tag overlay font control (build_tag_font_control): the slider
         # tooltip AND the stacked "DICOM Tags" button (text + tooltip).
