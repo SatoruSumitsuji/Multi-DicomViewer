@@ -65,7 +65,9 @@ from rendercanvas.pyqt6 import RenderCanvas
 
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.i18n import t
+from multi_dicomviewer.viewers.cpr_mixin import CPRMixin
 from multi_dicomviewer.core import settings
+from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import default_overlay_keywords, overlay_lines
 from multi_dicomviewer.core.image_export import (
@@ -441,10 +443,35 @@ class _Overlay(QWidget):
         mip = v._mip_img.get(key)
         if mip is not None:
             p.drawImage(self.rect(), mip)
+        # Short-axis (CPR): pane A shows a centred crosshair + the editable
+        # control-point marker instead of the normal MPR crosshair / measures.
+        if v._cpr is not None and key == "A":
+            self._paint_cpr(p, w, h)
+            self._paint_info(p, key, w, h)
+            return
         if v._cl_on:
             self._paint_cross(p, key, w, h)
         self._paint_measures(p, key, w, h)
         self._paint_info(p, key, w, h)
+
+    def _paint_cpr(self, p, w, h):
+        """Short-axis overlay: a centred amber crosshair (the cross-section is
+        centred on the vessel) plus the nearest control-point marker as a
+        draggable dot."""
+        v = self._v
+        cx, cy = v._world_to_screen("A", 0.0, 0.0)   # section centre = output 0,0
+        if v._cl_on:
+            pen = QPen(QColor(255, 217, 0, 128), 1.0)
+            p.setPen(pen)
+            p.drawLine(QPointF(0, cy), QPointF(w, cy))
+            p.drawLine(QPointF(cx, 0), QPointF(cx, h))
+        # Editable pseudo-centre marker(s): the nearest control point, drawn at
+        # its in-plane offset from the centreline, draggable to fine-tune it.
+        for _ci, (du, dv) in v._cpr_marker_geom():
+            mx, my = v._world_to_screen("A", du, dv)
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(QColor(255, 235, 0))
+            p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
 
     # -- crosshair + ▲ markers + slab guides -------------------------------
     def _paint_cross(self, p, key, w, h):
@@ -1024,11 +1051,14 @@ class _ColorMapDialog(QDialog):
 
 
 # --------------------------------------------------------------- viewer
-class CTViewer(AbstractViewer):
+class CTViewer(CPRMixin, AbstractViewer):
     handles_modality = "CT"
     #: emitted by the series-navigation buttons ("first"/"prev"/"next"/"last")
     #: — the shell steps through this study's CT series (angio-style F/A nav)
     series_nav = pyqtSignal(str)
+    #: CoSync short-axis broadcast — display index / rotation° (see CPRMixin)
+    cpr_index_changed = pyqtSignal(int)
+    cpr_rotation_changed = pyqtSignal(float)
     tags_requested = pyqtSignal()
     #: emitted when the tag-text-size slider moves (shell broadcasts the pt)
     overlay_font_changed = pyqtSignal(int)
@@ -1112,6 +1142,13 @@ class CTViewer(AbstractViewer):
         self._cmap_dlg = None
         self._lut_key = None                 # cache key for the colormap tex
         self._lut_tex = None
+        # short-axis (CPR) state — shared logic lives in CPRMixin. None unless
+        # the user turns a polyline trace into a vessel centreline (_enter_cpr);
+        # pane A then becomes the cross-section scroller.
+        self._cpr = None
+        self._cpr_drag = None                # grabbed control-point index
+        self._cpr_rot_prev = None            # dial-rotation anchor angle
+        self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
         # measurements
         self._meas_on = False
         self._meas_type = None               # line|polyline|ellipse|polygon|angle
@@ -1218,6 +1255,7 @@ class CTViewer(AbstractViewer):
         lay.addLayout(imgrow, 1)
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_seek_bar())
+        lay.addWidget(self._build_cpr_bar())
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, False)
@@ -1396,6 +1434,17 @@ class CTViewer(AbstractViewer):
             self._pending_rclick = (key, x, y)
             self._rclick_timer.start(dbl_ms)
             return
+        # Short-axis (CPR) pane A: a left-press grabs a control-point marker to
+        # edit it, or (Rotate/Spin) starts the dial rotation. WL/Zoom/Move fall
+        # through to the normal drag in _on_move; Paging is handled there too.
+        # There is no MPR crosshair on the cross-section, so never grab it.
+        if self._cpr is not None and key == "A":
+            if self._drag_btn == 1:
+                if self._cpr_grab(x, y):
+                    return
+                if self._tool in ("ROTATE", "SPIN"):
+                    self._cpr_rot_start(x, y)
+            return
         # Pressing within the (now 5%) crosshair grab band grabs the centreline
         # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
         # is small, so SPIN still owns the drag everywhere off the lines; on the
@@ -1430,12 +1479,30 @@ class CTViewer(AbstractViewer):
             return
         dx, dy = x - self._last[0], y - self._last[1]
         self._last = (x, y)
+        # Short-axis (CPR) pane A: dispatch the drag to the CPR handlers. A
+        # grabbed marker moves; Rotate/Spin dials the section; Paging scrolls
+        # the pull-back. WL/Zoom/Move fall through to the normal _drag (they
+        # operate on the cross-section's window-level / camera).
+        if self._cpr is not None and key == "A":
+            if self._cpr_drag is not None:
+                self._cpr_drag_move(x, y)
+                return
+            if self._tool in ("ROTATE", "SPIN"):
+                self._cpr_rot_move(x, y)
+                return
+            if self._tool == "PAGING":
+                self._cpr_page_drag(dy)
+                return
         shift = "Shift" in (ev.get("modifiers") or ())
         self._drag(key, dx, dy, shift, x, y)
 
     def _on_up(self, key, ev):
         if self._meas_on and self._meas_drag:
             self._measure_release()
+        # End any short-axis marker drag / dial rotation.
+        if self._cpr is not None:
+            self._cpr_drag_end()
+            self._cpr_rot_end()
         self._meas_drag = False
         self._drag_btn = None
         self._cross_grab = False
@@ -1481,11 +1548,18 @@ class CTViewer(AbstractViewer):
         if self._meas_on:
             self._measure_finish_draft()
             return
+        if self._cpr is not None and key == "A":
+            return                                # no recenter on the section
         self._recenter(key, ev["x"], ev["y"])
 
     def _on_wheel(self, key, ev):
         # rendercanvas: wheel-up gives dy<0; page forward (+1) on wheel-up.
-        self._wheel(key, 1 if ev["dy"] < 0 else -1)
+        step = 1 if ev["dy"] < 0 else -1
+        # Short-axis: the wheel scrolls the cross-section along the vessel.
+        if self._cpr is not None and key == "A":
+            self._cpr_set_index(self._cpr_disp(self._cpr["idx"]) + step)
+            return
+        self._wheel(key, step)
 
     def showEvent(self, e):  # noqa: N802 (Qt override)
         """Re-fit and repaint once the pane is actually on screen.
@@ -2439,9 +2513,29 @@ class CTViewer(AbstractViewer):
         v = np.asarray(v, float).copy()
         self._frame["A"] = (u, v, np.cross(u, v))
 
+    #: Rt90/Lt90/Flip as 2x2 matrices acting on the short-axis (u,v) frame —
+    #: bu = T[0,0]·u0 + T[0,1]·v0, etc. (see CPRMixin._cpr_apply_xform).
+    _XFORM_2X2 = {
+        "rt90": np.array([[0.0, 1.0], [-1.0, 0.0]]),    # (u,v) -> (v, -u)
+        "lt90": np.array([[0.0, -1.0], [1.0, 0.0]]),    # (u,v) -> (-v, u)
+        "fliph": np.array([[-1.0, 0.0], [0.0, 1.0]]),   # (u,v) -> (-u, v)
+        "flipv": np.array([[1.0, 0.0], [0.0, -1.0]]),   # (u,v) -> (u, -v)
+    }
+
     def _2d_transform(self, kind):
         """Rotate the 2-D image 90° (rt90/lt90) or flip it (fliph/flipv).
-        Applied incrementally to the current display axes (composable)."""
+        Applied incrementally to the current display axes (composable).
+        In short-axis (CPR) mode the same buttons transform the cross-section
+        via the CPR display transform T instead of the 2-D axes."""
+        if self._cpr is not None:
+            M = self._XFORM_2X2.get(kind)
+            if M is None:
+                return
+            self._cpr["T"] = M @ self._cpr["T"]
+            self._cpr_apply_xform()
+            self._view_initial = False
+            self._refresh(reset_cam=True)
+            return
         if self._mode != "2D" or self._vol is None:
             return
         u, v = self._axes2d
@@ -2847,6 +2941,12 @@ class CTViewer(AbstractViewer):
         for key in ("A", "B"):
             p = self.pane[key]
             if p.material is None:
+                continue
+            # Short-axis (CPR): pane A is the oblique cross-section, rendered by
+            # its own plane + camera (the map pane keeps its normal MPR).
+            if self._cpr is not None and key == "A":
+                self._render_cpr_pane(p)
+                self._overlay["A"].update()
                 continue
             u, v, n = self._frame[key]
             pc = self._pc[key]
@@ -3973,6 +4073,15 @@ class CTViewer(AbstractViewer):
             d = {"type": self._meas_type, "pane": which, "pts": []}
             self._draft = d
         d["pts"].append(w)
+        # Capture the ABSOLUTE 3-D position of each click on the plane active
+        # when it was made (world mm), so a polyline traced across rotated /
+        # paged planes lifts to a correct 3-D centreline (Short-axis / CPR) —
+        # mirrors the VTK viewer. Only meaningful for polylines.
+        if d["type"] == "polyline":
+            u, v, _n = self._frame[which]
+            pc = self._pc[which]
+            d.setdefault("pts3d", []).append(
+                np.asarray(pc, float) + float(w[0]) * u + float(w[1]) * v)
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
             self._commit_draft()
         elif d["type"] == "angle" and len(d["pts"]) >= 3:
@@ -4059,6 +4168,11 @@ class CTViewer(AbstractViewer):
             pts = list(d["pts"])
         self._meas_seq += 1
         m = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        # Carry the per-click 3-D control points (polyline only) so the trace
+        # can seed a short-axis centreline and its control markers.
+        if d["type"] == "polyline" and d.get("pts3d") \
+                and len(d["pts3d"]) == len(pts):
+            m["pts3d"] = [np.asarray(P, float) for P in d["pts3d"]]
         self._measures[d["pane"]].append(m)
         self._redraw_meas(d["pane"])
         # Log to the study's measurement history (shell-owned).
@@ -4203,9 +4317,14 @@ class CTViewer(AbstractViewer):
         menu = QMenu(self)
         add_pt = menu.addAction(t("Add point"))
         spline_act = None
+        cpr_act = None
         if m["type"] == "polyline":
             spline_act = menu.addAction(
                 t("UnSpline") if m.get("smooth") else t("Spline"))
+            # Curved-MPR: build a centreline from this trace and scroll the
+            # short-axis cross-sections in pane A. 3-D MPR only, >=2 points.
+            if self._mode == "3D" and len(m["pts"]) >= 2:
+                cpr_act = menu.addAction(t("Short-axis MPR (CPR)"))
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
@@ -4227,6 +4346,9 @@ class CTViewer(AbstractViewer):
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
+        elif cpr_act is not None and chosen is cpr_act:
+            self._enter_cpr(which, mi)
+            return                               # _enter_cpr redraws itself
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
         elif center_angle_act is not None and chosen is center_angle_act:
@@ -4314,6 +4436,196 @@ class CTViewer(AbstractViewer):
         self._cl_on = self._cl_btn.isChecked()
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    # ==================================================================
+    # Short-axis (CPR). Shared state + control logic live in CPRMixin; the
+    # backend-specific pieces are here: the scrubber bar, entering/leaving the
+    # mode, the live oblique GPU slice (material.plane + oriented camera) and
+    # the QPainter overlay. Mirrors the VTK viewer feature-for-feature.
+    # ==================================================================
+    def _build_cpr_bar(self) -> QWidget:
+        """Bottom scrubber for short-axis mode: scroll the cross-section along
+        the traced vessel, reverse the direction, and exit. Hidden unless CPR
+        is active."""
+        self._cpr_wrap = QWidget()
+        row = QHBoxLayout(self._cpr_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        cap = QLabel(t("Short-axis:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        self._cpr_cap = cap
+        row.addWidget(cap)
+        self._cpr_rev_btn = FitButton(t("Reverse"))
+        self._cpr_rev_btn.setCheckable(True)
+        self._cpr_rev_btn.setHelpToolTip(
+            t("Reverse the scroll order to distal->proximal (match an IVUS "
+              "pull-back). Cross-section content is unchanged."))
+        self._cpr_rev_btn.clicked.connect(self._cpr_toggle_reverse)
+        row.addWidget(self._cpr_rev_btn)
+        self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
+        self._cpr_slider.setMinimum(0)
+        self._cpr_slider.setMaximum(0)
+        self._cpr_slider.setMinimumHeight(26)
+        self._cpr_slider.setStyleSheet(_SEEK_SLIDER_QSS)
+        self._cpr_slider.valueChanged.connect(self._cpr_set_index)
+        row.addWidget(self._cpr_slider, 1)
+        self._cpr_lbl = QLabel("")
+        self._cpr_lbl.setMinimumWidth(170)
+        fl = self._cpr_lbl.font(); fl.setBold(True); self._cpr_lbl.setFont(fl)
+        row.addWidget(self._cpr_lbl)
+        self._cpr_exit_btn = FitButton(t("Exit CPR"))
+        self._cpr_exit_btn.setHelpToolTip(
+            t("Leave short-axis mode and restore the normal MPR"))
+        self._cpr_exit_btn.clicked.connect(self._exit_cpr)
+        row.addWidget(self._cpr_exit_btn)
+        self._cpr_wrap.setVisible(False)
+        return self._cpr_wrap
+
+    def _enter_cpr(self, which, mi):
+        """Turn polyline *mi* on pane *which* into a vessel centreline and put
+        pane A into short-axis (cross-section) scroll mode. Mirrors the VTK
+        viewer's _enter_cpr."""
+        m = self._measures[which][mi]
+        u, v, nrm = self._axes_for(which)
+        p3 = m.get("pts3d")
+        if p3 and len(p3) >= 2:
+            ctrl = [np.asarray(P, dtype=float) for P in p3]
+        else:
+            pts2d = self._outline(m)
+            if len(pts2d) < 2:
+                return
+            o = self._pc[which]
+            ctrl = [np.asarray(o, float) + float(x) * u + float(y) * v
+                    for (x, y) in pts2d]
+        step = max(1e-3, min(self._dims))
+        cl = CenterLine.from_points(ctrl, step_mm=step)
+        if cl.n < 2:
+            return
+        fu, fv = cl.frames(ref_up=nrm)
+        fu = -fu                                   # view proximal->distal
+        self._cpr = {
+            "cl": cl, "u": fu, "v": fv, "idx": cl.n // 2,
+            "u0": fu.copy(), "v0": fv.copy(),
+            "T": np.eye(2), "rot": 0.0, "reversed": False,
+            "half": 25.0, "src": which, "src_mi": mi,
+            "ref_up": np.asarray(nrm, float),
+        }
+        self.set_side("Bi")                        # A = cross-section, src = map
+        for b in self._t2d_btns:                   # Rt90/Lt90/Flip work in CPR
+            b.setEnabled(True)
+        self._cpr_rev_btn.setChecked(False)
+        self._cpr_sync_bar()
+        self._refresh(reset_cam=True)
+
+    def _exit_cpr(self):
+        """Leave short-axis mode and restore pane A's normal MPR."""
+        if self._cpr is None:
+            return
+        self._cpr = None
+        self._cpr_drag = None
+        self._cpr_rot_prev = None
+        self._cpr_marker_pts = []
+        self._cpr_wrap.setVisible(False)
+        for b in self._t2d_btns:                   # 2-D-only again outside CPR
+            b.setEnabled(self._mode == "2D")
+        self._init_frames()                        # rebuild pane A's MPR frame
+        self._refresh(reset_cam=True)
+
+    def _cpr_sync_bar(self):
+        c = self._cpr
+        if c is None:
+            return
+        cl = c["cl"]
+        d = self._cpr_disp(c["idx"])
+        self._cpr_wrap.setVisible(True)
+        self._cpr_slider.blockSignals(True)
+        self._cpr_slider.setMaximum(cl.n - 1)
+        self._cpr_slider.setValue(d)
+        self._cpr_slider.blockSignals(False)
+        pos_mm = float(cl.arclen[c["idx"]])
+        self._cpr_lbl.setText(
+            f"{d + 1} / {cl.n}   ({pos_mm:.1f} / {cl.length_mm:.1f} mm)")
+
+    # ---- live oblique slice (GPU) ----
+    def _render_cpr_pane(self, p):
+        """Render pane A as the short-axis cross-section: an oblique GPU slice
+        (plane normal = tangent) with the camera oriented to (u, v). Reuses the
+        same VolumeSliceMaterial + OrthographicCamera path the MPR panes use."""
+        o, u, v, tg = self._cpr_frame()
+        n = _norm(np.asarray(tg, float))
+        p.material.plane = (float(n[0]), float(n[1]), float(n[2]),
+                            float(-np.dot(n, o)))
+        if self._color:
+            p.material.clim = (_HU_LO, _HU_HI)
+            p.material.map = self._lut_texture()
+        else:
+            p.material.map = None
+            p.material.clim = (self._lvl - self._win / 2.0,
+                               self._lvl + self._win / 2.0)
+        p.mesh.visible = True
+        self._mip_img["A"] = None
+        self._config_cpr_cam(p, o, u, v)
+        p.render()
+
+    def _config_cpr_cam(self, p, o, u, v):
+        """Orient/position pane A's camera to view the cross-section face-on
+        with U=right, V=up, FOV = +-half mm (mirrors _config_cam)."""
+        ur = _norm(np.asarray(u, float))
+        vr = _norm(np.asarray(v, float))
+        w = _norm(np.cross(ur, vr))
+        R = np.column_stack([ur, vr, w]).astype(np.float64)
+        p.cam.local.rotation = la.quat_from_mat(R)
+        p.cam.local.position = np.asarray(o, float) + w * self._cam_off
+        ps = max(1e-3, float(self._cpr["half"]))
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        p.cam.height = 2.0 * ps
+        p.cam.width = 2.0 * ps * (pw / ph)
+        p.cam.depth_range = (0.1, 4.0 * self._cam_off + self._diag)
+
+    # ---- control-point markers (edit the pseudo-centres in the section) ----
+    def _cpr_marker_geom(self):
+        """Recompute the single nearest control-point marker's in-plane offset
+        (du,dv) and cache it in _cpr_marker_pts for hit-testing. Returns the
+        list of (ctrl_idx, (du,dv))."""
+        self._cpr_marker_pts = []
+        p3 = self._cpr_ctrl_pts3d()
+        if not p3:
+            return self._cpr_marker_pts
+        o, u, vv, n = self._cpr_frame()
+        dns = [abs(float(np.dot(np.asarray(P, float) - o, n))) for P in p3]
+        near = int(np.argmin(dns))
+        P = np.asarray(p3[near], float)
+        du = float(np.dot(P - o, u))
+        dv = float(np.dot(P - o, vv))
+        self._cpr_marker_pts.append((near, (du, dv)))
+        return self._cpr_marker_pts
+
+    def _cpr_grab(self, sx, sy) -> bool:
+        """A press near a control-point marker on the section starts a drag."""
+        if self._cpr is None:
+            return False
+        for ci, (du, dv) in self._cpr_marker_geom():
+            mx, my = self._world_to_screen("A", du, dv)
+            if (mx - sx) ** 2 + (my - sy) ** 2 <= 14.0 ** 2:
+                self._cpr_drag = ci
+                return True
+        return False
+
+    def _cpr_drag_move(self, sx, sy):
+        """Move the grabbed control point IN the cross-section plane (its along-
+        vessel depth is preserved); the map-pane trace follows live."""
+        if self._cpr_drag is None:
+            return
+        p3 = self._cpr_ctrl_pts3d()
+        ci = self._cpr_drag
+        if not p3 or not (0 <= ci < len(p3)):
+            return
+        o, u, vv, n = self._cpr_frame()
+        du, dv = self._disp_to_world("A", sx, sy)
+        dn = float(np.dot(np.asarray(p3[ci], float) - o, n))     # keep depth
+        p3[ci] = np.asarray(o, float) + du * u + dv * vv + dn * n
+        self._overlay["A"].update()
+        self._redraw_meas(self._cpr["src"])        # map-pane trace follows
 
     def _toggle_hires(self, on: bool) -> None:
         """HQ-Img toggle: disable/enable the coarse interactive LOD, persist the
