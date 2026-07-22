@@ -190,8 +190,11 @@ class _CoregPane:
         self._init_wl(loaded)
         self.canvas.spacing_mm = dicom_io.series_spacing_mm(series)
         self.master_radio.setVisible(self.is_ivus)
-        self.zoom_btn.setVisible(self.is_ivus)
-        self.wl_btn.setVisible(self.is_ivus)
+        # Zoom / WL drag modes are available on EVERY loaded pane — IVUS and
+        # angio alike (an angio pane can't spin, but a drag can still zoom or
+        # window it). The buttons sit in the nav row, i.e. below the seekbar.
+        self.zoom_btn.setVisible(True)
+        self.wl_btn.setVisible(True)
         # Angio panes carry the CoSync overlay; IVUS panes do not but get
         # MultiSync-style drag-to-rotate of the cross-section.
         self.canvas.set_coreg_visible(not self.is_ivus)
@@ -368,14 +371,15 @@ class CoregWindow(QMainWindow):
             sc.activated.connect(lambda m=mode: self._toggle_drag_mode(m))
 
     def _set_drag_mode(self, mode: str) -> None:
-        """Set what a free-drag does on every IVUS-like pane (rotate / zoom /
-        wl) and sync the Zoom/WL button states."""
+        """Set what a free-drag does on every loaded pane (rotate / zoom / wl)
+        and sync the Zoom/WL button states. Applies to IVUS and angio panes
+        alike; rotate only actually spins the IVUS-like ones (angio has no
+        free rotation), but zoom / wl work everywhere."""
         self._drag_mode = mode if mode in ("rotate", "zoom", "wl") else "rotate"
         for p in self.panes:
-            if p.is_ivus:
-                p.canvas.set_drag_mode(self._drag_mode)
-                p.zoom_btn.setChecked(self._drag_mode == "zoom")
-                p.wl_btn.setChecked(self._drag_mode == "wl")
+            p.canvas.set_drag_mode(self._drag_mode)
+            p.zoom_btn.setChecked(self._drag_mode == "zoom")
+            p.wl_btn.setChecked(self._drag_mode == "wl")
 
     def _toggle_drag_mode(self, mode: str) -> None:
         """Z / W: toggle into *mode*, or back to rotate if already in it."""

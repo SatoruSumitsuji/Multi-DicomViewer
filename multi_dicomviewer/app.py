@@ -166,6 +166,20 @@ def main(argv: list[str]) -> int:
 
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationDisplayName(APP_NAME)
+
+    # Windows: give the process an explicit AppUserModelID so every top-level
+    # window it opens (main + CoSync + the other tool windows) is grouped under
+    # ONE taskbar button — the app's own, not python.exe's. Hovering that button
+    # then shows a live thumbnail per open window, each selectable. Without this
+    # the windows scatter under Python's icon (or don't group at all).
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "Sumi2g.MultiDicomViewer")
+        except Exception:
+            pass          # best-effort; grouping is cosmetic, never block start
 
     # A frozen Windows/Linux build shows a NATIVE PyInstaller splash before
     # Python even starts (see the .spec) — the only thing that can cover the

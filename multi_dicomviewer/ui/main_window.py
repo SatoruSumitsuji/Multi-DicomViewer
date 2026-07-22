@@ -1359,8 +1359,8 @@ class MainWindow(QMainWindow):
             preset=preset,
             preset_frames=preset_frames,
             preset_viewers=preset_viewers,
-            parent=self,
         )
+        self._as_taskbar_window(self._multisync)
         # Open maximized so the synchronised grid + sync editor have
         # room without the user resizing first.
         self._multisync.showMaximized()
@@ -1417,7 +1417,8 @@ class MainWindow(QMainWindow):
                   "multi-IVUS sync viewer.)"),
             )
             return
-        self._coreg_win = CoregWindow(specs, parent=self)
+        self._coreg_win = CoregWindow(specs)
+        self._as_taskbar_window(self._coreg_win)
         self._coreg_win.showMaximized()
         self._coreg_win.raise_()
 
@@ -1425,7 +1426,8 @@ class MainWindow(QMainWindow):
         """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
         from multi_dicomviewer.ui.dicom_check_window import DicomCheckWindow
         self._dicomcheck_win = DicomCheckWindow(
-            start_dir=self._last_open_dir(), parent=self)
+            start_dir=self._last_open_dir())
+        self._as_taskbar_window(self._dicomcheck_win)
         self._dicomcheck_win.show()
         self._dicomcheck_win.raise_()
 
@@ -1447,7 +1449,8 @@ class MainWindow(QMainWindow):
         """Launch the DicomFolder tool (organize DICOM files by tag)."""
         from multi_dicomviewer.ui.dicom_folder_window import DicomFolderWindow
         self._dicomfolder_win = DicomFolderWindow(
-            start_dir=self._last_open_dir(), parent=self)
+            start_dir=self._last_open_dir())
+        self._as_taskbar_window(self._dicomfolder_win)
         self._dicomfolder_win.show()
         self._dicomfolder_win.raise_()
 
@@ -1757,7 +1760,8 @@ class MainWindow(QMainWindow):
             se = self._series_by_uid.get(uid) if uid else None
             if se is not None:
                 title = se.label
-        self._ortho_win = OrthogonalViewWindow(panels, title, parent=self)
+        self._ortho_win = OrthogonalViewWindow(panels, title)
+        self._as_taskbar_window(self._ortho_win)
         self._ortho_win.showMaximized()
         self._ortho_win.raise_()
 
@@ -1907,10 +1911,11 @@ class MainWindow(QMainWindow):
                     t("The active pane has no image displayed."))
                 return
             self._rupture_win = RupturePredictorWindow(
-                qimage=qimg, calib=calib, parent=self)
+                qimage=qimg, calib=calib)
         else:
             self._rupture_win = RupturePredictorWindow(
-                plane=plane, frame_index=frame_index, calib=calib, parent=self)
+                plane=plane, frame_index=frame_index, calib=calib)
+        self._as_taskbar_window(self._rupture_win)
         self._rupture_win.showMaximized()
         self._rupture_win.raise_()
         parts = [t("IVUS frame stepper") if plane is not None
@@ -2216,7 +2221,36 @@ class MainWindow(QMainWindow):
             t("◀ Hide Studies") if vis else t("Show Studies ▶")
         )
 
+    #: Non-modal tool windows opened as their OWN owner-less taskbar window.
+    #: Attribute names on self; closed together with the main window below.
+    _TOOL_WINDOW_ATTRS = (
+        "_coreg_win", "_multisync", "_ortho_win", "_rupture_win",
+        "_dicomcheck_win", "_dicomfolder_win",
+    )
+
+    def _as_taskbar_window(self, win):
+        """Mark a freshly-created non-modal tool window as an independent
+        top-level window. It is built owner-less (no ``parent=self``) so Windows
+        gives it its OWN taskbar button + hover thumbnail — an *owned* window is
+        hidden from the taskbar, so only the main window would show. The process
+        AppUserModelID (set in app.main) groups them all under one app button.
+        Closing the main window also closes it (see closeEvent)."""
+        icon = self.windowIcon()
+        if not icon.isNull():
+            win.setWindowIcon(icon)
+        return win
+
     def closeEvent(self, e):  # noqa: N802 (Qt override)
+        # Owner-less tool windows (CoSync etc.) don't close automatically with
+        # us — close them explicitly so the app actually quits (else the last
+        # open one keeps the process alive) and nothing is orphaned.
+        for attr in self._TOOL_WINDOW_ATTRS:
+            win = getattr(self, attr, None)
+            if win is not None:
+                try:
+                    win.close()
+                except RuntimeError:
+                    pass          # already destroyed by Qt — fine
         # Finalize each VTK CT render window while its native window is still
         # valid, so VTK releases its GL context cleanly instead of flooding the
         # terminal with "wglMakeCurrent failed ... invalid handle (code 6)" when
