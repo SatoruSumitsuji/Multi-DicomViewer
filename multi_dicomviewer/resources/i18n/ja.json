@@ -319,6 +319,7 @@
   "Loading DICOM…": "DICOM を読み込み中…",
   "Loading {kind}": "{kind} を読み込み中",
   "Loading {label} …": "{label} を読み込み中 …",
+  "Still loading {label} …": "{label} を読み込み中です …",
   "Loading {n} file(s) …": "{n} 件のファイルを読み込み中 …",
   "Long View": "長軸表示",
   "Long-axis (longitudinal) view — available only in single-pane (1x1) layout": "長軸（縦断）表示 — 単一ペイン（1x1）レイアウトでのみ利用可能",
