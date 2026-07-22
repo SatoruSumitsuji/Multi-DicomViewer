@@ -14,7 +14,9 @@ import os
 import sys
 import traceback
 
-from PyQt6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent, QMimeData, QObject, QRect, QSize, Qt, QThread, QTimer, pyqtSignal,
+)
 from PyQt6.QtGui import (
     QAction,
     QActionGroup,
@@ -430,6 +432,39 @@ class _Placeholder(QWidget):
 
     def set_text(self, text: str) -> None:
         self._label.setText(text)
+
+
+class _SeriesLoadWorker(QObject):
+    """Reads + decodes a series off the GUI thread.
+
+    The heavy part of opening a study — reading every slice and decoding the
+    pixel data into a numpy HU volume (tens of seconds for a 600+ slice cardiac
+    CT) — is pure CPU/IO with no Qt objects, so it runs here in a worker thread
+    while the main window stays responsive. Only the returned LoadedSeries
+    (numpy volume + header) crosses back; the GPU/VTK pipeline is built by the
+    main thread in the ``done`` slot (Qt/GL objects must live on the GUI
+    thread). The progress callback fires on THIS thread, so it emits a queued
+    signal rather than touching the dialog directly."""
+
+    progress = pyqtSignal(str, int, int)     # phase, done, total
+    done = pyqtSignal(object)                 # LoadedSeries
+    failed = pyqtSignal(str)                  # formatted error text
+
+    def __init__(self, series):
+        super().__init__()
+        self._series = series
+
+    def run(self) -> None:
+        try:
+            loaded = dicom_io.load_series(
+                self._series,
+                progress=lambda phase, d, tot: self.progress.emit(phase, d, tot),
+            )
+        except Exception as exc:                          # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+            return
+        self.done.emit(loaded)
 
 
 class ViewerPane(QFrame):
@@ -880,6 +915,11 @@ class MainWindow(QMainWindow):
         self._study_by_series_uid: dict[str, str] = {}
         self._cur_study_uid: str | None = None
         self._hist_dialog: MeasureHistoryDialog | None = None
+        # Background series loads in flight: pane -> (thread, worker, dialog).
+        # A series load runs off the GUI thread (see _open_series) so the app
+        # stays usable while a big CT reads; this tracks the live jobs so a
+        # pane isn't double-loaded and the threads aren't GC'd mid-run.
+        self._loads: dict[object, tuple] = {}
         # Per-series MP4 export range [start, end] (0-based frame indices),
         # reported by a cine viewer's Play-range markers. A series only
         # appears here while its range is narrower than the full clip; a
@@ -2241,6 +2281,11 @@ class MainWindow(QMainWindow):
         return win
 
     def closeEvent(self, e):  # noqa: N802 (Qt override)
+        # Finish any background series loads first: a QThread destroyed while
+        # still running aborts the process, so stop + wait each one (the decode
+        # can't be interrupted, but a load in flight at quit is rare).
+        for pane in list(self._loads):
+            self._cleanup_load(pane)
         # Owner-less tool windows (CoSync etc.) don't close automatically with
         # us — close them explicitly so the app actually quits (else the last
         # open one keeps the process alive) and nothing is orphaned.
@@ -3605,6 +3650,13 @@ class MainWindow(QMainWindow):
                 self._follow_active_pane()
             self.statusBar().showMessage(t("Resumed {label}", label=series.label))
             return
+        # A load already running for this pane? Ignore the repeat request so
+        # the same series isn't decoded twice into one pane (loading a
+        # DIFFERENT pane meanwhile is fine — it gets its own worker).
+        if pane in self._loads:
+            self.statusBar().showMessage(
+                t("Still loading {label} …", label=series.label))
+            return
         self.statusBar().showMessage(t("Loading {label} …", label=series.label))
         # Cut the OUTGOING series's background prefetch BEFORE reading
         # any new files so disk / CPU bandwidth is freed for the new
@@ -3614,13 +3666,13 @@ class MainWindow(QMainWindow):
         cur_v = pane.current_viewer()
         if cur_v is not None and hasattr(cur_v, "_stop_prefetch"):
             cur_v._stop_prefetch()
-        # CT load (read every slice + build the HU volume + VTK pipeline)
-        # is the multi-second wait the user saw *after* the scan bar hit
-        # 100%. Keep a real, phased progress dialog up through all of it
-        # so the last stretch is never a frozen UI. XA/IVUS also gets a
-        # dialog now — a 100-300 MB compressed cine clip can take
-        # several seconds to read off disk and decode frame 0, and the
-        # user previously had no way to tell the UI from a freeze.
+        # CT load (read every slice + build the HU volume) is the multi-second
+        # wait the user saw after the scan bar hit 100%. It now runs on a
+        # WORKER THREAD so the rest of the app stays usable while it reads;
+        # a NON-modal phased progress dialog tracks it (was app-modal, which
+        # froze everything). XA/IVUS goes the same route — a 100-300 MB cine
+        # clip can also take seconds to read + decode frame 0. Only the final
+        # GPU/VTK build runs back on the GUI thread (see _finish_open_series).
         is_ct = series.modality == Modality.CT
         title = (t("Loading CT") if is_ct
                  else t("Loading {kind}", kind=series.kind or 'DICOM'))
@@ -3628,36 +3680,87 @@ class MainWindow(QMainWindow):
                        else t("Reading DICOM file…"))
         dlg = QProgressDialog(initial_msg, None, 0, 0, self)
         dlg.setWindowTitle(title)
-        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
         dlg.setMinimumDuration(0)
         dlg.setAutoClose(False)
         dlg.setAutoReset(False)
         dlg.setValue(0)
         dlg.show()
-        QApplication.processEvents()
 
-        def _cb(phase: str, done: int, total: int) -> None:
-            if dlg is None:
-                return
-            if dlg.labelText() != phase:
-                dlg.setLabelText(phase)
-            if total and dlg.maximum() != total:
-                dlg.setMaximum(total)
-            dlg.setValue(done)
-            QApplication.processEvents()
+        thread = QThread(self)
+        worker = _SeriesLoadWorker(series)
+        worker.moveToThread(thread)
+        self._loads[pane] = (thread, worker, dlg, series)
 
-        try:
-            loaded = dicom_io.load_series(series, progress=_cb)
-        except Exception as exc:
-            if dlg is not None:
-                dlg.close()
-            traceback.print_exc()
-            QMessageBox.critical(
-                self, t("Load failed"), f"{series.label}\n\n{exc}"
-            )
-            self.statusBar().showMessage(t("Load failed."))
+        # Connect to BOUND METHODS of self (not lambdas): self lives on the GUI
+        # thread, so Qt auto-uses a queued connection and the slot runs on the
+        # GUI thread — safe to touch the dialog / build the view. A lambda has
+        # no QObject affinity and would run in the WORKER thread instead. The
+        # pane/series context is recovered from the registry via sender().
+        worker.progress.connect(self._on_load_progress)
+        worker.done.connect(self._on_load_done)
+        worker.failed.connect(self._on_load_failed)
+        thread.started.connect(worker.run)
+        thread.start()
+
+    def _load_entry_for_sender(self):
+        """(pane, entry) for the worker that emitted the signal now running, or
+        (None, None) if it's already been cleaned up."""
+        worker = self.sender()
+        for pane, entry in self._loads.items():
+            if entry[1] is worker:
+                return pane, entry
+        return None, None
+
+    def _on_load_progress(self, phase: str, done: int, total: int) -> None:
+        _pane, entry = self._load_entry_for_sender()
+        if entry is None:
             return
+        dlg = entry[2]
+        if dlg.labelText() != phase:
+            dlg.setLabelText(phase)
+        if total and dlg.maximum() != total:
+            dlg.setMaximum(total)
+        dlg.setValue(done)
 
+    def _on_load_done(self, loaded) -> None:
+        pane, entry = self._load_entry_for_sender()
+        if pane is None:
+            return
+        self._finish_open_series(pane, entry[3], loaded)
+
+    def _on_load_failed(self, msg: str) -> None:
+        pane, entry = self._load_entry_for_sender()
+        if pane is None:
+            return
+        self._fail_open_series(pane, entry[3], msg)
+
+    def _cleanup_load(self, pane) -> None:
+        """Tear down a finished background load: stop its thread and drop the
+        registry entry (also closes the progress dialog)."""
+        entry = self._loads.pop(pane, None)
+        if entry is None:
+            return
+        thread, worker, dlg = entry[0], entry[1], entry[2]
+        dlg.close()
+        thread.quit()
+        thread.wait()
+        worker.deleteLater()
+        thread.deleteLater()
+
+    def _fail_open_series(self, pane, series, msg: str) -> None:
+        """Background load raised — surface it exactly as the old inline path."""
+        self._cleanup_load(pane)
+        QMessageBox.critical(
+            self, t("Load failed"), f"{series.label}\n\n{msg}")
+        self.statusBar().showMessage(t("Load failed."))
+
+    def _finish_open_series(self, pane, series, loaded) -> None:
+        """Runs on the GUI thread once the worker has the decoded series.
+        Builds the GPU/VTK view (Qt objects must live here) and does all the
+        post-load bookkeeping the old synchronous path did."""
+        entry = self._loads.get(pane)
+        dlg = entry[2] if entry else None
         if dlg is not None:
             # The VTK pipeline build has no fine-grained progress, so show
             # an indeterminate "constructing" bar for that last phase.
@@ -3668,8 +3771,7 @@ class MainWindow(QMainWindow):
 
         self._cur_study_uid = self._study_by_series_uid.get(series.series_uid)
         pane.show_series(loaded, series.label, self._pane_bar(series))
-        if dlg is not None:
-            dlg.close()
+        self._cleanup_load(pane)
         # Carry the current anonymize + tag-overlay choices onto the
         # (possibly newly built) viewer.
         v = pane.current_viewer()
