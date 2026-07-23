@@ -849,7 +849,6 @@ class XAViewer(AbstractViewer):
             t("Reset orientation: undo Rt90°/Lt90°/Flip and free rotation "
               "back to the originally-loaded view"))
         self._reset_orient_btn.clicked.connect(self._reset_transform)
-        row.addWidget(self._reset_orient_btn)
 
         # High-quality cine: keep frames bilinear-smooth even during playback
         # (default OFF = fast nearest-neighbour cine; ON costs more per frame —
@@ -867,7 +866,6 @@ class XAViewer(AbstractViewer):
               "stills use S-Zoom."))
         self._hq_cine_btn.setChecked(bool(self._dq.get("xa_hq_cine")))
         self._hq_cine_btn.toggled.connect(self._toggle_hq_cine)
-        row.addWidget(self._hq_cine_btn)
 
         # S-Zoom: high-quality (Lanczos) upscaling of the enlarged image —
         # sharper than the default bilinear. Denoise: edge-preserving (bilateral)
@@ -886,7 +884,6 @@ class XAViewer(AbstractViewer):
         self._smooth_btn.setChecked(bool(self._dq.get("xa_smooth")))
         self._smooth_btn.setEnabled(_have_cv2)
         self._smooth_btn.toggled.connect(self._toggle_smooth)
-        row.addWidget(self._smooth_btn)
 
         self._denoise_btn = QPushButton(t("Denoise"))
         self._denoise_btn.setCheckable(True)
@@ -897,7 +894,6 @@ class XAViewer(AbstractViewer):
         self._denoise_btn.setChecked(bool(self._dq.get("xa_denoise")))
         self._denoise_btn.setEnabled(_have_cv2)
         self._denoise_btn.toggled.connect(self._toggle_denoise)
-        row.addWidget(self._denoise_btn)
         if not _have_cv2:
             for _b in (self._smooth_btn, self._denoise_btn):
                 _b.setToolTip(_b.toolTip() + t("  (OpenCV not available)"))
@@ -914,7 +910,6 @@ class XAViewer(AbstractViewer):
         self._drag_zoom_btn.setToolTip(
             t("Zoom mode: drag up/down on the image to zoom in/out."))
         self._drag_zoom_btn.clicked.connect(self._toggle_drag_zoom)
-        row.addWidget(self._drag_zoom_btn)
 
         self._drag_wl_btn = QPushButton(t("W/L"))
         self._drag_wl_btn.setCheckable(True)
@@ -923,7 +918,19 @@ class XAViewer(AbstractViewer):
             t("W/L mode: drag on the image to change window (left/right) and "
               "level (up/down)."))
         self._drag_wl_btn.clicked.connect(self._toggle_drag_wl)
+
+        # Toolbar order right of the Flip buttons: the drag Zoom / W/L toggles,
+        # a small gap, Reset, another gap, then the quality toggles
+        # (S-Cine / S-Zoom / Denoise). Grouped with spacers so the three
+        # clusters read apart at a glance.
+        row.addWidget(self._drag_zoom_btn)
         row.addWidget(self._drag_wl_btn)
+        row.addSpacing(16)
+        row.addWidget(self._reset_orient_btn)
+        row.addSpacing(16)
+        row.addWidget(self._hq_cine_btn)
+        row.addWidget(self._smooth_btn)
+        row.addWidget(self._denoise_btn)
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
