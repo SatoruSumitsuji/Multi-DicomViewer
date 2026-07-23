@@ -686,8 +686,15 @@ class ViewerPane(QFrame):
             self._cur_viewer = None
             self._set_pane_title(t("{mod} (unsupported)", mod=mod))
             return
-        viewer.load_series(loaded, title)
+        # Make the viewer the current (visible) stack page BEFORE loading, so
+        # every setVisible() inside load_series()/_relayout() runs against an
+        # on-screen parent. On a freshly built viewer the page is otherwise
+        # still hidden, and macOS (Cocoa) can drop the show of a child toggled
+        # visible under a hidden QStackedWidget page — that's why a biplane XA's
+        # Bi/Lt/Rt bar failed to appear on first load until a re-drop forced a
+        # second _relayout. Already-current viewers make this a no-op.
         self._stack.setCurrentWidget(viewer)
+        viewer.load_series(loaded, title)
         self._cur_viewer = viewer
         self._set_pane_title(pane_label if pane_label is not None else title)
         # A freshly built or re-shown viewer must match this pane's current
@@ -1424,14 +1431,22 @@ class MainWindow(QMainWindow):
                 continue
             v = pane.current_viewer()
             fr = int(getattr(v, "_frame", 0))    # keep the frame on screen now
+            # Carry the source IVUS's display ROTATION and play-order (Reverse)
+            # so the CoSync pane opens matching what the user set up — the same
+            # way a CT short-axis already carries its rotation (angio panes have
+            # neither: rotation 0, not reversed).
+            cv = getattr(v, "canvas", None)
+            rot = (float(cv.free_rotation())
+                   if cv is not None and hasattr(cv, "free_rotation") else 0.0)
+            rev = bool(getattr(v, "_reversed", False))
             side = v.current_side() if hasattr(v, "current_side") else None
             if side == "Bi":
-                specs.append((se, 0, fr))
-                specs.append((se, 1, fr))
+                specs.append((se, 0, fr, rot, rev))
+                specs.append((se, 1, fr, rot, rev))
             elif side == "Rt":
-                specs.append((se, 1, fr))
+                specs.append((se, 1, fr, rot, rev))
             else:                                # "Lt", single-plane, or none
-                specs.append((se, 0, fr))
+                specs.append((se, 0, fr, rot, rev))
         # Include any CT pane currently in short-axis (Stretch MPR) mode as a
         # synthetic pull-back — it joins the CoSync grid like an IVUS and can
         # be landmark-synced against the real IVUS / other short-axes.
@@ -1446,7 +1461,7 @@ class MainWindow(QMainWindow):
         specs = specs[:6]
         # A CT short-axis is a driver too (is_ivus in the CoSync window), so it
         # satisfies the "need a pull-back" requirement.
-        has_ivus = (any(s.modality == Modality.IVUS for s, _p, _f in specs)
+        has_ivus = (any(s.modality == Modality.IVUS for s, *_ in specs)
                     or bool(cpr_specs))
         specs = (specs + cpr_specs)[:6]
         if not has_ivus:
@@ -3830,6 +3845,8 @@ class MainWindow(QMainWindow):
         # Measuring / history are modality-agnostic (XA and IVUS both).
         if hasattr(viewer, "measurement_added"):
             viewer.measurement_added.connect(self._record_measurement)
+        if hasattr(viewer, "measurement_removed"):
+            viewer.measurement_removed.connect(self._remove_measurement)
         if hasattr(viewer, "history_requested"):
             viewer.history_requested.connect(self._show_history)
         if hasattr(viewer, "tags_requested"):
@@ -4241,6 +4258,22 @@ class MainWindow(QMainWindow):
         self._measure_history.setdefault(uid, []).append(m)
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
             self._refresh_history_dialog()
+
+    def _remove_measurement(self, mid: int) -> None:
+        """Drop the most-recent history entry for source-measure *mid* — used
+        when a trace is 'resumed' (un-committed to keep extending it) so the
+        eventual re-commit doesn't leave a duplicate. Scans newest-first and
+        removes one match across the current study (falls back to any study)."""
+        uid = self._cur_study_uid or "—"
+        for key in (uid, *[k for k in self._measure_history if k != uid]):
+            hist = self._measure_history.get(key, [])
+            for i in range(len(hist) - 1, -1, -1):
+                if getattr(hist[i], "mid", None) == mid:
+                    del hist[i]
+                    if (self._hist_dialog is not None
+                            and self._hist_dialog.isVisible()):
+                        self._refresh_history_dialog()
+                    return
 
     def _show_history(self) -> None:
         if self._hist_dialog is None:

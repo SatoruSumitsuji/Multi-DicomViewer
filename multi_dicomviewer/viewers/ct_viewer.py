@@ -249,6 +249,20 @@ def _tris_pd(tris) -> vtkPolyData:
     return pd
 
 
+#: Idle measure-vertex dot size (physical px, VTK PointSize). The off-plane
+#: hollow ring is sized so its OUTER edge matches this dot's outer diameter.
+_MEAS_PT_PX = 10.0
+
+
+def _ring_polylines(centers, radius, seg=20):
+    """Closed-circle outlines (one polyline per centre) for hollow off-plane
+    markers — the 中抜き (ring) depth cue, matching the Mac viewer."""
+    ang = [2.0 * math.pi * k / seg for k in range(seg + 1)]  # +1 closes the loop
+    return [[(cx + radius * math.cos(a), cy + radius * math.sin(a))
+             for a in ang]
+            for (cx, cy) in centers]
+
+
 def _dashed_pd(p0, p1, dash, gap) -> vtkPolyData:
     p0 = np.asarray(p0, float)
     p1 = np.asarray(p1, float)
@@ -466,6 +480,42 @@ def _colored_dashed_pd(segments, colors, z=0.66) -> vtkPolyData:
             lines.InsertNextCell(2)
             lines.InsertCellPoint(idx); lines.InsertCellPoint(idx + 1)
             cell_rgb.InsertNextTuple3(*rgb)
+            idx += 2
+            s = e + dash
+    pd.SetPoints(pts); pd.SetLines(lines)
+    if cell_rgb.GetNumberOfTuples() > 0:
+        pd.GetCellData().SetScalars(cell_rgb)
+    return pd
+
+
+def _colored_dashed_rgba_pd(segments, colors, z=0.62) -> vtkPolyData:
+    """Like _colored_dashed_pd but per-dash cell carries RGBA (uint8; a 3-tuple
+    is padded opaque). Used for the off-plane 点線 outline, whose 50% alpha must
+    survive into each dash cell — the caller's mapper must direct-colour cells."""
+    pd = vtkPolyData()
+    pts = vtkPoints()
+    lines = vtkCellArray()
+    cell_rgb = vtkUnsignedCharArray()
+    cell_rgb.SetNumberOfComponents(4)
+    cell_rgb.SetName("Colors")
+    idx = 0
+    for (p0, p1), rgb in zip(segments, colors):
+        a = np.asarray(p0, float)
+        b = np.asarray(p1, float)
+        L = float(np.linalg.norm(b - a))
+        if L < 1e-6:
+            continue
+        d = (b - a) / L
+        dash = max(0.4, L / 44.0)
+        s = 0.0
+        while s < L:
+            e = min(s + dash, L)
+            qa = a + d * s; qb = a + d * e
+            pts.InsertNextPoint(float(qa[0]), float(qa[1]), z)
+            pts.InsertNextPoint(float(qb[0]), float(qb[1]), z)
+            lines.InsertNextCell(2)
+            lines.InsertCellPoint(idx); lines.InsertCellPoint(idx + 1)
+            cell_rgb.InsertNextTuple4(*_rgba(rgb))
             idx += 2
             s = e + dash
     pd.SetPoints(pts); pd.SetLines(lines)
@@ -1041,7 +1091,7 @@ class _Pane:
         mp = vtkActor()
         mp.SetMapper(self.meas_pts_mapper)
         mp.GetProperty().SetColor(1.0, 0.85, 0.0)  # yellow idle dots
-        mp.GetProperty().SetPointSize(10.0)
+        mp.GetProperty().SetPointSize(_MEAS_PT_PX)
         if hasattr(mp.GetProperty(), "SetRenderPointsAsSpheres"):
             mp.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(mp)
@@ -1056,19 +1106,42 @@ class _Pane:
         if hasattr(mpe.GetProperty(), "SetRenderPointsAsSpheres"):
             mpe.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(mpe)
-        # Vessel-trace vertices that lie OFF the current cutting plane: drawn
-        # at 50% opacity as a depth cue (they sit in front of / behind the
-        # shown slice). Same yellow, half alpha.
+        # Vessel-trace vertices that lie OFF the current cutting plane: drawn as
+        # HOLLOW 50% yellow rings (中抜き) — a depth cue that they sit in front
+        # of / behind the shown slice. Ring outlines (per-cell RGBA so the 50%
+        # alpha lives in the cell), NOT filled dots, matching the Mac viewer.
         self.meas_pts_off_mapper = vtkPolyDataMapper()
         self.meas_pts_off_mapper.SetInputData(vtkPolyData())
+        self.meas_pts_off_mapper.ScalarVisibilityOn()
+        self.meas_pts_off_mapper.SetScalarModeToUseCellData()
+        self.meas_pts_off_mapper.SetColorModeToDirectScalars()
         mpo = vtkActor()
         mpo.SetMapper(self.meas_pts_off_mapper)
-        mpo.GetProperty().SetColor(1.0, 0.85, 0.0)
-        mpo.GetProperty().SetPointSize(10.0)
-        mpo.GetProperty().SetOpacity(0.5)             # off-plane = 50%
-        if hasattr(mpo.GetProperty(), "SetRenderPointsAsSpheres"):
-            mpo.GetProperty().SetRenderPointsAsSpheres(True)
+        mpo.GetProperty().SetColor(1.0, 0.85, 0.0)    # fallback (cells carry RGBA)
+        mpo.GetProperty().SetLineWidth(2.0)
+        if hasattr(mpo.GetProperty(), "SetRenderLinesAsTubes"):
+            mpo.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(mpo)
+        # Keep the ring width DPR-scaled like the other measure lines (the list
+        # was built before this actor existed, so append it here).
+        self._meas_line_actors.append((2.4, mpo))    # off-plane hollow rings
+        # Fully off-plane trace SEGMENTS (both endpoints off the slice): drawn
+        # as a 点線 (dotted) at 50% so you can tell at a glance which stretch of
+        # the pseudo-centreline is out of the shown cross-section. Per-cell RGBA
+        # (alpha lives in the dash cells), tube-rendered so the dashes show.
+        self.meas_off_dash_mapper = vtkPolyDataMapper()
+        self.meas_off_dash_mapper.SetInputData(vtkPolyData())
+        self.meas_off_dash_mapper.ScalarVisibilityOn()
+        self.meas_off_dash_mapper.SetScalarModeToUseCellData()
+        self.meas_off_dash_mapper.SetColorModeToDirectScalars()
+        mod = vtkActor()
+        mod.SetMapper(self.meas_off_dash_mapper)
+        mod.GetProperty().SetColor(1.0, 0.85, 0.0)   # fallback (cells carry RGBA)
+        mod.GetProperty().SetLineWidth(2.0)
+        if hasattr(mod.GetProperty(), "SetRenderLinesAsTubes"):
+            mod.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(mod)
+        self._meas_line_actors.append((2.4, mod))    # off-plane dotted outline
         self.meas_labels = []                 # number billboards
 
         self.info = vtkCornerAnnotation()
@@ -1446,6 +1519,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: emitted when a measurement is committed — the shell files it under
     #: the current study so it shows in the shared Measure History.
     measurement_added = pyqtSignal(object)
+    #: emitted when a committed measure is un-committed ("resumed" to keep
+    #: extending its trace) — carries the measure id so the shell drops that
+    #: stale history entry; re-committing then re-adds it fresh.
+    measurement_removed = pyqtSignal(int)
     #: emitted when the user clicks "Measure History"
     history_requested = pyqtSignal()
     #: image right-click ▸ Export DICOM / CSV → shell runs that export for the
@@ -2741,6 +2818,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # (drawn green by a second points mapper); the rest stay yellow.
         edit_pts = []
         off_pts = []                 # trace vertices off the current plane (50%)
+        off_dash_segs: list = []     # segments fully off-plane → 点線 (dotted)
+        off_dash_cols: list = []
         _, _, _pn = self._axes_for(key)          # this plane's normal
         _po = self._pc[key]
         e = self._edit
@@ -2762,15 +2841,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                 off_flag = [abs(float(np.dot(np.asarray(P, float) - _po,
                                              _pn))) > 1.0 for P in p3]
             if off_flag is not None and not m.get("smooth"):
-                # Draw the outline as PER-SEGMENT cells so the off-plane parts
-                # of the LINE (not just the point dots) fade to 50%. A trace is
-                # normally un-splined; a smooth trace keeps one line alpha.
+                # Draw the outline as PER-SEGMENT cells so the parts of the LINE
+                # leaving the slice read differently. A trace is normally
+                # un-splined; a smooth trace keeps one line alpha. Three states:
+                #   both endpoints in-plane  → solid, full alpha
+                #   one endpoint off-plane   → solid, 50% (the transition)
+                #   both endpoints off-plane → 点線 (dotted), 50%
+                # so at a glance you can tell which stretch is out of range.
                 verts = list(m["pts"])
                 half_a = max(1, a4 // 2)
                 for i in range(len(verts) - 1):
-                    polylines.append([verts[i], verts[i + 1]])
-                    seg_a = half_a if (off_flag[i] or off_flag[i + 1]) else a4
-                    outline_colors.append((rgb[0], rgb[1], rgb[2], seg_a))
+                    o0, o1 = off_flag[i], off_flag[i + 1]
+                    if o0 and o1:
+                        off_dash_segs.append((verts[i], verts[i + 1]))
+                        off_dash_cols.append((rgb[0], rgb[1], rgb[2], half_a))
+                    else:
+                        polylines.append([verts[i], verts[i + 1]])
+                        seg_a = half_a if (o0 or o1) else a4
+                        outline_colors.append((rgb[0], rgb[1], rgb[2], seg_a))
             else:
                 polylines.append(self._outline(m))
                 outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
@@ -2859,7 +2947,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
         p.meas_pts_edit_mapper.SetInputData(_points_pd(edit_pts))
-        p.meas_pts_off_mapper.SetInputData(_points_pd(off_pts))
+        # Off-plane pseudo-centres → hollow 50% yellow rings (中抜き). Ring
+        # radius tracks the pane's parallel scale so the on-screen size stays
+        # constant across zoom (same trick the ▲ markers use).
+        if off_pts:
+            ps_off = p.ren.GetActiveCamera().GetParallelScale()
+            # Size the hollow ring so its OUTER edge matches the in-plane filled
+            # dot's outer diameter (_MEAS_PT_PX). The dot is _MEAS_PT_PX physical
+            # px across → radius _MEAS_PT_PX/2. The ring is a tube of width
+            # 2.4*dpr, so its CENTRELINE radius must be (dot_radius − tube_half)
+            # for the tube's outer edge to land on dot_radius. Convert that
+            # screen radius to world mm via the parallel scale (= half the
+            # viewport's world height) so it stays a constant on-screen size.
+            h_phys = max(1.0, p.canvas.height() * dpr)
+            ring_r_px = max(1.0, _MEAS_PT_PX / 2.0 - 1.2 * dpr)
+            ring_r_world = ring_r_px * (2.0 * ps_off) / h_phys
+            rings = _ring_polylines(off_pts, ring_r_world)
+            p.meas_pts_off_mapper.SetInputData(
+                _colored_multi_pd(rings, [(255, 217, 0, 128)] * len(rings)))
+        else:
+            p.meas_pts_off_mapper.SetInputData(vtkPolyData())
+        # Fully off-plane segments → dotted (点線) at 50%.
+        p.meas_off_dash_mapper.SetInputData(
+            _colored_dashed_rgba_pd(off_dash_segs, off_dash_cols))
         self._rebuild_labels(p, labels)
         p.render()
 
@@ -3066,8 +3176,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             pts = d["pts"][:2]
         else:
             pts = list(d["pts"])
-        self._meas_seq += 1
-        rec = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        # A resumed trace keeps its ORIGINAL id (and colour / spline / alpha) so
+        # it reads as the same result continued, not a brand-new one; a fresh
+        # draft takes the next sequence number.
+        if d.get("resume_id") is not None:
+            rid = int(d["resume_id"])
+            self._meas_seq = max(self._meas_seq, rid)
+        else:
+            self._meas_seq += 1
+            rid = self._meas_seq
+        rec = {"id": rid, "type": d["type"], "pts": pts}
+        for k in ("color", "smooth", "transp"):
+            if d.get(k) is not None:
+                rec[k] = d[k]
         # Carry the absolute 3-D trace (vessel centreline control points) so a
         # later Short-axis MPR uses the real geometry regardless of how the
         # plane was moved while tracing.
@@ -3084,6 +3205,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             kind=self._JP.get(d["type"], d["type"]),
             points=[tuple(q) for q in pts],
             text=self._metrics_text(d["pane"], m_dict),
+            mid=rid,
         ))
 
     def _measure_finish_draft(self):
@@ -3091,6 +3213,56 @@ class CTViewer(CPRMixin, AbstractViewer):
         if d and d["type"] in ("polyline", "polygon") \
                 and len(d["pts"]) >= 2:
             self._commit_draft()
+
+    def _resume_trace(self, which, mi, endpoint_vi):
+        """Un-commit polyline *mi* back into the in-progress draft so the user
+        can keep clicking to EXTEND it from the *endpoint_vi* end (0 = start,
+        last = end). New clicks always append to the draft, so a start-resume
+        reverses the vertex order first (the geometry is identical; CPR handles
+        direction). The stale Measure-History entry is dropped here and re-added
+        when the trace is committed again, keeping the same result id."""
+        if not (0 <= mi < len(self._measures[which])):
+            return
+        m = self._measures[which][mi]
+        if m["type"] != "polyline" or len(m["pts"]) < 2:
+            return
+        # Switch the tool to Polyline so the next clicks EXTEND this trace.
+        # (Right-click only reaches this menu with Measure mode already on, so
+        # left-clicks route to measuring — we just need the type armed.) Sync
+        # the toolbar buttons WITHOUT calling _set_measure_type, which would
+        # wipe the draft we're about to install.
+        self._meas_type = "polyline"
+        for k, b in self._meas_btns.items():
+            b.setChecked(k == "polyline")
+            b.setStyleSheet(
+                "background:#1f77b4;color:white;" if k == "polyline" else "")
+        self._refresh_tool_availability()
+        # Prefer the absolute 3-D control points (re-projected onto the CURRENT
+        # plane) as the source of truth; fall back to the stored 2-D vertices.
+        p3 = m.get("pts3d")
+        if p3 and len(p3) == len(m["pts"]) and self._mode == "3D":
+            pts3d = [np.asarray(P, float) for P in p3]
+            pts = [self._world3d_to_out(which, P) for P in pts3d]
+        else:
+            pts3d = None
+            pts = [tuple(q) for q in m["pts"]]
+        if endpoint_vi == 0:                     # resume from the START end
+            pts = list(reversed(pts))
+            if pts3d is not None:
+                pts3d = list(reversed(pts3d))
+        d = {"type": "polyline", "pane": which, "pts": pts,
+             "resume_id": m["id"]}
+        if pts3d is not None:
+            d["pts3d"] = pts3d
+        for k in ("color", "smooth", "transp"):  # keep the trace's appearance
+            if k in m:
+                d[k] = m[k]
+        # Drop the committed result (and its history entry); it lives on as the
+        # draft now and re-commits under the same id.
+        self.measurement_removed.emit(int(m["id"]))
+        del self._measures[which][mi]
+        self._draft = d
+        self._redraw_meas(which)
 
     def _measure_right(self, which, sx, sy) -> bool:
         """Right-click on a measure (handle / outline / Center-Angle) → its menu.
@@ -3219,11 +3391,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         mi, vi = hit
         m = self._measures[which][mi]
         menu = QMenu(self)
-        del_pt = del_res = None
+        del_pt = del_res = resume_act = None
         if m["type"] in ("polyline", "polygon"):
             del_pt = menu.addAction(t("Delete point"))
             if len(m["pts"]) <= 2:                # never shrink below Line
                 del_pt.setEnabled(False)
+        # Right-click on a polyline END vertex (the 断端) → "Resume trace":
+        # un-commit it so the user can keep clicking points to EXTEND that end
+        # (Add point only inserts BETWEEN existing vertices, never past an end).
+        if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
+            resume_act = menu.addAction(t("Resume trace"))
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
@@ -3240,6 +3417,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         )
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
+        elif resume_act is not None and chosen is resume_act:
+            self._resume_trace(which, mi, vi)
+            return                               # _resume_trace redraws itself
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
@@ -4047,6 +4227,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_marker_pts.append((near, (du, dv)))
         p.meas_pts_mapper.SetInputData(_points_pd(pts))
         p.meas_pts_off_mapper.SetInputData(vtkPolyData())
+        p.meas_off_dash_mapper.SetInputData(vtkPolyData())
         p.meas_pts_edit_mapper.SetInputData(vtkPolyData())
 
     def _cpr_grab(self, sx, sy) -> bool:

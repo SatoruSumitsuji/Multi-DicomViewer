@@ -20,6 +20,10 @@ class Measurement:
     kind: str
     points: list[tuple[float, float]] = field(default_factory=list)
     spacing_mm: Optional[tuple[float, float]] = None  # (row, col) mm/px
+    #: Optional source-measure id (the viewer's per-result sequence number).
+    #: Lets the history store drop a stale entry when a trace is "resumed"
+    #: (un-committed to keep extending it), so re-committing doesn't duplicate.
+    mid: Optional[int] = None
     #: Pre-formatted label (used when the emitter already built the full
     #: metrics string — e.g. polygon Area + Dmax/Dmin). label() returns
     #: this verbatim when set, otherwise it falls back to the legacy
