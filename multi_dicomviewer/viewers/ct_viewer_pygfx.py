@@ -699,8 +699,10 @@ class _Overlay(QWidget):
                     idle_off.append(q)
                 else:
                     idle_on.append(q)
-            dots(idle_on, QColor(255, 217, 0), 4.0)              # yellow handles
-            dots_hollow(idle_off, QColor(255, 217, 0, 128), 4.0)  # off-plane 50%
+            # In-range dot a touch larger than the off-plane ring so the
+            # in-plane pseudo-centre reads as the more prominent of the two.
+            dots(idle_on, QColor(255, 217, 0), 4.4)              # yellow handles
+            dots_hollow(idle_off, QColor(255, 217, 0, 128), 3.3)  # off-plane 50%
             if mi == edit_mi and not edit_ca and 0 <= edit_vi < len(m["pts"]):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor

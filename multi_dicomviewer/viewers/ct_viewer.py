@@ -249,9 +249,12 @@ def _tris_pd(tris) -> vtkPolyData:
     return pd
 
 
-#: Idle measure-vertex dot size (physical px, VTK PointSize). The off-plane
-#: hollow ring is sized so its OUTER edge matches this dot's outer diameter.
-_MEAS_PT_PX = 10.0
+#: Idle measure-vertex dot size (physical px, VTK PointSize).
+_MEAS_PT_PX = 11.0
+#: Off-plane hollow-ring OUTER radius (physical px). Kept a touch SMALLER than
+#: the in-plane dot's radius (_MEAS_PT_PX/2) so the in-range filled dot reads as
+#: the more prominent of the two.
+_CPR_RING_OUTER_PX = 4.0
 
 
 def _ring_polylines(centers, radius, seg=20):
@@ -2952,15 +2955,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # constant across zoom (same trick the ▲ markers use).
         if off_pts:
             ps_off = p.ren.GetActiveCamera().GetParallelScale()
-            # Size the hollow ring so its OUTER edge matches the in-plane filled
-            # dot's outer diameter (_MEAS_PT_PX). The dot is _MEAS_PT_PX physical
-            # px across → radius _MEAS_PT_PX/2. The ring is a tube of width
-            # 2.4*dpr, so its CENTRELINE radius must be (dot_radius − tube_half)
-            # for the tube's outer edge to land on dot_radius. Convert that
+            # Size the hollow ring's OUTER edge to _CPR_RING_OUTER_PX — kept a
+            # little smaller than the in-plane dot's radius (_MEAS_PT_PX/2) so
+            # the in-range filled dot stands out more. The ring is a tube of
+            # width 2.4*dpr, so its CENTRELINE radius must be (outer − tube_half)
+            # for the tube's outer edge to land on the target. Convert that
             # screen radius to world mm via the parallel scale (= half the
             # viewport's world height) so it stays a constant on-screen size.
             h_phys = max(1.0, p.canvas.height() * dpr)
-            ring_r_px = max(1.0, _MEAS_PT_PX / 2.0 - 1.2 * dpr)
+            ring_r_px = max(1.0, _CPR_RING_OUTER_PX - 1.2 * dpr)
             ring_r_world = ring_r_px * (2.0 * ps_off) / h_phys
             rings = _ring_polylines(off_pts, ring_r_world)
             p.meas_pts_off_mapper.SetInputData(
