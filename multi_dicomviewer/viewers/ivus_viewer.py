@@ -287,7 +287,7 @@ class IVUSViewer(XAViewer):
         # "Angle Set" (left of Long View): rotate the cross-section to the angle
         # you want at THIS frame, then click to key it. The seek bar marks each
         # keyframe and the angle is interpolated between them (CoSync-style).
-        self._angle_set_btn = QPushButton(t("Angle Set"))
+        self._angle_set_btn = QPushButton(t("Multi-Rot Angle Set"))
         self._angle_set_btn.setToolTip(
             t("Key the current frame's rotation angle. Angles are interpolated "
               "between keyframes (shortest path); the first/last keys are held "
@@ -451,7 +451,7 @@ class IVUSViewer(XAViewer):
         # "Angle Set" button.
         btn = getattr(self, "_angle_set_btn", None)
         if btn is not None:
-            btn.setText(t("Angle Set"))
+            btn.setText(t("Multi-Rot Angle Set"))
             btn.setToolTip(
                 t("Key the current frame's rotation angle. Angles are "
                   "interpolated between keyframes (shortest path); the "

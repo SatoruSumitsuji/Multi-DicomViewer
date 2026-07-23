@@ -3248,7 +3248,35 @@ class MainWindow(QMainWindow):
             target = dataclasses.replace(series, files=[plane_path])
         else:
             target = series
-        self._on_export_requested(fmt, [target])
+        # Image right-click: an MP4 should match what's on screen.
+        self._on_export_requested(fmt, [target], use_display_transform=True)
+
+    def _display_transform_for_uid(self, uid: str):
+        """On-screen state of the viewer currently showing *uid*, as
+        {"flip", "rot90", "free_rot", "window", "level"} — so an image
+        right-click MP4 export bakes in what's shown (orientation, free rotation
+        and current W/L). None when the series isn't shown or the viewer has no
+        image canvas (e.g. the CT viewer), so those fall back to the original."""
+        if not uid:
+            return None
+        for pane in self._shown_panes():
+            if pane.shown_series_uid() != uid:
+                continue
+            v = pane.current_viewer()
+            cv = getattr(v, "canvas", None)
+            if cv is None or not hasattr(cv, "orient_state"):
+                return None
+            flip, rot90 = cv.orient_state()
+            fr = (float(cv.free_rotation())
+                  if hasattr(cv, "free_rotation") else 0.0)
+            win = getattr(v, "_window", None)
+            lvl = getattr(v, "_level", None)
+            # Colour (RGB) series have no meaningful W/L — don't force one.
+            if getattr(v, "_is_color", False):
+                win = lvl = None
+            return {"flip": flip, "rot90": rot90, "free_rot": fr,
+                    "window": win, "level": lvl}
+        return None
 
     def _on_angle_export(self, uid: str, payload: object) -> None:
         """IVUS "Export" of angle keyframes: reuse the export filename-tag
@@ -3307,12 +3335,19 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage(t("Angle Set exported."))
 
-    def _on_export_requested(self, fmt: str, series_list: list) -> None:
+    def _on_export_requested(self, fmt: str, series_list: list,
+                             use_display_transform: bool = False) -> None:
         """Right-click ▸ Export (DICOM)/(MP4)/(CSV): show the filename-
         fields dialog, ask for an output folder, run the export with a
         live progress bar. Runs on the UI thread (simpler; MP4 of a few
         hundred frames is still seconds, not minutes). CSV writes one
-        file per series listing the displayed DICOM-tag-overlay tags."""
+        file per series listing the displayed DICOM-tag-overlay tags.
+
+        *use_display_transform* is True only for the IMAGE right-click path:
+        an MP4 then bakes in what the viewer shows (orientation + free rotation
+        + current W/L). The Studies-list export leaves it False, so it always
+        writes the ORIGINAL image regardless of on-screen state. DICOM (verbatim
+        copy) and CSV (tag data) ignore it either way."""
         if not series_list or fmt not in (
             "dicom", "mp4", "csv", "anon-dicom"
         ):
@@ -3440,12 +3475,21 @@ class MainWindow(QMainWindow):
                 frame_ranges = [
                     self._mp4_ranges.get(s.series_uid) for s in series_list
                 ]
+                # Image right-click → bake each series' on-screen state
+                # (orientation + free rotation + W/L) so it exports as shown.
+                # Studies-list export leaves this None → original image.
+                transforms = (
+                    [self._display_transform_for_uid(s.series_uid)
+                     for s in series_list]
+                    if use_display_transform else None
+                )
                 written = exporter.export_mp4(
                     series_list, out_dir, cfg.fields,
                     bitrate_mbps=cfg.bitrate_mbps,
                     fps_override=cfg.fps,
                     crf=cfg.crf,
                     frame_ranges=frame_ranges,
+                    transforms=transforms,
                     progress=_cb,
                 )
         except RuntimeError as e:

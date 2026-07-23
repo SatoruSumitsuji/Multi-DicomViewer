@@ -2207,6 +2207,12 @@ class ImageCanvas(QWidget):
     def free_rotation(self) -> float:
         return self._free_rot
 
+    def orient_state(self) -> tuple[bool, int]:
+        """Current discrete orientation: (horizontal-flip?, ×90° CW count).
+        Applied as flip-then-rotate (see _oriented). Lets an exporter bake the
+        same orientation the canvas shows into written frames."""
+        return bool(self._t_flip), int(self._t_rot % 4)
+
     def _free_rot_angle(self, sx: float, sy: float) -> float:
         return math.degrees(math.atan2(sy - self.height() / 2.0,
                                        sx - self.width() / 2.0))

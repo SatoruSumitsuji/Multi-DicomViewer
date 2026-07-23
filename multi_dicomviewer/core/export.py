@@ -659,16 +659,22 @@ def _write_mp4(path: str, frames: list[np.ndarray],
     stream.close()
 
 
-def _render_xa_series(series: Series) -> tuple[list[np.ndarray], float]:
+def _render_xa_series(series: Series, window: Optional[float] = None,
+                      level: Optional[float] = None
+                      ) -> tuple[list[np.ndarray], float]:
     """Decoded RGB frames for an XA / IVUS series, with the source FPS
     (None → caller's default). For biplane (2 planes), the two views are
-    laid out side-by-side per frame so the output is one MP4."""
+    laid out side-by-side per frame so the output is one MP4. *window* /
+    *level*, when given, override the series default (so an image right-click
+    MP4 uses the viewer's current W/L)."""
     loaded = load_xa(series)
     planes = loaded.xa_planes or []
     if not planes:
         return [], 0.0
     n = max(p.total_frames for p in planes)
     fps = loaded.cine_fps or 0.0
+    win = window if (window is not None and window > 0) else loaded.window
+    lvl = level if level is not None else loaded.level
 
     out: list[np.ndarray] = []
     for i in range(n):
@@ -676,7 +682,7 @@ def _render_xa_series(series: Series) -> tuple[list[np.ndarray], float]:
         h_max = 0
         for p in planes:
             j = min(i, p.total_frames - 1)
-            tile = _to_rgb_u8(p.frame(j), loaded.window, loaded.level)
+            tile = _to_rgb_u8(p.frame(j), win, lvl)
             tiles.append(tile)
             h_max = max(h_max, tile.shape[0])
         # Pad each tile to the tallest height, then hstack.
@@ -702,14 +708,16 @@ def _render_ct_series(series: Series) -> tuple[list[np.ndarray], float]:
     return out, 15.0
 
 
-def render_series_for_mp4(series: Series
+def render_series_for_mp4(series: Series, window: Optional[float] = None,
+                          level: Optional[float] = None
                           ) -> tuple[list[np.ndarray], float]:
     """Public helper: returns (RGB-frames, default-fps) for one series.
     Dispatches by modality. The caller decides the final fps (the source
-    rate is the default; the dialog can override)."""
+    rate is the default; the dialog can override). *window* / *level* override
+    the series-default W/L for XA/IVUS (image right-click 'as shown' export)."""
     if series.modality == Modality.CT:
         return _render_ct_series(series)
-    return _render_xa_series(series)
+    return _render_xa_series(series, window=window, level=level)
 
 
 def _clip_to_range(frames: list[np.ndarray],
@@ -728,6 +736,59 @@ def _clip_to_range(frames: list[np.ndarray],
     return frames[start:end + 1]
 
 
+def _rotate_rgb_centre(frame: np.ndarray, deg: float) -> np.ndarray:
+    """Rotate an RGB uint8 frame *deg*° clockwise about its centre, keeping the
+    same H×W (corners clip to black) — the way ImageCanvas paints a free
+    rotation. Qt raster paint, so no extra image dependency is needed (a
+    QApplication already exists whenever the app triggers an export)."""
+    from PyQt6.QtGui import QImage, QPainter
+    h, w = frame.shape[:2]
+    src = np.ascontiguousarray(frame[..., :3], dtype=np.uint8)
+    qsrc = QImage(src.data, w, h, 3 * w, QImage.Format.Format_RGB888)
+    out = QImage(w, h, QImage.Format.Format_RGB888)
+    out.fill(0)
+    p = QPainter(out)
+    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    p.translate(w / 2.0, h / 2.0)
+    p.rotate(float(deg))                 # +deg = clockwise, matching the canvas
+    p.translate(-w / 2.0, -h / 2.0)
+    p.drawImage(0, 0, qsrc)
+    p.end()
+    ptr = out.constBits()
+    ptr.setsize(out.sizeInBytes())
+    bpl = out.bytesPerLine()
+    arr = np.frombuffer(ptr, np.uint8).reshape(h, bpl)[:, : w * 3]
+    return arr.reshape(h, w, 3).copy()
+
+
+def _apply_display_transform(frames: list[np.ndarray],
+                             tf: Optional[dict]) -> list[np.ndarray]:
+    """Bake a viewer's display transform into RGB *frames* so the MP4 matches
+    what was on screen. *tf* = {"flip": bool, "rot90": int, "free_rot": deg}
+    (see ImageCanvas.orient_state / free_rotation); None = no change. Applied
+    flip → ×90° → free-rotate, the same order the canvas uses. Zoom / pan are
+    intentionally NOT applied — the export keeps the whole frame."""
+    if not tf:
+        return frames
+    flip = bool(tf.get("flip"))
+    rot90 = int(tf.get("rot90", 0)) % 4
+    ang = float(tf.get("free_rot", 0.0)) % 360.0
+    if not flip and not rot90 and ang < 1e-3:
+        return frames
+    out = []
+    for f in frames:
+        g = f
+        if flip:
+            g = np.fliplr(g)
+        if rot90:
+            g = np.rot90(g, -rot90)      # ×90° clockwise, matching _oriented
+        g = np.ascontiguousarray(g)
+        if ang >= 1e-3:
+            g = _rotate_rgb_centre(g, ang)
+        out.append(g)
+    return out
+
+
 def export_mp4(series_list: list[Series],
                out_dir: str,
                fields: Iterable[str],
@@ -736,6 +797,7 @@ def export_mp4(series_list: list[Series],
                crf: Optional[int] = None,
                frame_ranges: Optional[
                    list[Optional[tuple[int, int]]]] = None,
+               transforms: Optional[list[Optional[dict]]] = None,
                progress: ProgressCB = None) -> list[str]:
     """Write one .mp4 per series into *out_dir*. Returns the list of
     files written. ``fps_override`` (from the dialog) wins over the
@@ -757,8 +819,15 @@ def export_mp4(series_list: list[Series],
             progress(si, n,
                      f"Rendering [{si + 1}/{n}] {series.kind} "
                      f"#{series.number or '?'}")
+        tf = (transforms[si]
+              if (transforms is not None and si < len(transforms)) else None)
         try:
-            frames, src_fps = render_series_for_mp4(series)
+            # 'As shown' export uses the viewer's current W/L (rendered from raw
+            # so it stays crisp); a normal export uses the series default.
+            win = tf.get("window") if tf else None
+            lvl = tf.get("level") if tf else None
+            frames, src_fps = render_series_for_mp4(
+                series, window=win, level=lvl)
         except Exception as e:
             if progress:
                 progress(si, n, f"Failed: {e}")
@@ -772,6 +841,11 @@ def export_mp4(series_list: list[Series],
             frames = _clip_to_range(frames, rng)
             if not frames:
                 continue
+        # Bake the on-screen orientation + free rotation so the MP4 matches what
+        # the viewer showed (e.g. a rotated IVUS pull-back). W/L is already
+        # applied above; zoom / pan are intentionally NOT (keep the full frame).
+        if tf is not None:
+            frames = _apply_display_transform(frames, tf)
         fps = float(fps_override) if fps_override and fps_override > 0 \
             else (src_fps or 15.0)
 
