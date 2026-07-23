@@ -123,6 +123,16 @@ class _CoregPane:
         self.master_radio.setToolTip(
             t("Make this the active IVUS — its frame drives the markers"))
         self.master_radio.toggled.connect(self._on_master_toggled)
+        # Reverse the play/scroll order (distal↔proximal) AFTER entering CoSync,
+        # so a pull-back can be flipped here too (IVUS-like panes only). Between
+        # Master and the Zoom/WL drag toggles. Tracks a per-pane reversed flag.
+        self._reversed = False
+        self.reverse_btn = QPushButton(t("Reverse"))
+        self.reverse_btn.setCheckable(True)
+        self.reverse_btn.setToolTip(
+            t("Reverse the play/scroll order (distal↔proximal)"))
+        self.reverse_btn.setVisible(False)
+        self.reverse_btn.clicked.connect(self._toggle_reverse)
         # Drag-mode toggles (IVUS-like panes): Zoom / WL, right of Master. The
         # default drag Spins (rotates) the cross-section; these switch what a
         # drag does. Applied to the WHOLE image (all frames), not a sync point.
@@ -146,6 +156,7 @@ class _CoregPane:
             t("While adding a CoSync point, include this IVUS's current frame"))
         self.include_cb.setVisible(False)
         self.nav.addWidget(self.master_radio)
+        self.nav.addWidget(self.reverse_btn)
         self.nav.addWidget(self.zoom_btn)
         self.nav.addWidget(self.wl_btn)
         self.nav.addStretch(1)
@@ -158,6 +169,9 @@ class _CoregPane:
         self.master_radio.setText(t("Master"))
         self.master_radio.setToolTip(
             t("Make this the active IVUS — its frame drives the markers"))
+        self.reverse_btn.setText(t("Reverse"))
+        self.reverse_btn.setToolTip(
+            t("Reverse the play/scroll order (distal↔proximal)"))
         self.include_cb.setText(t("Include in this point"))
         self.include_cb.setToolTip(
             t("While adding a CoSync point, include this IVUS's current frame"))
@@ -199,6 +213,12 @@ class _CoregPane:
         self._init_wl(loaded)
         self.canvas.spacing_mm = dicom_io.series_spacing_mm(series)
         self.master_radio.setVisible(self.is_ivus)
+        # Reverse applies only to IVUS-like scrubbing panes (an angio is a
+        # still). A fresh load starts in the order it was given (the source's
+        # play-order is already baked in via the load reverse flag).
+        self._reversed = False
+        self.reverse_btn.setVisible(self.is_ivus)
+        self.reverse_btn.setChecked(False)
         # Zoom / WL drag modes are available on EVERY loaded pane — IVUS and
         # angio alike (an angio pane can't spin, but a drag can still zoom or
         # window it). The buttons sit in the nav row, i.e. below the seekbar.
@@ -243,6 +263,9 @@ class _CoregPane:
         self.is_ivus = True                       # a master/driver like IVUS
         self.canvas.spacing_mm = spec.get("spacing_mm")
         self.master_radio.setVisible(True)
+        self._reversed = False
+        self.reverse_btn.setVisible(True)         # flip the synthetic pull-back
+        self.reverse_btn.setChecked(False)
         self.zoom_btn.setVisible(True)            # Zoom / WL drag modes
         self.wl_btn.setVisible(True)
         self.canvas.set_coreg_visible(False)      # no guide overlay
@@ -299,6 +322,32 @@ class _CoregPane:
     def _on_master_toggled(self, on: bool) -> None:
         if on:
             self.owner._set_active_ivus(self.index)
+
+    def _toggle_reverse(self) -> None:
+        """Flip this pane's play/scroll order (distal↔proximal) in place. Keeps
+        the physically-shown frame, mirrors every CoSync-point frame stored for
+        this pane so the points still mark the same cross-sections, then lets
+        the window re-range / re-sync. IVUS reverses its plane; a CT short-axis
+        reverses its pre-rendered stack."""
+        n = self.total
+        if n <= 1 or (self.plane is None and self._stack is None):
+            self.reverse_btn.setChecked(self._reversed)   # nothing to flip
+            return
+        if self._stack is not None:
+            self._stack = self._stack[::-1].copy()
+        elif self.plane is not None:
+            self.plane.reverse()
+        self.cur = n - 1 - self.cur
+        # Mirror this pane's stored CoSync-point frames so each point still
+        # marks the same physical cross-section after the flip.
+        for lm in self.owner._landmarks:
+            fr = lm.get("frames", {})
+            if self.index in fr:
+                fr[self.index] = n - 1 - fr[self.index]
+        self._reversed = not self._reversed
+        self.reverse_btn.setChecked(self._reversed)
+        self.show_frame(self.cur)
+        self.owner._on_pane_reversed(self)
 
     def _on_slider_pressed(self) -> None:
         # Grabbing an IVUS seekbar means the user is positioning for a NEW
@@ -1419,6 +1468,17 @@ class CoregWindow(QMainWindow):
         self._active_ivus = pane_idx
         self._drive_markers()
         self._refresh_global_seek()      # master changed → re-range on its axis
+
+    def _on_pane_reversed(self, pane) -> None:
+        """A pane flipped its play-order (its stored CoSync-point frames were
+        already mirrored): refresh the point list's frame labels, re-range the
+        global seek (its axis may have flipped if it's the master), then re-apply
+        the rotation 按分 and re-drive the markers so everything stays in step."""
+        self._refresh_list()
+        self._refresh_global_seek()
+        for p in self.panes:
+            self._apply_rotation(p)
+        self._drive_markers()
 
     def _on_ivus_scrub(self, pane_idx: int) -> None:
         """Scrubbing the MASTER IVUS moves the others in lockstep (once ≥2
