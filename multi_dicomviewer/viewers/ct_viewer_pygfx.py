@@ -331,6 +331,8 @@ def _compute_slab_qimage(p):
     else:
         g = np.clip((mip - (p["lvl"] - p["win"] / 2.0))
                     / max(1e-6, p["win"]), 0.0, 1.0)
+        if p.get("invert"):                       # WB reverse (grayscale only)
+            g = 1.0 - g
         gg = (g * 255.0).astype(np.uint8)
         rgb = np.stack([gg, gg, gg], axis=2)
     rgb = np.ascontiguousarray(rgb)
@@ -640,15 +642,21 @@ class _Overlay(QWidget):
             a4 = transp_to_alpha(m.get("transp", 0))
             of = off_flags(m)
             if of is not None and not m.get("smooth"):
-                # Per-segment outline: fade a segment to 50% where it leaves the
-                # slice (either endpoint off-plane), so the light-blue vessel
-                # line dims exactly where it dives out of the cross-section.
+                # Per-segment outline, three states (same as the VTK viewer):
+                #   both endpoints ON  → solid, full alpha
+                #   one endpoint OFF   → solid, 50% alpha (leaving the slice)
+                #   both endpoints OFF → DOTTED, 50% alpha (fully out of range)
+                # so "in the cross-section" vs "out of it" reads at a glance.
                 verts = list(m["pts"])
                 half_a = max(1, a4 // 2)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 for i in range(len(verts) - 1):
-                    seg_a = half_a if (of[i] or of[i + 1]) else a4
-                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], seg_a), 1.8))
+                    o0, o1 = of[i], of[i + 1]
+                    seg_a = half_a if (o0 or o1) else a4
+                    pen = QPen(QColor(rgb[0], rgb[1], rgb[2], seg_a), 1.8)
+                    if o0 and o1:
+                        pen.setStyle(Qt.PenStyle.DotLine)
+                    p.setPen(pen)
                     p.drawLine(S(verts[i]), S(verts[i + 1]))
             else:
                 draw_outline(v._outline(m), rgb, alpha=a4)
@@ -1133,6 +1141,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     plane_export_requested = pyqtSignal(str, str, str)
     #: emitted on every committed measurement (shell logs it per study)
     measurement_added = pyqtSignal(object)
+    #: emitted with a measurement id when a committed result is un-committed
+    #: (Resume trace) so the shell drops its stale Measure-History entry; the
+    #: entry comes back under the SAME id when the trace is committed again.
+    measurement_removed = pyqtSignal(int)
     #: fired from a background debounce thread to wake the GUI thread and crisp
     #: up the slab LOD. A cross-thread queued signal posts an event that wakes a
     #: fully-idle Qt loop — which same-thread QTimer/aboutToBlock can't do
@@ -1205,6 +1217,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmap_dlg = None
         self._lut_key = None                 # cache key for the colormap tex
         self._lut_tex = None
+        self._invert = False                 # WB reverse (grayscale negative)
+        self._inv_key = None                 # cache key for the inverted ramp
+        self._inv_tex = None
         # short-axis (CPR) state — shared logic lives in CPRMixin. None unless
         # the user turns a polyline trace into a vessel centreline (_enter_cpr);
         # pane A then becomes the cross-section scroller.
@@ -1217,6 +1232,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_type = None               # line|polyline|ellipse|polygon|angle
         self._measures = {"A": [], "B": []}  # finalized {id,type,pts,...}
         self._meas_seq = 0
+        self._snap_lumen = True              # snap trace clicks to the lumen
         self._draft = None                   # {type, pane, pts} in progress
         self._edit = None                    # {key, mi, vi} handle drag
         self._center_angle_target = None     # {key, mi} during 3-pt pick
@@ -1821,6 +1837,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         lbl = getattr(self, "_slab_lbl", None)
         if lbl is not None:
             lbl.setText(t("Slab:"))
+        if getattr(self, "_slab_spin", None) is not None:
+            self._slab_spin.setToolTip(
+                t("Slab-MIP thickness of the active pane (0 = thin MPR)"))
         lbl = getattr(self, "_measure_lbl", None)
         if lbl is not None:
             lbl.setText(t("Measure:"))
@@ -1899,6 +1918,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         ]
         for b, tip in zip(getattr(self, "_t2d_btns", None) or [], t2d_tips):
             b.setHelpToolTip(tip)
+        b = getattr(self, "_invert_btn", None)
+        if b is not None:
+            b.setText(t("WB reverse"))
+            b.setHelpToolTip(t("Invert grayscale (black↔white negative)"))
 
         # -- bottom 2-D seek bar -----------------------------------------
         lbl = getattr(self, "_seek_frame_lbl", None)
@@ -2082,6 +2105,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._slab_spin.setRange(0.0, 50.0)
         self._slab_spin.setSingleStep(0.5)
         self._slab_spin.setDecimals(1)
+        self._slab_spin.setToolTip(
+            t("Slab-MIP thickness of the active pane (0 = thin MPR)"))
         self._slab_spin.valueChanged.connect(self._set_slab)
         row.addWidget(self._slab_spin)
 
@@ -2175,6 +2200,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
             self._t2d_btns.append(b)
             row2.addWidget(b)
+        # Grayscale invert (black↔white negative) — right of Flip-V.
+        self._invert_btn = FitButton(t("WB reverse"))
+        self._invert_btn.setCheckable(True)
+        self._invert_btn.setHelpToolTip(
+            t("Invert grayscale (black↔white negative)"))
+        self._invert_btn.clicked.connect(self._toggle_invert)
+        row2.addWidget(self._invert_btn)
         row2.addStretch(1)
 
         col.addLayout(row)
@@ -2834,6 +2866,98 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _axes_for(self, key):
         return self._frame[key]
 
+    # A traced polyline stores BOTH 2-D pane coords and absolute 3-D volume
+    # coords (pts3d); these two convert between them for the plane live NOW.
+    def _out_to_world3d(self, which, wx, wy):
+        u, v, _n = self._axes_for(which)
+        o = self._pc[which]
+        return o + float(wx) * u + float(wy) * v
+
+    def _world3d_to_out(self, which, P):
+        u, v, _n = self._axes_for(which)
+        d = np.asarray(P, dtype=float) - self._pc[which]
+        return (float(np.dot(d, u)), float(np.dot(d, v)))
+
+    # ---- lumen (high-HU) snapping for vessel tracing ----
+    def _hu_along(self, P, n, ds):
+        """Trilinear HU samples of the volume at P + d·n for each d in *ds*
+        (world mm). Out-of-volume samples read as very low HU so they never
+        win the brightest-peak search. Mirrors the VTK viewer."""
+        if self._vol is None:
+            return None
+        sx, sy, sz = self._dims
+        pts = np.asarray(P, float)[None, :] + np.asarray(ds, float)[:, None] * n
+        fx = pts[:, 0] / sx
+        fy = pts[:, 1] / sy
+        fz = pts[:, 2] / sz
+        nz, ny, nx = self._vol.shape
+        inb = ((fx >= 0) & (fx <= nx - 1) & (fy >= 0) & (fy <= ny - 1)
+               & (fz >= 0) & (fz <= nz - 1))
+        out = np.full(len(ds), -2000.0)
+        if not inb.any():
+            return out
+        val = _trilinear_sample(self._vol, fx, fy, fz)
+        out[inb] = np.asarray(val, float)[inb]
+        return out
+
+    def _snap_to_lumen(self, P, n, reach=8.0, floor_hu=150.0):
+        """Move P along ±*reach* mm of the plane normal *n* to the centre of
+        the nearest contrast-bright (lumen) run — the depth the slab MIP hid.
+
+        Picks the brightest run whose centre is closest to the click (so it
+        can't jump to a distant bright structure), then returns its intensity-
+        weighted centroid. No-op (returns P) if nothing rises above *floor_hu*
+        or the volume isn't available."""
+        n = np.asarray(n, float)
+        nn = float(np.linalg.norm(n))
+        if self._vol is None or nn < 1e-9:
+            return np.asarray(P, float)
+        n = n / nn
+        step = max(0.25, min(self._dims) * 0.5)
+        ds = np.arange(-reach, reach + step, step)
+        hu = self._hu_along(P, n, ds)
+        if hu is None:
+            return np.asarray(P, float)
+        peak = float(hu.max())
+        if peak < floor_hu:
+            return np.asarray(P, float)          # no lumen in reach → leave it
+        thr = max(floor_hu, 0.5 * peak)
+        bright = hu >= thr
+        best = None                    # contiguous bright runs; pick nearest d=0
+        i = 0
+        N = len(ds)
+        while i < N:
+            if not bright[i]:
+                i += 1
+                continue
+            j = i
+            while j < N and bright[j]:
+                j += 1
+            centre = 0.5 * (ds[i] + ds[j - 1])
+            if best is None or abs(centre) < abs(best[2]):
+                best = (i, j, centre)
+            i = j
+        if best is None:
+            return np.asarray(P, float)
+        i, j, _c = best
+        w = hu[i:j] - thr
+        wsum = float(w.sum())
+        d_star = float(np.dot(w, ds[i:j]) / wsum) if wsum > 1e-9 \
+            else float(ds[(i + j) // 2])
+        return np.asarray(P, float) + d_star * n
+
+    def _snap_trace(self, which, mi):
+        """Re-snap every vertex of a 3-D trace to the contrast lumen along the
+        CURRENT plane normal (orient the plane roughly along the vessel first
+        for the best axis). Redraws the trace afterwards."""
+        m = self._measures[which][mi]
+        p3 = m.get("pts3d")
+        if not p3:
+            return
+        _, _, nrm = self._axes_for(which)
+        m["pts3d"] = [self._snap_to_lumen(P, nrm) for P in p3]
+        self._redraw_meas(which)
+
     def _cc(self, key):
         """Crosshair centre (C projected into the pane plane, relative to
         the pane's reslice centre) — output coords mm. Used by overlays."""
@@ -2952,6 +3076,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "thick": float(self._thick[key]), "vol": self._vol,
             "max_planes": _SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL,
             "color": bool(self._color),
+            "invert": bool(self._invert),
             "bands": [dict(b) for b in self._bands],
             "opacity": float(self._opacity),
             "win": float(self._win), "lvl": float(self._lvl),
@@ -3021,9 +3146,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.material.clim = (_HU_LO, _HU_HI)
                 p.material.map = self._lut_texture()
             else:
-                p.material.map = None
-                p.material.clim = (self._lvl - self._win / 2.0,
-                                   self._lvl + self._win / 2.0)
+                self._gray_material(p)
             if reset_cam:
                 self._fit_pane(key)
             else:
@@ -4141,10 +4264,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # paged planes lifts to a correct 3-D centreline (Short-axis / CPR) —
         # mirrors the VTK viewer. Only meaningful for polylines.
         if d["type"] == "polyline":
-            u, v, _n = self._frame[which]
-            pc = self._pc[which]
-            d.setdefault("pts3d", []).append(
-                np.asarray(pc, float) + float(w[0]) * u + float(w[1]) * v)
+            P = self._out_to_world3d(which, *w)
+            # Optionally snap the DEPTH to the contrast lumen along the plane
+            # normal (the slab MIP hid it) — same as the VTK viewer.
+            if self._snap_lumen and self._mode == "3D":
+                _, _, nrm = self._axes_for(which)
+                P = self._snap_to_lumen(P, nrm)
+                d["pts"][-1] = self._world3d_to_out(which, P)  # keep 2-D in step
+            d.setdefault("pts3d", []).append(P)
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
             self._commit_draft()
         elif d["type"] == "angle" and len(d["pts"]) >= 3:
@@ -4166,6 +4293,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._resnap_center_angle(m)
         else:
             m["pts"][e["vi"]] = w
+            # Keep the absolute 3-D trace in step: the dragged vertex moves on
+            # the CURRENT plane, so its new 3-D is that 2-D point lifted here
+            # (then snapped to the lumen along the normal, if enabled).
+            if m.get("pts3d") and 0 <= e["vi"] < len(m["pts3d"]):
+                P = self._out_to_world3d(e["key"], *w)
+                if self._snap_lumen and self._mode == "3D":
+                    _, _, nrm = self._axes_for(e["key"])
+                    P = self._snap_to_lumen(P, nrm)
+                    m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
+                m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
@@ -4229,8 +4366,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             pts = d["pts"][:2]
         else:
             pts = list(d["pts"])
-        self._meas_seq += 1
-        m = {"id": self._meas_seq, "type": d["type"], "pts": pts}
+        # A resumed trace keeps its ORIGINAL id (and colour / spline / alpha) so
+        # it reads as the same result continued, not a brand-new one; a fresh
+        # draft takes the next sequence number.
+        if d.get("resume_id") is not None:
+            rid = int(d["resume_id"])
+            self._meas_seq = max(self._meas_seq, rid)
+        else:
+            self._meas_seq += 1
+            rid = self._meas_seq
+        m = {"id": rid, "type": d["type"], "pts": pts}
+        for k in ("color", "smooth", "transp"):
+            if d.get(k) is not None:
+                m[k] = d[k]
         # Carry the per-click 3-D control points (polyline only) so the trace
         # can seed a short-axis centreline and its control markers.
         if d["type"] == "polyline" and d.get("pts3d") \
@@ -4240,7 +4388,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_meas(d["pane"])
         # Log to the study's measurement history (shell-owned).
         meas = Measurement(kind=d["type"].capitalize(), points=list(pts),
-                           spacing_mm=None)
+                           spacing_mm=None, mid=rid)
         meas.text = self._metrics_text(d["pane"], m)
         self.measurement_added.emit(meas)
 
@@ -4248,6 +4396,55 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = self._draft
         if d and d["type"] in ("polyline", "polygon") and len(d["pts"]) >= 2:
             self._commit_draft()
+
+    def _resume_trace(self, which, mi, endpoint_vi):
+        """Un-commit polyline *mi* back into the in-progress draft so the user
+        can keep clicking to EXTEND it from the *endpoint_vi* end (0 = start,
+        last = end). New clicks always append to the draft, so a start-resume
+        reverses the vertex order first (the geometry is identical; CPR handles
+        direction). The stale Measure-History entry is dropped here and re-added
+        when the trace is committed again, keeping the same result id."""
+        if not (0 <= mi < len(self._measures[which])):
+            return
+        m = self._measures[which][mi]
+        if m["type"] != "polyline" or len(m["pts"]) < 2:
+            return
+        # Arm the Polyline tool so the next clicks EXTEND this trace. Sync the
+        # toolbar buttons WITHOUT calling _set_measure_type, which would wipe
+        # the draft we're about to install.
+        self._meas_type = "polyline"
+        self._meas_hover = None
+        for k, b in self._meas_btns.items():
+            b.setChecked(k == "polyline")
+            b.setStyleSheet(
+                "background:#1f77b4;color:white;" if k == "polyline" else "")
+        self._refresh_tool_availability()
+        # Prefer the absolute 3-D control points (re-projected onto the CURRENT
+        # plane) as the source of truth; fall back to the stored 2-D vertices.
+        p3 = m.get("pts3d")
+        if p3 is not None and len(p3) == len(m["pts"]) and self._mode == "3D":
+            pts3d = [np.asarray(P, float) for P in p3]
+            pts = [self._world3d_to_out(which, P) for P in pts3d]
+        else:
+            pts3d = None
+            pts = [tuple(q) for q in m["pts"]]
+        if endpoint_vi == 0:                     # resume from the START end
+            pts = list(reversed(pts))
+            if pts3d is not None:
+                pts3d = list(reversed(pts3d))
+        d = {"type": "polyline", "pane": which, "pts": pts,
+             "resume_id": m["id"]}
+        if pts3d is not None:
+            d["pts3d"] = pts3d
+        for k in ("color", "smooth", "transp"):  # keep the trace's appearance
+            if k in m:
+                d[k] = m[k]
+        # Drop the committed result (and its history entry); it lives on as the
+        # draft now and re-commits under the same id.
+        self.measurement_removed.emit(int(m["id"]))
+        del self._measures[which][mi]
+        self._draft = d
+        self._redraw_meas(which)
 
     def _measure_right(self, which, sx, sy) -> bool:
         """Right-click on a measure (handle / outline / Center-Angle marker) →
@@ -4335,11 +4532,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         mi, vi = hit
         m = self._measures[which][mi]
         menu = QMenu(self)
-        del_pt = del_res = None
+        del_pt = del_res = resume_act = None
         if m["type"] in ("polyline", "polygon"):
             del_pt = menu.addAction(t("Delete point"))
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
+        # Right-click on a polyline END vertex (the 断端) → "Resume trace":
+        # un-commit it so the user can keep clicking points to EXTEND that end
+        # (Add point only inserts BETWEEN existing vertices, never past an end).
+        if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
+            resume_act = menu.addAction(t("Resume trace"))
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
         from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
@@ -4357,6 +4559,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
+        elif resume_act is not None and chosen is resume_act:
+            self._resume_trace(which, mi, vi)
+            return                               # _resume_trace redraws itself
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
@@ -4388,6 +4593,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             # short-axis cross-sections in pane A. 3-D MPR only, >=2 points.
             if self._mode == "3D" and len(m["pts"]) >= 2:
                 cpr_act = menu.addAction(t("Short-axis MPR (CPR)"))
+        # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
+        # checkable auto-snap toggle for future clicks.
+        snap_now_act = snap_auto_act = None
+        if m["type"] == "polyline" and self._mode == "3D" and m.get("pts3d"):
+            snap_now_act = menu.addAction(t("Snap trace to lumen"))
+            snap_auto_act = menu.addAction(t("Auto-snap to lumen"))
+            snap_auto_act.setCheckable(True)
+            snap_auto_act.setChecked(self._snap_lumen)
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
@@ -4412,6 +4625,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif cpr_act is not None and chosen is cpr_act:
             self._enter_cpr(which, mi)
             return                               # _enter_cpr redraws itself
+        elif snap_now_act is not None and chosen is snap_now_act:
+            self._snap_trace(which, mi)
+        elif snap_auto_act is not None and chosen is snap_auto_act:
+            self._snap_lumen = snap_auto_act.isChecked()
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
         elif center_angle_act is not None and chosen is center_angle_act:
@@ -4621,9 +4838,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.material.clim = (_HU_LO, _HU_HI)
             p.material.map = self._lut_texture()
         else:
-            p.material.map = None
-            p.material.clim = (self._lvl - self._win / 2.0,
-                               self._lvl + self._win / 2.0)
+            self._gray_material(p)
         p.mesh.visible = True
         self._mip_img["A"] = None
         self._config_cpr_cam(p, o, u, v)
@@ -4713,8 +4928,47 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lut_key = key
         return self._lut_tex
 
+    def _invert_texture(self):
+        """1-D white→black gray ramp with the W/L window baked in, over the
+        full HU domain [_HU_LO,_HU_HI] — the same mechanism (and clim) as the
+        HU colormap, which is the proven-good path on Metal.
+
+        Why not just swap the clim ends: a reversed clim (low > high) is
+        undefined behaviour for the material's clamp, so it renders garbage on
+        gradients. Why 4096 entries: the window is baked into the ramp, so a
+        narrow window must still resolve >256 grey levels or it would band."""
+        key = (self._win, self._lvl)
+        if key != self._inv_key:
+            n = 4096
+            hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
+            g = np.clip((hu - (self._lvl - self._win / 2.0))
+                        / max(1e-6, self._win), 0.0, 1.0).astype(np.float32)
+            g = (1.0 - g).astype(np.float32)          # the negative
+            arr = np.stack([g, g, g, np.ones_like(g)], axis=1)
+            self._inv_tex = gfx.Texture(arr, dim=1)
+            self._inv_key = key
+        return self._inv_tex
+
+    def _gray_material(self, p):
+        """Apply the plain (non-colormap) grayscale mapping to a pane material.
+        WB reverse renders through an inverted gray ramp; the normal path is
+        left exactly as it was (direct clim, no map)."""
+        if self._invert:
+            p.material.clim = (_HU_LO, _HU_HI)
+            p.material.map = self._invert_texture()
+        else:
+            p.material.map = None
+            p.material.clim = (self._lvl - self._win / 2.0,
+                               self._lvl + self._win / 2.0)
+
     def _toggle_color(self):
         self._color = self._cmap_btn.isChecked()
+        self._refresh()
+
+    def _toggle_invert(self):
+        """WB reverse: invert the grayscale (black↔white). Applies to every
+        pane, including the short-axis (all use the gray ramp)."""
+        self._invert = self._invert_btn.isChecked()
         self._refresh()
 
     def _open_setting(self):
