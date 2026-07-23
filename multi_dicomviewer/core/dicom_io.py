@@ -856,6 +856,12 @@ class XAPlane:
         self.is_color = is_color
         self._ready = np.zeros(total_frames, dtype=bool)
         self._ready[0] = True
+        #: True after reverse(): for a single-dataset cine (frame_files is None)
+        #: the LAZY decode must read frame (total-1-i), not i, or an as-yet
+        #: undecoded frame would come back in the original order and undo the
+        #: reversal (only the already-decoded frames get physically swapped by
+        #: reverse()). frame_files stacks reverse the file list instead.
+        self._reversed = False
 
     def reverse(self) -> None:
         """Reverse the frame order in place (distal↔proximal). The caller MUST
@@ -867,6 +873,11 @@ class XAPlane:
             if self.frame_files is not None:
                 self.frame_files = list(reversed(self.frame_files))
             self._ready = self._ready[::-1].copy()
+            # Flip the lazy-decode direction too (single-dataset cines): the
+            # frame-order swap above only moves ALREADY-decoded frames, so
+            # undecoded ones must decode from the mirrored index to stay in
+            # sync. (No-op for frame_files stacks, whose list was reversed.)
+            self._reversed = not self._reversed
 
     def frame(self, i: int) -> np.ndarray:
         """Return frame *i* (float32 gray or uint8 RGB), decoding it on
@@ -1265,6 +1276,10 @@ def _plane_decode(plane: "XAPlane", i: int) -> np.ndarray:
     fc = bool(getattr(plane, "force_color", False))
     ff = getattr(plane, "frame_files", None)
     if ff is None:
+        # A reversed single-dataset cine decodes the mirrored frame so lazy /
+        # prefetch decodes match the swapped volume (see XAPlane._reversed).
+        if getattr(plane, "_reversed", False):
+            i = plane.total_frames - 1 - i
         return _decode_frame(plane._ds, i, force_color=fc)
     ds = pydicom.dcmread(ff[i], force=True)
     fr = _decode_frame(ds, 0, force_color=fc)

@@ -42,6 +42,7 @@
   "Add / edit / commit CoReg point": "CoReg点の追加・修正・確定",
   "Add / edit / commit CoSync point": "CoSync点の追加・修正・確定",
   "Add point": "点の追加",
+  "Resume trace": "トレース再開",
   "Align each IVUS to the landmark frame/rotation, then press the button again to commit (IVUS sync point).": "各IVUSを目印フレーム・回転へ合わせ、もう一度ボタンで確定（IVUS同期点）。",
   "Also clear all Private (vendor) tag values": "Private タグ（ベンダー私的タグ）の値もすべて空にする",
   "Also offer DICOMDIR for deletion": "DICOMDIRも削除対象にする",

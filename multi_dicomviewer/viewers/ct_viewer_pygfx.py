@@ -599,6 +599,33 @@ class _Overlay(QWidget):
             for q in pts:
                 p.drawEllipse(S(q), r, r)
 
+        def dots_hollow(pts, color, r=4.0, width=1.4):
+            # Off-plane depth cue: a hollow ring (中抜き) rather than a filled
+            # dot, so an off-slice pseudo-centre reads as "behind/in front".
+            # *r* is the OUTER radius (matches the filled dot's r); the stroke
+            # straddles the path, so draw at r-width/2 to keep the outer edge
+            # on r — the ring and the filled dot then share an outer diameter.
+            rr = max(0.5, r - width / 2.0)
+            p.setPen(QPen(color, width))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for q in pts:
+                p.drawEllipse(S(q), rr, rr)
+
+        # This pane's cutting-plane frame — used to fade the parts of a 3-D
+        # vessel trace that lie OFF the shown slice (depth cue), matching the
+        # VTK viewer's off-plane handling in _redraw_geom.
+        _pu, _pv, _pn = v._axes_for(key)
+        _po = v._pc[key]
+
+        def off_flags(m):
+            """Per-vertex True where the trace's 3-D point is >1 mm off this
+            plane; None when the measure carries no matching 3-D points."""
+            p3 = m.get("pts3d") if m["type"] == "polyline" else None
+            if p3 is None or len(p3) != len(m["pts"]):
+                return None
+            return [abs(float(np.dot(np.asarray(P, float) - _po, _pn))) > 1.0
+                    for P in p3]
+
         e = v._edit
         edit_mi = e["mi"] if (e and e["key"] == key) else -1
         edit_vi = e["vi"] if (e and e["key"] == key) else -1
@@ -610,8 +637,21 @@ class _Overlay(QWidget):
             if v._results_hidden or m.get("hidden"):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
-            draw_outline(v._outline(m), rgb,
-                         alpha=transp_to_alpha(m.get("transp", 0)))
+            a4 = transp_to_alpha(m.get("transp", 0))
+            of = off_flags(m)
+            if of is not None and not m.get("smooth"):
+                # Per-segment outline: fade a segment to 50% where it leaves the
+                # slice (either endpoint off-plane), so the light-blue vessel
+                # line dims exactly where it dives out of the cross-section.
+                verts = list(m["pts"])
+                half_a = max(1, a4 // 2)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for i in range(len(verts) - 1):
+                    seg_a = half_a if (of[i] or of[i + 1]) else a4
+                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], seg_a), 1.8))
+                    p.drawLine(S(verts[i]), S(verts[i + 1]))
+            else:
+                draw_outline(v._outline(m), rgb, alpha=a4)
             if m["type"] in ("ellipse", "polygon"):
                 maj, mnr, _, _ = _major_minor(m)
                 for seg in (maj, mnr):
@@ -648,9 +688,19 @@ class _Overlay(QWidget):
                 dots(ca_idle, QColor(255, 140, 0), 5.0)
                 if ca_edit:
                     dots([ca["pts"][edit_vi]], QColor(59, 219, 90), 7.0)
-            idle = [q for vi, q in enumerate(v._handles(m))
-                    if not (mi == edit_mi and not edit_ca and vi == edit_vi)]
-            dots(idle, QColor(255, 217, 0), 4.0)            # yellow handles
+            # Trace vertices (the vessel's pseudo-centres): on-plane ones draw
+            # as solid yellow dots, off-plane ones as 50% hollow yellow rings so
+            # the user sees which pseudo-centres sit in the shown cross-section.
+            idle_on, idle_off = [], []
+            for vi, q in enumerate(v._handles(m)):
+                if mi == edit_mi and not edit_ca and vi == edit_vi:
+                    continue                          # the dragged one → green
+                if of is not None and vi < len(of) and of[vi]:
+                    idle_off.append(q)
+                else:
+                    idle_on.append(q)
+            dots(idle_on, QColor(255, 217, 0), 4.0)              # yellow handles
+            dots_hollow(idle_off, QColor(255, 217, 0, 128), 4.0)  # off-plane 50%
             if mi == edit_mi and not edit_ca and 0 <= edit_vi < len(m["pts"]):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
@@ -660,6 +710,17 @@ class _Overlay(QWidget):
             p.setFont(fb)
             ax, ay = v._world_to_screen(key, *v._anchor(m))
             p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
+
+        # CPR: on the MAP pane, mark where the short-axis is currently cut (the
+        # scrubbed centreline point projected onto this plane) — the CT analogue
+        # of the IVUS pull-back position marker. Green, matching the VTK viewer.
+        if v._cpr is not None and key == v._cpr.get("src"):
+            cl = v._cpr["cl"]
+            i = int(v._cpr["idx"])
+            if 0 <= i < len(cl.points):
+                pw = np.asarray(cl.points[i], float) - _po
+                dots([(float(np.dot(pw, _pu)), float(np.dot(pw, _pv)))],
+                     QColor(59, 219, 90), 7.0)
 
         d = v._draft
         if d and d["pane"] == key and d["pts"]:

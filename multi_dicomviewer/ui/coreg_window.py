@@ -164,12 +164,16 @@ class _CoregPane:
 
     # ---- loading ----
     def load(self, series: Series | None, plane_index: int = 0,
-             start_frame: int = 0) -> None:
+             start_frame: int = 0, rotation: float = 0.0,
+             reverse: bool = False) -> None:
         """Load *series* into this pane. *plane_index* selects which biplane
         projection to show (0 = Lt / left, 1 = Rt / right) so the pane
         mirrors what the source pane displayed; ignored for single-plane.
         *start_frame* opens on the frame the source pane was showing (so an
-        angio still keeps the frame the user picked, not frame 0)."""
+        angio still keeps the frame the user picked, not frame 0). *rotation*
+        and *reverse* carry the source IVUS's display rotation and play-order
+        (distal↔proximal) so this pane opens matching it (a CT short-axis
+        carries the same via load_stack); both are no-ops for angio panes."""
         self.series = series
         if series is None:
             self.plane = None
@@ -183,6 +187,11 @@ class _CoregPane:
         planes = loaded.xa_planes or [None]
         pidx = plane_index if 0 <= plane_index < len(planes) else 0
         self.plane = planes[pidx]
+        # Match the source's play-order: Reverse physically flips the plane's
+        # frames (distal↔proximal), so scrub / landmark mapping run the same way
+        # here. Safe on this fresh load — no prefetch is running on it.
+        if reverse and self.plane is not None:
+            self.plane.reverse()
         self.total = self.plane.total_frames if self.plane else 0
         self.is_color = bool(loaded.is_color
                              or getattr(self.plane, "is_color", False))
@@ -199,6 +208,10 @@ class _CoregPane:
         # MultiSync-style drag-to-rotate of the cross-section.
         self.canvas.set_coreg_visible(not self.is_ivus)
         self.canvas.set_free_rotation_enabled(self.is_ivus)
+        # Carry the source IVUS's display rotation (angio panes don't rotate).
+        # Landmark 按分 later overrides it, but the initial view matches.
+        if self.is_ivus and rotation:
+            self.canvas.set_free_rotation(float(rotation))
         mod = series.modality.value if hasattr(series.modality, "value") \
             else str(series.modality)
         side = f" {'Lt' if pidx == 0 else 'Rt'}" if len(planes) > 1 else ""
@@ -658,8 +671,13 @@ class CoregWindow(QMainWindow):
             if isinstance(spec, dict):            # CT short-axis stack pane
                 pane.load_stack(spec)
                 continue
-            se, pidx, start = spec
-            pane.load(se, pidx, start)
+            # (series, plane, start[, rotation, reverse]) — the last two carry
+            # the source IVUS's display rotation + play-order so the pane opens
+            # matching it (older 3-tuples default to no rotation / forward).
+            se, pidx, start = spec[0], spec[1], spec[2]
+            rot = float(spec[3]) if len(spec) > 3 else 0.0
+            rev = bool(spec[4]) if len(spec) > 4 else False
+            pane.load(se, pidx, start, rotation=rot, reverse=rev)
             if not pane.is_ivus:
                 self._wire_angio(pane)
                 self._guides[i] = {"vertices": [], "curve": [], "frame": None}
