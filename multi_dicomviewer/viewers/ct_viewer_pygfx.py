@@ -1238,6 +1238,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
+        self._shift_tool = False             # Shift-press runs the tool, not measure
         self._meas_hover = None              # cursor (output coords) for draft preview
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
@@ -1475,7 +1476,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if self._meas_on:
                 return                        # right-click in measure mode = no-op
-        if self._meas_on:
+        # Shift while measuring temporarily runs the SELECTED tool instead of
+        # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
+        # off the slab; Move/Zoom just help you look) — so you can reorient the
+        # plane mid-trace without leaving Measure. Falls through to the same
+        # tool path idle-Measure uses; _shift_tool keeps _on_move on that path
+        # for the rest of the drag (Shift may be released mid-gesture).
+        _shift = "Shift" in (ev.get("modifiers") or ())
+        self._shift_tool = bool(self._meas_on and _shift and self._drag_btn == 1)
+        if self._meas_on and not _shift:
             self._cross_grab = False
             # Left-click MEASURES while a type is selected or a Center-Angle
             # pick is in progress, and it also grabs an existing measure's
@@ -1535,7 +1544,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
-        if self._meas_on:
+        if self._meas_on and not self._shift_tool:
             if self._meas_drag:
                 self._measure_drag(key, x, y)
                 return
@@ -1583,6 +1592,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_drag_end()
             self._cpr_rot_end()
         self._meas_drag = False
+        self._shift_tool = False
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
@@ -1611,6 +1621,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._meas_drag = False
+        self._shift_tool = False
         self._spin_prev = None
         try:
             gw = QWidget.mouseGrabber()
@@ -1624,7 +1635,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # from consecutive right-downs in _on_down — never recenter on it.
         if ev.get("button") == 2:
             return
-        if self._meas_on:
+        # Shift+double-click recentres even while Measuring (the trace follows
+        # the moved image, see _recenter → _redraw_meas). A plain double-click
+        # in Measure mode still finishes the polyline draft.
+        if self._meas_on and "Shift" not in (ev.get("modifiers") or ()):
             self._measure_finish_draft()
             return
         if self._cpr is not None and key == "A":
@@ -3140,6 +3154,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             pc = self._pc[key]
             p.material.plane = (float(n[0]), float(n[1]), float(n[2]),
                                 float(-np.dot(n, pc)))
+            # Anatomy-anchored traces (pts3d) re-project on ANY view change —
+            # recentre / move / rotate / spin / page — not only on measure
+            # edits, so the pseudo-centre points AND their line follow the
+            # image even after Measure is switched off.
+            self._reproject_traces(key)
             if self._color:
                 # Colormap bakes W/L into the LUT over [_HU_LO,_HU_HI]; clim
                 # maps that HU span to the LUT's 0..1 domain.
@@ -4183,10 +4202,29 @@ class CTViewer(CPRMixin, AbstractViewer):
                 f"Dmax:{dmax:.1f}  Dmin:{dmin:.1f}mm{ca_str}")
 
     # ---- drawing (the overlay paints; these just trigger repaint) ----
+    def _reproject_traces(self, key):
+        """A vessel-trace polyline stores ABSOLUTE 3-D control points (pts3d);
+        re-derive its 2-D pane coords from them against the plane live NOW, so
+        the trace stays glued to the anatomy when the plane is recentred /
+        moved / rotated / paged instead of sitting still on screen. A plain 2-D
+        measure has no pts3d and is untouched. 3-D MPR only."""
+        if self._mode != "3D":
+            return
+        for m in self._measures[key]:
+            p3 = m.get("pts3d")
+            if p3 and m["type"] == "polyline" and len(p3) == len(m["pts"]):
+                m["pts"] = [self._world3d_to_out(key, P) for P in p3]
+        d = self._draft
+        if (d is not None and d.get("pane") == key and d.get("pts3d")
+                and len(d["pts3d"]) == len(d["pts"])):
+            d["pts"] = [self._world3d_to_out(key, P) for P in d["pts3d"]]
+
     def _redraw_geom(self, key):
+        self._reproject_traces(key)
         self._overlay[key].update()
 
     def _redraw_meas(self, key):
+        self._reproject_traces(key)
         self._recompute_compares(key)      # keep comparisons in sync on edit/delete
         self._metrics[key] = [self._metrics_text(key, m)
                               for m in self._measures[key]]

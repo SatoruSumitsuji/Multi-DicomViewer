@@ -326,6 +326,76 @@ def main() -> int:
           all(v.pane[k].material.map is None
               and v.pane[k].material.clim == (lo, hi) for k in ("A", "B")))
 
+    # ------------------------------------ 5. traces follow the image
+    print("\n5. Anatomy-anchored traces follow the view")
+    v._invert = False
+    v._measures = {"A": [], "B": []}
+    v._draft = None
+    key = "A"
+    u, vv, _n = v._axes_for(key)
+    pc0 = np.array(v._pc[key], float)
+    pts2d = [(-6.0, -6.0), (0.0, 0.0), (5.0, 5.0)]
+    p3 = [pc0 + a * u + b * vv for (a, b) in pts2d]
+    v._measures[key] = [{"id": 1, "type": "polyline",
+                         "pts": list(pts2d), "pts3d": p3}]
+    # a committed trace must keep its 3-D anchor and re-project its 2-D coords
+    v._recenter(key, 40, 40)                     # double-click recentre
+    app.processEvents()
+    moved = float(np.linalg.norm(np.array(v._pc[key], float) - pc0))
+    m = v._measures[key][0]
+    check("recentre actually moved the plane centre", moved > 0.5,
+          f"{moved:.1f} mm")
+    check("trace keeps its 3-D anchor",
+          all(np.allclose(a, b) for a, b in zip(m["pts3d"], p3)))
+    expect = [v._world3d_to_out(key, P) for P in p3]
+    check("trace 2-D coords re-projected onto the moved plane",
+          all(abs(q[0] - e[0]) < 1e-6 and abs(q[1] - e[1]) < 1e-6
+              for q, e in zip(m["pts"], expect))
+          and not np.allclose(np.asarray(m["pts"], float),
+                              np.asarray(pts2d, float)),
+          f"{pts2d[0]} -> {m['pts'][0]}")
+    # a rotate/page must do the same (the re-projection hangs off _refresh)
+    before = [tuple(q) for q in m["pts"]]
+    v._pc[key] = np.array(v._pc[key], float) + 3.0 * np.asarray(u, float)
+    v._refresh()
+    app.processEvents()
+    check("trace re-projects on any view change",
+          not np.allclose(np.asarray(m["pts"], float),
+                          np.asarray(before, float)),
+          f"{before[0]} -> {m['pts'][0]}")
+
+    # ------------------------------------------- 6. Shift modifiers
+    print("\n6. Shift gestures (parity with the VTK viewer)")
+    v._meas_on = True
+    v._meas_type = "polyline"
+    v._draft = {"type": "polyline", "pane": key, "pts": [(0.0, 0.0),
+                                                         (2.0, 2.0)],
+                "pts3d": [pc0, pc0 + 2.0 * u + 2.0 * vv]}
+    n_before = len(v._measures[key])
+    v._on_dblclick(key, {"button": 1, "x": 30, "y": 30,
+                         "modifiers": ()})
+    check("plain double-click finishes the draft while measuring",
+          v._draft is None and len(v._measures[key]) == n_before + 1)
+    pc_before = np.array(v._pc[key], float)
+    v._on_dblclick(key, {"button": 1, "x": 60, "y": 60,
+                         "modifiers": ("Shift",)})
+    check("Shift+double-click recentres while measuring",
+          float(np.linalg.norm(np.array(v._pc[key], float)
+                               - pc_before)) > 0.5)
+    v._draft = None
+    v._on_down(key, {"button": 1, "x": 50, "y": 50,
+                     "modifiers": ("Shift",)})
+    check("Shift+press runs the tool instead of measuring",
+          v._shift_tool is True and v._draft is None)
+    v._on_up(key, {"button": 1, "x": 50, "y": 50, "modifiers": ()})
+    check("the Shift-tool flag clears on release", v._shift_tool is False)
+    v._on_down(key, {"button": 1, "x": 50, "y": 50, "modifiers": ()})
+    check("plain press still measures",
+          v._shift_tool is False and v._draft is not None)
+    v._on_up(key, {"button": 1, "x": 50, "y": 50, "modifiers": ()})
+    v._draft = None
+    v._meas_on = False
+
     print("\n" + ("ALL PASS" if not FAILED
                   else f"{len(FAILED)} FAILED: {FAILED}"))
     win.close()
