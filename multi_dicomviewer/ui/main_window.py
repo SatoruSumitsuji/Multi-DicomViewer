@@ -27,6 +27,7 @@ from PyQt6.QtGui import (
     QKeySequence,
     QPainter,
     QPen,
+    QPixmap,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -467,6 +468,80 @@ class _SeriesLoadWorker(QObject):
         self.done.emit(loaded)
 
 
+class _FolderScanWorker(QObject):
+    """Scans / indexes a DICOM folder off the GUI thread.
+
+    Reading a large study's per-file metadata (``scan_folder`` /
+    ``index_files``) is pure pydicom + dataclass work with no Qt objects, so
+    it runs here while the shell stays responsive — the user can pick another
+    folder, drag series, etc. while a big CT study is still being indexed
+    (the scan used to run on the GUI thread behind an app-modal dialog, which
+    froze the whole window, including the native folder picker). The built
+    Patient tree crosses back via ``done``; it's merged on the GUI thread."""
+
+    progress = pyqtSignal(int, int)          # done, total
+    done = pyqtSignal(object)                 # patients dict
+    failed = pyqtSignal(str)
+
+    def __init__(self, scan_fn):
+        super().__init__()
+        self._scan_fn = scan_fn
+
+    def run(self) -> None:
+        try:
+            patients = self._scan_fn(
+                lambda done, total: self.progress.emit(done, total))
+        except Exception as exc:                          # noqa: BLE001
+            traceback.print_exc()
+            self.failed.emit(str(exc))
+            return
+        self.done.emit(patients)
+
+
+class _StillLabel(QLabel):
+    """A demoted pane's frozen last image.
+
+    When a pane is put to sleep to free memory (its heavy CT volume / XA clip
+    is released) the last image it showed is kept here as a plain pixmap.
+    Selecting the pane (a click) both activates it AND reloads its series — the
+    user asked that picking a pane always make it the live/active one, even for
+    CT (where only one is kept live at a time, so the previous CT sleeps). A
+    mouse-wheel does the same. Double-click is left to the pane's own 1×1
+    maximise handler."""
+
+    def __init__(self, pane):
+        super().__init__(pane)
+        self._pane = pane
+        self._src = None                       # unscaled source pixmap
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet("background:#000;")
+
+    def set_image(self, pixmap) -> None:
+        self._src = pixmap
+        self._rescale()
+
+    def _rescale(self) -> None:
+        if self._src is None or self._src.isNull():
+            return
+        super().setPixmap(self._src.scaled(
+            self.size(), Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation))
+
+    def resizeEvent(self, e):                    # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        self._rescale()
+
+    def mousePressEvent(self, ev):               # noqa: N802 (Qt override)
+        # Selecting a still pane makes it active AND reloads it (promote is a
+        # no-op if it's mid-load). activated fires first so it's the active
+        # pane before the load starts.
+        self._pane.activated.emit(self._pane)
+        self._pane.promote_requested.emit(self._pane)
+
+    def wheelEvent(self, ev):                    # noqa: N802 (Qt override)
+        self._pane.promote_requested.emit(self._pane)
+
+
 class ViewerPane(QFrame):
     """One grid cell. Modality agnostic: it caches one viewer per modality
     and shows whichever the dropped/loaded series needs."""
@@ -479,6 +554,7 @@ class ViewerPane(QFrame):
     pane_move_requested = pyqtSignal(int, int)  # (src index, dest index)
     pane_cleared = pyqtSignal(object)         # the ✕ emptied this pane
     maximize_requested = pyqtSignal(object)   # 1×1 button / double-click → 1×1
+    promote_requested = pyqtSignal(object)    # a demoted still pane was used
 
     def __init__(self, index: int, parent=None):
         super().__init__(parent)
@@ -540,6 +616,15 @@ class ViewerPane(QFrame):
         )
         self._stack = QStackedWidget()
         self._stack.addWidget(self._idle)
+        # "Still" page: a memory-light snapshot of a demoted (slept) pane. It
+        # holds the last image the pane showed as a plain pixmap while the heavy
+        # viewer (CT volume / XA clip) is freed; a data-needing interaction
+        # reloads the real series (see promote_requested / _promote_pane).
+        self._still = _StillLabel(self)
+        self._stack.addWidget(self._still)
+        self._still_series = None      # Series to reload on promote (None → live)
+        self._still_state = None       # best-effort view snapshot (Phase 3)
+        self._series_ref = None        # Series currently shown (for LRU/demote)
 
         self._box = QVBoxLayout(self)
         self._box.setContentsMargins(1, 1, 1, 1)
@@ -696,6 +781,7 @@ class ViewerPane(QFrame):
         self._stack.setCurrentWidget(viewer)
         viewer.load_series(loaded, title)
         self._cur_viewer = viewer
+        self._clear_still()          # a live load supersedes any frozen snapshot
         self._set_pane_title(pane_label if pane_label is not None else title)
         # A freshly built or re-shown viewer must match this pane's current
         # Max-Image / compact state.
@@ -711,8 +797,55 @@ class ViewerPane(QFrame):
 
     def has_data(self) -> bool:
         """True if this pane currently shows a loaded series (drives the
-        layout-picker's bright-vs-dark cell shading)."""
-        return self._cur_viewer is not None
+        layout-picker's bright-vs-dark cell shading). A demoted "still" pane
+        still counts as having data — its series is just frozen to save
+        memory, not gone."""
+        return self._cur_viewer is not None or self._still_series is not None
+
+    def is_still(self) -> bool:
+        """True while this pane is a memory-freed frozen snapshot."""
+        return self._still_series is not None
+
+    def demote_to_still(self, series, state=None) -> bool:
+        """Sleep this pane: keep its last image on screen as a static pixmap
+        but free the live viewer's volume/clip. Returns False if there was
+        nothing live to demote (e.g. still loading). *series* is what to
+        reload on promote; *state* is an optional view snapshot for restore."""
+        v = self._cur_viewer
+        if v is None or series is None:
+            return False
+        # Prefer a viewer-provided snapshot() (needed where a GL/GPU surface —
+        # VTK on Windows, wgpu on Mac — doesn't render into QWidget.grab());
+        # fall back to grabbing the widget for plain-Qt viewers (XA canvas).
+        if hasattr(v, "snapshot"):
+            try:
+                pix = v.snapshot()
+            except Exception:
+                pix = v.grab()
+        else:
+            pix = v.grab()
+        if pix is None or pix.isNull():
+            return False
+        self._still.set_image(pix)
+        self._still_series = series
+        self._still_state = state
+        # Release the heavy data. CT's VTK clear() frees the volume but leaves
+        # _loaded_uid set, which would make _open_series' fast-path show an
+        # empty viewer on reload — force a real reload by clearing it. (XA's
+        # clear() already resets _loaded_uid.)
+        v.clear()
+        try:
+            v._loaded_uid = ""
+        except Exception:
+            pass
+        self._cur_viewer = None
+        self._stack.setCurrentWidget(self._still)
+        return True
+
+    def _clear_still(self) -> None:
+        self._still_series = None
+        self._still_state = None
+        self._still.set_image(QPixmap())
 
     def is_loaded(self, modality, series_uid: str) -> bool:
         """True if this pane already has *series_uid* loaded into the
@@ -731,6 +864,7 @@ class ViewerPane(QFrame):
             return
         self._stack.setCurrentWidget(viewer)
         self._cur_viewer = viewer
+        self._clear_still()          # returning to a live viewer ends still mode
         self._set_pane_title(pane_label)
 
     def set_shown_series(self, uid: str | None) -> None:
@@ -747,6 +881,8 @@ class ViewerPane(QFrame):
             v.clear()
         self._cur_viewer = None
         self._shown_uid = None
+        self._series_ref = None
+        self._clear_still()
         self._idle.findChild(QLabel).setText(
             t("Pane {n}\n\n"
               "Drag & drop a series from the Info panel,\n"
@@ -927,6 +1063,10 @@ class MainWindow(QMainWindow):
         # stays usable while a big CT reads; this tracks the live jobs so a
         # pane isn't double-loaded and the threads aren't GC'd mid-run.
         self._loads: dict[object, tuple] = {}
+        # Background folder-scan/index jobs (worker -> (thread, dlg, open_in_pane,
+        # spread_roots)) so the scan runs off the GUI thread and its threads
+        # aren't GC'd mid-run.
+        self._scans: dict[object, tuple] = {}
         # Per-series MP4 export range [start, end] (0-based frame indices),
         # reported by a cine viewer's Play-range markers. A series only
         # appears here while its range is narrower than the full clip; a
@@ -1005,10 +1145,19 @@ class MainWindow(QMainWindow):
             pane.pane_move_requested.connect(self._swap_panes)
             pane.pane_cleared.connect(self._on_pane_cleared)
             pane.maximize_requested.connect(self._maximize_pane)
+            pane.promote_requested.connect(self._promote_pane)
             self._panes.append(pane)
         # Panes in grid-slot order (drag a title onto another to swap).
         self._order: list[ViewerPane] = list(self._panes)
         self._active = self._panes[0]
+        # LRU bookkeeping for the memory cap: a monotonic "use clock" stamped on
+        # each pane whenever it's loaded or activated. When more than the cap of
+        # a modality is live at once, the least-recently-used one is demoted to a
+        # frozen still (its volume/clip freed) so many series can stay on screen
+        # without exhausting memory. See _touch_pane / _enforce_live_caps.
+        self._use_seq = 0
+        self._pane_touch: dict[ViewerPane, int] = {}
+        self._live_cap = self._load_live_caps()   # {Modality: live-at-once cap}
 
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
@@ -1169,6 +1318,9 @@ class MainWindow(QMainWindow):
         )
         self._tagsz_lbl.setText(t("Tag size:"))
         self._tag_font_slider.setToolTip(t("DICOM tag text size (all panes)"))
+        self._settings_btn.setText(t("Settings"))
+        self._settings_btn.setToolTip(
+            t("Display count, angio image quality, CT colour map"))
 
         # Panes (placeholders, tooltips) + every cached viewer.
         for pane in self._panes:
@@ -2245,6 +2397,21 @@ class MainWindow(QMainWindow):
         self._tag_font_slider.valueChanged.connect(self._set_tag_font_pt)
         row.addWidget(self._tag_font_slider)
 
+        # "Settings" — a popup gathering the app-wide display preferences:
+        # display count (memory cap), angio image quality (S-Cine/S-Zoom/
+        # Denoise) and the CT HU colour map.
+        self._settings_btn = FitButton(t("Settings"))
+        self._settings_btn.setToolTip(
+            t("Display count, angio image quality, CT colour map"))
+        # Grey background — the same grey used for the CT screen's utility
+        # controls — so this new button reads as a distinct settings entry.
+        self._settings_btn.setStyleSheet(
+            "QPushButton { background:#6e6e6e; color:#f0f0f0;"
+            " border:1px solid #5a5a5a; border-radius:6px; padding:3px 8px; }"
+            "QPushButton:hover { background:#7d7d7d; }")
+        self._settings_btn.clicked.connect(self._open_settings)
+        row.addWidget(self._settings_btn)
+
         # Bi/Lt/Rt lives inside each viewer's own "Plane:" bar now (per-pane),
         # so there is no global plane switch in this top bar anymore.
         # (FitButton itself is now shrinkable — Preferred policy + an icon/first-
@@ -2515,10 +2682,67 @@ class MainWindow(QMainWindow):
 
     def _set_active_pane(self, pane: ViewerPane) -> None:
         self._active = pane
+        self._touch_pane(pane)
         for p in self._panes:
             p.set_active(p is pane and p.isVisible())
         self._sync_xa_shortcuts()
         self._follow_active_pane()
+
+    # ------------------------------------------------- memory cap (LRU sleep)
+    def _load_live_caps(self) -> dict:
+        """Per-modality 'live at once' caps as {Modality: n}, from user settings.
+        Beyond a cap the least-recently-used pane of that modality is frozen to
+        a still and its memory freed — so opening many large CTs / angios can't
+        exhaust RAM (the cause of the hard crash when 3 CT + 11 XA were open)."""
+        caps = settings.load_live_caps()
+        return {Modality.CT: caps["CT"], Modality.XA: caps["XA"]}
+
+    def _touch_pane(self, pane: ViewerPane) -> None:
+        """Stamp *pane* as most-recently-used on the LRU clock."""
+        self._use_seq += 1
+        self._pane_touch[pane] = self._use_seq
+
+    def _pane_live_modality(self, pane: ViewerPane):
+        """The modality whose data *pane* currently holds live (not a still),
+        or None if the pane is empty / frozen / still loading."""
+        if pane.is_still() or pane.current_viewer() is None:
+            return None
+        s = getattr(pane, "_series_ref", None)
+        return s.modality if s is not None else None
+
+    def _enforce_live_caps(self, keep: ViewerPane) -> None:
+        """Demote least-recently-used live panes to frozen stills until each
+        modality is within its _LIVE_CAP. *keep* (the just-loaded/active pane)
+        is never demoted. A pane with a load in flight is left alone."""
+        for mod, cap in self._live_cap.items():
+            live = [p for p in self._panes
+                    if self._pane_live_modality(p) == mod
+                    and p not in self._loads]
+            if len(live) <= cap:
+                continue
+            # Oldest first; never touch the pane we want to keep. Iterate a copy
+            # so removing from `live` mid-loop doesn't skip the next candidate.
+            live.sort(key=lambda p: self._pane_touch.get(p, 0))
+            for p in list(live):
+                if len(live) <= cap:
+                    break
+                if p is keep:
+                    continue
+                if p.demote_to_still(getattr(p, "_series_ref", None)):
+                    live.remove(p)
+
+    def _promote_pane(self, pane: ViewerPane) -> None:
+        """A frozen still pane was interacted with → reload its series (its
+        view rebuilds; the LRU cap then frees whatever is now oldest). The
+        still state is cleared by show_series only once the reload SUCCEEDS, so
+        a failed load leaves the frozen image in place and the user can retry."""
+        if not pane.is_still() or pane in self._loads:
+            return
+        series = pane._still_series
+        if series is None:
+            return
+        self._set_active_pane(pane)
+        self._open_series(series, pane)
 
     def _follow_active_pane(self) -> None:
         """Make the browser reflect whatever the ACTIVE pane shows: highlight
@@ -2939,32 +3163,70 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+        # NON-modal + off the GUI thread: a big CT study's per-file metadata
+        # scan used to run here on the GUI thread behind an app-modal dialog,
+        # freezing the whole window (you couldn't even open the folder picker).
+        # Now a worker does the scan while the shell stays live; the post-scan
+        # merge/auto-open runs in _on_scan_done on the GUI thread.
         dlg = QProgressDialog(t("Loading DICOM…"), None, 0, 0, self)
         dlg.setWindowTitle(t("Scanning"))
-        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
         dlg.setMinimumDuration(300)   # don't flash for tiny folders
-        dlg.setAutoClose(True)
-        dlg.setAutoReset(True)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
 
-        def _progress(done, total):
-            if total and dlg.maximum() != total:
-                dlg.setMaximum(total)
-            dlg.setValue(done)
-            QApplication.processEvents()
+        thread = QThread(self)
+        worker = _FolderScanWorker(scan_fn)
+        worker.moveToThread(thread)
+        self._scans[worker] = (thread, dlg, open_in_pane, spread_roots)
+        worker.progress.connect(self._on_scan_progress)
+        worker.done.connect(self._on_scan_done)
+        worker.failed.connect(self._on_scan_failed)
+        thread.started.connect(worker.run)
+        thread.start()
 
-        try:
-            new_patients = scan_fn(_progress)
-        except Exception as exc:
-            dlg.reset()
-            dlg.close()
-            QMessageBox.critical(self, t("Scan failed"), str(exc))
+    def _scan_entry_for_sender(self):
+        """(worker, entry) for the scan worker that emitted the running signal,
+        or (None, None) if already cleaned up."""
+        worker = self.sender()
+        entry = self._scans.get(worker)
+        return (worker, entry) if entry is not None else (None, None)
+
+    def _cleanup_scan(self, worker) -> None:
+        entry = self._scans.pop(worker, None)
+        if entry is None:
             return
-        # reset() — not just setValue(max) — cancels the minimumDuration
-        # force-show timer and hides the dialog. For a fast/empty scan the timer
-        # would otherwise fire AFTER this function returned and pop a "Scanning"
-        # window that nothing ever closed (the empty-folder hang).
+        thread, dlg = entry[0], entry[1]
         dlg.reset()
         dlg.close()
+        thread.quit()
+        thread.wait()
+        worker.deleteLater()
+        thread.deleteLater()
+
+    def _on_scan_progress(self, done: int, total: int) -> None:
+        _worker, entry = self._scan_entry_for_sender()
+        if entry is None:
+            return
+        dlg = entry[1]
+        if total and dlg.maximum() != total:
+            dlg.setMaximum(total)
+        dlg.setValue(done)
+
+    def _on_scan_failed(self, msg: str) -> None:
+        worker, entry = self._scan_entry_for_sender()
+        if entry is None:
+            return
+        self._cleanup_scan(worker)
+        QMessageBox.critical(self, t("Scan failed"), msg)
+
+    def _on_scan_done(self, new_patients) -> None:
+        worker, entry = self._scan_entry_for_sender()
+        if entry is None:
+            return
+        open_in_pane, spread_roots = entry[2], entry[3]
+        self._cleanup_scan(worker)
         # Series UIDs contributed by THIS folder — used to auto-open the
         # newly dropped study (not whatever sorts first overall).
         new_uids = {
@@ -3685,6 +3947,8 @@ class MainWindow(QMainWindow):
         if pane.is_loaded(series.modality, series.series_uid):
             pane.switch_to_loaded(series.modality, self._pane_bar(series))
             pane.set_shown_series(series.series_uid)
+            pane._series_ref = series
+            self._touch_pane(pane)
             self._cur_study_uid = self._study_by_series_uid.get(
                 series.series_uid
             )
@@ -3707,6 +3971,7 @@ class MainWindow(QMainWindow):
             self._update_cine_series_pos(pane)
             if pane is self._active:
                 self._follow_active_pane()
+            self._enforce_live_caps(keep=pane)
             self.statusBar().showMessage(t("Resumed {label}", label=series.label))
             return
         # A load already running for this pane? Ignore the repeat request so
@@ -3830,6 +4095,8 @@ class MainWindow(QMainWindow):
 
         self._cur_study_uid = self._study_by_series_uid.get(series.series_uid)
         pane.show_series(loaded, series.label, self._pane_bar(series))
+        pane._series_ref = series          # remembered for LRU demote / promote
+        self._touch_pane(pane)             # freshly loaded = most-recently-used
         self._cleanup_load(pane)
         # Carry the current anonymize + tag-overlay choices onto the
         # (possibly newly built) viewer.
@@ -3864,6 +4131,10 @@ class MainWindow(QMainWindow):
         # Keep an open history window pointed at the now-current study.
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
             self._refresh_history_dialog()
+        # Now that this pane is fully live, sleep the least-recently-used panes
+        # of the same modality if we're over the memory cap — freeing their
+        # volume/clip while keeping their last image on screen.
+        self._enforce_live_caps(keep=pane)
         self.statusBar().showMessage(t("Loaded {label}", label=series.label))
 
     def _clear_all(self) -> None:
@@ -3893,6 +4164,12 @@ class MainWindow(QMainWindow):
             viewer.measurement_removed.connect(self._remove_measurement)
         if hasattr(viewer, "history_requested"):
             viewer.history_requested.connect(self._show_history)
+        # CT HU colour map is global: when it's edited in one CT pane, mirror it
+        # onto every other CT pane (persistence is done in the viewer).
+        if hasattr(viewer, "colormap_changed"):
+            viewer.colormap_changed.connect(
+                lambda bands, op, src=viewer:
+                self._propagate_ct_colormap(src, bands, op))
         if hasattr(viewer, "tags_requested"):
             viewer.tags_requested.connect(
                 lambda vv=viewer: self._open_tag_dialog(vv)
@@ -4153,6 +4430,70 @@ class MainWindow(QMainWindow):
             t("Anonymize settings updated: {n} tag(s)", n=len(tags))
             + (t(" + private") if emptify_private else "")
         )
+
+    def _open_settings(self) -> None:
+        """Top-bar Settings button: display count + angio image quality + CT
+        colour map, in one popup. Saved and applied live on OK."""
+        from multi_dicomviewer.ui.settings_dialog import SettingsDialog
+        caps = {"CT": self._live_cap[Modality.CT],
+                "XA": self._live_cap[Modality.XA]}
+        quality = settings.load_display_quality()
+        dlg = SettingsDialog(caps, quality, self._open_ct_color, self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        # Display count: persist + apply (over-cap panes sleep now; keep=active
+        # so the focused pane is never the one demoted).
+        vals = dlg.caps()
+        settings.save_live_caps(vals)
+        self._live_cap = {Modality.CT: vals["CT"], Modality.XA: vals["XA"]}
+        self._enforce_live_caps(keep=self._active)
+        # Angio quality: merge into the persisted prefs, then push to every
+        # loaded XA viewer (updates its canvases + S-Cine/S-Zoom/Denoise
+        # buttons) so the change takes effect without reopening the series.
+        q = settings.load_display_quality()
+        q.update(dlg.quality())
+        settings.save_display_quality(q)
+        for v in self._all_loaded_viewers():
+            if hasattr(v, "reload_display_quality"):
+                v.reload_display_quality()
+        self.statusBar().showMessage(
+            t("Settings saved (CT {ct} / Angio {xa} live)",
+              ct=vals["CT"], xa=vals["XA"]))
+
+    def _all_loaded_viewers(self) -> list:
+        """Every cached viewer across all panes (deduplicated)."""
+        seen, out = set(), []
+        for pane in self._panes:
+            for v in pane.all_viewers():
+                if id(v) not in seen:
+                    seen.add(id(v))
+                    out.append(v)
+        return out
+
+    def _propagate_ct_colormap(self, source, bands, opacity) -> None:
+        """Mirror a colour-map edit from *source* onto every other CT viewer so
+        the HU colour map is shared app-wide (each already persisted it)."""
+        for v in self._all_loaded_viewers():
+            if v is not source and hasattr(v, "apply_global_colormap"):
+                v.apply_global_colormap(bands, opacity)
+
+    def _open_ct_color(self) -> None:
+        """Open the HU colour-map editor for a CT pane. Prefers the active
+        pane's CT viewer; else the first loaded CT viewer. Tells the user to
+        load a CT series if none is open."""
+        cands = []
+        av = self._active.current_viewer() if self._active else None
+        if av is not None:
+            cands.append(av)
+        cands += [v for v in self._all_loaded_viewers() if v is not av]
+        for v in cands:
+            if hasattr(v, "_open_setting") and getattr(v, "_vol", None) \
+                    is not None:
+                v._open_setting()
+                return
+        QMessageBox.information(
+            self, t("CT colour"),
+            t("Load a CT series first, then edit its HU colour map."))
 
     def _fit_studies_dock_width(self, width: int) -> None:
         """Thumbnail "Fit: min × 10 across" → widen the Studies dock toward

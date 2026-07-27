@@ -1070,9 +1070,25 @@ class DicomFolderWindow(QMainWindow):
         self._groups = {}
         self._file_group = {}
         self._next_new = 1
+        # Base grouping first, then an ALWAYS-ON refinement: any base group that
+        # spans more than one patient name is split per patient so files from
+        # different patients never share an output folder. This is deliberately
+        # NOT a user-facing "group by" option — mixing different patients into
+        # one folder is never wanted, so it is applied unconditionally on top of
+        # whatever grouping the user picked. A group with a single patient keeps
+        # its plain folder name (no patient suffix), so the common case is
+        # unchanged; the suffix appears only where it's needed to separate.
+        base = [_group_of(f, group_by, separate) for f in self._files]
+        pts_per_key: dict[str, set] = {}
+        for (key, _sub), f in zip(base, self._files):
+            pts_per_key.setdefault(key, set()).add(f["patientName"])
         order = 0
         for idx, f in enumerate(self._files):
-            key, default_sub = _group_of(f, group_by, separate)
+            key, default_sub = base[idx]
+            if len(pts_per_key.get(key, ())) > 1:
+                pt = f["patientName"] or "Unknown"
+                key = f"{key} / {pt}"
+                default_sub = f"{default_sub}_{_safe(pt)}"
             if key not in self._groups:
                 self._groups[key] = {"name": default_sub, "manual": False,
                                      "order": order}

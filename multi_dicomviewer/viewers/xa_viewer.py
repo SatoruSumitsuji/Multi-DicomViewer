@@ -927,10 +927,12 @@ class XAViewer(AbstractViewer):
         row.addWidget(self._drag_wl_btn)
         row.addSpacing(16)
         row.addWidget(self._reset_orient_btn)
-        row.addSpacing(16)
-        row.addWidget(self._hq_cine_btn)
-        row.addWidget(self._smooth_btn)
-        row.addWidget(self._denoise_btn)
+        # S-Cine / S-Zoom / Denoise moved to the shell's "Settings" popup
+        # (Angio image quality). The buttons are still built above so the
+        # settings + reload_display_quality keep working, just not shown here.
+        self._hq_cine_btn.hide()
+        self._smooth_btn.hide()
+        self._denoise_btn.hide()
 
         # Exposed so subclasses (IVUS) can insert their own toggles into
         # this toolbar via ``_insert_series_nav_widget`` — they land just
@@ -1346,6 +1348,24 @@ class XAViewer(AbstractViewer):
         self._dq["xa_denoise"] = on
         settings.save_display_quality(self._dq)
 
+    def reload_display_quality(self) -> None:
+        """Re-read the app-wide image-quality prefs (e.g. after they were
+        changed in the shell's Settings dialog) and apply them to this viewer's
+        canvases and its S-Cine / S-Zoom / Denoise toolbar buttons — without
+        re-firing the per-button save handlers (signals are blocked)."""
+        self._dq = settings.load_display_quality()
+        for c in (self.canvas, self.canvas2):
+            c.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
+            c.set_smooth(bool(self._dq.get("xa_smooth")))
+            c.set_denoise(bool(self._dq.get("xa_denoise")))
+            c.update()
+        for btn, key in ((self._hq_cine_btn, "xa_hq_cine"),
+                         (self._smooth_btn, "xa_smooth"),
+                         (self._denoise_btn, "xa_denoise")):
+            btn.blockSignals(True)
+            btn.setChecked(bool(self._dq.get(key)))
+            btn.blockSignals(False)
+
     # ----------------------------------------------- zoom (Z / Shift+Z)
     def zoom_in(self) -> None:
         for c in (self.canvas, self.canvas2):
@@ -1584,6 +1604,33 @@ class XAViewer(AbstractViewer):
             self._planes, lambda: self._timer.isActive(), self
         )
         self._prefetch.start()
+
+    def snapshot(self):
+        """A QPixmap of just the cine image(s) — no toolbars — for the shell's
+        memory-saving 'still' pane. The XA canvas is plain-Qt painting so a
+        direct grab is reliable and WYSIWYG (correct aspect, overlay at its
+        displayed size). Only visible plane canvases are captured (both, side by
+        side, in biplane Bi view)."""
+        from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+        cs = [c for c in (self.canvas, self.canvas2)
+              if c is not None and c.isVisible()]
+        imgs = [p.toImage() for p in (c.grab() for c in cs)
+                if p is not None and not p.isNull()]
+        if not imgs:
+            return None
+        if len(imgs) == 1:
+            return QPixmap.fromImage(imgs[0])
+        h = max(i.height() for i in imgs)
+        w = sum(i.width() for i in imgs) + 2 * (len(imgs) - 1)
+        out = QImage(w, h, QImage.Format.Format_RGB32)
+        out.fill(QColor(0, 0, 0))
+        painter = QPainter(out)
+        x = 0
+        for i in imgs:
+            painter.drawImage(x, 0, i)
+            x += i.width() + 2
+        painter.end()
+        return QPixmap.fromImage(out)
 
     def clear(self) -> None:
         self._timer.stop()
