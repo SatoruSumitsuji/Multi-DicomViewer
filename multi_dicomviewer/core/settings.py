@@ -404,6 +404,56 @@ def save_live_caps(caps: dict) -> None:
         pass
 
 
+# --------------------------------------- advanced angio/IVUS image quality
+ADVANCED_QUALITY_PATH = SETTINGS_DIR / "advanced_quality.json"
+
+#: Fine-grained enhancement parameters for the 2-D (XA / IVUS) viewer, tuned in
+#: the "Advanced" quality dialog. Defaults reproduce the classic single-step
+#: Denoise: denoise sigma 50, no sharpen, no CLAHE. CT is NOT affected.
+_ADV_QUALITY_DEFAULTS = {"denoise": 50.0, "sharpen": 0.0, "clahe": 0.0}
+_ADV_QUALITY_RANGE = {
+    "denoise": (0.0, 150.0),     # bilateral colour sigma
+    "sharpen": (0.0, 200.0),     # unsharp amount, %
+    "clahe": (0.0, 4.0),         # CLAHE clip limit
+}
+
+
+def load_advanced_quality() -> dict:
+    """Return the advanced XA/IVUS enhancement params, clamped, with defaults
+    for any missing/unreadable key."""
+    out = dict(_ADV_QUALITY_DEFAULTS)
+    try:
+        data = json.loads(ADVANCED_QUALITY_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k, (lo, hi) in _ADV_QUALITY_RANGE.items():
+                if k in data:
+                    try:
+                        out[k] = max(lo, min(hi, float(data[k])))
+                    except (TypeError, ValueError):
+                        pass
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def save_advanced_quality(params: dict) -> None:
+    """Best-effort persist of the advanced XA/IVUS enhancement params."""
+    try:
+        out = {}
+        for k, (lo, hi) in _ADV_QUALITY_RANGE.items():
+            try:
+                out[k] = max(lo, min(hi, float(
+                    params.get(k, _ADV_QUALITY_DEFAULTS[k]))))
+            except (TypeError, ValueError):
+                out[k] = _ADV_QUALITY_DEFAULTS[k]
+        out["version"] = 1
+        ADVANCED_QUALITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ADVANCED_QUALITY_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ------------------------------------------------- CT HU colour map (global)
 CT_COLORMAP_PATH = SETTINGS_DIR / "ct_colormap.json"
 

@@ -230,19 +230,47 @@ def _hex_to_rgb(hexstr, default=(0x33, 0xE6, 0xFF)):
         return default
 
 
+def _smooth_lut_edges(col: np.ndarray, alpha: np.ndarray, sigma: float = 5.0):
+    """Soften the hard band edges of a step colour map: Gaussian-blur the
+    premultiplied colour + alpha along the HU axis so adjacent bands (and the
+    band↔grayscale boundary) blend over a short HU ramp — removes the
+    posterised "blocky / speckly" colour look on noisy CT. Edge-padded so the
+    HU extremes don't dip. Returns (colour, alpha). Mirrors ct_viewer._smooth_
+    lut_edges so VTK and pygfx colour maps match."""
+    r = int(max(1, round(3 * sigma)))
+    x = np.arange(-r, r + 1, dtype=np.float64)
+    k = np.exp(-(x ** 2) / (2.0 * sigma * sigma))
+    k /= k.sum()
+
+    def _sm(a):
+        pad = np.pad(a, ((r, r),) + ((0, 0),) * (a.ndim - 1), mode="edge")
+        if a.ndim == 1:
+            return np.convolve(pad, k, mode="valid")
+        out = np.empty((a.shape[0], a.shape[1]), np.float64)
+        for c in range(a.shape[1]):
+            out[:, c] = np.convolve(pad[:, c], k, mode="valid")
+        return out
+
+    pm = _sm(col * alpha[:, None])
+    a_s = _sm(alpha)
+    col_s = pm / np.maximum(a_s[:, None], 1e-6)
+    return col_s, a_s
+
+
 def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
-    """512×4 RGBA float32 colormap over HU [_HU_LO,_HU_HI]. Inside the FIRST
-    enabled band containing a HU value: band colour blended over the windowed
-    grayscale by *opacity*. Outside any band: grayscale. The numpy analogue of
-    the VTK viewer's _band_lut (which produced a vtkLookupTable); here it feeds
-    a pygfx 1-D colormap Texture assigned to VolumeSliceMaterial.map."""
+    """512×4 RGBA float32 colormap over HU [_HU_LO,_HU_HI], with the band edges
+    smoothed (see _smooth_lut_edges) so the colour look isn't posterised /
+    speckly. Inside the first enabled band: band colour blended over the
+    windowed grayscale by *opacity*; outside: grayscale. Feeds a pygfx 1-D
+    colormap Texture. Mirrors the VTK viewer's _band_lut_rgb."""
     n = 512
     hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
     glo = lvl - win / 2.0
     span = max(1e-6, float(win))
-    g = np.clip((hu - glo) / span, 0.0, 1.0).astype(np.float32)
+    g = np.clip((hu - glo) / span, 0.0, 1.0)
     op = float(min(1.0, max(0.0, opacity)))
-    out = np.stack([g, g, g, np.ones_like(g)], axis=1).astype(np.float32)
+    col = np.zeros((n, 3), np.float64)
+    alpha = np.zeros(n, np.float64)
     assigned = np.zeros(n, dtype=bool)
     for b in bands:
         if not b["on"]:
@@ -250,10 +278,15 @@ def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
         m = (hu >= b["lo"]) & (hu <= b["hi"]) & (~assigned)
         if not m.any():
             continue
-        col = b["rgb"]
-        for c in range(3):
-            out[m, c] = op * col[c] + (1.0 - op) * g[m]
+        col[m] = b["rgb"]
+        alpha[m] = 1.0
         assigned |= m
+    col_s, a_s = _smooth_lut_edges(col, alpha)
+    eff = (op * a_s)[:, None]
+    rgb = g[:, None] * (1.0 - eff) + np.clip(col_s, 0.0, 1.0) * eff
+    rgb = np.clip(rgb, 0.0, 1.0)
+    out = np.concatenate(
+        [rgb.astype(np.float32), np.ones((n, 1), np.float32)], axis=1)
     return out
 
 
@@ -640,6 +673,17 @@ class _Overlay(QWidget):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
             a4 = transp_to_alpha(m.get("transp", 0))
+            # Point HU probe → a fixed-size "+" (two ~12 px segments) + #id.
+            if m["type"] == "point":
+                sp = S(m["pts"][0])
+                p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], a4), 1.8))
+                p.drawLine(QPointF(sp.x() - 6, sp.y()),
+                           QPointF(sp.x() + 6, sp.y()))
+                p.drawLine(QPointF(sp.x(), sp.y() - 6),
+                           QPointF(sp.x(), sp.y() + 6))
+                p.setPen(QPen(QColor(255, 217, 0)))
+                p.drawText(QPointF(sp.x() + 8, sp.y() - 6), f"#{m['id']}")
+                continue
             of = off_flags(m)
             if of is not None and not m.get("smooth"):
                 # Per-segment outline, three states (same as the VTK viewer):
@@ -860,6 +904,14 @@ class _Overlay(QWidget):
                                     _white, 1.0, _black)
                 y += lh
 
+        # Point-probe hover HU — follows the cursor, painted last (on top).
+        ph = v._probe_hover
+        if ph is not None and ph[0] == key:
+            _, hx, hy, htxt = ph
+            p.setFont(QFont("monospace", 11))
+            p.setPen(QColor(255, 255, 102))
+            p.drawText(QPointF(hx + 12, hy - 4), htxt)
+
     # -- corner info text + angio readout ----------------------------------
     def _paint_info(self, p, key, w, h):
         v = self._v
@@ -976,13 +1028,15 @@ class _ColorMapDialog(QDialog):
     per band, Opacity slider, Add/Reset). Changes apply live via
     on_change(bands, opacity). Pure Qt — copied verbatim from the VTK viewer."""
 
-    def __init__(self, bands, opacity, on_change, parent=None):
+    def __init__(self, bands, opacity, on_change, win=400.0, lvl=40.0,
+                 parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("ColorMap Setting"))
-        self.resize(560, 420)
+        self.resize(560, 520)
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
         self._on_change = on_change
+        self._win, self._lvl = float(win), float(lvl)
 
         self._rows_host = QWidget()
         self._rows = QVBoxLayout(self._rows_host)
@@ -1014,14 +1068,28 @@ class _ColorMapDialog(QDialog):
         btns.addStretch(1)
         btns.addWidget(close)
 
+        from multi_dicomviewer.ui.hu_legend import HuLegend
+        self._legend = HuLegend(
+            lambda b, o, w, l: _band_lut_array(b, o, w, l)[:, :3],
+            _HU_LO, _HU_HI)
+        _leg_lbl = QLabel(t("Legend — groups / grayscale (W/L) / colour"))
+
         col = QVBoxLayout(self)
         col.addWidget(scroll, 1)
         col.addLayout(op_row)
+        col.addWidget(_leg_lbl)
+        col.addWidget(self._legend)
         col.addLayout(btns)
         self._rebuild()
+        self._refresh_legend()
+
+    def _refresh_legend(self):
+        self._legend.set_params(self._bands, self._opacity,
+                                self._win, self._lvl)
 
     def _emit(self):
         self._on_change(self._bands, self._opacity)
+        self._refresh_legend()
 
     def _op_changed(self, v):
         self._opacity = v / 100.0
@@ -1052,6 +1120,8 @@ class _ColorMapDialog(QDialog):
         self._op.blockSignals(False)
         self._op_lbl.setText(f"{self._opacity:.2f}")
         self._rebuild()
+        if getattr(self, "_legend", None) is not None:
+            self._refresh_legend()
 
     def _rebuild(self):
         while self._rows.count():
@@ -1246,6 +1316,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_drag = False              # canvas is dragging a handle
         self._shift_tool = False             # Shift-press runs the tool, not measure
         self._meas_hover = None              # cursor (output coords) for draft preview
+        self._probe_hover = None             # (key, sx, sy, text) for the Point HU probe
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
         self._cmp_sel = []                   # [(key, mi)] picked shapes (max 2)
@@ -1563,6 +1634,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # don't drive the tool. Idle Measure (no type chosen) falls
             # through so Zoom/Move/… still work.
             if bool(self._meas_type) or self._center_angle_target is not None:
+                if self._meas_type == "point":
+                    self._measure_hover(key, x, y)
                 return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
             self._hover_cross(key, x, y)      # no button → preview centreline grab
@@ -2107,6 +2180,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         self._cmap_btn = FitButton("ColorMap")
         self._cmap_btn.setCheckable(True)
+        # Colour ON → a soft, muted (low-saturation) pale-yellow background.
+        self._cmap_btn.setStyleSheet(
+            "QPushButton:checked { background:#e3ddaa; color:#101010; }")
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
@@ -3601,10 +3677,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[which].update()
 
     def _on_leave(self, key, ev) -> None:
-        # Cursor left the pane → drop any hover highlight (not mid-drag).
+        # Cursor left the pane → drop any hover highlight (not mid-drag) + the
+        # point-probe HU readout.
         if not self._cross_grab and self._cross_hi.get(key) is not None:
             self._cross_hi[key] = None
             self._overlay[key].update()
+        self._measure_hover_clear(key)
 
     def _cross_move(self, which, sx, sy):
         wx, wy = self._disp_to_world(which, sx, sy)
@@ -3886,10 +3964,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measure_lbl = QLabel(t("Measure:"))
         row.addWidget(self._measure_lbl)
         self._meas_btns = {}
-        for label, key in (("Line", "line"), ("Polyline", "polyline"),
+        for label, key in (("Point", "point"),
+                           ("Line", "line"), ("Polyline", "polyline"),
                            ("Ellipse", "ellipse"), ("Polygon", "polygon"),
                            ("Angle", "angle")):
-            b = FitButton(label)
+            b = FitButton(t(label) if key == "point" else label)
+            if key == "point":
+                b.setHelpToolTip(
+                    t("Probe HU at a point: hover shows the value, click drops "
+                      "a + marker and lists it"))
             b.setMinimumWidth(min(b.sizeHint().width(), 56))
             b.setCheckable(True)
             b.clicked.connect(lambda _c, k=key: self._set_measure_type(k))
@@ -3977,6 +4060,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_type = key
         self._draft = None
         self._meas_hover = None
+        if key != "point":
+            self._measure_hover_clear()
         for k, b in self._meas_btns.items():
             b.setChecked(k == key)
             # Active = blue + WHITE text; colour-only override keeps size/shape.
@@ -3990,6 +4075,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draft = None
         self._edit = None
         self._meas_hover = None
+        self._measure_hover_clear()
         self._compares = []
         self._cmp_sel = []
         self._results_hidden = False
@@ -4176,6 +4262,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _outline(self, m):
         t = m["type"]
+        if t == "point":
+            return list(m["pts"][:1])
         if t == "line":
             return list(m["pts"][:2])
         if t == "polyline":
@@ -4210,12 +4298,50 @@ class CTViewer(CPRMixin, AbstractViewer):
             return _polygon_centroid(m["pts"])
         return self._anchor(m)
 
+    def _hu_at(self, P):
+        """Trilinear HU at a single 3-D world point *P*, or None outside the
+        volume."""
+        if P is None or self._vol is None:
+            return None
+        sx, sy, sz = self._dims
+        vx, vy, vz = P[0] / sx, P[1] / sy, P[2] / sz
+        nz, ny, nx = self._vol.shape
+        if not (0 <= vx <= nx - 1 and 0 <= vy <= ny - 1 and 0 <= vz <= nz - 1):
+            return None
+        return float(_trilinear_sample(
+            self._vol, np.array([vx]), np.array([vy]), np.array([vz]))[0])
+
+    def _measure_hover(self, which, sx, sy):
+        """Point-probe hover: show the HU under the cursor (painted next to it
+        by the overlay). Repaints only the hovered pane."""
+        if self._vol is None:
+            return
+        w = self._disp_to_world(which, sx, sy)
+        try:
+            hu = self._hu_at(self._out_to_world3d(which, *w))
+        except Exception:
+            hu = None
+        self._probe_hover = (which, sx, sy, "—" if hu is None else f"HU {hu:.0f}")
+        self._overlay[which].update()
+
+    def _measure_hover_clear(self, which=None):
+        if self._probe_hover is None:
+            return
+        k = self._probe_hover[0]
+        self._probe_hover = None
+        self._overlay[k].update()
+
     def _metrics_text(self, key, m):
         t = m["type"]
         pts = m["pts"]
         ca = m.get("center_angle")
         ca_str = (f"  CenterAngle:{ca['angle']:.1f}°"
                   if ca and "angle" in ca else "")
+        if t == "point":
+            p3 = (m.get("pts3d") or [None])[0]
+            hu = self._hu_at(p3) if p3 is not None else None
+            return (f"#{m['id']} Point: HU {hu:.0f}" if hu is not None
+                    else f"#{m['id']} Point: HU —")
         if t == "line":
             return f"#{m['id']} Line: {_dist(pts[0], pts[1]):.1f} mm"
         if t == "polyline":
@@ -4327,6 +4453,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not self._meas_type:
             return False
         w = self._disp_to_world(which, sx, sy)
+        # Point HU probe: each click drops a persistent "+" and lists its HU in
+        # the top-right result block (a single click finishes it; no draft).
+        if self._meas_type == "point":
+            try:
+                P = self._out_to_world3d(which, *w)
+            except Exception:
+                P = None
+            self._meas_seq += 1
+            self._measures[which].append(
+                {"id": self._meas_seq, "type": "point", "pts": [w],
+                 "pts3d": [P] if P is not None else []})
+            self._redraw_meas(which)
+            return False
         d = self._draft
         if d is None or d["pane"] != which or d["type"] != self._meas_type:
             d = {"type": self._meas_type, "pane": which, "pts": []}
@@ -5044,15 +5183,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._invert = self._invert_btn.isChecked()
         self._refresh()
 
-    def _open_setting(self):
-        if self._cmap_dlg is None:
-            self._cmap_dlg = _ColorMapDialog(
-                self._bands, self._opacity, self._apply_colormap, self)
+    def _open_setting(self, parent=None, modal=False):
+        """Open the HU colour-map editor. *parent*/*modal* let the shell open it
+        ON TOP of (and modal to) the Settings popup — otherwise a Settings-modal
+        dialog would sit in front of it and block its controls. A fresh dialog
+        is built each time (the viewer's bands are the source of truth)."""
+        dlg = _ColorMapDialog(self._bands, self._opacity,
+                              self._apply_colormap, self._win, self._lvl,
+                              parent or self)
+        self._cmap_dlg = dlg
+        if modal:
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
+            dlg.exec()
+            self._cmap_dlg = None
         else:
-            self._cmap_dlg.set_bands(self._bands, self._opacity)
-        self._cmap_dlg.show()
-        self._cmap_dlg.raise_()
-        self._cmap_dlg.activateWindow()
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
 
     def _apply_colormap(self, bands, opacity):
         self._bands = [dict(b) for b in bands]

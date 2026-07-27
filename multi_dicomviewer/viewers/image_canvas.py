@@ -295,7 +295,11 @@ class ImageCanvas(QWidget):
         self._hq_cine: bool = False        # smooth (bilinear) even during cine
         # Opt-in OpenCV image-quality toggles (default OFF = current look).
         self._smooth: bool = False         # Lanczos high-quality upscaling
-        self._denoise: bool = False        # edge-preserving noise reduction
+        self._denoise: bool = False        # master enable for the enhance pipe
+        # Advanced enhancement params (applied only while _denoise is on):
+        # denoise sigma, unsharp amount %, CLAHE clip. Defaults reproduce the
+        # classic single-step Denoise.
+        self._adv = {"denoise": 50.0, "sharpen": 0.0, "clahe": 0.0}
         # Oriented (and, when _denoise is on, denoised) source frame backing
         # _qimg — kept so the Lanczos paint path can resample the real pixels.
         self._proc8: np.ndarray | None = None
@@ -368,13 +372,26 @@ class ImageCanvas(QWidget):
             self.update()
 
     def set_denoise(self, on: bool) -> None:
-        """Edge-preserving noise reduction (bilateral) on the source frame.
-        Changes the actual pixels shown, so the frame is rebuilt. Default OFF;
-        no-op if OpenCV is unavailable."""
+        """Master enable for the enhancement pipeline (denoise + optional
+        sharpen / CLAHE — see set_enhance_params). Changes the actual pixels
+        shown, so the frame is rebuilt. Default OFF; no-op if OpenCV is
+        unavailable."""
         on = bool(on)
         if on != self._denoise:
             self._denoise = on
             self._rebuild_frame()
+
+    def set_enhance_params(self, denoise: float, sharpen: float,
+                           clahe: float) -> None:
+        """Set the advanced enhancement parameters (bilateral denoise sigma,
+        unsharp amount %, CLAHE clip). Rebuilds the frame if they changed and
+        the pipeline is enabled."""
+        adv = {"denoise": float(denoise), "sharpen": float(sharpen),
+               "clahe": float(clahe)}
+        if adv != self._adv:
+            self._adv = adv
+            if self._denoise:
+                self._rebuild_frame()
 
     def set_frame(self, frame8: np.ndarray) -> None:
         self._raw_frame8 = frame8
@@ -388,7 +405,9 @@ class ImageCanvas(QWidget):
             return
         f = self._oriented(self._raw_frame8)
         if self._denoise:
-            f = image_quality.denoise(f)
+            f = image_quality.enhance(
+                f, self._adv["denoise"], self._adv["sharpen"],
+                self._adv["clahe"])
         self._proc8 = f
         self._qimg = to_qimage(f)
         self._img_size = (f.shape[1], f.shape[0])
