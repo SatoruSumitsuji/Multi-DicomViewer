@@ -22,7 +22,16 @@ DISPLAY_QUALITY_PATH = SETTINGS_DIR / "display_quality.json"
 LANGUAGE_PATH = SETTINGS_DIR / "language.json"
 DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
 DICOMFOLDER_OPTIONS_PATH = SETTINGS_DIR / "dicomfolder_options.json"
+LIVE_CAPS_PATH = SETTINGS_DIR / "live_caps.json"
 _SCHEMA_VERSION = 2
+
+#: How many panes of a modality may hold their full data (volume / clip) live
+#: at once before the least-recently-used one is frozen to a memory-light still.
+#: Kept low by default (a 600-slice cardiac CT is ~0.7 GB) and user-raisable in
+#: the Display-count settings dialog up to the max.
+LIVE_CAPS_DEFAULT = {"CT": 1, "XA": 3}
+LIVE_CAPS_MIN = {"CT": 1, "XA": 1}
+LIVE_CAPS_MAX = {"CT": 4, "XA": 8}
 
 
 def load_dicomfolder_sort(default=(0, 0)) -> tuple[int, int]:
@@ -354,6 +363,108 @@ def save_display_quality(prefs: dict) -> None:
         DISPLAY_QUALITY_PATH.write_text(
             json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError:
+        pass
+
+
+# ----------------------------------------------- live pane count (memory cap)
+def _clamp_cap(mod: str, val) -> int:
+    lo, hi = LIVE_CAPS_MIN[mod], LIVE_CAPS_MAX[mod]
+    try:
+        return max(lo, min(hi, int(val)))
+    except (TypeError, ValueError):
+        return LIVE_CAPS_DEFAULT[mod]
+
+
+def load_live_caps() -> dict:
+    """Return the per-modality 'live at once' caps {"CT": n, "XA": m},
+    clamped to the allowed range, falling back to the defaults."""
+    out = dict(LIVE_CAPS_DEFAULT)
+    try:
+        data = json.loads(LIVE_CAPS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k in LIVE_CAPS_DEFAULT:
+                if k in data:
+                    out[k] = _clamp_cap(k, data[k])
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def save_live_caps(caps: dict) -> None:
+    """Best-effort persist of the live-pane caps. A failed write must not
+    break the session."""
+    try:
+        out = {k: _clamp_cap(k, caps.get(k, LIVE_CAPS_DEFAULT[k]))
+               for k in LIVE_CAPS_DEFAULT}
+        out["version"] = 1
+        LIVE_CAPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LIVE_CAPS_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# ------------------------------------------------- CT HU colour map (global)
+CT_COLORMAP_PATH = SETTINGS_DIR / "ct_colormap.json"
+
+#: Factory-default HU colour bands (must match the viewers' _DEFAULT_BANDS).
+#: Each band colours HU range [lo, hi]; "on" toggles it. Shared by every CT
+#: pane and persisted, so a colour edit in one pane applies everywhere and
+#: survives a restart.
+CT_COLORMAP_DEFAULT_BANDS = [
+    {"rgb": (1.0, 0.0, 0.0), "lo": -1000, "hi": 0,    "on": True},
+    {"rgb": (1.0, 1.0, 0.0), "lo": 0,     "hi": 50,   "on": True},
+    {"rgb": (0.0, 1.0, 0.0), "lo": 50,    "hi": 250,  "on": True},
+    {"rgb": (0.0, 0.0, 1.0), "lo": 250,   "hi": 350,  "on": False},
+    {"rgb": (1.0, 1.0, 1.0), "lo": 350,   "hi": 700,  "on": True},
+    {"rgb": (1.0, 0.0, 1.0), "lo": 850,   "hi": 2000, "on": True},
+]
+CT_COLORMAP_DEFAULT_OPACITY = 0.25
+
+
+def _sanitize_band(b):
+    """Coerce one persisted band dict into the canonical shape, or None."""
+    try:
+        rgb = tuple(float(c) for c in b["rgb"])
+        if len(rgb) != 3:
+            return None
+        return {"rgb": rgb, "lo": int(b["lo"]), "hi": int(b["hi"]),
+                "on": bool(b["on"])}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def load_ct_colormap() -> dict:
+    """Return the global CT colour map as {"bands": [...], "opacity": float},
+    falling back to the factory default when absent/unreadable."""
+    default = {"bands": [dict(b) for b in CT_COLORMAP_DEFAULT_BANDS],
+               "opacity": CT_COLORMAP_DEFAULT_OPACITY}
+    try:
+        data = json.loads(CT_COLORMAP_PATH.read_text(encoding="utf-8"))
+        bands = [sb for sb in (_sanitize_band(b)
+                               for b in data.get("bands", [])) if sb]
+        if not bands:
+            return default
+        op = float(data.get("opacity", CT_COLORMAP_DEFAULT_OPACITY))
+        return {"bands": bands, "opacity": max(0.0, min(1.0, op))}
+    except (OSError, ValueError, TypeError):
+        return default
+
+
+def save_ct_colormap(bands, opacity) -> None:
+    """Best-effort persist of the global CT colour map. A failed write must
+    not break the session."""
+    try:
+        out = {"bands": [sb for sb in (_sanitize_band(b) for b in bands) if sb],
+               "opacity": max(0.0, min(1.0, float(opacity))),
+               "version": 1}
+        # store rgb as a list (JSON has no tuple)
+        for b in out["bands"]:
+            b["rgb"] = list(b["rgb"])
+        CT_COLORMAP_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CT_COLORMAP_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
         pass
 
 

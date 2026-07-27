@@ -1,0 +1,114 @@
+"""Unified Settings popup (top-bar "Settings" button).
+
+Gathers the app-wide display preferences in one place:
+
+  * Display count — how many CT / angio panes stay fully loaded before older
+    ones become memory-saving stills (see settings.load_live_caps).
+  * Angio image quality — S-Cine / S-Zoom / Denoise (settings.display_quality).
+  * CT colour — a button that opens the HU colour-map editor for the active
+    CT pane (that editor applies live and is per-viewer).
+"""
+from __future__ import annotations
+
+from PyQt6.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+)
+
+from multi_dicomviewer.core import image_quality, settings
+from multi_dicomviewer.i18n import t
+
+
+class SettingsDialog(QDialog):
+    """App-wide display settings. *caps* is {"CT": n, "XA": m}; *quality* is the
+    display-quality dict; *on_ct_color* opens the CT colour-map editor."""
+
+    def __init__(self, caps: dict, quality: dict, on_ct_color, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(t("Settings"))
+        self._on_ct_color = on_ct_color
+        root = QVBoxLayout(self)
+
+        # ---- Display count -------------------------------------------------
+        gb_count = QGroupBox(t("Display count"))
+        cform = QFormLayout(gb_count)
+        cnote = QLabel(
+            t("How many images stay fully loaded at once. Older panes beyond "
+              "this become a still snapshot to save memory; click one to "
+              "reload it. Higher = more interactive at once, but more memory."))
+        cnote.setWordWrap(True)
+        cform.addRow(cnote)
+        self._spins: dict[str, QSpinBox] = {}
+        for key, label in (("CT", t("CT panes")), ("XA", t("Angio panes"))):
+            sb = QSpinBox()
+            sb.setRange(settings.LIVE_CAPS_MIN[key], settings.LIVE_CAPS_MAX[key])
+            sb.setValue(int(caps.get(key, settings.LIVE_CAPS_DEFAULT[key])))
+            sb.setSuffix(t("  (max {n})", n=settings.LIVE_CAPS_MAX[key]))
+            self._spins[key] = sb
+            cform.addRow(label, sb)
+        root.addWidget(gb_count)
+
+        # ---- Angio image quality ------------------------------------------
+        gb_q = QGroupBox(t("Angio image quality"))
+        qlay = QVBoxLayout(gb_q)
+        have_cv2 = image_quality.available()
+        self._q_boxes: dict[str, QCheckBox] = {}
+        for key, label, tip, needs_cv2 in (
+            ("xa_hq_cine", t("S-Cine"),
+             t("Smooth (bilinear) frames even during cine playback. "
+               "Default off (fast). Affects motion only."), False),
+            ("xa_smooth", t("S-Zoom"),
+             t("High-quality (Lanczos) upscaling — sharper when enlarged. "
+               "Default off. For fast machines."), True),
+            ("xa_denoise", t("Denoise"),
+             t("Edge-preserving noise reduction — calms speckle while keeping "
+               "vessel/catheter edges crisp. Default off."), True),
+        ):
+            cb = QCheckBox(label)
+            cb.setChecked(bool(quality.get(key)))
+            cb.setToolTip(tip)
+            if needs_cv2 and not have_cv2:
+                cb.setEnabled(False)
+                cb.setToolTip(tip + t("  (OpenCV not available)"))
+            self._q_boxes[key] = cb
+            qlay.addWidget(cb)
+        root.addWidget(gb_q)
+
+        # ---- CT colour -----------------------------------------------------
+        gb_c = QGroupBox(t("CT colour"))
+        clay = QHBoxLayout(gb_c)
+        clay.addWidget(QLabel(t("HU-value colour map:")))
+        color_btn = QPushButton(t("Color setting…"))
+        color_btn.setToolTip(
+            t("Edit the HU-value colour bands for the active CT pane"))
+        color_btn.clicked.connect(self._open_color)
+        clay.addWidget(color_btn)
+        clay.addStretch(1)
+        root.addWidget(gb_c)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        root.addWidget(btns)
+
+    def _open_color(self) -> None:
+        if callable(self._on_ct_color):
+            self._on_ct_color()
+
+    def caps(self) -> dict:
+        """Chosen live-pane caps as {"CT": n, "XA": m}."""
+        return {k: sb.value() for k, sb in self._spins.items()}
+
+    def quality(self) -> dict:
+        """Chosen angio quality toggles as {key: bool}."""
+        return {k: cb.isChecked() for k, cb in self._q_boxes.items()}

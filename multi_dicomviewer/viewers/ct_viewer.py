@@ -80,6 +80,7 @@ import vtkmodules.vtkInteractionStyle  # noqa: F401
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 
 from multi_dicomviewer.config import CT_WL_PRESETS
+from multi_dicomviewer.core import settings
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.cpr_mixin import CPRMixin
 from multi_dicomviewer.core.dicom_io import LoadedSeries
@@ -1528,6 +1529,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     measurement_removed = pyqtSignal(int)
     #: emitted when the user clicks "Measure History"
     history_requested = pyqtSignal()
+    #: HU colour map edited here — shell persists it and mirrors it onto every
+    #: other CT pane so the colour map is global. Args: (bands, opacity).
+    colormap_changed = pyqtSignal(object, float)
     #: image right-click ▸ Export DICOM / CSV → shell runs that export for the
     #: shown CT series. Args: (fmt, series_uid, plane_path); CT always passes
     #: plane_path="" (one volume — A/B panes are reformats of the same data).
@@ -1603,8 +1607,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._thick = {"A": 0.0, "B": 5.0}   # slab mm per pane
         self._color = False
         self._invert = False                 # grayscale black↔white negative
-        self._bands = [dict(b) for b in _DEFAULT_BANDS]
-        self._opacity = 0.25
+        # HU colour map is GLOBAL + persisted: load the shared bands so every
+        # CT pane (and a fresh restart) starts from the same colour map.
+        _cm = settings.load_ct_colormap()
+        self._bands = [dict(b) for b in _cm["bands"]]
+        self._opacity = float(_cm["opacity"])
         self._cmap_dlg = None
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
@@ -1963,13 +1970,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._cl_btn)
         self._style_cl()
 
-        self._setting_btn = setting = FitButton(t("Setting"))
-        setting.setHelpToolTip(
-            t("HU colour-map settings (band colour, HU range, opacity)")
-        )
-        setting.setStyleSheet(_util_btn_css)
-        setting.clicked.connect(self._open_setting)
-        row.addWidget(setting)
+        # The per-pane "Setting" button (opened the HU colour-map editor) was
+        # removed: the colour map is now global and edited from the shell's
+        # "Settings" popup (CT colour ▸ Color setting…). _open_setting stays —
+        # the shell calls it for the active CT pane.
+        self._setting_btn = None
 
         row.addWidget(QLabel("W/L:"))
         self._preset = QComboBox()
@@ -3709,6 +3714,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         nz = self._image.GetDimensions()[2]
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
+    def snapshot(self):
+        """A QPixmap of just the image frames (canvases) — no toolbars — for the
+        shell's memory-saving 'still' pane. Grabs the frame widgets exactly as
+        shown (WYSIWYG), so the image keeps its on-screen aspect ratio and the
+        baked-in overlay stays at its displayed size. (VTK's window-to-image was
+        tried but re-rendered the fixed-pixel text actors at the capture
+        resolution, distorting the text-to-image ratio and the pane height.)
+        Visible panes (A and, in Bi view, B) are composed side by side into one
+        raw-pixel image. Returns None on failure."""
+        from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+        imgs = []
+        for key in ("A", "B"):
+            if not self._frames[key].isVisible():
+                continue
+            pm = self._frames[key].grab()
+            if pm is not None and not pm.isNull():
+                imgs.append(pm.toImage())            # raw physical pixels
+        if not imgs:
+            return None
+        if len(imgs) == 1:
+            return QPixmap.fromImage(imgs[0])
+        h = max(i.height() for i in imgs)
+        w = sum(i.width() for i in imgs) + 2 * (len(imgs) - 1)
+        out = QImage(w, h, QImage.Format.Format_RGB32)
+        out.fill(QColor(0, 0, 0))
+        painter = QPainter(out)
+        x = 0
+        for i in imgs:
+            painter.drawImage(x, 0, i)
+            x += i.width() + 2
+        painter.end()
+        return QPixmap.fromImage(out)
+
     def clear(self) -> None:
         self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._play2d_resume = False              # next Play starts at Frame 1
@@ -3964,6 +4002,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._color = True
             self._cmap_btn.setChecked(True)
         self._refresh()
+        # The colour map is global: persist it and let the shell mirror it onto
+        # every other CT pane.
+        settings.save_ct_colormap(self._bands, self._opacity)
+        self.colormap_changed.emit([dict(b) for b in self._bands],
+                                   self._opacity)
+
+    def apply_global_colormap(self, bands, opacity):
+        """Adopt a colour map edited in ANOTHER CT pane (shell propagation).
+        Updates the bands + any open editor and redraws, but does NOT force
+        colour mode on (each pane keeps its own ColorMap toggle), persist, or
+        re-emit (which would loop)."""
+        self._bands = [dict(b) for b in bands]
+        self._opacity = float(opacity)
+        if self._cmap_dlg is not None:
+            self._cmap_dlg.set_bands(self._bands, self._opacity)
+        if self._color:                     # only repaint if colour is showing
+            self._refresh()
 
     # ------------------------------------------------ curved-MPR / short-axis
     def _enter_cpr(self, which, mi):

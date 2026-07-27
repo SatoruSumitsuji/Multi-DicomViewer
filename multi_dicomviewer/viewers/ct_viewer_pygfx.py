@@ -1145,6 +1145,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: (Resume trace) so the shell drops its stale Measure-History entry; the
     #: entry comes back under the SAME id when the trace is committed again.
     measurement_removed = pyqtSignal(int)
+    #: HU colour map edited here — shell persists it and mirrors it onto every
+    #: other CT pane so the colour map is global. Args: (bands, opacity).
+    colormap_changed = pyqtSignal(object, float)
     #: fired from a background debounce thread to wake the GUI thread and crisp
     #: up the slab LOD. A cross-thread queued signal posts an event that wakes a
     #: fully-idle Qt loop — which same-thread QTimer/aboutToBlock can't do
@@ -1212,8 +1215,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = True
         self._cl_on = True                   # crosshair/slab overlay visible
         self._color = False                  # HU colormap on/off
-        self._bands = [dict(b) for b in _DEFAULT_BANDS]
-        self._opacity = 0.25
+        # HU colour map is GLOBAL + persisted: load the shared bands so every
+        # CT pane (and a fresh restart) starts from the same colour map.
+        _cm = settings.load_ct_colormap()
+        self._bands = [dict(b) for b in _cm["bands"]]
+        self._opacity = float(_cm["opacity"])
         self._cmap_dlg = None
         self._lut_key = None                 # cache key for the colormap tex
         self._lut_tex = None
@@ -2151,12 +2157,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.insertWidget(0, self._hires_btn)
         row.insertSpacing(1, 8)
 
-        self._setting_btn = setting = FitButton(t("Setting"))
-        setting.setHelpToolTip(t(
-            "HU colour-map settings (band colour, HU range, opacity)"))
-        setting.setStyleSheet(_sr_qss)
-        setting.clicked.connect(self._open_setting)
-        row.addWidget(setting)
+        # The per-pane "Setting" button (opened the HU colour-map editor) was
+        # removed: the colour map is now global and edited from the shell's
+        # "Settings" popup (CT colour ▸ Color setting…). _open_setting stays —
+        # the shell calls it for the active CT pane.
+        self._setting_btn = None
 
         row.addWidget(QLabel("W/L:"))
         self._preset = QComboBox()
@@ -2783,6 +2788,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Default 3-D MPR for thin-slice volumes (≥201 slices), 2-D native
         # paging for ordinary (≤200-slice) series. _set_mode also fits & draws.
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
+
+    def snapshot(self):
+        """A QPixmap of just the rendered CT image(s) — no toolbars — for the
+        shell's memory-saving 'still' pane. Reuses the GPU-readback + overlay
+        compositor (_grab_pane_qimage), so the frozen image matches what's on
+        screen (WYSIWYG, correct aspect). Visible panes are composed side by
+        side into one raw-pixel image. None on failure."""
+        from PyQt6.QtGui import QColor, QImage, QPixmap
+        imgs = []
+        for key in ("A", "B"):
+            if not self._frames[key].isVisible():
+                continue
+            qi = self._grab_pane_qimage(key)
+            if qi is not None and not qi.isNull():
+                imgs.append(qi)
+        if not imgs:
+            return None
+        if len(imgs) == 1:
+            return QPixmap.fromImage(imgs[0])
+        h = max(i.height() for i in imgs)
+        w = sum(i.width() for i in imgs) + 2 * (len(imgs) - 1)
+        out = QImage(w, h, QImage.Format.Format_RGB32)
+        out.fill(QColor(0, 0, 0))
+        painter = QPainter(out)
+        x = 0
+        for i in imgs:
+            painter.drawImage(x, 0, i)
+            x += i.width() + 2
+        painter.end()
+        return QPixmap.fromImage(out)
 
     def clear(self) -> None:
         self._play2d_btn.setChecked(False)       # stop any running auto-page
@@ -5026,6 +5061,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._color = True
             self._cmap_btn.setChecked(True)
         self._refresh()
+        # The colour map is global: persist it and let the shell mirror it onto
+        # every other CT pane.
+        settings.save_ct_colormap(self._bands, self._opacity)
+        self.colormap_changed.emit([dict(b) for b in self._bands],
+                                   self._opacity)
+
+    def apply_global_colormap(self, bands, opacity):
+        """Adopt a colour map edited in ANOTHER CT pane (shell propagation).
+        Updates the bands + any open editor and redraws, but does NOT force
+        colour mode on, persist, or re-emit (which would loop)."""
+        self._bands = [dict(b) for b in bands]
+        self._opacity = float(opacity)
+        if self._cmap_dlg is not None:
+            self._cmap_dlg.set_bands(self._bands, self._opacity)
+        if self._color:
+            self._refresh()
 
     def _reset(self):
         if self._vol is None:
