@@ -2403,12 +2403,12 @@ class MainWindow(QMainWindow):
         self._settings_btn = FitButton(t("Settings"))
         self._settings_btn.setToolTip(
             t("Display count, angio image quality, CT colour map"))
-        # Grey background — the same grey used for the CT screen's utility
-        # controls — so this new button reads as a distinct settings entry.
+        # Deep-red background (darker than the CT active-pane frame red) with
+        # white text, so this settings entry clearly stands out in the top bar.
         self._settings_btn.setStyleSheet(
-            "QPushButton { background:#6e6e6e; color:#f0f0f0;"
-            " border:1px solid #5a5a5a; border-radius:6px; padding:3px 8px; }"
-            "QPushButton:hover { background:#7d7d7d; }")
+            "QPushButton { background:#b3121b; color:#ffffff; font-weight:bold;"
+            " border:1px solid #7d0d13; border-radius:6px; padding:3px 8px; }"
+            "QPushButton:hover { background:#c8202a; }")
         self._settings_btn.clicked.connect(self._open_settings)
         row.addWidget(self._settings_btn)
 
@@ -4438,7 +4438,9 @@ class MainWindow(QMainWindow):
         caps = {"CT": self._live_cap[Modality.CT],
                 "XA": self._live_cap[Modality.XA]}
         quality = settings.load_display_quality()
-        dlg = SettingsDialog(caps, quality, self._open_ct_color, self)
+        dlg = SettingsDialog(caps, quality, self._open_ct_color,
+                             on_advanced=self._open_advanced_quality,
+                             parent=self)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Display count: persist + apply (over-cap panes sleep now; keep=active
@@ -4470,6 +4472,19 @@ class MainWindow(QMainWindow):
                     out.append(v)
         return out
 
+    def _open_advanced_quality(self) -> None:
+        """Settings ▸ Angio image quality ▸ Advanced… : fine denoise / sharpen /
+        CLAHE with a live preview (XA + IVUS only). Saved + applied on OK."""
+        from multi_dicomviewer.ui.advanced_quality_dialog import (
+            AdvancedQualityDialog)
+        dlg = AdvancedQualityDialog(settings.load_advanced_quality(), self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+        settings.save_advanced_quality(dlg.values())
+        for v in self._all_loaded_viewers():
+            if hasattr(v, "reload_display_quality"):
+                v.reload_display_quality()
+
     def _propagate_ct_colormap(self, source, bands, opacity) -> None:
         """Mirror a colour-map edit from *source* onto every other CT viewer so
         the HU colour map is shared app-wide (each already persisted it)."""
@@ -4477,10 +4492,10 @@ class MainWindow(QMainWindow):
             if v is not source and hasattr(v, "apply_global_colormap"):
                 v.apply_global_colormap(bands, opacity)
 
-    def _open_ct_color(self) -> None:
-        """Open the HU colour-map editor for a CT pane. Prefers the active
-        pane's CT viewer; else the first loaded CT viewer. Tells the user to
-        load a CT series if none is open."""
+    def _open_ct_color(self, parent=None) -> None:
+        """Open the HU colour-map editor for a CT pane, modal ON TOP of the
+        Settings popup (*parent*). Prefers the active pane's CT viewer; else the
+        first loaded CT viewer. Tells the user to load a CT series if none open."""
         cands = []
         av = self._active.current_viewer() if self._active else None
         if av is not None:
@@ -4489,10 +4504,10 @@ class MainWindow(QMainWindow):
         for v in cands:
             if hasattr(v, "_open_setting") and getattr(v, "_vol", None) \
                     is not None:
-                v._open_setting()
+                v._open_setting(parent=parent, modal=True)
                 return
         QMessageBox.information(
-            self, t("CT colour"),
+            parent or self, t("CT colour"),
             t("Load a CT series first, then edit its HU colour map."))
 
     def _fit_studies_dock_width(self, width: int) -> None:

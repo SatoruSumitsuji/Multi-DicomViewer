@@ -31,10 +31,12 @@ class SettingsDialog(QDialog):
     """App-wide display settings. *caps* is {"CT": n, "XA": m}; *quality* is the
     display-quality dict; *on_ct_color* opens the CT colour-map editor."""
 
-    def __init__(self, caps: dict, quality: dict, on_ct_color, parent=None):
+    def __init__(self, caps: dict, quality: dict, on_ct_color,
+                 on_advanced=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         self._on_ct_color = on_ct_color
+        self._on_advanced = on_advanced
         root = QVBoxLayout(self)
 
         # ---- Display count -------------------------------------------------
@@ -80,6 +82,14 @@ class SettingsDialog(QDialog):
                 cb.setToolTip(tip + t("  (OpenCV not available)"))
             self._q_boxes[key] = cb
             qlay.addWidget(cb)
+        # Advanced… → fine denoise/sharpen/CLAHE with a live preview.
+        adv_btn = QPushButton(t("Advanced…"))
+        adv_btn.setToolTip(
+            t("Fine-tune denoise strength, sharpening and local contrast "
+              "(applies while Denoise is on; live preview)"))
+        adv_btn.setEnabled(callable(self._on_advanced) and have_cv2)
+        adv_btn.clicked.connect(self._open_advanced)
+        qlay.addWidget(adv_btn)
         root.addWidget(gb_q)
 
         # ---- CT colour -----------------------------------------------------
@@ -102,8 +112,14 @@ class SettingsDialog(QDialog):
         root.addWidget(btns)
 
     def _open_color(self) -> None:
+        # Pass THIS dialog as the parent so the colour editor opens modal ON TOP
+        # of Settings (operable), and Settings resumes once it's closed.
         if callable(self._on_ct_color):
-            self._on_ct_color()
+            self._on_ct_color(self)
+
+    def _open_advanced(self) -> None:
+        if callable(self._on_advanced):
+            self._on_advanced()
 
     def caps(self) -> dict:
         """Chosen live-pane caps as {"CT": n, "XA": m}."""

@@ -565,15 +565,20 @@ class XAViewer(AbstractViewer):
         #: pull-back's slider fires many valueChanged per mouse move; we render
         #: once per event-loop pass instead of per step so the handle keeps up.
         self._seek_render_pending = False
-        # Persisted image-quality toggles (default all-OFF = current look).
+        # Persisted image-quality toggles (default all-OFF = current look) plus
+        # the fine-grained "Advanced" enhancement params (XA/IVUS only).
         self._dq = settings.load_display_quality()
+        self._adv = settings.load_advanced_quality()
 
         self.canvas = ImageCanvas()    # primary / Front
         self.canvas2 = ImageCanvas()   # Lateral, only in side-by-side
-        # Apply the persisted image-quality choices to both canvases.
+        # Apply the persisted image-quality choices to both canvases. Set the
+        # enhance params BEFORE the denoise master so the first build uses them.
         for _c in (self.canvas, self.canvas2):
             _c.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
             _c.set_smooth(bool(self._dq.get("xa_smooth")))
+            _c.set_enhance_params(self._adv["denoise"], self._adv["sharpen"],
+                                  self._adv["clahe"])
             _c.set_denoise(bool(self._dq.get("xa_denoise")))
         self.canvas2.hide()
 
@@ -1354,9 +1359,12 @@ class XAViewer(AbstractViewer):
         canvases and its S-Cine / S-Zoom / Denoise toolbar buttons — without
         re-firing the per-button save handlers (signals are blocked)."""
         self._dq = settings.load_display_quality()
+        self._adv = settings.load_advanced_quality()
         for c in (self.canvas, self.canvas2):
             c.set_hq_cine(bool(self._dq.get("xa_hq_cine")))
             c.set_smooth(bool(self._dq.get("xa_smooth")))
+            c.set_enhance_params(self._adv["denoise"], self._adv["sharpen"],
+                                 self._adv["clahe"])
             c.set_denoise(bool(self._dq.get("xa_denoise")))
             c.update()
         for btn, key in ((self._hq_cine_btn, "xa_hq_cine"),
