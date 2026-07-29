@@ -484,11 +484,22 @@ def _sanitize_band(b):
         return None
 
 
+#: Default spatial colour-smoothing strength (mm) — a weak Gaussian on the
+#: reslice before colour mapping so the band boundaries read as smooth curves
+#: (like SSMView) instead of the voxel-grid staircase. 0 = off (crisp/blocky).
+CT_COLOR_SMOOTH_MM_DEFAULT = 0.4
+CT_COLOR_SMOOTH_MM_MAX = 2.0
+
+
 def load_ct_colormap() -> dict:
-    """Return the global CT colour map as {"bands": [...], "opacity": float},
-    falling back to the factory default when absent/unreadable."""
+    """Return the global CT colour map as {"bands": [...], "opacity": float,
+    "smooth_mm": float}, falling back to the factory default when absent/
+    unreadable. *smooth_mm* is the spatial Gaussian strength in mm applied to
+    the colour reslice (0 = crisp; ~0.4 = a gentle default that de-jaggs the
+    band boundaries)."""
     default = {"bands": [dict(b) for b in CT_COLORMAP_DEFAULT_BANDS],
-               "opacity": CT_COLORMAP_DEFAULT_OPACITY}
+               "opacity": CT_COLORMAP_DEFAULT_OPACITY,
+               "smooth_mm": CT_COLOR_SMOOTH_MM_DEFAULT}
     try:
         data = json.loads(CT_COLORMAP_PATH.read_text(encoding="utf-8"))
         bands = [sb for sb in (_sanitize_band(b)
@@ -496,17 +507,27 @@ def load_ct_colormap() -> dict:
         if not bands:
             return default
         op = float(data.get("opacity", CT_COLORMAP_DEFAULT_OPACITY))
-        return {"bands": bands, "opacity": max(0.0, min(1.0, op))}
+        try:
+            sm = float(data.get("smooth_mm", CT_COLOR_SMOOTH_MM_DEFAULT))
+        except (TypeError, ValueError):
+            sm = CT_COLOR_SMOOTH_MM_DEFAULT
+        return {"bands": bands, "opacity": max(0.0, min(1.0, op)),
+                "smooth_mm": max(0.0, min(CT_COLOR_SMOOTH_MM_MAX, sm))}
     except (OSError, ValueError, TypeError):
         return default
 
 
-def save_ct_colormap(bands, opacity) -> None:
+def save_ct_colormap(bands, opacity, smooth_mm=CT_COLOR_SMOOTH_MM_DEFAULT) -> None:
     """Best-effort persist of the global CT colour map. A failed write must
     not break the session."""
     try:
+        try:
+            sm = max(0.0, min(CT_COLOR_SMOOTH_MM_MAX, float(smooth_mm)))
+        except (TypeError, ValueError):
+            sm = CT_COLOR_SMOOTH_MM_DEFAULT
         out = {"bands": [sb for sb in (_sanitize_band(b) for b in bands) if sb],
                "opacity": max(0.0, min(1.0, float(opacity))),
+               "smooth_mm": sm,
                "version": 1}
         # store rgb as a list (JSON has no tuple)
         for b in out["bands"]:

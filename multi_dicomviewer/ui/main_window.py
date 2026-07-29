@@ -4168,8 +4168,8 @@ class MainWindow(QMainWindow):
         # onto every other CT pane (persistence is done in the viewer).
         if hasattr(viewer, "colormap_changed"):
             viewer.colormap_changed.connect(
-                lambda bands, op, src=viewer:
-                self._propagate_ct_colormap(src, bands, op))
+                lambda bands, op, smooth, src=viewer:
+                self._propagate_ct_colormap(src, bands, op, smooth))
         if hasattr(viewer, "tags_requested"):
             viewer.tags_requested.connect(
                 lambda vv=viewer: self._open_tag_dialog(vv)
@@ -4485,12 +4485,12 @@ class MainWindow(QMainWindow):
             if hasattr(v, "reload_display_quality"):
                 v.reload_display_quality()
 
-    def _propagate_ct_colormap(self, source, bands, opacity) -> None:
+    def _propagate_ct_colormap(self, source, bands, opacity, smooth) -> None:
         """Mirror a colour-map edit from *source* onto every other CT viewer so
         the HU colour map is shared app-wide (each already persisted it)."""
         for v in self._all_loaded_viewers():
             if v is not source and hasattr(v, "apply_global_colormap"):
-                v.apply_global_colormap(bands, opacity)
+                v.apply_global_colormap(bands, opacity, smooth)
 
     def _open_ct_color(self, parent=None) -> None:
         """Open the HU colour-map editor for a CT pane, modal ON TOP of the
