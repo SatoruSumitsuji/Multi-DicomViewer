@@ -60,6 +60,7 @@ from vtkmodules.vtkCommonDataModel import (
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
 from vtkmodules.vtkFiltersSources import vtkLineSource
 from vtkmodules.vtkImagingCore import vtkImageMapToColors, vtkImageReslice
+from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth
 from vtkmodules.vtkRenderingAnnotation import vtkCornerAnnotation
 from vtkmodules.vtkRenderingCore import (
     vtkActor,
@@ -592,6 +593,11 @@ _DEFAULT_BANDS = [
 ]
 _HU_LO, _HU_HI = -1000.0, 2000.0
 
+#: Max colour-reslice pixels/side (A): in colour mode the MPR is resliced at
+#: this resolution over the whole FOV so magnified band boundaries stay smooth
+#: curves instead of a voxel-grid staircase. Grayscale keeps voxel resolution.
+_RESLICE_NPX_CAP = 2048
+
 
 def _smooth_lut_edges(col: np.ndarray, alpha: np.ndarray, sigma: float = 5.0):
     """Soften the hard band edges of a step colour map: Gaussian-blur the
@@ -622,9 +628,10 @@ def _smooth_lut_edges(col: np.ndarray, alpha: np.ndarray, sigma: float = 5.0):
 
 def _band_lut_rgb(bands, opacity, win, lvl, n: int = 512) -> np.ndarray:
     """(n, 3) float RGB for HU in [_HU_LO, _HU_HI]: enabled band colours blended
-    over the windowed grayscale by *opacity*, with the band edges smoothed (see
-    _smooth_lut_edges). Outside any band → grayscale. Shared by the VTK LUT and
-    (mirrored) the pygfx colormap so both look identical."""
+    over the windowed grayscale by *opacity*, with CRISP/hard band edges
+    (matching SSMView). Outside any band → grayscale. Smoothness of the on-image
+    band boundaries is handled SPATIALLY (a Gaussian on the reslice), not in the
+    LUT. Shared by the VTK LUT and (mirrored) the pygfx colormap."""
     hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
     glo = lvl - win / 2.0
     span = max(1e-6, float(win))
@@ -642,15 +649,14 @@ def _band_lut_rgb(bands, opacity, win, lvl, n: int = 512) -> np.ndarray:
         col[m] = b["rgb"]
         alpha[m] = 1.0
         assigned |= m
-    col_s, a_s = _smooth_lut_edges(col, alpha)
-    eff = (op * a_s)[:, None]
-    rgb = g[:, None] * (1.0 - eff) + np.clip(col_s, 0.0, 1.0) * eff
+    eff = (op * alpha)[:, None]
+    rgb = g[:, None] * (1.0 - eff) + col * eff
     return np.clip(rgb, 0.0, 1.0)
 
 
 def _band_lut(bands, opacity, win, lvl) -> vtkLookupTable:
-    """HU -> RGB table (smoothed band edges). Inside an enabled band: band
-    colour blended over the windowed grayscale by *opacity*; outside: grayscale."""
+    """HU -> RGB table (crisp bands). Inside an enabled band: band colour blended
+    over the windowed grayscale by *opacity*; outside: grayscale."""
     rgb = _band_lut_rgb(bands, opacity, win, lvl)
     n = rgb.shape[0]
     lut = vtkLookupTable()
@@ -927,12 +933,24 @@ class _Pane:
         self.reslice.SetOutputDimensionality(2)
         self.reslice.SetInterpolationModeToLinear()
         self.reslice.SetBackgroundLevel(-1000.0)
+        # Optional spatial smoothing of the HU reslice BEFORE colour mapping, so
+        # the hard colour-band boundaries read as smooth curves instead of the
+        # voxel-grid staircase (see CTViewer._refresh; std set per-redraw from
+        # the mm strength). colours is wired to the reslice by default (smoothing
+        # off) and re-routed through gauss when the strength is > 0.
+        self.gauss = vtkImageGaussianSmooth()
+        self.gauss.SetDimensionality(2)
+        self.gauss.SetInputConnection(self.reslice.GetOutputPort())
         self.colors = vtkImageMapToColors()
         self.colors.SetOutputFormatToRGB()
         self.colors.SetLookupTable(_gray_lut(400.0, 40.0))  # default
         self.colors.SetInputConnection(self.reslice.GetOutputPort())
         self.actor = vtkImageActor()
         self.actor.GetMapper().SetInputConnection(self.colors.GetOutputPort())
+        # Linear (bilinear) display interpolation so magnifying the colour
+        # reslice smooths the pixels instead of showing a hard nearest-neighbour
+        # staircase at the band boundaries.
+        self.actor.SetInterpolate(True)
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.0, 0.0, 0.0)
         self.ren.GetActiveCamera().ParallelProjectionOn()
@@ -1404,14 +1422,15 @@ class _ColorMapDialog(QDialog):
     Changes apply live via on_change(bands, opacity)."""
 
     def __init__(self, bands, opacity, on_change, win=400.0, lvl=40.0,
-                 parent=None):
+                 smooth_mm=0.4, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("ColorMap Setting"))
-        self.resize(560, 520)
+        self.resize(560, 560)
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
         self._on_change = on_change
         self._win, self._lvl = float(win), float(lvl)
+        self._smooth_mm = float(smooth_mm)
 
         self._rows_host = QWidget()
         self._rows = QVBoxLayout(self._rows_host)
@@ -1446,10 +1465,25 @@ class _ColorMapDialog(QDialog):
         from multi_dicomviewer.ui.hu_legend import HuLegend
         self._legend = HuLegend(_band_lut_rgb, _HU_LO, _HU_HI)
         _leg_lbl = QLabel(t("Legend — groups / grayscale (W/L) / colour"))
+        # Spatial smoothing of the colour boundaries (mm) — de-jaggs the band
+        # edges (a weak Gaussian on the colour reslice). 0 = crisp/blocky.
+        sm_row = QHBoxLayout()
+        sm_row.addWidget(QLabel(t("Boundary smoothing")))
+        self._smooth_sld = QSlider(Qt.Orientation.Horizontal)
+        self._smooth_sld.setRange(0, 20)        # 0.0–2.0 mm, /10
+        self._smooth_sld.setValue(int(round(self._smooth_mm * 10)))
+        self._smooth_sld.setToolTip(
+            t("Smooths the colour band boundaries so they read as curves, not "
+              "a voxel-grid staircase. 0 = crisp. Higher softens fine detail."))
+        self._smooth_sld.valueChanged.connect(self._on_smooth_changed)
+        self._smooth_lbl = QLabel(f"{self._smooth_mm:.1f} mm")
+        sm_row.addWidget(self._smooth_sld, 1)
+        sm_row.addWidget(self._smooth_lbl)
 
         col = QVBoxLayout(self)
         col.addWidget(scroll, 1)
         col.addLayout(op_row)
+        col.addLayout(sm_row)
         col.addWidget(_leg_lbl)
         col.addWidget(self._legend)
         col.addLayout(btns)
@@ -1457,12 +1491,17 @@ class _ColorMapDialog(QDialog):
         self._refresh_legend()
 
     # -------------------------------------------------------- helpers
+    def _on_smooth_changed(self, v):
+        self._smooth_mm = v / 10.0
+        self._smooth_lbl.setText(f"{self._smooth_mm:.1f} mm")
+        self._emit()
+
     def _refresh_legend(self):
         self._legend.set_params(self._bands, self._opacity,
                                 self._win, self._lvl)
 
     def _emit(self):
-        self._on_change(self._bands, self._opacity)
+        self._on_change(self._bands, self._opacity, self._smooth_mm)
         self._refresh_legend()
 
     def _op_changed(self, v):
@@ -1605,8 +1644,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: emitted when the user clicks "Measure History"
     history_requested = pyqtSignal()
     #: HU colour map edited here — shell persists it and mirrors it onto every
-    #: other CT pane so the colour map is global. Args: (bands, opacity).
-    colormap_changed = pyqtSignal(object, float)
+    #: other CT pane so the colour map is global. Args:
+    #: (bands, opacity, smooth_mm).
+    colormap_changed = pyqtSignal(object, float, float)
     #: image right-click ▸ Export DICOM / CSV → shell runs that export for the
     #: shown CT series. Args: (fmt, series_uid, plane_path); CT always passes
     #: plane_path="" (one volume — A/B panes are reformats of the same data).
@@ -1687,6 +1727,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         _cm = settings.load_ct_colormap()
         self._bands = [dict(b) for b in _cm["bands"]]
         self._opacity = float(_cm["opacity"])
+        #: Spatial colour-smoothing strength (mm): a weak Gaussian on the colour
+        #: reslice so band boundaries are smooth curves, not the voxel-grid
+        #: staircase. Global + persisted; 0 = crisp.
+        self._cmap_smooth_mm = float(_cm.get("smooth_mm", 0.4))
         self._cmap_dlg = None
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
@@ -4149,7 +4193,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         so nothing is lost) to avoid a stale parent when opened from Settings."""
         dlg = _ColorMapDialog(self._bands, self._opacity,
                               self._apply_colormap, self._win, self._lvl,
-                              parent or self)
+                              self._cmap_smooth_mm, parent or self)
         self._cmap_dlg = dlg
         if modal:
             dlg.setWindowModality(Qt.WindowModality.WindowModal)
@@ -4160,26 +4204,31 @@ class CTViewer(CPRMixin, AbstractViewer):
             dlg.raise_()
             dlg.activateWindow()
 
-    def _apply_colormap(self, bands, opacity):
+    def _apply_colormap(self, bands, opacity, smooth_mm=None):
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
+        if smooth_mm is not None:
+            self._cmap_smooth_mm = float(smooth_mm)
         if not self._color:                 # show the result immediately
             self._color = True
             self._cmap_btn.setChecked(True)
         self._refresh()
         # The colour map is global: persist it and let the shell mirror it onto
         # every other CT pane.
-        settings.save_ct_colormap(self._bands, self._opacity)
+        settings.save_ct_colormap(self._bands, self._opacity,
+                                  self._cmap_smooth_mm)
         self.colormap_changed.emit([dict(b) for b in self._bands],
-                                   self._opacity)
+                                   self._opacity, self._cmap_smooth_mm)
 
-    def apply_global_colormap(self, bands, opacity):
+    def apply_global_colormap(self, bands, opacity, smooth_mm=None):
         """Adopt a colour map edited in ANOTHER CT pane (shell propagation).
         Updates the bands + any open editor and redraws, but does NOT force
         colour mode on (each pane keeps its own ColorMap toggle), persist, or
         re-emit (which would loop)."""
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
+        if smooth_mm is not None:
+            self._cmap_smooth_mm = float(smooth_mm)
         if self._cmap_dlg is not None:
             self._cmap_dlg.set_bands(self._bands, self._opacity)
         if self._color:                     # only repaint if colour is showing
@@ -4286,18 +4335,41 @@ class CTViewer(CPRMixin, AbstractViewer):
             f"{d + 1} / {cl.n}   ({pos_mm:.1f} / {cl.length_mm:.1f} mm)"
         )
 
+    def _wire_color_smoothing(self, p, step):
+        """(C) Route the colour reslice through the Gaussian when colour mode is
+        on and a smoothing strength is set, else straight to the LUT. *step* is
+        the reslice output spacing (mm) so the mm strength maps to a pixel std."""
+        if self._color and self._cmap_smooth_mm > 0.0:
+            sd = max(0.01, self._cmap_smooth_mm / max(1e-6, step))
+            p.gauss.SetStandardDeviations(sd, sd, 0.0)
+            p.gauss.SetRadiusFactors(2.0, 2.0, 0.0)
+            p.gauss.Modified()
+            p.colors.SetInputConnection(p.gauss.GetOutputPort())
+        else:
+            p.colors.SetInputConnection(p.reslice.GetOutputPort())
+
     def _refresh(self, reset_cam=False):
         if self._image is None:
             return
-        step = max(1e-3, min(self._dims))
-        half, n = self._half, self._npx
+        # (A) In COLOUR mode reslice at the MAX resolution (the whole FOV filled
+        # to the pixel cap) so the hard band boundaries stay smooth curves when
+        # the coronary is zoomed in hard, instead of a voxel-grid staircase.
+        # Grayscale keeps the fast voxel resolution (its gradients hide the grid).
+        base_step = max(1e-3, min(self._dims))
+        half = self._half
+        if self._color:
+            n = _RESLICE_NPX_CAP
+            step = max(base_step * 0.1, 2.0 * half / n)
+        else:
+            step = base_step
+            n = min(_RESLICE_NPX_CAP, max(64, int(2 * half / step) + 1))
         for key in ("A", "B"):
             p = self.pane[key]
             # Pane A in short-axis (CPR) mode: reslice the cross-section plane
             # with a tight FOV instead of the normal MPR matrix.
             if self._cpr is not None and key == "A":
                 hcpr = self._cpr["half"]
-                ncpr = max(64, int(2 * hcpr / step) + 1)
+                ncpr = min(_RESLICE_NPX_CAP, max(64, int(2 * hcpr / step) + 1))
                 p.reslice.SetResliceAxes(self._cpr_matrix())
                 p.reslice.SetOutputSpacing(step, step, step)
                 p.reslice.SetOutputOrigin(-hcpr, -hcpr, 0.0)
@@ -4306,6 +4378,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.reslice.Modified()
                 p.colors.SetLookupTable(self._lut())
                 p.colors.Modified()
+                self._wire_color_smoothing(p, step)
                 if reset_cam:
                     self._fit_cpr_pane()
                 # No crosshair / C-arm angle on a cross-section; label the
@@ -4353,6 +4426,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.reslice.Modified()
             p.colors.SetLookupTable(self._lut())
             p.colors.Modified()
+            self._wire_color_smoothing(p, step)
             # Fit BEFORE drawing the ▲ markers: their size is now tied to
             # the camera's parallel scale, so the camera must already be at
             # its final zoom when _update_cross runs (otherwise the initial

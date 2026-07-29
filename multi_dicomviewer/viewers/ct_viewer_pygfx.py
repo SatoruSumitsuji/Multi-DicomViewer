@@ -258,11 +258,11 @@ def _smooth_lut_edges(col: np.ndarray, alpha: np.ndarray, sigma: float = 5.0):
 
 
 def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
-    """512×4 RGBA float32 colormap over HU [_HU_LO,_HU_HI], with the band edges
-    smoothed (see _smooth_lut_edges) so the colour look isn't posterised /
-    speckly. Inside the first enabled band: band colour blended over the
-    windowed grayscale by *opacity*; outside: grayscale. Feeds a pygfx 1-D
-    colormap Texture. Mirrors the VTK viewer's _band_lut_rgb."""
+    """512×4 RGBA float32 colormap over HU [_HU_LO,_HU_HI] with CRISP/hard band
+    edges (matching SSMView). Inside the first enabled band: band colour blended
+    over the windowed grayscale by *opacity*; outside: grayscale. On-image
+    boundary smoothness is handled spatially, not in the LUT. Feeds a pygfx 1-D
+    colormap Texture; mirrors the VTK viewer's _band_lut_rgb."""
     n = 512
     hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
     glo = lvl - win / 2.0
@@ -281,10 +281,8 @@ def _band_lut_array(bands, opacity, win, lvl) -> np.ndarray:
         col[m] = b["rgb"]
         alpha[m] = 1.0
         assigned |= m
-    col_s, a_s = _smooth_lut_edges(col, alpha)
-    eff = (op * a_s)[:, None]
-    rgb = g[:, None] * (1.0 - eff) + np.clip(col_s, 0.0, 1.0) * eff
-    rgb = np.clip(rgb, 0.0, 1.0)
+    eff = (op * alpha)[:, None]
+    rgb = np.clip(g[:, None] * (1.0 - eff) + col * eff, 0.0, 1.0)
     out = np.concatenate(
         [rgb.astype(np.float32), np.ones((n, 1), np.float32)], axis=1)
     return out
@@ -1029,14 +1027,15 @@ class _ColorMapDialog(QDialog):
     on_change(bands, opacity). Pure Qt — copied verbatim from the VTK viewer."""
 
     def __init__(self, bands, opacity, on_change, win=400.0, lvl=40.0,
-                 parent=None):
+                 smooth_mm=0.4, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("ColorMap Setting"))
-        self.resize(560, 520)
+        self.resize(560, 560)
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
         self._on_change = on_change
         self._win, self._lvl = float(win), float(lvl)
+        self._smooth_mm = float(smooth_mm)
 
         self._rows_host = QWidget()
         self._rows = QVBoxLayout(self._rows_host)
@@ -1073,22 +1072,40 @@ class _ColorMapDialog(QDialog):
             lambda b, o, w, l: _band_lut_array(b, o, w, l)[:, :3],
             _HU_LO, _HU_HI)
         _leg_lbl = QLabel(t("Legend — groups / grayscale (W/L) / colour"))
+        sm_row = QHBoxLayout()
+        sm_row.addWidget(QLabel(t("Boundary smoothing")))
+        self._smooth_sld = QSlider(Qt.Orientation.Horizontal)
+        self._smooth_sld.setRange(0, 20)        # 0.0–2.0 mm, /10
+        self._smooth_sld.setValue(int(round(self._smooth_mm * 10)))
+        self._smooth_sld.setToolTip(
+            t("Smooths the colour band boundaries so they read as curves, not "
+              "a voxel-grid staircase. 0 = crisp. Higher softens fine detail."))
+        self._smooth_sld.valueChanged.connect(self._on_smooth_changed)
+        self._smooth_lbl = QLabel(f"{self._smooth_mm:.1f} mm")
+        sm_row.addWidget(self._smooth_sld, 1)
+        sm_row.addWidget(self._smooth_lbl)
 
         col = QVBoxLayout(self)
         col.addWidget(scroll, 1)
         col.addLayout(op_row)
+        col.addLayout(sm_row)
         col.addWidget(_leg_lbl)
         col.addWidget(self._legend)
         col.addLayout(btns)
         self._rebuild()
         self._refresh_legend()
 
+    def _on_smooth_changed(self, v):
+        self._smooth_mm = v / 10.0
+        self._smooth_lbl.setText(f"{self._smooth_mm:.1f} mm")
+        self._emit()
+
     def _refresh_legend(self):
         self._legend.set_params(self._bands, self._opacity,
                                 self._win, self._lvl)
 
     def _emit(self):
-        self._on_change(self._bands, self._opacity)
+        self._on_change(self._bands, self._opacity, self._smooth_mm)
         self._refresh_legend()
 
     def _op_changed(self, v):
@@ -1216,8 +1233,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: entry comes back under the SAME id when the trace is committed again.
     measurement_removed = pyqtSignal(int)
     #: HU colour map edited here — shell persists it and mirrors it onto every
-    #: other CT pane so the colour map is global. Args: (bands, opacity).
-    colormap_changed = pyqtSignal(object, float)
+    #: other CT pane so the colour map is global. Args:
+    #: (bands, opacity, smooth_mm).
+    colormap_changed = pyqtSignal(object, float, float)
     #: fired from a background debounce thread to wake the GUI thread and crisp
     #: up the slab LOD. A cross-thread queued signal posts an event that wakes a
     #: fully-idle Qt loop — which same-thread QTimer/aboutToBlock can't do
@@ -1290,6 +1308,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         _cm = settings.load_ct_colormap()
         self._bands = [dict(b) for b in _cm["bands"]]
         self._opacity = float(_cm["opacity"])
+        self._cmap_smooth_mm = float(_cm.get("smooth_mm", 0.4))
         self._cmap_dlg = None
         self._lut_key = None                 # cache key for the colormap tex
         self._lut_tex = None
@@ -5190,7 +5209,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         is built each time (the viewer's bands are the source of truth)."""
         dlg = _ColorMapDialog(self._bands, self._opacity,
                               self._apply_colormap, self._win, self._lvl,
-                              parent or self)
+                              self._cmap_smooth_mm, parent or self)
         self._cmap_dlg = dlg
         if modal:
             dlg.setWindowModality(Qt.WindowModality.WindowModal)
@@ -5201,25 +5220,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             dlg.raise_()
             dlg.activateWindow()
 
-    def _apply_colormap(self, bands, opacity):
+    def _apply_colormap(self, bands, opacity, smooth_mm=None):
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
+        if smooth_mm is not None:
+            self._cmap_smooth_mm = float(smooth_mm)
         if not self._color:
             self._color = True
             self._cmap_btn.setChecked(True)
         self._refresh()
         # The colour map is global: persist it and let the shell mirror it onto
         # every other CT pane.
-        settings.save_ct_colormap(self._bands, self._opacity)
+        settings.save_ct_colormap(self._bands, self._opacity,
+                                  self._cmap_smooth_mm)
         self.colormap_changed.emit([dict(b) for b in self._bands],
-                                   self._opacity)
+                                   self._opacity, self._cmap_smooth_mm)
 
-    def apply_global_colormap(self, bands, opacity):
+    def apply_global_colormap(self, bands, opacity, smooth_mm=None):
         """Adopt a colour map edited in ANOTHER CT pane (shell propagation).
         Updates the bands + any open editor and redraws, but does NOT force
         colour mode on, persist, or re-emit (which would loop)."""
         self._bands = [dict(b) for b in bands]
         self._opacity = float(opacity)
+        if smooth_mm is not None:
+            self._cmap_smooth_mm = float(smooth_mm)
         if self._cmap_dlg is not None:
             self._cmap_dlg.set_bands(self._bands, self._opacity)
         if self._color:

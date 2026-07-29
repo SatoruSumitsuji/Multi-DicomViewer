@@ -159,6 +159,8 @@
   "Display count, angio image quality, CT colour map": "表示画像数・アンギオ画質・CTカラーマップ",
   "Angio image quality": "アンギオ画質",
   "Legend — groups / grayscale (W/L) / colour": "凡例 — グループ / グレイスケール(W/L) / カラー",
+  "Boundary smoothing": "境界のスムージング",
+  "Smooths the colour band boundaries so they read as curves, not a voxel-grid staircase. 0 = crisp. Higher softens fine detail.": "カラーバンドの境界を滑らかな曲線にします（ボクセル格子の階段状を解消）。0=くっきり。大きくすると細部が甘くなります。",
   "Point": "点",
   "Probe HU at a point: hover shows the value, click drops a + marker and lists it": "点のCT値プローブ: ホバーで値表示、クリックで+印を付けて一覧表示",
   "Advanced…": "詳細…",
