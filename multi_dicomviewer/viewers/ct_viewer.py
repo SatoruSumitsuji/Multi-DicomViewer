@@ -4448,13 +4448,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             pw = max(1, int(round(p.canvas.width() * dpr)))
             ph = max(1, int(round(p.canvas.height() * dpr)))
             half_u = ps * pw / ph                       # half visible width (mm)
-            # SPIN rolls the camera → the visible rect is rotated in the (u,v)
-            # plane; widen the (axis-aligned) sampled box to its bounding box so
-            # the rolled corners aren't left unsampled.
+            # SPIN rolls the camera → the visible rect is rotated in the output
+            # (u,v) plane; widen the axis-aligned sampled box to its bounding
+            # box so the rolled corners aren't left unsampled. The camera lives
+            # in the OUTPUT frame (x=U, y=V), so read the roll straight from its
+            # ViewUp's in-plane components — NOT via the world plane axes.
             vup = cam.GetViewUp()
-            _u, _v, _nn = self._axes_for(key)
-            c = abs(float(np.dot(vup, _v)))             # |cos(roll)|
-            s = abs(float(np.dot(vup, _u)))             # |sin(roll)|
+            mag = math.hypot(float(vup[0]), float(vup[1])) or 1.0
+            c = abs(float(vup[1])) / mag                # |cos(roll)|
+            s = abs(float(vup[0])) / mag                # |sin(roll)|
             box_u = half_u * c + ps * s
             box_v = half_u * s + ps * c
             spacing = max(base_step * 0.05, 2.0 * ps / ph)   # ≈ display pixel
