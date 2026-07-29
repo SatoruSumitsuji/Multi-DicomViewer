@@ -3814,31 +3814,54 @@ class CTViewer(CPRMixin, AbstractViewer):
         ]
 
     def _hu_stats(self, key, poly):
-        """Min/max HU of the reslice-output pixels inside *poly*."""
-        p = self.pane[key]
-        p.reslice.Update()
-        img = p.reslice.GetOutput()
-        ox, oy, _oz = img.GetOrigin()
-        sxp, syp, _sz = img.GetSpacing()
-        dx, dy, _dz = img.GetDimensions()
+        """Min/max HU inside *poly* (output-plane U,V mm), sampled DIRECTLY from
+        the volume on a voxel-pitch grid — independent of the display reslice
+        (which now only covers the zoomed-in viewport, so reading its pixels
+        would miss an off-screen ROI)."""
+        if self._vol is None or len(poly) < 3:
+            return 0.0, 0.0
+        u, v, _n = self._axes_for(key)
+        pc = self._pc[key]
         xs = [q[0] for q in poly]
         ys = [q[1] for q in poly]
-        i0 = max(0, int((min(xs) - ox) / sxp))
-        i1 = min(dx - 1, int((max(xs) - ox) / sxp) + 1)
-        j0 = max(0, int((min(ys) - oy) / syp))
-        j1 = min(dy - 1, int((max(ys) - oy) / syp) + 1)
-        lo, hi = 1e9, -1e9
-        for j in range(j0, j1 + 1):
-            wy = oy + j * syp
-            for i in range(i0, i1 + 1):
-                wx = ox + i * sxp
-                if _point_in_poly(wx, wy, poly):
-                    val = img.GetScalarComponentAsDouble(i, j, 0, 0)
-                    lo = min(lo, val)
-                    hi = max(hi, val)
-        if lo > hi:
+        step = max(0.1, min(self._dims))          # ~voxel pitch
+        # Gather the (u,v) grid points inside the polygon, lift to 3-D world.
+        pts = []
+        y = min(ys)
+        while y <= max(ys):
+            x = min(xs)
+            while x <= max(xs):
+                if _point_in_poly(x, y, poly):
+                    pts.append(pc + x * u + y * v)
+                x += step
+            y += step
+        if not pts:
             return 0.0, 0.0
-        return lo, hi
+        # Batched trilinear sample of the volume (voxel index = world / spacing).
+        P = np.asarray(pts, float)
+        sx, sy, sz = self._dims
+        fx = P[:, 0] / sx
+        fy = P[:, 1] / sy
+        fz = P[:, 2] / sz
+        nz, ny, nx = self._vol.shape
+        inb = ((fx >= 0) & (fx <= nx - 1) & (fy >= 0) & (fy <= ny - 1)
+               & (fz >= 0) & (fz <= nz - 1))
+        if not inb.any():
+            return 0.0, 0.0
+        fx, fy, fz = fx[inb], fy[inb], fz[inb]
+        x0 = np.clip(np.floor(fx).astype(int), 0, nx - 2)
+        y0 = np.clip(np.floor(fy).astype(int), 0, ny - 2)
+        z0 = np.clip(np.floor(fz).astype(int), 0, nz - 2)
+        tx, ty, tz = fx - x0, fy - y0, fz - z0
+        V = self._vol
+        val = np.zeros(len(fx))
+        for dz in (0, 1):
+            for dy2 in (0, 1):
+                for dx2 in (0, 1):
+                    w = ((tx if dx2 else 1 - tx) * (ty if dy2 else 1 - ty)
+                         * (tz if dz else 1 - tz))
+                    val += w * V[z0 + dz, y0 + dy2, x0 + dx2]
+        return float(val.min()), float(val.max())
 
     # --------------------------------------------------- AbstractViewer
     def load_series(self, loaded: LoadedSeries, title: str) -> None:
@@ -4340,7 +4363,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         on and a smoothing strength is set, else straight to the LUT. *step* is
         the reslice output spacing (mm) so the mm strength maps to a pixel std."""
         if self._color and self._cmap_smooth_mm > 0.0:
-            sd = max(0.01, self._cmap_smooth_mm / max(1e-6, step))
+            # mm strength → output pixels; capped so a fine (zoomed) reslice
+            # can't make a huge, slow kernel. The display-resolution reslice
+            # already removes the staircase, so this mainly calms voxel noise.
+            sd = max(0.01, min(6.0, self._cmap_smooth_mm / max(1e-6, step)))
             p.gauss.SetStandardDeviations(sd, sd, 0.0)
             p.gauss.SetRadiusFactors(2.0, 2.0, 0.0)
             p.gauss.Modified()
@@ -4351,23 +4377,13 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _refresh(self, reset_cam=False):
         if self._image is None:
             return
-        # (A) In COLOUR mode reslice at the MAX resolution (the whole FOV filled
-        # to the pixel cap) so the hard band boundaries stay smooth curves when
-        # the coronary is zoomed in hard, instead of a voxel-grid staircase.
-        # Grayscale keeps the fast voxel resolution (its gradients hide the grid).
         base_step = max(1e-3, min(self._dims))
-        half = self._half
-        if self._color:
-            n = _RESLICE_NPX_CAP
-            step = max(base_step * 0.1, 2.0 * half / n)
-        else:
-            step = base_step
-            n = min(_RESLICE_NPX_CAP, max(64, int(2 * half / step) + 1))
         for key in ("A", "B"):
             p = self.pane[key]
             # Pane A in short-axis (CPR) mode: reslice the cross-section plane
             # with a tight FOV instead of the normal MPR matrix.
             if self._cpr is not None and key == "A":
+                step = base_step
                 hcpr = self._cpr["half"]
                 ncpr = min(_RESLICE_NPX_CAP, max(64, int(2 * hcpr / step) + 1))
                 p.reslice.SetResliceAxes(self._cpr_matrix())
@@ -4410,14 +4426,49 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.render()
                 continue
             p.reslice.SetResliceAxes(self._matrix(key))
-            p.reslice.SetOutputSpacing(step, step, step)
-            p.reslice.SetOutputOrigin(-half, -half, 0.0)
-            p.reslice.SetOutputExtent(0, n - 1, 0, n - 1, 0, 0)
             th = self._thick[key]
+            # Fit the camera FIRST on a reset so the zoom-adaptive reslice below
+            # samples exactly the fitted view (the ▲ markers are also sized to
+            # the camera's parallel scale, so it must be final before _update_
+            # cross).
+            if reset_cam:
+                self._fit_pane(key)
+            # --- Zoom-adaptive, display-resolution reslice -------------------
+            # Reslice ONLY the VISIBLE viewport (from the camera) at the screen's
+            # pixel density, instead of the whole FOV at the voxel grid. This is
+            # what keeps the colour band boundaries smooth curves at ANY zoom
+            # (a fixed-grid reslice becomes a staircase when magnified). The
+            # camera lives in the reslice OUTPUT frame: focal point = visible
+            # centre (mm from _pc), ParallelScale = half the visible height (mm).
+            dpr = max(1.0, p.canvas.devicePixelRatioF())
+            cam = p.ren.GetActiveCamera()
+            ps = max(1e-3, cam.GetParallelScale())
+            fp = cam.GetFocalPoint()
+            fx, fy = float(fp[0]), float(fp[1])
+            pw = max(1, int(round(p.canvas.width() * dpr)))
+            ph = max(1, int(round(p.canvas.height() * dpr)))
+            half_u = ps * pw / ph                       # half visible width (mm)
+            # SPIN rolls the camera → the visible rect is rotated in the (u,v)
+            # plane; widen the (axis-aligned) sampled box to its bounding box so
+            # the rolled corners aren't left unsampled.
+            vup = cam.GetViewUp()
+            _u, _v, _nn = self._axes_for(key)
+            c = abs(float(np.dot(vup, _v)))             # |cos(roll)|
+            s = abs(float(np.dot(vup, _u)))             # |sin(roll)|
+            box_u = half_u * c + ps * s
+            box_v = half_u * s + ps * c
+            spacing = max(base_step * 0.05, 2.0 * ps / ph)   # ≈ display pixel
+            nu = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_u / spacing) + 1))
+            nv = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_v / spacing) + 1))
+            p.reslice.SetOutputSpacing(spacing, spacing, base_step)
+            p.reslice.SetOutputOrigin(fx - box_u, fy - box_v, 0.0)
+            p.reslice.SetOutputExtent(0, nu - 1, 0, nv - 1, 0, 0)
             if th > 0 and hasattr(p.reslice, "SetSlabModeToMax"):
                 p.reslice.SetSlabModeToMax()
+                # Slab depth sampled at the VOXEL pitch (through-plane), not the
+                # fine in-plane display pitch.
                 p.reslice.SetSlabNumberOfSlices(
-                    max(1, int(round(th / step)))
+                    max(1, int(round(th / base_step)))
                 )
                 if hasattr(p.reslice, "SetSlabSliceSpacingFraction"):
                     p.reslice.SetSlabSliceSpacingFraction(1.0)
@@ -4426,13 +4477,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.reslice.Modified()
             p.colors.SetLookupTable(self._lut())
             p.colors.Modified()
-            self._wire_color_smoothing(p, step)
-            # Fit BEFORE drawing the ▲ markers: their size is now tied to
-            # the camera's parallel scale, so the camera must already be at
-            # its final zoom when _update_cross runs (otherwise the initial
-            # view's markers would be sized for the pre-fit scale).
-            if reset_cam:
-                self._fit_pane(key)
+            self._wire_color_smoothing(p, spacing)
             self._update_cross(key)
             self._update_info(key, title_only=False)
             p.render()
