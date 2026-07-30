@@ -1785,6 +1785,19 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _on_resize(self, key, ev):
         if self._vol is None:
             return
+        # Short-axis (CPR) pane A has its OWN camera + plane (the oblique
+        # cross-section, normal = vessel tangent). The normal MPR fit path
+        # below would re-point the camera at the MPR frame and re-scale from
+        # _ps["A"], leaving the camera mismatched with the CPR material plane
+        # — the distorted sliver seen when switching Plane Bi->Lt in CPR.
+        # Re-render through the CPR path so _config_cpr_cam picks up the new
+        # aspect ratio (its "half" zoom is preserved).
+        if self._cpr is not None and key == "A":
+            p = self.pane[key]
+            if p.material is not None:
+                self._render_cpr_pane(p)
+                self._overlay[key].update()
+            return
         if self._view_initial:
             self._fit_pane(key)
         else:
