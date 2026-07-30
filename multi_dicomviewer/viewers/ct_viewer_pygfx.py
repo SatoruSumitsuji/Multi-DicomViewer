@@ -1535,14 +1535,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._cmp_on and self._drag_btn == 1:
             self._compare_pick(key, x, y)
             return
-        # Shift + right-click (single two-finger tap + Shift) = full-quality
-        # ("high-res") rebuild. A single gesture so trackpad users don't need
-        # the hard-to-do right-DOUBLE-click (which is kept). It only re-renders,
-        # so it's safe in any tool/measure mode; check it before everything else.
-        if (self._drag_btn == 2
-                and "Shift" in (ev.get("modifiers") or ())):
-            self._force_crisp()
-            return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
         # first, in any tool/measure mode, since it's a fixed screen target.
@@ -1601,6 +1593,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # preempt it (the export menu is modal and would block the second
         # click otherwise).
         if self._drag_btn == 2:
+            # Shift + right-click = full-quality ("high-res") rebuild — a
+            # trackpad-friendly single gesture (the right-DOUBLE-click is kept
+            # too). Checked HERE, not before the measure handling above, so a
+            # Shift+right-click ON a measure element still reaches the measure
+            # menu (Resume trace / Delete) — Windows parity, where Shift is
+            # ignored on right-click and the measure menu always wins.
+            if "Shift" in (ev.get("modifiers") or ()):
+                self._force_crisp()
+                return
             try:
                 dbl_ms = max(150, int(QApplication.doubleClickInterval()))
             except Exception:
@@ -2371,8 +2372,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         is2d = getattr(self, "_mode", "3D") == "2D"
         for n, b in self._tool_btns.items():
             active = (n == getattr(self, "_tool", None))
-            b.setEnabled(not measuring
-                         and not (is2d and n in _MPR_ONLY_TOOLS))
+            # Keep the tools clickable WHILE measuring so the user can pick which
+            # tool a Shift+drag uses (matches the Windows viewer; the shortcut
+            # keys already switch them). The dimmed-red styling below still
+            # signals "hold Shift to use it here".
+            b.setEnabled(not (is2d and n in _MPR_ONLY_TOOLS))
             if measuring:
                 # greyed-out; the selected tool keeps a dimmed red.
                 b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
