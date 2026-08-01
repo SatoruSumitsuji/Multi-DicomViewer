@@ -315,6 +315,28 @@ def _polylines_pd(polylines, z=0.72) -> vtkPolyData:
     return pd
 
 
+def _lv_pts_pd(pts_xy, colors, z=0.8) -> vtkPolyData:
+    """Vert-cell polydata for the LV axis pick markers — one point per (x, y)
+    output-plane coord with a per-cell RGB colour (apex vs basal)."""
+    from vtkmodules.vtkCommonCore import vtkUnsignedCharArray
+    pd = vtkPolyData()
+    vp = vtkPoints()
+    verts = vtkCellArray()
+    col = vtkUnsignedCharArray()
+    col.SetNumberOfComponents(3)
+    col.SetName("Colors")
+    for i, (x, y) in enumerate(pts_xy):
+        vp.InsertNextPoint(float(x), float(y), float(z))
+        verts.InsertNextCell(1)
+        verts.InsertCellPoint(i)
+        r, g, b = colors[i]
+        col.InsertNextTuple3(int(r), int(g), int(b))
+    pd.SetPoints(vp)
+    pd.SetVerts(verts)
+    pd.GetCellData().SetScalars(col)
+    return pd
+
+
 def _dashed_multi_pd(segments, z=0.66) -> vtkPolyData:
     """One polydata of faint dotted lines for several 2-D segments
     (major/minor diameter guides). Dash length scales with each
@@ -723,6 +745,18 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._owner._compare_pick(
                 self._which, e.position().x(), e.position().y()
             )
+            return
+        # LV EF axis pick: a left-click drops the apex / basal points while the
+        # LV tool is armed. No drag (clear _last), so rotating to a long-axis
+        # view still uses SPIN normally between picks.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._lv is not None
+                and self._owner._lv.get("pick")):
+            self._last = None
+            self._cross = False
+            self._meas_drag = False
+            self._owner._lv_click(
+                self._which, e.position().x(), e.position().y())
             return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
@@ -1135,6 +1169,28 @@ class _Pane:
         if hasattr(mar.GetProperty(), "SetRenderLinesAsTubes"):
             mar.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(mar)
+        # LV EF (Phase 1): the apex→base long axis line + the 3 picked axis
+        # points (apex green, basal cyan). Own actors so they draw over the MPR.
+        self.lv_line_mapper = vtkPolyDataMapper()
+        self.lv_line_mapper.SetInputData(vtkPolyData())
+        lla = vtkActor()
+        lla.SetMapper(self.lv_line_mapper)
+        lla.GetProperty().SetColor(1.0, 0.85, 0.0)      # yellow long axis
+        lla.GetProperty().SetLineWidth(2.4)
+        if hasattr(lla.GetProperty(), "SetRenderLinesAsTubes"):
+            lla.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(lla)
+        self.lv_pts_mapper = vtkPolyDataMapper()
+        self.lv_pts_mapper.SetInputData(vtkPolyData())
+        self.lv_pts_mapper.ScalarVisibilityOn()
+        self.lv_pts_mapper.SetScalarModeToUseCellData()
+        self.lv_pts_mapper.SetColorModeToDirectScalars()
+        lpa = vtkActor()
+        lpa.SetMapper(self.lv_pts_mapper)
+        lpa.GetProperty().SetPointSize(13.0)
+        if hasattr(lpa.GetProperty(), "SetRenderPointsAsSpheres"):
+            lpa.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(lpa)
         # VTK line width is in render-window PHYSICAL pixels, and this canvas
         # sizes its render window by devicePixelRatio — so on a scaled Windows
         # display the lines render thinner than the equivalent Qt-drawn IVUS
@@ -1732,6 +1788,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: staircase. Global + persisted; 0 = crisp.
         self._cmap_smooth_mm = float(_cm.get("smooth_mm", 0.4))
         self._cmap_dlg = None
+        # LV EF measurement state (Phase 1): None = off; else
+        # {"model": LVModel, "picks": [3-D apex, basal1, basal2], "pick": bool}.
+        self._lv = None
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2159,6 +2218,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Invert grayscale (black↔white negative)"))
         self._invert_btn.clicked.connect(self._toggle_invert)
         row2.addWidget(self._invert_btn)
+        # LV EF (Phase 1): enter LV volume-measurement mode — pick the long axis
+        # (apex + 2 basal points) on a rotated long-axis view, then trace the
+        # endo/epi borders (Phase 1b) for a voxel-counted LV volume.
+        self._lv_btn = FitButton(t("LV EF"))
+        self._lv_btn.setCheckable(True)
+        self._lv_btn.setHelpToolTip(
+            t("LV EF: rotate to a long-axis view, click the apex then the two "
+              "basal (mitral-annulus) points to set the LV long axis"))
+        self._lv_btn.clicked.connect(self._toggle_lv)
+        row2.addWidget(self._lv_btn)
         row2.addStretch(1)
 
         col.addLayout(row)
@@ -3903,6 +3972,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._play2d_resume = False              # next Play starts at Frame 1
         self._set_play2d_speed(1.0)              # back to 1× for a new series
         self._cpr = None                         # drop any short-axis session
+        self._lv = None                          # drop any LV EF session
         self._cpr_wrap.setVisible(False)
 
         b = self._bounds
@@ -3968,6 +4038,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cpr = None                         # drop any short-axis session
+        self._lv = None                          # drop any LV EF session
         self._cpr_wrap.setVisible(False)
         self._vol = None
         self._image = None
@@ -4092,6 +4163,100 @@ class CTViewer(CPRMixin, AbstractViewer):
         u, v, _n = self._axes_for(which)
         d = np.asarray(P, dtype=float) - self._pc[which]
         return (float(np.dot(d, u)), float(np.dot(d, v)))
+
+    # ------------------------------------------------ LV EF (Phase 1: axis)
+    def _toggle_lv(self) -> None:
+        """Enter/leave LV EF mode. On enter, arm the 3-point long-axis pick
+        (apex, then the two basal points)."""
+        on = self._lv_btn.isChecked()
+        if on:
+            from multi_dicomviewer.core.lv_measure import LVModel
+            # Measure and LV picking are mutually exclusive click owners.
+            if self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv = {"model": LVModel(n_planes=6), "picks": [], "pick": True}
+        else:
+            self._lv = None
+        self._lv_update_text()
+        self._redraw_all_lv()
+
+    def _lv_click(self, which, sx, sy) -> None:
+        """Drop the next LV axis point (apex → basal-1 → basal-2). After the
+        3rd, build the long axis and stop picking."""
+        lv = self._lv
+        if lv is None or not lv.get("pick"):
+            return
+        wx, wy = self._disp_to_world(which, sx, sy)
+        P = self._out_to_world3d(which, wx, wy)
+        lv["picks"].append(np.asarray(P, dtype=float))
+        if len(lv["picks"]) >= 3:
+            apex, b1, b2 = lv["picks"][0], lv["picks"][1], lv["picks"][2]
+            try:
+                lv["model"].set_axis(b1, b2, apex)
+                lv["pick"] = False
+            except Exception:
+                lv["picks"] = []                 # degenerate → restart the pick
+        self._lv_update_text()
+        self._redraw_all_lv()
+
+    def _lv_reset_picks(self) -> None:
+        """Clear the picked points and re-arm the pick (redo the long axis)."""
+        if self._lv is None:
+            return
+        self._lv["picks"] = []
+        self._lv["pick"] = True
+        self._lv["model"].axis = None
+        self._lv_update_text()
+        self._redraw_all_lv()
+
+    def _lv_update_text(self) -> None:
+        """Show the current LV step / axis result in each pane's result text."""
+        lv = self._lv
+        if lv is None:
+            for k in ("A", "B"):
+                self.pane[k].resultact.SetInput("")
+                self.pane[k].render()
+            return
+        n = len(lv["picks"])
+        if lv.get("pick"):
+            step = (t("click the APEX"), t("click BASAL point 1"),
+                    t("click BASAL point 2"))[min(n, 2)]
+            msg = t("LV EF — {step}", step=step)
+        else:
+            ax = lv["model"].axis
+            length = ax.length_mm if ax is not None else 0.0
+            msg = t("LV axis set (length {mm:.0f} mm).\n"
+                    "Next: rotate & trace the endo border (Phase 1b).",
+                    mm=length)
+        for k in ("A", "B"):
+            self.pane[k].resultact.SetInput(msg)
+            self.pane[k].render()
+
+    def _redraw_lv(self, key) -> None:
+        """Project the LV picks + long axis onto pane *key* and update its
+        overlay actors (called on every view change so they stay anchored)."""
+        p = self.pane[key]
+        lv = self._lv
+        if lv is None or not lv["picks"]:
+            p.lv_pts_mapper.SetInputData(vtkPolyData())
+            p.lv_line_mapper.SetInputData(vtkPolyData())
+            return
+        cols = [(60, 220, 90), (60, 180, 255), (60, 180, 255)]  # apex, basal×2
+        xy = [self._world3d_to_out(key, P) for P in lv["picks"]]
+        p.lv_pts_mapper.SetInputData(_lv_pts_pd(xy, cols[:len(xy)]))
+        ax = lv["model"].axis
+        if ax is not None:
+            a = self._world3d_to_out(key, ax.apex)
+            b = self._world3d_to_out(key, ax.base_center)
+            p.lv_line_mapper.SetInputData(_polylines_pd([[a, b]]))
+        else:
+            p.lv_line_mapper.SetInputData(vtkPolyData())
+
+    def _redraw_all_lv(self) -> None:
+        for k in ("A", "B"):
+            self._redraw_lv(k)
+            self.pane[k].render()
 
     # ---- lumen (high-HU) snapping for vessel tracing ----
     def _hu_at(self, P):
@@ -4497,6 +4662,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._cpr is not None and kk == "A":
                     continue
                 self._redraw_geom(kk)
+        # LV EF axis + points re-project onto the (possibly moved) planes too.
+        if self._lv is not None:
+            for kk in ("A", "B"):
+                self._redraw_lv(kk)
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
