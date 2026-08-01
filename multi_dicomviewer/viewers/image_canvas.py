@@ -296,6 +296,7 @@ class ImageCanvas(QWidget):
         # Opt-in OpenCV image-quality toggles (default OFF = current look).
         self._smooth: bool = False         # Lanczos high-quality upscaling
         self._denoise: bool = False        # master enable for the enhance pipe
+        self._invert: bool = False         # WB reverse (grayscale black<->white)
         # Advanced enhancement params (applied only while _denoise is on):
         # denoise sigma, unsharp amount %, CLAHE clip. Defaults reproduce the
         # classic single-step Denoise.
@@ -381,6 +382,14 @@ class ImageCanvas(QWidget):
             self._denoise = on
             self._rebuild_frame()
 
+    def set_invert(self, on: bool) -> None:
+        """WB reverse: invert the grayscale (black<->white negative). Rebuilds
+        the frame so the shown (and exported) pixels reflect it. Default OFF."""
+        on = bool(on)
+        if on != self._invert:
+            self._invert = on
+            self._rebuild_frame()
+
     def set_enhance_params(self, denoise: float, sharpen: float,
                            clahe: float) -> None:
         """Set the advanced enhancement parameters (bilateral denoise sigma,
@@ -408,6 +417,8 @@ class ImageCanvas(QWidget):
             f = image_quality.enhance(
                 f, self._adv["denoise"], self._adv["sharpen"],
                 self._adv["clahe"])
+        if self._invert:
+            f = 255 - f                    # WB reverse (black<->white negative)
         self._proc8 = f
         self._qimg = to_qimage(f)
         self._img_size = (f.shape[1], f.shape[0])
