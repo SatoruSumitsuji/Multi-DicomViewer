@@ -348,6 +348,7 @@
   "Load CoSync…": "CoSyncを読込…",
   "Load a series first, then choose overlay items.": "先にシリーズを読み込んでから、オーバーレイ項目を選択してください。",
   "Load failed": "読み込み失敗",
+  "Could not display {label}.\nGraphics/RAM may be exhausted by several large CT series open at once — close another CT pane and try again.": "{label} を表示できませんでした。\n複数の大きな CT を同時に開くとグラフィック/メモリが不足することがあります。別の CT ペインを閉じて再試行してください。",
   "Load failed.": "読み込みに失敗しました。",
   "Loaded {label}": "{label} を読み込みました",
   "Loaded {n} CoReg point(s).": "{n}個のCoReg点を読み込みました。",

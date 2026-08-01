@@ -625,6 +625,7 @@ class ViewerPane(QFrame):
         self._still_series = None      # Series to reload on promote (None → live)
         self._still_state = None       # best-effort view snapshot (Phase 3)
         self._series_ref = None        # Series currently shown (for LRU/demote)
+        self._volume_bytes = 0         # est. live volume size (bytes), mem budget
 
         self._box = QVBoxLayout(self)
         self._box.setContentsMargins(1, 1, 1, 1)
@@ -1158,6 +1159,16 @@ class MainWindow(QMainWindow):
         self._use_seq = 0
         self._pane_touch: dict[ViewerPane, int] = {}
         self._live_cap = self._load_live_caps()   # {Modality: live-at-once cap}
+        # Per-modality RAW-volume memory budget (bytes) for LIVE panes. The
+        # count cap alone treats a 200-slice CT the same as a 640-slice
+        # 0.25 mm one (~0.7 GB) — so a high cap (e.g. CT=4) lets several huge
+        # volumes go live at once and the GPU/VTK build of the newest exhausts
+        # memory → black CT. This budget demotes the oldest live volume(s) when
+        # the live total (incl. the incoming one) would exceed it, so small
+        # series still use the full count cap while big ones can't pile up.
+        # Actual footprint ≈ 2-3× the raw bytes (numpy + VTK float copy).
+        self._live_bytes_budget = {
+            Modality.CT: 1_100_000_000, Modality.XA: 2_000_000_000}
 
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
@@ -2731,6 +2742,51 @@ class MainWindow(QMainWindow):
                 if p.demote_to_still(getattr(p, "_series_ref", None)):
                     live.remove(p)
 
+    def _free_live_for_incoming(self, incoming_pane: ViewerPane,
+                                modality, incoming_bytes: int = 0) -> None:
+        """Demote the least-recently-used OTHER live panes of *modality* to
+        stills — freeing their volume + GPU memory — BEFORE the incoming pane
+        builds its own (possibly large) volume.
+
+        Without this, loading a 2nd big CT builds its ~0.7 GB VTK volume while
+        the outgoing CT is still live, so the peak holds BOTH and the GPU/RAM
+        exhausts → the new pane renders black and the only recovery was an app
+        restart (which loses the whole session). Freeing first means the build
+        has the memory it needs.
+
+        Two limits are enforced (oldest demoted first):
+          * the COUNT cap — keep at most cap-1 others (the incoming makes cap);
+          * a raw-volume MEMORY budget — so a high count cap (e.g. CT=4) can't
+            let several huge volumes pile up: small series still use the whole
+            cap, but big ones auto-free the oldest until the live total
+            (incl. the incoming one) fits the budget.
+        The post-build _enforce_live_caps still runs for the general case."""
+        others = [p for p in self._panes
+                  if p is not incoming_pane
+                  and self._pane_live_modality(p) == modality
+                  and p not in self._loads]
+        others.sort(key=lambda p: self._pane_touch.get(p, 0))   # oldest first
+
+        def _demote_oldest() -> bool:
+            if not others:
+                return False
+            p = others.pop(0)
+            p.demote_to_still(getattr(p, "_series_ref", None))
+            return True
+
+        cap = self._live_cap.get(modality)
+        if cap:                                  # count cap: leave room for one
+            while len(others) > cap - 1 and _demote_oldest():
+                pass
+        budget = self._live_bytes_budget.get(modality)
+        if budget:                               # memory budget (raw volume)
+            def _live_total() -> int:
+                return (int(incoming_bytes)
+                        + sum(int(getattr(p, "_volume_bytes", 0))
+                              for p in others))
+            while others and _live_total() > budget and _demote_oldest():
+                pass
+
     def _promote_pane(self, pane: ViewerPane) -> None:
         """A frozen still pane was interacted with → reload its series (its
         view rebuilds; the LRU cap then frees whatever is now oldest). The
@@ -4094,8 +4150,31 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         self._cur_study_uid = self._study_by_series_uid.get(series.series_uid)
-        pane.show_series(loaded, series.label, self._pane_bar(series))
+        # Free the least-recently-used live panes of THIS modality BEFORE
+        # building the (possibly large) new volume, so the build never
+        # transiently holds both its and the outgoing volume's GPU/RAM — the
+        # exhaustion that showed a black CT recoverable only by an app restart.
+        incoming_bytes = int(getattr(getattr(loaded, "volume", None),
+                                     "nbytes", 0) or 0)
+        self._free_live_for_incoming(pane, loaded.modality, incoming_bytes)
+        try:
+            pane.show_series(loaded, series.label, self._pane_bar(series))
+        except Exception as exc:                          # noqa: BLE001
+            # Safety net: if the GPU/VTK build still fails (e.g. a single
+            # volume larger than available graphics memory), surface it instead
+            # of leaving a silently-black pane that forces a restart.
+            traceback.print_exc()
+            self._cleanup_load(pane)
+            pane.reset()
+            QMessageBox.critical(
+                self, t("Load failed"),
+                t("Could not display {label}.\nGraphics/RAM may be exhausted "
+                  "by several large CT series open at once — close another CT "
+                  "pane and try again.", label=series.label))
+            self.statusBar().showMessage(t("Load failed."))
+            return
         pane._series_ref = series          # remembered for LRU demote / promote
+        pane._volume_bytes = incoming_bytes    # for the live-memory budget
         self._touch_pane(pane)             # freshly loaded = most-recently-used
         self._cleanup_load(pane)
         # Carry the current anonymize + tag-overlay choices onto the
