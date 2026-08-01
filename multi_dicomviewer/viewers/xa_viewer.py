@@ -847,6 +847,18 @@ class XAViewer(AbstractViewer):
             self._orient_btns.append(b)
             row.addWidget(b)
 
+        # Grayscale invert (black<->white negative) — right of Flip-V, matching
+        # the CT 2-D toolbar. Mainly for chest X-ray (CXp) and other static
+        # Secondary-Capture / DX stills. A plain toggle (not an orientation), so
+        # "Reset" leaves it alone.
+        self._wb_btn = QPushButton(t("WB reverse"))
+        self._wb_btn.setCheckable(True)
+        self._wb_btn.setStyleSheet(
+            "QPushButton:checked { background:#1f77b4; color:white; }")
+        self._wb_btn.setToolTip(t("Invert grayscale (black↔white negative)"))
+        self._wb_btn.toggled.connect(self._toggle_wb_reverse)
+        row.addWidget(self._wb_btn)
+
         # "Reset" — undo every display transform (Rt90/Lt90/Flip-H/Flip-V and
         # the IVUS free drag-rotation) back to the originally-loaded orientation.
         self._reset_orient_btn = QPushButton(t("Reset"))
@@ -1336,6 +1348,14 @@ class XAViewer(AbstractViewer):
             c.set_hq_cine(on)
         self._dq["xa_hq_cine"] = on
         settings.save_display_quality(self._dq)
+
+    def _toggle_wb_reverse(self, on: bool) -> None:
+        """WB reverse: invert the grayscale (black<->white negative) on both
+        canvases. Matches the CT 2-D 'WB reverse' button; mainly for chest
+        X-ray (CXp) and other still images. Not persisted (a per-view choice)."""
+        on = bool(on)
+        for c in (self.canvas, self.canvas2):
+            c.set_invert(on)
 
     def _toggle_smooth(self, on: bool) -> None:
         """Lanczos high-quality upscaling toggle (both canvases), persisted."""
@@ -2571,6 +2591,10 @@ class XAViewer(AbstractViewer):
             )):
                 b.setText(label)
                 b.setToolTip(tip)
+        btn = getattr(self, "_wb_btn", None)
+        if btn is not None:
+            btn.setText(t("WB reverse"))
+            btn.setToolTip(t("Invert grayscale (black↔white negative)"))
         btn = getattr(self, "_reset_orient_btn", None)
         if btn is not None:
             btn.setText(t("Reset"))
