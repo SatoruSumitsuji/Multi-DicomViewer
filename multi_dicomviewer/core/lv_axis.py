@@ -84,6 +84,28 @@ class LVAxis:
         return cls(apex=ap, base_center=base_center, axis=axis,
                    radial0=radial0, binormal=binormal, length_mm=length)
 
+    @classmethod
+    def from_frame(cls, origin, axis_dir, radial0) -> "LVAxis":
+        """Build the axis directly from a view frame: *origin* a point on the
+        axis (the along = 0 reference, e.g. the crosshair centre), *axis_dir*
+        the rotation-axis direction (the long-axis view's up), *radial0* the
+        θ = 0 in-plane direction (the view's right).
+
+        Used when the LV long axis is taken from the current long-axis MPR view
+        instead of picked points — the apex/base extent is then defined by the
+        traced borders (see LVSurface.from_meridian_contours), so ``apex`` here
+        is just the along-origin and ``length_mm`` is a nominal placeholder."""
+        o = np.asarray(origin, dtype=np.float64).reshape(3)
+        axis = _unit(axis_dir)
+        if float(np.linalg.norm(axis)) < 1e-9:
+            raise ValueError("degenerate axis direction")
+        r = np.asarray(radial0, dtype=np.float64).reshape(3)
+        radial0 = _unit(r - float(np.dot(r, axis)) * axis,
+                        fallback=_perp_any(axis))
+        binormal = _unit(np.cross(axis, radial0))
+        return cls(apex=o, base_center=o + axis, axis=axis,
+                   radial0=radial0, binormal=binormal, length_mm=0.0)
+
     # --------------------------------------------------------- meridian / xform
     def meridian_dir(self, theta_deg: float) -> np.ndarray:
         """Unit radial direction of the θ meridian (θ=0 → radial0,
