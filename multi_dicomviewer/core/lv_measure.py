@@ -47,6 +47,33 @@ class LVModel:
         self.epi_contours.clear()
         self.endo = self.epi = None
 
+    def set_axis_from_frame(self, origin, axis_dir, radial0) -> None:
+        """Define the long axis from the current long-axis VIEW instead of
+        picked points: *origin* a point on the axis (crosshair), *axis_dir* the
+        rotation axis (view up), *radial0* the θ=0 direction (view right). The
+        apex/base extent is then derived from the traced borders. Clears any
+        contours built against a previous axis."""
+        self.axis = LVAxis.from_frame(origin, axis_dir, radial0)
+        self.endo_contours.clear()
+        self.epi_contours.clear()
+        self.endo = self.epi = None
+
+    def along_range(self, which: str = "endo"):
+        """(apex_along, base_along) of the currently-captured *which* borders —
+        the along span where every meridian has a point (apex = max of the
+        per-meridian minima, base = min of the per-meridian maxima, the base
+        cut plane ⟂ the axis). None if <1 border or they don't overlap."""
+        store = self.endo_contours if which == "endo" else self.epi_contours
+        if not store:
+            return None
+        mins, maxs = [], []
+        for c in store.values():
+            a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+            mins.append(float(a.min()))
+            maxs.append(float(a.max()))
+        apex, base = max(mins), min(maxs)
+        return (apex, base) if base > apex else None
+
     def plane_angles(self) -> list[float]:
         """Rotation angles (deg) of the long-axis drawing planes. n planes span
         0..180° (each plane also covers its +180° wall)."""
@@ -80,7 +107,10 @@ class LVModel:
         pos_theta = plane_angle % 360.0
         neg_theta = (plane_angle + 180.0) % 360.0
         store = self.endo_contours if which == "endo" else self.epi_contours
-        for theta, mask in ((pos_theta, s >= 0), (neg_theta, s < 0)):
+        # On-axis points (s ≈ 0: the apex/base poles) belong to BOTH walls, so
+        # each meridian reaches the pole — otherwise a pole assigned to only one
+        # wall shortens the other meridian's along-range (a false apex/base cut).
+        for theta, mask in ((pos_theta, s >= 0), (neg_theta, s <= 0)):
             if not np.any(mask):
                 continue
             prof = np.column_stack([along[mask], np.abs(s[mask])])

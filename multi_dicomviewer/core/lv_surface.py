@@ -95,10 +95,24 @@ class LVSurface:
         """
         if len(contours) < 3:
             raise ValueError("need at least 3 meridians to build a surface")
-        length = float(axis.length_mm)
-        k = max(2, int(round(length / max(1e-3, level_step))) + 1)
-        along = np.linspace(0.0, length, k)
         thetas = np.array(sorted(contours.keys()), dtype=float)
+        # along-range = the span where EVERY meridian has a point (no
+        # extrapolation): apex = max of per-meridian minima, base = min of
+        # per-meridian maxima. The base is thus a plane ⟂ the axis at the
+        # most-basal level common to all borders — editing a border's basal end
+        # moves it. (The axis's own apex/length are not used here: the axis may
+        # come from the current view, with the extent defined by the borders.)
+        mins, maxs = [], []
+        for th in thetas:
+            a = np.asarray(contours[th], float).reshape(-1, 2)[:, 0]
+            mins.append(float(a.min()))
+            maxs.append(float(a.max()))
+        apex_along, base_along = max(mins), min(maxs)
+        if base_along <= apex_along:
+            raise ValueError("border along-ranges do not overlap")
+        k = max(2, int(round((base_along - apex_along)
+                             / max(1e-3, level_step))) + 1)
+        along = np.linspace(apex_along, base_along, k)
         # radius of each meridian interpolated onto the common axial levels.
         r_km = np.zeros((k, len(thetas)))
         for j, th in enumerate(thetas):
@@ -169,11 +183,12 @@ class LVSurface:
         X, Y, Z = np.meshgrid(gx, gy, gz, indexing="ij")
         pts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
         along, px, py = self.axis.project_array(pts)
-        length = float(self.along[-1])
-        step = length / (self.n_levels - 1)
+        lo_a = float(self.along[0])
+        hi_a = float(self.along[-1])
+        step = (hi_a - lo_a) / (self.n_levels - 1)
         inside = np.zeros(len(pts), dtype=bool)
-        in_range = (along >= 0.0) & (along <= length)
-        lvl = np.clip(np.round(along / max(1e-9, step)).astype(int),
+        in_range = (along >= lo_a) & (along <= hi_a)
+        lvl = np.clip(np.round((along - lo_a) / max(1e-9, step)).astype(int),
                       0, self.n_levels - 1)
         sa = np.column_stack([px, py])
         for k in range(self.n_levels):

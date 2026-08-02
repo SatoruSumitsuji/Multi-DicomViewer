@@ -746,18 +746,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
-        # LV EF axis pick: a left-click drops the apex / basal points while the
-        # LV tool is armed. No drag (clear _last), so rotating to a long-axis
-        # view still uses SPIN normally between picks.
-        if (e.button() == Qt.MouseButton.LeftButton
-                and self._owner._lv is not None
-                and self._owner._lv.get("pick")):
-            self._last = None
-            self._cross = False
-            self._meas_drag = False
-            self._owner._lv_click(
-                self._which, e.position().x(), e.position().y())
-            return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
         # first, in any tool/measure mode, since it's a fixed screen target.
@@ -1028,6 +1016,7 @@ class _Pane:
         self.ren.AddActor(self.rot_arrow)
         # Two dashed lines = the other pane's slab-MIP width.
         self.slab_mappers = []
+        self.slab_actors = []
         for _ in range(2):
             mp = vtkPolyDataMapper()
             mp.SetInputData(vtkPolyData())
@@ -1038,6 +1027,7 @@ class _Pane:
             a.GetProperty().SetOpacity(0.5)        # 50% transparent
             self.ren.AddActor(a)
             self.slab_mappers.append(mp)
+            self.slab_actors.append(a)
             self._overlay_actors.append(a)
 
         # Measurement overlay (filled/edges + vertex markers).
@@ -1191,6 +1181,26 @@ class _Pane:
         if hasattr(lpa.GetProperty(), "SetRenderPointsAsSpheres"):
             lpa.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lpa)
+        # Captured endo (red) / epi (green) borders — redrawn from the model so
+        # a traced border stays visible (and re-appears on revisiting a plane).
+        self.lv_endo_mapper = vtkPolyDataMapper()
+        self.lv_endo_mapper.SetInputData(vtkPolyData())
+        lea = vtkActor()
+        lea.SetMapper(self.lv_endo_mapper)
+        lea.GetProperty().SetColor(1.0, 0.25, 0.25)     # endo red
+        lea.GetProperty().SetLineWidth(2.4)
+        if hasattr(lea.GetProperty(), "SetRenderLinesAsTubes"):
+            lea.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(lea)
+        self.lv_epi_mapper = vtkPolyDataMapper()
+        self.lv_epi_mapper.SetInputData(vtkPolyData())
+        lpe = vtkActor()
+        lpe.SetMapper(self.lv_epi_mapper)
+        lpe.GetProperty().SetColor(0.25, 0.85, 0.35)    # epi green
+        lpe.GetProperty().SetLineWidth(2.4)
+        if hasattr(lpe.GetProperty(), "SetRenderLinesAsTubes"):
+            lpe.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(lpe)
         # VTK line width is in render-window PHYSICAL pixels, and this canvas
         # sizes its render window by devicePixelRatio — so on a scaled Windows
         # display the lines render thinner than the equivalent Qt-drawn IVUS
@@ -1391,6 +1401,12 @@ class _Pane:
         self.ren.AddViewProp(self.hover_hu)
 
         self.canvas.GetRenderWindow().AddRenderer(self.ren)
+
+    def set_slab_visible(self, on: bool) -> None:
+        """Show/hide just the two slab-width parallel lines (not the whole
+        crosshair) — LV trace mode hides these but keeps the centreline."""
+        for a in self.slab_actors:
+            a.SetVisibility(bool(on))
 
     def set_overlay_visible(self, on: bool) -> None:
         for a in self._overlay_actors:
@@ -1789,7 +1805,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmap_smooth_mm = float(_cm.get("smooth_mm", 0.4))
         self._cmap_dlg = None
         # LV EF measurement state (Phase 1): None = off; else
-        # {"model": LVModel, "picks": [3-D apex, basal1, basal2], "pick": bool}.
+        # {"model": LVModel, "phase": "contour", "plane_idx": int,
+        # "target": "endo"|"epi", "plane_done": bool, "prev_side": str}.
         self._lv = None
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
@@ -1856,6 +1873,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
+        lay.addWidget(self._build_lv_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -1998,6 +2016,89 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._cpr_exit_btn)
         self._cpr_wrap.setVisible(False)
         return self._cpr_wrap
+
+    def _build_lv_bar(self) -> QWidget:
+        """LV EF bar (always visible, below the image): Trace toggles LV mode;
+        the rest step the rotated long-axis planes and trace endo/epi. The
+        non-Trace controls are enabled only while in LV mode. Survives
+        'Max Image'. Buttons pack from the LEFT (stretch at the end)."""
+        self._lv_wrap = QWidget()
+        self._lv_wrap._mdv_keep_on_max = True
+        row = QHBoxLayout(self._lv_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(4)
+        cap = QLabel(t("LV:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        row.addWidget(cap)
+        # Trace = enter / leave LV mode (was the "LV EF" toolbar button).
+        self._lv_btn = FitButton(t("Trace"))
+        self._lv_btn.setCheckable(True)
+        self._lv_btn.setStyleSheet(
+            "QPushButton:checked{background:#c0392b;color:white;}")
+        self._lv_btn.setHelpToolTip(
+            t("LV EF: set a long-axis view first (the current view becomes the "
+              "rotation axis), then trace the endo/epi border on each rotated "
+              "plane to measure LV volume"))
+        self._lv_btn.clicked.connect(self._toggle_lv)
+        row.addWidget(self._lv_btn)
+        self._lv_prev_btn = FitButton(t("◀ Prev plane"))
+        self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
+        self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
+        row.addWidget(self._lv_prev_btn)
+        self._lv_plane_lbl = QLabel("0/6")     # 0/6 until Trace is pressed
+        self._lv_plane_lbl.setMinimumWidth(78)
+        fl = self._lv_plane_lbl.font(); fl.setBold(True)
+        self._lv_plane_lbl.setFont(fl)
+        self._lv_plane_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self._lv_plane_lbl)
+        self._lv_next_btn = FitButton(t("▶ Next plane"))
+        self._lv_next_btn.setHelpToolTip(t("Next long-axis plane"))
+        self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
+        row.addWidget(self._lv_next_btn)
+        # Explicit target: click Endo or Epi BEFORE tracing (active = blue).
+        # With neither active, a trace is a plain polyline (not captured). The
+        # drawn borders stay colour-coded endo=red / epi=green.
+        self._lv_endo_btn = FitButton(t("Endo"))
+        self._lv_endo_btn.setCheckable(True)
+        self._lv_endo_btn.setStyleSheet(
+            "QPushButton:checked{background:#1f77b4;color:white;}")
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_set_target("endo"))
+        row.addWidget(self._lv_endo_btn)
+        self._lv_epi_btn = FitButton(t("Epi"))
+        self._lv_epi_btn.setCheckable(True)
+        self._lv_epi_btn.setStyleSheet(
+            "QPushButton:checked{background:#1f77b4;color:white;}")
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_set_target("epi"))
+        row.addWidget(self._lv_epi_btn)
+        # Compute the LV volume (voxels inside the endo surface) + myocardial mass.
+        self._lv_vol_btn = FitButton(t("Calc Vol"))
+        self._lv_vol_btn.setStyleSheet("background:#1f77b4;color:white;")
+        self._lv_vol_btn.setHelpToolTip(
+            t("Compute LV cavity volume (+ myocardial mass) from the traced "
+              "endo/epi borders"))
+        self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
+        row.addWidget(self._lv_vol_btn)
+        self._lv_redo_btn = FitButton(t("Clear borders"))
+        self._lv_redo_btn.setHelpToolTip(
+            t("Discard all traced borders and start again from plane 1"))
+        self._lv_redo_btn.clicked.connect(self._lv_clear_contours)
+        row.addWidget(self._lv_redo_btn)
+        self._lv_exit_btn = FitButton(t("Exit LV"))
+        self._lv_exit_btn.clicked.connect(self._lv_exit)
+        row.addWidget(self._lv_exit_btn)
+        row.addStretch(1)               # pack all buttons to the LEFT
+        self._lv_bar_btns = [
+            self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
+            self._lv_epi_btn, self._lv_vol_btn, self._lv_redo_btn,
+            self._lv_exit_btn]
+        self._lv_set_bar_enabled(False)   # only Trace active until LV mode
+        return self._lv_wrap
+
+    def _lv_set_bar_enabled(self, on: bool) -> None:
+        """Enable/disable the non-Trace LV controls (Trace stays active so the
+        user can always enter LV mode)."""
+        for b in getattr(self, "_lv_bar_btns", []):
+            b.setEnabled(bool(on))
 
     # -------------------------------------------- plane bar (below the image)
     def _build_plane_bar(self) -> QWidget:
@@ -2218,17 +2319,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Invert grayscale (black↔white negative)"))
         self._invert_btn.clicked.connect(self._toggle_invert)
         row2.addWidget(self._invert_btn)
-        # LV EF (Phase 1): enter LV volume-measurement mode — pick the long axis
-        # (apex + 2 basal points) on a rotated long-axis view, then trace the
-        # endo/epi borders (Phase 1b) for a voxel-counted LV volume.
-        self._lv_btn = FitButton(t("LV EF"))
-        self._lv_btn.setCheckable(True)
-        self._lv_btn.setHelpToolTip(
-            t("LV EF: rotate to a long-axis view, click the apex then the two "
-              "basal (mitral-annulus) points to set the LV long axis"))
-        self._lv_btn.clicked.connect(self._toggle_lv)
-        row2.addWidget(self._lv_btn)
         row2.addStretch(1)
+        # (LV EF entry lives in the LV bar below as "Trace" — see _build_lv_bar.)
 
         col.addLayout(row)
         col.addLayout(row2)
@@ -3071,6 +3163,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if p3 is not None and len(p3) == len(m["pts"]):
                 off_flag = [abs(float(np.dot(np.asarray(P, float) - _po,
                                              _pn))) > 1.0 for P in p3]
+            if m.get("_lv"):
+                off_flag = None      # LV borders draw uniform (no off-plane cue)
             if off_flag is not None and not m.get("smooth"):
                 # Draw the outline as PER-SEGMENT cells so the parts of the LINE
                 # leaving the slice read differently. A trace is normally
@@ -3209,9 +3303,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_geom(key)
         self._redraw_compare(key)
         p = self.pane[key]
-        # "Hide/Show All Result" hides the measure result text too.
-        lines = ([] if self._results_hidden
-                 else [self._metrics_text(key, m) for m in self._measures[key]])
+        # "Hide/Show All Result" hides the measure result text too. In LV mode,
+        # the border traces show NO length (they're LV contours, not rulers);
+        # the LV volume result + tracing guidance are shown instead.
+        meas_lines = ([] if self._results_hidden
+                      else [self._metrics_text(key, m)
+                            for m in self._measures[key]
+                            if m.get("_lv") is None])
+        lines = self._lv_status_lines() + meas_lines
         self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
         # Confine the result block to ~40% width (right) by word-wrapping it to
         # the fixed-size result actor (which honours the exact slider font).
@@ -3279,13 +3378,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             w = self._disp_to_world(which, sx, sy)
             self._center_angle_add(w)
             return False
-        hit = self._pick_handle(which, sx, sy)
+        # While ACTIVELY drawing an LV border (Endo/Epi armed AND a draft already
+        # in progress), a click ADDS the next point to that line — it never grabs
+        # a nearby existing border's handle, so you can trace a 2nd line right
+        # next to the first. When NOT mid-draw (no draft yet, or the line is
+        # finished), a click on a handle still grabs it to MOVE the point.
+        lv_drawing = (self._lv is not None
+                      and self._lv.get("target") in ("endo", "epi")
+                      and self._draft is not None
+                      and self._draft.get("pane") == which
+                      and len(self._draft.get("pts", [])) >= 1)
+        hit = None if lv_drawing else self._pick_handle(which, sx, sy)
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             self._redraw_geom(which)            # show the green dot now
             return True
         # A Center-Angle marker point can be dragged just like a polygon vertex.
-        ca_hit = self._pick_center_angle(which, sx, sy)
+        ca_hit = None if lv_drawing else self._pick_center_angle(which, sx, sy)
         if ca_hit is not None:
             self._edit = {"key": which, "mi": ca_hit[0], "vi": ca_hit[1],
                           "ca": True}
@@ -3484,6 +3593,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if d and d["type"] in ("polyline", "polygon") \
                 and len(d["pts"]) >= 2:
             self._commit_draft()
+            # LV EF: a finished border is captured to the current target and the
+            # per-plane sequence advances endo → epi (both on THIS plane before
+            # the user steps to the next long-axis plane).
+            if self._lv is not None and self._lv.get("phase") == "contour":
+                self._lv_on_border_committed()
 
     def _resume_trace(self, which, mi, endpoint_vi):
         """Un-commit polyline *mi* back into the in-progress draft so the user
@@ -4002,22 +4116,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
     def snapshot(self):
-        """A QPixmap of just the image frames (canvases) — no toolbars — for the
-        shell's memory-saving 'still' pane. Grabs the frame widgets exactly as
-        shown (WYSIWYG), so the image keeps its on-screen aspect ratio and the
-        baked-in overlay stays at its displayed size. (VTK's window-to-image was
-        tried but re-rendered the fixed-pixel text actors at the capture
-        resolution, distorting the text-to-image ratio and the pane height.)
-        Visible panes (A and, in Bi view, B) are composed side by side into one
-        raw-pixel image. Returns None on failure."""
+        """A QPixmap of just the image frames — no toolbars — for the shell's
+        memory-saving 'still' pane.
+
+        MUST read the VTK render window via vtkWindowToImageFilter (glReadPixels),
+        NOT QWidget.grab(): the canvas is a NATIVE OpenGL window with no Qt paint
+        engine, so grab() paints black and logs
+        "QPainter::begin: Paint device returned engine == 0". That black grab is
+        what made a demoted CT pane go black. The window-to-image capture keeps
+        the image + overlay text actors (the earlier text-size cosmetic quirk is
+        far preferable to a black still). Visible panes are composed side by side.
+        Returns None on failure."""
         from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
         imgs = []
         for key in ("A", "B"):
             if not self._frames[key].isVisible():
                 continue
-            pm = self._frames[key].grab()
-            if pm is not None and not pm.isNull():
-                imgs.append(pm.toImage())            # raw physical pixels
+            qi = self._grab_pane_qimage(key)
+            if qi is not None and not qi.isNull():
+                imgs.append(qi)
         if not imgs:
             return None
         if len(imgs) == 1:
@@ -4164,94 +4281,334 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = np.asarray(P, dtype=float) - self._pc[which]
         return (float(np.dot(d, u)), float(np.dot(d, v)))
 
-    # ------------------------------------------------ LV EF (Phase 1: axis)
+    # ------------------------------------------------ LV EF (Phase 1)
     def _toggle_lv(self) -> None:
-        """Enter/leave LV EF mode. On enter, arm the 3-point long-axis pick
-        (apex, then the two basal points)."""
+        """Enter/leave LV EF mode. The rotation axis is taken from the CURRENT
+        long-axis view (no apex/basal picks): axis = the view's up direction,
+        θ=0 = the view's right, centre = the crosshair. The apex/base extent and
+        the base-cut plane are then derived from the traced borders."""
         on = self._lv_btn.isChecked()
         if on:
+            if self._image is None:
+                self._lv_btn.setChecked(False)
+                return
             from multi_dicomviewer.core.lv_measure import LVModel
-            # Measure and LV picking are mutually exclusive click owners.
             if self._meas_on:
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
-            self._lv = {"model": LVModel(n_planes=6), "picks": [], "pick": True}
+            key0 = self._active_pane if self._active_pane in ("A", "B") else "A"
+            u, v, _n = self._frame[key0]
+            a = math.radians(self._cross_ang[key0])
+            # Rotation axis = the active pane's NON-green-▲ centreline (the
+            # crosshair line WITHOUT the apex arrow — the user aligns it with the
+            # LV long axis). The green-▲ centreline is the θ=0 in-plane radial.
+            # The long-axis view then puts the no-arrow centreline VERTICAL and
+            # steps the planes by rotating the radial around it. (Verified by the
+            # user: the no-arrow line is the one perpendicular to _apex_dir3.)
+            axis_dir = -math.sin(a) * u + math.cos(a) * v     # no-arrow centreline
+            radial0 = math.cos(a) * u + math.sin(a) * v       # green-▲ direction
+            origin = np.asarray(self._pc[key0], dtype=float).copy()
+            model = LVModel(n_planes=6)
+            model.set_axis_from_frame(origin, axis_dir, radial0)
+            self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
+                        "target": None, "pane": key0,   # trace on the ACTIVE pane
+                        "prev_side": self.current_side()}
+            self._lv_enter_contour()
         else:
-            self._lv = None
-        self._lv_update_text()
-        self._redraw_all_lv()
+            self._lv_exit(from_toggle=True)
+            return
 
-    def _lv_click(self, which, sx, sy) -> None:
-        """Drop the next LV axis point (apex → basal-1 → basal-2). After the
-        3rd, build the long axis and stop picking."""
+    # ---- contour phase: step the rotated long-axis planes, trace endo/epi ----
+    def _lv_enter_contour(self) -> None:
+        """Axis is set → show long-axis plane 0 on a single big pane and arm the
+        polyline tool so the endo/epi border is traced exactly like a vessel
+        trace (each vertex captured in 3-D)."""
         lv = self._lv
-        if lv is None or not lv.get("pick"):
-            return
-        wx, wy = self._disp_to_world(which, sx, sy)
-        P = self._out_to_world3d(which, wx, wy)
-        lv["picks"].append(np.asarray(P, dtype=float))
-        if len(lv["picks"]) >= 3:
-            apex, b1, b2 = lv["picks"][0], lv["picks"][1], lv["picks"][2]
-            try:
-                lv["model"].set_axis(b1, b2, apex)
-                lv["pick"] = False
-            except Exception:
-                lv["picks"] = []                 # degenerate → restart the pick
-        self._lv_update_text()
-        self._redraw_all_lv()
+        lv["phase"] = "contour"
+        lv["plane_idx"] = 0
+        lv["target"] = None                       # no capture until Endo/Epi is
+        self._lv_endo_btn.setChecked(False)       # clicked → plain polyline
+        self._lv_epi_btn.setChecked(False)
+        # Trace on the ACTIVE pane (the one the user set the long-axis view on):
+        # A → show Lt (left only), B → show Rt (right only).
+        self.set_side("Lt" if lv["pane"] == "A" else "Rt")
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type("polyline")
+        self._lv_set_bar_enabled(True)      # the LV bar is always visible
+        self._lv_show_plane()
 
-    def _lv_reset_picks(self) -> None:
-        """Clear the picked points and re-arm the pick (redo the long axis)."""
-        if self._lv is None:
+    def _lv_show_plane(self) -> None:
+        """Reslice pane A to the current rotated long-axis plane; update label."""
+        lv = self._lv
+        ax = lv["model"].axis
+        if ax is None:
             return
-        self._lv["picks"] = []
-        self._lv["pick"] = True
-        self._lv["model"].axis = None
+        angs = lv["model"].plane_angles()
+        idx = lv["plane_idx"] % len(angs)
+        lv["plane_idx"] = idx
+        phi = angs[idx]
+        pane = lv["pane"]
+        u, v, n = self._ortho(ax.meridian_dir(phi), ax.axis)  # v = apex→base up
+        self._frame[pane] = (u, v, n)
+        self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        self._cross_ang[pane] = 0.0
+        # Fit the view only the FIRST time; keep the user's zoom/pan when they
+        # step planes (angle change) afterwards.
+        first = not lv.get("fitted", False)
+        lv["fitted"] = True
+        self._view_initial = first
+        # Show only THIS plane's captured borders — they reproject via pts3d, so
+        # another plane's border would draw squished onto this one.
+        for mm in self._measures[pane]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[0] != idx)
+        self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")   # e.g. 1/6
+        self._refresh(reset_cam=first)
+        # Keep the centreline (crosshair) but drop only the slab-width parallel
+        # lines in LV trace mode.
+        self.pane[pane].set_overlay_visible(self._cl_btn.isChecked())
+        self.pane[pane].set_slab_visible(False)
+        self.pane[pane].render()
         self._lv_update_text()
+
+    def _lv_capture_current(self) -> None:
+        """Capture the freshly-traced polyline on the LV pane into the model for
+        the current (plane, target), then KEEP it on screen — recoloured
+        (endo=red, epi=green) and tagged by (plane, target). The displayed
+        border is thus EXACTLY what you traced (no reconstruction). Re-tracing
+        the same border replaces the previous one."""
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
+            return
+        if lv.get("target") not in ("endo", "epi"):
+            return                                # no target armed → plain polyline
+        pane = lv["pane"]
+        if self._draft and self._draft.get("pane") == pane \
+                and len(self._draft.get("pts", [])) >= 2:
+            self._commit_draft()                  # finish an un-committed trace
+        m = None
+        for cand in reversed(self._measures[pane]):
+            if (cand.get("type") == "polyline" and len(cand.get("pts3d", [])) >= 2
+                    and cand.get("_lv") is None):     # a fresh (untagged) trace
+                m = cand
+                break
+        if m is None:
+            return
+        phi = lv["model"].plane_angles()[lv["plane_idx"]]
+        try:
+            lv["model"].set_long_axis_contour(phi, m["pts3d"], which=lv["target"])
+        except Exception:
+            return
+        tag = (lv["plane_idx"], lv["target"])
+        # re-trace: drop the previous captured border for this (plane, target)
+        self._measures[pane] = [mm for mm in self._measures[pane]
+                                if mm is m or mm.get("_lv") != tag]
+        m["_lv"] = tag
+        m["color"] = "#ff4040" if lv["target"] == "endo" else "#40c040"
+        m["smooth"] = True             # AUTO-spline the LV border on finish
+        #                                (LV traces only; other traces unchanged)
+        self._lv_result_lines = []     # a changed border invalidates the volume
+        self._draft = None
+        self._redraw_meas(pane)
+        self._redraw_all_lv()          # refresh the base-cut line from the model
+
+    def _lv_step_plane(self, delta) -> None:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        self._lv_capture_current()
+        pane = self._lv["pane"]
+        # drop any leftover un-captured scratch polyline (plain, untagged)
+        self._measures[pane] = [
+            m for m in self._measures[pane]
+            if not (m.get("type") == "polyline" and m.get("_lv") is None)]
+        self._draft = None
+        self._lv["plane_idx"] += int(delta)
+        self._lv_show_plane()
+
+    def _lv_apply_target(self, target) -> None:
+        """Set the active border target + sync the Endo/Epi buttons + text
+        (no capture — the caller handles that)."""
+        self._lv["target"] = target
+        self._lv_endo_btn.setChecked(target == "endo")
+        self._lv_epi_btn.setChecked(target == "epi")
+        self._lv_update_text()
+
+    def _lv_set_target(self, target) -> None:
+        """Endo/Epi button: EXPLICITLY choose which border the next trace is.
+        Clicking the already-active one turns capture OFF → a plain polyline.
+        Captures any pending trace under the previous target first."""
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        self._lv_capture_current()
+        new = None if self._lv.get("target") == target else target
+        self._lv_apply_target(new)
+
+    def _lv_on_border_committed(self) -> None:
+        """A border was just finished (double-click). Capture it ONLY if an
+        Endo/Epi target is armed; otherwise leave it as a plain polyline. No
+        auto endo→epi switch — the user picks each target explicitly."""
+        lv = self._lv
+        if lv.get("target") in ("endo", "epi"):
+            self._lv_capture_current()
+            self._lv_update_text()
+
+    def _lv_clear_contours(self) -> None:
+        """Discard all captured borders and start tracing again from plane 0
+        (the long axis / view is kept)."""
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        pane = self._lv["pane"]
+        self._lv["model"].endo_contours.clear()
+        self._lv["model"].epi_contours.clear()
+        self._measures[pane] = [m for m in self._measures[pane]
+                                if m.get("type") != "polyline"]
+        self._draft = None
+        self._lv_result_lines = []
+        self._lv["plane_idx"] = 0
+        self._lv_apply_target(None)
+        self._lv_show_plane()
+        self._redraw_meas(pane)
+
+    def _lv_compute_volume(self) -> None:
+        """Build the endo/epi surfaces from the traced borders and report the LV
+        cavity volume (voxels inside the endo surface) + myocardial mass."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        self._lv_capture_current()          # capture any pending trace
+        m = self._lv["model"]
+        # Parent dialogs to the TOP-LEVEL window, not this embedded viewer, to
+        # avoid Qt's "must be a top level window" console warning.
+        top = self.window()
+        try:
+            m.build()
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.information(
+                top, t("LV EF"),
+                t("Could not build the LV surface: {err}", err=str(exc)))
+            return
+        spacing = max(0.5, float(min(self._dims)))
+        endo_ml = m.volume_ml(spacing, "endo")
+        if endo_ml is None:
+            QMessageBox.information(
+                top, t("LV EF"),
+                t("Trace the endo border on at least 3 planes first."))
+            return
+        # Show the result in the pane's RESULT block (not a dialog). Myocardial
+        # MASS is omitted — density can't be read from the image (only a
+        # reference value), so we report volumes only.
+        lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
+        myo_ml = m.myocardial_volume_ml(spacing)
+        if myo_ml is not None:
+            lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
+        self._lv_result_lines = lines
+        self._lv_update_text()
+
+    def _lv_exit(self, from_toggle=False) -> None:
+        """Leave LV mode entirely, restoring the normal MPR view."""
+        if self._lv is not None and self._lv.get("phase") == "contour":
+            self._lv_capture_current()
+        # Remove the on-screen LV border traces (kept in the model for volume).
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures[k]
+                                 if m.get("_lv") is None]
+        self._lv = None
+        self._lv_result_lines = []
+        self._lv_set_bar_enabled(False)     # the LV bar stays visible; grey out
+        self._lv_plane_lbl.setText("0/6")   # reset the plane counter
+        if not from_toggle:
+            self._lv_btn.setChecked(False)
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self.set_side("Bi")
+        self._init_frames()
+        self._view_initial = True
+        # Restore the crosshair + slab overlay (LV trace mode hid the slab).
+        for k in ("A", "B"):
+            self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[k].set_slab_visible(True)
+        self._lv_update_text()
+        self._refresh(reset_cam=True)
         self._redraw_all_lv()
 
     def _lv_update_text(self) -> None:
-        """Show the current LV step / axis result in each pane's result text."""
+        """Refresh the LV status/result text via the unified result path so the
+        volume result and border metrics never fight over the result block."""
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+
+    def _lv_status_lines(self) -> list:
+        """Result-block lines for LV mode: the computed volume result (if any),
+        then the current tracing guidance. Empty when not in LV mode."""
         lv = self._lv
         if lv is None:
-            for k in ("A", "B"):
-                self.pane[k].resultact.SetInput("")
-                self.pane[k].render()
-            return
-        n = len(lv["picks"])
-        if lv.get("pick"):
-            step = (t("click the APEX"), t("click BASAL point 1"),
-                    t("click BASAL point 2"))[min(n, 2)]
-            msg = t("LV EF — {step}", step=step)
-        else:
-            ax = lv["model"].axis
-            length = ax.length_mm if ax is not None else 0.0
-            msg = t("LV axis set (length {mm:.0f} mm).\n"
-                    "Next: rotate & trace the endo border (Phase 1b).",
-                    mm=length)
-        for k in ("A", "B"):
-            self.pane[k].resultact.SetInput(msg)
-            self.pane[k].render()
+            return []
+        lines = list(getattr(self, "_lv_result_lines", []))
+        if lv.get("phase") == "contour":
+            m = lv["model"]
+            tgt = lv.get("target")
+            if tgt == "endo":
+                head = t("tracing Endo (red) — double-click to finish")
+            elif tgt == "epi":
+                head = t("tracing Epi (green) — double-click to finish")
+            else:
+                head = t("click Endo or Epi to trace that border "
+                         "(otherwise it's a plain polyline)")
+            lines.append(
+                t("LV EF — {head}\ncaptured: endo {ne} / epi {nep} meridians",
+                  head=head, ne=len(m.endo_contours), nep=len(m.epi_contours)))
+        return lines
 
     def _redraw_lv(self, key) -> None:
-        """Project the LV picks + long axis onto pane *key* and update its
-        overlay actors (called on every view change so they stay anchored)."""
+        """Draw the base-cut line for the current long-axis plane on the LV pane.
+        The endo/epi BORDERS are the user's own traced polylines (kept on screen
+        recoloured), not a reconstruction — so nothing is redrawn for them here.
+        Re-run on every view change so the base line stays anchored."""
         p = self.pane[key]
         lv = self._lv
-        if lv is None or not lv["picks"]:
-            p.lv_pts_mapper.SetInputData(vtkPolyData())
-            p.lv_line_mapper.SetInputData(vtkPolyData())
+        p.lv_pts_mapper.SetInputData(vtkPolyData())     # no pick markers
+        p.lv_line_mapper.SetInputData(vtkPolyData())
+        p.lv_endo_mapper.SetInputData(vtkPolyData())    # borders = the measures
+        p.lv_epi_mapper.SetInputData(vtkPolyData())
+        if (lv is None or lv.get("phase") != "contour"
+                or key != lv.get("pane") or lv["model"].axis is None):
             return
-        cols = [(60, 220, 90), (60, 180, 255), (60, 180, 255)]  # apex, basal×2
-        xy = [self._world3d_to_out(key, P) for P in lv["picks"]]
-        p.lv_pts_mapper.SetInputData(_lv_pts_pd(xy, cols[:len(xy)]))
-        ax = lv["model"].axis
-        if ax is not None:
-            a = self._world3d_to_out(key, ax.apex)
-            b = self._world3d_to_out(key, ax.base_center)
-            p.lv_line_mapper.SetInputData(_polylines_pd([[a, b]]))
-        else:
-            p.lv_line_mapper.SetInputData(vtkPolyData())
+        # Base-cut line: ⟂ the axis at the most-basal common along-level. On the
+        # long-axis plane the along coord maps to output-y, radius to output-x,
+        # so it's a horizontal line at y = base_along (spanning the FOV width).
+        rng = (lv["model"].along_range("endo")
+               or lv["model"].along_range("epi"))
+        if rng is not None:
+            base = rng[1]
+            X = float(getattr(self, "_half", 100.0))
+            p.lv_line_mapper.SetInputData(
+                _polylines_pd([[(-X, base), (X, base)]]))
+
+    def _lv_border_polys(self, key, which, phi):
+        """Output-plane polylines of the captured *which* border for the two
+        meridians (phi, phi+180) lying in the long-axis plane at rotation phi."""
+        ax = self._lv["model"].axis
+        store = (self._lv["model"].endo_contours if which == "endo"
+                 else self._lv["model"].epi_contours)
+        polys = []
+        for th in (phi % 360.0, (phi + 180.0) % 360.0):
+            prof = None
+            for kk, vv in store.items():
+                if abs((kk - th + 180.0) % 360.0 - 180.0) < 1e-3:
+                    prof = vv
+                    break
+            if prof is None:
+                continue
+            pts = [self._world3d_to_out(
+                       key, ax.to_world(th, float(r), float(al)))
+                   for (al, r) in prof]
+            if len(pts) >= 2:
+                polys.append(pts)
+        return polys
 
     def _redraw_all_lv(self) -> None:
         for k in ("A", "B"):
