@@ -210,6 +210,39 @@ class LVModel:
         planes.pop(plane_angle % 360.0, None)
         planes.pop((plane_angle + 180.0) % 360.0, None)
 
+    # ----------------------------------------------------- persistence (JSON)
+    def to_dict(self) -> dict:
+        """Serialise the axis + traced Endo/Epi borders as 3-D volume-mm data —
+        enough to fully re-apply them to the same series later (LVEF workflow)."""
+        ax = self.axis
+        return {
+            "kind": "mdv-lvef", "version": 1,
+            "n_planes": self.n_planes,
+            "axis": None if ax is None else {
+                "origin": [float(x) for x in ax.apex],
+                "axis": [float(x) for x in ax.axis],
+                "radial0": [float(x) for x in ax.radial0],
+            },
+            "endo_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
+                            for k, v in self.endo_planes.items()},
+            "epi_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
+                           for k, v in self.epi_planes.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "LVModel":
+        """Rebuild a model from to_dict() output (axis + Endo/Epi 3-D borders)."""
+        m = cls(n_planes=int(d.get("n_planes", 6)))
+        ax = d.get("axis")
+        if ax:
+            m.set_axis_from_frame(ax["origin"], ax["axis"], ax["radial0"])
+        for which, key in (("endo", "endo_planes"), ("epi", "epi_planes")):
+            for k, pts in (d.get(key) or {}).items():
+                arr = np.asarray(pts, float).reshape(-1, 3)
+                if len(arr) >= 2:
+                    m.set_long_axis_contour(float(k), arr, which=which)
+        return m
+
     # ----------------------------------------------------------------- build
     def build(self, level_step: float = LV_LEVEL_STEP_MM,
               n_theta: int = LV_RING_POINTS) -> None:
