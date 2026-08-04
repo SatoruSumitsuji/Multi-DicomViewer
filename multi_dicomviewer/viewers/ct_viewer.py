@@ -775,6 +775,23 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
+        # SAX: grab the thick ○-marked LEVEL line (long-axis pane → translate the
+        # cross-section level) or CENTRELINE (short-axis pane → rotate the
+        # meridian) to review the endo/epi borders. Checked before Measure so the
+        # line wins, but _lv_line_press yields to a measure-handle grab so border
+        # points still edit. The line thickens slightly while held.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._lv_sax_active()):
+            kind = self._owner._lv_line_press(
+                self._which, e.position().x(), e.position().y())
+            if kind:
+                self._owner._lv_line_drag = kind
+                self._owner._lv_line_set_grabbed(self._which, True)
+                self._lv_line = True
+                self._cross = False
+                self._meas_drag = False
+                self._last = e.position()
+                return
         # Shift while measuring temporarily runs the SELECTED tool instead of
         # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
         # off the slab; Move/Zoom just help you look) — so you can reorient the
@@ -835,6 +852,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                               p.y() - self._last.y(), shift, p.x(), p.y())
             self._last = p
             return
+        if getattr(self, "_lv_line", False) and self._last is not None:
+            self._owner._lv_line_move(
+                self._which, e.position().x(), e.position().y())
+            self._last = e.position()
+            return
         if self._owner._meas_on and self._meas_drag:
             self._owner._measure_drag(
                 self._which, e.position().x(), e.position().y()
@@ -845,9 +867,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # type IS active, the press left _last = None, so the guard below
         # returns and no tool drag happens.
         if self._last is None:
-            # No button down. Point-probe armed → show the HU under the cursor;
-            # any other measure type armed → a click starts a measurement (no
-            # hover); otherwise hover-preview the centreline grab.
+            # No button down. SAX: hover-thicken the level/centre line so the
+            # user sees where a click will grab it. Point-probe armed → show the
+            # HU under the cursor; any other measure type armed → a click starts
+            # a measurement (no hover); otherwise hover-preview the centreline.
+            if self._owner._lv_sax_active():
+                self._owner._lv_line_hover(
+                    self._which, e.position().x(), e.position().y())
+                return
             if (self._owner._meas_on
                     and self._owner._meas_type == "point"):
                 self._owner._measure_hover(
@@ -871,6 +898,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if getattr(self, "_lv_line", False):
+            self._owner._lv_line_drag = None
+            self._owner._lv_line_set_grabbed(self._which, False)
+            self._owner._lv_line_hi[self._which] = False   # re-hover next move
+            self._lv_line = False
+            self._last = None
+            return
         if self._owner._cpr_drag is not None:
             self._owner._cpr_drag_end()          # rebuild centreline on release
             self._last = None
@@ -1170,6 +1204,8 @@ class _Pane:
         if hasattr(lla.GetProperty(), "SetRenderLinesAsTubes"):
             lla.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(lla)
+        self.lv_line_actor = lla       # kept so the SAX level/centre line can be
+        self.lv_line_w = 2.4           # thickened while grabbed (see _lv_line_*)
         self.lv_pts_mapper = vtkPolyDataMapper()
         self.lv_pts_mapper.SetInputData(vtkPolyData())
         self.lv_pts_mapper.ScalarVisibilityOn()
@@ -1177,10 +1213,11 @@ class _Pane:
         self.lv_pts_mapper.SetColorModeToDirectScalars()
         lpa = vtkActor()
         lpa.SetMapper(self.lv_pts_mapper)
-        lpa.GetProperty().SetPointSize(13.0)
+        lpa.GetProperty().SetPointSize(8.0)     # SCREEN px → constant under zoom
         if hasattr(lpa.GetProperty(), "SetRenderPointsAsSpheres"):
             lpa.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lpa)
+        self.lv_pts_actor = lpa
         # Captured endo (red) / epi (green) borders — redrawn from the model so
         # a traced border stays visible (and re-appears on revisiting a plane).
         self.lv_endo_mapper = vtkPolyDataMapper()
@@ -1832,6 +1869,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # (line, mode) currently highlighted per pane (None = normal crosshair).
         self._cross_dragging = None          # "A"/"B" while a cross gesture runs
         self._cross_hi = {"A": None, "B": None}   # (line, mode) or None
+        self._lv_line_drag = None            # "level"/"meridian" while grabbing
+        #                                      the SAX level / centre line
+        self._lv_line_hi = {"A": False, "B": False}   # line thickened on hover
         # Drawn crosshair rotation per pane (deg); follows the cursor
         # while CrossLine-dragging so the crosshair tracks the drag.
         self._cross_ang = {"A": 0.0, "B": 0.0}
@@ -2060,16 +2100,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         # drawn borders stay colour-coded endo=red / epi=green.
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.setCheckable(True)
-        self._lv_endo_btn.setStyleSheet(
-            "QPushButton:checked{background:#1f77b4;color:white;}")
+        self._lv_endo_btn.setStyleSheet(     # active = red, matching the endo line
+            "QPushButton:checked{background:#d32f2f;color:white;}")
         self._lv_endo_btn.clicked.connect(lambda: self._lv_set_target("endo"))
         row.addWidget(self._lv_endo_btn)
         self._lv_epi_btn = FitButton(t("Epi"))
         self._lv_epi_btn.setCheckable(True)
-        self._lv_epi_btn.setStyleSheet(
-            "QPushButton:checked{background:#1f77b4;color:white;}")
+        self._lv_epi_btn.setStyleSheet(      # active = green, matching the epi line
+            "QPushButton:checked{background:#2e8b57;color:white;}")
         self._lv_epi_btn.clicked.connect(lambda: self._lv_set_target("epi"))
         row.addWidget(self._lv_epi_btn)
+        # Short-axis display FIRST in the flow (trace → SAX check/edit → Calc):
+        # reslice ⟂ the rotation axis and draw the endo/epi borders (splined
+        # through the 12 meridian points) at each level; ◀▶ then rotate the
+        # meridian instead of stepping the long-axis plane.
+        self._lv_sax_btn = FitButton(t("SAX"))
+        self._lv_sax_btn.setCheckable(True)
+        self._lv_sax_btn.setStyleSheet(
+            "QPushButton:checked{background:#b8860b;color:white;}")
+        self._lv_sax_btn.setHelpToolTip(
+            t("Short-axis view: show the endo/epi borders on cross-sections ⟂ "
+              "the long axis (◀ ▶ scroll the level)"))
+        self._lv_sax_btn.clicked.connect(self._lv_toggle_sax)
+        row.addWidget(self._lv_sax_btn)
         # Compute the LV volume (voxels inside the endo surface) + myocardial mass.
         self._lv_vol_btn = FitButton(t("Calc Vol"))
         self._lv_vol_btn.setStyleSheet("background:#1f77b4;color:white;")
@@ -2089,8 +2142,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addStretch(1)               # pack all buttons to the LEFT
         self._lv_bar_btns = [
             self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
-            self._lv_epi_btn, self._lv_vol_btn, self._lv_redo_btn,
-            self._lv_exit_btn]
+            self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
+            self._lv_redo_btn, self._lv_exit_btn]
         self._lv_set_bar_enabled(False)   # only Trace active until LV mode
         return self._lv_wrap
 
@@ -2648,6 +2701,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 b.setChecked(False)
                 b.setStyleSheet("")
             self._measure_hover_clear()
+            # Arm Reset: after a measure/LV session the view is off its initial
+            # position, so the first Reset click should restore it (without this
+            # the 2-stage Reset only reset W/L until the user first dragged).
+            self._view_initial = False
         self._refresh_tool_availability()   # grey/restore the interaction tools
 
     def _set_measure_type(self, key):
@@ -2711,7 +2768,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Ask which analysis to run (%PA / Thickness), then compute."""
         if not self._cmp_on or len(self._cmp_sel) != 2:
             return
-        dlg = CompareOptionsDialog(self._cmp_want_pa, self._cmp_want_thk, self)
+        dlg = CompareOptionsDialog(self._cmp_want_pa, self._cmp_want_thk,
+                                   self.window())
         if not dlg.exec():
             self._cancel_compare()
             return
@@ -3236,21 +3294,35 @@ class CTViewer(CPRMixin, AbstractViewer):
         # so it reads as not-yet-committed; on commit it re-renders solid
         # through the outline path above.
         draft_segs: list = []
+        draft_col = _hex_to_rgb(None)
         d = self._draft
         if d and d["pane"] == key and d["pts"]:
             if d["type"] == "ellipse" and len(d["pts"]) >= 2:
                 # Preview the oblique ellipse whose major axis is the drag.
                 dpts = _ellipse_outline(
                     _ellipse_from_major(d["pts"][0], d["pts"][1]))
+                draft_segs = list(zip(dpts, dpts[1:]))
             else:
                 dpts = list(d["pts"])
-            draft_segs = list(zip(dpts, dpts[1:]))
+                # LV Endo/Epi trace: preview the committed points with the SAME
+                # centripetal Catmull-Rom the final border uses, in the target's
+                # colour, so what you see IS what you'll get (place fewer points).
+                lv_trace = (self._lv is not None
+                            and self._lv.get("phase") == "contour"
+                            and self._lv.get("target") in ("endo", "epi")
+                            and d["type"] == "polyline")
+                src = (_smooth_open(dpts)
+                       if (lv_trace and len(dpts) >= 3) else dpts)
+                draft_segs = list(zip(src, src[1:]))
+                if lv_trace:
+                    draft_col = ((211, 47, 47) if self._lv["target"] == "endo"
+                                 else (46, 139, 87))
             handles += list(d["pts"])
         p.meas_mapper.SetInputData(
             _colored_multi_pd(polylines, outline_colors)
         )
         p.meas_draft_mapper.SetInputData(
-            _colored_dashed_pd(draft_segs, [_hex_to_rgb(None)] * len(draft_segs))
+            _colored_dashed_pd(draft_segs, [draft_col] * len(draft_segs))
         )
         p.meas_axis_mapper.SetInputData(
             _colored_dashed_pd(axis_segs, axis_colors)
@@ -3338,6 +3410,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return mi, vi
         return None
 
+    def _lv_has_border(self, which, target) -> bool:
+        """True if a captured Endo/Epi (*target*) border already exists for the
+        current LV plane on *which* pane."""
+        if self._lv is None:
+            return False
+        idx = self._lv.get("plane_idx", 0)
+        for m in self._measures.get(which, []):
+            tag = m.get("_lv")
+            if tag is not None and tag[0] == idx and tag[1] == target:
+                return True
+        return False
+
     def _pick_center_angle(self, which, sx, sy):
         """Pick a finalized Center-Angle marker point (the orange perimeter
         dots) so it can be dragged like a polygon vertex. Returns (mi, ci)."""
@@ -3383,12 +3467,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         # a nearby existing border's handle, so you can trace a 2nd line right
         # next to the first. When NOT mid-draw (no draft yet, or the line is
         # finished), a click on a handle still grabs it to MOVE the point.
-        lv_drawing = (self._lv is not None
-                      and self._lv.get("target") in ("endo", "epi")
+        lv_target = self._lv.get("target") if self._lv is not None else None
+        lv_drawing = (lv_target in ("endo", "epi")
                       and self._draft is not None
                       and self._draft.get("pane") == which
                       and len(self._draft.get("pts", [])) >= 1)
         hit = None if lv_drawing else self._pick_handle(which, sx, sy)
+        # Starting a NEW LV border (target armed, no draft yet): don't let the
+        # first click grab a DIFFERENT border's point (e.g. an Epi vertex when
+        # you're starting an Endo right next to it) — start the new line instead.
+        # A point of the SAME target's border is still grabbable (to edit it).
+        if (hit is not None and lv_target in ("endo", "epi")
+                and self._draft is None):
+            tag = self._measures[which][hit[0]].get("_lv")
+            if tag is None or tag[1] != lv_target:
+                hit = None
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             self._redraw_geom(which)            # show the green dot now
@@ -3415,6 +3508,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 {"id": self._meas_seq, "type": "point", "pts": [w],
                  "pts3d": [P] if P is not None else []})
             self._redraw_meas(which)
+            return False
+        # LV mode: a NEW polyline may start ONLY when Endo or Epi is active AND
+        # that border isn't captured yet. So it's blocked when neither Endo nor
+        # Epi is selected (a click does nothing), while the short-axis is shown
+        # (confirm/edit only), or on a plane+target that already has a captured
+        # border (edit that one instead). Point MOVE (handle grab above) and
+        # ADD/DELETE (right-click) still work.
+        if (self._lv is not None and self._lv.get("phase") == "contour"
+                and self._meas_type == "polyline" and self._draft is None
+                and (self._lv.get("sax") is not None
+                     or lv_target not in ("endo", "epi")
+                     or self._lv_has_border(which, lv_target))):
             return False
         d = self._draft
         if d is None or d["pane"] != which or d["type"] != self._meas_type:
@@ -3494,6 +3599,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
         self._redraw_compare(e["key"])
+        self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
+
+    def _lv_live_recapture(self, key, m) -> None:
+        """If *m* is an LV endo/epi border being edited on the long-axis pane
+        while short-axis is shown, feed the edited 3-D border back into the model
+        and redraw the short-axis at once, so the cross-section tracks the edit."""
+        if not self._lv_sax_active():
+            return
+        tag = m.get("_lv")
+        if (tag is None or key != self._lv.get("pane")
+                or not m.get("pts3d") or tag[1] not in ("endo", "epi")):
+            return
+        angs = self._lv["model"].plane_angles()
+        self._lv["model"].set_long_axis_contour(
+            angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+        sa = self._lv["sax_pane"]
+        self._redraw_lv(sa)
+        self.pane[sa].render()
 
     def _resnap_center_angle(self, m):
         """After the shape itself changes (a vertex / ellipse-handle drag),
@@ -3534,7 +3657,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _measure_release(self):
         if self._edit:
             key = self._edit["key"]
+            mi = self._edit.get("mi")
             self._edit = None
+            if (mi is not None and 0 <= mi < len(self._measures[key])):
+                self._lv_live_recapture(key, self._measures[key][mi])
             self._redraw_meas(key)
 
     def _set_ellipse_handle(self, m, vi, w):
@@ -3808,6 +3934,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
         elif chosen is del_res:
+            self._lv_drop_border(m)              # clear its model contour (if LV)
             del self._measures[which][mi]
         else:
             for act, hexcol in color_actions:
@@ -3952,6 +4079,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if m.get("pts3d") and len(m["pts3d"]) == len(pts) - 1:
             m["pts3d"].insert(best_i + 1, self._out_to_world3d(which, wx, wy))
         self._resnap_center_angle(m)
+        self._lv_live_recapture(which, m)     # edited LV border → refresh SAX
 
     def _snap_trace(self, which, mi):
         """Re-snap every vertex of a 3-D trace to the contrast lumen along the
@@ -3981,6 +4109,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             m.pop("pts3d", None)               # a Line is a plain 2-D measure
         m["pts"] = pts
         self._resnap_center_angle(m)
+        self._lv_live_recapture(which, m)     # edited LV border → refresh SAX
 
     # ----- measurement geometry / sampling -----
     def _ellipse_params(self, p0, p1):
@@ -4296,10 +4425,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._meas_on:
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
-            key0 = self._active_pane if self._active_pane in ("A", "B") else "A"
+            # LV always traces the long axis on the RIGHT pane (B); the LEFT (A)
+            # becomes the short-axis (SAX) side. (User decision 2026-08-03: right
+            # = long axis, regardless of which pane was active.)
+            key0 = "B"
             u, v, _n = self._frame[key0]
             a = math.radians(self._cross_ang[key0])
-            # Rotation axis = the active pane's NON-green-▲ centreline (the
+            # Rotation axis = the RIGHT pane's NON-green-▲ centreline (the
             # crosshair line WITHOUT the apex arrow — the user aligns it with the
             # LV long axis). The green-▲ centreline is the θ=0 in-plane radial.
             # The long-axis view then puts the no-arrow centreline VERTICAL and
@@ -4311,7 +4443,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             model = LVModel(n_planes=6)
             model.set_axis_from_frame(origin, axis_dir, radial0)
             self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
-                        "target": None, "pane": key0,   # trace on the ACTIVE pane
+                        "target": None, "pane": key0,   # trace on the RIGHT pane
+                        "sax": None,                    # short-axis level (None=long)
                         "prev_side": self.current_side()}
             self._lv_enter_contour()
         else:
@@ -4329,9 +4462,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["target"] = None                       # no capture until Endo/Epi is
         self._lv_endo_btn.setChecked(False)       # clicked → plain polyline
         self._lv_epi_btn.setChecked(False)
-        # Trace on the ACTIVE pane (the one the user set the long-axis view on):
-        # A → show Lt (left only), B → show Rt (right only).
-        self.set_side("Lt" if lv["pane"] == "A" else "Rt")
+        # Stay in Bi: trace on the ACTIVE pane (the one the user set the
+        # long-axis view on), keeping the other pane visible for reference so
+        # SAX can be checked side-by-side without a layout switch.
+        self.set_side("Bi")
         if not self._meas_on:
             self._meas_btn.setChecked(True)
             self._toggle_measure()
@@ -4373,6 +4507,134 @@ class CTViewer(CPRMixin, AbstractViewer):
         self.pane[pane].set_slab_visible(False)
         self.pane[pane].render()
         self._lv_update_text()
+
+    def _lv_toggle_sax(self) -> None:
+        """Enter/leave the short-axis DISPLAY. On: show BOTH panes — the traced
+        long-axis view stays on its pane (with a movable level line), and the
+        OTHER pane shows the cross-section ⟂ the axis at that level with the
+        endo/epi borders. ◀ ▶ translate the level; the short-axis updates."""
+        from PyQt6.QtWidgets import QMessageBox
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
+            self._lv_sax_btn.setChecked(False)
+            return
+        if self._lv_sax_btn.isChecked():
+            self._lv_capture_current()
+            rng = self._lv_level_range()
+            m = lv["model"]
+            if rng is None or (len(m.endo_contours) < 3
+                               and len(m.epi_contours) < 3):
+                self._lv_sax_btn.setChecked(False)
+                QMessageBox.information(
+                    self.window(), t("LV EF"),
+                    t("Trace the endo border on at least 3 planes first."))
+                return
+            # Start at the mid of the COMMON range (where the border is drawn),
+            # not the scroll range (which extends past the apex), so the border
+            # shows on entry.
+            common = self._lv_common_range() or rng
+            lv["sax"] = 0.5 * (common[0] + common[1])
+            sa = "A" if lv["pane"] == "B" else "B"
+            lv["sax_pane"] = sa
+            # Remember the cross-section pane's current image so leaving SAX can
+            # restore it (we're already in Bi — no layout switch).
+            lv["sax_saved"] = (
+                tuple(np.asarray(a).copy() for a in self._frame[sa]),
+                np.asarray(self._pc[sa]).copy(),
+                self._cross_ang[sa], self._thick[sa])
+            lv["fitted_sax"] = False
+            self._lv_apply_target(None)             # no capture in short-axis
+            self.set_side("Bi")                      # long-axis + short-axis
+            self._lv_show_sax_both()
+        else:
+            self._lv_leave_sax()
+            self._lv_show_plane()                    # back to the long-axis view
+
+    def _lv_show_sax_both(self) -> None:
+        """Full setup on ENTERING short-axis mode: the traced long-axis pane on
+        one side + the short-axis cross-section on the other. The long-axis pane
+        is set up ONCE here — rotating (◀ ▶) or scrolling the level afterwards
+        must NOT re-slice it, so its image/axis stay fixed."""
+        lv = self._lv
+        ax = lv["model"].axis
+        if ax is None or lv.get("sax") is None:
+            return
+        la, sa = lv["pane"], lv["sax_pane"]
+        # long-axis pane: the current rotated plane (borders of THIS plane only)
+        angs = lv["model"].plane_angles()
+        idx = lv["plane_idx"] % len(angs)
+        u, v, n = self._ortho(ax.meridian_dir(angs[idx]), ax.axis)
+        self._frame[la] = (u, v, n)
+        self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        self._cross_ang[la] = 0.0
+        for mm in self._measures[la]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[0] != idx)
+        self._lv_set_short_frame()                   # short-axis (level) pane
+        first = not lv.get("fitted_sax", False)
+        lv["fitted_sax"] = True
+        self._view_initial = first
+        self._lv_update_sax_label()
+        self._refresh(reset_cam=first)
+        for k in (la, sa):
+            self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[k].set_slab_visible(False)
+            self.pane[k].render()
+
+    def _lv_set_short_frame(self) -> None:
+        """Reslice ONLY the short-axis (cross-section) pane to the current level.
+        Never touches the long-axis pane, so rotating/scrolling can't disturb
+        it."""
+        lv = self._lv
+        ax = lv["model"].axis
+        sa = lv["sax_pane"]
+        o, ex, ey, nn = ax.short_axis_basis(float(lv["sax"]))
+        self._frame[sa] = (ex, ey, nn)
+        self._pc[sa] = o
+        self._cross_ang[sa] = 0.0
+        self._thick[sa] = 0.0                        # thin cross-section
+        for mm in self._measures[sa]:                # no long-axis borders here
+            if mm.get("_lv") is not None:
+                mm["hidden"] = True
+
+    def _lv_update_sax_label(self) -> None:
+        rng = self._lv_level_range()
+        pos = (float(self._lv["sax"]) - rng[0]) if rng else 0.0
+        self._lv_plane_lbl.setText(t("SAX {mm:.0f}mm", mm=pos))
+
+    def _lv_reslice_short(self) -> None:
+        """Redraw SAX after a LEVEL or ROTATION change: reslice ONLY the
+        short-axis pane and redraw all overlays via the same path as entry. The
+        long-axis pane's frame is untouched, so its image/axis stay fixed (only
+        its level-line overlay moves). Uses the full _refresh + visibility path
+        so the endo/epi splines always re-appear."""
+        lv = self._lv
+        if lv is None or lv.get("sax") is None:
+            return
+        self._lv_set_short_frame()
+        self._lv_update_sax_label()
+        self._view_initial = False
+        self._refresh()                  # long-axis frame unchanged → image fixed
+        for k in (lv["pane"], lv["sax_pane"]):
+            self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[k].set_slab_visible(False)
+            self.pane[k].render()
+
+    def _lv_leave_sax(self) -> None:
+        """Return from short-axis to the long-axis view (staying in Bi): restore
+        the cross-section pane to the image it showed before SAX."""
+        lv = self._lv
+        sa = lv.get("sax_pane")
+        saved = lv.get("sax_saved")
+        if sa is not None and saved is not None:
+            self._frame[sa] = tuple(np.asarray(a).copy() for a in saved[0])
+            self._pc[sa] = np.asarray(saved[1]).copy()
+            self._cross_ang[sa] = saved[2]
+            self._thick[sa] = saved[3]
+        lv["sax"] = None
+        lv["sax_saved"] = None
+        self._lv_sax_btn.setChecked(False)
 
     def _lv_capture_current(self) -> None:
         """Capture the freshly-traced polyline on the LV pane into the model for
@@ -4418,6 +4680,14 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_step_plane(self, delta) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":
             return
+        # Short-axis mode: ◀ ▶ ROTATE — step the meridian. The LONG-AXIS pane
+        # (right) reslices to that meridian plane (so its border can be edited
+        # against the matching image) and the short-axis centreline rotates; the
+        # short-axis LEVEL is unchanged. Level itself moves by paging/mouse-drag.
+        if self._lv.get("sax") is not None:
+            self._lv["plane_idx"] += int(delta)
+            self._lv_show_sax_both()       # reslice long-axis to the new meridian
+            return
         self._lv_capture_current()
         pane = self._lv["pane"]
         # drop any leftover un-captured scratch polyline (plain, untagged)
@@ -4426,7 +4696,171 @@ class CTViewer(CPRMixin, AbstractViewer):
             if not (m.get("type") == "polyline" and m.get("_lv") is None)]
         self._draft = None
         self._lv["plane_idx"] += int(delta)
+        self._lv_apply_target("endo")      # each new plane starts on Endo
         self._lv_show_plane()
+
+    def _lv_sax_active(self) -> bool:
+        """True while the short-axis DISPLAY is up (level is scrollable)."""
+        return (self._lv is not None
+                and self._lv.get("phase") == "contour"
+                and self._lv.get("sax") is not None)
+
+    def _lv_level_range(self):
+        """The along span to SCROLL the short-axis level over. Apex side is
+        EXTENDED to the most-apical traced point of ANY meridian (min of minima)
+        so the level can travel to the apex even if a few meridians stopped short
+        (the border simply isn't drawn out there — see short_axis_border_pts);
+        base side stays at the common base (min of maxima). Independent of where
+        the border is drawable, so the level moves freely toward the apex."""
+        m = self._lv["model"]
+        mins, maxs = [], []
+        for store in (m.endo_contours, m.epi_contours):
+            for c in store.values():
+                a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+                mins.append(float(a.min()))
+                maxs.append(float(a.max()))
+        if not mins:
+            return None
+        lo, hi = min(mins), min(maxs)     # apex = deepest, base = common
+        return (lo, hi) if hi > lo else None
+
+    def _lv_common_range(self):
+        """The COMMON along-range where every endo AND epi meridian reaches —
+        the span the border is actually drawn over (used to pick the SAX entry
+        level so the border shows on entry)."""
+        m = self._lv["model"]
+        rs = [r for r in (m.along_range("endo"), m.along_range("epi"))
+              if r is not None]
+        if not rs:
+            return None
+        lo = max(r[0] for r in rs)
+        hi = min(r[1] for r in rs)
+        return (lo, hi) if hi > lo else rs[0]
+
+    def _lv_step_level(self, delta) -> None:
+        """Move the short-axis LEVEL one paging notch (wheel / arrow keys)."""
+        rng = self._lv_level_range()
+        if rng is None:
+            return
+        step = (rng[1] - rng[0]) / 24.0            # ~24 levels apex→base
+        self._lv["sax"] = min(rng[1], max(
+            rng[0], float(self._lv["sax"]) + float(delta) * step))
+        self._lv_reslice_short()
+
+    def _lv_drag_level(self, dy) -> None:
+        """Move the short-axis LEVEL by a mouse drag (Paging tool): drag down →
+        toward the base, up → toward the apex. Full span ≈ 200 px of drag."""
+        rng = self._lv_level_range()
+        if rng is None:
+            return
+        span = rng[1] - rng[0]
+        self._lv["sax"] = min(rng[1], max(
+            rng[0], float(self._lv["sax"]) + (dy / 200.0) * span))
+        self._lv_reslice_short()
+
+    # ---- SAX: grab the ○-marked level / centre line directly ----
+    def _lv_px_to_mm(self, which, px) -> float:
+        """Screen px → output-plane mm for *which* pane (for a constant-width
+        grab band that tracks zoom)."""
+        p = self.pane[which]
+        ps = float(p.ren.GetActiveCamera().GetParallelScale())
+        return float(px) * (2.0 * ps / max(1, p.canvas.height()))
+
+    def _lv_line_press(self, which, sx, sy):
+        """Hit-test the SAX lines: returns "level" if the press lands on the
+        long-axis pane's level line, "meridian" if on the short-axis pane's
+        centreline, else None. Yields (returns None) when a measure handle is
+        under the cursor so border points still edit."""
+        if not self._lv_sax_active() or self._lv["model"].axis is None:
+            return None
+        if self._pick_handle(which, sx, sy) is not None:
+            return None                       # let the border point be edited
+        lv = self._lv
+        ax = lv["model"].axis
+        wx, wy = self._disp_to_world(which, sx, sy)
+        band = self._lv_px_to_mm(which, 25.0)     # generous grab band (~25 px)
+        if which == lv.get("pane"):
+            _, y = self._world3d_to_out(
+                which, ax.apex + float(lv["sax"]) * ax.axis)
+            if abs(wy - y) <= band:
+                return "level"
+        elif which == lv.get("sax_pane"):
+            angs = lv["model"].plane_angles()
+            md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
+            u, v, _n = self._frame[which]
+            dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
+            nrm = math.hypot(dx, dy) or 1.0
+            dx, dy = dx / nrm, dy / nrm
+            if abs(wx * (-dy) + wy * dx) <= band:   # ⟂ dist to the centre line
+                return "meridian"
+        return None
+
+    def _lv_line_move(self, which, sx, sy) -> None:
+        """Drag the grabbed SAX line: level line → translate the cross-section
+        level (parallel move); centreline → rotate the meridian (snapping to the
+        nearest traced plane)."""
+        kind = self._lv_line_drag
+        if kind is None:
+            return
+        lv = self._lv
+        ax = lv["model"].axis
+        wx, wy = self._disp_to_world(which, sx, sy)
+        if kind == "level":
+            along = wy + float(np.dot(self._pc[which] - ax.apex, ax.axis))
+            rng = self._lv_level_range()
+            if rng is not None:
+                along = min(rng[1], max(rng[0], along))
+            lv["sax"] = along
+            self._lv_reslice_short()
+        elif kind == "meridian":
+            th = math.degrees(math.atan2(wy, wx)) % 180.0
+            angs = lv["model"].plane_angles()
+            idx = min(range(len(angs)), key=lambda i: min(
+                abs(th - angs[i]), 180.0 - abs(th - angs[i])))
+            if idx != (lv["plane_idx"] % len(angs)):
+                lv["plane_idx"] = idx
+                self._lv_show_sax_both()
+
+    def _lv_drop_border(self, m) -> None:
+        """A captured LV border measure is being deleted: drop its meridian
+        contour from the model too and refresh the short-axis, so nothing stale
+        lingers (and the volume recomputes clean)."""
+        if self._lv is None:
+            return
+        tag = m.get("_lv")
+        if tag is None:
+            return
+        idx, target = tag
+        angs = self._lv["model"].plane_angles()
+        if 0 <= idx < len(angs):
+            self._lv["model"].clear_contour(angs[idx], which=target)
+        self._lv_result_lines = []               # invalidate any volume result
+        if self._lv_sax_active():
+            self._redraw_lv(self._lv["sax_pane"])
+            self.pane[self._lv["sax_pane"]].render()
+
+    def _lv_line_set_grabbed(self, which, on: bool) -> None:
+        """Thicken the SAX line a little while it's hovered/held (feedback, like
+        the crosshair) — kept modest since the line is already fairly thick."""
+        p = self.pane[which]
+        a = getattr(p, "lv_line_actor", None)
+        if a is None:
+            return
+        a.GetProperty().SetLineWidth(3.8 if on else getattr(p, "lv_line_w", 2.4))
+        p.render()
+
+    def _lv_line_hover(self, which, sx, sy) -> None:
+        """Cursor moved with no button down: thicken the level/centre line while
+        the cursor is inside its (unchanged) grab band, so 'click here to grab'
+        is visible; restore it otherwise. Only re-renders on a state change."""
+        if self._lv_line_drag is not None:
+            return                                # a drag owns the thickness
+        on = bool(self._lv_sax_active()
+                  and self._lv_line_press(which, sx, sy) is not None)
+        if self._lv_line_hi.get(which) == on:
+            return
+        self._lv_line_hi[which] = on
+        self._lv_line_set_grabbed(which, on)
 
     def _lv_apply_target(self, target) -> None:
         """Set the active border target + sync the Endo/Epi buttons + text
@@ -4468,6 +4902,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draft = None
         self._lv_result_lines = []
         self._lv["plane_idx"] = 0
+        if self._lv.get("sax") is not None:     # leaving short-axis (stay Bi)
+            self._lv_leave_sax()
         self._lv_apply_target(None)
         self._lv_show_plane()
         self._redraw_meas(pane)
@@ -4517,6 +4953,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if m.get("_lv") is None]
         self._lv = None
         self._lv_result_lines = []
+        self._lv_sax_btn.setChecked(False)  # leave short-axis display
         self._lv_set_bar_enabled(False)     # the LV bar stays visible; grey out
         self._lv_plane_lbl.setText("0/6")   # reset the plane counter
         if not from_toggle:
@@ -4563,6 +5000,36 @@ class CTViewer(CPRMixin, AbstractViewer):
                   head=head, ne=len(m.endo_contours), nep=len(m.epi_contours)))
         return lines
 
+    @staticmethod
+    def _circle_poly(cx, cy, r, n=20):
+        """A small closed circle polyline (output coords) used as a direction
+        marker at one end of the LV level / centre lines."""
+        return [(cx + r * math.cos(2.0 * math.pi * i / n),
+                 cy + r * math.sin(2.0 * math.pi * i / n))
+                for i in range(n + 1)]
+
+    def _lv_view_half(self, key):
+        """(half_width, half_height) of the pane's CURRENTLY VISIBLE region in
+        output-mm (tracks zoom), so overlay markers can sit near the visible
+        edge instead of the fixed FOV corner."""
+        p = self.pane[key]
+        ps = float(p.ren.GetActiveCamera().GetParallelScale())   # half-height
+        w = max(1, p.canvas.width())
+        h = max(1, p.canvas.height())
+        return ps * (w / h), ps
+
+    def _lv_edge_xy(self, key, ux, uy, frac=0.9):
+        """A point ~frac of the way to the VISIBLE edge along direction (ux,uy)
+        from the pane centre — used to keep the direction ring near the edge at
+        any zoom."""
+        hw, hh = self._lv_view_half(key)
+        nrm = math.hypot(ux, uy) or 1.0
+        ux, uy = ux / nrm, uy / nrm
+        tx = hw / abs(ux) if abs(ux) > 1e-6 else 1e18
+        ty = hh / abs(uy) if abs(uy) > 1e-6 else 1e18
+        d = frac * min(tx, ty)
+        return ux * d, uy * d
+
     def _redraw_lv(self, key) -> None:
         """Draw the base-cut line for the current long-axis plane on the LV pane.
         The endo/epi BORDERS are the user's own traced polylines (kept on screen
@@ -4575,11 +5042,65 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_endo_mapper.SetInputData(vtkPolyData())    # borders = the measures
         p.lv_epi_mapper.SetInputData(vtkPolyData())
         if (lv is None or lv.get("phase") != "contour"
-                or key != lv.get("pane") or lv["model"].axis is None):
+                or lv["model"].axis is None):
             return
-        # Base-cut line: ⟂ the axis at the most-basal common along-level. On the
-        # long-axis plane the along coord maps to output-y, radius to output-x,
-        # so it's a horizontal line at y = base_along (spanning the FOV width).
+        ax = lv["model"].axis
+        # SHORT-AXIS mode (both panes visible):
+        if lv.get("sax") is not None:
+            along0 = float(lv["sax"])
+            if key == lv.get("sax_pane"):
+                # the cross-section pane: endo (red) / epi (green) closed splines
+                # through the level×meridian border crossings, with the crossing
+                # points themselves marked as fixed-SCREEN-size dots (so they
+                # don't grow when the pane is zoomed).
+                mark_xy = []
+                for which, mapper in (("endo", p.lv_endo_mapper),
+                                      ("epi", p.lv_epi_mapper)):
+                    sp = lv["model"].short_axis_border_pts(along0, which)
+                    if sp is None or len(sp) < 3:
+                        continue
+                    xy = [self._world3d_to_out(key, P) for P in sp]
+                    sm = _smooth_closed(xy)         # closed Catmull-Rom
+                    mapper.SetInputData(_polylines_pd([[tuple(q) for q in sm]]))
+                    mark_xy.extend(xy)              # the crossing points
+                if mark_xy:
+                    # yellow dots (visible on BOTH the red endo and green epi
+                    # lines), fixed screen size (constant under zoom).
+                    p.lv_pts_mapper.SetInputData(
+                        _lv_pts_pd(mark_xy, [(255, 210, 0)] * len(mark_xy)))
+                # centreline showing the current long-axis plane direction
+                # (rotated by ◀ ▶); it lies in this short-axis plane. A ring
+                # marks the +θ end so the long/short views share an orientation.
+                angs = lv["model"].plane_angles()
+                md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
+                u, v, _n = self._frame[key]
+                dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
+                nrm = math.hypot(dx, dy) or 1.0
+                dx, dy = dx / nrm, dy / nrm
+                X = float(getattr(self, "_half", 100.0))
+                ex, ey = self._lv_edge_xy(key, dx, dy)      # near the visible edge
+                cr = max(2.0, 0.04 * self._lv_view_half(key)[1])
+                p.lv_line_mapper.SetInputData(_polylines_pd([
+                    [(-dx * X, -dy * X), (dx * X, dy * X)],
+                    self._circle_poly(ex, ey, cr)]))
+            elif key == lv.get("pane"):
+                # the long-axis pane: the movable LEVEL line ⟂ the axis (a
+                # horizontal line at output-y = the current cross-section level).
+                # A ring marks the +θ (meridian) end — same direction as the
+                # short-axis centreline's ring — kept near the visible edge.
+                _, y = self._world3d_to_out(key, ax.apex + along0 * ax.axis)
+                X = float(getattr(self, "_half", 100.0))
+                hw, hh = self._lv_view_half(key)
+                cr = max(2.0, 0.04 * hh)
+                p.lv_line_mapper.SetInputData(_polylines_pd([
+                    [(-X, y), (X, y)],
+                    self._circle_poly(0.9 * hw, y, cr)]))
+            return
+        if key != lv.get("pane"):
+            return
+        # LONG-AXIS view: base-cut line ⟂ the axis at the most-basal common
+        # along-level (along maps to output-y, radius to output-x, so it's a
+        # horizontal line at y = base_along across the FOV).
         rng = (lv["model"].along_range("endo")
                or lv["model"].along_range("epi"))
         if rng is not None:
@@ -4738,7 +5259,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         so nothing is lost) to avoid a stale parent when opened from Settings."""
         dlg = _ColorMapDialog(self._bands, self._opacity,
                               self._apply_colormap, self._win, self._lvl,
-                              self._cmap_smooth_mm, parent or self)
+                              self._cmap_smooth_mm, parent or self.window())
         self._cmap_dlg = dlg
         if modal:
             dlg.setWindowModality(Qt.WindowModality.WindowModal)
@@ -5372,7 +5893,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Right-click on the readout → pick LAO/RAO + CRA/CAU and rotate the
         pane to that C-arm angle (to line the slice up with an angio view)."""
         vals = self._angio_angle_vals(which) or (0, 0)
-        dlg = _AngioAngleDialog(vals[0], vals[1], self)
+        dlg = _AngioAngleDialog(vals[0], vals[1], self.window())
         if dlg.exec():
             prim, sec = dlg.values()
             self._set_angio_angle(which, prim, sec)
@@ -5775,6 +6296,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         k = self._active_pane
         t = self._tool
         S = 12.0
+        # LV short-axis: don't let Rotate/Spin tilt the locked derived frames.
+        if self._lv_sax_active() and t in ("ROTATE", "SPIN"):
+            return
         if t == "PAGING":
             # Paging is up/down only (left/right do nothing).
             if direction == "up":
@@ -5837,6 +6361,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._image is None:
             return
         t = self._tool
+        # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
+        # LEVEL; free rotation (Rotate/Spin) is blocked so the cross-section and
+        # the long-axis pane can't be tilted out of their locked frames (use
+        # ◀ ▶ to rotate the reference centreline instead).
+        if self._lv_sax_active():
+            if t == "PAGING":
+                self._view_initial = False
+                self._lv_drag_level(dy)
+                return
+            if t in ("ROTATE", "SPIN"):
+                return
         if t != "WL":
             self._view_initial = False
         if t == "WL":
@@ -5954,6 +6489,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _wheel(self, which, delta):
         if self._image is None:
             return
+        # LV short-axis: the wheel pages the cross-section LEVEL along the axis.
+        if self._lv_sax_active():
+            self._lv_step_level(1 if delta > 0 else -1)
+            return
         if self._mode == "2D":
             self._page2d(1 if delta > 0 else -1)
             return
@@ -6036,18 +6575,45 @@ class CTViewer(CPRMixin, AbstractViewer):
         crossline. Mirrors the pygfx/Mac viewer."""
         other = "B" if which == "A" else "A"
         n = self._frame[which][2]
-        _ou, ov, on = self._frame[other]
+        _ou, _ov, on = self._frame[other]
         new_n = _norm(np.cross(crossdir, n))            # companion plane normal
         if float(np.dot(new_n, on)) < 0.0:
             new_n = -new_n                              # keep the viewing side stable
-        v_new = ov - float(np.dot(ov, new_n)) * new_n   # old up projected in-plane
-        if float(np.linalg.norm(v_new)) < 1e-6:         # old up ⟂ new plane
-            v_new = np.cross(new_n, crossdir)
-        v_new = _norm(v_new)
-        u_new = np.cross(v_new, new_n)                  # u×v = new_n (ortho convention)
+        # Companion UP = which's through-plane axis n (the axis SHARED by the two
+        # planes). It always lies in the companion plane (n ⟂ new_n) and is FIXED
+        # while the crossline rotates, so the companion's image can't drift or
+        # lock over many turns — the old code projected the PREVIOUS up each step,
+        # which parallel-transported an accumulating error and folded (snapping
+        # the image "stuck" once the up passed the plane normal). n is also the
+        # anatomically-correct vertical for an orthogonal companion (e.g. axial's
+        # S–I becomes the sagittal/coronal up).
+        v_new = _norm(n - float(np.dot(n, new_n)) * new_n)
+        if float(np.linalg.norm(v_new)) < 1e-6:         # n ⟂ new plane (unreachable)
+            v_new = _norm(np.cross(new_n, crossdir))
+        u_new = _norm(np.cross(v_new, new_n))           # u×v = new_n (ortho convention)
         self._frame[other] = (u_new, v_new, new_n)
         self._cross_ang[other] = math.degrees(math.atan2(
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
+        self._pc[other] = self._center.copy()
+
+    def _rotate_companion_by(self, which, d_deg) -> None:
+        """Incremental companion coupling for a crossLINE ROTATE: the crossline
+        turns by *d_deg* in *which*'s plane, so the companion plane turns by the
+        same amount AROUND the shared axis n (= which's normal). Rotating the
+        companion frame RIGIDLY around n keeps its CURRENT orientation (no snap
+        to a fresh derivation) and, because n is the rotation axis, holds the
+        companion's no-▲ centreline (which lies along n) fixed while its image
+        turns about it — with no parallel-transport drift/lock over many turns.
+        The crossline mark rides with the frame (its frame-relative angle is
+        unchanged)."""
+        if abs(float(d_deg)) < 1e-9:
+            return
+        other = "B" if which == "A" else "A"
+        n = _norm(self._frame[which][2])
+        u, v, _nn = self._frame[other]
+        u2 = _rotate(u, n, d_deg)
+        v2 = _rotate(v, n, d_deg)
+        self._frame[other] = self._ortho(u2, v2)
         self._pc[other] = self._center.copy()
 
     def _cross_zone(self, which, sx, sy):
@@ -6120,7 +6686,12 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _cross_press(self, which, sx, sy) -> bool:
         """Start a CrossLine gesture (overriding the tool) when the press lands
         ON the crosshair; else False so the active tool handles the drag. The
-        caught line/mode also lock the vivid highlight for the whole drag."""
+        caught line/mode also lock the vivid highlight for the whole drag.
+
+        The crosshair grab wins over EVERY tool — including SPIN: a press that
+        lands on a crossline rotates/moves that line (and couples the other pane
+        via the now-smooth _rotate_companion_by), while a press OFF the crosshair
+        falls through to SPIN (whole-pane roll, other pane untouched)."""
         caught, line, mode = self._cross_zone(which, sx, sy)
         if not caught:
             return False
@@ -6322,12 +6893,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = (d + 180.0) % 360.0 - 180.0
         self._cross_prev = cur
         self._cross_ang[which] += d
-        a = math.radians(self._cross_ang[which])
-        crossdir = u * math.cos(a) + v * math.sin(a)
-        # Re-derive the companion plane so it stays ⟂ to this pane and still
-        # contains the rotated crossline, keeping its orientation continuous
-        # (see _couple_companion — it does NOT snap the companion straight).
-        self._couple_companion(which, crossdir)
+        # Turn the companion by the SAME increment about the shared axis, from
+        # its CURRENT orientation — no snap to a fresh derivation, no drift/lock
+        # over many turns, and the companion's no-▲ line (the shared axis) stays
+        # put while its image rotates about it. (see _rotate_companion_by)
+        self._rotate_companion_by(which, d)
         self._view_initial = False
         self._refresh()
 

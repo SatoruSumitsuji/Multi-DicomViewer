@@ -32,9 +32,13 @@ class LVModel:
             raise ValueError("n_planes must be 4, 6 or 8")
         self.n_planes = int(n_planes)
         self.axis: LVAxis | None = None
-        # meridian angle (deg) -> (T,2) array of (along, radius)
+        # meridian angle (deg) -> (T,2) array of (along, radius) [for the volume]
         self.endo_contours: dict[float, np.ndarray] = {}
         self.epi_contours: dict[float, np.ndarray] = {}
+        # plane angle (deg) -> (N,3) RAW traced border in volume mm [for the
+        # short-axis display: intersect this polyline with the level plane]
+        self.endo_planes: dict[float, np.ndarray] = {}
+        self.epi_planes: dict[float, np.ndarray] = {}
         self.endo: LVSurface | None = None
         self.epi: LVSurface | None = None
 
@@ -45,6 +49,8 @@ class LVModel:
         self.axis = LVAxis.from_points(basal1, basal2, apex)
         self.endo_contours.clear()
         self.epi_contours.clear()
+        self.endo_planes.clear()
+        self.epi_planes.clear()
         self.endo = self.epi = None
 
     def set_axis_from_frame(self, origin, axis_dir, radial0) -> None:
@@ -56,6 +62,8 @@ class LVModel:
         self.axis = LVAxis.from_frame(origin, axis_dir, radial0)
         self.endo_contours.clear()
         self.epi_contours.clear()
+        self.endo_planes.clear()
+        self.epi_planes.clear()
         self.endo = self.epi = None
 
     def along_range(self, which: str = "endo"):
@@ -73,6 +81,76 @@ class LVModel:
             maxs.append(float(a.max()))
         apex, base = max(mins), min(maxs)
         return (apex, base) if base > apex else None
+
+    def level_range(self, which: str = "endo"):
+        """Apex→base span for SCROLLING the short-axis display level: apex = the
+        MOST-apical point of any meridian (min of per-meridian minima) so the
+        level can reach the true apex even if one meridian's trace stopped
+        early; base = the common base cut (min of per-meridian maxima). Wider on
+        the apical side than along_range() (which needs every meridian present).
+        None if no borders."""
+        store = self.endo_contours if which == "endo" else self.epi_contours
+        if not store:
+            return None
+        mins, maxs = [], []
+        for c in store.values():
+            a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+            mins.append(float(a.min()))
+            maxs.append(float(a.max()))
+        lo, hi = min(mins), min(maxs)
+        return (lo, hi) if hi > lo else None
+
+    def short_axis_border_pts(self, along0: float, which: str = "endo"):
+        """The border points (3-D volume mm) where the traced *which* border
+        crosses the short-axis plane at axial position *along0* (⟂ the rotation
+        axis), ORDERED by angle θ around the axis so a closed spline can be
+        drawn straight through them. None if <3 crossings.
+
+        Method (the DIRECT one, per the clinician's spec): intersect the level
+        plane at *along0* with each traced long-axis border POLYLINE — every
+        segment whose two ends straddle along0 yields one crossing point, right
+        on the drawn border. This makes no assumption about the border being a
+        clean function of along (so a wall that dips toward the axis, or a trace
+        that wiggles, can't misplace a point the way the along/radius split
+        could); the short-axis passes exactly through the long-axis crossings.
+        A plane whose border doesn't reach this level contributes nothing (near
+        the apex the ring simply shrinks through the planes that still cross)."""
+        if self.axis is None:
+            return None
+        planes = self.endo_planes if which == "endo" else self.epi_planes
+        if len(planes) < 2:                    # <2 planes ⇒ <4 crossings
+            return None
+        ax = self.axis
+        # For each PLANE, intersect its traced border with the level and assign
+        # every crossing to that plane's own meridian by the SIGN of the in-plane
+        # radial (e_s): s≥0 → φ wall, s<0 → φ+180 wall. This is robust even when
+        # the crossing is near the axis (small radius) — where a global arctan2(θ)
+        # would be noisy and mis-bin the point. Keep the OUTERMOST crossing per
+        # meridian (drops papillary/wiggle inner crossings) and order the result
+        # by meridian angle (deterministic — no θ), giving one clean point per
+        # direction that sits exactly on the long-axis border crossing.
+        best: dict[float, tuple[float, np.ndarray]] = {}
+        for phi, pts3d in planes.items():
+            p = np.asarray(pts3d, float).reshape(-1, 3)
+            if len(p) < 2:
+                continue
+            along = (p - ax.apex) @ ax.axis
+            e_s = ax.meridian_dir(phi)
+            for i in range(len(p) - 1):
+                a0, a1 = float(along[i]), float(along[i + 1])
+                if a0 == a1:
+                    continue
+                t = (along0 - a0) / (a1 - a0)
+                if not (-1e-9 <= t <= 1.0 + 1e-9):
+                    continue
+                P = p[i] + t * (p[i + 1] - p[i])
+                s = float((P - ax.apex) @ e_s)          # signed in-plane radial
+                mth = (phi % 360.0) if s >= 0.0 else ((phi + 180.0) % 360.0)
+                if mth not in best or abs(s) > best[mth][0]:
+                    best[mth] = (abs(s), P)
+        if len(best) < 3:
+            return None
+        return np.asarray([best[a][1] for a in sorted(best)])
 
     def plane_angles(self) -> list[float]:
         """Rotation angles (deg) of the long-axis drawing planes. n planes span
@@ -101,6 +179,10 @@ class LVModel:
         ax = self.axis
         e_s = ax.meridian_dir(plane_angle)
         pts = np.asarray(pts3d, dtype=float).reshape(-1, 3)
+        # Keep the RAW traced polyline for this plane — the short-axis display
+        # intersects it with the level plane directly (see short_axis_border_pts).
+        planes = self.endo_planes if which == "endo" else self.epi_planes
+        planes[plane_angle % 360.0] = pts.copy()
         d = pts - ax.apex
         along = d @ ax.axis
         s = d @ e_s                                   # signed radial in-plane
@@ -115,12 +197,18 @@ class LVModel:
                 continue
             prof = np.column_stack([along[mask], np.abs(s[mask])])
             prof = prof[np.argsort(prof[:, 0])]
-            store[theta] = prof
+            # Keep the RAW (along, radius) samples (strictly-increasing along) —
+            # short_axis_border_pts intersects them with the level directly.
+            keep = np.concatenate(([True], np.diff(prof[:, 0]) > 1e-9))
+            store[theta] = prof[keep]
 
     def clear_contour(self, plane_angle: float, which: str = "endo") -> None:
         store = self.endo_contours if which == "endo" else self.epi_contours
         store.pop(plane_angle % 360.0, None)
         store.pop((plane_angle + 180.0) % 360.0, None)
+        planes = self.endo_planes if which == "endo" else self.epi_planes
+        planes.pop(plane_angle % 360.0, None)
+        planes.pop((plane_angle + 180.0) % 360.0, None)
 
     # ----------------------------------------------------------------- build
     def build(self, level_step: float = LV_LEVEL_STEP_MM,
