@@ -1206,6 +1206,17 @@ class _Pane:
         self.ren.AddActor(lla)
         self.lv_line_actor = lla       # kept so the SAX level/centre line can be
         self.lv_line_w = 2.4           # thickened while grabbed (see _lv_line_*)
+        # LV wall-thickness colour map (translucent annulus fill between the
+        # short-axis endo & epi borders; per-cell RGBA set by _redraw_lv).
+        self.lv_wall_mapper = vtkPolyDataMapper()
+        self.lv_wall_mapper.SetInputData(vtkPolyData())
+        self.lv_wall_mapper.ScalarVisibilityOn()
+        self.lv_wall_mapper.SetScalarModeToUseCellData()
+        self.lv_wall_mapper.SetColorModeToDirectScalars()
+        lwa = vtkActor()
+        lwa.SetMapper(self.lv_wall_mapper)
+        lwa.GetProperty().SetOpacity(1.0)    # alpha lives per-cell
+        self.ren.AddActor(lwa)
         self.lv_pts_mapper = vtkPolyDataMapper()
         self.lv_pts_mapper.SetInputData(vtkPolyData())
         self.lv_pts_mapper.ScalarVisibilityOn()
@@ -2131,11 +2142,32 @@ class CTViewer(CPRMixin, AbstractViewer):
               "endo/epi borders"))
         self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
         row.addWidget(self._lv_vol_btn)
+        # Wall-thickness colour map on the short axis (Epi−Endo gap, coloured).
+        self._lv_wall_btn = FitButton(t("Wall"))
+        self._lv_wall_btn.setCheckable(True)
+        self._lv_wall_btn.setStyleSheet(
+            "QPushButton:checked{background:#8e44ad;color:white;}")
+        self._lv_wall_btn.setHelpToolTip(
+            t("Short-axis WALL THICKNESS colour map (Epi−Endo), on every level"))
+        self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
+        row.addWidget(self._lv_wall_btn)
         self._lv_redo_btn = FitButton(t("Clear borders"))
         self._lv_redo_btn.setHelpToolTip(
             t("Discard all traced borders and start again from plane 1"))
         self._lv_redo_btn.clicked.connect(self._lv_clear_contours)
         row.addWidget(self._lv_redo_btn)
+        # Save / load the traced Endo/Epi borders (3-D volume mm) for this series.
+        self._lv_save_btn = FitButton(t("Save"))
+        self._lv_save_btn.setHelpToolTip(
+            t("Save the Endo/Epi 3-D borders to a file (re-apply after reloading "
+              "this series)"))
+        self._lv_save_btn.clicked.connect(self._lv_save)
+        row.addWidget(self._lv_save_btn)
+        self._lv_load_btn = FitButton(t("Load"))
+        self._lv_load_btn.setHelpToolTip(
+            t("Load previously-saved Endo/Epi 3-D borders and apply them"))
+        self._lv_load_btn.clicked.connect(self._lv_load)
+        row.addWidget(self._lv_load_btn)
         self._lv_exit_btn = FitButton(t("Exit LV"))
         self._lv_exit_btn.clicked.connect(self._lv_exit)
         row.addWidget(self._lv_exit_btn)
@@ -2143,7 +2175,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_bar_btns = [
             self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
             self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
-            self._lv_redo_btn, self._lv_exit_btn]
+            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+            self._lv_exit_btn]
         self._lv_set_bar_enabled(False)   # only Trace active until LV mode
         return self._lv_wrap
 
@@ -4943,6 +4976,144 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_result_lines = lines
         self._lv_update_text()
 
+    # ---- wall-thickness colour map (short axis) ----
+    def _lv_toggle_wall(self) -> None:
+        """Toggle the short-axis wall-thickness colour map (Epi−Endo). Turns SAX
+        on if needed (the map lives on the cross-section)."""
+        if self._lv is None or self._lv.get("phase") != "contour":
+            self._lv_wall_btn.setChecked(False)
+            return
+        self._lv_wall = self._lv_wall_btn.isChecked()
+        if self._lv_wall and not self._lv_sax_active():
+            self._lv_sax_btn.setChecked(True)
+            self._lv_toggle_sax()
+            return                              # _lv_toggle_sax redraws
+        if self._lv_sax_active():
+            self._redraw_lv(self._lv["sax_pane"])
+            self.pane[self._lv["sax_pane"]].render()
+
+    def _lv_draw_wall(self, p, endo_sm, epi_sm) -> None:
+        """Fill the annulus between the short-axis endo (inner) and epi (outer)
+        splines with the Epi−Endo wall-thickness heatmap (Compare's gap
+        colours), translucent, on the cross-section pane."""
+        outer = [tuple(q) for q in epi_sm]
+        inner = [tuple(q) for q in endo_sm]
+        if len(outer) < 3 or len(inner) < 3:
+            return
+        cen = _polygon_centroid(outer)
+        radials = _radial_gap_compare(outer, inner, cen, 1.0)
+        n = len(radials)
+        tris, cols = [], []
+        for i in range(n):
+            a, b = radials[i], radials[(i + 1) % n]
+            da = abs(b["ang"] - a["ang"]) % 360.0
+            if 2.5 < da < 357.5:                # skip a large angular gap
+                continue
+            rgb = _hex_to_rgb(_gap_color(a["gap"]))
+            col = (rgb[0], rgb[1], rgb[2], 140)    # ~55% opacity
+            tris.append((a["inner"], a["outer"], b["outer"]))
+            tris.append((a["inner"], b["outer"], b["inner"]))
+            cols += [col, col]
+        if tris:
+            p.lv_wall_mapper.SetInputData(_filled_tris_pd(tris, cols))
+
+    # ---- save / load the traced Endo/Epi 3-D borders ----
+    def _lv_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if self._lv is None or self._lv.get("model") is None:
+            return
+        self._lv_capture_current()
+        m = self._lv["model"]
+        if not (m.endo_planes or m.epi_planes):
+            QMessageBox.information(self.window(), t("LV EF"),
+                                    t("No borders to save yet."))
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save LV borders"), "LV_borders.lvef.json",
+            "LV EF (*.lvef.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(m.to_dict(), f, ensure_ascii=False)
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        self._lv_result_lines = [t("Saved: {p}", p=os.path.basename(path))]
+        self._lv_update_text()
+
+    def _lv_load(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core.lv_measure import LVModel
+        import json
+        if self._image is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load LV borders"), "",
+            "LV EF (*.lvef.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                model = LVModel.from_dict(json.load(f))
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("Load failed: {err}", err=str(exc)))
+            return
+        if model.axis is None:
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("The file has no LV axis."))
+            return
+        self._lv_apply_model(model)
+
+    def _lv_apply_model(self, model) -> None:
+        """Enter LV contour mode with a loaded model (axis + borders from file)
+        and re-create the on-screen Endo/Epi border measures from it."""
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
+                    "target": None, "pane": "B", "sax": None,
+                    "prev_side": self.current_side()}
+        self._lv_btn.setChecked(True)
+        self._lv_enter_contour()
+        self._lv_rebuild_measures()
+        self._lv_apply_target("endo")
+        self._lv_show_plane()
+        self._lv_result_lines = [
+            t("Loaded borders: endo {ne} / epi {nep} planes",
+              ne=len(model.endo_planes), nep=len(model.epi_planes))]
+        self._lv_update_text()
+
+    def _lv_rebuild_measures(self) -> None:
+        """(Re)create the per-plane Endo/Epi border measures on the LV pane from
+        the model's stored 3-D borders (used after a Load)."""
+        lv = self._lv
+        pane = lv["pane"]
+        m = lv["model"]
+        self._measures[pane] = [mm for mm in self._measures[pane]
+                                if mm.get("_lv") is None]
+        angs = m.plane_angles()
+        for which, store, col in (("endo", m.endo_planes, "#ff4040"),
+                                  ("epi", m.epi_planes, "#40c040")):
+            for phi, pts3d in store.items():
+                arr = np.asarray(pts3d, float).reshape(-1, 3)
+                if len(arr) < 2:
+                    continue
+                idx = min(range(len(angs)), key=lambda i: min(
+                    abs(angs[i] - phi), abs(angs[i] - phi + 360.0),
+                    abs(angs[i] - phi - 360.0)))
+                p3 = [arr[j].copy() for j in range(len(arr))]
+                self._meas_seq = getattr(self, "_meas_seq", 0) + 1
+                self._measures[pane].append({
+                    "id": self._meas_seq, "type": "polyline",
+                    "pts3d": p3,
+                    "pts": [self._world3d_to_out(pane, P) for P in p3],
+                    "color": col, "smooth": True, "_lv": (idx, which)})
+
     def _lv_exit(self, from_toggle=False) -> None:
         """Leave LV mode entirely, restoring the normal MPR view."""
         if self._lv is not None and self._lv.get("phase") == "contour":
@@ -4953,6 +5124,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if m.get("_lv") is None]
         self._lv = None
         self._lv_result_lines = []
+        self._lv_wall = False
+        self._lv_wall_btn.setChecked(False)
         self._lv_sax_btn.setChecked(False)  # leave short-axis display
         self._lv_set_bar_enabled(False)     # the LV bar stays visible; grey out
         self._lv_plane_lbl.setText("0/6")   # reset the plane counter
@@ -5041,6 +5214,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_line_mapper.SetInputData(vtkPolyData())
         p.lv_endo_mapper.SetInputData(vtkPolyData())    # borders = the measures
         p.lv_epi_mapper.SetInputData(vtkPolyData())
+        p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
         if (lv is None or lv.get("phase") != "contour"
                 or lv["model"].axis is None):
             return
@@ -5054,6 +5228,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # points themselves marked as fixed-SCREEN-size dots (so they
                 # don't grow when the pane is zoomed).
                 mark_xy = []
+                border_sm = {}
                 for which, mapper in (("endo", p.lv_endo_mapper),
                                       ("epi", p.lv_epi_mapper)):
                     sp = lv["model"].short_axis_border_pts(along0, which)
@@ -5063,6 +5238,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                     sm = _smooth_closed(xy)         # closed Catmull-Rom
                     mapper.SetInputData(_polylines_pd([[tuple(q) for q in sm]]))
                     mark_xy.extend(xy)              # the crossing points
+                    border_sm[which] = sm
+                # WALL-THICKNESS colour map: translucent annulus between endo &
+                # epi, each angular sector coloured by its Epi−Endo gap (the same
+                # heatmap Compare uses). Recomputed at every level.
+                if (getattr(self, "_lv_wall", False)
+                        and "endo" in border_sm and "epi" in border_sm):
+                    self._lv_draw_wall(p, border_sm["endo"], border_sm["epi"])
                 if mark_xy:
                     # yellow dots (visible on BOTH the red endo and green epi
                     # lines), fixed screen size (constant under zoom).
