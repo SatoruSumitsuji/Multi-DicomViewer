@@ -118,8 +118,9 @@ _SPIN_SIGN = 1.0
 # KEEPS its slab look (instead of dropping to the thin GPU slice) while staying
 # smooth on low-memory Macs. The debounce timer rebuilds full quality on settle.
 # Tune these if motion is still heavy (lower) or too soft (raise) on the Mac.
-_SLAB_IW_FULL = 480     # slab-MIP sample columns at rest
+_SLAB_IW_FULL = 480     # slab-MIP sample columns for the immediate at-rest build
 _SLAB_IW_LOD = 200      # ...during an interactive drag/page (coarse but smooth)
+_SLAB_IW_NATIVE = 1000  # ...the crisp settle build (off-thread, ~native res)
 _SLAB_PLANES_FULL = 64  # MIP plane cap at rest
 _SLAB_PLANES_LOD = 8    # ...during an interactive drag/page
 
@@ -3217,14 +3218,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         return self._world_to_screen(key, ccx, ccy)
 
     # ----------------------------------------------------- slab-MIP (CPU)
-    def _slab_params(self, key, lod=False) -> dict:
+    def _slab_params(self, key, lod=False, native=False) -> dict:
         """Snapshot (on the GUI thread) everything _compute_slab_qimage needs:
         a plain dict of numpy/scalars + the (read-only, shared) volume — no Qt
-        widget access — so the build can run on a worker thread."""
+        widget access — so the build can run on a worker thread.
+
+        Three quality tiers: lod (coarse, during a drag), full (the immediate
+        at-rest paint), and native (the off-thread settle build at ~2× the pane
+        pixels so the STATIC slab is crisp on a Retina display)."""
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
-        iw = min(pw, _SLAB_IW_LOD if lod else _SLAB_IW_FULL)
+        if lod:
+            iw = min(pw, _SLAB_IW_LOD)
+        elif native:
+            iw = min(_SLAB_IW_NATIVE, pw * 2)
+        else:
+            iw = min(pw, _SLAB_IW_FULL)
         ih = max(1, int(round(iw * ph / pw)))
         u, v, n = self._frame[key]
         return {
@@ -3331,9 +3341,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._mip_img[key] = None
             p.render()
             self._overlay[key].update()
-        # (Re)arm the high-quality rebuild on interactive refreshes; a full
-        # refresh has already painted the slab MIP, so cancel any pending one.
-        if lod and any(self._thick[k] > 0 for k in ("A", "B")):
+        # Whenever a slab is on screen, (re)arm the off-thread NATIVE-resolution
+        # rebuild so the STATIC image crisps up once interaction settles — for
+        # the coarse interactive frames AND the immediate full (480) paint, so a
+        # non-interactive refresh (W/L, reset, HQ-Img) also ends up crisp.
+        if any(self._thick[k] > 0 for k in ("A", "B")):
             self._lod_pending = True
             self._arm_lod()
         else:
@@ -3393,7 +3405,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._cancel_lod()
         self._lod_pending = False
-        params = {k: self._slab_params(k, lod=False)
+        params = {k: self._slab_params(k, native=True)
                   for k in ("A", "B") if self._thick[k] > 0}
         if not params:
             return
@@ -5161,6 +5173,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         settings.save_display_quality(self._dq)
         if self._vol is not None:
             self._refresh(lod=False)
+
+    def reload_display_quality(self) -> None:
+        """Re-read the app-wide display-quality prefs (the shell calls this after
+        the Settings dialog): sync the CT full-quality (HQ-Img) toggle live and
+        repaint. Mirrors the XA viewer's hook so 'always high quality' can be set
+        from Settings too, not only the HQ-Img button."""
+        self._dq = settings.load_display_quality()
+        on = bool(self._dq.get("ct_full_quality"))
+        if on != self._lod_off:
+            self._lod_off = on
+            btn = getattr(self, "_hires_btn", None)
+            if btn is not None:
+                btn.blockSignals(True)
+                btn.setChecked(on)
+                btn.blockSignals(False)
+            if self._vol is not None:
+                self._refresh(lod=False)
 
     # ---------------------------------------------------- HU colormap
     def _lut_texture(self):
