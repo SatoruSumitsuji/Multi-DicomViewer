@@ -5404,6 +5404,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_load_btn = FitButton(t("Load"))
         self._lv_load_btn.clicked.connect(self._lv_load)
         row.addWidget(self._lv_load_btn)
+        self._lv_stl_btn = FitButton(t("STL"))
+        self._lv_stl_btn.clicked.connect(self._lv_export_stl)
+        row.addWidget(self._lv_stl_btn)
         self._lv_exit_btn = FitButton(t("Exit LV"))
         self._lv_exit_btn.clicked.connect(self._lv_exit)
         row.addWidget(self._lv_exit_btn)
@@ -5412,7 +5415,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
             self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_exit_btn]
+            self._lv_load_btn, self._lv_stl_btn, self._lv_exit_btn]
         self._lv_set_bar_enabled(False)
         return self._lv_wrap
 
@@ -5882,7 +5885,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return d
         return ""
 
-    def _lv_default_name(self) -> str:
+    def _lv_default_stem(self) -> str:
+        """Series-named file stem, e.g. 'ARIFIN;20260629_Se006' — the base for
+        the .lv.json and the exported _Endo/_Epi/_EndoEpi.stl filenames."""
         import re
         meta = self._lv_series_meta()
         name = meta.get("patient", "")
@@ -5897,8 +5902,69 @@ class CTViewer(CPRMixin, AbstractViewer):
         stem = ";".join(p for p in (name, date) if p)
         if seno:
             stem = (stem + "_" + seno) if stem else seno
-        stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "LV_borders"
-        return stem + ".lvef.json"
+        return re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "LV_borders"
+
+    def _lv_default_name(self) -> str:
+        return self._lv_default_stem() + ".lv.json"
+
+    def _lv_export_stl(self) -> None:
+        from PyQt6.QtWidgets import QDialog, QMessageBox
+        from multi_dicomviewer.ui.lv_stl_dialog import LVStlExportDialog
+        from multi_dicomviewer.core.stl_io import write_stl
+        import os
+        if self._lv is None or self._lv.get("model") is None:
+            return
+        self._lv_capture_current()
+        m = self._lv["model"]
+        try:
+            m.build()
+        except Exception:                                  # noqa: BLE001
+            pass
+        endo = getattr(m, "endo", None)
+        epi = getattr(m, "epi", None)
+        if endo is None and epi is None:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Trace at least 3 planes and press Calc Vol first — there is "
+                  "no surface to export yet."))
+            return
+        stem = self._lv_default_stem()
+        dlg = LVStlExportDialog(self._lv_series_dir(), stem,
+                                endo is not None, epi is not None, self.window())
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        ch = dlg.choices()
+        outdir = dlg.out_dir() or self._lv_series_dir() or os.getcwd()
+        if not os.path.isdir(outdir):
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("Output folder does not exist."))
+            return
+        jobs = []
+        if ch["endo"] and endo is not None:
+            jobs.append(("_Endo.stl", [endo.to_mesh()]))
+        if ch["epi"] and epi is not None:
+            jobs.append(("_Epi.stl", [epi.to_mesh()]))
+        if ch["both"]:
+            meshes = [s.to_mesh() for s in (endo, epi) if s is not None]
+            if meshes:
+                jobs.append(("_EndoEpi.stl", meshes))
+        if not jobs:
+            return
+        written = []
+        try:
+            for suffix, meshes in jobs:
+                path = os.path.join(outdir, stem + suffix)
+                write_stl(path, meshes, header="MDV LV " + stem)
+                written.append(os.path.basename(path))
+        except Exception as exc:                           # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("STL export failed: {err}", err=str(exc)))
+            return
+        self._lv_result_lines = [t("Exported STL: {f}", f=", ".join(written))]
+        self._lv_update_text()
+        QMessageBox.information(
+            self.window(), t("LV EF"),
+            t("Exported to {d}:\n{f}", d=outdir, f="\n".join(written)))
 
     def _lv_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
@@ -5917,7 +5983,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             else self._lv_default_name()
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save LV borders"), default,
-            "LV EF (*.lvef.json);;JSON (*.json)")
+            "LV (*.lv.json);;JSON (*.json)")
         if not path:
             return
         data = m.to_dict()
@@ -5940,7 +6006,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV borders"), self._lv_series_dir(),
-            "LV EF (*.lvef.json);;JSON (*.json)")
+            "LV (*.lv.json *.lvef.json);;JSON (*.json)")
         if not path:
             return
         try:
