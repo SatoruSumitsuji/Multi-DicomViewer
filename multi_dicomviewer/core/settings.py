@@ -330,24 +330,37 @@ def save_ivus_color(series_uid: str, color: bool) -> None:
 # --------------------------------------------------- display-quality prefs
 #: App-wide image-quality toggles (default OFF / current behaviour, so a fresh
 #: install renders exactly as before). Persisted so the user sets them once.
+#: Mac 3DCT quality modes: high = always full; adaptive = crisp when still,
+#: coarse while moving (default); low = always coarse.
+CT_QUALITY_MODES = ("high", "adaptive", "low")
+
 _DQ_DEFAULTS = {
     "xa_hq_cine": False,      # Angio/IVUS: smooth (bilinear) frames during cine
     "xa_smooth": False,       # Angio/IVUS: high-quality (Lanczos) upscaling
     "xa_denoise": False,      # Angio/IVUS: edge-preserving noise reduction
-    "ct_full_quality": False,  # Mac 3DCT: disable the interactive coarse LOD
+    "ct_quality_mode": "adaptive",   # Mac 3DCT: high | adaptive | low
 }
 
 
 def load_display_quality() -> dict:
-    """Return the persisted image-quality toggles, falling back to the
-    all-OFF defaults for any missing/unreadable key."""
+    """Return the persisted image-quality prefs, falling back to defaults for
+    any missing/unreadable key."""
     out = dict(_DQ_DEFAULTS)
     try:
         data = json.loads(DISPLAY_QUALITY_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            for k in _DQ_DEFAULTS:
-                if isinstance(data.get(k), bool):
-                    out[k] = data[k]
+            for k, dv in _DQ_DEFAULTS.items():
+                v = data.get(k)
+                if isinstance(dv, bool):
+                    if isinstance(v, bool):
+                        out[k] = v
+                elif k == "ct_quality_mode":
+                    if v in CT_QUALITY_MODES:
+                        out[k] = v
+            # Migrate the legacy boolean (ct_full_quality=True → always high).
+            if data.get("ct_quality_mode") not in CT_QUALITY_MODES \
+                    and data.get("ct_full_quality") is True:
+                out["ct_quality_mode"] = "high"
     except (OSError, ValueError):
         pass
     return out
@@ -357,7 +370,13 @@ def save_display_quality(prefs: dict) -> None:
     """Best-effort persist of the image-quality toggles. A failed write must
     not break the session."""
     try:
-        out = {k: bool(prefs.get(k, _DQ_DEFAULTS[k])) for k in _DQ_DEFAULTS}
+        out = {}
+        for k, dv in _DQ_DEFAULTS.items():
+            v = prefs.get(k, dv)
+            if k == "ct_quality_mode":
+                out[k] = v if v in CT_QUALITY_MODES else dv
+            else:
+                out[k] = bool(v)
         out["version"] = 1
         DISPLAY_QUALITY_PATH.parent.mkdir(parents=True, exist_ok=True)
         DISPLAY_QUALITY_PATH.write_text(

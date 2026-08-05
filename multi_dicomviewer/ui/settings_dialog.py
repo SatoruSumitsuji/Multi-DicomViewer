@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
 )
@@ -92,20 +93,6 @@ class SettingsDialog(QDialog):
         qlay.addWidget(adv_btn)
         root.addWidget(gb_q)
 
-        # ---- CT image quality ---------------------------------------------
-        gb_ctq = QGroupBox(t("CT image quality"))
-        ctqlay = QVBoxLayout(gb_ctq)
-        cb_ct = QCheckBox(t("Always full quality (3DCT)"))
-        cb_ct.setChecked(bool(quality.get("ct_full_quality")))
-        cb_ct.setToolTip(
-            t("Keep 3DCT MPR sharp even while dragging / zooming / rotating "
-              "(turns off the coarse interactive preview). Same as the HQ-Img "
-              "button. Smoother on a fast machine; heavier on a slow one. The "
-              "static image is always rebuilt crisp regardless."))
-        self._q_boxes["ct_full_quality"] = cb_ct
-        ctqlay.addWidget(cb_ct)
-        root.addWidget(gb_ctq)
-
         # ---- CT colour -----------------------------------------------------
         gb_c = QGroupBox(t("CT colour"))
         clay = QHBoxLayout(gb_c)
@@ -117,6 +104,30 @@ class SettingsDialog(QDialog):
         clay.addWidget(color_btn)
         clay.addStretch(1)
         root.addWidget(gb_c)
+
+        # ---- CT image quality (Mac 3DCT only) -----------------------------
+        gb_ctq = QGroupBox(t("CT Image Quality (Only Mac)"))
+        ctqlay = QVBoxLayout(gb_ctq)
+        self._ctq_radios: dict[str, QRadioButton] = {}
+        mode = quality.get("ct_quality_mode", "adaptive")
+        if mode not in ("high", "adaptive", "low"):
+            mode = "adaptive"
+        for val, label, tip in (
+            ("high", t("Always high quality"),
+             t("Keep 3DCT MPR sharp even while dragging / zooming / rotating. "
+               "Smoother on a fast Mac; heavier on a slow one.")),
+            ("adaptive", t("High when still, low while moving"),
+             t("Sharp static image; a coarse preview only while you "
+               "drag / zoom / rotate. Default.")),
+            ("low", t("Always low quality"),
+             t("Always the coarse preview — fastest, for slow machines.")),
+        ):
+            rb = QRadioButton(label)
+            rb.setToolTip(tip)
+            rb.setChecked(val == mode)
+            self._ctq_radios[val] = rb
+            ctqlay.addWidget(rb)
+        root.addWidget(gb_ctq)
 
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -140,5 +151,11 @@ class SettingsDialog(QDialog):
         return {k: sb.value() for k, sb in self._spins.items()}
 
     def quality(self) -> dict:
-        """Chosen angio quality toggles as {key: bool}."""
-        return {k: cb.isChecked() for k, cb in self._q_boxes.items()}
+        """Chosen image-quality prefs: the angio {key: bool} toggles plus the
+        Mac CT quality mode ('high' | 'adaptive' | 'low')."""
+        out = {k: cb.isChecked() for k, cb in self._q_boxes.items()}
+        for val, rb in self._ctq_radios.items():
+            if rb.isChecked():
+                out["ct_quality_mode"] = val
+                break
+        return out
