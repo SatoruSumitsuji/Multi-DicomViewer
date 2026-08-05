@@ -867,24 +867,28 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # type IS active, the press left _last = None, so the guard below
         # returns and no tool drag happens.
         if self._last is None:
-            # No button down. SAX: hover-thicken the level/centre line so the
-            # user sees where a click will grab it. Point-probe armed → show the
-            # HU under the cursor; any other measure type armed → a click starts
-            # a measurement (no hover); otherwise hover-preview the centreline.
-            if self._owner._lv_sax_active():
-                self._owner._lv_line_hover(
-                    self._which, e.position().x(), e.position().y())
-                return
+            # No button down. Point-probe armed → show the HU under the cursor;
+            # any other measure type armed → a click starts a measurement (no
+            # hover); otherwise hover-preview the centreline.
+            x, y = e.position().x(), e.position().y()
             # Hover-highlight (green) an existing control point so the user sees
             # it will be grabbed before pressing. Skip while a draft trace is
             # active here (then a click adds a point, it doesn't grab a handle).
             drafting = (self._owner._draft is not None
                         and self._owner._draft.get("pane") == self._which)
             if self._owner._meas_on and not drafting:
-                self._owner._measure_hover_handle(
-                    self._which, e.position().x(), e.position().y())
+                self._owner._measure_hover_handle(self._which, x, y)
             else:
                 self._owner._clear_hover_handle()
+            # SAX: with no border point under the cursor, thicken the ○ line
+            # handle so the user still sees the level / meridian is grabbable.
+            if (self._owner._lv_sax_active()
+                    and self._owner._meas_hover_handle is None):
+                self._owner._lv_line_hover(self._which, x, y)
+                return
+            if self._owner._lv_sax_active():
+                self._owner._lv_line_set_grabbed(self._which, False)
+                return
             if (self._owner._meas_on
                     and self._owner._meas_type == "point"):
                 self._owner._measure_hover(
@@ -3458,13 +3462,27 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ---- picking ----
     def _pick_handle(self, which, sx, sy):
+        # In LV mode, endo & epi points overlap near the apex/base; picking the
+        # topmost blindly grabs (or deletes) the WRONG border and shadows the one
+        # you meant. So when an Endo/Epi target is armed, the ARMED border's
+        # point wins; a point that belongs to the OTHER LV border is ignored (so
+        # you never grab/delete it by mistake); plain (non-LV) measures still
+        # match as a fallback.
+        lv_t = self._lv.get("target") if self._lv is not None else None
+        fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_qt(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
-                    return mi, vi
-        return None
+                    if lv_t not in ("endo", "epi"):
+                        return mi, vi
+                    tag = m.get("_lv")
+                    if tag is not None and tag[1] == lv_t:
+                        return mi, vi                  # armed border wins
+                    if tag is None and fallback is None:
+                        fallback = (mi, vi)            # non-LV measure fallback
+        return fallback
 
     def _measure_hover_handle(self, which, sx, sy) -> None:
         """Highlight (green) the existing control point under the cursor so the
@@ -4849,21 +4867,28 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_line_press(self, which, sx, sy):
         """Hit-test the SAX lines: returns "level" if the press lands on the
-        long-axis pane's level line, "meridian" if on the short-axis pane's
-        centreline, else None. Yields (returns None) when a measure handle is
-        under the cursor so border points still edit."""
+        long-axis pane's level-line ○ handle, "meridian" if on the short-axis
+        pane's centreline ○ handle, else None. Grabs ONLY near the ○ handle (out
+        at the view edge, clear of the heart) — NOT along the whole line, which
+        crosses the trace and would steal clicks meant to place / edit a border
+        point (a near-miss moved the level, dropping the point onto a different
+        cross-section). Yields while a trace is in progress or a border point is
+        under the cursor, so tracing / editing always wins."""
         if not self._lv_sax_active() or self._lv["model"].axis is None:
             return None
+        if self._draft is not None and self._draft.get("pane") == which:
+            return None                       # mid-trace → clicks add points
         if self._pick_handle(which, sx, sy) is not None:
             return None                       # let the border point be edited
         lv = self._lv
         ax = lv["model"].axis
         wx, wy = self._disp_to_world(which, sx, sy)
-        band = self._lv_px_to_mm(which, 25.0)     # generous grab band (~25 px)
+        rgrab = self._lv_px_to_mm(which, 22.0)    # radius around the ○ handle
         if which == lv.get("pane"):
             _, y = self._world3d_to_out(
                 which, ax.apex + float(lv["sax"]) * ax.axis)
-            if abs(wy - y) <= band:
+            hw, _hh = self._lv_view_half(which)
+            if math.hypot(wx - 0.9 * hw, wy - y) <= rgrab:
                 return "level"
         elif which == lv.get("sax_pane"):
             angs = lv["model"].plane_angles()
@@ -4872,7 +4897,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
             nrm = math.hypot(dx, dy) or 1.0
             dx, dy = dx / nrm, dy / nrm
-            if abs(wx * (-dy) + wy * dx) <= band:   # ⟂ dist to the centre line
+            ex, ey = self._lv_edge_xy(which, dx, dy)
+            if math.hypot(wx - ex, wy - ey) <= rgrab:
                 return "meridian"
         return None
 
