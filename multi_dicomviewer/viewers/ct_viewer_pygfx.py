@@ -772,6 +772,13 @@ class _Overlay(QWidget):
         edit_mi = e["mi"] if (e and e["key"] == key) else -1
         edit_vi = e["vi"] if (e and e["key"] == key) else -1
         edit_ca = bool(e.get("ca")) if (e and e["key"] == key) else False
+        # Hover highlight: the control point under the cursor turns green so the
+        # user knows it will be grabbed before pressing (twin of the drag green).
+        hh = v._meas_hover_handle
+        hov_here = bool(hh and hh["key"] == key)
+        hov_mi = hh["mi"] if hov_here else -1
+        hov_vi = hh["vi"] if hov_here else -1
+        hov_ca = bool(hh.get("ca")) if hov_here else False
 
         for mi, m in enumerate(v._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
@@ -842,18 +849,26 @@ class _Overlay(QWidget):
                 # Orange marker picks; the one being dragged turns green (like a
                 # polygon vertex).
                 ca_edit = edit_ca and mi == edit_mi and 0 <= edit_vi < len(ca["pts"])
+                ca_hov = (hov_ca and mi == hov_mi
+                          and 0 <= hov_vi < len(ca["pts"]) and not ca_edit)
                 ca_idle = [q for ci, q in enumerate(ca["pts"])
-                           if not (ca_edit and ci == edit_vi)]
+                           if not (ca_edit and ci == edit_vi)
+                           and not (ca_hov and ci == hov_vi)]
                 dots(ca_idle, QColor(255, 140, 0), 5.0)
+                if ca_hov:
+                    dots([ca["pts"][hov_vi]], QColor(59, 219, 90), 6.0)
                 if ca_edit:
                     dots([ca["pts"][edit_vi]], QColor(59, 219, 90), 7.0)
             # Trace vertices (the vessel's pseudo-centres): on-plane ones draw
             # as solid yellow dots, off-plane ones as 50% hollow yellow rings so
             # the user sees which pseudo-centres sit in the shown cross-section.
-            idle_on, idle_off = [], []
+            idle_on, idle_off, hov_pts = [], [], []
             for vi, q in enumerate(v._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     continue                          # the dragged one → green
+                if (not hov_ca and mi == hov_mi and vi == hov_vi):
+                    hov_pts.append(q)                 # hovered one → green
+                    continue
                 if of is not None and vi < len(of) and of[vi]:
                     idle_off.append(q)
                 else:
@@ -862,6 +877,7 @@ class _Overlay(QWidget):
             # in-plane pseudo-centre reads as the more prominent of the two.
             dots(idle_on, QColor(255, 217, 0), 4.4)              # yellow handles
             dots_hollow(idle_off, QColor(255, 217, 0, 128), 3.3)  # off-plane 50%
+            dots(hov_pts, QColor(59, 219, 90), 6.0)             # hover green
             if mi == edit_mi and not edit_ca and 0 <= edit_vi < len(m["pts"]):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
@@ -1464,6 +1480,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._snap_lumen = True              # snap trace clicks to the lumen
         self._draft = None                   # {type, pane, pts} in progress
         self._edit = None                    # {key, mi, vi} handle drag
+        self._meas_hover_handle = None       # {key, mi, vi, ca} handle under cursor
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
@@ -1811,9 +1828,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if self._draft and self._draft["pane"] == key:
                 # Update the dashed draft preview that follows the cursor.
+                self._clear_hover_handle()
                 self._meas_hover = self._disp_to_world(key, x, y)
                 self._overlay[key].update()
                 return
+            # Not drawing a draft here → hover-highlight (green) an existing
+            # control point so the user sees it will be grabbed before pressing.
+            self._measure_hover_handle(key, x, y)
             # Measuring with a type / Center-Angle pick (but not dragging) →
             # don't drive the tool. Idle Measure (no type chosen) falls
             # through so Zoom/Move/… still work.
@@ -1821,6 +1842,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._meas_type == "point":
                     self._measure_hover(key, x, y)
                 return
+        else:
+            self._clear_hover_handle()
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
             # SAX: hover-thicken the level / centre line so the user sees where a
             # click will grab it (mirrors the crosshair hover preview).
@@ -4679,6 +4702,32 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if math.hypot(qx - sx, qy - sy) < 12.0:
                     return mi, vi
         return None
+
+    def _measure_hover_handle(self, which, sx, sy) -> None:
+        """Highlight (green) the existing control point under the cursor so the
+        user sees it will be grabbed BEFORE pressing — the hover twin of the
+        green drag colour, so hover→grab→drag reads as one continuous state.
+        Covers both ordinary vertices and Center-Angle marker points."""
+        hit = self._pick_handle(which, sx, sy)
+        if hit is not None:
+            new = {"key": which, "mi": hit[0], "vi": hit[1], "ca": False}
+        else:
+            ca = self._pick_center_angle(which, sx, sy)
+            new = ({"key": which, "mi": ca[0], "vi": ca[1], "ca": True}
+                   if ca is not None else None)
+        if new == self._meas_hover_handle:
+            return
+        old = self._meas_hover_handle
+        self._meas_hover_handle = new
+        for k in ({which} | ({old["key"]} if old else set())):
+            self._overlay[k].update()
+
+    def _clear_hover_handle(self) -> None:
+        if self._meas_hover_handle is None:
+            return
+        k = self._meas_hover_handle["key"]
+        self._meas_hover_handle = None
+        self._overlay[k].update()
 
     def _pick_center_angle(self, which, sx, sy):
         """Pick a finalized Center-Angle marker point (the orange dots) so it
