@@ -885,24 +885,46 @@ class _Overlay(QWidget):
 
         d = v._draft
         if d and d["pane"] == key and d["pts"]:
-            # Yellow DASHED preview that follows the cursor while points are
-            # being placed (matches the XA/IVUS canvas), incl. the angle tool.
-            pen = QPen(QColor(244, 208, 63), 1.2)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            p.setPen(pen)
-            p.setBrush(Qt.BrushStyle.NoBrush)
             hover = v._meas_hover
-            if d["type"] == "ellipse" and hover is not None:
-                # Major axis = first click → cursor; preview the oblique ellipse.
-                p.drawPolyline(poly(_ellipse_outline(
-                    _ellipse_from_major(d["pts"][0], hover))))
+            # LV Endo/Epi trace: preview the committed points with the SAME
+            # centripetal Catmull-Rom the final border uses, in the target's
+            # colour (what you see is what you'll get); the last point → cursor
+            # rubber-band stays straight.
+            lv_trace = (v._lv is not None
+                        and v._lv.get("phase") == "contour"
+                        and v._lv.get("target") in ("endo", "epi")
+                        and d["type"] == "polyline")
+            if lv_trace:
+                col = ((211, 47, 47) if v._lv["target"] == "endo"
+                       else (46, 139, 87))
+                pts = list(d["pts"])
+                src = _smooth_open(pts) if len(pts) >= 3 else pts
+                pen = QPen(QColor(*col), 2.0)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                if len(src) >= 2:
+                    p.drawPolyline(poly(src))
+                if hover is not None and pts:
+                    p.drawLine(S(pts[-1]), S(hover))
+                dots(pts, QColor(255, 217, 0), 4.0)
             else:
-                preview = list(d["pts"])
-                if hover is not None and d["type"] != "ellipse":
-                    preview.append(hover)
-                if len(preview) >= 2:
-                    p.drawPolyline(poly(preview))
-            dots(list(d["pts"]), QColor(255, 217, 0), 4.0)
+                # Yellow DASHED preview that follows the cursor while points are
+                # being placed (matches the XA/IVUS canvas), incl. the angle tool.
+                pen = QPen(QColor(244, 208, 63), 1.2)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                if d["type"] == "ellipse" and hover is not None:
+                    p.drawPolyline(poly(_ellipse_outline(
+                        _ellipse_from_major(d["pts"][0], hover))))
+                else:
+                    preview = list(d["pts"])
+                    if hover is not None and d["type"] != "ellipse":
+                        preview.append(hover)
+                    if len(preview) >= 2:
+                        p.drawPolyline(poly(preview))
+                dots(list(d["pts"]), QColor(255, 217, 0), 4.0)
 
         # per-measure result strings, top-right, confined to the right 40% and
         # word-wrapped so growing the font can't make them overlap the tags.
@@ -4705,8 +4727,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if d["type"] == "polyline":
             P = self._out_to_world3d(which, *w)
             # Optionally snap the DEPTH to the contrast lumen along the plane
-            # normal (the slab MIP hid it) — same as the VTK viewer.
-            if self._snap_lumen and self._mode == "3D":
+            # normal (the slab MIP hid it) — same as the VTK viewer. NOT for LV
+            # borders: endo/epi aren't the vessel lumen, so snapping would push
+            # the traced point off the plane (a hollow depth-cue dot) and break
+            # the WYSIWYG capture.
+            if self._snap_lumen and self._mode == "3D" and self._lv is None:
                 _, _, nrm = self._axes_for(which)
                 P = self._snap_to_lumen(P, nrm)
                 d["pts"][-1] = self._world3d_to_out(which, P)  # keep 2-D in step
@@ -4737,7 +4762,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # (then snapped to the lumen along the normal, if enabled).
             if m.get("pts3d") and 0 <= e["vi"] < len(m["pts3d"]):
                 P = self._out_to_world3d(e["key"], *w)
-                if self._snap_lumen and self._mode == "3D":
+                if self._snap_lumen and self._mode == "3D" \
+                        and self._lv is None:
                     _, _, nrm = self._axes_for(e["key"])
                     P = self._snap_to_lumen(P, nrm)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
