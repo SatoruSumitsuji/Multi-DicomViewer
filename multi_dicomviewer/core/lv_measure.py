@@ -24,6 +24,41 @@ from .lv_axis import LVAxis
 from .lv_surface import LV_LEVEL_STEP_MM, LV_RING_POINTS, LVSurface
 
 
+def _cr_densify_3d(pts: np.ndarray, per_seg: int = 8) -> np.ndarray:
+    """Centripetal Catmull-Rom densification of an OPEN (N,3) polyline — the SAME
+    spline the viewer draws the long-axis border with. Intersecting the DENSE
+    curve (not the raw chords) with a short-axis level makes the crossing lie on
+    the displayed border even where it curves hard (the apex), so the short-axis
+    points match the long-axis line there."""
+    P = np.asarray(pts, float).reshape(-1, 3)
+    n = len(P)
+    if n < 3:
+        return P
+    ext = np.vstack([P[0], P, P[-1]])          # duplicate endpoints
+    out = []
+
+    def _kt(ti, a, b):
+        d = float(np.linalg.norm(b - a))
+        return ti + (d ** 0.5 if d > 1e-9 else 1e-6)
+
+    for i in range(1, len(ext) - 2):
+        p0, p1, p2, p3 = ext[i - 1], ext[i], ext[i + 1], ext[i + 2]
+        t0 = 0.0
+        t1 = _kt(t0, p0, p1)
+        t2 = _kt(t1, p1, p2)
+        t3 = _kt(t2, p2, p3)
+        for s in range(per_seg):
+            t = t1 + (t2 - t1) * (s / per_seg)
+            a1 = (t1 - t) / (t1 - t0) * p0 + (t - t0) / (t1 - t0) * p1
+            a2 = (t2 - t) / (t2 - t1) * p1 + (t - t1) / (t2 - t1) * p2
+            a3 = (t3 - t) / (t3 - t2) * p2 + (t - t2) / (t3 - t2) * p3
+            b1 = (t2 - t) / (t2 - t0) * a1 + (t - t0) / (t2 - t0) * a2
+            b2 = (t3 - t) / (t3 - t1) * a2 + (t - t1) / (t3 - t1) * a3
+            out.append((t2 - t) / (t2 - t1) * b1 + (t - t1) / (t2 - t1) * b2)
+    out.append(ext[-2])
+    return np.asarray(out)
+
+
 class LVModel:
     """Holds the LV measurement state for one cardiac phase (ED or ES)."""
 
@@ -131,7 +166,9 @@ class LVModel:
         # direction that sits exactly on the long-axis border crossing.
         best: dict[float, tuple[float, np.ndarray]] = {}
         for phi, pts3d in planes.items():
-            p = np.asarray(pts3d, float).reshape(-1, 3)
+            # Densify to the DISPLAYED spline first, so the crossing lies on the
+            # drawn long-axis border (matches it even at the curved apex).
+            p = _cr_densify_3d(pts3d)
             if len(p) < 2:
                 continue
             along = (p - ax.apex) @ ax.axis
