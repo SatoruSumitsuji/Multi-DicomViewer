@@ -3631,7 +3631,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # to the contrast lumen along the plane normal (the MIP hid the depth).
         if d["type"] == "polyline" and self._mode == "3D":
             P = self._out_to_world3d(which, *w)
-            if self._snap_lumen:
+            # NOT for LV borders: endo/epi aren't the vessel lumen, so snapping
+            # would push the point off the traced plane (its 3-D depth jumps to
+            # the bright blood pool), so the short-axis crossing lands off the
+            # drawn border — the "point off the section line / balloon" bug.
+            if self._snap_lumen and self._lv is None:
                 _, _, nrm = self._axes_for(which)
                 P = self._snap_to_lumen(P, nrm)
                 d["pts"][-1] = self._world3d_to_out(which, P)   # keep 2-D in step
@@ -3689,7 +3693,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             # (then snapped to the lumen along the normal, if enabled).
             if m.get("pts3d") and 0 <= e["vi"] < len(m["pts3d"]):
                 P = self._out_to_world3d(e["key"], *w)
-                if self._snap_lumen:
+                # NOT for LV borders (see _measure_left): snapping an endo/epi
+                # point to the lumen moves its 3-D depth off the drawn plane, so
+                # the short-axis crossing jumps off the border (the balloon).
+                if self._snap_lumen and self._lv is None:
                     _, _, nrm = self._axes_for(e["key"])
                     P = self._snap_to_lumen(P, nrm)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
