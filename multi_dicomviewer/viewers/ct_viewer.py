@@ -6694,15 +6694,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         t = self._tool
         # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
-        # LEVEL; free rotation (Rotate/Spin) is blocked so the cross-section and
-        # the long-axis pane can't be tilted out of their locked frames (use
-        # ◀ ▶ to rotate the reference centreline instead).
+        # LEVEL; ROTATE is blocked because tilting the reslice FRAME would
+        # corrupt the locked short-axis / long-axis geometry (use ◀ ▶ to rotate
+        # the reference centreline instead). SPIN is allowed — it only rolls the
+        # camera (the image AND the overlay rotate together), leaving the frame
+        # and the reconstructed data untouched.
         if self._lv_sax_active():
             if t == "PAGING":
                 self._view_initial = False
                 self._lv_drag_level(dy)
                 return
-            if t in ("ROTATE", "SPIN"):
+            if t == "ROTATE":
                 return
         if t != "WL":
             self._view_initial = False
