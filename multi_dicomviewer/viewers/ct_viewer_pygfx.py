@@ -1707,6 +1707,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if self._meas_on:
                 return                        # right-click in measure mode = no-op
+        # SAX: grab the thick ○-marked LEVEL line (long-axis pane → translate the
+        # cross-section level) or the CENTRELINE (short-axis pane → rotate the
+        # meridian) to review the endo/epi borders. Checked BEFORE Measure so the
+        # line wins, but _lv_line_press yields to a measure-handle grab so border
+        # points still edit. The line thickens slightly while held.
+        if self._drag_btn == 1 and self._lv_sax_active():
+            kind = self._lv_line_press(key, x, y)
+            if kind:
+                self._lv_line_drag = kind
+                self._lv_line_set_grabbed(key, True)
+                self._cross_grab = False
+                self._meas_drag = False
+                self._last = (x, y)
+                return
         # Shift while measuring temporarily runs the SELECTED tool instead of
         # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
         # off the slab; Move/Zoom just help you look) — so you can reorient the
@@ -1784,6 +1798,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
+        # SAX line drag: move the level (long-axis pane) or rotate the meridian
+        # (short-axis pane). Takes priority over measure/tool while held.
+        if self._lv_line_drag is not None:
+            if self._drag_btn == 1:
+                self._lv_line_move(key, x, y)
+                self._last = (x, y)
+            return
         if self._meas_on and not self._shift_tool:
             if self._meas_drag:
                 self._measure_drag(key, x, y)
@@ -1801,6 +1822,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._measure_hover(key, x, y)
                 return
         if self._drag_btn != 1:               # left-drag drives tool/crosshair
+            # SAX: hover-thicken the level / centre line so the user sees where a
+            # click will grab it (mirrors the crosshair hover preview).
+            if self._lv_sax_active():
+                self._lv_line_hover(key, x, y)
+                return
             self._hover_cross(key, x, y)      # no button → preview centreline grab
             return
         if self._cross_grab:
@@ -1827,6 +1853,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y)
 
     def _on_up(self, key, ev):
+        # End a SAX level/meridian line drag and drop its highlight.
+        if self._lv_line_drag is not None:
+            self._lv_line_drag = None
+            self._lv_line_set_grabbed(key, False)
+            self._lv_line_hi[key] = False        # re-hover on next move
+            self._drag_btn = None
+            self._last = None
+            return
         if self._meas_on and self._meas_drag:
             self._measure_release()
         # End any short-axis marker drag / dial rotation.
@@ -3595,6 +3629,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._vol is None:
             return
         t = self._tool
+        # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
+        # LEVEL; free rotation (Rotate/Spin) is blocked so the cross-section and
+        # the long-axis pane can't be tilted out of their locked frames (use
+        # ◀ ▶ to rotate the reference centreline instead).
+        if self._lv_sax_active():
+            if t == "PAGING":
+                self._view_initial = False
+                self._lv_drag_level(dy)
+                return
+            if t in ("ROTATE", "SPIN"):
+                return
         if t != "WL":
             self._view_initial = False
         if t == "WL":
@@ -3676,6 +3721,11 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _wheel(self, which, delta):
         if self._vol is None:
+            return
+        # SAX: the wheel scrolls the cross-section LEVEL (up = toward the apex),
+        # so you can page through the short-axis stack without grabbing the line.
+        if self._lv_sax_active():
+            self._lv_step_level(1 if delta > 0 else -1)
             return
         if self._mode == "2D":
             self._page2d(1 if delta > 0 else -1)
