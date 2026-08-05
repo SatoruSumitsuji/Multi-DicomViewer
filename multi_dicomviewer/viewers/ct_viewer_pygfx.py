@@ -486,6 +486,8 @@ class _Overlay(QWidget):
         if v._cl_on:
             self._paint_cross(p, key, w, h)
         self._paint_measures(p, key, w, h)
+        if v._lv is not None:
+            self._paint_lv(p, key, w, h)
         self._paint_info(p, key, w, h)
 
     def _paint_cpr(self, p, w, h):
@@ -606,6 +608,111 @@ class _Overlay(QWidget):
                                S(tip[0] + bx * hs, tip[1] + by * hs))
 
     # -- measurements (outlines, calipers, handles, labels, results) -------
+    # -- LV EF overlay (endo/epi splines, crossing dots, level/centre line,
+    #    wall-thickness fill) — the pygfx equivalent of the VTK _redraw_lv ----
+    def _paint_lv(self, p, key, w, h):
+        v = self._v
+        lv = v._lv
+        if lv is None or lv.get("phase") != "contour" \
+                or lv["model"].axis is None:
+            return
+        ax = lv["model"].axis
+
+        def S(pt):
+            sx, sy = v._world_to_screen(key, pt[0], pt[1])
+            return QPointF(sx, sy)
+
+        yellow = QColor(255, 210, 0)
+        if lv.get("sax") is not None:
+            along0 = float(lv["sax"])
+            if key == lv.get("sax_pane"):
+                border_sm, mark = {}, []
+                for which in ("endo", "epi"):
+                    sp = lv["model"].short_axis_border_pts(along0, which)
+                    if sp is None or len(sp) < 3:
+                        continue
+                    xy = [v._world3d_to_out(key, P) for P in sp]
+                    border_sm[which] = _smooth_closed(xy)
+                    mark.extend(xy)
+                if v._lv_wall and "endo" in border_sm and "epi" in border_sm:
+                    self._paint_lv_wall(p, key, border_sm["endo"],
+                                        border_sm["epi"])
+                for which, colr in (("endo", (255, 64, 64)),
+                                    ("epi", (64, 192, 64))):
+                    sm = border_sm.get(which)
+                    if not sm:
+                        continue
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.setPen(QPen(QColor(*colr), 2.2))
+                    p.drawPolyline(QPolygonF([S(q) for q in sm]))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(yellow)
+                for q in mark:                        # fixed screen-size dots
+                    p.drawEllipse(S(q), 3.5, 3.5)
+                angs = lv["model"].plane_angles()
+                md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
+                u, vv, _n = v._frame[key]
+                dx, dy = float(np.dot(md, u)), float(np.dot(md, vv))
+                nrm = math.hypot(dx, dy) or 1.0
+                dx, dy = dx / nrm, dy / nrm
+                X = float(v._half)
+                ex, ey = v._lv_edge_xy(key, dx, dy)
+                cr = max(2.0, 0.04 * v._lv_view_half(key)[1])
+                lw = 3.8 if v._lv_line_hi.get(key) else 2.4
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(yellow, lw))
+                p.drawLine(S((-dx * X, -dy * X)), S((dx * X, dy * X)))
+                p.drawPolyline(QPolygonF(
+                    [S(q) for q in v._circle_poly(ex, ey, cr)]))
+            elif key == lv.get("pane"):
+                _, y = v._world3d_to_out(key, ax.apex + along0 * ax.axis)
+                X = float(v._half)
+                hw, hh = v._lv_view_half(key)
+                cr = max(2.0, 0.04 * hh)
+                lw = 3.8 if v._lv_line_hi.get(key) else 2.4
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(yellow, lw))
+                p.drawLine(S((-X, y)), S((X, y)))
+                p.drawPolyline(QPolygonF(
+                    [S(q) for q in v._circle_poly(0.9 * hw, y, cr)]))
+            return
+        # LONG-AXIS view: base-cut line ⟂ the axis at the common basal level.
+        if key != lv.get("pane"):
+            return
+        rng = (lv["model"].along_range("endo")
+               or lv["model"].along_range("epi"))
+        if rng is not None:
+            base = rng[1]
+            X = float(v._half)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(yellow, 2.4))
+            p.drawLine(S((-X, base)), S((X, base)))
+
+    def _paint_lv_wall(self, p, key, endo_sm, epi_sm):
+        v = self._v
+        outer = [tuple(q) for q in epi_sm]
+        inner = [tuple(q) for q in endo_sm]
+        if len(outer) < 3 or len(inner) < 3:
+            return
+        cen = _polygon_centroid(outer)
+        radials = _radial_gap_compare(outer, inner, cen, 1.0)
+        n = len(radials)
+
+        def S(pt):
+            sx, sy = v._world_to_screen(key, pt[0], pt[1])
+            return QPointF(sx, sy)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(n):
+            a, b = radials[i], radials[(i + 1) % n]
+            da = abs(b["ang"] - a["ang"]) % 360.0
+            if 2.5 < da < 357.5:
+                continue
+            rgb = _hex_to_rgb(_gap_color(a["gap"]))
+            p.setBrush(QColor(rgb[0], rgb[1], rgb[2], 140))
+            p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
+                                     S(b["outer"]), S(b["inner"])]))
+
     def _paint_measures(self, p, key, w, h):
         v = self._v
 
@@ -799,7 +906,10 @@ class _Overlay(QWidget):
 
         # per-measure result strings, top-right, confined to the right 40% and
         # word-wrapped so growing the font can't make them overlap the tags.
-        lines = v._metrics.get(key, [])
+        # In LV mode, prepend the LV status / volume result lines.
+        lines = list(v._metrics.get(key, []))
+        if v._lv is not None:
+            lines = v._lv_status_lines() + lines
         if lines and not v._results_hidden:
             p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
             p.setFont(QFont("monospace", v._overlay_font_pt))
@@ -1346,6 +1456,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmp_want_pa = False            # last-used: compute %PA (IVUS)
         self._cmp_want_thk = True            # last-used: compute Thickness (CT LV)
         self._mip_img = {"A": None, "B": None}   # slab-MIP QImage per pane
+        # LV EF (ported from the VTK viewer): whole state in self._lv (None when
+        # off). Rendering is done in the _Overlay (QPainter), not VTK actors.
+        self._lv = None
+        self._lv_result_lines = []
+        self._lv_wall = False
+        self._lv_line_drag = None             # "level"/"meridian" while grabbing
+        self._lv_line_hi = {"A": False, "B": False}
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
         self._overlay_font_pt = TAG_FONT_PT_DEFAULT
@@ -1433,6 +1550,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addWidget(self._measure_bar)
         lay.addLayout(imgrow, 1)
         lay.addWidget(plane_bar)
+        lay.addWidget(self._build_lv_bar())
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
 
@@ -1746,6 +1864,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # in Measure mode still finishes the polyline draft.
         if self._meas_on and "Shift" not in (ev.get("modifiers") or ()):
             self._measure_finish_draft()
+            self._lv_on_border_committed()     # LV: capture the finished border
             return
         if self._cpr is not None and key == "A":
             return                                # no recenter on the section
@@ -2840,6 +2959,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and self._loaded_uid == new_uid):
             return
         self._loaded_uid = new_uid
+
+        # A genuinely new series → leave any LV mode and clear its state (the
+        # borders/axis are tied to the previous series' volume coordinates).
+        if self._lv is not None:
+            self._lv = None
+            self._lv_result_lines = []
+            self._lv_wall = False
+            if getattr(self, "_lv_btn", None) is not None:
+                self._lv_btn.setChecked(False)
+                self._lv_wall_btn.setChecked(False)
+                self._lv_sax_btn.setChecked(False)
+                self._lv_plane_lbl.setText("0/6")
+                self._lv_set_bar_enabled(False)
 
         vol = np.ascontiguousarray(loaded.volume, dtype=np.float32)  # (z,y,x)
         self._vol = vol
@@ -4444,7 +4576,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._reproject_traces(key)
         self._recompute_compares(key)      # keep comparisons in sync on edit/delete
         self._metrics[key] = [self._metrics_text(key, m)
-                              for m in self._measures[key]]
+                              for m in self._measures[key]
+                              if m.get("_lv") is None]   # LV borders aren't results
         self._overlay[key].update()
         self._update_hideall_btn()
 
@@ -4494,13 +4627,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         if cat and cat.get("key") == which:
             self._center_angle_add(self._disp_to_world(which, sx, sy))
             return False
-        hit = self._pick_handle(which, sx, sy)
+        # LV: while ACTIVELY drawing an endo/epi border, a click adds the next
+        # point (never grabs a nearby other border's handle).
+        lv_target = self._lv.get("target") if self._lv is not None else None
+        lv_drawing = (lv_target in ("endo", "epi")
+                      and self._draft is not None
+                      and self._draft.get("pane") == which
+                      and len(self._draft.get("pts", [])) >= 1)
+        hit = None if lv_drawing else self._pick_handle(which, sx, sy)
+        # Starting a NEW LV border must not grab a DIFFERENT border's point.
+        if (hit is not None and lv_target in ("endo", "epi")
+                and self._draft is None):
+            tag = self._measures[which][hit[0]].get("_lv")
+            if tag is None or tag[1] != lv_target:
+                hit = None
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             self._redraw_geom(which)
             return True
         # A Center-Angle marker point can be dragged just like a polygon vertex.
-        ca_hit = self._pick_center_angle(which, sx, sy)
+        ca_hit = None if lv_drawing else self._pick_center_angle(which, sx, sy)
         if ca_hit is not None:
             self._edit = {"key": which, "mi": ca_hit[0], "vi": ca_hit[1],
                           "ca": True}
@@ -4521,6 +4667,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 {"id": self._meas_seq, "type": "point", "pts": [w],
                  "pts3d": [P] if P is not None else []})
             self._redraw_meas(which)
+            return False
+        # LV: a NEW polyline may start ONLY with Endo/Epi active and no captured
+        # border for this plane yet; blocked in SAX (confirm/edit only).
+        if (self._lv is not None and self._lv.get("phase") == "contour"
+                and self._meas_type == "polyline" and self._draft is None
+                and (self._lv.get("sax") is not None
+                     or lv_target not in ("endo", "epi")
+                     or self._lv_has_border(which, lv_target))):
             return False
         d = self._draft
         if d is None or d["pane"] != which or d["type"] != self._meas_type:
@@ -4574,6 +4728,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._resnap_center_angle(m)
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
+        self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
 
     def _resnap_center_angle(self, m):
         """After the shape itself changes (a vertex / ellipse-handle drag),
@@ -4984,6 +5139,764 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cl_on = self._cl_btn.isChecked()
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    # ==================================================================
+    # LV EF (ported from the VTK viewer). Logic reuses the shared measure/
+    # frame/model infrastructure; LV drawing is done by _Overlay._paint_lv
+    # (QPainter) instead of VTK actors, so here "redraw" = overlay.update().
+    # ==================================================================
+    def _lv_redraw_all(self) -> None:
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _build_lv_bar(self) -> QWidget:
+        self._lv_wrap = QWidget()
+        self._lv_wrap._mdv_keep_on_max = True
+        row = QHBoxLayout(self._lv_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(4)
+        cap = QLabel(t("LV:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        row.addWidget(cap)
+        self._lv_btn = FitButton(t("Trace"))
+        self._lv_btn.setCheckable(True)
+        self._lv_btn.setStyleSheet(
+            "QPushButton:checked{background:#c0392b;color:white;}")
+        self._lv_btn.setHelpToolTip(
+            t("LV EF: set a long-axis view first (the current view becomes the "
+              "rotation axis), then trace the endo/epi border on each rotated "
+              "plane to measure LV volume"))
+        self._lv_btn.clicked.connect(self._toggle_lv)
+        row.addWidget(self._lv_btn)
+        self._lv_prev_btn = FitButton(t("◀ Prev plane"))
+        self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
+        row.addWidget(self._lv_prev_btn)
+        self._lv_plane_lbl = QLabel("0/6")
+        self._lv_plane_lbl.setMinimumWidth(78)
+        fl = self._lv_plane_lbl.font(); fl.setBold(True)
+        self._lv_plane_lbl.setFont(fl)
+        self._lv_plane_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self._lv_plane_lbl)
+        self._lv_next_btn = FitButton(t("▶ Next plane"))
+        self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
+        row.addWidget(self._lv_next_btn)
+        self._lv_endo_btn = FitButton(t("Endo"))
+        self._lv_endo_btn.setCheckable(True)
+        self._lv_endo_btn.setStyleSheet(
+            "QPushButton:checked{background:#d32f2f;color:white;}")
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_set_target("endo"))
+        row.addWidget(self._lv_endo_btn)
+        self._lv_epi_btn = FitButton(t("Epi"))
+        self._lv_epi_btn.setCheckable(True)
+        self._lv_epi_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_set_target("epi"))
+        row.addWidget(self._lv_epi_btn)
+        self._lv_sax_btn = FitButton(t("SAX"))
+        self._lv_sax_btn.setCheckable(True)
+        self._lv_sax_btn.setStyleSheet(
+            "QPushButton:checked{background:#b8860b;color:white;}")
+        self._lv_sax_btn.clicked.connect(self._lv_toggle_sax)
+        row.addWidget(self._lv_sax_btn)
+        self._lv_vol_btn = FitButton(t("Calc Vol"))
+        self._lv_vol_btn.setStyleSheet("background:#1f77b4;color:white;")
+        self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
+        row.addWidget(self._lv_vol_btn)
+        self._lv_wall_btn = FitButton(t("Wall"))
+        self._lv_wall_btn.setCheckable(True)
+        self._lv_wall_btn.setStyleSheet(
+            "QPushButton:checked{background:#8e44ad;color:white;}")
+        self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
+        row.addWidget(self._lv_wall_btn)
+        self._lv_redo_btn = FitButton(t("Clear borders"))
+        self._lv_redo_btn.clicked.connect(self._lv_clear_contours)
+        row.addWidget(self._lv_redo_btn)
+        self._lv_save_btn = FitButton(t("Save"))
+        self._lv_save_btn.clicked.connect(self._lv_save)
+        row.addWidget(self._lv_save_btn)
+        self._lv_load_btn = FitButton(t("Load"))
+        self._lv_load_btn.clicked.connect(self._lv_load)
+        row.addWidget(self._lv_load_btn)
+        self._lv_exit_btn = FitButton(t("Exit LV"))
+        self._lv_exit_btn.clicked.connect(self._lv_exit)
+        row.addWidget(self._lv_exit_btn)
+        row.addStretch(1)
+        self._lv_bar_btns = [
+            self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
+            self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
+            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+            self._lv_exit_btn]
+        self._lv_set_bar_enabled(False)
+        return self._lv_wrap
+
+    def _lv_set_bar_enabled(self, on: bool) -> None:
+        for b in getattr(self, "_lv_bar_btns", []):
+            b.setEnabled(bool(on))
+
+    def _toggle_lv(self) -> None:
+        on = self._lv_btn.isChecked()
+        if not on:
+            self._lv_exit(from_toggle=True)
+            return
+        if self._vol is None:
+            self._lv_btn.setChecked(False)
+            return
+        from multi_dicomviewer.core.lv_measure import LVModel
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        key0 = "B"                       # right pane = long-axis trace
+        u, v, _n = self._frame[key0]
+        a = math.radians(self._cross_ang[key0])
+        axis_dir = -math.sin(a) * u + math.cos(a) * v     # no-arrow centreline
+        radial0 = math.cos(a) * u + math.sin(a) * v       # green-▲ direction
+        origin = np.asarray(self._pc[key0], dtype=float).copy()
+        model = LVModel(n_planes=6)
+        model.set_axis_from_frame(origin, axis_dir, radial0)
+        self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
+                    "target": None, "pane": key0, "sax": None,
+                    "prev_side": self.current_side()}
+        self._lv_enter_contour()
+
+    def _lv_enter_contour(self) -> None:
+        lv = self._lv
+        lv["phase"] = "contour"
+        lv["plane_idx"] = 0
+        lv["target"] = None
+        self._lv_endo_btn.setChecked(False)
+        self._lv_epi_btn.setChecked(False)
+        self.set_side("Bi")
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type("polyline")
+        self._lv_set_bar_enabled(True)
+        self._lv_show_plane()
+
+    def _lv_show_plane(self) -> None:
+        lv = self._lv
+        ax = lv["model"].axis
+        if ax is None:
+            return
+        angs = lv["model"].plane_angles()
+        idx = lv["plane_idx"] % len(angs)
+        lv["plane_idx"] = idx
+        phi = angs[idx]
+        pane = lv["pane"]
+        u, v, n = self._ortho(ax.meridian_dir(phi), ax.axis)
+        self._frame[pane] = (u, v, n)
+        self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        self._cross_ang[pane] = 0.0
+        first = not lv.get("fitted", False)
+        lv["fitted"] = True
+        self._view_initial = first
+        for mm in self._measures[pane]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[0] != idx)
+        self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")
+        self._refresh(reset_cam=first)
+        self._overlay[pane].update()
+        self._lv_update_text()
+
+    def _lv_toggle_sax(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
+            self._lv_sax_btn.setChecked(False)
+            return
+        if self._lv_sax_btn.isChecked():
+            self._lv_capture_current()
+            rng = self._lv_level_range()
+            m = lv["model"]
+            if rng is None or (len(m.endo_contours) < 3
+                               and len(m.epi_contours) < 3):
+                self._lv_sax_btn.setChecked(False)
+                QMessageBox.information(
+                    self.window(), t("LV EF"),
+                    t("Trace the endo border on at least 3 planes first."))
+                return
+            common = self._lv_common_range() or rng
+            lv["sax"] = 0.5 * (common[0] + common[1])
+            sa = "A" if lv["pane"] == "B" else "B"
+            lv["sax_pane"] = sa
+            lv["sax_saved"] = (
+                tuple(np.asarray(a).copy() for a in self._frame[sa]),
+                np.asarray(self._pc[sa]).copy(),
+                self._cross_ang[sa], self._thick[sa])
+            lv["fitted_sax"] = False
+            self._lv_apply_target(None)
+            self.set_side("Bi")
+            self._lv_show_sax_both()
+        else:
+            self._lv_leave_sax()
+            self._lv_show_plane()
+
+    def _lv_show_sax_both(self) -> None:
+        lv = self._lv
+        ax = lv["model"].axis
+        if ax is None or lv.get("sax") is None:
+            return
+        la, sa = lv["pane"], lv["sax_pane"]
+        angs = lv["model"].plane_angles()
+        idx = lv["plane_idx"] % len(angs)
+        u, v, n = self._ortho(ax.meridian_dir(angs[idx]), ax.axis)
+        self._frame[la] = (u, v, n)
+        self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        self._cross_ang[la] = 0.0
+        for mm in self._measures[la]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[0] != idx)
+        self._lv_set_short_frame()
+        first = not lv.get("fitted_sax", False)
+        lv["fitted_sax"] = True
+        self._view_initial = first
+        self._lv_update_sax_label()
+        self._refresh(reset_cam=first)
+        for k in (la, sa):
+            self._overlay[k].update()
+
+    def _lv_set_short_frame(self) -> None:
+        lv = self._lv
+        ax = lv["model"].axis
+        sa = lv["sax_pane"]
+        o, ex, ey, nn = ax.short_axis_basis(float(lv["sax"]))
+        self._frame[sa] = (ex, ey, nn)
+        self._pc[sa] = o
+        self._cross_ang[sa] = 0.0
+        self._thick[sa] = 0.0
+        for mm in self._measures[sa]:
+            if mm.get("_lv") is not None:
+                mm["hidden"] = True
+
+    def _lv_update_sax_label(self) -> None:
+        rng = self._lv_level_range()
+        pos = (float(self._lv["sax"]) - rng[0]) if rng else 0.0
+        self._lv_plane_lbl.setText(t("SAX {mm:.0f}mm", mm=pos))
+
+    def _lv_reslice_short(self) -> None:
+        lv = self._lv
+        if lv is None or lv.get("sax") is None:
+            return
+        self._lv_set_short_frame()
+        self._lv_update_sax_label()
+        self._view_initial = False
+        self._refresh()
+        for k in (lv["pane"], lv["sax_pane"]):
+            self._overlay[k].update()
+
+    def _lv_leave_sax(self) -> None:
+        lv = self._lv
+        sa = lv.get("sax_pane")
+        saved = lv.get("sax_saved")
+        if sa is not None and saved is not None:
+            self._frame[sa] = tuple(np.asarray(a).copy() for a in saved[0])
+            self._pc[sa] = np.asarray(saved[1]).copy()
+            self._cross_ang[sa] = saved[2]
+            self._thick[sa] = saved[3]
+        lv["sax"] = None
+        lv["sax_saved"] = None
+        self._lv_sax_btn.setChecked(False)
+
+    def _lv_capture_current(self) -> None:
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
+            return
+        if lv.get("target") not in ("endo", "epi"):
+            return
+        pane = lv["pane"]
+        if self._draft and self._draft.get("pane") == pane \
+                and len(self._draft.get("pts", [])) >= 2:
+            self._commit_draft()
+        m = None
+        for cand in reversed(self._measures[pane]):
+            if (cand.get("type") == "polyline"
+                    and len(cand.get("pts3d", [])) >= 2
+                    and cand.get("_lv") is None):
+                m = cand
+                break
+        if m is None:
+            return
+        phi = lv["model"].plane_angles()[lv["plane_idx"]]
+        try:
+            lv["model"].set_long_axis_contour(phi, m["pts3d"],
+                                              which=lv["target"])
+        except Exception:
+            return
+        tag = (lv["plane_idx"], lv["target"])
+        self._measures[pane] = [mm for mm in self._measures[pane]
+                                if mm is m or mm.get("_lv") != tag]
+        m["_lv"] = tag
+        m["color"] = "#ff4040" if lv["target"] == "endo" else "#40c040"
+        m["smooth"] = True
+        self._lv_result_lines = []
+        self._draft = None
+        self._redraw_meas(pane)
+        self._lv_redraw_all()
+
+    def _lv_step_plane(self, delta) -> None:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        if self._lv.get("sax") is not None:
+            self._lv["plane_idx"] += int(delta)
+            self._lv_show_sax_both()
+            return
+        self._lv_capture_current()
+        pane = self._lv["pane"]
+        self._measures[pane] = [
+            m for m in self._measures[pane]
+            if not (m.get("type") == "polyline" and m.get("_lv") is None)]
+        self._draft = None
+        self._lv["plane_idx"] += int(delta)
+        self._lv_apply_target("endo")
+        self._lv_show_plane()
+
+    def _lv_sax_active(self) -> bool:
+        return (self._lv is not None
+                and self._lv.get("phase") == "contour"
+                and self._lv.get("sax") is not None)
+
+    def _lv_level_range(self):
+        m = self._lv["model"]
+        mins, maxs = [], []
+        for store in (m.endo_contours, m.epi_contours):
+            for c in store.values():
+                a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+                mins.append(float(a.min()))
+                maxs.append(float(a.max()))
+        if not mins:
+            return None
+        lo, hi = min(mins), min(maxs)
+        return (lo, hi) if hi > lo else None
+
+    def _lv_common_range(self):
+        m = self._lv["model"]
+        rs = [r for r in (m.along_range("endo"), m.along_range("epi"))
+              if r is not None]
+        if not rs:
+            return None
+        lo = max(r[0] for r in rs)
+        hi = min(r[1] for r in rs)
+        return (lo, hi) if hi > lo else rs[0]
+
+    def _lv_step_level(self, delta) -> None:
+        rng = self._lv_level_range()
+        if rng is None:
+            return
+        step = (rng[1] - rng[0]) / 24.0
+        self._lv["sax"] = min(rng[1], max(
+            rng[0], float(self._lv["sax"]) + float(delta) * step))
+        self._lv_reslice_short()
+
+    def _lv_drag_level(self, dy) -> None:
+        rng = self._lv_level_range()
+        if rng is None:
+            return
+        span = rng[1] - rng[0]
+        self._lv["sax"] = min(rng[1], max(
+            rng[0], float(self._lv["sax"]) + (dy / 200.0) * span))
+        self._lv_reslice_short()
+
+    def _lv_px_to_mm(self, which, px) -> float:
+        ps = float(self._ps[which])
+        return float(px) * (2.0 * ps / max(1, self.pane[which].canvas.height()))
+
+    def _lv_line_press(self, which, sx, sy):
+        if not self._lv_sax_active() or self._lv["model"].axis is None:
+            return None
+        if self._pick_handle(which, sx, sy) is not None:
+            return None
+        lv = self._lv
+        ax = lv["model"].axis
+        wx, wy = self._disp_to_world(which, sx, sy)
+        band = self._lv_px_to_mm(which, 25.0)
+        if which == lv.get("pane"):
+            _, y = self._world3d_to_out(
+                which, ax.apex + float(lv["sax"]) * ax.axis)
+            if abs(wy - y) <= band:
+                return "level"
+        elif which == lv.get("sax_pane"):
+            angs = lv["model"].plane_angles()
+            md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
+            u, v, _n = self._frame[which]
+            dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
+            nrm = math.hypot(dx, dy) or 1.0
+            dx, dy = dx / nrm, dy / nrm
+            if abs(wx * (-dy) + wy * dx) <= band:
+                return "meridian"
+        return None
+
+    def _lv_line_move(self, which, sx, sy) -> None:
+        kind = self._lv_line_drag
+        if kind is None:
+            return
+        lv = self._lv
+        ax = lv["model"].axis
+        wx, wy = self._disp_to_world(which, sx, sy)
+        if kind == "level":
+            along = wy + float(np.dot(self._pc[which] - ax.apex, ax.axis))
+            rng = self._lv_level_range()
+            if rng is not None:
+                along = min(rng[1], max(rng[0], along))
+            lv["sax"] = along
+            self._lv_reslice_short()
+        elif kind == "meridian":
+            th = math.degrees(math.atan2(wy, wx)) % 180.0
+            angs = lv["model"].plane_angles()
+            idx = min(range(len(angs)), key=lambda i: min(
+                abs(th - angs[i]), 180.0 - abs(th - angs[i])))
+            if idx != (lv["plane_idx"] % len(angs)):
+                lv["plane_idx"] = idx
+                self._lv_show_sax_both()
+
+    def _lv_drop_border(self, m) -> None:
+        if self._lv is None:
+            return
+        tag = m.get("_lv")
+        if tag is None:
+            return
+        idx, target = tag
+        angs = self._lv["model"].plane_angles()
+        if 0 <= idx < len(angs):
+            self._lv["model"].clear_contour(angs[idx], which=target)
+        self._lv_result_lines = []
+        if self._lv_sax_active():
+            self._overlay[self._lv["sax_pane"]].update()
+
+    def _lv_line_set_grabbed(self, which, on: bool) -> None:
+        if self._lv_line_hi.get(which) == bool(on):
+            return
+        self._lv_line_hi[which] = bool(on)
+        self._overlay[which].update()
+
+    def _lv_line_hover(self, which, sx, sy) -> None:
+        if self._lv_line_drag is not None:
+            return
+        on = bool(self._lv_sax_active()
+                  and self._lv_line_press(which, sx, sy) is not None)
+        self._lv_line_set_grabbed(which, on)
+
+    def _lv_apply_target(self, target) -> None:
+        self._lv["target"] = target
+        self._lv_endo_btn.setChecked(target == "endo")
+        self._lv_epi_btn.setChecked(target == "epi")
+        self._lv_update_text()
+
+    def _lv_set_target(self, target) -> None:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        self._lv_capture_current()
+        new = None if self._lv.get("target") == target else target
+        self._lv_apply_target(new)
+
+    def _lv_on_border_committed(self) -> None:
+        lv = self._lv
+        if lv is not None and lv.get("target") in ("endo", "epi"):
+            self._lv_capture_current()
+            self._lv_update_text()
+
+    def _lv_clear_contours(self) -> None:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        pane = self._lv["pane"]
+        self._lv["model"].endo_contours.clear()
+        self._lv["model"].epi_contours.clear()
+        self._lv["model"].endo_planes.clear()
+        self._lv["model"].epi_planes.clear()
+        self._measures[pane] = [m for m in self._measures[pane]
+                                if m.get("type") != "polyline"]
+        self._draft = None
+        self._lv_result_lines = []
+        self._lv["plane_idx"] = 0
+        if self._lv.get("sax") is not None:
+            self._lv_leave_sax()
+        self._lv_apply_target(None)
+        self._lv_show_plane()
+        self._redraw_meas(pane)
+
+    def _lv_has_border(self, which, target) -> bool:
+        if self._lv is None:
+            return False
+        idx = self._lv.get("plane_idx", 0)
+        for m in self._measures.get(which, []):
+            tag = m.get("_lv")
+            if tag is not None and tag[0] == idx and tag[1] == target:
+                return True
+        return False
+
+    def _lv_live_recapture(self, key, m) -> None:
+        if not self._lv_sax_active():
+            return
+        tag = m.get("_lv")
+        if (tag is None or key != self._lv.get("pane")
+                or not m.get("pts3d") or tag[1] not in ("endo", "epi")):
+            return
+        angs = self._lv["model"].plane_angles()
+        self._lv["model"].set_long_axis_contour(
+            angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+        self._overlay[self._lv["sax_pane"]].update()
+
+    def _lv_compute_volume(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        self._lv_capture_current()
+        m = self._lv["model"]
+        top = self.window()
+        try:
+            m.build()
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.information(
+                top, t("LV EF"),
+                t("Could not build the LV surface: {err}", err=str(exc)))
+            return
+        spacing = max(0.5, float(min(self._dims)))
+        endo_ml = m.volume_ml(spacing, "endo")
+        if endo_ml is None:
+            QMessageBox.information(
+                top, t("LV EF"),
+                t("Trace the endo border on at least 3 planes first."))
+            return
+        lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
+        myo_ml = m.myocardial_volume_ml(spacing)
+        if myo_ml is not None:
+            lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
+        self._lv_result_lines = lines
+        self._lv_update_text()
+
+    def _lv_toggle_wall(self) -> None:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            self._lv_wall_btn.setChecked(False)
+            return
+        self._lv_wall = self._lv_wall_btn.isChecked()
+        if self._lv_wall and not self._lv_sax_active():
+            self._lv_sax_btn.setChecked(True)
+            self._lv_toggle_sax()
+            return
+        if self._lv_sax_active():
+            self._overlay[self._lv["sax_pane"]].update()
+
+    def _lv_series_meta(self) -> dict:
+        h = self._header
+        if h is None:
+            return {}
+        pn = str(getattr(h, "PatientName", "") or "")
+        return {
+            "patient": pn.split("^")[0].strip() or pn.strip(),
+            "date": str(getattr(h, "StudyDate", "")
+                        or getattr(h, "AcquisitionDate", "") or ""),
+            "series_number": str(getattr(h, "SeriesNumber", "") or ""),
+            "series_uid": str(getattr(h, "SeriesInstanceUID", "") or ""),
+        }
+
+    def _lv_series_dir(self) -> str:
+        import os
+        h = self._header
+        fn = getattr(h, "filename", None) if h is not None else None
+        if fn:
+            d = os.path.dirname(str(fn))
+            if os.path.isdir(d):
+                return d
+        return ""
+
+    def _lv_default_name(self) -> str:
+        import re
+        meta = self._lv_series_meta()
+        name = meta.get("patient", "")
+        date = meta.get("date", "")
+        sn = meta.get("series_number", "")
+        seno = ""
+        if sn:
+            try:
+                seno = "Se%03d" % int(sn)
+            except (TypeError, ValueError):
+                seno = "Se" + sn
+        stem = ";".join(p for p in (name, date) if p)
+        if seno:
+            stem = (stem + "_" + seno) if stem else seno
+        stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "LV_borders"
+        return stem + ".lvef.json"
+
+    def _lv_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if self._lv is None or self._lv.get("model") is None:
+            return
+        self._lv_capture_current()
+        m = self._lv["model"]
+        if not (m.endo_planes or m.epi_planes):
+            QMessageBox.information(self.window(), t("LV EF"),
+                                    t("No borders to save yet."))
+            return
+        d = self._lv_series_dir()
+        default = os.path.join(d, self._lv_default_name()) if d \
+            else self._lv_default_name()
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save LV borders"), default,
+            "LV EF (*.lvef.json);;JSON (*.json)")
+        if not path:
+            return
+        data = m.to_dict()
+        data["series"] = self._lv_series_meta()
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        self._lv_result_lines = [t("Saved: {p}", p=os.path.basename(path))]
+        self._lv_update_text()
+
+    def _lv_load(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core.lv_measure import LVModel
+        import json
+        if self._vol is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load LV borders"), self._lv_series_dir(),
+            "LV EF (*.lvef.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            model = LVModel.from_dict(data)
+        except Exception as exc:                          # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("Load failed: {err}", err=str(exc)))
+            return
+        if model.axis is None:
+            QMessageBox.warning(self.window(), t("LV EF"),
+                                t("The file has no LV axis."))
+            return
+        saved = (data.get("series") or {}).get("series_uid", "")
+        cur = self._lv_series_meta().get("series_uid", "")
+        if saved and cur and saved != cur:
+            if QMessageBox.question(
+                    self.window(), t("LV EF"),
+                    t("This file was saved for a DIFFERENT series — the borders "
+                      "may not line up. Load anyway?")) != \
+                    QMessageBox.StandardButton.Yes:
+                return
+        self._lv_apply_model(model)
+
+    def _lv_apply_model(self, model) -> None:
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
+                    "target": None, "pane": "B", "sax": None,
+                    "prev_side": self.current_side()}
+        self._lv_btn.setChecked(True)
+        self._lv_enter_contour()
+        self._lv_rebuild_measures()
+        self._lv_apply_target("endo")
+        self._lv_show_plane()
+        self._lv_result_lines = [
+            t("Loaded borders: endo {ne} / epi {nep} planes",
+              ne=len(model.endo_planes), nep=len(model.epi_planes))]
+        if (len(model.endo_contours) >= 3 or len(model.epi_contours) >= 3):
+            self._lv_sax_btn.setChecked(True)
+            self._lv_toggle_sax()
+        self._lv_update_text()
+
+    def _lv_rebuild_measures(self) -> None:
+        lv = self._lv
+        pane = lv["pane"]
+        m = lv["model"]
+        self._measures[pane] = [mm for mm in self._measures[pane]
+                                if mm.get("_lv") is None]
+        angs = m.plane_angles()
+        for which, store, col in (("endo", m.endo_planes, "#ff4040"),
+                                  ("epi", m.epi_planes, "#40c040")):
+            for phi, pts3d in store.items():
+                arr = np.asarray(pts3d, float).reshape(-1, 3)
+                if len(arr) < 2:
+                    continue
+                idx = min(range(len(angs)), key=lambda i: min(
+                    abs(angs[i] - phi), abs(angs[i] - phi + 360.0),
+                    abs(angs[i] - phi - 360.0)))
+                p3 = [arr[j].copy() for j in range(len(arr))]
+                self._meas_seq = getattr(self, "_meas_seq", 0) + 1
+                self._measures[pane].append({
+                    "id": self._meas_seq, "type": "polyline",
+                    "pts3d": p3,
+                    "pts": [self._world3d_to_out(pane, P) for P in p3],
+                    "color": col, "smooth": True, "_lv": (idx, which)})
+
+    def _lv_exit(self, from_toggle=False) -> None:
+        if self._lv is not None and self._lv.get("phase") == "contour":
+            self._lv_capture_current()
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures[k]
+                                 if m.get("_lv") is None]
+        self._lv = None
+        self._lv_result_lines = []
+        self._lv_wall = False
+        self._lv_wall_btn.setChecked(False)
+        self._lv_sax_btn.setChecked(False)
+        self._lv_set_bar_enabled(False)
+        self._lv_plane_lbl.setText("0/6")
+        if not from_toggle:
+            self._lv_btn.setChecked(False)
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self.set_side("Bi")
+        self._init_frames()
+        self._view_initial = True
+        self._lv_update_text()
+        self._refresh(reset_cam=True)
+        self._lv_redraw_all()
+
+    def _lv_update_text(self) -> None:
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+
+    def _lv_status_lines(self) -> list:
+        lv = self._lv
+        if lv is None:
+            return []
+        lines = list(getattr(self, "_lv_result_lines", []))
+        if lv.get("phase") == "contour":
+            m = lv["model"]
+            tgt = lv.get("target")
+            if tgt == "endo":
+                head = t("tracing Endo (red) — double-click to finish")
+            elif tgt == "epi":
+                head = t("tracing Epi (green) — double-click to finish")
+            else:
+                head = t("click Endo or Epi to trace that border "
+                         "(otherwise it's a plain polyline)")
+            lines.append(
+                t("LV EF — {head}\ncaptured: endo {ne} / epi {nep} meridians",
+                  head=head, ne=len(m.endo_contours), nep=len(m.epi_contours)))
+        return lines
+
+    @staticmethod
+    def _circle_poly(cx, cy, r, n=20):
+        return [(cx + r * math.cos(2.0 * math.pi * i / n),
+                 cy + r * math.sin(2.0 * math.pi * i / n))
+                for i in range(n + 1)]
+
+    def _lv_view_half(self, key):
+        ps = float(self._ps[key])
+        w = max(1, self.pane[key].canvas.width())
+        h = max(1, self.pane[key].canvas.height())
+        return ps * (w / h), ps
+
+    def _lv_edge_xy(self, key, ux, uy, frac=0.9):
+        hw, hh = self._lv_view_half(key)
+        nrm = math.hypot(ux, uy) or 1.0
+        ux, uy = ux / nrm, uy / nrm
+        tx = hw / abs(ux) if abs(ux) > 1e-6 else 1e18
+        ty = hh / abs(uy) if abs(uy) > 1e-6 else 1e18
+        d = frac * min(tx, ty)
+        return ux * d, uy * d
 
     # ==================================================================
     # Short-axis (CPR). Shared state + control logic live in CPRMixin; the
