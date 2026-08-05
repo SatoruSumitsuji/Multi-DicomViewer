@@ -5552,7 +5552,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         ax = lv["model"].axis
         sa = lv["sax_pane"]
         o, ex, ey, nn = ax.short_axis_basis(float(lv["sax"]))
-        self._frame[sa] = (ex, ey, nn)
+        # View from the APEX toward the BASE (cardiology convention): horizontal
+        # MIRROR so LV is on the viewer's right, RV on the left, diaphragm down.
+        # Negates the in-plane horizontal axis (and normal, keeping right-handed).
+        # Display-only — measurements use the axis/borders, so are unaffected.
+        self._frame[sa] = (-ex, ey, -nn)
         self._pc[sa] = o
         self._cross_ang[sa] = 0.0
         self._thick[sa] = 0.0
