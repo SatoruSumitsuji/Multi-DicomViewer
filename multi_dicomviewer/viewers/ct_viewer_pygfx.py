@@ -524,13 +524,14 @@ class _Overlay(QWidget):
         # opaque; the rotate zone also draws small double-headed arrows.
         hi = v._cross_hi.get(key)
         hl_line = hi[0] if hi else None
+        both = hi is not None and hi[1] == "center"   # intersection → both lines
         base_pen = QPen(QColor(255, 217, 0, 128), 1.0)      # amber, 50%
         hi_pen = QPen(QColor(204, 204, 0, 255), 1.6)        # yellow, opaque
         # full-extent crosshair lines through the crosshair centre
-        p.setPen(hi_pen if hl_line == "H" else base_pen)
+        p.setPen(hi_pen if (both or hl_line == "H") else base_pen)
         p.drawLine(S(ccx - half * uh[0], ccy - half * uh[1]),
                    S(ccx + half * uh[0], ccy + half * uh[1]))
-        p.setPen(hi_pen if hl_line == "V" else base_pen)
+        p.setPen(hi_pen if (both or hl_line == "V") else base_pen)
         p.drawLine(S(ccx - half * uv[0], ccy - half * uv[1]),
                    S(ccx + half * uv[0], ccy + half * uv[1]))
         if hi is not None and hi[1] == "rotate":
@@ -1692,6 +1693,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._cpr is not None:
             self._cpr_drag_end()
             self._cpr_rot_end()
+        # Commit an intersection recentre: the point held under the cursor during
+        # the drag jumps to the image centre in both panes (done on RELEASE).
+        if self._cross_grab and self._cross_mode == "center":
+            self._recenter(key, ev["x"], ev["y"])
         self._meas_drag = False
         self._shift_tool = False
         self._drag_btn = None
@@ -3664,7 +3669,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return (False, None, None)
-        grab_h = on_h                         # green-▲ (H) wins the central square
+        # BOTH bands overlap → the crossline INTERSECTION: dragging here moves
+        # the whole crosshair (a live recentre), like the VTK viewer.
+        if on_h and on_v:
+            return (True, "C", "center")
+        grab_h = on_h
         along = along_h if grab_h else along_v
         mode = "move" if along <= mid else "rotate"
         return (True, "H" if grab_h else "V", mode)
@@ -3676,6 +3685,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         caught, line, mode = self._cross_zone(which, sx, sy)
         if not caught:
             return False
+        # Intersection grab → live recentre (handled in _cross_move; committed on
+        # release). No per-line state needed.
+        if mode == "center":
+            self._cross_mode = "center"
+            self._cross_hi[which] = (line, mode)
+            self._overlay[which].update()
+            return True
         wx, wy = self._disp_to_world(which, sx, sy)   # world (gesture state)
         ccx, ccy = self._cc(which)
         a = math.radians(self._cross_ang[which])
@@ -3719,6 +3735,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, n = self._frame[which]
         other = "B" if which == "A" else "A"
+        if self._cross_mode == "center":
+            # Intersection drag: the crosshair centre FOLLOWS the cursor while
+            # the background images stay put (only _center moves, not _pc); the
+            # actual recentre happens on release (see _on_up → _recenter).
+            self._center = self._pc[which] + wx * u + wy * v
+            self._clamp_center()
+            self._view_initial = False
+            self._refresh()
+            return
         if self._cross_mode == "move":
             a = math.radians(self._cross_ang[which])
             uh = np.array([math.cos(a), math.sin(a)])
