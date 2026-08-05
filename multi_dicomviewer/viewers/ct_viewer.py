@@ -5033,6 +5033,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             "series_uid": str(getattr(h, "SeriesInstanceUID", "") or ""),
         }
 
+    def _lv_series_dir(self) -> str:
+        """Folder the displayed CT series was read from (where the .lvef.json is
+        kept), so Save/Load open there. '' if unknown."""
+        import os
+        h = self._header
+        fn = getattr(h, "filename", None) if h is not None else None
+        if fn:
+            d = os.path.dirname(str(fn))
+            if os.path.isdir(d):
+                return d
+        return ""
+
     def _lv_default_name(self) -> str:
         """Suggested .lvef.json filename from the series, e.g.
         'ARIFIN;20260629_Se003.lvef.json'."""
@@ -5065,8 +5077,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("LV EF"),
                                     t("No borders to save yet."))
             return
+        d = self._lv_series_dir()
+        default = os.path.join(d, self._lv_default_name()) if d \
+            else self._lv_default_name()
         path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save LV borders"), self._lv_default_name(),
+            self.window(), t("Save LV borders"), default,
             "LV EF (*.lvef.json);;JSON (*.json)")
         if not path:
             return
@@ -5089,7 +5104,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._image is None:
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.window(), t("Load LV borders"), "",
+            self.window(), t("Load LV borders"), self._lv_series_dir(),
             "LV EF (*.lvef.json);;JSON (*.json)")
         if not path:
             return
