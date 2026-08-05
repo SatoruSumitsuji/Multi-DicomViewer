@@ -6,4 +6,4 @@ browser + linked layout) with pluggable modality viewer modules sharing
 one study model so a patient's studies can be correlated side by side.
 """
 
-__version__ = "3.0.1"
+__version__ = "4.0.0"
