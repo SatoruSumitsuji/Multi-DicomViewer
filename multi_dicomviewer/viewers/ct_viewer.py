@@ -5018,6 +5018,41 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.lv_wall_mapper.SetInputData(_filled_tris_pd(tris, cols))
 
     # ---- save / load the traced Endo/Epi 3-D borders ----
+    def _lv_series_meta(self) -> dict:
+        """Series identity (name/date/series-no + UID) recorded in the .lvef.json
+        so a load can confirm it's being applied to the same 3-D CT."""
+        h = self._header
+        if h is None:
+            return {}
+        pn = str(getattr(h, "PatientName", "") or "")
+        return {
+            "patient": pn.split("^")[0].strip() or pn.strip(),
+            "date": str(getattr(h, "StudyDate", "")
+                        or getattr(h, "AcquisitionDate", "") or ""),
+            "series_number": str(getattr(h, "SeriesNumber", "") or ""),
+            "series_uid": str(getattr(h, "SeriesInstanceUID", "") or ""),
+        }
+
+    def _lv_default_name(self) -> str:
+        """Suggested .lvef.json filename from the series, e.g.
+        'ARIFIN;20260629_Se003.lvef.json'."""
+        import re
+        meta = self._lv_series_meta()
+        name = meta.get("patient", "")
+        date = meta.get("date", "")
+        sn = meta.get("series_number", "")
+        seno = ""
+        if sn:
+            try:
+                seno = "Se%03d" % int(sn)
+            except (TypeError, ValueError):
+                seno = "Se" + sn
+        stem = ";".join(p for p in (name, date) if p)
+        if seno:
+            stem = (stem + "_" + seno) if stem else seno
+        stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip() or "LV_borders"
+        return stem + ".lvef.json"
+
     def _lv_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -5031,13 +5066,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                                     t("No borders to save yet."))
             return
         path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save LV borders"), "LV_borders.lvef.json",
+            self.window(), t("Save LV borders"), self._lv_default_name(),
             "LV EF (*.lvef.json);;JSON (*.json)")
         if not path:
             return
+        data = m.to_dict()
+        data["series"] = self._lv_series_meta()      # for the load-time match
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(m.to_dict(), f, ensure_ascii=False)
+                json.dump(data, f, ensure_ascii=False)
         except Exception as exc:                          # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Save failed: {err}", err=str(exc)))
@@ -5058,7 +5095,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         try:
             with open(path, encoding="utf-8") as f:
-                model = LVModel.from_dict(json.load(f))
+                data = json.load(f)
+            model = LVModel.from_dict(data)
         except Exception as exc:                          # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Load failed: {err}", err=str(exc)))
@@ -5067,6 +5105,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("The file has no LV axis."))
             return
+        # The 3-D borders are in THIS series' volume coordinates — warn (but let
+        # the user override) if the file was saved for a different series.
+        saved = (data.get("series") or {}).get("series_uid", "")
+        cur = self._lv_series_meta().get("series_uid", "")
+        if saved and cur and saved != cur:
+            if QMessageBox.question(
+                    self.window(), t("LV EF"),
+                    t("This file was saved for a DIFFERENT series — the borders "
+                      "may not line up. Load anyway?")) != \
+                    QMessageBox.StandardButton.Yes:
+                return
         self._lv_apply_model(model)
 
     def _lv_apply_model(self, model) -> None:
