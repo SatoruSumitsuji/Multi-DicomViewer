@@ -92,6 +92,20 @@ class SettingsDialog(QDialog):
         qlay.addWidget(adv_btn)
         root.addWidget(gb_q)
 
+        # ---- CT image quality ---------------------------------------------
+        gb_ctq = QGroupBox(t("CT image quality"))
+        ctqlay = QVBoxLayout(gb_ctq)
+        cb_ct = QCheckBox(t("Always full quality (3DCT)"))
+        cb_ct.setChecked(bool(quality.get("ct_full_quality")))
+        cb_ct.setToolTip(
+            t("Keep 3DCT MPR sharp even while dragging / zooming / rotating "
+              "(turns off the coarse interactive preview). Same as the HQ-Img "
+              "button. Smoother on a fast machine; heavier on a slow one. The "
+              "static image is always rebuilt crisp regardless."))
+        self._q_boxes["ct_full_quality"] = cb_ct
+        ctqlay.addWidget(cb_ct)
+        root.addWidget(gb_ctq)
+
         # ---- CT colour -----------------------------------------------------
         gb_c = QGroupBox(t("CT colour"))
         clay = QHBoxLayout(gb_c)
