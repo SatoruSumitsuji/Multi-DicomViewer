@@ -875,6 +875,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._owner._lv_line_hover(
                     self._which, e.position().x(), e.position().y())
                 return
+            # Hover-highlight (green) an existing control point so the user sees
+            # it will be grabbed before pressing. Skip while a draft trace is
+            # active here (then a click adds a point, it doesn't grab a handle).
+            drafting = (self._owner._draft is not None
+                        and self._owner._draft.get("pane") == self._which)
+            if self._owner._meas_on and not drafting:
+                self._owner._measure_hover_handle(
+                    self._which, e.position().x(), e.position().y())
+            else:
+                self._owner._clear_hover_handle()
             if (self._owner._meas_on
                     and self._owner._meas_type == "point"):
                 self._owner._measure_hover(
@@ -1862,6 +1872,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_seq = 0              # type-independent running number
         self._draft = None              # {type, pane, pts} in progress
         self._edit = None               # {key, mi, vi} handle drag
+        self._meas_hover_handle = None  # {key, mi, vi, ca} handle under cursor
         self._center_angle_target = None  # {key, mi} during 3-pt pick
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
@@ -3223,6 +3234,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         edit_mi = e["mi"] if (e and e["key"] == key) else -1
         edit_vi = e["vi"] if (e and e["key"] == key) else -1
         edit_ca = bool(e.get("ca")) if (e and e["key"] == key) else False
+        # Hover highlight: the control point under the cursor turns green (the
+        # same green as while dragging) so the user knows it will be grabbed
+        # before pressing. Drawn through the edit-points actor.
+        hh = self._meas_hover_handle
+        hov_here = bool(hh and hh["key"] == key)
+        hov_mi = hh["mi"] if hov_here else -1
+        hov_vi = hh["vi"] if hov_here else -1
+        hov_ca = bool(hh.get("ca")) if hov_here else False
         for mi, m in enumerate(self._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
             # right-click Hide → skip its line, handles, axes and id label.
@@ -3292,6 +3311,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             for vi, q in enumerate(self._handles(m)):
                 if mi == edit_mi and not edit_ca and vi == edit_vi:
                     edit_pts.append(q)
+                elif not hov_ca and mi == hov_mi and vi == hov_vi:
+                    edit_pts.append(q)            # hovered → green
                 elif (off_flag is not None and vi < len(off_flag)
                       and off_flag[vi]):
                     off_pts.append(q)
@@ -3317,9 +3338,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     if ci != 2:
                         ca_segs.append((centre, q))
                         ca_colors.append((255, 140, 0))
-                    # The marker being dragged turns green (like a vertex);
-                    # the rest stay orange.
+                    # The marker being dragged (or hovered) turns green (like a
+                    # vertex); the rest stay orange.
                     if mi == edit_mi and edit_ca and ci == edit_vi:
+                        edit_pts.append(q)
+                    elif hov_ca and mi == hov_mi and ci == hov_vi:
                         edit_pts.append(q)
                     else:
                         ca_pts.append(q)
@@ -3442,6 +3465,31 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if math.hypot(qx - sx, qy - sy) < 12.0:
                     return mi, vi
         return None
+
+    def _measure_hover_handle(self, which, sx, sy) -> None:
+        """Highlight (green) the existing control point under the cursor so the
+        user sees it will be grabbed BEFORE pressing — the hover twin of the
+        green drag colour. Covers ordinary vertices and Center-Angle points."""
+        hit = self._pick_handle(which, sx, sy)
+        if hit is not None:
+            new = {"key": which, "mi": hit[0], "vi": hit[1], "ca": False}
+        else:
+            ca = self._pick_center_angle(which, sx, sy)
+            new = ({"key": which, "mi": ca[0], "vi": ca[1], "ca": True}
+                   if ca is not None else None)
+        if new == self._meas_hover_handle:
+            return
+        old = self._meas_hover_handle
+        self._meas_hover_handle = new
+        for k in ({which} | ({old["key"]} if old else set())):
+            self._redraw_geom(k)
+
+    def _clear_hover_handle(self) -> None:
+        if self._meas_hover_handle is None:
+            return
+        k = self._meas_hover_handle["key"]
+        self._meas_hover_handle = None
+        self._redraw_geom(k)
 
     def _lv_has_border(self, which, target) -> bool:
         """True if a captured Endo/Epi (*target*) border already exists for the
