@@ -1364,10 +1364,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # it does fire), and the thread wake (guaranteed) — all coordinated by
         # _lod_pending so _lod_settle runs exactly once per interaction.
         self._lod_pending = False
-        # Persisted image-quality prefs; ct_full_quality=True turns the coarse
-        # interactive LOD OFF so a fast Mac always shows full-quality MPR.
+        # Persisted image-quality prefs. ct_quality_mode: 'high' = never coarse,
+        # 'adaptive' = coarse only while moving (crisp when still, default),
+        # 'low' = always coarse. (All set from Settings ▸ CT Image Quality.)
         self._dq = settings.load_display_quality()
-        self._lod_off = bool(self._dq.get("ct_full_quality"))
+        self._ct_quality = self._dq.get("ct_quality_mode", "adaptive")
         self._lod_due = None             # monotonic deadline for the rebuild
         self._lod_thread = None          # single reusable debounce worker
         self._slab_gen = 0               # generation token for async slab builds
@@ -1998,7 +1999,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if key in mode_tips:
                 b.setHelpToolTip(mode_tips[key])
 
-        # -- ReCalc / Measure / CenterLine / HQ-Img tooltips -------------
+        # -- ReCalc / Measure / CenterLine tooltips ----------------------
         b = getattr(self, "_recalc_btn", None)
         if b is not None:
             b.setHelpToolTip(t(
@@ -2013,12 +2014,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         b = getattr(self, "_cl_btn", None)
         if b is not None:
             b.setHelpToolTip(t("Show/hide crosshair & slab lines"))
-        b = getattr(self, "_hires_btn", None)
-        if b is not None:
-            b.setHelpToolTip(t(
-                "Full-quality images: keep MPR sharp even while dragging / "
-                "zooming / rotating (turns OFF the coarse interactive "
-                "preview). Smoother on a fast Mac; heavier on a slow one."))
 
         # -- Setting / Measure History / DICOM-tag button ----------------
         b = getattr(self, "_setting_btn", None)
@@ -2247,25 +2242,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cl_btn.clicked.connect(self._toggle_centerline)
         row.addWidget(self._cl_btn)
 
-        # HQ-Img: disable the coarse interactive LOD so drag/zoom/rotate stays
-        # full quality (smoother on a fast Mac, heavier on a slow one). Default
-        # OFF = keep the LOD. Persisted across restarts. The viewer-wide button
-        # stylesheet has no :checked rule, so give it an explicit blue active
-        # state (otherwise a toggled-on button looks identical to off).
-        self._hires_btn = FitButton("HQ-Img")
-        self._hires_btn.setCheckable(True)
-        self._hires_btn.setChecked(self._lod_off)
-        self._hires_btn.setStyleSheet(
-            "QPushButton:checked { background:#1f77b4; color:white; }")
-        self._hires_btn.setHelpToolTip(t(
-            "Full-quality images: keep MPR sharp even while dragging / zooming "
-            "/ rotating (turns OFF the coarse interactive preview). Smoother on "
-            "a fast Mac; heavier on a slow one."))
-        self._hires_btn.toggled.connect(self._toggle_hires)
-        # Placed at the very LEFT of this row (before the "Plane:" label) so the
-        # full-quality toggle is the first, most prominent control on the strip.
-        row.insertWidget(0, self._hires_btn)
-        row.insertSpacing(1, 8)
+        # CT image quality (the old HQ-Img toolbar toggle) now lives entirely in
+        # Settings ▸ CT Image Quality (Only Mac): high / adaptive / low.
+        self._hires_btn = None
 
         # The per-pane "Setting" button (opened the HU colour-map editor) was
         # removed: the colour map is now global and edited from the shell's
@@ -3290,10 +3269,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # quality once the interaction settles.
         if self._vol is None:
             return
-        # "HQ-Img" (ct_full_quality): never use the coarse interactive LOD — a
-        # fast Mac rebuilds full quality every frame instead.
-        if self._lod_off:
+        # CT quality mode: 'high' never uses the coarse LOD (full every frame);
+        # 'low' is always coarse (never crisps up); 'adaptive' keeps the caller's
+        # lod (coarse only while moving, then a crisp settle when still).
+        if self._ct_quality == "high":
             lod = False
+        elif self._ct_quality == "low":
+            lod = True
         # Any refresh (interactive frame or full) supersedes an in-flight async
         # high-res slab build, so bump the generation to discard a late result.
         self._slab_gen += 1
@@ -3343,9 +3325,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[key].update()
         # Whenever a slab is on screen, (re)arm the off-thread NATIVE-resolution
         # rebuild so the STATIC image crisps up once interaction settles — for
-        # the coarse interactive frames AND the immediate full (480) paint, so a
-        # non-interactive refresh (W/L, reset, HQ-Img) also ends up crisp.
-        if any(self._thick[k] > 0 for k in ("A", "B")):
+        # the coarse interactive frames AND the immediate full paint. In 'low'
+        # mode the user asked for always-coarse, so skip the crisp settle.
+        if self._ct_quality != "low" and any(self._thick[k] > 0
+                                             for k in ("A", "B")):
             self._lod_pending = True
             self._arm_lod()
         else:
@@ -5165,29 +5148,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._overlay["A"].update()
         self._redraw_meas(self._cpr["src"])        # map-pane trace follows
 
-    def _toggle_hires(self, on: bool) -> None:
-        """HQ-Img toggle: disable/enable the coarse interactive LOD, persist the
-        choice, and repaint at full quality now."""
-        self._lod_off = bool(on)
-        self._dq["ct_full_quality"] = self._lod_off
-        settings.save_display_quality(self._dq)
-        if self._vol is not None:
-            self._refresh(lod=False)
-
     def reload_display_quality(self) -> None:
         """Re-read the app-wide display-quality prefs (the shell calls this after
-        the Settings dialog): sync the CT full-quality (HQ-Img) toggle live and
-        repaint. Mirrors the XA viewer's hook so 'always high quality' can be set
-        from Settings too, not only the HQ-Img button."""
+        the Settings dialog): apply the chosen CT quality mode live and repaint.
+        CT image quality is set only from Settings ▸ CT Image Quality."""
         self._dq = settings.load_display_quality()
-        on = bool(self._dq.get("ct_full_quality"))
-        if on != self._lod_off:
-            self._lod_off = on
-            btn = getattr(self, "_hires_btn", None)
-            if btn is not None:
-                btn.blockSignals(True)
-                btn.setChecked(on)
-                btn.blockSignals(False)
+        mode = self._dq.get("ct_quality_mode", "adaptive")
+        if mode != self._ct_quality:
+            self._ct_quality = mode
             if self._vol is not None:
                 self._refresh(lod=False)
 
