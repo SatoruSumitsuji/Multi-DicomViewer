@@ -1835,6 +1835,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Not drawing a draft here → hover-highlight (green) an existing
             # control point so the user sees it will be grabbed before pressing.
             self._measure_hover_handle(key, x, y)
+            # SAX: with no border point under the cursor, thicken the ○ line
+            # handle so the user still sees the level / meridian is grabbable.
+            if self._lv_sax_active() and self._meas_hover_handle is None:
+                self._lv_line_hover(key, x, y)
+            elif self._lv_sax_active():
+                self._lv_line_set_grabbed(key, False)
             # Measuring with a type / Center-Angle pick (but not dragging) →
             # don't drive the tool. Idle Measure (no type chosen) falls
             # through so Zoom/Move/… still work.
@@ -4695,13 +4701,27 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ---- picking ----
     def _pick_handle(self, which, sx, sy):
+        # In LV mode, endo & epi points overlap near the apex/base; picking the
+        # topmost blindly grabs (or deletes) the WRONG border and shadows the one
+        # you meant. So when an Endo/Epi target is armed, the ARMED border's
+        # point wins; a point that belongs to the OTHER LV border is ignored (so
+        # you never grab/delete it by mistake); plain (non-LV) measures still
+        # match as a fallback.
+        lv_t = self._lv.get("target") if self._lv is not None else None
+        fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_screen(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
-                    return mi, vi
-        return None
+                    if lv_t not in ("endo", "epi"):
+                        return mi, vi
+                    tag = m.get("_lv")
+                    if tag is not None and tag[1] == lv_t:
+                        return mi, vi                  # armed border wins
+                    if tag is None and fallback is None:
+                        fallback = (mi, vi)            # non-LV measure fallback
+        return fallback
 
     def _measure_hover_handle(self, which, sx, sy) -> None:
         """Highlight (green) the existing control point under the cursor so the
@@ -5242,6 +5262,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         m = self._measures[which][mi]
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
+        # 3-D lift of the new point on the CURRENT plane, so a trace that carries
+        # per-vertex 3-D (LV borders / CPR centrelines) stays consistent — an
+        # inserted point with no 3-D desynced pts/pts3d and dropped later points
+        # onto the wrong cross-section.
+        p3d = None
+        try:
+            p3d = self._out_to_world3d(which, wx, wy)
+        except Exception:
+            p3d = None
         if m["type"] == "ellipse":
             e1, e2, m1, m2 = m["pts"]            # major ends, minor ends
             m["type"] = "polygon"
@@ -5249,6 +5278,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if m["type"] == "line":
             m["type"] = "polyline"
             m["pts"] = [m["pts"][0], pt, m["pts"][1]]
+            if m.get("pts3d") and len(m["pts3d"]) == 2:
+                m["pts3d"] = [m["pts3d"][0], p3d, m["pts3d"][1]]
+            self._lv_after_point_edit(which, m)
             return
         pts = list(m["pts"])
         n = len(pts)
@@ -5262,7 +5294,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 best_d, best_i = d, i
         pts.insert(best_i + 1, pt)
         m["pts"] = pts
+        if m.get("pts3d") and len(m["pts3d"]) == n:
+            m["pts3d"].insert(best_i + 1, p3d)
         self._resnap_center_angle(m)
+        self._lv_after_point_edit(which, m)
 
     def _delete_point(self, which, mi, vi):
         m = self._measures[which][mi]
@@ -5272,10 +5307,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         if len(pts) <= 2 or not (0 <= vi < len(pts)):
             return
         del pts[vi]
+        if m.get("pts3d") and 0 <= vi < len(m["pts3d"]):
+            del m["pts3d"][vi]
         if len(pts) == 2:
             m["type"] = "line"
         m["pts"] = pts
         self._resnap_center_angle(m)
+        self._lv_after_point_edit(which, m)
+
+    def _lv_after_point_edit(self, which, m) -> None:
+        """After Add/Delete point on an LV border, push the reshaped trace back
+        into the model and refresh the short-axis so add/delete behave like a
+        vertex drag (which already re-captures live)."""
+        if self._lv is not None and m.get("_lv") is not None:
+            self._lv_live_recapture(which, m)
 
     def _toggle_centerline(self):
         self._cl_on = self._cl_btn.isChecked()
@@ -5645,18 +5690,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         return float(px) * (2.0 * ps / max(1, self.pane[which].canvas.height()))
 
     def _lv_line_press(self, which, sx, sy):
+        # Grab the SAX line ONLY near its ○ handle (out at the view edge, clear
+        # of the heart) — NOT along its whole length, which crosses the trace and
+        # would otherwise steal clicks meant to place / edit a border point (a
+        # near-miss moved the level instead, dropping the point onto a different
+        # cross-section). Also yield outright while a trace is in progress or the
+        # cursor is on a border point, so tracing / editing always wins.
         if not self._lv_sax_active() or self._lv["model"].axis is None:
             return None
+        if self._draft is not None and self._draft.get("pane") == which:
+            return None                       # mid-trace → clicks add points
         if self._pick_handle(which, sx, sy) is not None:
-            return None
+            return None                       # let the border point be edited
         lv = self._lv
         ax = lv["model"].axis
         wx, wy = self._disp_to_world(which, sx, sy)
-        band = self._lv_px_to_mm(which, 25.0)
+        rgrab = self._lv_px_to_mm(which, 22.0)    # radius around the ○ handle
         if which == lv.get("pane"):
             _, y = self._world3d_to_out(
                 which, ax.apex + float(lv["sax"]) * ax.axis)
-            if abs(wy - y) <= band:
+            hw, _hh = self._lv_view_half(which)
+            if math.hypot(wx - 0.9 * hw, wy - y) <= rgrab:
                 return "level"
         elif which == lv.get("sax_pane"):
             angs = lv["model"].plane_angles()
@@ -5665,7 +5719,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
             nrm = math.hypot(dx, dy) or 1.0
             dx, dy = dx / nrm, dy / nrm
-            if abs(wx * (-dy) + wy * dx) <= band:
+            ex, ey = self._lv_edge_xy(which, dx, dy)
+            if math.hypot(wx - ex, wy - ey) <= rgrab:
                 return "meridian"
         return None
 
