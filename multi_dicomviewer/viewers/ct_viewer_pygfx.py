@@ -656,25 +656,23 @@ class _Overlay(QWidget):
                 nrm = math.hypot(dx, dy) or 1.0
                 dx, dy = dx / nrm, dy / nrm
                 X = float(v._half)
-                ex, ey = v._lv_edge_xy(key, dx, dy)
-                cr = max(2.0, 0.04 * v._lv_view_half(key)[1])
                 lw = 3.8 if v._lv_line_hi.get(key) else 2.4
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(yellow, lw))
                 p.drawLine(S((-dx * X, -dy * X)), S((dx * X, dy * X)))
-                p.drawPolyline(QPolygonF(
-                    [S(q) for q in v._circle_poly(ex, ey, cr)]))
+                hs = v._lv_handle_screen(key)   # ○ handle pinned to the pane edge
+                if hs is not None:
+                    p.drawEllipse(QPointF(hs[0], hs[1]), 9.0, 9.0)
             elif key == lv.get("pane"):
                 _, y = v._world3d_to_out(key, ax.apex + along0 * ax.axis)
                 X = float(v._half)
-                hw, hh = v._lv_view_half(key)
-                cr = max(2.0, 0.04 * hh)
                 lw = 3.8 if v._lv_line_hi.get(key) else 2.4
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(yellow, lw))
                 p.drawLine(S((-X, y)), S((X, y)))
-                p.drawPolyline(QPolygonF(
-                    [S(q) for q in v._circle_poly(0.9 * hw, y, cr)]))
+                hs = v._lv_handle_screen(key)   # ○ handle pinned to the pane edge
+                if hs is not None:
+                    p.drawEllipse(QPointF(hs[0], hs[1]), 9.0, 9.0)
             return
         # LONG-AXIS view: base-cut line ⟂ the axis at the common basal level.
         if key != lv.get("pane"):
@@ -5702,26 +5700,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None                       # mid-trace → clicks add points
         if self._pick_handle(which, sx, sy) is not None:
             return None                       # let the border point be edited
-        lv = self._lv
-        ax = lv["model"].axis
-        wx, wy = self._disp_to_world(which, sx, sy)
-        rgrab = self._lv_px_to_mm(which, 22.0)    # radius around the ○ handle
-        if which == lv.get("pane"):
-            _, y = self._world3d_to_out(
-                which, ax.apex + float(lv["sax"]) * ax.axis)
-            hw, _hh = self._lv_view_half(which)
-            if math.hypot(wx - 0.9 * hw, wy - y) <= rgrab:
-                return "level"
-        elif which == lv.get("sax_pane"):
-            angs = lv["model"].plane_angles()
-            md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
-            u, v, _n = self._frame[which]
-            dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
-            nrm = math.hypot(dx, dy) or 1.0
-            dx, dy = dx / nrm, dy / nrm
-            ex, ey = self._lv_edge_xy(which, dx, dy)
-            if math.hypot(wx - ex, wy - ey) <= rgrab:
-                return "meridian"
+        hs = self._lv_handle_screen(which)    # the visible ○ (pinned to the edge)
+        if hs is None:
+            return None
+        if math.hypot(sx - hs[0], sy - hs[1]) <= 22.0:
+            return "level" if which == self._lv.get("pane") else "meridian"
         return None
 
     def _lv_line_move(self, which, sx, sy) -> None:
@@ -6094,6 +6077,46 @@ class CTViewer(CPRMixin, AbstractViewer):
         ty = hh / abs(uy) if abs(uy) > 1e-6 else 1e18
         d = frac * min(tx, ty)
         return ux * d, uy * d
+
+    def _lv_handle_screen(self, key):
+        """Screen px (hx, hy) of the SAX line's ○ grab handle for *key* — the
+        + end of the line, always pinned JUST INSIDE the pane edge so it stays
+        on-screen and reachable at any zoom / pan (a world-fixed position drifts
+        off when the pane is panned/zoomed). None if this pane has no SAX line."""
+        lv = self._lv
+        if (lv is None or lv.get("model") is None
+                or lv["model"].axis is None or lv.get("sax") is None):
+            return None
+        ax = lv["model"].axis
+        if key == lv.get("pane"):
+            _, y = self._world3d_to_out(key, ax.apex + float(lv["sax"]) * ax.axis)
+            cx, cy = self._world_to_screen(key, 0.0, y)
+            ex, ey = self._world_to_screen(key, 1.0, y)     # +x world direction
+        elif key == lv.get("sax_pane"):
+            angs = lv["model"].plane_angles()
+            md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
+            u, v, _n = self._frame[key]
+            mx, my = float(np.dot(md, u)), float(np.dot(md, v))
+            nrm = math.hypot(mx, my) or 1.0
+            cx, cy = self._world_to_screen(key, 0.0, 0.0)
+            ex, ey = self._world_to_screen(key, mx / nrm, my / nrm)
+        else:
+            return None
+        dx, dy = ex - cx, ey - cy
+        L = math.hypot(dx, dy) or 1.0
+        dx, dy = dx / L, dy / L
+        W = max(1, self.pane[key].canvas.width())
+        H = max(1, self.pane[key].canvas.height())
+        m = 14.0                                    # inset = handle radius + pad
+        # March the line from its centre in the + direction to the pane boundary.
+        tx = (((W - m) - cx) / dx if dx > 1e-9
+              else ((m - cx) / dx if dx < -1e-9 else 1e18))
+        ty = (((H - m) - cy) / dy if dy > 1e-9
+              else ((m - cy) / dy if dy < -1e-9 else 1e18))
+        t = max(0.0, min(tx, ty))
+        hx = min(W - m, max(m, cx + dx * t))        # clamp inside as a safety net
+        hy = min(H - m, max(m, cy + dy * t))
+        return hx, hy
 
     # ==================================================================
     # Short-axis (CPR). Shared state + control logic live in CPRMixin; the
