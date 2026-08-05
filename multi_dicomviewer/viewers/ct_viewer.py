@@ -5150,6 +5150,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_result_lines = [
             t("Loaded borders: endo {ne} / epi {nep} planes",
               ne=len(model.endo_planes), nep=len(model.epi_planes))]
+        # Go straight to the short-axis (left pane) so the loaded borders are
+        # shown there immediately and the level/centre lines are draggable.
+        if (len(model.endo_contours) >= 3 or len(model.epi_contours) >= 3):
+            self._lv_sax_btn.setChecked(True)
+            self._lv_toggle_sax()
         self._lv_update_text()
 
     def _lv_rebuild_measures(self) -> None:
