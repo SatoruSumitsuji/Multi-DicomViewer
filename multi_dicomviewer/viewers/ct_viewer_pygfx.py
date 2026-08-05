@@ -3715,6 +3715,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
         self._pc[other] = self._center.copy()
 
+    def _rotate_companion_by(self, which, d_deg) -> None:
+        """Incremental companion coupling for a crossLINE ROTATE: the crossline
+        turns by *d_deg* in *which*'s plane, so the companion plane turns by the
+        same amount AROUND the shared axis n (= which's normal). Rotating the
+        companion frame RIGIDLY around n keeps its CURRENT orientation (no snap to
+        a fresh derivation) and holds its no-▲ centreline (which lies along n)
+        fixed while its image turns about it — no drift/lock over many turns.
+        (Ported from the VTK viewer.)"""
+        if abs(float(d_deg)) < 1e-9:
+            return
+        other = "B" if which == "A" else "A"
+        n = _norm(self._frame[which][2])
+        u, v, _nn = self._frame[other]
+        u2 = _rotate(u, n, d_deg)
+        v2 = _rotate(v, n, d_deg)
+        self._frame[other] = self._ortho(u2, v2)
+        self._pc[other] = self._center.copy()
+
     def _patient_axis_vol(self, p):
         """A patient-LPS direction (e.g. (1,0,0)=Left) in volume coords."""
         pb = getattr(self, "_pbasis", None)
@@ -3926,12 +3944,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = (d + 180.0) % 360.0 - 180.0
         self._cross_prev = cur
         self._cross_ang[which] += d
-        a = math.radians(self._cross_ang[which])
-        crossdir = u * math.cos(a) + v * math.sin(a)
-        # Re-derive the companion plane so it stays ⟂ to this pane and still
-        # contains the rotated crossline, keeping its orientation continuous
-        # (see _couple_companion — it does NOT snap the companion straight).
-        self._couple_companion(which, crossdir)
+        # Turn the companion by the SAME increment about the shared axis, from
+        # its CURRENT orientation — no snap, no drift/lock over many turns, and
+        # the companion's no-▲ line (the shared axis) stays put while its image
+        # rotates about it (matches the fixed VTK viewer).
+        self._rotate_companion_by(which, d)
         self._view_initial = False
         self._refresh(lod=True)                # coarse slab while dragging
 
