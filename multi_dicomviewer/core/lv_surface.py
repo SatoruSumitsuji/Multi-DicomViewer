@@ -96,36 +96,49 @@ class LVSurface:
         if len(contours) < 3:
             raise ValueError("need at least 3 meridians to build a surface")
         thetas = np.array(sorted(contours.keys()), dtype=float)
-        # along-range = the span where EVERY meridian has a point (no
-        # extrapolation): apex = max of per-meridian minima, base = min of
-        # per-meridian maxima. The base is thus a plane ⟂ the axis at the
-        # most-basal level common to all borders — editing a border's basal end
-        # moves it. (The axis's own apex/length are not used here: the axis may
-        # come from the current view, with the extent defined by the borders.)
+        # along-range: the APEX extends to the DEEPEST traced point of ANY
+        # meridian (min of minima), so a short trace on one wall no longer clips
+        # the whole surface off partway. Each level is then rebuilt from ONLY the
+        # meridians that actually REACH it (angular interpolation across the
+        # gaps) — no vertical extrapolation, so an aneurysmal / atypical apex is
+        # taken from the real traces, not invented. The BASE stays the common
+        # flat cut ⟂ the axis at the most-basal level common to all borders.
         mins, maxs = [], []
         for th in thetas:
             a = np.asarray(contours[th], float).reshape(-1, 2)[:, 0]
             mins.append(float(a.min()))
             maxs.append(float(a.max()))
-        apex_along, base_along = max(mins), min(maxs)
+        apex_along, base_along = min(mins), min(maxs)
         if base_along <= apex_along:
             raise ValueError("border along-ranges do not overlap")
         k = max(2, int(round((base_along - apex_along)
                              / max(1e-3, level_step))) + 1)
         along = np.linspace(apex_along, base_along, k)
-        # radius of each meridian interpolated onto the common axial levels.
-        r_km = np.zeros((k, len(thetas)))
+        # radius of each meridian at each level, or NaN where the level is
+        # OUTSIDE that meridian's own traced range (so it doesn't contribute).
+        r_km = np.full((k, len(thetas)), np.nan)
         for j, th in enumerate(thetas):
             c = np.asarray(contours[th], float).reshape(-1, 2)
             cc = c[np.argsort(c[:, 0])]
-            r_km[:, j] = np.interp(along, cc[:, 0], cc[:, 1],
-                                   left=cc[0, 1], right=cc[-1, 1])
-        # per level, resample radii around θ to a uniform ring, then → 2-D pts.
+            lo, hi = float(cc[0, 0]), float(cc[-1, 0])
+            m = (along >= lo - 1e-6) & (along <= hi + 1e-6)
+            r_km[m, j] = np.interp(along[m], cc[:, 0], cc[:, 1])
+        # per level, resample radii around θ using ONLY the meridians present at
+        # that level, then → 2-D pts. Deep apical levels are built from the few
+        # meridians that reach there; the basal levels from all of them.
         out_ang = np.radians(np.linspace(0.0, 360.0, n_theta, endpoint=False))
         cos_t, sin_t = np.cos(out_ang), np.sin(out_ang)
         rings = np.zeros((k, n_theta, 2))
         for ki in range(k):
-            r_theta = _resample_periodic(thetas, r_km[ki], n_theta)
+            valid = ~np.isnan(r_km[ki])
+            nv = int(valid.sum())
+            if nv >= 3:
+                r_theta = _resample_periodic(thetas[valid], r_km[ki, valid],
+                                             n_theta)
+            elif nv >= 1:                          # too few for a ring → a disc
+                r_theta = np.full(n_theta, float(np.nanmean(r_km[ki, valid])))
+            else:
+                r_theta = np.zeros(n_theta)
             r_theta = np.clip(r_theta, 0.0, None)
             rings[ki, :, 0] = r_theta * cos_t
             rings[ki, :, 1] = r_theta * sin_t
