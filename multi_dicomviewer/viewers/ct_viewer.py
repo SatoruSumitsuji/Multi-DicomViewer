@@ -5167,6 +5167,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QDialog, QMessageBox
         from multi_dicomviewer.ui.lv_stl_dialog import LVStlExportDialog
         from multi_dicomviewer.core.stl_io import write_stl
+        from multi_dicomviewer.core.lv_surface import myocardial_shell_mesh
         import os
         if self._lv is None or self._lv.get("model") is None:
             return
@@ -5197,13 +5198,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         jobs = []
         if ch["endo"] and endo is not None:
-            jobs.append(("_Endo.stl", [endo.to_mesh()]))
+            jobs.append(("_Endo.stl", [endo.to_mesh(close_base=False)]))
         if ch["epi"] and epi is not None:
-            jobs.append(("_Epi.stl", [epi.to_mesh()]))
+            jobs.append(("_Epi.stl", [epi.to_mesh(close_base=False)]))
         if ch["both"]:
-            meshes = [s.to_mesh() for s in (endo, epi) if s is not None]
-            if meshes:
-                jobs.append(("_EndoEpi.stl", meshes))
+            shell = (myocardial_shell_mesh(endo, epi)
+                     if (endo is not None and epi is not None) else None)
+            if shell is not None:
+                jobs.append(("_EndoEpi.stl", [shell]))
+            else:                                   # only one surface → open cup
+                surf = endo if endo is not None else epi
+                if surf is not None:
+                    jobs.append(("_EndoEpi.stl", [surf.to_mesh(close_base=False)]))
         if not jobs:
             return
         written = []
