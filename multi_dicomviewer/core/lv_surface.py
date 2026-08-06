@@ -50,6 +50,63 @@ def _resample_periodic(theta_src, r_src, n_out: int) -> np.ndarray:
     return np.interp(out_ang, th_ext, r_ext)
 
 
+def _gauss_kernel(sigma: float) -> np.ndarray:
+    r = int(max(1, round(3.0 * sigma)))
+    x = np.arange(-r, r + 1, dtype=float)
+    k = np.exp(-(x * x) / (2.0 * sigma * sigma))
+    return k / k.sum()
+
+
+def _smooth_ring_stack(rings, ang_sigma: float = 5.0, lon_sigma: float = 3.0,
+                       apex_frac: float = 0.4):
+    """Gaussian smoothing of a (K, Nθ, 2) ring stack for a nicer DISPLAY mesh —
+    applied ONLY near the apex, where sparse meridians make the rings POLYGONAL
+    (a hexagon from 6 meridians) and the changing meridian set per level makes
+    the loft 'spiral'. The smoothing is blended in with a per-level weight that
+    is 1 at the apex and fades to 0 over the apical *apex_frac* of the length,
+    so the BODY (the real 12-meridian shape) and the basal rim are kept exactly.
+    Purely cosmetic — the volume is measured from the ORIGINAL rings, not this."""
+    R = np.asarray(rings, float)
+    K = len(R)
+    if K < 3:
+        return R.copy()
+    ka = _gauss_kernel(ang_sigma)                  # periodic (angular)
+    ra = len(ka) // 2
+    A = np.zeros_like(R)
+    for i, w in enumerate(ka):
+        A += w * np.roll(R, i - ra, axis=1)
+    kl = _gauss_kernel(lon_sigma)                  # edge-clamped (longitudinal)
+    rl = len(kl) // 2
+    idx = np.arange(K)
+    S = np.zeros_like(A)
+    for i, w in enumerate(kl):
+        S += w * A[np.clip(idx + (i - rl), 0, K - 1)]
+    # per-level blend weight: 1 at the apex (level 0) → 0 by apex_frac up.
+    t = idx / max(1, K - 1)
+    wv = np.clip(1.0 - t / max(1e-6, apex_frac), 0.0, 1.0)
+    wv = wv * wv * (3.0 - 2.0 * wv)                # smoothstep
+    wv = wv[:, None, None]
+    out = wv * S + (1.0 - wv) * R
+    out[-1] = R[-1]                                # keep the basal rim crisp
+    return out
+
+
+def _apex_tip(axis, along, rings):
+    """A point on the axis just past the apical ring, its distance chosen by
+    extrapolating the apical taper to radius 0 — so the cap is a smooth POINT,
+    not a flat nub (a fixed one-step tip left a stub when ring 0 still had a
+    finite radius). Clamped to a sane range."""
+    k = len(along)
+    step = float(along[1] - along[0]) if k >= 2 else 1.0
+    r0 = float(np.hypot(rings[0, :, 0], rings[0, :, 1]).mean())
+    r1 = (float(np.hypot(rings[1, :, 0], rings[1, :, 1]).mean())
+          if k >= 2 else r0)
+    slope = (r1 - r0) / step if step > 1e-6 else 0.0     # radius grows basally
+    ext = (r0 / slope) if slope > 1e-3 else max(step, r0)
+    ext = float(min(max(ext, step), 3.0 * max(r0, step)))
+    return axis.apex + (float(along[0]) - ext) * axis.axis
+
+
 def _points_in_polygon(pts: np.ndarray, poly: np.ndarray) -> np.ndarray:
     """Vectorised crossing-number point-in-polygon. *pts* (P,2), *poly* (V,2)
     closed implicitly (last→first). Returns (P,) bool. Works for concave rings."""
@@ -214,24 +271,39 @@ class LVSurface:
         return (ml, count) if return_count else ml
 
     # ---------------------------------------------------------------- meshing
-    def to_mesh(self, close_base: bool = True):
+    def _rings_world(self, rings):
+        """World points (K*Nθ, 3) for an explicit ring stack (may be a smoothed
+        copy), in the same layout as ring_world stacked over levels."""
+        ax = self.axis
+        a = self.along
+        out = []
+        for i in range(len(a)):
+            o = ax.apex + float(a[i]) * ax.axis
+            xy = rings[i]
+            out.append(o + np.outer(xy[:, 0], ax.radial0)
+                       + np.outer(xy[:, 1], ax.binormal))
+        return np.concatenate(out, 0)
+
+    def to_mesh(self, close_base: bool = True, smooth: bool = True):
         """Triangulated surface (vertices (V,3), faces (F,3) int). Rings lofted
         with quad strips; the apex is fanned to a point (rounded bottom).
 
         *close_base* True → also fan a flat base cap, giving a CLOSED solid (for
         voxelisation). False → leave the basal rim OPEN: a thin single-wall
         'cup'/bowl (wall + apex only, no fill), which is what the Endo/Epi STL
-        export wants (a filled solid is not what a surface should look like)."""
+        export wants (a filled solid is not what a surface should look like).
+        *smooth* lightly rounds the display mesh (calms the apical spiral/facets
+        the sparse apical meridians produce); the measured volume uses the raw
+        rings, so it is UNAFFECTED."""
         k, nth, _ = self.rings.shape
         ax = self.axis
         a = self.along
-        # Apex TIP: a point on the axis just BEYOND the most-apical ring (one
-        # ring-spacing further apical), so the cap makes a proper pointed bottom.
-        # NEVER axis.apex — that origin can sit in the middle of the borders, so
-        # fanning ring 0 to it folds the tip INWARD (the inverted-apex bug).
-        step = float(a[1] - a[0]) if k >= 2 else 1.0
-        apex = (ax.apex + (float(a[0]) - step) * ax.axis).reshape(1, 3)
-        ring_pts = np.concatenate([self.ring_world(i) for i in range(k)], 0)
+        rings = _smooth_ring_stack(self.rings) if smooth else self.rings
+        # Apex TIP: extrapolate the apical taper to radius 0 for a smooth point
+        # (NEVER axis.apex — that origin can sit mid-border and fold the tip
+        # inward). The base uses the most-basal ring's own plane centre.
+        apex = _apex_tip(ax, a, rings).reshape(1, 3)
+        ring_pts = self._rings_world(rings)
         verts_list = [ring_pts, apex]
         apex_i = k * nth
         faces = []
@@ -276,16 +348,19 @@ def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
     if ki < 2 or ko < 2 or outer.rings.shape[1] != nth:
         # Degenerate → fall back to the two open cups side by side.
         return None
-    iring = np.concatenate([inner.ring_world(i) for i in range(ki)], 0)
-    oring = np.concatenate([outer.ring_world(i) for i in range(ko)], 0)
-    # Shared apex TIP: on the axis, just beyond BOTH surfaces' most-apical rings
-    # (so endo and epi both fan APICALLY to it and the myocardium closes to a
-    # point at the tip — never axis.apex, which can sit mid-border and invert).
+    irings = _smooth_ring_stack(inner.rings)       # cosmetic (volume unaffected)
+    orings = _smooth_ring_stack(outer.rings)
+    iring = inner._rings_world(irings)
+    oring = outer._rings_world(orings)
+    # Shared apex TIP: on the axis, apically beyond BOTH surfaces' apical rings
+    # (endo and epi both fan APICALLY to it, so the myocardium closes to a smooth
+    # point). Extrapolate each surface's taper and take the more apical tip.
     ax = outer.axis
-    a0 = min(float(inner.along[0]), float(outer.along[0]))
-    step = max(float(inner.along[1] - inner.along[0]) if ki >= 2 else 1.0,
-               float(outer.along[1] - outer.along[0]) if ko >= 2 else 1.0)
-    apex = (ax.apex + (a0 - step) * ax.axis).reshape(1, 3)
+    ti = _apex_tip(inner.axis, inner.along, irings)
+    to = _apex_tip(outer.axis, outer.along, orings)
+    apex_pt = ti if float((ti - ax.apex) @ ax.axis) < float(
+        (to - ax.apex) @ ax.axis) else to
+    apex = apex_pt.reshape(1, 3)
     verts = np.concatenate([iring, oring, apex], 0)
     ib0, ob0, ap = 0, ki * nth, ki * nth + ko * nth
     faces = []
