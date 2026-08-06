@@ -4905,8 +4905,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if which == lv.get("pane"):
             _, y = self._world3d_to_out(
                 which, ax.apex + float(lv["sax"]) * ax.axis)
-            hw, _hh = self._lv_view_half(which)
-            if math.hypot(wx - 0.9 * hw, wy - y) <= rgrab:
+            hx, hy = self._lv_ring_xy(which, 0.0, y, 1.0, 0.0)
+            if math.hypot(wx - hx, wy - hy) <= rgrab:
                 return "level"
         elif which == lv.get("sax_pane"):
             angs = lv["model"].plane_angles()
@@ -4915,7 +4915,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
             nrm = math.hypot(dx, dy) or 1.0
             dx, dy = dx / nrm, dy / nrm
-            ex, ey = self._lv_edge_xy(which, dx, dy)
+            ex, ey = self._lv_ring_xy(which, 0.0, 0.0, dx, dy)
             if math.hypot(wx - ex, wy - ey) <= rgrab:
                 return "meridian"
         return None
@@ -5423,17 +5423,66 @@ class CTViewer(CPRMixin, AbstractViewer):
         h = max(1, p.canvas.height())
         return ps * (w / h), ps
 
-    def _lv_edge_xy(self, key, ux, uy, frac=0.9):
-        """A point ~frac of the way to the VISIBLE edge along direction (ux,uy)
-        from the pane centre — used to keep the direction ring near the edge at
-        any zoom."""
+    def _lv_view_center(self, key):
+        """(cx, cy) of the pane's CURRENTLY VISIBLE region in output-mm — the
+        camera focal point (which lives in the reslice output frame). The origin
+        (0,0) is the LV axis point, NOT the visible centre once the pane is
+        panned/zoomed onto the heart, so overlay handles must be anchored here,
+        not at the origin, or they drift off-screen."""
+        fp = self.pane[key].ren.GetActiveCamera().GetFocalPoint()
+        return float(fp[0]), float(fp[1])
+
+    def _lv_ring_radius(self, key):
+        """Output-mm radius of the ○ grab handle for *key* (grows with zoom-out
+        so it stays a sensible on-screen size)."""
+        return max(2.0, 0.04 * self._lv_view_half(key)[1])
+
+    def _lv_line_clip(self, key, ax0, ay0, ux, uy):
+        """Clip the (infinite) line through (ax0, ay0) with direction (ux, uy) to
+        the pane's visible rectangle [cx±hw, cy±hh] shrunk by the ○ handle radius.
+        Returns ((x0,y0), (x1,y1), grabbed) — the −θ and +θ visible endpoints and
+        whether the line actually crosses the rect. If it misses (LV centre panned
+        far off-screen), both endpoints collapse to the clamped anchor so the ○
+        still shows at the nearest inside corner and stays grabbable."""
         hw, hh = self._lv_view_half(key)
+        cx, cy = self._lv_view_center(key)
+        mg = 1.8 * self._lv_ring_radius(key)
+        xlo, xhi = cx - hw + mg, cx + hw - mg
+        ylo, yhi = cy - hh + mg, cy + hh - mg
+        if xlo > xhi:
+            xlo = xhi = cx
+        if ylo > yhi:
+            ylo = yhi = cy
         nrm = math.hypot(ux, uy) or 1.0
         ux, uy = ux / nrm, uy / nrm
-        tx = hw / abs(ux) if abs(ux) > 1e-6 else 1e18
-        ty = hh / abs(uy) if abs(uy) > 1e-6 else 1e18
-        d = frac * min(tx, ty)
-        return ux * d, uy * d
+        INF = 1e18
+        fallback = (min(xhi, max(xlo, ax0)), min(yhi, max(ylo, ay0)))
+        if abs(ux) > 1e-9:
+            ta, tb = (xlo - ax0) / ux, (xhi - ax0) / ux
+            txlo, txhi = min(ta, tb), max(ta, tb)
+        elif xlo <= ax0 <= xhi:
+            txlo, txhi = -INF, INF
+        else:
+            return fallback, fallback, False
+        if abs(uy) > 1e-9:
+            ta, tb = (ylo - ay0) / uy, (yhi - ay0) / uy
+            tylo, tyhi = min(ta, tb), max(ta, tb)
+        elif ylo <= ay0 <= yhi:
+            tylo, tyhi = -INF, INF
+        else:
+            return fallback, fallback, False
+        t0, t1 = max(txlo, tylo), min(txhi, tyhi)
+        if t0 > t1:                                   # line misses the rect
+            return fallback, fallback, False
+        return ((ax0 + ux * t0, ay0 + uy * t0),
+                (ax0 + ux * t1, ay0 + uy * t1), True)
+
+    def _lv_ring_xy(self, key, ax0, ay0, ux, uy):
+        """Output-mm (x, y) of the ○ grab handle — the +θ end of the line's
+        visible segment (see _lv_line_clip), so it is ALWAYS on-screen and on the
+        drawn line at any zoom / pan."""
+        _p0, p1, _ok = self._lv_line_clip(key, ax0, ay0, ux, uy)
+        return p1
 
     def _redraw_lv(self, key) -> None:
         """Draw the base-cut line for the current long-axis plane on the LV pane.
@@ -5492,11 +5541,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 nrm = math.hypot(dx, dy) or 1.0
                 dx, dy = dx / nrm, dy / nrm
                 X = float(getattr(self, "_half", 100.0))
-                ex, ey = self._lv_edge_xy(key, dx, dy)      # near the visible edge
-                cr = max(2.0, 0.04 * self._lv_view_half(key)[1])
+                # centreline + ○ handle, both clipped to the visible rect so the
+                # handle stays reachable AND on the drawn line at any zoom / pan.
+                (sx0, sy0), (ex, ey), _ok = self._lv_line_clip(
+                    key, 0.0, 0.0, dx, dy)
+                cr = self._lv_ring_radius(key)
+                line = ([(sx0, sy0), (ex, ey)] if _ok
+                        else [(-dx * X, -dy * X), (dx * X, dy * X)])
                 p.lv_line_mapper.SetInputData(_polylines_pd([
-                    [(-dx * X, -dy * X), (dx * X, dy * X)],
-                    self._circle_poly(ex, ey, cr)]))
+                    line, self._circle_poly(ex, ey, cr)]))
             elif key == lv.get("pane"):
                 # the long-axis pane: the movable LEVEL line ⟂ the axis (a
                 # horizontal line at output-y = the current cross-section level).
@@ -5504,11 +5557,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # short-axis centreline's ring — kept near the visible edge.
                 _, y = self._world3d_to_out(key, ax.apex + along0 * ax.axis)
                 X = float(getattr(self, "_half", 100.0))
-                hw, hh = self._lv_view_half(key)
-                cr = max(2.0, 0.04 * hh)
+                cr = self._lv_ring_radius(key)
+                # level line + ○ handle, clipped to the visible rect so the ○
+                # sits near the visible right edge, on the line, at any zoom / pan.
+                (lx0, ly0), (hx, hy), _ok = self._lv_line_clip(
+                    key, 0.0, y, 1.0, 0.0)
+                line = [(lx0, ly0), (hx, hy)] if _ok else [(-X, y), (X, y)]
                 p.lv_line_mapper.SetInputData(_polylines_pd([
-                    [(-X, y), (X, y)],
-                    self._circle_poly(0.9 * hw, y, cr)]))
+                    line, self._circle_poly(hx, hy, cr)]))
             return
         if key != lv.get("pane"):
             return
