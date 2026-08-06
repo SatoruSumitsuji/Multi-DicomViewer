@@ -236,6 +236,11 @@ class LVSurface:
         verts = np.concatenate(verts_list, 0)
         return verts, np.asarray(faces, dtype=np.int64)
 
+    # ------------------------------------------------------------------ private
+    def _all_ring_points(self) -> np.ndarray:
+        return np.concatenate([self.ring_world(i)
+                               for i in range(self.n_levels)], 0)
+
 
 def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
     """Watertight myocardial 'cup' between the INNER (endo) and OUTER (epi)
@@ -286,8 +291,3 @@ def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
         faces.append([ibase + j, obase + j, obase + jn])
         faces.append([ibase + j, obase + jn, ibase + jn])
     return verts, np.asarray(faces, dtype=np.int64)
-
-    # ------------------------------------------------------------------ private
-    def _all_ring_points(self) -> np.ndarray:
-        return np.concatenate([self.ring_world(i)
-                               for i in range(self.n_levels)], 0)
