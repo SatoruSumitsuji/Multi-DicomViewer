@@ -92,18 +92,14 @@ def _smooth_ring_stack(rings, ang_sigma: float = 5.0, lon_sigma: float = 3.0,
 
 
 def _apex_tip(axis, along, rings):
-    """A point on the axis just past the apical ring, its distance chosen by
-    extrapolating the apical taper to radius 0 — so the cap is a smooth POINT,
-    not a flat nub (a fixed one-step tip left a stub when ring 0 still had a
-    finite radius). Clamped to a sane range."""
+    """A point on the axis a SHORT hemisphere-height (≈ the apical-ring radius)
+    below the apical ring, so the apex closes as a small rounded cap — NOT a
+    long spike (extrapolating the shallow taper to radius 0 overshot into a
+    pointed spike) and not a flat nub."""
     k = len(along)
     step = float(along[1] - along[0]) if k >= 2 else 1.0
     r0 = float(np.hypot(rings[0, :, 0], rings[0, :, 1]).mean())
-    r1 = (float(np.hypot(rings[1, :, 0], rings[1, :, 1]).mean())
-          if k >= 2 else r0)
-    slope = (r1 - r0) / step if step > 1e-6 else 0.0     # radius grows basally
-    ext = (r0 / slope) if slope > 1e-3 else max(step, r0)
-    ext = float(min(max(ext, step), 3.0 * max(r0, step)))
+    ext = float(max(r0, 0.6 * step))
     return axis.apex + (float(along[0]) - ext) * axis.axis
 
 
@@ -299,13 +295,8 @@ class LVSurface:
         ax = self.axis
         a = self.along
         rings = _smooth_ring_stack(self.rings) if smooth else self.rings
-        # Apex TIP: extrapolate the apical taper to radius 0 for a smooth point
-        # (NEVER axis.apex — that origin can sit mid-border and fold the tip
-        # inward). The base uses the most-basal ring's own plane centre.
-        apex = _apex_tip(ax, a, rings).reshape(1, 3)
         ring_pts = self._rings_world(rings)
-        verts_list = [ring_pts, apex]
-        apex_i = k * nth
+        verts_list = [ring_pts]
         faces = []
         for i in range(k - 1):                     # loft between rings (outward)
             a0 = i * nth
@@ -314,19 +305,47 @@ class LVSurface:
                 jn = (j + 1) % nth
                 faces.append([a0 + j, a1 + jn, a1 + j])
                 faces.append([a0 + j, a0 + jn, a1 + jn])
-        for j in range(nth):                       # apex cap (rounded bottom)
-            jn = (j + 1) % nth
-            faces.append([apex_i, jn, j])
+        nxt = k * nth
         if close_base:
             # Flat base cap at the most-basal ring's OWN plane centre (not the
             # axis base_center, which may not sit at that level).
             base = (ax.apex + float(a[-1]) * ax.axis).reshape(1, 3)
-            base_i = apex_i + 1
+            base_i = nxt
             verts_list.append(base)
+            nxt += 1
             base0 = (k - 1) * nth
             for j in range(nth):                   # base cap (flat) → solid
                 jn = (j + 1) % nth
                 faces.append([base_i, base0 + j, base0 + jn])
+        # Rounded APEX DOME below ring 0: a SHORT hemispherical cap (height ≈ the
+        # apical ring radius), NOT a long extrapolated spike. A few rings shrink
+        # along a quarter-ellipse from ring 0 to a tip, so the bottom is a
+        # natural rounded apex.
+        r0 = float(np.hypot(rings[0, :, 0], rings[0, :, 1]).mean())
+        step = float(a[1] - a[0]) if k >= 2 else 1.0
+        h = max(r0, 0.6 * step)                    # dome height (apical)
+        c0 = ax.apex + float(a[0]) * ax.axis       # ring-0 plane centre
+        P0 = ring_pts[:nth]
+        n_dome = 3
+        prev = 0                                   # ring-0 block offset
+        for s in range(1, n_dome):
+            u = s / float(n_dome)
+            scale = float(np.cos(u * np.pi / 2.0))
+            drop = h * float(np.sin(u * np.pi / 2.0))
+            off = nxt
+            verts_list.append((c0 - drop * ax.axis) + scale * (P0 - c0))
+            nxt += nth
+            for j in range(nth):                   # loft ring→dome (apical dir)
+                jn = (j + 1) % nth
+                faces.append([off + j, prev + jn, prev + j])
+                faces.append([off + j, off + jn, prev + jn])
+            prev = off
+        tip_i = nxt
+        verts_list.append((c0 - h * ax.axis).reshape(1, 3))
+        nxt += 1
+        for j in range(nth):                       # fan last dome ring → tip
+            jn = (j + 1) % nth
+            faces.append([tip_i, prev + jn, prev + j])
         verts = np.concatenate(verts_list, 0)
         return verts, np.asarray(faces, dtype=np.int64)
 
