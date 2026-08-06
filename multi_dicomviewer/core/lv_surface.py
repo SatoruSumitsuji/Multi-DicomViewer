@@ -103,6 +103,43 @@ def _apex_tip(axis, along, rings):
     return axis.apex + (float(along[0]) - ext) * axis.axis
 
 
+def _apex_cap_profile(along, rings, n_cap: int = 10):
+    """Wall-CONTINUING rounded apex cap below rings[0]. Returns
+    ([(along, scale), …], tip_along), scale = radius / rings[0]-radius.
+
+    A cubic Bézier in the (drop, radius) plane: it leaves the reliable ring along
+    the WALL's own tangent (so there is no shoulder / 'debeso' bulge where the
+    cap meets the wall) and curves to a rounded tip over a depth ≈ the ring
+    radius. Smoother and better-behaved than a hemisphere (kinks) or a global
+    paraboloid (collapses to a flat apex)."""
+    along = np.asarray(along, float)
+    n = len(along)
+    a0 = float(along[0])
+    rm = np.hypot(rings[:, :, 0], rings[:, :, 1]).mean(axis=1)
+    r0 = float(rm[0])
+    if r0 < 1e-6 or n < 2:
+        return [], a0
+    # local wall slope dr/dalong at the join (radius grows basally → m > 0).
+    w = min(n, 6)
+    m = float(np.polyfit(along[:w], rm[:w], 1)[0]) if w >= 2 else 1.0
+    m = float(np.clip(m, 0.3, 4.0))
+    D = float(np.clip(r0 / m, 0.7 * r0, 1.6 * r0))  # cap depth (apical)
+    # Bézier control points in (drop d≥0 apical, radius r):
+    p0 = np.array([0.0, r0])
+    p1 = np.array([0.35 * D, r0 - 0.35 * D * m])    # continue the wall tangent
+    p2 = np.array([D, 0.45 * r0])                   # steepen → rounded tip
+    p3 = np.array([D, 0.0])
+    prof = []
+    for s in range(1, n_cap + 1):
+        t = s / float(n_cap)
+        b = ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1
+             + 3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3)
+        d, r = float(b[0]), float(max(0.0, b[1]))
+        prof.append((a0 - d, float(min(1.0, r / r0))))
+    a_tip = a0 - D
+    return prof[:-1], float(a_tip)               # last point → the tip vertex
+
+
 def _points_in_polygon(pts: np.ndarray, poly: np.ndarray) -> np.ndarray:
     """Vectorised crossing-number point-in-polygon. *pts* (P,2), *poly* (V,2)
     closed implicitly (last→first). Returns (P,) bool. Works for concave rings."""
@@ -345,33 +382,26 @@ class LVSurface:
             for j in range(nth):                   # flat base cap → solid
                 jn = (j + 1) % nth
                 faces.append([base_i, base0 + j, base0 + jn])
-        # Rounded APEX DOME below the deepest RELIABLE ring: rings shrink along a
-        # quarter-ellipse (height ≈ that ring's radius) to a tip, so the bottom
-        # follows the wall's curve into a smooth rounded apex — no thin neck, no
-        # spike, no nub.
-        r0 = float(np.hypot(rings[0, :, 0], rings[0, :, 1]).mean())
-        step = float(along[1] - along[0]) if km >= 2 else 1.0
-        h = max(r0, 0.6 * step)                    # dome height (apical)
-        c0 = ax.apex + float(along[0]) * ax.axis   # reliable-ring plane centre
+        # Rounded APEX CAP that CONTINUES the wall (paraboloid fit) below the
+        # reliable ring, so it matches the wall's slope at the join (no 'debeso'
+        # shoulder) and rounds to a smooth tip.
+        c0 = ax.apex + float(along[0]) * ax.axis
         P0 = ring_pts[:nth]
-        n_dome = 7
+        prof, a_tip = _apex_cap_profile(along, rings)
         prev = 0
-        for s in range(1, n_dome):
-            u = s / float(n_dome)
-            scale = float(np.cos(u * np.pi / 2.0))
-            drop = h * float(np.sin(u * np.pi / 2.0))
+        for d, scale in prof:
             off = nxt
-            verts_list.append((c0 - drop * ax.axis) + scale * (P0 - c0))
+            verts_list.append((ax.apex + d * ax.axis) + scale * (P0 - c0))
             nxt += nth
-            for j in range(nth):                   # loft ring→dome (apical dir)
+            for j in range(nth):                   # loft ring→cap (apical dir)
                 jn = (j + 1) % nth
                 faces.append([off + j, prev + jn, prev + j])
                 faces.append([off + j, off + jn, prev + jn])
             prev = off
         tip_i = nxt
-        verts_list.append((c0 - h * ax.axis).reshape(1, 3))
+        verts_list.append((ax.apex + a_tip * ax.axis).reshape(1, 3))
         nxt += 1
-        for j in range(nth):                       # fan last dome ring → tip
+        for j in range(nth):                       # fan last cap ring → tip
             jn = (j + 1) % nth
             faces.append([tip_i, prev + jn, prev + j])
         verts = np.concatenate(verts_list, 0)
@@ -383,92 +413,72 @@ class LVSurface:
                                for i in range(self.n_levels)], 0)
 
 
+def _cup_block(surf, base_off, outward):
+    """A closed 'cup' (trimmed wall + Bézier apex cap + tip) for one surface,
+    with face indices offset by *base_off* and windings for OUTWARD (epi) or
+    inward (endo). Returns (verts (M,3), faces, base_ring_index, M)."""
+    ax = surf.axis
+    rings = _smooth_ring_stack(surf.rings)
+    ts = surf._reliable_start()
+    rings_t, along_t = rings[ts:], surf.along[ts:]
+    nth = rings_t.shape[1]
+    km = len(rings_t)
+    ring_pts = surf._rings_world(rings_t, along_t)          # km*nth
+    c0 = ax.apex + float(along_t[0]) * ax.axis
+    P0 = ring_pts[:nth]
+    prof, a_tip = _apex_cap_profile(along_t, rings_t)
+    cap_pts = [((ax.apex + d * ax.axis) + sc * (P0 - c0)) for d, sc in prof]
+    tip = (ax.apex + a_tip * ax.axis).reshape(1, 3)
+    verts = np.concatenate([ring_pts] + cap_pts + [tip], 0)
+    B = base_off
+    faces = []
+    for i in range(km - 1):                                 # wall loft
+        a0, a1 = B + i * nth, B + (i + 1) * nth
+        for j in range(nth):
+            jn = (j + 1) % nth
+            if outward:
+                faces.append([a0 + j, a1 + jn, a1 + j])
+                faces.append([a0 + j, a0 + jn, a1 + jn])
+            else:
+                faces.append([a0 + j, a1 + j, a1 + jn])
+                faces.append([a0 + j, a1 + jn, a0 + jn])
+    prev = B                                                # apex cap loft
+    capB = B + km * nth
+    for cidx in range(len(cap_pts)):
+        off = capB + cidx * nth
+        for j in range(nth):
+            jn = (j + 1) % nth
+            if outward:
+                faces.append([off + j, prev + jn, prev + j])
+                faces.append([off + j, off + jn, prev + jn])
+            else:
+                faces.append([off + j, prev + j, prev + jn])
+                faces.append([off + j, prev + jn, off + jn])
+        prev = off
+    tip_i = capB + len(cap_pts) * nth
+    for j in range(nth):                                    # fan to tip
+        jn = (j + 1) % nth
+        faces.append([tip_i, prev + jn, prev + j] if outward
+                     else [tip_i, prev + j, prev + jn])
+    return verts, faces, B + (km - 1) * nth, len(verts)
+
+
 def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
     """Watertight myocardial 'cup' between the INNER (endo) and OUTER (epi)
-    surfaces — the wall has the real myocardial thickness. Built as: outer wall
-    + apex cap (normals out), inner wall + apex cap (normals in), joined at the
-    base by an annular rim so the cavity stays open at the base (you can see
-    into the cup) while the solid is closed everywhere else. Both surfaces share
-    the same axis / ring-point count. Vertices in world mm."""
-    _, nth, _ = inner.rings.shape
+    surfaces — the wall has the real myocardial thickness. Each surface is a
+    closed cup (trimmed wall + rounded Bézier apex cap); the outer faces out, the
+    inner faces the cavity, and a basal annular rim joins their base rings so the
+    cavity stays open at the base while the solid is closed everywhere else.
+    Vertices in world mm."""
+    nth = inner.rings.shape[1]
     if inner.rings.shape[0] < 2 or outer.rings.shape[0] < 2 \
             or outer.rings.shape[1] != nth:
         return None
-    ax = outer.axis
-    irings = _smooth_ring_stack(inner.rings)       # cosmetic (volume unaffected)
-    orings = _smooth_ring_stack(outer.rings)
-    its = inner._reliable_start()
-    ots = outer._reliable_start()
-    iw_rings, iw_along = irings[its:], inner.along[its:]
-    ow_rings, ow_along = orings[ots:], outer.along[ots:]
-    kmi, kmo = len(iw_rings), len(ow_rings)
-    iw = inner._rings_world(iw_rings, iw_along)    # kmi*nth  (reliable→base)
-    ow = outer._rings_world(ow_rings, ow_along)    # kmo*nth
-    # Rounded apex domes from each surface's deepest RELIABLE ring, meeting at a
-    # shared tip (so the myocardium closes to a smooth rounded point — no thin
-    # neck / spike). Tip = the more apical of the two hemisphere tips.
-    Ri = float(np.hypot(iw_rings[0, :, 0], iw_rings[0, :, 1]).mean())
-    Ro = float(np.hypot(ow_rings[0, :, 0], ow_rings[0, :, 1]).mean())
-    ci_a, co_a = float(iw_along[0]), float(ow_along[0])
-    tip_a = min(ci_a - max(Ri, 0.6), co_a - max(Ro, 0.6))
-    tip = (ax.apex + tip_a * ax.axis).reshape(1, 3)
-    n_dome = 7
-    c0i, c0o = ax.apex + ci_a * ax.axis, ax.apex + co_a * ax.axis
-    P0i, P0o = iw[:nth], ow[:nth]
-    hi, ho = ci_a - tip_a, co_a - tip_a
-    idome, odome = [], []
-    for s in range(1, n_dome):
-        u = s / float(n_dome)
-        sc, sn = float(np.cos(u * np.pi / 2)), float(np.sin(u * np.pi / 2))
-        idome.append((c0i - hi * sn * ax.axis) + sc * (P0i - c0i))
-        odome.append((c0o - ho * sn * ax.axis) + sc * (P0o - c0o))
-    verts = np.concatenate(
-        [iw, np.concatenate(idome, 0), ow, np.concatenate(odome, 0), tip], 0)
-    IB = 0
-    IDB = kmi * nth
-    OB = IDB + (n_dome - 1) * nth
-    ODB = OB + kmo * nth
-    TIP = ODB + (n_dome - 1) * nth
-    faces = []
-    # INNER wall (normals into the cavity), reliable→base.
-    for i in range(kmi - 1):
-        a0, a1 = IB + i * nth, IB + (i + 1) * nth
-        for j in range(nth):
-            jn = (j + 1) % nth
-            faces.append([a0 + j, a1 + j, a1 + jn])
-            faces.append([a0 + j, a1 + jn, a0 + jn])
-    prev = IB                                       # inner apex dome (inward)
-    for d in range(n_dome - 1):
-        off = IDB + d * nth
-        for j in range(nth):
-            jn = (j + 1) % nth
-            faces.append([off + j, prev + j, prev + jn])
-            faces.append([off + j, prev + jn, off + jn])
-        prev = off
-    for j in range(nth):                            # inner tip fan (inward)
-        jn = (j + 1) % nth
-        faces.append([TIP, prev + j, prev + jn])
-    # OUTER wall (normals outward), reliable→base.
-    for i in range(kmo - 1):
-        a0, a1 = OB + i * nth, OB + (i + 1) * nth
-        for j in range(nth):
-            jn = (j + 1) % nth
-            faces.append([a0 + j, a1 + jn, a1 + j])
-            faces.append([a0 + j, a0 + jn, a1 + jn])
-    prev = OB                                       # outer apex dome (outward)
-    for d in range(n_dome - 1):
-        off = ODB + d * nth
-        for j in range(nth):
-            jn = (j + 1) % nth
-            faces.append([off + j, prev + jn, prev + j])
-            faces.append([off + j, off + jn, prev + jn])
-        prev = off
-    for j in range(nth):                            # outer tip fan (outward)
-        jn = (j + 1) % nth
-        faces.append([TIP, prev + jn, prev + j])
-    # BASE RIM: annulus joining the inner base ring to the outer base ring.
-    ibase, obase = IB + (kmi - 1) * nth, OB + (kmo - 1) * nth
-    for j in range(nth):
+    iv, ifaces, ibase, isz = _cup_block(inner, 0, outward=False)
+    ov, ofaces, obase, _osz = _cup_block(outer, isz, outward=True)
+    verts = np.concatenate([iv, ov], 0)
+    faces = ifaces + ofaces
+    for j in range(nth):                                    # base rim annulus
         jn = (j + 1) % nth
         faces.append([ibase + j, obase + j, obase + jn])
         faces.append([ibase + j, obase + jn, ibase + jn])
