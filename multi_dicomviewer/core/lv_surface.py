@@ -215,13 +215,13 @@ class LVSurface:
         verts_list = [ring_pts, apex]
         apex_i = k * nth
         faces = []
-        for i in range(k - 1):                     # loft between rings
+        for i in range(k - 1):                     # loft between rings (outward)
             a0 = i * nth
             a1 = (i + 1) * nth
             for j in range(nth):
                 jn = (j + 1) % nth
-                faces.append([a0 + j, a1 + j, a1 + jn])
-                faces.append([a0 + j, a1 + jn, a0 + jn])
+                faces.append([a0 + j, a1 + jn, a1 + j])
+                faces.append([a0 + j, a0 + jn, a1 + jn])
         for j in range(nth):                       # apex cap (rounded bottom)
             jn = (j + 1) % nth
             faces.append([apex_i, jn, j])
@@ -260,30 +260,32 @@ def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
     verts = np.concatenate([iring, oring, apex], 0)
     ib0, ob0, ap = 0, ki * nth, ki * nth + ko * nth
     faces = []
-    # INNER (endo) wall — winding REVERSED so normals face the cavity.
+    # INNER (endo) wall — normals face the CAVITY (radially inward = out of the
+    # myocardial solid on the cavity side).
     for i in range(ki - 1):
         a0 = ib0 + i * nth
         a1 = ib0 + (i + 1) * nth
         for j in range(nth):
             jn = (j + 1) % nth
-            faces.append([a0 + j, a1 + jn, a1 + j])
-            faces.append([a0 + j, a0 + jn, a1 + jn])
-    for j in range(nth):                           # inner apex cap (reversed)
+            faces.append([a0 + j, a1 + j, a1 + jn])
+            faces.append([a0 + j, a1 + jn, a0 + jn])
+    for j in range(nth):                           # inner apex cap (into cavity)
         jn = (j + 1) % nth
         faces.append([ap, ib0 + j, ib0 + jn])
-    # OUTER (epi) wall — normals outward.
+    # OUTER (epi) wall — normals point OUTWARD.
     for i in range(ko - 1):
         a0 = ob0 + i * nth
         a1 = ob0 + (i + 1) * nth
         for j in range(nth):
             jn = (j + 1) % nth
-            faces.append([a0 + j, a1 + j, a1 + jn])
-            faces.append([a0 + j, a1 + jn, a0 + jn])
-    for j in range(nth):                           # outer apex cap
+            faces.append([a0 + j, a1 + jn, a1 + j])
+            faces.append([a0 + j, a0 + jn, a1 + jn])
+    for j in range(nth):                           # outer apex cap (outward)
         jn = (j + 1) % nth
         faces.append([ap, ob0 + jn, ob0 + j])
-    # BASE RIM: annulus joining the endo base ring to the epi base ring, so the
-    # wall thickness is closed at the top while the cavity mouth stays open.
+    # BASE RIM: annulus joining the endo base ring to the epi base ring, closing
+    # the wall thickness at the top (exterior normal points basally, +axis) while
+    # the cavity mouth stays open.
     ibase = ib0 + (ki - 1) * nth
     obase = ob0 + (ko - 1) * nth
     for j in range(nth):
