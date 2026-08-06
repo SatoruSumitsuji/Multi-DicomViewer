@@ -123,7 +123,11 @@ def _apex_cap_profile(along, rings, n_cap: int = 10):
     w = min(n, 6)
     m = float(np.polyfit(along[:w], rm[:w], 1)[0]) if w >= 2 else 1.0
     m = float(np.clip(m, 0.3, 4.0))
-    D = float(np.clip(r0 / m, 0.7 * r0, 1.6 * r0))  # cap depth (apical)
+    # cap depth (apical protrusion length). A full wall-tangent teardrop wants
+    # ≈ r0/m, but that protrudes far past where the traced wall naturally closes
+    # (reads as a 'debeso' / pointed nub). Take ¼ of it so the cap hugs the
+    # wall's own curvature and closes snugly just below the reliable ring.
+    D = 0.25 * float(np.clip(r0 / m, 0.7 * r0, 1.6 * r0))
     # Bézier control points in (drop d≥0 apical, radius r):
     p0 = np.array([0.0, r0])
     p1 = np.array([0.35 * D, r0 - 0.35 * D * m])    # continue the wall tangent
