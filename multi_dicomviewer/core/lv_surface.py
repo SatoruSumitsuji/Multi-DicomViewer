@@ -210,8 +210,15 @@ class LVSurface:
         'cup'/bowl (wall + apex only, no fill), which is what the Endo/Epi STL
         export wants (a filled solid is not what a surface should look like)."""
         k, nth, _ = self.rings.shape
+        ax = self.axis
+        a = self.along
+        # Apex TIP: a point on the axis just BEYOND the most-apical ring (one
+        # ring-spacing further apical), so the cap makes a proper pointed bottom.
+        # NEVER axis.apex — that origin can sit in the middle of the borders, so
+        # fanning ring 0 to it folds the tip INWARD (the inverted-apex bug).
+        step = float(a[1] - a[0]) if k >= 2 else 1.0
+        apex = (ax.apex + (float(a[0]) - step) * ax.axis).reshape(1, 3)
         ring_pts = np.concatenate([self.ring_world(i) for i in range(k)], 0)
-        apex = self.axis.apex.reshape(1, 3)
         verts_list = [ring_pts, apex]
         apex_i = k * nth
         faces = []
@@ -226,7 +233,9 @@ class LVSurface:
             jn = (j + 1) % nth
             faces.append([apex_i, jn, j])
         if close_base:
-            base = self.axis.base_center.reshape(1, 3)
+            # Flat base cap at the most-basal ring's OWN plane centre (not the
+            # axis base_center, which may not sit at that level).
+            base = (ax.apex + float(a[-1]) * ax.axis).reshape(1, 3)
             base_i = apex_i + 1
             verts_list.append(base)
             base0 = (k - 1) * nth
@@ -256,7 +265,14 @@ def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
         return None
     iring = np.concatenate([inner.ring_world(i) for i in range(ki)], 0)
     oring = np.concatenate([outer.ring_world(i) for i in range(ko)], 0)
-    apex = inner.axis.apex.reshape(1, 3)           # shared apex point
+    # Shared apex TIP: on the axis, just beyond BOTH surfaces' most-apical rings
+    # (so endo and epi both fan APICALLY to it and the myocardium closes to a
+    # point at the tip — never axis.apex, which can sit mid-border and invert).
+    ax = outer.axis
+    a0 = min(float(inner.along[0]), float(outer.along[0]))
+    step = max(float(inner.along[1] - inner.along[0]) if ki >= 2 else 1.0,
+               float(outer.along[1] - outer.along[0]) if ko >= 2 else 1.0)
+    apex = (ax.apex + (a0 - step) * ax.axis).reshape(1, 3)
     verts = np.concatenate([iring, oring, apex], 0)
     ib0, ob0, ap = 0, ki * nth, ki * nth + ko * nth
     faces = []
