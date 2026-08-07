@@ -5667,26 +5667,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         return p1
 
     def _lv_draw_apex_markers(self, key, p) -> None:
-        """Draw the user-defined Endo (red) / Epi (green) apex markers. On the
-        long-axis (trace) pane both are shown (they lie in every rotated plane
-        through the axis); on the short-axis pane a marker shows ONLY when its
-        level matches the current cross-section (within a slice tolerance), so it
-        appears just when that apex is actually in this cut."""
+        """Draw the user-defined Endo (red) / Epi (green) apex markers on the
+        long-axis (trace) pane AND, while short-axis is shown, on the short-axis
+        pane (projected onto that plane) so they stay visible for reference /
+        dragging at any level."""
         lv = self._lv
         if lv is None or lv["model"].axis is None:
             return
-        ax = lv["model"].axis
+        if key not in (lv.get("pane"), lv.get("sax_pane")):
+            return
         pts, cols = [], []
-        sax = lv.get("sax")
-        is_sax = sax is not None and key == lv.get("sax_pane")
         for tgt, rgb in (("endo", (255, 64, 64)), ("epi", (64, 200, 80))):
             P = lv["model"].endo_apex if tgt == "endo" else lv["model"].epi_apex
             if P is None:
-                continue
-            if is_sax:                                  # only if in THIS cut
-                if abs(float(ax.project(P)[0]) - float(sax)) > 2.0:
-                    continue
-            elif key != lv.get("pane"):
                 continue
             pts.append(self._world3d_to_out(key, P))
             cols.append(rgb)
