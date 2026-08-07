@@ -2285,10 +2285,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         m = lv["model"]
         ph = lv.get("phase")
         pas = lv.get("pass")
-        endo_on = pas == "endo" or m.endo_axis is not None
-        epi_on = pas == "epi" or m.epi_axis is not None
-        endo_btn.setStyleSheet(self._LV_STY["endo"] if endo_on else "")
-        epi_btn.setStyleSheet(self._LV_STY["epi"] if epi_on else "")
+        # Exactly ONE pass is active — only its button is coloured (the rotation
+        # axis is that pass's axis too, switched in _lv_select_pass).
+        endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
+        epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
         axis_set = m._axis_for(pas) is not None
         setax.setStyleSheet(self._LV_STY["setaxis"] if axis_set else "")
         tracing = ph in ("apex", "contour")
