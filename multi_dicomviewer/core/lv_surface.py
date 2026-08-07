@@ -187,11 +187,12 @@ def _apex_cap_profile(along, rings, n_cap: int = 10):
     return prof[:-1], float(a_tip)               # last point → the tip vertex
 
 
-def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 12):
-    """Like _apex_cap_profile but the cap DEPTH is fixed so the tip lands at the
-    user-defined apex's along *a_tip*. The rings still leave the deepest ring
-    along the WALL's own tangent and round to the tip, so the apex is smooth AND
-    passes through the user apex vertex (no flat disc, no straight cone)."""
+def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 16):
+    """Rounded apex cap whose depth is fixed so the tip lands on the user apex's
+    along *a_tip*. Uses a power-law taper radius = r0·(1 − d/D)^k: k < 1 gives a
+    BLUNT, rounded (U-shaped) apex with a vertical (rounded) tip and no straight
+    cone. The gentler the wall near the apex, the smaller k — so a broad Epi apex
+    comes out ROUNDER than a narrower Endo one, matching the traced borders."""
     along = np.asarray(along, float)
     n = len(along)
     a0 = float(along[0])
@@ -201,21 +202,18 @@ def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 12):
         return [], float(a_tip)
     w = min(n, 6)
     m = float(np.polyfit(along[:w], rm[:w], 1)[0]) if w >= 2 else 1.0
-    m = float(np.clip(m, 0.2, 6.0))
+    m = float(np.clip(m, 0.2, 3.0))
     D = a0 - float(a_tip)
-    if D < 0.15 * r0:               # apex ≈ deepest ring → a minimal round cap
-        D = 0.15 * r0
-    p0 = np.array([0.0, r0])
-    p1 = np.array([0.35 * D, max(0.0, r0 - 0.35 * D * m)])   # wall tangent
-    p2 = np.array([D, 0.45 * r0])                            # steepen → tip
-    p3 = np.array([D, 0.0])
+    if D < 0.1:                    # apex ≈ at the (converged) deepest ring →
+        return [], float(a_tip)    # no cap rings; caller fans the ring to the tip
+    # bluntness: k<1 = round/blunt. Gentle wall (small m, e.g. epi) → smaller k
+    # → rounder; steeper wall (endo) → nearer a cone but still rounded.
+    k = float(np.clip(0.40 + 0.30 * m, 0.40, 0.95))
     prof = []
     for s in range(1, n_cap + 1):
-        t = s / float(n_cap)
-        b = ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1
-             + 3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3)
-        d, r = float(b[0]), float(max(0.0, b[1]))
-        prof.append((a0 - d, float(min(1.0, r / r0))))
+        frac = s / float(n_cap)
+        scale = (1.0 - frac) ** k
+        prof.append((a0 - D * frac, float(max(0.0, min(1.0, scale)))))
     return prof[:-1], float(a0 - D)
 
 
