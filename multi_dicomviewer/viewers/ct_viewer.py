@@ -2281,6 +2281,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 b.setStyleSheet("")
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
+            self._refresh_tool_availability()        # restore WB reverse / tools
             return
         m = lv["model"]
         ph = lv.get("phase")
@@ -2302,6 +2303,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                   self._lv_save_btn, self._lv_stl_btn):
             b.setEnabled(contour)
         self._lv_exit_btn.setEnabled(True)
+        self._refresh_tool_availability()   # grey Rotate/Spin/Thick + WB reverse
 
     # -------------------------------------------- plane bar (below the image)
     def _build_plane_bar(self) -> QWidget:
@@ -2717,18 +2719,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         measuring = getattr(self, "_meas_on", False) and bool(
             getattr(self, "_meas_type", None))
         is2d = getattr(self, "_mode", "3D") == "2D"
+        locked = self._lv_axis_locked()          # LV axis set → no re-tilt tools
         for n, b in self._tool_btns.items():
             active = (n == getattr(self, "_tool", None))
             # Keep the tools clickable WHILE measuring so the user can pick which
             # tool a Shift+drag uses (the shortcut keys already switch them); the
             # dimmed-red styling below still signals "hold Shift to use it here".
-            b.setEnabled(not (is2d and n in _MPR_ONLY_TOOLS))
+            b.setEnabled(not ((is2d or locked) and n in _MPR_ONLY_TOOLS))
             if measuring:
                 b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
                                 else "color:#9a9a9a;")
             else:
                 b.setStyleSheet("background:#c0392b;color:white;" if active
                                 else "")
+        # WB reverse (grayscale invert) and the slab-thickness spin are disabled
+        # throughout LV mode (thin slices, fixed grayscale).
+        if getattr(self, "_invert_btn", None) is not None:
+            self._invert_btn.setEnabled(self._lv is None)
+        if getattr(self, "_slab_spin", None) is not None and self._lv is not None:
+            self._slab_spin.setEnabled(False)
 
     # --------------------------------------------------- CenterLine
     def _style_cl(self):
@@ -5159,6 +5168,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and self._lv.get("phase") == "contour"
                 and self._lv.get("sax") is not None)
 
+    def _lv_axis_locked(self) -> bool:
+        """True once the active pass's long axis is SET (Set axis pressed) and we
+        are on the long-axis view — the 3DCT↔vertical-axis relationship is then
+        fixed, so Rotate/Spin/Thick (which would re-tilt the reslice frame) are
+        blocked. Zoom/Move/WL and the cross-section level still work."""
+        lv = self._lv
+        return (lv is not None
+                and lv.get("phase") in ("ready", "apex", "contour")
+                and lv.get("sax") is None)
+
     def _lv_sax_stores(self):
         """The contour store(s) whose along values are in the CURRENT SAX axis'
         frame — the single pass shown, or epi for 'both' (its axis is the SAX
@@ -7236,6 +7255,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if t == "ROTATE":
                 return
+        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Thick
+        # (which would re-tilt the reslice frame) are blocked. Zoom/Move/WL/Paging
+        # still work (they don't change the axis relationship).
+        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "THICK"):
+            return
         if t != "WL":
             self._view_initial = False
         if t == "WL":
