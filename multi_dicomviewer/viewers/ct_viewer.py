@@ -1442,6 +1442,27 @@ class _Pane:
         # Added AFTER the halo so the yellow text sits on top of the outline.
         self.ren.AddViewProp(self.angle)
 
+        # LV wall-thickness legend (bottom-left) — one coloured line per gap
+        # band (red <5 / orange 5-7 / yellow 7-9 / green >9 mm). Shown only while
+        # the short-axis wall map is up (see _lv_update_wall_legend).
+        self.lv_wall_legend = []
+        for i in range(4):
+            a = vtkTextActor()
+            a.SetTextScaleModeToNone()
+            tp = a.GetTextProperty()
+            tp.SetFontFamilyToArial()
+            _set_vtk_tag_font(tp)
+            tp.SetFontSize(16)
+            tp.SetBold(True)
+            tp.SetJustificationToLeft()
+            tp.SetVerticalJustificationToBottom()
+            a.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            a.GetPositionCoordinate().SetValue(0.012, 0.012 + i * 0.045)
+            a.SetInput("")
+            a.SetVisibility(False)
+            self.ren.AddViewProp(a)
+            self.lv_wall_legend.append(a)
+
         # DICOM tags (top-left) and measure results (top-right) render as their
         # OWN fixed-size text actors, NOT vtkCornerAnnotation corners. The
         # annotation auto-fits its font to the viewport, which made the tag-size
@@ -5446,19 +5467,71 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ---- wall-thickness colour map (short axis) ----
     def _lv_toggle_wall(self) -> None:
-        """Toggle the short-axis wall-thickness colour map (Epi−Endo). Turns SAX
-        on if needed (the map lives on the cross-section)."""
-        if self._lv is None or self._lv.get("phase") != "contour":
+        """Toggle the short-axis wall-thickness colour map. Turning it ON shows
+        the COMBINED short-axis (Endo + Epi borders on the epi axis) and colours
+        the Epi−Endo gap; needs both passes traced."""
+        from PyQt6.QtWidgets import QMessageBox
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
             self._lv_wall_btn.setChecked(False)
             return
         self._lv_wall = self._lv_wall_btn.isChecked()
-        if self._lv_wall and not self._lv_sax_active():
+        if not self._lv_wall:                       # turning OFF → just redraw
+            if self._lv_sax_active():
+                self._redraw_lv(lv["sax_pane"])
+                self.pane[lv["sax_pane"]].render()
+            return
+        m = lv["model"]
+        both = (m.endo_axis is not None and len(m.endo_contours) >= 3
+                and m.epi_axis is not None and len(m.epi_contours) >= 3)
+        if not both:
+            self._lv_wall_btn.setChecked(False)
+            self._lv_wall = False
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Trace BOTH Endo and Epi (≥3 planes each) first — the wall "
+                  "map needs both borders."))
+            return
+        # Ensure the COMBINED (both-border, epi-axis) short-axis is shown.
+        if not self._lv_sax_active():
             self._lv_sax_btn.setChecked(True)
-            self._lv_toggle_sax()
-            return                              # _lv_toggle_sax redraws
+            self._lv_toggle_sax()                   # both done → sax_which='both'
+        elif lv.get("sax_which") != "both":
+            lv["sax_which"] = "both"
+            m.axis = self._lv_sax_axis()
+            lv["fitted_sax"] = False
+            rng = self._lv_common_range() or self._lv_level_range()
+            if rng:
+                lv["sax"] = 0.5 * (rng[0] + rng[1])
+            self._lv_show_sax_both()
         if self._lv_sax_active():
-            self._redraw_lv(self._lv["sax_pane"])
-            self.pane[self._lv["sax_pane"]].render()
+            self._redraw_lv(lv["sax_pane"])
+            self.pane[lv["sax_pane"]].render()
+
+    def _lv_update_wall_legend(self) -> None:
+        """Show/hide the bottom-left wall-thickness colour legend (red <5 /
+        orange 5-7 / yellow 7-9 / green >9 mm) on the short-axis pane — visible
+        only while the wall map is up."""
+        lv = self._lv
+        show = bool(getattr(self, "_lv_wall", False)) and self._lv_sax_active()
+        sa = lv.get("sax_pane") if lv is not None else None
+        # bottom→top: green (thick) … red (thin, critical). ASCII labels so they
+        # render regardless of the VTK font.
+        bands = [("wall > 9 mm", (0.18, 0.80, 0.44)),
+                 ("wall 7-9 mm", (0.95, 0.77, 0.06)),
+                 ("wall 5-7 mm", (1.0, 0.55, 0.0)),
+                 ("wall < 5 mm", (0.70, 0.0, 0.0))]
+        for k in ("A", "B"):
+            legend = getattr(self.pane[k], "lv_wall_legend", [])
+            on = show and k == sa
+            for i, a in enumerate(legend):
+                if on and i < len(bands):
+                    label, (r, g, b) = bands[i]
+                    a.GetTextProperty().SetColor(r, g, b)
+                    a.SetInput(label)
+                    a.SetVisibility(True)
+                else:
+                    a.SetVisibility(False)
 
     def _lv_draw_wall(self, p, endo_sm, epi_sm) -> None:
         """Fill the annulus between the short-axis endo (inner) and epi (outer)
@@ -5906,6 +5979,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_epi_mapper.SetInputData(vtkPolyData())
         p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
         p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
+        self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
         # Apex markers stay visible in EVERY LV phase once an axis exists (so the
