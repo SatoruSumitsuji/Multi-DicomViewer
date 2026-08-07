@@ -4790,17 +4790,61 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["plane_idx"] = 0
         self._lv_enter_contour()
 
+    def _lv_apex_on_axis(self, tgt, sx, sy):
+        """3-D point for an apex click/drag at screen (sx,sy), CONSTRAINED to the
+        pass's long (rotation) axis — the apex can slide ALONG the axis but never
+        leave it. None if that axis isn't set."""
+        ax = self._lv["model"]._axis_for(tgt)
+        if ax is None:
+            return None
+        which = self._lv["pane"]
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        along = float(np.dot(P - ax.apex, ax.axis))    # project onto the axis
+        return ax.apex + along * ax.axis
+
+    def _lv_follow_apex(self, tgt, P_old, P_new) -> None:
+        """Move every border vertex that had CONVERGED to this apex (snapped to
+        *P_old*) to *P_new*, so the traced Endo/Epi lines track the apex as it
+        slides along the axis. Re-stores the affected planes' contours."""
+        if P_old is None:
+            return
+        model = self._lv["model"]
+        angs = model.plane_angles()
+        pane = self._lv["pane"]
+        P_old = np.asarray(P_old, float)
+        eps = 0.05                                     # snapped pts sit ON P_old
+        for m in self._measures[pane]:
+            tag = m.get("_lv")
+            if tag is None or tag[1] != tgt or not m.get("pts3d"):
+                continue
+            moved = False
+            p3 = [list(map(float, P)) for P in m["pts3d"]]
+            for i, P in enumerate(p3):
+                if np.linalg.norm(np.asarray(P) - P_old) <= eps:
+                    p3[i] = list(map(float, P_new))
+                    moved = True
+            if moved:
+                m["pts3d"] = [tuple(x) for x in p3]
+                try:
+                    model.set_long_axis_contour(
+                        angs[tag[0] % len(angs)], m["pts3d"], tgt)
+                except Exception:
+                    pass
+
     def _lv_place_apex(self, which, sx, sy) -> bool:
-        """Place the ACTIVE pass's apex at the clicked point (phase 'apex'), then
-        start tracing that pass. Returns True if the click was consumed."""
+        """Place the ACTIVE pass's apex at the clicked point (phase 'apex'),
+        constrained to the pass's long axis, then start tracing. Returns True if
+        the click was consumed."""
         lv = self._lv
         if (lv is None or lv.get("phase") != "apex"
                 or lv.get("apex_target") is None or which != lv.get("pane")):
             return False
-        wx, wy = self._disp_to_world(which, sx, sy)
-        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
-        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
         tgt = lv["apex_target"]
+        P = self._lv_apex_on_axis(tgt, sx, sy)
+        if P is None:
+            return False
         lv["model"].set_apex_point(tgt, P)
         self._lv_result_lines = []                 # invalidate any volume result
         lv["apex_target"] = None
@@ -4841,17 +4885,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         return None
 
     def _lv_apex_move(self, which, sx, sy) -> None:
-        """Drag the grabbed apex marker to a new 3-D point on the long-axis
-        plane."""
+        """Drag the grabbed apex ALONG its long axis (it can't leave the axis),
+        carrying with it the border points that had converged to it."""
         tgt = self._lv_apex_drag
         if tgt is None or self._lv is None:
             return
-        wx, wy = self._disp_to_world(which, sx, sy)
-        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
-        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
-        self._lv["model"].set_apex_point(tgt, P)
+        P_new = self._lv_apex_on_axis(tgt, sx, sy)
+        if P_new is None:
+            return
+        model = self._lv["model"]
+        P_old = model.endo_apex if tgt == "endo" else model.epi_apex
+        self._lv_follow_apex(tgt, P_old, P_new)    # border pts track the apex
+        model.set_apex_point(tgt, P_new)
         self._lv_result_lines = []
         self._redraw_all_lv()
+        self._redraw_meas(self._lv["pane"])        # moved border points
         for k in ("A", "B"):
             self.pane[k].render()
 
