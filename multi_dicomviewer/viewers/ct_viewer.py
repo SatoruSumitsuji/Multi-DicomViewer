@@ -4715,21 +4715,35 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].render()
 
     def _lv_select_pass(self, which: str) -> None:
-        """Endo / Epi button = choose (and ENTER) that analysis pass. Unset axis
-        → align it; already set → resume tracing on its own axis."""
+        """Endo / Epi button = choose that analysis pass (the sole active one).
+        In SAX it ISOLATES that pass (long + short show only it, on its own axis)
+        for editing; otherwise it enters/resumes the long-axis trace on its axis.
+        Unset axis → align it first."""
         if self._lv is None:
             if not self._lv_enter_mode():
                 return
         lv = self._lv
-        if lv.get("sax") is not None:               # leave SAX back to tracing
-            self._lv_leave_sax()
+        m = lv["model"]
+        if lv.get("sax") is not None:               # in SAX → isolate this pass
+            store = m.endo_contours if which == "endo" else m.epi_contours
+            if m._axis_for(which) is not None and len(store) >= 3:
+                lv["pass"] = which
+                lv["sax_which"] = which
+                m.axis = self._lv_sax_axis()
+                lv["fitted_sax"] = False
+                rng = self._lv_common_range() or self._lv_level_range()
+                if rng:
+                    lv["sax"] = 0.5 * (rng[0] + rng[1])
+                self._lv_sync_buttons()
+                self._lv_show_sax_both()
+            return
         lv["pass"] = which
         self._lv_thick_zero_both()
-        ax = lv["model"]._axis_for(which)
+        ax = m._axis_for(which)
         if ax is None:
             self._lv_enter_align()
             return
-        lv["model"].axis = ax                       # activate this pass's axis
+        m.axis = ax                                 # activate this pass's axis
         lv["phase"] = "contour"
         lv["plane_idx"] = 0
         self._lv_enter_contour()
@@ -4864,17 +4878,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv_sax_btn.isChecked():
             self._lv_capture_current()
             m = lv["model"]
-            if (m.epi_axis is None or len(m.epi_contours) < 3
-                    or m.endo_axis is None or len(m.endo_contours) < 3):
+            endo_ok = m.endo_axis is not None and len(m.endo_contours) >= 3
+            epi_ok = m.epi_axis is not None and len(m.epi_contours) >= 3
+            # BOTH traced → combined view (endo resampled to the epi axis + epi),
+            # the basis for Vol/STL. Otherwise a single-pass short-axis of the
+            # active/available pass on ITS OWN axis, for reviewing/editing it.
+            if endo_ok and epi_ok:
+                which = "both"
+            elif lv.get("pass") == "endo" and endo_ok:
+                which = "endo"
+            elif lv.get("pass") == "epi" and epi_ok:
+                which = "epi"
+            elif endo_ok:
+                which = "endo"
+            elif epi_ok:
+                which = "epi"
+            else:
                 self._lv_sax_btn.setChecked(False)
                 QMessageBox.information(
                     self.window(), t("LV EF"),
-                    t("Complete BOTH passes first — trace Endo and Epi on at "
-                      "least 3 planes each. The short-axis uses the Epi axis."))
+                    t("Trace this pass on at least 3 planes first."))
                 return
-            # SAX is referenced to the EPI (myocardial) axis; point the model's
-            # active axis there so the existing SAX code slices both borders
-            # against it (short_axis_border_pts default ref_axis = model.axis).
+            lv["sax_which"] = which
+            # Point the model's active axis at the SAX reference axis so the
+            # existing SAX code slices against it (short_axis_border_pts default
+            # ref_axis = model.axis): endo/epi single → that axis; both → epi.
             m.axis = self._lv_sax_axis()
             rng = self._lv_level_range()
             if rng is None:
@@ -4898,6 +4926,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.set_side("Bi")                      # long-axis + short-axis
             self._lv_show_sax_both()
         else:
+            # From a SINGLE-pass short-axis, pressing SAX first shows the COMBINED
+            # (endo→epi + epi) view — the basis for Vol/STL — instead of leaving.
+            m = lv["model"]
+            both_done = (m.endo_axis is not None and len(m.endo_contours) >= 3
+                         and m.epi_axis is not None and len(m.epi_contours) >= 3)
+            if (lv.get("sax") is not None and both_done
+                    and lv.get("sax_which") != "both"):
+                self._lv_sax_btn.setChecked(True)
+                lv["sax_which"] = "both"
+                m.axis = self._lv_sax_axis()
+                lv["fitted_sax"] = False
+                rng = self._lv_common_range() or self._lv_level_range()
+                if rng:
+                    lv["sax"] = 0.5 * (rng[0] + rng[1])
+                self._lv_show_sax_both()
+                return
             self._lv_leave_sax()
             self._lv_show_plane()                    # back to the long-axis view
 
@@ -4918,13 +4962,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[la] = (u, v, n)
         self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[la] = 0.0
-        # The reference long-axis pane is resliced on the EPI axis here, so only
-        # epi borders lie in-plane — show those; endo borders (their own axis)
-        # would project wrong. Both borders still show on the SAX pane.
+        # The reference long-axis pane is resliced on the SAX axis; show only the
+        # border that lies in-plane there (the single pass, or epi for 'both').
+        w = lv.get("sax_which")
+        ref_which = w if w in ("endo", "epi") else "epi"
         for mm in self._measures[la]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx) or (tag[1] != "epi")
+                mm["hidden"] = (tag[0] != idx) or (tag[1] != ref_which)
         self._lv_set_short_frame()                   # short-axis (level) pane
         first = not lv.get("fitted_sax", False)
         lv["fitted_sax"] = True
@@ -4982,10 +5027,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].render()
 
     def _lv_sax_axis(self):
-        """The reference axis for the short-axis display = the EPI (myocardial)
-        axis (falls back to endo / active if epi isn't set)."""
+        """Reference axis for the short-axis display, by what it shows: a single
+        pass → that pass's own axis; 'both' → the EPI (myocardial) axis (endo is
+        resampled onto it)."""
         m = self._lv["model"]
-        return m.epi_axis or m.endo_axis or m.axis
+        w = self._lv.get("sax_which")
+        if w == "endo":
+            return m.endo_axis or m.axis
+        if w == "epi":
+            return m.epi_axis or m.axis
+        return m.epi_axis or m.endo_axis or m.axis        # both → epi
+
+    def _lv_sax_borders(self):
+        """Which border(s) the short-axis shows: a single pass, or both."""
+        w = self._lv.get("sax_which")
+        return ["endo", "epi"] if w not in ("endo", "epi") else [w]
 
     def _lv_leave_sax(self) -> None:
         """Return from short-axis to the long-axis view (staying in Bi): restore
@@ -5096,16 +5152,27 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and self._lv.get("phase") == "contour"
                 and self._lv.get("sax") is not None)
 
-    def _lv_level_range(self):
-        """The along span to SCROLL the short-axis level over. Apex side is
-        EXTENDED to the most-apical traced point of ANY meridian (min of minima)
-        so the level can travel to the apex even if a few meridians stopped short
-        (the border simply isn't drawn out there — see short_axis_border_pts);
-        base side stays at the common base (min of maxima). Independent of where
-        the border is drawable, so the level moves freely toward the apex."""
+    def _lv_sax_stores(self):
+        """The contour store(s) whose along values are in the CURRENT SAX axis'
+        frame — the single pass shown, or epi for 'both' (its axis is the SAX
+        reference; endo is resampled onto it at draw time)."""
         m = self._lv["model"]
+        w = self._lv.get("sax_which")
+        if w == "endo":
+            return (m.endo_contours,)
+        if w == "epi":
+            return (m.epi_contours,)
+        if w == "both":
+            return (m.epi_contours,)
+        return (m.endo_contours, m.epi_contours)          # fallback
+
+    def _lv_level_range(self):
+        """The along span (in the SAX axis' frame) to SCROLL the level over:
+        apex = the most-apical traced point (min of minima), base = the common
+        base (min of maxima). Uses only the store(s) in the SAX axis' frame so
+        endo/epi on different axes aren't mixed."""
         mins, maxs = [], []
-        for store in (m.endo_contours, m.epi_contours):
+        for store in self._lv_sax_stores():
             for c in store.values():
                 a = np.asarray(c, float).reshape(-1, 2)[:, 0]
                 mins.append(float(a.min()))
@@ -5116,17 +5183,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         return (lo, hi) if hi > lo else None
 
     def _lv_common_range(self):
-        """The COMMON along-range where every endo AND epi meridian reaches —
-        the span the border is actually drawn over (used to pick the SAX entry
-        level so the border shows on entry)."""
-        m = self._lv["model"]
-        rs = [r for r in (m.along_range("endo"), m.along_range("epi"))
-              if r is not None]
-        if not rs:
+        """COMMON along-range (SAX axis frame) where every meridian of the shown
+        border reaches — used to pick the SAX entry level so the border shows on
+        entry."""
+        mins, maxs = [], []
+        for store in self._lv_sax_stores():
+            for c in store.values():
+                a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+                mins.append(float(a.min()))
+                maxs.append(float(a.max()))
+        if not mins:
             return None
-        lo = max(r[0] for r in rs)
-        hi = min(r[1] for r in rs)
-        return (lo, hi) if hi > lo else rs[0]
+        lo, hi = max(mins), min(maxs)
+        return (lo, hi) if hi > lo else (min(mins), min(maxs))
 
     def _lv_step_level(self, delta) -> None:
         """Move the short-axis LEVEL one paging notch (wheel / arrow keys)."""
@@ -5823,8 +5892,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # don't grow when the pane is zoomed).
                 mark_xy = []
                 border_sm = {}
+                show = self._lv_sax_borders()       # single pass, or both
                 for which, mapper in (("endo", p.lv_endo_mapper),
                                       ("epi", p.lv_epi_mapper)):
+                    if which not in show:
+                        continue
                     sp = lv["model"].short_axis_border_pts(along0, which)
                     if sp is None or len(sp) < 3:
                         continue
