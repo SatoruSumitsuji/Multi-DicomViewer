@@ -2304,24 +2304,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
             return
-        m = lv["model"]
         ph = lv.get("phase")
         pas = lv.get("pass")
+        sax_on = lv.get("sax") is not None
         # Exactly ONE pass is active — only its button is coloured (the rotation
-        # axis is that pass's axis too, switched in _lv_select_pass).
+        # axis is that pass's axis too, switched in _lv_select_pass). Set axis is
+        # dark-yellow while its axis is in use (ready/apex/contour); Trace is red
+        # while tracing (apex/contour); both go grey when undone.
         endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
         epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
-        axis_set = m._axis_for(pas) is not None
-        setax.setStyleSheet(self._LV_STY["setaxis"] if axis_set else "")
-        tracing = ph in ("apex", "contour")
-        trace.setStyleSheet(self._LV_STY["trace"] if tracing else "")
-        # enable by phase
-        setax.setEnabled(ph == "align")
-        trace.setEnabled(ph == "ready")
+        setax.setStyleSheet(self._LV_STY["setaxis"]
+                            if ph in ("ready", "apex", "contour") else "")
+        trace.setStyleSheet(self._LV_STY["trace"]
+                            if ph in ("apex", "contour") else "")
+        # LIFO enable: you can only turn OFF the LAST button turned on.
+        #   align → Set axis armed (set)         ready → Set axis (undo) + Trace
+        #   apex/contour (SAX off) → Trace (undo) + SAX (on)   SAX on → SAX only
+        setax.setEnabled(ph in ("align", "ready"))
+        trace.setEnabled(ph in ("ready", "apex", "contour") and not sax_on)
+        self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
-        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_sax_btn,
-                  self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
-                  self._lv_save_btn, self._lv_stl_btn):
+        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
+                  self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+                  self._lv_stl_btn):
             b.setEnabled(contour)
         self._lv_exit_btn.setEnabled(True)
         self._refresh_tool_availability()   # grey Rotate/Spin/Thick + WB reverse
@@ -4726,35 +4731,58 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].render()
 
     def _lv_set_axis(self) -> None:
-        """'Set axis' button: capture the current view as the ACTIVE pass's long
-        axis (→ READY: do final zoom/move, then press Trace)."""
+        """'Set axis' button. ALIGN → READY: capture the current view as this
+        pass's long axis. READY → ALIGN (press again): UNDO — back to the
+        Endo/Epi-only state with the IMAGE KEPT, unlocking Spin/Rotate/Thick."""
         lv = self._lv
-        if lv is None or lv.get("phase") != "align" or lv.get("pass") is None:
+        if lv is None or lv.get("pass") is None:
             return
-        which = lv["pass"]
-        origin, axis_dir, radial0 = self._lv_axis_from_view()
-        lv["model"].set_axis_from_frame(origin, axis_dir, radial0, which=which)
-        lv["phase"] = "ready"
-        lv["plane_idx"] = 0
-        self._lv_sync_buttons()
-        self._lv_show_plane()                        # right pane: axis vertical
+        ph = lv.get("phase")
+        if ph == "align":
+            which = lv["pass"]
+            origin, axis_dir, radial0 = self._lv_axis_from_view()
+            lv["model"].set_axis_from_frame(origin, axis_dir, radial0,
+                                            which=which)
+            lv["phase"] = "ready"
+            lv["plane_idx"] = 0
+            self._lv_sync_buttons()
+            self._lv_show_plane()                    # right pane: axis vertical
+        elif ph == "ready":
+            self._lv_enter_align()                   # undo (keeps the image)
 
     def _lv_start_trace(self) -> None:
-        """'Trace' button (READY → APEX): arm placement — the first plain click
-        drops this pass's apex (Shift-click adjusts the view instead), then the
-        border is traced."""
+        """'Trace' button. READY → tracing: place this pass's apex (first plain
+        click; Shift-click adjusts the view) then trace — or resume if the apex
+        is already set. APEX/CONTOUR (press again, SAX off) → UNDO back to READY."""
         lv = self._lv
-        if lv is None or lv.get("phase") != "ready":
+        if lv is None:
             return
-        lv["phase"] = "apex"
-        lv["apex_target"] = lv["pass"]
-        if self._meas_on:                           # clicks place the apex first
-            self._meas_btn.setChecked(False)
-            self._toggle_measure()
-        self._lv_sync_buttons()
-        self._lv_update_text()
-        for k in ("A", "B"):
-            self.pane[k].render()
+        ph = lv.get("phase")
+        if ph == "ready":
+            m = lv["model"]
+            apex = m.endo_apex if lv["pass"] == "endo" else m.epi_apex
+            if apex is not None:                     # apex already set → resume
+                lv["apex_target"] = None
+                self._lv_enter_contour()
+                return
+            lv["phase"] = "apex"
+            lv["apex_target"] = lv["pass"]
+            if self._meas_on:                        # clicks place the apex first
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv_sync_buttons()
+            self._lv_update_text()
+            for k in ("A", "B"):
+                self.pane[k].render()
+        elif ph in ("apex", "contour") and lv.get("sax") is None:
+            lv["phase"] = "ready"                    # UNDO trace → ready
+            lv["apex_target"] = None
+            if self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv_sync_buttons()
+            self._lv_update_text()
+            self._lv_show_plane()
 
     def _lv_select_pass(self, which: str) -> None:
         """Endo / Epi button = choose that analysis pass (the sole active one).
@@ -5018,22 +5046,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.set_side("Bi")                      # long-axis + short-axis
             self._lv_show_sax_both()
         else:
-            # From a SINGLE-pass short-axis, pressing SAX first shows the COMBINED
-            # (endo→epi + epi) view — the basis for Vol/STL — instead of leaving.
-            m = lv["model"]
-            both_done = (m.endo_axis is not None and len(m.endo_contours) >= 3
-                         and m.epi_axis is not None and len(m.epi_contours) >= 3)
-            if (lv.get("sax") is not None and both_done
-                    and lv.get("sax_which") != "both"):
-                self._lv_sax_btn.setChecked(True)
-                lv["sax_which"] = "both"
-                m.axis = self._lv_sax_axis()
-                lv["fitted_sax"] = False
-                rng = self._lv_common_range() or self._lv_level_range()
-                if rng:
-                    lv["sax"] = 0.5 * (rng[0] + rng[1])
-                self._lv_show_sax_both()
-                return
+            # SAX is the last-on button → pressing it turns SAX OFF (back to the
+            # long-axis trace). The endo/epi single-vs-both content is chosen via
+            # the Endo/Epi buttons and Wall, not by re-pressing SAX.
             self._lv_leave_sax()
             self._lv_show_plane()                    # back to the long-axis view
 
