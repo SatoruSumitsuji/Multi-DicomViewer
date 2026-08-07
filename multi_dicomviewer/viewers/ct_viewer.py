@@ -5947,24 +5947,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         return p1
 
     def _lv_draw_apex_markers(self, key, p) -> None:
-        """Draw the user-defined Endo (red) / Epi (green) apex markers on the
-        long-axis (trace) pane AND, while short-axis is shown, on the short-axis
-        pane (projected onto that plane) so they stay visible for reference /
-        dragging at any level."""
+        """Draw ONLY the ACTIVE pass's apex marker (endo=red / epi=green) on the
+        long-axis (trace) pane and, while short-axis is shown, on the short-axis
+        pane. The inactive pass's apex is hidden (Endo active → no epi apex, and
+        vice-versa)."""
         lv = self._lv
         if lv is None or lv["model"].axis is None:
             return
         if key not in (lv.get("pane"), lv.get("sax_pane")):
             return
-        pts, cols = [], []
-        for tgt, rgb in (("endo", (255, 64, 64)), ("epi", (64, 200, 80))):
-            P = lv["model"].endo_apex if tgt == "endo" else lv["model"].epi_apex
-            if P is None:
-                continue
-            pts.append(self._world3d_to_out(key, P))
-            cols.append(rgb)
-        if pts:
-            p.lv_apex_mapper.SetInputData(_lv_pts_pd(pts, cols, z=0.9))
+        tgt = lv.get("pass")
+        if tgt == "endo":
+            P, rgb = lv["model"].endo_apex, (255, 64, 64)
+        elif tgt == "epi":
+            P, rgb = lv["model"].epi_apex, (64, 200, 80)
+        else:
+            return
+        if P is None:
+            return
+        p.lv_apex_mapper.SetInputData(
+            _lv_pts_pd([self._world3d_to_out(key, P)], [rgb], z=0.9))
 
     def _redraw_lv(self, key) -> None:
         """Draw the base-cut line for the current long-axis plane on the LV pane.
