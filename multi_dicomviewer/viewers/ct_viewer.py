@@ -4673,6 +4673,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["target"] = None
         self.set_side("Bi")
         self._lv_thick_zero_both()                  # slab 0 both panes
+        # Hide the other pass's border while aligning this one (e.g. the Endo
+        # line must vanish once Epi is active) — _lv_show_plane isn't called in
+        # the align phase, so set the visibility here.
+        for mm in self._measures[lv["pane"]]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[1] != lv.get("pass"))
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
