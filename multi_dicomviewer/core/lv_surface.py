@@ -50,6 +50,46 @@ def _resample_periodic(theta_src, r_src, n_out: int) -> np.ndarray:
     return np.interp(out_ang, th_ext, r_ext)
 
 
+def _densify_profile(cc: np.ndarray, per_seg: int = 12) -> np.ndarray:
+    """Centripetal Catmull-Rom densification of a meridian's (along, radius)
+    profile — the SAME spline the viewer draws the border with. Interpolating the
+    ring radii from the DENSE curve (instead of the raw chords) makes the
+    reconstructed surface follow the drawn border, so the apex rounds along the
+    wall's curve instead of coning to a straight point. Radius clamped ≥0; result
+    sorted with strictly-increasing *along* for np.interp."""
+    P = np.asarray(cc, float).reshape(-1, 2)
+    n = len(P)
+    if n < 3:
+        return P
+    ext = np.vstack([P[0], P, P[-1]])
+
+    def _kt(ti, a, b):
+        d = float(np.linalg.norm(b - a))
+        return ti + (d ** 0.5 if d > 1e-9 else 1e-6)
+
+    out = []
+    for i in range(1, len(ext) - 2):
+        p0, p1, p2, p3 = ext[i - 1], ext[i], ext[i + 1], ext[i + 2]
+        t0 = 0.0
+        t1 = _kt(t0, p0, p1)
+        t2 = _kt(t1, p1, p2)
+        t3 = _kt(t2, p2, p3)
+        for s in range(per_seg):
+            t = t1 + (t2 - t1) * (s / per_seg)
+            a1 = (t1 - t) / (t1 - t0) * p0 + (t - t0) / (t1 - t0) * p1
+            a2 = (t2 - t) / (t2 - t1) * p1 + (t - t1) / (t2 - t1) * p2
+            a3 = (t3 - t) / (t3 - t2) * p2 + (t - t2) / (t3 - t2) * p3
+            b1 = (t2 - t) / (t2 - t0) * a1 + (t - t0) / (t2 - t0) * a2
+            b2 = (t3 - t) / (t3 - t1) * a2 + (t - t1) / (t3 - t1) * a3
+            out.append((t2 - t) / (t2 - t1) * b1 + (t - t1) / (t2 - t1) * b2)
+    out.append(ext[-2])
+    D = np.asarray(out, float)
+    D[:, 1] = np.clip(D[:, 1], 0.0, None)
+    D = D[np.argsort(D[:, 0])]
+    keep = np.concatenate(([True], np.diff(D[:, 0]) > 1e-9))
+    return D[keep]
+
+
 def _gauss_kernel(sigma: float) -> np.ndarray:
     r = int(max(1, round(3.0 * sigma)))
     x = np.arange(-r, r + 1, dtype=float)
@@ -88,6 +128,9 @@ def _smooth_ring_stack(rings, ang_sigma: float = 5.0, lon_sigma: float = 3.0,
     wv = wv[:, None, None]
     out = wv * S + (1.0 - wv) * R
     out[-1] = R[-1]                                # keep the basal rim crisp
+    out[0] = R[0]                                  # keep the apical-most ring —
+    #   the longitudinal blur would otherwise inflate a converged (~0) apex ring
+    #   toward its wider neighbours, leaving a dimple where the cap meets it.
     return out
 
 
@@ -142,6 +185,38 @@ def _apex_cap_profile(along, rings, n_cap: int = 10):
         prof.append((a0 - d, float(min(1.0, r / r0))))
     a_tip = a0 - D
     return prof[:-1], float(a_tip)               # last point → the tip vertex
+
+
+def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 12):
+    """Like _apex_cap_profile but the cap DEPTH is fixed so the tip lands at the
+    user-defined apex's along *a_tip*. The rings still leave the deepest ring
+    along the WALL's own tangent and round to the tip, so the apex is smooth AND
+    passes through the user apex vertex (no flat disc, no straight cone)."""
+    along = np.asarray(along, float)
+    n = len(along)
+    a0 = float(along[0])
+    rm = np.hypot(rings[:, :, 0], rings[:, :, 1]).mean(axis=1)
+    r0 = float(rm[0])
+    if r0 < 1e-6 or n < 2:
+        return [], float(a_tip)
+    w = min(n, 6)
+    m = float(np.polyfit(along[:w], rm[:w], 1)[0]) if w >= 2 else 1.0
+    m = float(np.clip(m, 0.2, 6.0))
+    D = a0 - float(a_tip)
+    if D < 0.15 * r0:               # apex ≈ deepest ring → a minimal round cap
+        D = 0.15 * r0
+    p0 = np.array([0.0, r0])
+    p1 = np.array([0.35 * D, max(0.0, r0 - 0.35 * D * m)])   # wall tangent
+    p2 = np.array([D, 0.45 * r0])                            # steepen → tip
+    p3 = np.array([D, 0.0])
+    prof = []
+    for s in range(1, n_cap + 1):
+        t = s / float(n_cap)
+        b = ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1
+             + 3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3)
+        d, r = float(b[0]), float(max(0.0, b[1]))
+        prof.append((a0 - d, float(min(1.0, r / r0))))
+    return prof[:-1], float(a0 - D)
 
 
 def _points_in_polygon(pts: np.ndarray, poly: np.ndarray) -> np.ndarray:
@@ -252,6 +327,7 @@ class LVSurface:
         for j, th in enumerate(thetas):
             c = np.asarray(contours[th], float).reshape(-1, 2)
             cc = c[np.argsort(c[:, 0])]
+            cc = _densify_profile(cc)          # follow the drawn spline curve
             lo, hi = float(cc[0, 0]), float(cc[-1, 0])
             m = (along >= lo - 1e-6) & (along <= hi + 1e-6)
             r_km[m, j] = np.interp(along[m], cc[:, 0], cc[:, 1])
@@ -406,20 +482,19 @@ class LVSurface:
             for j in range(nth):                   # flat base cap → solid
                 jn = (j + 1) % nth
                 faces.append([base_i, base0 + j, base0 + jn])
-        if apex_w is not None:                      # converge to the user apex
-            tip_i = nxt
-            verts_list.append(np.asarray(apex_w, float).reshape(1, 3))
-            for j in range(nth):                   # fan the deepest ring → apex
-                jn = (j + 1) % nth                 # winding matches the outward
-                faces.append([tip_i, jn, j])       # wall (edge jn→j on ring 0)
-            verts = np.concatenate(verts_list, 0)
-            return verts, np.asarray(faces, dtype=np.int64)
-        # Rounded APEX CAP that CONTINUES the wall (paraboloid fit) below the
-        # reliable ring, so it matches the wall's slope at the join (no 'debeso'
-        # shoulder) and rounds to a smooth tip.
+        # Rounded APEX CAP that CONTINUES the wall (no shoulder) and rounds to a
+        # smooth tip. With a user apex the cap depth is fixed so the tip lands
+        # EXACTLY on that vertex (still rounded — no flat disc / straight cone);
+        # otherwise the cap synthesises its own depth.
         c0 = ax.apex + float(along[0]) * ax.axis
         P0 = ring_pts[:nth]
-        prof, a_tip = _apex_cap_profile(along, rings)
+        if apex_w is not None:
+            a_tip = float(np.dot(np.asarray(apex_w, float) - ax.apex, ax.axis))
+            prof, _ = _apex_cap_profile_to(along, rings, a_tip)
+            tip_pt = np.asarray(apex_w, float).reshape(1, 3)
+        else:
+            prof, a_tip = _apex_cap_profile(along, rings)
+            tip_pt = (ax.apex + a_tip * ax.axis).reshape(1, 3)
         prev = 0
         for d, scale in prof:
             off = nxt
@@ -431,7 +506,7 @@ class LVSurface:
                 faces.append([off + j, off + jn, prev + jn])
             prev = off
         tip_i = nxt
-        verts_list.append((ax.apex + a_tip * ax.axis).reshape(1, 3))
+        verts_list.append(tip_pt)
         nxt += 1
         for j in range(nth):                       # fan last cap ring → tip
             jn = (j + 1) % nth
@@ -446,11 +521,11 @@ class LVSurface:
 
 
 def _cup_block(surf, base_off, outward):
-    """A closed 'cup' (wall + apex tip) for one surface, with face indices offset
-    by *base_off* and windings for OUTWARD (epi) or inward (endo). With a
-    user-defined apex the wall keeps all levels and fans straight to that exact
-    vertex; otherwise the apical neck is trimmed and a rounded Bézier cap is
-    synthesised. Returns (verts (M,3), faces, base_ring_index, M)."""
+    """A closed 'cup' (wall + rounded apex cap) for one surface, with face
+    indices offset by *base_off* and windings for OUTWARD (epi) or inward (endo).
+    With a user-defined apex the cap depth is fixed so its rounded tip lands on
+    that vertex; otherwise a rounded Bézier cap is synthesised and the apical
+    neck trimmed. Returns (verts (M,3), faces, base_ring_index, M)."""
     ax = surf.axis
     rings = _smooth_ring_stack(surf.rings)
     apex_w = getattr(surf, "apex_world", None)
@@ -471,20 +546,16 @@ def _cup_block(surf, base_off, outward):
             else:
                 faces.append([a0 + j, a1 + j, a1 + jn])
                 faces.append([a0 + j, a1 + jn, a0 + jn])
-    if apex_w is not None:                                  # fan deepest ring→apex
-        verts = np.concatenate([ring_pts,
-                                np.asarray(apex_w, float).reshape(1, 3)], 0)
-        tip_i = B + km * nth
-        for j in range(nth):
-            jn = (j + 1) % nth
-            faces.append([tip_i, B + jn, B + j] if outward
-                         else [tip_i, B + j, B + jn])
-        return verts, faces, B + (km - 1) * nth, len(verts)
-    c0 = ax.apex + float(along_t[0]) * ax.axis              # synthesised cap
+    c0 = ax.apex + float(along_t[0]) * ax.axis              # rounded apex cap
     P0 = ring_pts[:nth]
-    prof, a_tip = _apex_cap_profile(along_t, rings_t)
+    if apex_w is not None:
+        a_tip = float(np.dot(np.asarray(apex_w, float) - ax.apex, ax.axis))
+        prof, _ = _apex_cap_profile_to(along_t, rings_t, a_tip)
+        tip = np.asarray(apex_w, float).reshape(1, 3)
+    else:
+        prof, a_tip = _apex_cap_profile(along_t, rings_t)
+        tip = (ax.apex + a_tip * ax.axis).reshape(1, 3)
     cap_pts = [((ax.apex + d * ax.axis) + sc * (P0 - c0)) for d, sc in prof]
-    tip = (ax.apex + a_tip * ax.axis).reshape(1, 3)
     verts = np.concatenate([ring_pts] + cap_pts + [tip], 0)
     prev = B                                                # apex cap loft
     capB = B + km * nth
