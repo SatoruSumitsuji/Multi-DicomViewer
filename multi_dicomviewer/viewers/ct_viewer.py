@@ -3583,6 +3583,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
+            # Skip HIDDEN measures — their handles aren't drawn, so picking one
+            # would grab an invisible point (another pass/plane's border
+            # reprojected here) and shadow the visible point you meant to edit.
+            if self._results_hidden or m.get("hidden"):
+                continue
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_qt(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
