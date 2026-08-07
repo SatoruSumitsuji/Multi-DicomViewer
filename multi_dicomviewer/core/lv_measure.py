@@ -340,19 +340,43 @@ class LVModel:
             m.set_apex_point("epi", d["epi_apex"])
         return m
 
+    def _common_base(self):
+        """Common basal cut for Endo & Epi as (endo_base_along, epi_base_along) in
+        each surface's OWN axis, judged on the EPI (myocardial) axis: take the
+        most-apical of the two surfaces' own most-basal common levels (so borders
+        are present everywhere up to the cut), then express that one world plane
+        on each axis. (None, None) if either surface can't build."""
+        er = self.along_range("endo")
+        pr = self.along_range("epi")
+        if er is None or pr is None \
+                or self.endo_axis is None or self.epi_axis is None:
+            return None, None
+        pap, pa = self.epi_axis.apex, self.epi_axis.axis
+        eap, ea = self.endo_axis.apex, self.endo_axis.axis
+        # endo's own basal plane, measured along the EPI axis
+        endo_base_on_epi = float(((eap + er[1] * ea) - pap) @ pa)
+        common_epi = min(endo_base_on_epi, pr[1])       # most-apical → common
+        base_pt = pap + common_epi * pa                 # one world basal plane
+        endo_base = float((base_pt - eap) @ ea)         # onto endo axis
+        return endo_base, common_epi
+
     # ----------------------------------------------------------------- build
     def build(self, level_step: float = LV_LEVEL_STEP_MM,
               n_theta: int = LV_RING_POINTS) -> None:
         """(Re)build the endo/epi ring stacks — each from ITS OWN axis + stored
-        meridian contours. Needs ≥3 meridians for a surface."""
+        meridian contours. When both exist, cut them at a COMMON basal level
+        judged on the epi axis. Needs ≥3 meridians for a surface."""
+        endo_ok = self.endo_axis is not None and len(self.endo_contours) >= 3
+        epi_ok = self.epi_axis is not None and len(self.epi_contours) >= 3
+        endo_base = epi_base = None
+        if endo_ok and epi_ok:
+            endo_base, epi_base = self._common_base()
         self.endo = (LVSurface.from_meridian_contours(
-            self.endo_axis, self.endo_contours, level_step, n_theta)
-            if self.endo_axis is not None and len(self.endo_contours) >= 3
-            else None)
+            self.endo_axis, self.endo_contours, level_step, n_theta,
+            base_along=endo_base) if endo_ok else None)
         self.epi = (LVSurface.from_meridian_contours(
-            self.epi_axis, self.epi_contours, level_step, n_theta)
-            if self.epi_axis is not None and len(self.epi_contours) >= 3
-            else None)
+            self.epi_axis, self.epi_contours, level_step, n_theta,
+            base_along=epi_base) if epi_ok else None)
         # converge each built surface to its user-defined apex vertex (if set)
         if self.endo is not None:
             self.endo.apex_world = self.endo_apex

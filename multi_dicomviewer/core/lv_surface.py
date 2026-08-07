@@ -206,13 +206,18 @@ class LVSurface:
     @classmethod
     def from_meridian_contours(cls, axis: LVAxis, contours: dict,
                                level_step: float = LV_LEVEL_STEP_MM,
-                               n_theta: int = LV_RING_POINTS) -> "LVSurface":
+                               n_theta: int = LV_RING_POINTS,
+                               base_along: float | None = None) -> "LVSurface":
         """Build the ring stack from per-meridian long-axis contours.
 
         *contours* maps a meridian angle θ (deg) → an (T,2) array of
         (along, radius) samples for that meridian (apex→base). A long-axis
         plane at rotation φ contributes TWO meridians: φ (the +radial wall) and
         φ+180 (the −radial wall). Provide them already split by wall.
+
+        *base_along* overrides the basal cut level (this axis' along); used to
+        cut Endo and Epi at a COMMON basal level judged on the epi axis (see
+        LVModel.build). None → the surface's own most-basal common level.
         """
         if len(contours) < 3:
             raise ValueError("need at least 3 meridians to build a surface")
@@ -229,7 +234,13 @@ class LVSurface:
             a = np.asarray(contours[th], float).reshape(-1, 2)[:, 0]
             mins.append(float(a.min()))
             maxs.append(float(a.max()))
-        apex_along, base_along = min(mins), min(maxs)
+        apex_along = min(mins)
+        if base_along is None:
+            base_along = min(maxs)
+        else:                                   # common basal cut (clamped)
+            base_along = float(np.clip(base_along,
+                                       apex_along + max(1e-3, level_step),
+                                       max(maxs)))
         if base_along <= apex_along:
             raise ValueError("border along-ranges do not overlap")
         k = max(2, int(round((base_along - apex_along)
