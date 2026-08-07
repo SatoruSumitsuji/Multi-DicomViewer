@@ -198,15 +198,21 @@ class LVModel:
         planes = self.endo_planes if which == "endo" else self.epi_planes
         if len(planes) < 2:                    # <2 planes ⇒ <4 crossings
             return None
-        nbin = max(6, 2 * self.n_planes)
-        best: dict[int, tuple[float, np.ndarray, float]] = {}
-        for _phi, pts3d in planes.items():
+        # SAME-axis (the border's own axis): bin each crossing to that PLANE's
+        # meridian by the SIGN of its in-plane radial (robust near the axis where
+        # a global θ is noisy) — points land exactly on the 12 meridians. Only
+        # for a CROSS-axis reference (endo shown on the epi axis) fall back to
+        # global-θ binning, since the plane φ no longer maps to this axis.
+        same_axis = (ax is self._axis_for(which))
+        best: dict = {}
+        for phi, pts3d in planes.items():
             # Densify to the DISPLAYED spline first, so the crossing lies on the
             # drawn long-axis border (matches it even at the curved apex).
             p = _cr_densify_3d(pts3d)
             if len(p) < 2:
                 continue
             along = (p - ax.apex) @ ax.axis
+            e_s = ax.meridian_dir(phi) if same_axis else None
             for i in range(len(p) - 1):
                 a0, a1 = float(along[i]), float(along[i + 1])
                 if a0 == a1:
@@ -215,18 +221,23 @@ class LVModel:
                 if not (-1e-9 <= t <= 1.0 + 1e-9):
                     continue
                 P = p[i] + t * (p[i + 1] - p[i])
-                d = P - ax.apex
-                x = float(d @ ax.radial0)
-                y = float(d @ ax.binormal)
-                r = float(np.hypot(x, y))
-                th = float(np.degrees(np.arctan2(y, x))) % 360.0
-                b = int(round(th / 360.0 * nbin)) % nbin
-                if b not in best or r > best[b][0]:
-                    best[b] = (r, P, th)
+                if same_axis:
+                    s = float((P - ax.apex) @ e_s)      # signed in-plane radial
+                    key = (phi % 360.0) if s >= 0.0 else ((phi + 180.0) % 360.0)
+                    rad = abs(s)
+                    ordv = key
+                else:
+                    d = P - ax.apex
+                    x, y = float(d @ ax.radial0), float(d @ ax.binormal)
+                    rad = float(np.hypot(x, y))
+                    ordv = float(np.degrees(np.arctan2(y, x))) % 360.0
+                    key = int(round(ordv / 360.0 * max(6, 2 * self.n_planes)))
+                if key not in best or rad > best[key][0]:
+                    best[key] = (rad, P, ordv)
         if len(best) < 3:
             return None
-        order = sorted(best.values(), key=lambda t: t[2])   # by θ
-        return np.asarray([P for _r, P, _th in order])
+        order = sorted(best.values(), key=lambda t: t[2])   # by meridian / θ
+        return np.asarray([P for _r, P, _o in order])
 
     def plane_angles(self) -> list[float]:
         """Rotation angles (deg) of the long-axis drawing planes. n planes span
