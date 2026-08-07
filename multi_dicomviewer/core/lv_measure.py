@@ -66,7 +66,14 @@ class LVModel:
         if n_planes not in (4, 6, 8):
             raise ValueError("n_planes must be 4, 6 or 8")
         self.n_planes = int(n_planes)
-        self.axis: LVAxis | None = None
+        # Endo (lumen) and Epi (myocardium) are INDEPENDENT analyses, each traced
+        # on its OWN long axis (their apexes are offset, so a single shared axis
+        # can't put both apexes at the bottom of their trace planes — see
+        # [[lv-apex-point-feature]]). ``axis`` points at the ACTIVE pass's axis
+        # (so the tracing code stays axis-agnostic); build()/SAX pick per-surface.
+        self.endo_axis: LVAxis | None = None
+        self.epi_axis: LVAxis | None = None
+        self.axis: LVAxis | None = None          # = the active pass's axis
         # meridian angle (deg) -> (T,2) array of (along, radius) [for the volume]
         self.endo_contours: dict[float, np.ndarray] = {}
         self.epi_contours: dict[float, np.ndarray] = {}
@@ -83,10 +90,16 @@ class LVModel:
         self.epi: LVSurface | None = None
 
     # ------------------------------------------------------------------- axis
+    def _axis_for(self, which: str) -> "LVAxis | None":
+        return self.endo_axis if which == "endo" else self.epi_axis
+
     def set_axis(self, basal1, basal2, apex) -> None:
-        """Define the long axis from the two basal points + the apex. Clears
-        any contours built against a previous axis."""
-        self.axis = LVAxis.from_points(basal1, basal2, apex)
+        """Define BOTH long axes from the two basal points + the apex (legacy /
+        shared-axis entry). Clears all contours."""
+        ax = LVAxis.from_points(basal1, basal2, apex)
+        self.endo_axis = ax
+        self.epi_axis = LVAxis.from_points(basal1, basal2, apex)
+        self.axis = self.epi_axis
         self.endo_contours.clear()
         self.epi_contours.clear()
         self.endo_planes.clear()
@@ -94,19 +107,30 @@ class LVModel:
         self.endo_apex = self.epi_apex = None
         self.endo = self.epi = None
 
-    def set_axis_from_frame(self, origin, axis_dir, radial0) -> None:
-        """Define the long axis from the current long-axis VIEW instead of
-        picked points: *origin* a point on the axis (crosshair), *axis_dir* the
-        rotation axis (view up), *radial0* the θ=0 direction (view right). The
-        apex/base extent is then derived from the traced borders. Clears any
-        contours built against a previous axis."""
-        self.axis = LVAxis.from_frame(origin, axis_dir, radial0)
-        self.endo_contours.clear()
-        self.epi_contours.clear()
-        self.endo_planes.clear()
-        self.epi_planes.clear()
-        self.endo_apex = self.epi_apex = None
-        self.endo = self.epi = None
+    def set_axis_from_frame(self, origin, axis_dir, radial0,
+                            which: str | None = None) -> None:
+        """Define a long axis from the current long-axis VIEW: *origin* a point
+        on the axis (crosshair), *axis_dir* the rotation axis (view up),
+        *radial0* the θ=0 direction (view right). The apex/base extent is derived
+        from the traced borders. *which* ("endo"/"epi") sets that pass's axis and
+        clears only that surface's data; None sets BOTH (legacy) and clears all.
+        ``axis`` is left pointing at the axis just set (the active pass)."""
+        ax = LVAxis.from_frame(origin, axis_dir, radial0)
+        if which in (None, "endo"):
+            self.endo_axis = ax if which == "endo" \
+                else LVAxis.from_frame(origin, axis_dir, radial0)
+            self.endo_contours.clear()
+            self.endo_planes.clear()
+            self.endo_apex = None
+            self.endo = None
+        if which in (None, "epi"):
+            self.epi_axis = ax if which == "epi" \
+                else LVAxis.from_frame(origin, axis_dir, radial0)
+            self.epi_contours.clear()
+            self.epi_planes.clear()
+            self.epi_apex = None
+            self.epi = None
+        self.axis = self._axis_for(which) if which else self.epi_axis
 
     def set_apex_point(self, which: str, p3d) -> None:
         """Set the user-defined apex vertex (volume mm) for *which* surface
@@ -155,44 +179,34 @@ class LVModel:
         lo, hi = min(mins), min(maxs)
         return (lo, hi) if hi > lo else None
 
-    def short_axis_border_pts(self, along0: float, which: str = "endo"):
+    def short_axis_border_pts(self, along0: float, which: str = "endo",
+                              ref_axis: "LVAxis | None" = None):
         """The border points (3-D volume mm) where the traced *which* border
-        crosses the short-axis plane at axial position *along0* (⟂ the rotation
-        axis), ORDERED by angle θ around the axis so a closed spline can be
-        drawn straight through them. None if <3 crossings.
+        crosses the short-axis plane at axial position *along0* along *ref_axis*
+        (the SAX reference axis — the EPI axis, so BOTH borders show on the same
+        cut even though Endo/Epi were traced on their own axes), ORDERED by angle
+        θ around *ref_axis*. None if <3 crossings.
 
-        Method (the DIRECT one, per the clinician's spec): intersect the level
-        plane at *along0* with each traced long-axis border POLYLINE — every
-        segment whose two ends straddle along0 yields one crossing point, right
-        on the drawn border. This makes no assumption about the border being a
-        clean function of along (so a wall that dips toward the axis, or a trace
-        that wiggles, can't misplace a point the way the along/radius split
-        could); the short-axis passes exactly through the long-axis crossings.
-        A plane whose border doesn't reach this level contributes nothing (near
-        the apex the ring simply shrinks through the planes that still cross)."""
-        if self.axis is None:
+        Intersect the level plane at *along0* with each traced border POLYLINE —
+        every segment straddling along0 yields one crossing right on the drawn
+        border. Bin the crossings by θ around ref_axis (2×n_planes bins), keep
+        the OUTERMOST per bin (drops papillary/wiggle inner crossings), and
+        return them θ-ordered so a closed spline can be drawn through them."""
+        ax = ref_axis if ref_axis is not None else self.axis
+        if ax is None:
             return None
         planes = self.endo_planes if which == "endo" else self.epi_planes
         if len(planes) < 2:                    # <2 planes ⇒ <4 crossings
             return None
-        ax = self.axis
-        # For each PLANE, intersect its traced border with the level and assign
-        # every crossing to that plane's own meridian by the SIGN of the in-plane
-        # radial (e_s): s≥0 → φ wall, s<0 → φ+180 wall. This is robust even when
-        # the crossing is near the axis (small radius) — where a global arctan2(θ)
-        # would be noisy and mis-bin the point. Keep the OUTERMOST crossing per
-        # meridian (drops papillary/wiggle inner crossings) and order the result
-        # by meridian angle (deterministic — no θ), giving one clean point per
-        # direction that sits exactly on the long-axis border crossing.
-        best: dict[float, tuple[float, np.ndarray]] = {}
-        for phi, pts3d in planes.items():
+        nbin = max(6, 2 * self.n_planes)
+        best: dict[int, tuple[float, np.ndarray, float]] = {}
+        for _phi, pts3d in planes.items():
             # Densify to the DISPLAYED spline first, so the crossing lies on the
             # drawn long-axis border (matches it even at the curved apex).
             p = _cr_densify_3d(pts3d)
             if len(p) < 2:
                 continue
             along = (p - ax.apex) @ ax.axis
-            e_s = ax.meridian_dir(phi)
             for i in range(len(p) - 1):
                 a0, a1 = float(along[i]), float(along[i + 1])
                 if a0 == a1:
@@ -201,13 +215,18 @@ class LVModel:
                 if not (-1e-9 <= t <= 1.0 + 1e-9):
                     continue
                 P = p[i] + t * (p[i + 1] - p[i])
-                s = float((P - ax.apex) @ e_s)          # signed in-plane radial
-                mth = (phi % 360.0) if s >= 0.0 else ((phi + 180.0) % 360.0)
-                if mth not in best or abs(s) > best[mth][0]:
-                    best[mth] = (abs(s), P)
+                d = P - ax.apex
+                x = float(d @ ax.radial0)
+                y = float(d @ ax.binormal)
+                r = float(np.hypot(x, y))
+                th = float(np.degrees(np.arctan2(y, x))) % 360.0
+                b = int(round(th / 360.0 * nbin)) % nbin
+                if b not in best or r > best[b][0]:
+                    best[b] = (r, P, th)
         if len(best) < 3:
             return None
-        return np.asarray([best[a][1] for a in sorted(best)])
+        order = sorted(best.values(), key=lambda t: t[2])   # by θ
+        return np.asarray([P for _r, P, _th in order])
 
     def plane_angles(self) -> list[float]:
         """Rotation angles (deg) of the long-axis drawing planes. n planes span
@@ -231,9 +250,9 @@ class LVModel:
         split into the φ and φ+180° meridian profiles by the sign of the
         in-plane radial coordinate, each stored as (along, radius) sorted by
         along. *which* is "endo" or "epi"."""
-        if self.axis is None:
+        ax = self._axis_for(which)
+        if ax is None:
             raise RuntimeError("set_axis() before adding contours")
-        ax = self.axis
         e_s = ax.meridian_dir(plane_angle)
         pts = np.asarray(pts3d, dtype=float).reshape(-1, 3)
         # Keep the RAW traced polyline for this plane — the short-axis display
@@ -268,18 +287,22 @@ class LVModel:
         planes.pop((plane_angle + 180.0) % 360.0, None)
 
     # ----------------------------------------------------- persistence (JSON)
+    @staticmethod
+    def _axis_dict(ax):
+        return None if ax is None else {
+            "origin": [float(x) for x in ax.apex],
+            "axis": [float(x) for x in ax.axis],
+            "radial0": [float(x) for x in ax.radial0],
+        }
+
     def to_dict(self) -> dict:
-        """Serialise the axis + traced Endo/Epi borders as 3-D volume-mm data —
-        enough to fully re-apply them to the same series later (LVEF workflow)."""
-        ax = self.axis
+        """Serialise the Endo/Epi axes + apexes + traced borders as 3-D volume-mm
+        data — enough to fully re-apply them to the same series later."""
         return {
-            "kind": "mdv-lvef", "version": 2,
+            "kind": "mdv-lvef", "version": 3,
             "n_planes": self.n_planes,
-            "axis": None if ax is None else {
-                "origin": [float(x) for x in ax.apex],
-                "axis": [float(x) for x in ax.axis],
-                "radial0": [float(x) for x in ax.radial0],
-            },
+            "endo_axis": self._axis_dict(self.endo_axis),
+            "epi_axis": self._axis_dict(self.epi_axis),
             "endo_apex": (None if self.endo_apex is None
                           else [float(x) for x in self.endo_apex]),
             "epi_apex": (None if self.epi_apex is None
@@ -292,17 +315,25 @@ class LVModel:
 
     @classmethod
     def from_dict(cls, d: dict) -> "LVModel":
-        """Rebuild a model from to_dict() output (axis + Endo/Epi 3-D borders)."""
+        """Rebuild a model from to_dict() output. v3 has independent endo/epi
+        axes; v1/v2 have a single 'axis' → use it for BOTH (fallback)."""
         m = cls(n_planes=int(d.get("n_planes", 6)))
-        ax = d.get("axis")
-        if ax:
+        ea, pa = d.get("endo_axis"), d.get("epi_axis")
+        if ea or pa:                                   # v3: independent axes
+            if ea:
+                m.set_axis_from_frame(ea["origin"], ea["axis"], ea["radial0"],
+                                      which="endo")
+            if pa:
+                m.set_axis_from_frame(pa["origin"], pa["axis"], pa["radial0"],
+                                      which="epi")
+        elif d.get("axis"):                            # v1/v2: shared axis
+            ax = d["axis"]
             m.set_axis_from_frame(ax["origin"], ax["axis"], ax["radial0"])
         for which, key in (("endo", "endo_planes"), ("epi", "epi_planes")):
             for k, pts in (d.get(key) or {}).items():
                 arr = np.asarray(pts, float).reshape(-1, 3)
                 if len(arr) >= 2:
                     m.set_long_axis_contour(float(k), arr, which=which)
-        # v2+: user-defined apex vertices (older files have none → capped)
         if d.get("endo_apex") is not None:
             m.set_apex_point("endo", d["endo_apex"])
         if d.get("epi_apex") is not None:
@@ -312,16 +343,16 @@ class LVModel:
     # ----------------------------------------------------------------- build
     def build(self, level_step: float = LV_LEVEL_STEP_MM,
               n_theta: int = LV_RING_POINTS) -> None:
-        """(Re)build the endo (and epi, if traced) ring stacks from the stored
+        """(Re)build the endo/epi ring stacks — each from ITS OWN axis + stored
         meridian contours. Needs ≥3 meridians for a surface."""
-        if self.axis is None:
-            raise RuntimeError("set_axis() before build()")
         self.endo = (LVSurface.from_meridian_contours(
-            self.axis, self.endo_contours, level_step, n_theta)
-            if len(self.endo_contours) >= 3 else None)
+            self.endo_axis, self.endo_contours, level_step, n_theta)
+            if self.endo_axis is not None and len(self.endo_contours) >= 3
+            else None)
         self.epi = (LVSurface.from_meridian_contours(
-            self.axis, self.epi_contours, level_step, n_theta)
-            if len(self.epi_contours) >= 3 else None)
+            self.epi_axis, self.epi_contours, level_step, n_theta)
+            if self.epi_axis is not None and len(self.epi_contours) >= 3
+            else None)
         # converge each built surface to its user-defined apex vertex (if set)
         if self.endo is not None:
             self.endo.apex_world = self.endo_apex
