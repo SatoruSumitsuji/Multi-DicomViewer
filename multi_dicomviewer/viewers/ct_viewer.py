@@ -781,8 +781,9 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # yields while a line is being drawn so tracing always wins.
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._owner._lv is not None):
+            _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             r = self._owner._lv_apex_press(
-                self._which, e.position().x(), e.position().y())
+                self._which, e.position().x(), e.position().y(), _sh)
             if r == "place":
                 return
             if r in ("endo", "epi"):
@@ -2139,31 +2140,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
         row.addWidget(cap)
-        # Trace = enter / leave LV mode (was the "LV EF" toolbar button).
+        # Internal mode flag (no visible toggle any more — Endo/Epi enter LV mode,
+        # Exit LV leaves). Kept for the many `_lv_btn.isChecked()` state checks.
         self._lv_btn = FitButton(t("Trace"))
         self._lv_btn.setCheckable(True)
-        self._lv_btn.setStyleSheet(
-            "QPushButton:checked{background:#c0392b;color:white;}")
-        self._lv_btn.setHelpToolTip(
-            t("LV EF: set a long-axis view first (the current view becomes the "
-              "rotation axis), then trace the endo/epi border on each rotated "
-              "plane to measure LV volume"))
-        self._lv_btn.clicked.connect(self._toggle_lv)
-        row.addWidget(self._lv_btn)
-        # Set axis: capture the current view as the ACTIVE pass's long axis
-        # (used in the ALIGN sub-phase before placing that pass's apex).
+        self._lv_btn.setVisible(False)
+        # Endo / Epi = choose (and ENTER) the analysis pass. Each is traced on its
+        # own long axis. Endo→red, Epi→green when selected / done.
+        self._lv_endo_btn = FitButton(t("Endo"))
+        self._lv_endo_btn.setHelpToolTip(
+            t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_pass("endo"))
+        row.addWidget(self._lv_endo_btn)
+        self._lv_epi_btn = FitButton(t("Epi"))
+        self._lv_epi_btn.setHelpToolTip(
+            t("Epi (myocardial) pass — align its long-axis view, Set axis, then "
+              "Trace"))
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_pass("epi"))
+        row.addWidget(self._lv_epi_btn)
+        # Set axis: capture the current view as the active pass's long axis.
         self._lv_setaxis_btn = FitButton(t("Set axis"))
-        self._lv_setaxis_btn.setStyleSheet("background:#b8860b;color:white;")
         self._lv_setaxis_btn.setHelpToolTip(
-            t("Use the current long-axis view as this pass's rotation axis, then "
-              "place its apex"))
+            t("Use the current long-axis view as this pass's rotation axis"))
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
         row.addWidget(self._lv_setaxis_btn)
+        # Trace: place this pass's apex (first click; Shift-click to adjust the
+        # view instead) then trace its border.
+        self._lv_trace_btn = FitButton(t("Trace"))
+        self._lv_trace_btn.setHelpToolTip(
+            t("Place this pass's apex (first click; Shift-click to adjust the "
+              "view) then trace its border"))
+        self._lv_trace_btn.clicked.connect(self._lv_start_trace)
+        row.addWidget(self._lv_trace_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
         row.addWidget(self._lv_prev_btn)
-        self._lv_plane_lbl = QLabel("0/6")     # 0/6 until Trace is pressed
+        self._lv_plane_lbl = QLabel("0/6")     # 0/6 until a pass is started
         self._lv_plane_lbl.setMinimumWidth(78)
         fl = self._lv_plane_lbl.font(); fl.setBold(True)
         self._lv_plane_lbl.setFont(fl)
@@ -2173,21 +2186,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_next_btn.setHelpToolTip(t("Next long-axis plane"))
         self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
         row.addWidget(self._lv_next_btn)
-        # Explicit target: click Endo or Epi BEFORE tracing (active = blue).
-        # With neither active, a trace is a plain polyline (not captured). The
-        # drawn borders stay colour-coded endo=red / epi=green.
-        self._lv_endo_btn = FitButton(t("Endo"))
-        self._lv_endo_btn.setCheckable(True)
-        self._lv_endo_btn.setStyleSheet(     # active = red, matching the endo line
-            "QPushButton:checked{background:#d32f2f;color:white;}")
-        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_pass("endo"))
-        row.addWidget(self._lv_endo_btn)
-        self._lv_epi_btn = FitButton(t("Epi"))
-        self._lv_epi_btn.setCheckable(True)
-        self._lv_epi_btn.setStyleSheet(      # active = green, matching the epi line
-            "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_pass("epi"))
-        row.addWidget(self._lv_epi_btn)
         # Short-axis display FIRST in the flow (trace → SAX check/edit → Calc):
         # reslice ⟂ the rotation axis and draw the endo/epi borders (splined
         # through the 12 meridian points) at each level; ◀▶ then rotate the
@@ -2244,20 +2242,66 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn.clicked.connect(self._lv_exit)
         row.addWidget(self._lv_exit_btn)
         row.addStretch(1)               # pack all buttons to the LEFT
+        # Controls greyed out until in LV mode (Endo/Epi stay live — they ENTER
+        # LV mode; Load also stays live). _lv_sync_buttons refines by phase.
         self._lv_bar_btns = [
-            self._lv_setaxis_btn, self._lv_prev_btn, self._lv_next_btn,
-            self._lv_endo_btn, self._lv_epi_btn, self._lv_sax_btn,
-            self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
-            self._lv_save_btn, self._lv_load_btn, self._lv_stl_btn,
-            self._lv_exit_btn]
-        self._lv_set_bar_enabled(False)   # only Trace active until LV mode
+            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
+            self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
+            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+            self._lv_stl_btn, self._lv_exit_btn]
+        self._lv_sync_buttons()           # initial (not in LV mode) state
         return self._lv_wrap
 
+    #: LV bar button styles by state (default = plain grey/black).
+    _LV_STY = {
+        "endo": "QPushButton{background:#d32f2f;color:white;}",
+        "epi": "QPushButton{background:#2e8b57;color:white;}",
+        "setaxis": "QPushButton{background:#b8860b;color:white;}",
+        "trace": "QPushButton{background:#c0392b;color:white;}",
+    }
+
     def _lv_set_bar_enabled(self, on: bool) -> None:
-        """Enable/disable the non-Trace LV controls (Trace stays active so the
-        user can always enter LV mode)."""
+        """Enable/disable the non-entry LV controls (Endo/Epi/Load stay live)."""
         for b in getattr(self, "_lv_bar_btns", []):
             b.setEnabled(bool(on))
+
+    def _lv_sync_buttons(self) -> None:
+        """Colour + enable the LV bar by the current pass/phase (see the agreed
+        flow in [[lv-apex-point-feature]]). Endo/Epi are red/green when selected
+        or already set; Set axis turns dark-yellow once this pass's axis is set;
+        Trace turns red once apex/tracing is armed."""
+        lv = self._lv
+        endo_btn, epi_btn = self._lv_endo_btn, self._lv_epi_btn
+        setax, trace = self._lv_setaxis_btn, self._lv_trace_btn
+        endo_btn.setEnabled(True)
+        epi_btn.setEnabled(True)
+        self._lv_load_btn.setEnabled(True)
+        if lv is None:                                # not in LV mode
+            for b in (endo_btn, epi_btn, setax, trace):
+                b.setStyleSheet("")
+            self._lv_set_bar_enabled(False)
+            self._lv_exit_btn.setEnabled(False)
+            return
+        m = lv["model"]
+        ph = lv.get("phase")
+        pas = lv.get("pass")
+        endo_on = pas == "endo" or m.endo_axis is not None
+        epi_on = pas == "epi" or m.epi_axis is not None
+        endo_btn.setStyleSheet(self._LV_STY["endo"] if endo_on else "")
+        epi_btn.setStyleSheet(self._LV_STY["epi"] if epi_on else "")
+        axis_set = m._axis_for(pas) is not None
+        setax.setStyleSheet(self._LV_STY["setaxis"] if axis_set else "")
+        tracing = ph in ("apex", "contour")
+        trace.setStyleSheet(self._LV_STY["trace"] if tracing else "")
+        # enable by phase
+        setax.setEnabled(ph == "align")
+        trace.setEnabled(ph == "ready")
+        contour = ph == "contour"
+        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_sax_btn,
+                  self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
+                  self._lv_save_btn, self._lv_stl_btn):
+            b.setEnabled(contour)
+        self._lv_exit_btn.setEnabled(True)
 
     # -------------------------------------------- plane bar (below the image)
     def _build_plane_bar(self) -> QWidget:
@@ -4576,46 +4620,36 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ------------------------------------------------ LV EF (Phase 1)
     def _toggle_lv(self) -> None:
-        """Enter/leave LV EF mode. The rotation axis is taken from the CURRENT
-        long-axis view (no apex/basal picks): axis = the view's up direction,
-        θ=0 = the view's right, centre = the crosshair. The apex/base extent and
-        the base-cut plane are then derived from the traced borders."""
-        on = self._lv_btn.isChecked()
-        if on:
-            if self._image is None:
-                self._lv_btn.setChecked(False)
-                return
-            from multi_dicomviewer.core.lv_measure import LVModel
-            if self._meas_on:
-                self._meas_btn.setChecked(False)
-                self._toggle_measure()
-            # LV always traces the long axis on the RIGHT pane (B); the LEFT (A)
-            # becomes the short-axis (SAX) side. (User decision 2026-08-03: right
-            # = long axis, regardless of which pane was active.)
-            key0 = "B"
-            u, v, _n = self._frame[key0]
-            a = math.radians(self._cross_ang[key0])
-            # Rotation axis = the RIGHT pane's NON-green-▲ centreline (the
-            # crosshair line WITHOUT the apex arrow — the user aligns it with the
-            # LV long axis). The green-▲ centreline is the θ=0 in-plane radial.
-            # The long-axis view then puts the no-arrow centreline VERTICAL and
-            # steps the planes by rotating the radial around it. (Verified by the
-            # user: the no-arrow line is the one perpendicular to _apex_dir3.)
-            _ = (u, v, a)
-            model = LVModel(n_planes=6)
-            # Endo & Epi are traced as INDEPENDENT passes, each on its own long
-            # axis captured from the aligned view (see [[lv-apex-point-feature]]).
-            # Start the Endo pass in the ALIGN sub-phase: the user orients the
-            # long-axis view, then 'Set axis' captures it.
-            self._lv = {"model": model, "phase": "align", "plane_idx": 0,
-                        "target": None, "pane": key0,   # trace on the RIGHT pane
-                        "sax": None,                    # short-axis level (None=long)
-                        "pass": "endo",                 # active analysis pass
-                        "prev_side": self.current_side()}
-            self._lv_enter_align()
+        """Legacy toggle (kept for callers): enter LV mode on the Endo pass, or
+        leave it."""
+        if self._lv is None:
+            if self._lv_enter_mode():
+                self._lv_select_pass("endo")
         else:
             self._lv_exit(from_toggle=True)
-            return
+
+    def _lv_enter_mode(self) -> bool:
+        """Create the LV model + state (no axis yet — set per pass). Returns False
+        if there's no image. LV always works on the RIGHT pane (B) long axis; the
+        LEFT (A) becomes the short-axis side."""
+        if self._image is None:
+            return False
+        from multi_dicomviewer.core.lv_measure import LVModel
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv = {"model": LVModel(n_planes=6), "phase": "align",
+                    "plane_idx": 0, "target": None, "pane": "B",
+                    "sax": None, "pass": None,
+                    "prev_side": self.current_side()}
+        self._lv_btn.setChecked(True)               # internal mode flag
+        self.set_side("Bi")
+        return True
+
+    def _lv_thick_zero_both(self) -> None:
+        """Slab thickness → 0 mm on both panes (thin slices for tracing)."""
+        for k in ("A", "B"):
+            self._thick[k] = 0.0
 
     # ---- pass flow: align the view → Set axis → place apex → trace ----------
     def _lv_axis_from_view(self):
@@ -4638,39 +4672,59 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["phase"] = "align"
         lv["target"] = None
         self.set_side("Bi")
+        self._lv_thick_zero_both()                  # slab 0 both panes
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
-        self._lv_set_bar_enabled(True)
-        self._lv_sync_pass_buttons()
+        self._lv_sync_buttons()
         self._lv_update_text()
+        self._view_initial = False
+        self._refresh()
         for k in ("A", "B"):
             self.pane[k].render()
 
     def _lv_set_axis(self) -> None:
         """'Set axis' button: capture the current view as the ACTIVE pass's long
-        axis, then place that pass's apex."""
+        axis (→ READY: do final zoom/move, then press Trace)."""
         lv = self._lv
-        if lv is None or lv.get("phase") != "align":
+        if lv is None or lv.get("phase") != "align" or lv.get("pass") is None:
             return
         which = lv["pass"]
         origin, axis_dir, radial0 = self._lv_axis_from_view()
         lv["model"].set_axis_from_frame(origin, axis_dir, radial0, which=which)
-        lv["phase"] = "apex"
-        lv["apex_target"] = which
+        lv["phase"] = "ready"
         lv["plane_idx"] = 0
-        self._lv_sync_pass_buttons()
-        self._lv_show_plane()
+        self._lv_sync_buttons()
+        self._lv_show_plane()                        # right pane: axis vertical
+
+    def _lv_start_trace(self) -> None:
+        """'Trace' button (READY → APEX): arm placement — the first plain click
+        drops this pass's apex (Shift-click adjusts the view instead), then the
+        border is traced."""
+        lv = self._lv
+        if lv is None or lv.get("phase") != "ready":
+            return
+        lv["phase"] = "apex"
+        lv["apex_target"] = lv["pass"]
+        if self._meas_on:                           # clicks place the apex first
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lv_select_pass(self, which: str) -> None:
-        """Endo / Epi button = select that analysis pass. Unset axis → align it;
-        already set → resume tracing on it (its own axis)."""
+        """Endo / Epi button = choose (and ENTER) that analysis pass. Unset axis
+        → align it; already set → resume tracing on its own axis."""
+        if self._lv is None:
+            if not self._lv_enter_mode():
+                return
         lv = self._lv
-        if lv is None:
-            return
         if lv.get("sax") is not None:               # leave SAX back to tracing
             self._lv_leave_sax()
         lv["pass"] = which
+        self._lv_thick_zero_both()
         ax = lv["model"]._axis_for(which)
         if ax is None:
             self._lv_enter_align()
@@ -4679,27 +4733,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["phase"] = "contour"
         lv["plane_idx"] = 0
         self._lv_enter_contour()
-
-    # ---- apex phase: place the active pass's apex on its own long-axis view ----
-    def _lv_sync_pass_buttons(self) -> None:
-        """Reflect the active pass on the Endo/Epi buttons and enable/disable
-        controls by phase: during ALIGN only 'Set axis' is live; during APEX
-        placement trace/analysis stay disabled; in CONTOUR everything is live."""
-        lv = self._lv
-        ph = None if lv is None else lv.get("phase")
-        which = None if lv is None else lv.get("pass")
-        self._lv_endo_btn.setChecked(which == "endo")
-        self._lv_epi_btn.setChecked(which == "epi")
-        setax = getattr(self, "_lv_setaxis_btn", None)
-        if setax is not None:
-            setax.setEnabled(ph == "align")
-        # trace/analysis controls: live only once tracing has started
-        busy = ph in ("align", "apex")
-        for b in (getattr(self, n, None) for n in (
-                "_lv_sax_btn", "_lv_vol_btn", "_lv_stl_btn", "_lv_wall_btn",
-                "_lv_prev_btn", "_lv_next_btn", "_lv_save_btn")):
-            if b is not None:
-                b.setEnabled(not busy)
 
     def _lv_place_apex(self, which, sx, sy) -> bool:
         """Place the ACTIVE pass's apex at the clicked point (phase 'apex'), then
@@ -4718,15 +4751,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_enter_contour()                   # apex set → trace this pass
         return True
 
-    def _lv_apex_press(self, which, sx, sy):
+    def _lv_apex_press(self, which, sx, sy, shift=False):
         """Left-press hit-test for the apex markers. Returns "place" if a click
         was consumed as an apex placement, "endo"/"epi" if an existing marker was
-        grabbed to drag, else None. Grabbing is allowed only when NOT mid-trace
-        (no active draft) — never while drawing a line."""
+        grabbed to drag, else None. In the APEX phase a plain click places the
+        apex; a SHIFT-click yields (None) so the view can be zoomed/moved/rotated
+        to adjust before placing it. Grabbing is allowed only when NOT mid-trace."""
         lv = self._lv
         if lv is None or lv.get("phase") not in ("apex", "contour"):
             return None
         if lv.get("phase") == "apex" and lv.get("apex_target") is not None:
+            if shift:                               # adjust the view, don't place
+                return None
             return "place" if self._lv_place_apex(which, sx, sy) else None
         if which != lv.get("pane"):
             return None
@@ -4776,8 +4812,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._meas_btn.setChecked(True)
             self._toggle_measure()
         self._set_measure_type("polyline")
-        self._lv_set_bar_enabled(True)      # the LV bar is always visible
-        self._lv_sync_pass_buttons()
+        self._lv_sync_buttons()
         self._lv_show_plane()
 
     def _lv_show_plane(self) -> None:
@@ -5595,10 +5630,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_wall = False
         self._lv_wall_btn.setChecked(False)
         self._lv_sax_btn.setChecked(False)  # leave short-axis display
-        self._lv_set_bar_enabled(False)     # the LV bar stays visible; grey out
+        self._lv_btn.setChecked(False)      # internal mode flag off
+        self._lv_sync_buttons()             # reset colours + grey out the bar
         self._lv_plane_lbl.setText("0/6")   # reset the plane counter
-        if not from_toggle:
-            self._lv_btn.setChecked(False)
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
@@ -5627,14 +5661,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             return []
         lines = list(getattr(self, "_lv_result_lines", []))
         pas = lv.get("pass")
+        if pas is None:
+            lines.append(t("LV EF — choose Endo or Epi to start a pass"))
+            return lines
         name = t("Endo (lumen)") if pas == "endo" else t("Epi (myocardial)")
         if lv.get("phase") == "align":
             lines.append(t("LV EF [{p} pass] — align the {p} long-axis view, "
                            "then press 'Set axis'", p=name))
             return lines
+        if lv.get("phase") == "ready":
+            lines.append(t("LV EF [{p} pass] — axis set. Final Zoom/Move, then "
+                           "press 'Trace'", p=name))
+            return lines
         if lv.get("phase") == "apex":
-            lines.append(t("LV EF [{p} pass] — click the {p} apex on the "
-                           "long-axis view", p=name))
+            lines.append(t("LV EF [{p} pass] — click the {p} apex "
+                           "(Shift-click to adjust the view first)", p=name))
             return lines
         if lv.get("phase") == "contour":
             m = lv["model"]
@@ -5759,12 +5800,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_epi_mapper.SetInputData(vtkPolyData())
         p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
         p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
-        if (lv is None or lv.get("phase") not in ("apex", "contour")
-                or lv["model"].axis is None):
+        if lv is None:
             return
-        self._lv_draw_apex_markers(key, p)              # endo/epi apex vertices
-        if lv.get("phase") != "contour":
-            return                                       # apex phase: markers only
+        # Apex markers stay visible in EVERY LV phase once an axis exists (so the
+        # endo apex remains on screen while the epi pass is being set up).
+        if lv["model"].axis is not None:
+            self._lv_draw_apex_markers(key, p)
+        if lv.get("phase") != "contour" or lv["model"].axis is None:
+            return                                       # only markers pre-trace
         ax = lv["model"].axis
         # SHORT-AXIS mode (both panes visible):
         if lv.get("sax") is not None:
