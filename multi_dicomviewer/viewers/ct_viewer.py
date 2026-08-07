@@ -4835,12 +4835,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         first = not lv.get("fitted", False)
         lv["fitted"] = True
         self._view_initial = first
-        # Show only THIS plane's captured borders — they reproject via pts3d, so
-        # another plane's border would draw squished onto this one.
+        # Show only THIS plane's border for the ACTIVE pass. Endo and Epi are on
+        # DIFFERENT axes, so the other pass's border would project onto a wrong
+        # cross-section here (looks broken) — hide it; both show on the SAX pane.
         for mm in self._measures[pane]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx)
+                mm["hidden"] = (tag[0] != idx) or (tag[1] != lv.get("pass"))
         self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")   # e.g. 1/6
         self._refresh(reset_cam=first)
         # Keep the centreline (crosshair) but drop only the slab-width parallel
@@ -4917,10 +4918,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[la] = (u, v, n)
         self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[la] = 0.0
+        # The reference long-axis pane is resliced on the EPI axis here, so only
+        # epi borders lie in-plane — show those; endo borders (their own axis)
+        # would project wrong. Both borders still show on the SAX pane.
         for mm in self._measures[la]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx)
+                mm["hidden"] = (tag[0] != idx) or (tag[1] != "epi")
         self._lv_set_short_frame()                   # short-axis (level) pane
         first = not lv.get("fitted_sax", False)
         lv["fitted_sax"] = True
