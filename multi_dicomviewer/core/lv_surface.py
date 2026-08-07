@@ -175,6 +175,9 @@ class LVSurface:
     along: np.ndarray
     rings: np.ndarray
     reach: np.ndarray = None       # (K,) #meridians defining each level (or None)
+    apex_world: np.ndarray = None  # (3,) user-defined apex vertex the surface
+    #                                converges to (volume mm). None → synthesise a
+    #                                rounded cap from the traced rings instead.
 
     def _reliable_start(self) -> int:
         """Most-apical ring index to KEEP for the display mesh. Below it the
@@ -362,7 +365,13 @@ class LVSurface:
         _, nth, _ = self.rings.shape
         ax = self.axis
         rings_full = _smooth_ring_stack(self.rings) if smooth else self.rings
-        ts = self._reliable_start() if smooth else 0
+        apex_w = getattr(self, "apex_world", None)
+        # With a user-defined apex the near-apex trace points were SNAPPED to it,
+        # so every meridian reaches the tip and the rings taper reliably down to
+        # it — keep ALL levels (no neck-trim) and fan the deepest ring straight to
+        # that exact vertex. Without one, trim the unreliable apical neck and
+        # synthesise a rounded cap as before.
+        ts = 0 if apex_w is not None else (self._reliable_start() if smooth else 0)
         rings = rings_full[ts:]                     # wall = well-sampled levels
         along = self.along[ts:]
         km = len(rings)
@@ -386,6 +395,14 @@ class LVSurface:
             for j in range(nth):                   # flat base cap → solid
                 jn = (j + 1) % nth
                 faces.append([base_i, base0 + j, base0 + jn])
+        if apex_w is not None:                      # converge to the user apex
+            tip_i = nxt
+            verts_list.append(np.asarray(apex_w, float).reshape(1, 3))
+            for j in range(nth):                   # fan the deepest ring → apex
+                jn = (j + 1) % nth                 # winding matches the outward
+                faces.append([tip_i, jn, j])       # wall (edge jn→j on ring 0)
+            verts = np.concatenate(verts_list, 0)
+            return verts, np.asarray(faces, dtype=np.int64)
         # Rounded APEX CAP that CONTINUES the wall (paraboloid fit) below the
         # reliable ring, so it matches the wall's slope at the join (no 'debeso'
         # shoulder) and rounds to a smooth tip.
@@ -418,22 +435,19 @@ class LVSurface:
 
 
 def _cup_block(surf, base_off, outward):
-    """A closed 'cup' (trimmed wall + Bézier apex cap + tip) for one surface,
-    with face indices offset by *base_off* and windings for OUTWARD (epi) or
-    inward (endo). Returns (verts (M,3), faces, base_ring_index, M)."""
+    """A closed 'cup' (wall + apex tip) for one surface, with face indices offset
+    by *base_off* and windings for OUTWARD (epi) or inward (endo). With a
+    user-defined apex the wall keeps all levels and fans straight to that exact
+    vertex; otherwise the apical neck is trimmed and a rounded Bézier cap is
+    synthesised. Returns (verts (M,3), faces, base_ring_index, M)."""
     ax = surf.axis
     rings = _smooth_ring_stack(surf.rings)
-    ts = surf._reliable_start()
+    apex_w = getattr(surf, "apex_world", None)
+    ts = 0 if apex_w is not None else surf._reliable_start()
     rings_t, along_t = rings[ts:], surf.along[ts:]
     nth = rings_t.shape[1]
     km = len(rings_t)
     ring_pts = surf._rings_world(rings_t, along_t)          # km*nth
-    c0 = ax.apex + float(along_t[0]) * ax.axis
-    P0 = ring_pts[:nth]
-    prof, a_tip = _apex_cap_profile(along_t, rings_t)
-    cap_pts = [((ax.apex + d * ax.axis) + sc * (P0 - c0)) for d, sc in prof]
-    tip = (ax.apex + a_tip * ax.axis).reshape(1, 3)
-    verts = np.concatenate([ring_pts] + cap_pts + [tip], 0)
     B = base_off
     faces = []
     for i in range(km - 1):                                 # wall loft
@@ -446,6 +460,21 @@ def _cup_block(surf, base_off, outward):
             else:
                 faces.append([a0 + j, a1 + j, a1 + jn])
                 faces.append([a0 + j, a1 + jn, a0 + jn])
+    if apex_w is not None:                                  # fan deepest ring→apex
+        verts = np.concatenate([ring_pts,
+                                np.asarray(apex_w, float).reshape(1, 3)], 0)
+        tip_i = B + km * nth
+        for j in range(nth):
+            jn = (j + 1) % nth
+            faces.append([tip_i, B + jn, B + j] if outward
+                         else [tip_i, B + j, B + jn])
+        return verts, faces, B + (km - 1) * nth, len(verts)
+    c0 = ax.apex + float(along_t[0]) * ax.axis              # synthesised cap
+    P0 = ring_pts[:nth]
+    prof, a_tip = _apex_cap_profile(along_t, rings_t)
+    cap_pts = [((ax.apex + d * ax.axis) + sc * (P0 - c0)) for d, sc in prof]
+    tip = (ax.apex + a_tip * ax.axis).reshape(1, 3)
+    verts = np.concatenate([ring_pts] + cap_pts + [tip], 0)
     prev = B                                                # apex cap loft
     capB = B + km * nth
     for cidx in range(len(cap_pts)):

@@ -74,6 +74,11 @@ class LVModel:
         # short-axis display: intersect this polyline with the level plane]
         self.endo_planes: dict[float, np.ndarray] = {}
         self.epi_planes: dict[float, np.ndarray] = {}
+        # User-defined apex vertices (volume mm) each surface converges to — the
+        # endocardial (lumen) apex and the epicardial (myocardial) apex, set
+        # before tracing. None → synthesise a rounded cap from the traced rings.
+        self.endo_apex: np.ndarray | None = None
+        self.epi_apex: np.ndarray | None = None
         self.endo: LVSurface | None = None
         self.epi: LVSurface | None = None
 
@@ -86,6 +91,7 @@ class LVModel:
         self.epi_contours.clear()
         self.endo_planes.clear()
         self.epi_planes.clear()
+        self.endo_apex = self.epi_apex = None
         self.endo = self.epi = None
 
     def set_axis_from_frame(self, origin, axis_dir, radial0) -> None:
@@ -99,7 +105,21 @@ class LVModel:
         self.epi_contours.clear()
         self.endo_planes.clear()
         self.epi_planes.clear()
+        self.endo_apex = self.epi_apex = None
         self.endo = self.epi = None
+
+    def set_apex_point(self, which: str, p3d) -> None:
+        """Set the user-defined apex vertex (volume mm) for *which* surface
+        ("endo" = lumen apex, "epi" = myocardial apex). None clears it (falls
+        back to a synthesised cap). Applied to a built surface on the next
+        build()."""
+        p = None if p3d is None else np.asarray(p3d, float).reshape(3)
+        if which == "endo":
+            self.endo_apex = p
+        elif which == "epi":
+            self.epi_apex = p
+        else:
+            raise ValueError("which must be 'endo' or 'epi'")
 
     def along_range(self, which: str = "endo"):
         """(apex_along, base_along) of the currently-captured *which* borders —
@@ -253,13 +273,17 @@ class LVModel:
         enough to fully re-apply them to the same series later (LVEF workflow)."""
         ax = self.axis
         return {
-            "kind": "mdv-lvef", "version": 1,
+            "kind": "mdv-lvef", "version": 2,
             "n_planes": self.n_planes,
             "axis": None if ax is None else {
                 "origin": [float(x) for x in ax.apex],
                 "axis": [float(x) for x in ax.axis],
                 "radial0": [float(x) for x in ax.radial0],
             },
+            "endo_apex": (None if self.endo_apex is None
+                          else [float(x) for x in self.endo_apex]),
+            "epi_apex": (None if self.epi_apex is None
+                         else [float(x) for x in self.epi_apex]),
             "endo_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
                             for k, v in self.endo_planes.items()},
             "epi_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
@@ -278,6 +302,11 @@ class LVModel:
                 arr = np.asarray(pts, float).reshape(-1, 3)
                 if len(arr) >= 2:
                     m.set_long_axis_contour(float(k), arr, which=which)
+        # v2+: user-defined apex vertices (older files have none → capped)
+        if d.get("endo_apex") is not None:
+            m.set_apex_point("endo", d["endo_apex"])
+        if d.get("epi_apex") is not None:
+            m.set_apex_point("epi", d["epi_apex"])
         return m
 
     # ----------------------------------------------------------------- build
@@ -293,6 +322,11 @@ class LVModel:
         self.epi = (LVSurface.from_meridian_contours(
             self.axis, self.epi_contours, level_step, n_theta)
             if len(self.epi_contours) >= 3 else None)
+        # converge each built surface to its user-defined apex vertex (if set)
+        if self.endo is not None:
+            self.endo.apex_world = self.endo_apex
+        if self.epi is not None:
+            self.epi.apex_world = self.epi_apex
 
     # ---------------------------------------------------------------- volume
     def volume_ml(self, spacing: float, which: str = "endo") -> float | None:
