@@ -2150,6 +2150,15 @@ class CTViewer(CPRMixin, AbstractViewer):
               "plane to measure LV volume"))
         self._lv_btn.clicked.connect(self._toggle_lv)
         row.addWidget(self._lv_btn)
+        # Set axis: capture the current view as the ACTIVE pass's long axis
+        # (used in the ALIGN sub-phase before placing that pass's apex).
+        self._lv_setaxis_btn = FitButton(t("Set axis"))
+        self._lv_setaxis_btn.setStyleSheet("background:#b8860b;color:white;")
+        self._lv_setaxis_btn.setHelpToolTip(
+            t("Use the current long-axis view as this pass's rotation axis, then "
+              "place its apex"))
+        self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
+        row.addWidget(self._lv_setaxis_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
@@ -2171,13 +2180,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_btn.setCheckable(True)
         self._lv_endo_btn.setStyleSheet(     # active = red, matching the endo line
             "QPushButton:checked{background:#d32f2f;color:white;}")
-        self._lv_endo_btn.clicked.connect(lambda: self._lv_set_target("endo"))
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_pass("endo"))
         row.addWidget(self._lv_endo_btn)
         self._lv_epi_btn = FitButton(t("Epi"))
         self._lv_epi_btn.setCheckable(True)
         self._lv_epi_btn.setStyleSheet(      # active = green, matching the epi line
             "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._lv_epi_btn.clicked.connect(lambda: self._lv_set_target("epi"))
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_pass("epi"))
         row.addWidget(self._lv_epi_btn)
         # Short-axis display FIRST in the flow (trace → SAX check/edit → Calc):
         # reslice ⟂ the rotation axis and draw the endo/epi borders (splined
@@ -2236,10 +2245,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lv_exit_btn)
         row.addStretch(1)               # pack all buttons to the LEFT
         self._lv_bar_btns = [
-            self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
-            self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
-            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_load_btn, self._lv_stl_btn, self._lv_exit_btn]
+            self._lv_setaxis_btn, self._lv_prev_btn, self._lv_next_btn,
+            self._lv_endo_btn, self._lv_epi_btn, self._lv_sax_btn,
+            self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
+            self._lv_save_btn, self._lv_load_btn, self._lv_stl_btn,
+            self._lv_exit_btn]
         self._lv_set_bar_enabled(False)   # only Trace active until LV mode
         return self._lv_wrap
 
@@ -4591,63 +4601,109 @@ class CTViewer(CPRMixin, AbstractViewer):
             # The long-axis view then puts the no-arrow centreline VERTICAL and
             # steps the planes by rotating the radial around it. (Verified by the
             # user: the no-arrow line is the one perpendicular to _apex_dir3.)
-            axis_dir = -math.sin(a) * u + math.cos(a) * v     # no-arrow centreline
-            radial0 = math.cos(a) * u + math.sin(a) * v       # green-▲ direction
-            origin = np.asarray(self._pc[key0], dtype=float).copy()
+            _ = (u, v, a)
             model = LVModel(n_planes=6)
-            model.set_axis_from_frame(origin, axis_dir, radial0)
-            self._lv = {"model": model, "phase": "apex", "plane_idx": 0,
+            # Endo & Epi are traced as INDEPENDENT passes, each on its own long
+            # axis captured from the aligned view (see [[lv-apex-point-feature]]).
+            # Start the Endo pass in the ALIGN sub-phase: the user orients the
+            # long-axis view, then 'Set axis' captures it.
+            self._lv = {"model": model, "phase": "align", "plane_idx": 0,
                         "target": None, "pane": key0,   # trace on the RIGHT pane
                         "sax": None,                    # short-axis level (None=long)
-                        "apex_target": "endo",          # placing endo apex first
+                        "pass": "endo",                 # active analysis pass
                         "prev_side": self.current_side()}
-            self._lv_enter_apex()
+            self._lv_enter_align()
         else:
             self._lv_exit(from_toggle=True)
             return
 
-    # ---- apex phase: place the endo (lumen) and epi (myocardial) apex points --
-    def _lv_enter_apex(self) -> None:
-        """Before tracing, the operator MUST mark two apex vertices on the
-        long-axis view — the endocardial (lumen) apex, then the epicardial
-        (myocardial) apex — that the reconstructed Endo / Epi surfaces converge
-        to (see [[lvef-feature]]). Show plane 0 and arm single-click placement;
-        tracing is blocked until both are set."""
+    # ---- pass flow: align the view → Set axis → place apex → trace ----------
+    def _lv_axis_from_view(self):
+        """(origin, axis_dir, radial0) of the CURRENT long-axis view on the trace
+        pane — the rotation axis = the no-arrow centreline, θ=0 = the green-▲
+        radial (same convention the single-axis entry used)."""
+        key0 = self._lv["pane"]
+        u, v, _n = self._frame[key0]
+        a = math.radians(self._cross_ang[key0])
+        axis_dir = -math.sin(a) * u + math.cos(a) * v
+        radial0 = math.cos(a) * u + math.sin(a) * v
+        origin = np.asarray(self._pc[key0], dtype=float).copy()
+        return origin, axis_dir, radial0
+
+    def _lv_enter_align(self) -> None:
+        """ALIGN sub-phase for the active pass: free long-axis MPR so the user
+        orients the view; 'Set axis' then captures it. Trace/analysis controls
+        are disabled until the axis is set."""
         lv = self._lv
-        lv["phase"] = "apex"
-        lv["plane_idx"] = 0
+        lv["phase"] = "align"
         lv["target"] = None
-        lv["apex_target"] = ("endo" if lv["model"].endo_apex is None
-                             else ("epi" if lv["model"].epi_apex is None
-                                   else None))
-        self._lv_endo_btn.setChecked(False)
-        self._lv_epi_btn.setChecked(False)
         self.set_side("Bi")
-        # Measure OFF during apex placement — a left click drops an apex point,
-        # not a polyline vertex.
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lv_set_bar_enabled(True)
-        self._lv_update_apex_buttons()
+        self._lv_sync_pass_buttons()
+        self._lv_update_text()
+        for k in ("A", "B"):
+            self.pane[k].render()
+
+    def _lv_set_axis(self) -> None:
+        """'Set axis' button: capture the current view as the ACTIVE pass's long
+        axis, then place that pass's apex."""
+        lv = self._lv
+        if lv is None or lv.get("phase") != "align":
+            return
+        which = lv["pass"]
+        origin, axis_dir, radial0 = self._lv_axis_from_view()
+        lv["model"].set_axis_from_frame(origin, axis_dir, radial0, which=which)
+        lv["phase"] = "apex"
+        lv["apex_target"] = which
+        lv["plane_idx"] = 0
+        self._lv_sync_pass_buttons()
         self._lv_show_plane()
 
-    def _lv_update_apex_buttons(self) -> None:
-        """During apex placement, disable every trace/analysis control so the two
-        apex picks are mandatory; re-enable once both are set (or in a later
-        phase)."""
+    def _lv_select_pass(self, which: str) -> None:
+        """Endo / Epi button = select that analysis pass. Unset axis → align it;
+        already set → resume tracing on it (its own axis)."""
         lv = self._lv
-        placing = lv is not None and lv.get("phase") == "apex" \
-            and lv.get("apex_target") is not None
+        if lv is None:
+            return
+        if lv.get("sax") is not None:               # leave SAX back to tracing
+            self._lv_leave_sax()
+        lv["pass"] = which
+        ax = lv["model"]._axis_for(which)
+        if ax is None:
+            self._lv_enter_align()
+            return
+        lv["model"].axis = ax                       # activate this pass's axis
+        lv["phase"] = "contour"
+        lv["plane_idx"] = 0
+        self._lv_enter_contour()
+
+    # ---- apex phase: place the active pass's apex on its own long-axis view ----
+    def _lv_sync_pass_buttons(self) -> None:
+        """Reflect the active pass on the Endo/Epi buttons and enable/disable
+        controls by phase: during ALIGN only 'Set axis' is live; during APEX
+        placement trace/analysis stay disabled; in CONTOUR everything is live."""
+        lv = self._lv
+        ph = None if lv is None else lv.get("phase")
+        which = None if lv is None else lv.get("pass")
+        self._lv_endo_btn.setChecked(which == "endo")
+        self._lv_epi_btn.setChecked(which == "epi")
+        setax = getattr(self, "_lv_setaxis_btn", None)
+        if setax is not None:
+            setax.setEnabled(ph == "align")
+        # trace/analysis controls: live only once tracing has started
+        busy = ph in ("align", "apex")
         for b in (getattr(self, n, None) for n in (
-                "_lv_endo_btn", "_lv_epi_btn", "_lv_sax_btn", "_lv_vol_btn",
-                "_lv_stl_btn", "_lv_prev_btn", "_lv_next_btn", "_lv_save_btn")):
+                "_lv_sax_btn", "_lv_vol_btn", "_lv_stl_btn", "_lv_wall_btn",
+                "_lv_prev_btn", "_lv_next_btn", "_lv_save_btn")):
             if b is not None:
-                b.setEnabled(not placing)
+                b.setEnabled(not busy)
 
     def _lv_place_apex(self, which, sx, sy) -> bool:
-        """Place the current apex target at the clicked point on the long-axis
-        pane (phase 'apex'). Returns True if the click was consumed."""
+        """Place the ACTIVE pass's apex at the clicked point (phase 'apex'), then
+        start tracing that pass. Returns True if the click was consumed."""
         lv = self._lv
         if (lv is None or lv.get("phase") != "apex"
                 or lv.get("apex_target") is None or which != lv.get("pane")):
@@ -4658,17 +4714,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         tgt = lv["apex_target"]
         lv["model"].set_apex_point(tgt, P)
         self._lv_result_lines = []                 # invalidate any volume result
-        if tgt == "endo":
-            lv["apex_target"] = "epi"
-        else:
-            lv["apex_target"] = None
-            self._lv_enter_contour()               # both set → start tracing
-            return True
-        self._lv_update_apex_buttons()
-        self._lv_update_text()
-        self._redraw_all_lv()
-        for k in ("A", "B"):
-            self.pane[k].render()
+        lv["apex_target"] = None
+        self._lv_enter_contour()                   # apex set → trace this pass
         return True
 
     def _lv_apex_press(self, which, sx, sy):
@@ -4714,26 +4761,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self.pane[k].render()
 
-    # ---- contour phase: step the rotated long-axis planes, trace endo/epi ----
+    # ---- contour phase: step the rotated long-axis planes, trace this pass ----
     def _lv_enter_contour(self) -> None:
-        """Axis is set → show long-axis plane 0 on a single big pane and arm the
-        polyline tool so the endo/epi border is traced exactly like a vessel
-        trace (each vertex captured in 3-D)."""
+        """Axis + apex are set → trace the ACTIVE pass's border on its rotated
+        long-axis planes (the target is LOCKED to the pass — Endo pass traces
+        endo, Epi pass traces epi)."""
         lv = self._lv
         lv["phase"] = "contour"
         lv["plane_idx"] = 0
-        lv["target"] = None                       # no capture until Endo/Epi is
-        self._lv_endo_btn.setChecked(False)       # clicked → plain polyline
-        self._lv_epi_btn.setChecked(False)
-        # Stay in Bi: trace on the ACTIVE pane (the one the user set the
-        # long-axis view on), keeping the other pane visible for reference so
-        # SAX can be checked side-by-side without a layout switch.
+        lv["target"] = lv["pass"]                  # capture is locked to the pass
+        lv["model"].axis = lv["model"]._axis_for(lv["pass"])
         self.set_side("Bi")
         if not self._meas_on:
             self._meas_btn.setChecked(True)
             self._toggle_measure()
         self._set_measure_type("polyline")
         self._lv_set_bar_enabled(True)      # the LV bar is always visible
+        self._lv_sync_pass_buttons()
         self._lv_show_plane()
 
     def _lv_show_plane(self) -> None:
@@ -4783,14 +4827,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._lv_sax_btn.isChecked():
             self._lv_capture_current()
-            rng = self._lv_level_range()
             m = lv["model"]
-            if rng is None or (len(m.endo_contours) < 3
-                               and len(m.epi_contours) < 3):
+            if (m.epi_axis is None or len(m.epi_contours) < 3
+                    or m.endo_axis is None or len(m.endo_contours) < 3):
                 self._lv_sax_btn.setChecked(False)
                 QMessageBox.information(
                     self.window(), t("LV EF"),
-                    t("Trace the endo border on at least 3 planes first."))
+                    t("Complete BOTH passes first — trace Endo and Epi on at "
+                      "least 3 planes each. The short-axis uses the Epi axis."))
+                return
+            # SAX is referenced to the EPI (myocardial) axis; point the model's
+            # active axis there so the existing SAX code slices both borders
+            # against it (short_axis_border_pts default ref_axis = model.axis).
+            m.axis = self._lv_sax_axis()
+            rng = self._lv_level_range()
+            if rng is None:
+                self._lv_sax_btn.setChecked(False)
                 return
             # Start at the mid of the COMMON range (where the border is drawn),
             # not the scroll range (which extends past the apex), so the border
@@ -4890,9 +4942,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].set_slab_visible(False)
             self.pane[k].render()
 
+    def _lv_sax_axis(self):
+        """The reference axis for the short-axis display = the EPI (myocardial)
+        axis (falls back to endo / active if epi isn't set)."""
+        m = self._lv["model"]
+        return m.epi_axis or m.endo_axis or m.axis
+
     def _lv_leave_sax(self) -> None:
         """Return from short-axis to the long-axis view (staying in Bi): restore
-        the cross-section pane to the image it showed before SAX."""
+        the cross-section pane to the image it showed before SAX and re-activate
+        the current pass's axis for tracing."""
         lv = self._lv
         sa = lv.get("sax_pane")
         saved = lv.get("sax_saved")
@@ -4903,6 +4962,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._thick[sa] = saved[3]
         lv["sax"] = None
         lv["sax_saved"] = None
+        lv["model"].axis = lv["model"]._axis_for(lv.get("pass"))
+        lv["target"] = lv.get("pass")           # resume tracing this pass
         self._lv_sax_btn.setChecked(False)
 
     def _lv_snap_apex(self, pts3d, target, tol=3.0):
@@ -4987,7 +5048,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if not (m.get("type") == "polyline" and m.get("_lv") is None)]
         self._draft = None
         self._lv["plane_idx"] += int(delta)
-        self._lv_apply_target("endo")      # each new plane starts on Endo
+        self._lv_apply_target(self._lv["pass"])   # target locked to this pass
         self._lv_show_plane()
 
     def _lv_sax_active(self) -> bool:
@@ -5203,7 +5264,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv["plane_idx"] = 0
         if self._lv.get("sax") is not None:     # leaving short-axis (stay Bi)
             self._lv_leave_sax()
-        self._lv_apply_target(None)
+        self._lv_apply_target(self._lv.get("pass"))
         self._lv_show_plane()
         self._redraw_meas(pane)
 
@@ -5478,11 +5539,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._toggle_measure()
         self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
                     "target": None, "pane": "B", "sax": None,
+                    "pass": "epi" if model.epi_axis is not None else "endo",
                     "prev_side": self.current_side()}
         self._lv_btn.setChecked(True)
         self._lv_enter_contour()
         self._lv_rebuild_measures()
-        self._lv_apply_target("endo")
+        self._lv_apply_target(self._lv["pass"])
         self._lv_show_plane()
         self._lv_result_lines = [
             t("Loaded borders: endo {ne} / epi {nep} planes",
@@ -5564,27 +5626,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return []
         lines = list(getattr(self, "_lv_result_lines", []))
+        pas = lv.get("pass")
+        name = t("Endo (lumen)") if pas == "endo" else t("Epi (myocardial)")
+        if lv.get("phase") == "align":
+            lines.append(t("LV EF [{p} pass] — align the {p} long-axis view, "
+                           "then press 'Set axis'", p=name))
+            return lines
         if lv.get("phase") == "apex":
-            tgt = lv.get("apex_target")
-            if tgt == "endo":
-                lines.append(t("LV EF — click the ENDO (lumen) apex on the "
-                               "long-axis view"))
-            elif tgt == "epi":
-                lines.append(t("LV EF — now click the EPI (myocardial) apex"))
+            lines.append(t("LV EF [{p} pass] — click the {p} apex on the "
+                           "long-axis view", p=name))
             return lines
         if lv.get("phase") == "contour":
             m = lv["model"]
-            tgt = lv.get("target")
-            if tgt == "endo":
-                head = t("tracing Endo (red) — double-click to finish")
-            elif tgt == "epi":
-                head = t("tracing Epi (green) — double-click to finish")
-            else:
-                head = t("click Endo or Epi to trace that border "
-                         "(otherwise it's a plain polyline)")
+            head = (t("tracing Endo (red) — double-click to finish")
+                    if pas == "endo"
+                    else t("tracing Epi (green) — double-click to finish"))
             lines.append(
-                t("LV EF — {head}\ncaptured: endo {ne} / epi {nep} meridians",
-                  head=head, ne=len(m.endo_contours), nep=len(m.epi_contours)))
+                t("LV EF [{p} pass] — {head}\ncaptured: endo {ne} / epi {nep} "
+                  "meridians", p=name, head=head,
+                  ne=len(m.endo_contours), nep=len(m.epi_contours)))
         return lines
 
     @staticmethod
