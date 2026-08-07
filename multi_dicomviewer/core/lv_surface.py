@@ -511,8 +511,21 @@ def myocardial_shell_mesh(inner: "LVSurface", outer: "LVSurface"):
     ov, ofaces, obase, _osz = _cup_block(outer, isz, outward=True)
     verts = np.concatenate([iv, ov], 0)
     faces = ifaces + ofaces
-    for j in range(nth):                                    # base rim annulus
+    # Base rim annulus joining the inner & outer base rings. Endo and Epi may be
+    # traced on DIFFERENT axes, so vertex j of one need not point the same world
+    # direction as vertex j of the other — align by world angle around the OUTER
+    # (epi) axis and bridge with a constant offset (any offset is watertight; the
+    # offset just keeps the rim from twisting).
+    rax = outer.axis
+    ib = verts[ibase:ibase + nth] - rax.apex
+    ob = verts[obase:obase + nth] - rax.apex
+    phi_i = np.arctan2(ib @ rax.binormal, ib @ rax.radial0)
+    phi_o = np.arctan2(ob @ rax.binormal, ob @ rax.radial0)
+    dphi = (phi_o - phi_i[0] + np.pi) % (2 * np.pi) - np.pi
+    s = int(np.argmin(np.abs(dphi)))                       # outer vtx ≈ inner[0]
+    for j in range(nth):                                    # watertight annulus
         jn = (j + 1) % nth
-        faces.append([ibase + j, obase + j, obase + jn])
-        faces.append([ibase + j, obase + jn, ibase + jn])
+        oj, ojn = (j + s) % nth, (jn + s) % nth
+        faces.append([ibase + j, obase + oj, obase + ojn])
+        faces.append([ibase + j, obase + ojn, ibase + jn])
     return verts, np.asarray(faces, dtype=np.int64)
