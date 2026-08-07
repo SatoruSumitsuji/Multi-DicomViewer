@@ -775,6 +775,23 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
+        # LV apex points: place the two apex vertices (apex phase) or grab an
+        # existing marker to drag it. Checked before Measure so a click near a
+        # marker moves the apex instead of adding a trace point; _lv_apex_press
+        # yields while a line is being drawn so tracing always wins.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._lv is not None):
+            r = self._owner._lv_apex_press(
+                self._which, e.position().x(), e.position().y())
+            if r == "place":
+                return
+            if r in ("endo", "epi"):
+                self._owner._lv_apex_drag = r
+                self._cross = False
+                self._meas_drag = False
+                self._lv_line = False
+                self._last = e.position()
+                return
         # SAX: grab the thick ○-marked LEVEL line (long-axis pane → translate the
         # cross-section level) or CENTRELINE (short-axis pane → rotate the
         # meridian) to review the endo/epi borders. Checked before Measure so the
@@ -852,6 +869,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                               p.y() - self._last.y(), shift, p.x(), p.y())
             self._last = p
             return
+        if self._owner._lv_apex_drag is not None and self._last is not None:
+            self._owner._lv_apex_move(
+                self._which, e.position().x(), e.position().y())
+            self._last = e.position()
+            return
         if getattr(self, "_lv_line", False) and self._last is not None:
             self._owner._lv_line_move(
                 self._which, e.position().x(), e.position().y())
@@ -912,6 +934,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if self._owner._lv_apex_drag is not None:
+            self._owner._lv_apex_drag = None
+            self._last = None
+            return
         if getattr(self, "_lv_line", False):
             self._owner._lv_line_drag = None
             self._owner._lv_line_set_grabbed(self._which, False)
@@ -1243,6 +1269,21 @@ class _Pane:
             lpa.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lpa)
         self.lv_pts_actor = lpa
+        # LV user-defined APEX markers (endo=red, epi=green) — the vertices the
+        # reconstructed surface converges to. Bigger than the crossing dots and
+        # own actor so they draw over everything and stay grabbable.
+        self.lv_apex_mapper = vtkPolyDataMapper()
+        self.lv_apex_mapper.SetInputData(vtkPolyData())
+        self.lv_apex_mapper.ScalarVisibilityOn()
+        self.lv_apex_mapper.SetScalarModeToUseCellData()
+        self.lv_apex_mapper.SetColorModeToDirectScalars()
+        lapx = vtkActor()
+        lapx.SetMapper(self.lv_apex_mapper)
+        lapx.GetProperty().SetPointSize(15.0)   # SCREEN px → constant under zoom
+        if hasattr(lapx.GetProperty(), "SetRenderPointsAsSpheres"):
+            lapx.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(lapx)
+        self.lv_apex_actor = lapx
         # Captured endo (red) / epi (green) borders — redrawn from the model so
         # a traced border stays visible (and re-appears on revisiting a plane).
         self.lv_endo_mapper = vtkPolyDataMapper()
@@ -1898,6 +1939,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_line_drag = None            # "level"/"meridian" while grabbing
         #                                      the SAX level / centre line
         self._lv_line_hi = {"A": False, "B": False}   # line thickened on hover
+        self._lv_apex_drag = None            # "endo"/"epi" while dragging an apex
+        #                                      marker (None = not dragging)
         # Drawn crosshair rotation per pane (deg); follows the cursor
         # while CrossLine-dragging so the crosshair tracks the drag.
         self._cross_ang = {"A": 0.0, "B": 0.0}
@@ -4553,14 +4596,123 @@ class CTViewer(CPRMixin, AbstractViewer):
             origin = np.asarray(self._pc[key0], dtype=float).copy()
             model = LVModel(n_planes=6)
             model.set_axis_from_frame(origin, axis_dir, radial0)
-            self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
+            self._lv = {"model": model, "phase": "apex", "plane_idx": 0,
                         "target": None, "pane": key0,   # trace on the RIGHT pane
                         "sax": None,                    # short-axis level (None=long)
+                        "apex_target": "endo",          # placing endo apex first
                         "prev_side": self.current_side()}
-            self._lv_enter_contour()
+            self._lv_enter_apex()
         else:
             self._lv_exit(from_toggle=True)
             return
+
+    # ---- apex phase: place the endo (lumen) and epi (myocardial) apex points --
+    def _lv_enter_apex(self) -> None:
+        """Before tracing, the operator MUST mark two apex vertices on the
+        long-axis view — the endocardial (lumen) apex, then the epicardial
+        (myocardial) apex — that the reconstructed Endo / Epi surfaces converge
+        to (see [[lvef-feature]]). Show plane 0 and arm single-click placement;
+        tracing is blocked until both are set."""
+        lv = self._lv
+        lv["phase"] = "apex"
+        lv["plane_idx"] = 0
+        lv["target"] = None
+        lv["apex_target"] = ("endo" if lv["model"].endo_apex is None
+                             else ("epi" if lv["model"].epi_apex is None
+                                   else None))
+        self._lv_endo_btn.setChecked(False)
+        self._lv_epi_btn.setChecked(False)
+        self.set_side("Bi")
+        # Measure OFF during apex placement — a left click drops an apex point,
+        # not a polyline vertex.
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_set_bar_enabled(True)
+        self._lv_update_apex_buttons()
+        self._lv_show_plane()
+
+    def _lv_update_apex_buttons(self) -> None:
+        """During apex placement, disable every trace/analysis control so the two
+        apex picks are mandatory; re-enable once both are set (or in a later
+        phase)."""
+        lv = self._lv
+        placing = lv is not None and lv.get("phase") == "apex" \
+            and lv.get("apex_target") is not None
+        for b in (getattr(self, n, None) for n in (
+                "_lv_endo_btn", "_lv_epi_btn", "_lv_sax_btn", "_lv_vol_btn",
+                "_lv_stl_btn", "_lv_prev_btn", "_lv_next_btn", "_lv_save_btn")):
+            if b is not None:
+                b.setEnabled(not placing)
+
+    def _lv_place_apex(self, which, sx, sy) -> bool:
+        """Place the current apex target at the clicked point on the long-axis
+        pane (phase 'apex'). Returns True if the click was consumed."""
+        lv = self._lv
+        if (lv is None or lv.get("phase") != "apex"
+                or lv.get("apex_target") is None or which != lv.get("pane")):
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        tgt = lv["apex_target"]
+        lv["model"].set_apex_point(tgt, P)
+        self._lv_result_lines = []                 # invalidate any volume result
+        if tgt == "endo":
+            lv["apex_target"] = "epi"
+        else:
+            lv["apex_target"] = None
+            self._lv_enter_contour()               # both set → start tracing
+            return True
+        self._lv_update_apex_buttons()
+        self._lv_update_text()
+        self._redraw_all_lv()
+        for k in ("A", "B"):
+            self.pane[k].render()
+        return True
+
+    def _lv_apex_press(self, which, sx, sy):
+        """Left-press hit-test for the apex markers. Returns "place" if a click
+        was consumed as an apex placement, "endo"/"epi" if an existing marker was
+        grabbed to drag, else None. Grabbing is allowed only when NOT mid-trace
+        (no active draft) — never while drawing a line."""
+        lv = self._lv
+        if lv is None or lv.get("phase") not in ("apex", "contour"):
+            return None
+        if lv.get("phase") == "apex" and lv.get("apex_target") is not None:
+            return "place" if self._lv_place_apex(which, sx, sy) else None
+        if which != lv.get("pane"):
+            return None
+        drafting = (self._draft is not None
+                    and self._draft.get("pane") == which)
+        if drafting:                                # never grab while tracing
+            return None
+        wx, wy = self._disp_to_world(which, sx, sy)
+        rgrab = self._lv_px_to_mm(which, 14.0)
+        for tgt in ("endo", "epi"):
+            P = (lv["model"].endo_apex if tgt == "endo"
+                 else lv["model"].epi_apex)
+            if P is None:
+                continue
+            ox, oy = self._world3d_to_out(which, P)
+            if math.hypot(wx - ox, wy - oy) <= rgrab:
+                return tgt
+        return None
+
+    def _lv_apex_move(self, which, sx, sy) -> None:
+        """Drag the grabbed apex marker to a new 3-D point on the long-axis
+        plane."""
+        tgt = self._lv_apex_drag
+        if tgt is None or self._lv is None:
+            return
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        self._lv["model"].set_apex_point(tgt, P)
+        self._lv_result_lines = []
+        self._redraw_all_lv()
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     # ---- contour phase: step the rotated long-axis planes, trace endo/epi ----
     def _lv_enter_contour(self) -> None:
@@ -4753,6 +4905,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["sax_saved"] = None
         self._lv_sax_btn.setChecked(False)
 
+    def _lv_snap_apex(self, pts3d, target, tol=3.0):
+        """Return *pts3d* (list of 3-tuples) with any vertex within *tol* mm of
+        the *target* apex vertex moved exactly onto it, and consecutive
+        duplicates collapsed. No apex set → unchanged."""
+        lv = self._lv
+        P = (lv["model"].endo_apex if target == "endo"
+             else lv["model"].epi_apex)
+        arr = np.asarray(pts3d, float).reshape(-1, 3)
+        if P is None or len(arr) == 0:
+            return [tuple(q) for q in arr]
+        snapped = np.where(
+            (np.linalg.norm(arr - P, axis=1) <= tol)[:, None], P, arr)
+        out = [tuple(snapped[0])]
+        for q in snapped[1:]:                       # drop consecutive duplicates
+            if np.linalg.norm(np.asarray(out[-1]) - q) > 1e-6:
+                out.append(tuple(q))
+        return out
+
     def _lv_capture_current(self) -> None:
         """Capture the freshly-traced polyline on the LV pane into the model for
         the current (plane, target), then KEEP it on screen — recoloured
@@ -4776,6 +4946,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 break
         if m is None:
             return
+        # Snap any vertex within 3 mm of this surface's apex vertex to it, so
+        # every meridian passes through the shared apex (the displayed border
+        # ends there too — see [[lvef-feature]]).
+        m["pts3d"] = self._lv_snap_apex(m["pts3d"], lv["target"])
         phi = lv["model"].plane_angles()[lv["plane_idx"]]
         try:
             lv["model"].set_long_axis_contour(phi, m["pts3d"], which=lv["target"])
@@ -5390,6 +5564,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return []
         lines = list(getattr(self, "_lv_result_lines", []))
+        if lv.get("phase") == "apex":
+            tgt = lv.get("apex_target")
+            if tgt == "endo":
+                lines.append(t("LV EF — click the ENDO (lumen) apex on the "
+                               "long-axis view"))
+            elif tgt == "epi":
+                lines.append(t("LV EF — now click the EPI (myocardial) apex"))
+            return lines
         if lv.get("phase") == "contour":
             m = lv["model"]
             tgt = lv.get("target")
@@ -5484,6 +5666,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         _p0, p1, _ok = self._lv_line_clip(key, ax0, ay0, ux, uy)
         return p1
 
+    def _lv_draw_apex_markers(self, key, p) -> None:
+        """Draw the user-defined Endo (red) / Epi (green) apex markers. On the
+        long-axis (trace) pane both are shown (they lie in every rotated plane
+        through the axis); on the short-axis pane a marker shows ONLY when its
+        level matches the current cross-section (within a slice tolerance), so it
+        appears just when that apex is actually in this cut."""
+        lv = self._lv
+        if lv is None or lv["model"].axis is None:
+            return
+        ax = lv["model"].axis
+        pts, cols = [], []
+        sax = lv.get("sax")
+        is_sax = sax is not None and key == lv.get("sax_pane")
+        for tgt, rgb in (("endo", (255, 64, 64)), ("epi", (64, 200, 80))):
+            P = lv["model"].endo_apex if tgt == "endo" else lv["model"].epi_apex
+            if P is None:
+                continue
+            if is_sax:                                  # only if in THIS cut
+                if abs(float(ax.project(P)[0]) - float(sax)) > 2.0:
+                    continue
+            elif key != lv.get("pane"):
+                continue
+            pts.append(self._world3d_to_out(key, P))
+            cols.append(rgb)
+        if pts:
+            p.lv_apex_mapper.SetInputData(_lv_pts_pd(pts, cols, z=0.9))
+
     def _redraw_lv(self, key) -> None:
         """Draw the base-cut line for the current long-axis plane on the LV pane.
         The endo/epi BORDERS are the user's own traced polylines (kept on screen
@@ -5496,9 +5705,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_endo_mapper.SetInputData(vtkPolyData())    # borders = the measures
         p.lv_epi_mapper.SetInputData(vtkPolyData())
         p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
-        if (lv is None or lv.get("phase") != "contour"
+        p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
+        if (lv is None or lv.get("phase") not in ("apex", "contour")
                 or lv["model"].axis is None):
             return
+        self._lv_draw_apex_markers(key, p)              # endo/epi apex vertices
+        if lv.get("phase") != "contour":
+            return                                       # apex phase: markers only
         ax = lv["model"].axis
         # SHORT-AXIS mode (both panes visible):
         if lv.get("sax") is not None:
