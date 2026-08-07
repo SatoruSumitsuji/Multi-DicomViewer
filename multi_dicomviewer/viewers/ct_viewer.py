@@ -4800,16 +4800,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                     and self._draft.get("pane") == which)
         if drafting:                                # never grab while tracing
             return None
+        # Only the ACTIVE pass's apex is grabbable — the other pass's apex is
+        # shown for reference but must not be selected/moved from here.
+        tgt = lv.get("pass")
+        P = (lv["model"].endo_apex if tgt == "endo"
+             else lv["model"].epi_apex if tgt == "epi" else None)
+        if P is None:
+            return None
         wx, wy = self._disp_to_world(which, sx, sy)
         rgrab = self._lv_px_to_mm(which, 14.0)
-        for tgt in ("endo", "epi"):
-            P = (lv["model"].endo_apex if tgt == "endo"
-                 else lv["model"].epi_apex)
-            if P is None:
-                continue
-            ox, oy = self._world3d_to_out(which, P)
-            if math.hypot(wx - ox, wy - oy) <= rgrab:
-                return tgt
+        ox, oy = self._world3d_to_out(which, P)
+        if math.hypot(wx - ox, wy - oy) <= rgrab:
+            return tgt
         return None
 
     def _lv_apex_move(self, which, sx, sy) -> None:
