@@ -5690,6 +5690,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif ph in ("apex", "contour") and lv.get("sax") is None:
             lv["phase"] = "ready"                    # UNDO trace → ready
             lv["apex_target"] = None
+            # Clear this pass's placed apex so its marker disappears and it can be
+            # re-placed (re-Trace) — or the axis redone via Set axis.
+            lv["model"].set_apex_point(lv["pass"], None)
+            self._lv_result_lines = []
             if self._meas_on:
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
