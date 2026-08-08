@@ -613,8 +613,7 @@ class _Overlay(QWidget):
     def _paint_lv(self, p, key, w, h):
         v = self._v
         lv = v._lv
-        if lv is None or lv.get("phase") != "contour" \
-                or lv["model"].axis is None:
+        if lv is None or lv["model"].axis is None:
             return
         ax = lv["model"].axis
 
@@ -622,12 +621,31 @@ class _Overlay(QWidget):
             sx, sy = v._world_to_screen(key, pt[0], pt[1])
             return QPointF(sx, sy)
 
+        # Apex markers stay visible in EVERY LV phase once an axis exists — but
+        # ONLY the ACTIVE pass's marker is drawn (endo=red / epi=green), on the
+        # long-axis (trace) pane and, in SAX, on the cross-section pane too.
+        if key in (lv.get("pane"), lv.get("sax_pane")):
+            tgt = lv.get("pass")
+            if tgt == "endo":
+                Pa, argb = lv["model"].endo_apex, (255, 64, 64)
+            elif tgt == "epi":
+                Pa, argb = lv["model"].epi_apex, (64, 200, 80)
+            else:
+                Pa, argb = None, None
+            if Pa is not None:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(*argb))
+                p.drawEllipse(S(v._world3d_to_out(key, Pa)), 6.0, 6.0)
+
+        if lv.get("phase") != "contour":
+            return                                # only apex markers pre-trace
+
         yellow = QColor(255, 210, 0)
         if lv.get("sax") is not None:
             along0 = float(lv["sax"])
             if key == lv.get("sax_pane"):
                 border_sm, mark = {}, []
-                for which in ("endo", "epi"):
+                for which in v._lv_sax_borders():   # single pass, or both
                     sp = lv["model"].short_axis_border_pts(along0, which)
                     if sp is None or len(sp) < 3:
                         continue
@@ -637,6 +655,7 @@ class _Overlay(QWidget):
                 if v._lv_wall and "endo" in border_sm and "epi" in border_sm:
                     self._paint_lv_wall(p, key, border_sm["endo"],
                                         border_sm["epi"])
+                    self._paint_lv_wall_legend(p, w, h)
                 for which, colr in (("endo", (255, 64, 64)),
                                     ("epi", (64, 192, 64))):
                     sm = border_sm.get(which)
@@ -710,6 +729,26 @@ class _Overlay(QWidget):
             p.setBrush(QColor(rgb[0], rgb[1], rgb[2], 140))
             p.drawPolygon(QPolygonF([S(a["inner"]), S(a["outer"]),
                                      S(b["outer"]), S(b["inner"])]))
+
+    def _paint_lv_wall_legend(self, p, w, h):
+        """Bottom-left wall-thickness colour key (red <5 / orange 5-7 /
+        yellow 7-9 / green >9 mm), shown only while the wall map is up — the
+        QPainter equivalent of the VTK viewer's _lv_update_wall_legend."""
+        bands = _gap_legend()
+        if not bands:
+            return
+        p.setFont(QFont("monospace", 11))
+        _black, _white = QColor(0, 0, 0), QColor(255, 255, 255)
+        lh = 16.0
+        y = h - 40 - len(bands) * lh
+        fl = int(Qt.AlignmentFlag.AlignLeft) | int(Qt.AlignmentFlag.AlignVCenter)
+        for lab, hexc in bands:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(hexc))
+            p.drawRect(QRectF(10, y - 10 - 3.6, 12, 12))
+            _draw_outlined_text(p, QRectF(34, y - lh, 200, lh), fl, lab,
+                                _white, 1.0, _black)
+            y += lh
 
     def _paint_measures(self, p, key, w, h):
         v = self._v
@@ -1499,6 +1538,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_result_lines = []
         self._lv_wall = False
         self._lv_line_drag = None             # "level"/"meridian" while grabbing
+        self._lv_apex_drag = None             # "endo"/"epi" while dragging an apex
         self._lv_line_hi = {"A": False, "B": False}
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
@@ -1722,6 +1762,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if self._meas_on:
                 return                        # right-click in measure mode = no-op
+        # LV apex points: place the two apex vertices (apex phase) or grab an
+        # existing marker to drag it. Checked before Measure so a click near a
+        # marker moves the apex instead of adding a trace point; _lv_apex_press
+        # yields while a line is being drawn so tracing always wins.
+        if self._drag_btn == 1 and self._lv is not None:
+            _sh = "Shift" in (ev.get("modifiers") or ())
+            r = self._lv_apex_press(key, x, y, _sh)
+            if r == "place":
+                return
+            if r in ("endo", "epi"):
+                self._lv_apex_drag = r
+                self._cross_grab = False
+                self._meas_drag = False
+                self._last = (x, y)
+                return
         # SAX: grab the thick ○-marked LEVEL line (long-axis pane → translate the
         # cross-section level) or the CENTRELINE (short-axis pane → rotate the
         # meridian) to review the endo/epi borders. Checked BEFORE Measure so the
@@ -1813,6 +1868,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
+        # LV apex drag: slide the grabbed apex along its long axis (border points
+        # follow). Takes priority over everything while held.
+        if self._lv_apex_drag is not None:
+            if self._drag_btn == 1:
+                self._lv_apex_move(key, x, y)
+                self._last = (x, y)
+            return
         # SAX line drag: move the level (long-axis pane) or rotate the meridian
         # (short-axis pane). Takes priority over measure/tool while held.
         if self._lv_line_drag is not None:
@@ -1880,6 +1942,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y)
 
     def _on_up(self, key, ev):
+        # End an LV apex drag.
+        if self._lv_apex_drag is not None:
+            self._lv_apex_drag = None
+            self._drag_btn = None
+            self._last = None
+            return
         # End a SAX level/meridian line drag and drop its highlight.
         if self._lv_line_drag is not None:
             self._lv_line_drag = None
@@ -1930,6 +1998,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_drag = False
         self._shift_tool = False
         self._spin_prev = None
+        self._lv_line_drag = None
+        self._lv_apex_drag = None
         try:
             gw = QWidget.mouseGrabber()
             if gw is not None:
@@ -2570,13 +2640,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         measuring = getattr(self, "_meas_on", False) and bool(
             getattr(self, "_meas_type", None))
         is2d = getattr(self, "_mode", "3D") == "2D"
+        locked = (self._lv_axis_locked()
+                  if hasattr(self, "_lv") else False)   # LV axis set → no re-tilt
         for n, b in self._tool_btns.items():
             active = (n == getattr(self, "_tool", None))
             # Keep the tools clickable WHILE measuring so the user can pick which
             # tool a Shift+drag uses (matches the Windows viewer; the shortcut
             # keys already switch them). The dimmed-red styling below still
             # signals "hold Shift to use it here".
-            b.setEnabled(not (is2d and n in _MPR_ONLY_TOOLS))
+            b.setEnabled(not ((is2d or locked) and n in _MPR_ONLY_TOOLS))
             if measuring:
                 # greyed-out; the selected tool keeps a dimmed red.
                 b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
@@ -2586,6 +2658,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # overridden so the button keeps its base border/radius.
                 b.setStyleSheet("background:#c0392b;color:white;" if active
                                 else "")
+        # WB reverse (grayscale invert) and the slab-thickness spin are disabled
+        # throughout LV mode (thin slices, fixed grayscale).
+        in_lv = getattr(self, "_lv", None) is not None
+        if getattr(self, "_invert_btn", None) is not None:
+            self._invert_btn.setEnabled(not in_lv)
+        if getattr(self, "_slab_spin", None) is not None and in_lv:
+            self._slab_spin.setEnabled(False)
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
@@ -3054,7 +3133,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_wall_btn.setChecked(False)
                 self._lv_sax_btn.setChecked(False)
                 self._lv_plane_lbl.setText("0/6")
-                self._lv_set_bar_enabled(False)
+                self._lv_sync_buttons()          # reset colours + grey the bar
 
         vol = np.ascontiguousarray(loaded.volume, dtype=np.float32)  # (z,y,x)
         self._vol = vol
@@ -3669,6 +3748,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if t == "ROTATE":
                 return
+        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Thick
+        # (which would re-tilt the reslice frame) are blocked. Zoom/Move/WL/Paging
+        # still work (they don't change the axis relationship).
+        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "THICK"):
+            return
         if t != "WL":
             self._view_initial = False
         if t == "WL":
@@ -4711,6 +4795,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
+            if m.get("hidden"):
+                continue                           # invisible → can't be grabbed
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_screen(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
@@ -5337,6 +5423,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[k].update()
 
     def _build_lv_bar(self) -> QWidget:
+        """LV EF bar (below the image): Endo/Epi ENTER LV mode and select the
+        pass; Set axis captures the current long-axis view as that pass's axis;
+        Trace places the apex then traces. Buttons pack from the LEFT. The
+        non-entry controls are enabled only while in LV mode (refined by phase
+        in _lv_sync_buttons). Mirrors the VTK viewer's 2-pass flow."""
         self._lv_wrap = QWidget()
         self._lv_wrap._mdv_keep_on_max = True
         row = QHBoxLayout(self._lv_wrap)
@@ -5345,16 +5436,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
         row.addWidget(cap)
+        # Internal mode flag (no visible toggle — Endo/Epi enter LV mode, Exit LV
+        # leaves). Kept for the many `_lv_btn.isChecked()` state checks; NOT added
+        # to the row.
         self._lv_btn = FitButton(t("Trace"))
         self._lv_btn.setCheckable(True)
-        self._lv_btn.setStyleSheet(
-            "QPushButton:checked{background:#c0392b;color:white;}")
-        self._lv_btn.setHelpToolTip(
-            t("LV EF: set a long-axis view first (the current view becomes the "
-              "rotation axis), then trace the endo/epi border on each rotated "
-              "plane to measure LV volume"))
-        self._lv_btn.clicked.connect(self._toggle_lv)
-        row.addWidget(self._lv_btn)
+        self._lv_btn.setVisible(False)
+        # Endo / Epi = choose (and ENTER) the analysis pass. Each is traced on its
+        # own long axis. Endo→red, Epi→green when selected (via _lv_sync_buttons).
+        self._lv_endo_btn = FitButton(t("Endo"))
+        self._lv_endo_btn.setHelpToolTip(
+            t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_pass("endo"))
+        row.addWidget(self._lv_endo_btn)
+        self._lv_epi_btn = FitButton(t("Epi"))
+        self._lv_epi_btn.setHelpToolTip(
+            t("Epi (myocardial) pass — align its long-axis view, Set axis, then "
+              "Trace"))
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_pass("epi"))
+        row.addWidget(self._lv_epi_btn)
+        # Set axis: capture the current view as the active pass's long axis.
+        self._lv_setaxis_btn = FitButton(t("Set axis"))
+        self._lv_setaxis_btn.setHelpToolTip(
+            t("Use the current long-axis view as this pass's rotation axis"))
+        self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
+        row.addWidget(self._lv_setaxis_btn)
+        # Trace: place this pass's apex (first click; Shift-click to adjust the
+        # view instead) then trace its border.
+        self._lv_trace_btn = FitButton(t("Trace"))
+        self._lv_trace_btn.setHelpToolTip(
+            t("Place this pass's apex (first click; Shift-click to adjust the "
+              "view) then trace its border"))
+        self._lv_trace_btn.clicked.connect(self._lv_start_trace)
+        row.addWidget(self._lv_trace_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
         row.addWidget(self._lv_prev_btn)
@@ -5367,18 +5481,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_next_btn = FitButton(t("▶ Next plane"))
         self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
         row.addWidget(self._lv_next_btn)
-        self._lv_endo_btn = FitButton(t("Endo"))
-        self._lv_endo_btn.setCheckable(True)
-        self._lv_endo_btn.setStyleSheet(
-            "QPushButton:checked{background:#d32f2f;color:white;}")
-        self._lv_endo_btn.clicked.connect(lambda: self._lv_set_target("endo"))
-        row.addWidget(self._lv_endo_btn)
-        self._lv_epi_btn = FitButton(t("Epi"))
-        self._lv_epi_btn.setCheckable(True)
-        self._lv_epi_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._lv_epi_btn.clicked.connect(lambda: self._lv_set_target("epi"))
-        row.addWidget(self._lv_epi_btn)
         self._lv_sax_btn = FitButton(t("SAX"))
         self._lv_sax_btn.setCheckable(True)
         self._lv_sax_btn.setStyleSheet(
@@ -5411,56 +5513,368 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn.clicked.connect(self._lv_exit)
         row.addWidget(self._lv_exit_btn)
         row.addStretch(1)
+        # Controls greyed out until in LV mode (Endo/Epi/Load stay live — they
+        # ENTER LV mode). _lv_sync_buttons refines by phase.
         self._lv_bar_btns = [
-            self._lv_prev_btn, self._lv_next_btn, self._lv_endo_btn,
-            self._lv_epi_btn, self._lv_sax_btn, self._lv_vol_btn,
+            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
+            self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_load_btn, self._lv_stl_btn, self._lv_exit_btn]
-        self._lv_set_bar_enabled(False)
+            self._lv_stl_btn, self._lv_exit_btn]
+        self._lv_sync_buttons()             # initial (not in LV mode) state
         return self._lv_wrap
 
+    #: LV bar button styles by state (default = plain grey/black).
+    _LV_STY = {
+        "endo": "QPushButton{background:#d32f2f;color:white;}",
+        "epi": "QPushButton{background:#2e8b57;color:white;}",
+        "setaxis": "QPushButton{background:#b8860b;color:white;}",
+        "trace": "QPushButton{background:#c0392b;color:white;}",
+    }
+
     def _lv_set_bar_enabled(self, on: bool) -> None:
+        """Enable/disable the non-entry LV controls (Endo/Epi/Load stay live)."""
         for b in getattr(self, "_lv_bar_btns", []):
             b.setEnabled(bool(on))
 
+    def _lv_sync_buttons(self) -> None:
+        """Colour + enable the LV bar by the current pass/phase (mirror the VTK
+        viewer). Only the active pass's Endo/Epi is coloured; Set axis is
+        dark-yellow while its axis is in use (ready/apex/contour); Trace is red
+        while tracing (apex/contour). LIFO enable: only the last-turned-on of
+        {Set axis, Trace, SAX} can be turned off."""
+        lv = self._lv
+        endo_btn, epi_btn = self._lv_endo_btn, self._lv_epi_btn
+        setax, trace = self._lv_setaxis_btn, self._lv_trace_btn
+        endo_btn.setEnabled(True)
+        epi_btn.setEnabled(True)
+        self._lv_load_btn.setEnabled(True)
+        if lv is None:                                # not in LV mode
+            for b in (endo_btn, epi_btn, setax, trace):
+                b.setStyleSheet("")
+            self._lv_set_bar_enabled(False)
+            self._lv_exit_btn.setEnabled(False)
+            self._refresh_tool_availability()        # restore WB reverse / tools
+            return
+        ph = lv.get("phase")
+        pas = lv.get("pass")
+        sax_on = lv.get("sax") is not None
+        endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
+        epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
+        setax.setStyleSheet(self._LV_STY["setaxis"]
+                            if ph in ("ready", "apex", "contour") else "")
+        trace.setStyleSheet(self._LV_STY["trace"]
+                            if ph in ("apex", "contour") else "")
+        # LIFO enable: you can only turn OFF the LAST button turned on.
+        setax.setEnabled(ph in ("align", "ready"))
+        trace.setEnabled(ph in ("ready", "apex", "contour") and not sax_on)
+        self._lv_sax_btn.setEnabled(ph == "contour")
+        contour = ph == "contour"
+        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
+                  self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+                  self._lv_stl_btn):
+            b.setEnabled(contour)
+        self._lv_exit_btn.setEnabled(True)
+        self._refresh_tool_availability()   # grey Rotate/Spin/Thick + WB reverse
+
     def _toggle_lv(self) -> None:
-        on = self._lv_btn.isChecked()
-        if not on:
+        """Legacy toggle (kept for callers): enter LV mode on the Endo pass, or
+        leave it."""
+        if self._lv is None:
+            if self._lv_enter_mode():
+                self._lv_select_pass("endo")
+        else:
             self._lv_exit(from_toggle=True)
-            return
+
+    def _lv_enter_mode(self) -> bool:
+        """Create the LV model + state (no axis yet — set per pass). Returns False
+        if there's no volume. LV always works on the RIGHT pane (B) long axis; the
+        LEFT (A) becomes the short-axis side."""
         if self._vol is None:
-            self._lv_btn.setChecked(False)
-            return
+            return False
         from multi_dicomviewer.core.lv_measure import LVModel
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
-        key0 = "B"                       # right pane = long-axis trace
+        self._lv = {"model": LVModel(n_planes=6), "phase": "align",
+                    "plane_idx": 0, "target": None, "pane": "B",
+                    "sax": None, "pass": None,
+                    "prev_side": self.current_side()}
+        self._lv_btn.setChecked(True)               # internal mode flag
+        self.set_side("Bi")
+        return True
+
+    def _lv_thick_zero_both(self) -> None:
+        """Slab thickness → 0 mm on both panes (thin slices for tracing)."""
+        for k in ("A", "B"):
+            self._thick[k] = 0.0
+
+    # ---- pass flow: align the view → Set axis → place apex → trace ----------
+    def _lv_axis_from_view(self):
+        """(origin, axis_dir, radial0) of the CURRENT long-axis view on the trace
+        pane — the rotation axis = the no-arrow centreline, θ=0 = the green-▲
+        radial."""
+        key0 = self._lv["pane"]
         u, v, _n = self._frame[key0]
         a = math.radians(self._cross_ang[key0])
-        axis_dir = -math.sin(a) * u + math.cos(a) * v     # no-arrow centreline
-        radial0 = math.cos(a) * u + math.sin(a) * v       # green-▲ direction
+        axis_dir = -math.sin(a) * u + math.cos(a) * v
+        radial0 = math.cos(a) * u + math.sin(a) * v
         origin = np.asarray(self._pc[key0], dtype=float).copy()
-        model = LVModel(n_planes=6)
-        model.set_axis_from_frame(origin, axis_dir, radial0)
-        self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
-                    "target": None, "pane": key0, "sax": None,
-                    "prev_side": self.current_side()}
+        return origin, axis_dir, radial0
+
+    def _lv_enter_align(self) -> None:
+        """ALIGN sub-phase for the active pass: free long-axis MPR so the user
+        orients the view; 'Set axis' then captures it. Trace/analysis controls
+        are disabled until the axis is set."""
+        lv = self._lv
+        lv["phase"] = "align"
+        lv["target"] = None
+        self.set_side("Bi")
+        self._lv_thick_zero_both()                  # slab 0 both panes
+        # Hide the other pass's border while aligning this one.
+        for mm in self._measures[lv["pane"]]:
+            tag = mm.get("_lv")
+            if tag is not None:
+                mm["hidden"] = (tag[1] != lv.get("pass"))
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        self._view_initial = False
+        self._refresh()
+        self._lv_redraw_all()
+
+    def _lv_set_axis(self) -> None:
+        """'Set axis' button. ALIGN → READY: capture the current view as this
+        pass's long axis. READY → ALIGN (press again): UNDO — back to the
+        Endo/Epi-only state with the IMAGE KEPT, unlocking Spin/Rotate/Thick."""
+        lv = self._lv
+        if lv is None or lv.get("pass") is None:
+            return
+        ph = lv.get("phase")
+        if ph == "align":
+            which = lv["pass"]
+            origin, axis_dir, radial0 = self._lv_axis_from_view()
+            lv["model"].set_axis_from_frame(origin, axis_dir, radial0,
+                                            which=which)
+            lv["phase"] = "ready"
+            lv["plane_idx"] = 0
+            self._lv_sync_buttons()
+            self._lv_show_plane()                    # right pane: axis vertical
+        elif ph == "ready":
+            self._lv_enter_align()                   # undo (keeps the image)
+
+    def _lv_start_trace(self) -> None:
+        """'Trace' button. READY → tracing: place this pass's apex (first plain
+        click; Shift-click adjusts the view) then trace — or resume if the apex
+        is already set. APEX/CONTOUR (press again, SAX off) → UNDO back to READY."""
+        lv = self._lv
+        if lv is None:
+            return
+        ph = lv.get("phase")
+        if ph == "ready":
+            m = lv["model"]
+            apex = m.endo_apex if lv["pass"] == "endo" else m.epi_apex
+            if apex is not None:                     # apex already set → resume
+                lv["apex_target"] = None
+                self._lv_enter_contour()
+                return
+            lv["phase"] = "apex"
+            lv["apex_target"] = lv["pass"]
+            if self._meas_on:                        # clicks place the apex first
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv_sync_buttons()
+            self._lv_update_text()
+            self._lv_redraw_all()
+        elif ph in ("apex", "contour") and lv.get("sax") is None:
+            lv["phase"] = "ready"                    # UNDO trace → ready
+            lv["apex_target"] = None
+            if self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv_sync_buttons()
+            self._lv_update_text()
+            self._lv_show_plane()
+
+    def _lv_select_pass(self, which: str) -> None:
+        """Endo / Epi button = choose that analysis pass (the sole active one).
+        In SAX it ISOLATES that pass (long + short show only it, on its own axis)
+        for editing; otherwise it enters/resumes the long-axis trace on its axis.
+        Unset axis → align it first."""
+        if self._lv is None:
+            if not self._lv_enter_mode():
+                return
+        lv = self._lv
+        m = lv["model"]
+        if lv.get("sax") is not None:               # in SAX → isolate this pass
+            store = m.endo_contours if which == "endo" else m.epi_contours
+            if m._axis_for(which) is not None and len(store) >= 3:
+                lv["pass"] = which
+                lv["sax_which"] = which
+                m.axis = self._lv_sax_axis()
+                lv["fitted_sax"] = False
+                rng = self._lv_common_range() or self._lv_level_range()
+                if rng:
+                    lv["sax"] = 0.5 * (rng[0] + rng[1])
+                self._lv_sync_buttons()
+                self._lv_show_sax_both()
+            return
+        lv["pass"] = which
+        self._lv_thick_zero_both()
+        ax = m._axis_for(which)
+        if ax is None:
+            self._lv_enter_align()
+            return
+        m.axis = ax                                 # activate this pass's axis
+        lv["phase"] = "contour"
+        lv["plane_idx"] = 0
         self._lv_enter_contour()
 
+    # ---- apex points ----
+    def _lv_apex_on_axis(self, tgt, sx, sy):
+        """3-D point for an apex click/drag at screen (sx,sy), CONSTRAINED to the
+        pass's long (rotation) axis — the apex can slide ALONG the axis but never
+        leave it. None if that axis isn't set."""
+        ax = self._lv["model"]._axis_for(tgt)
+        if ax is None:
+            return None
+        which = self._lv["pane"]
+        wx, wy = self._disp_to_world(which, sx, sy)
+        P = self._out_to_world3d(which, wx, wy)
+        along = float(np.dot(P - ax.apex, ax.axis))     # project onto the axis
+        return ax.apex + along * ax.axis
+
+    def _lv_follow_apex(self, tgt, P_old, P_new) -> None:
+        """Move every border vertex that had CONVERGED to this apex (snapped to
+        *P_old*) to *P_new*, so the traced Endo/Epi lines track the apex as it
+        slides along the axis. Re-stores the affected planes' contours."""
+        if P_old is None:
+            return
+        model = self._lv["model"]
+        angs = model.plane_angles()
+        pane = self._lv["pane"]
+        P_old = np.asarray(P_old, float)
+        eps = 0.05                                     # snapped pts sit ON P_old
+        for m in self._measures[pane]:
+            tag = m.get("_lv")
+            if tag is None or tag[1] != tgt or not m.get("pts3d"):
+                continue
+            moved = False
+            p3 = [list(map(float, P)) for P in m["pts3d"]]
+            for i, P in enumerate(p3):
+                if np.linalg.norm(np.asarray(P) - P_old) <= eps:
+                    p3[i] = list(map(float, P_new))
+                    moved = True
+            if moved:
+                m["pts3d"] = [tuple(x) for x in p3]
+                try:
+                    model.set_long_axis_contour(
+                        angs[tag[0] % len(angs)], m["pts3d"], tgt)
+                except Exception:
+                    pass
+
+    def _lv_place_apex(self, which, sx, sy) -> bool:
+        """Place the ACTIVE pass's apex at the clicked point (phase 'apex'),
+        constrained to the pass's long axis, then start tracing. Returns True if
+        the click was consumed."""
+        lv = self._lv
+        if (lv is None or lv.get("phase") != "apex"
+                or lv.get("apex_target") is None or which != lv.get("pane")):
+            return False
+        tgt = lv["apex_target"]
+        P = self._lv_apex_on_axis(tgt, sx, sy)
+        if P is None:
+            return False
+        lv["model"].set_apex_point(tgt, P)
+        self._lv_result_lines = []                 # invalidate any volume result
+        lv["apex_target"] = None
+        self._lv_enter_contour()                   # apex set → trace this pass
+        return True
+
+    def _lv_apex_press(self, which, sx, sy, shift=False):
+        """Left-press hit-test for the apex markers. Returns "place" if a click
+        was consumed as an apex placement, "endo"/"epi" if an existing marker was
+        grabbed to drag, else None. In the APEX phase a plain click places the
+        apex; a SHIFT-click yields (None) so the view can be adjusted first.
+        Grabbing is allowed only when NOT mid-trace."""
+        lv = self._lv
+        if lv is None or lv.get("phase") not in ("apex", "contour"):
+            return None
+        if lv.get("phase") == "apex" and lv.get("apex_target") is not None:
+            if shift:                               # adjust the view, don't place
+                return None
+            return "place" if self._lv_place_apex(which, sx, sy) else None
+        if which != lv.get("pane"):
+            return None
+        drafting = (self._draft is not None
+                    and self._draft.get("pane") == which)
+        if drafting:                                # never grab while tracing
+            return None
+        # Only the ACTIVE pass's apex is grabbable.
+        tgt = lv.get("pass")
+        P = (lv["model"].endo_apex if tgt == "endo"
+             else lv["model"].epi_apex if tgt == "epi" else None)
+        if P is None:
+            return None
+        wx, wy = self._disp_to_world(which, sx, sy)
+        rgrab = self._lv_px_to_mm(which, 14.0)
+        ox, oy = self._world3d_to_out(which, P)
+        if math.hypot(wx - ox, wy - oy) <= rgrab:
+            return tgt
+        return None
+
+    def _lv_apex_move(self, which, sx, sy) -> None:
+        """Drag the grabbed apex ALONG its long axis (it can't leave the axis),
+        carrying with it the border points that had converged to it."""
+        tgt = self._lv_apex_drag
+        if tgt is None or self._lv is None:
+            return
+        P_new = self._lv_apex_on_axis(tgt, sx, sy)
+        if P_new is None:
+            return
+        model = self._lv["model"]
+        P_old = model.endo_apex if tgt == "endo" else model.epi_apex
+        self._lv_follow_apex(tgt, P_old, P_new)    # border pts track the apex
+        model.set_apex_point(tgt, P_new)
+        self._lv_result_lines = []
+        self._redraw_meas(self._lv["pane"])        # moved border points
+        self._lv_redraw_all()
+
+    def _lv_snap_apex(self, pts3d, target, tol=3.0):
+        """Return *pts3d* (list of 3-tuples) with any vertex within *tol* mm of
+        the *target* apex vertex moved exactly onto it, and consecutive
+        duplicates collapsed. No apex set → unchanged."""
+        lv = self._lv
+        P = (lv["model"].endo_apex if target == "endo"
+             else lv["model"].epi_apex)
+        arr = np.asarray(pts3d, float).reshape(-1, 3)
+        if P is None or len(arr) == 0:
+            return [tuple(q) for q in arr]
+        snapped = np.where(
+            (np.linalg.norm(arr - P, axis=1) <= tol)[:, None], P, arr)
+        out = [tuple(snapped[0])]
+        for q in snapped[1:]:                       # drop consecutive duplicates
+            if np.linalg.norm(np.asarray(out[-1]) - q) > 1e-6:
+                out.append(tuple(q))
+        return out
+
+    # ---- contour phase: step the rotated long-axis planes, trace this pass ----
     def _lv_enter_contour(self) -> None:
+        """Axis + apex are set → trace the ACTIVE pass's border on its rotated
+        long-axis planes (the target is LOCKED to the pass — Endo pass traces
+        endo, Epi pass traces epi)."""
         lv = self._lv
         lv["phase"] = "contour"
         lv["plane_idx"] = 0
-        lv["target"] = None
-        self._lv_endo_btn.setChecked(False)
-        self._lv_epi_btn.setChecked(False)
+        lv["target"] = lv["pass"]                  # capture is locked to the pass
+        lv["model"].axis = lv["model"]._axis_for(lv["pass"])
         self.set_side("Bi")
         if not self._meas_on:
             self._meas_btn.setChecked(True)
             self._toggle_measure()
         self._set_measure_type("polyline")
-        self._lv_set_bar_enabled(True)
+        self._lv_sync_buttons()
         self._lv_show_plane()
 
     def _lv_show_plane(self) -> None:
@@ -5480,10 +5894,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         first = not lv.get("fitted", False)
         lv["fitted"] = True
         self._view_initial = first
+        # Show only THIS plane's border for the ACTIVE pass. Endo and Epi are on
+        # DIFFERENT axes, so the other pass's border would project onto a wrong
+        # cross-section here — hide it; both show on the SAX pane.
         for mm in self._measures[pane]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx)
+                mm["hidden"] = (tag[0] != idx) or (tag[1] != lv.get("pass"))
         self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")
         self._refresh(reset_cam=first)
         self._overlay[pane].update()
@@ -5497,14 +5914,36 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._lv_sax_btn.isChecked():
             self._lv_capture_current()
-            rng = self._lv_level_range()
             m = lv["model"]
-            if rng is None or (len(m.endo_contours) < 3
-                               and len(m.epi_contours) < 3):
+            endo_ok = m.endo_axis is not None and len(m.endo_contours) >= 3
+            epi_ok = m.epi_axis is not None and len(m.epi_contours) >= 3
+            # BOTH traced → combined view (endo resampled to the epi axis + epi),
+            # the basis for Vol/STL. Otherwise a single-pass short-axis of the
+            # active/available pass on ITS OWN axis, for reviewing/editing it.
+            if endo_ok and epi_ok:
+                which = "both"
+            elif lv.get("pass") == "endo" and endo_ok:
+                which = "endo"
+            elif lv.get("pass") == "epi" and epi_ok:
+                which = "epi"
+            elif endo_ok:
+                which = "endo"
+            elif epi_ok:
+                which = "epi"
+            else:
                 self._lv_sax_btn.setChecked(False)
                 QMessageBox.information(
                     self.window(), t("LV EF"),
-                    t("Trace the endo border on at least 3 planes first."))
+                    t("Trace this pass on at least 3 planes first."))
+                return
+            lv["sax_which"] = which
+            # Point the model's active axis at the SAX reference axis so the SAX
+            # code slices against it (short_axis_border_pts default ref_axis =
+            # model.axis): endo/epi single → that axis; both → epi.
+            m.axis = self._lv_sax_axis()
+            rng = self._lv_level_range()
+            if rng is None:
+                self._lv_sax_btn.setChecked(False)
                 return
             common = self._lv_common_range() or rng
             lv["sax"] = 0.5 * (common[0] + common[1])
@@ -5515,10 +5954,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 np.asarray(self._pc[sa]).copy(),
                 self._cross_ang[sa], self._thick[sa])
             lv["fitted_sax"] = False
-            self._lv_apply_target(None)
+            self._lv_apply_target(None)             # no capture in short-axis
             self.set_side("Bi")
             self._lv_show_sax_both()
         else:
+            # SAX is the last-on button → pressing it turns SAX OFF (back to the
+            # long-axis trace).
             self._lv_leave_sax()
             self._lv_show_plane()
 
@@ -5534,10 +5975,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[la] = (u, v, n)
         self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[la] = 0.0
+        # The reference long-axis pane is resliced on the SAX axis; show only the
+        # border that lies in-plane there (the single pass, or epi for 'both').
+        w = lv.get("sax_which")
+        ref_which = w if w in ("endo", "epi") else "epi"
         for mm in self._measures[la]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx)
+                mm["hidden"] = (tag[0] != idx) or (tag[1] != ref_which)
         self._lv_set_short_frame()
         first = not lv.get("fitted_sax", False)
         lv["fitted_sax"] = True
@@ -5580,6 +6025,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in (lv["pane"], lv["sax_pane"]):
             self._overlay[k].update()
 
+    def _lv_sax_axis(self):
+        """Reference axis for the short-axis display, by what it shows: a single
+        pass → that pass's own axis; 'both' → the EPI (myocardial) axis (endo is
+        resampled onto it)."""
+        m = self._lv["model"]
+        w = self._lv.get("sax_which")
+        if w == "endo":
+            return m.endo_axis or m.axis
+        if w == "epi":
+            return m.epi_axis or m.axis
+        return m.epi_axis or m.endo_axis or m.axis        # both → epi
+
+    def _lv_sax_borders(self):
+        """Which border(s) the short-axis shows: a single pass, or both."""
+        w = self._lv.get("sax_which")
+        return ["endo", "epi"] if w not in ("endo", "epi") else [w]
+
+    def _lv_sax_stores(self):
+        """The contour store(s) whose along values are in the CURRENT SAX axis'
+        frame — the single pass shown, or epi for 'both' (its axis is the SAX
+        reference; endo is resampled onto it at draw time)."""
+        m = self._lv["model"]
+        w = self._lv.get("sax_which")
+        if w == "endo":
+            return (m.endo_contours,)
+        if w == "epi":
+            return (m.epi_contours,)
+        if w == "both":
+            return (m.epi_contours,)
+        return (m.endo_contours, m.epi_contours)          # fallback
+
     def _lv_leave_sax(self) -> None:
         lv = self._lv
         sa = lv.get("sax_pane")
@@ -5591,6 +6067,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._thick[sa] = saved[3]
         lv["sax"] = None
         lv["sax_saved"] = None
+        lv["model"].axis = lv["model"]._axis_for(lv.get("pass"))
+        lv["target"] = lv.get("pass")           # resume tracing this pass
         self._lv_sax_btn.setChecked(False)
 
     def _lv_capture_current(self) -> None:
@@ -5612,6 +6090,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 break
         if m is None:
             return
+        # Snap any vertex within 3 mm of this surface's apex vertex onto it, so
+        # every meridian passes through the shared apex (the displayed border
+        # ends there too).
+        m["pts3d"] = self._lv_snap_apex(m["pts3d"], lv["target"])
         phi = lv["model"].plane_angles()[lv["plane_idx"]]
         try:
             lv["model"].set_long_axis_contour(phi, m["pts3d"],
@@ -5643,7 +6125,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if not (m.get("type") == "polyline" and m.get("_lv") is None)]
         self._draft = None
         self._lv["plane_idx"] += int(delta)
-        self._lv_apply_target("endo")
+        self._lv_apply_target(self._lv["pass"])   # target locked to this pass
         self._lv_show_plane()
 
     def _lv_sax_active(self) -> bool:
@@ -5651,28 +6133,45 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and self._lv.get("phase") == "contour"
                 and self._lv.get("sax") is not None)
 
+    def _lv_axis_locked(self) -> bool:
+        """True once the active pass's long axis is SET (Set axis pressed) and we
+        are on the long-axis view — the 3DCT↔vertical-axis relationship is then
+        fixed, so Rotate/Spin/Thick (which would re-tilt the reslice frame) are
+        blocked. Zoom/Move/WL and the cross-section level still work."""
+        lv = self._lv
+        return (lv is not None
+                and lv.get("phase") in ("ready", "apex", "contour")
+                and lv.get("sax") is None)
+
     def _lv_level_range(self):
-        m = self._lv["model"]
+        """The along span (in the SAX axis' frame) to SCROLL the level over:
+        apex = the most-apical traced point (min of minima), base = the common
+        base (min of maxima). Uses only the store(s) in the SAX axis' frame."""
         mins, maxs = [], []
-        for store in (m.endo_contours, m.epi_contours):
+        for store in self._lv_sax_stores():
             for c in store.values():
                 a = np.asarray(c, float).reshape(-1, 2)[:, 0]
                 mins.append(float(a.min()))
                 maxs.append(float(a.max()))
         if not mins:
             return None
-        lo, hi = min(mins), min(maxs)
+        lo, hi = min(mins), min(maxs)     # apex = deepest, base = common
         return (lo, hi) if hi > lo else None
 
     def _lv_common_range(self):
-        m = self._lv["model"]
-        rs = [r for r in (m.along_range("endo"), m.along_range("epi"))
-              if r is not None]
-        if not rs:
+        """COMMON along-range (SAX axis frame) where every meridian of the shown
+        border reaches — used to pick the SAX entry level so the border shows on
+        entry."""
+        mins, maxs = [], []
+        for store in self._lv_sax_stores():
+            for c in store.values():
+                a = np.asarray(c, float).reshape(-1, 2)[:, 0]
+                mins.append(float(a.min()))
+                maxs.append(float(a.max()))
+        if not mins:
             return None
-        lo = max(r[0] for r in rs)
-        hi = min(r[1] for r in rs)
-        return (lo, hi) if hi > lo else rs[0]
+        lo, hi = max(mins), min(maxs)
+        return (lo, hi) if hi > lo else (min(mins), min(maxs))
 
     def _lv_step_level(self, delta) -> None:
         rng = self._lv_level_range()
@@ -5800,7 +6299,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv["plane_idx"] = 0
         if self._lv.get("sax") is not None:
             self._lv_leave_sax()
-        self._lv_apply_target(None)
+        self._lv_apply_target(self._lv.get("pass"))
         self._lv_show_plane()
         self._redraw_meas(pane)
 
@@ -5855,16 +6354,44 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_text()
 
     def _lv_toggle_wall(self) -> None:
-        if self._lv is None or self._lv.get("phase") != "contour":
+        """Toggle the short-axis wall-thickness colour map. Turning it ON shows
+        the COMBINED short-axis (Endo + Epi borders on the epi axis) and colours
+        the Epi−Endo gap; needs both passes traced."""
+        from PyQt6.QtWidgets import QMessageBox
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
             self._lv_wall_btn.setChecked(False)
             return
         self._lv_wall = self._lv_wall_btn.isChecked()
-        if self._lv_wall and not self._lv_sax_active():
-            self._lv_sax_btn.setChecked(True)
-            self._lv_toggle_sax()
+        if not self._lv_wall:                       # turning OFF → just redraw
+            if self._lv_sax_active():
+                self._overlay[lv["sax_pane"]].update()
             return
+        m = lv["model"]
+        both = (m.endo_axis is not None and len(m.endo_contours) >= 3
+                and m.epi_axis is not None and len(m.epi_contours) >= 3)
+        if not both:
+            self._lv_wall_btn.setChecked(False)
+            self._lv_wall = False
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Trace BOTH Endo and Epi (≥3 planes each) first — the wall "
+                  "map needs both borders."))
+            return
+        # Ensure the COMBINED (both-border, epi-axis) short-axis is shown.
+        if not self._lv_sax_active():
+            self._lv_sax_btn.setChecked(True)
+            self._lv_toggle_sax()                   # both done → sax_which='both'
+        elif lv.get("sax_which") != "both":
+            lv["sax_which"] = "both"
+            m.axis = self._lv_sax_axis()
+            lv["fitted_sax"] = False
+            rng = self._lv_common_range() or self._lv_level_range()
+            if rng:
+                lv["sax"] = 0.5 * (rng[0] + rng[1])
+            self._lv_show_sax_both()
         if self._lv_sax_active():
-            self._overlay[self._lv["sax_pane"]].update()
+            self._overlay[lv["sax_pane"]].update()
 
     def _lv_series_meta(self) -> dict:
         h = self._header
@@ -6048,11 +6575,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._toggle_measure()
         self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
                     "target": None, "pane": "B", "sax": None,
+                    "pass": "epi" if model.epi_axis is not None else "endo",
                     "prev_side": self.current_side()}
         self._lv_btn.setChecked(True)
         self._lv_enter_contour()
         self._lv_rebuild_measures()
-        self._lv_apply_target("endo")
+        self._lv_apply_target(self._lv["pass"])
         self._lv_show_plane()
         self._lv_result_lines = [
             t("Loaded borders: endo {ne} / epi {nep} planes",
@@ -6097,10 +6625,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_wall = False
         self._lv_wall_btn.setChecked(False)
         self._lv_sax_btn.setChecked(False)
-        self._lv_set_bar_enabled(False)
+        self._lv_btn.setChecked(False)      # internal mode flag off
+        self._lv_sync_buttons()             # reset colours + grey out the bar
         self._lv_plane_lbl.setText("0/6")
-        if not from_toggle:
-            self._lv_btn.setChecked(False)
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
@@ -6120,19 +6647,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return []
         lines = list(getattr(self, "_lv_result_lines", []))
-        if lv.get("phase") == "contour":
+        pas = lv.get("pass")
+        if pas is None:
+            lines.append(t("LV EF — choose Endo or Epi to start a pass"))
+            return lines
+        name = t("Endo (lumen)") if pas == "endo" else t("Epi (myocardial)")
+        ph = lv.get("phase")
+        if ph == "align":
+            lines.append(t("LV EF [{p} pass] — align the {p} long-axis view, "
+                           "then press 'Set axis'", p=name))
+            return lines
+        if ph == "ready":
+            lines.append(t("LV EF [{p} pass] — axis set. Final Zoom/Move, then "
+                           "press 'Trace'", p=name))
+            return lines
+        if ph == "apex":
+            lines.append(t("LV EF [{p} pass] — click the {p} apex "
+                           "(Shift-click to adjust the view first)", p=name))
+            return lines
+        if ph == "contour":
             m = lv["model"]
-            tgt = lv.get("target")
-            if tgt == "endo":
-                head = t("tracing Endo (red) — double-click to finish")
-            elif tgt == "epi":
-                head = t("tracing Epi (green) — double-click to finish")
-            else:
-                head = t("click Endo or Epi to trace that border "
-                         "(otherwise it's a plain polyline)")
+            head = (t("tracing Endo (red) — double-click to finish")
+                    if pas == "endo"
+                    else t("tracing Epi (green) — double-click to finish"))
             lines.append(
-                t("LV EF — {head}\ncaptured: endo {ne} / epi {nep} meridians",
-                  head=head, ne=len(m.endo_contours), nep=len(m.epi_contours)))
+                t("LV EF [{p} pass] — {head}\ncaptured: endo {ne} / epi {nep} "
+                  "meridians", p=name, head=head,
+                  ne=len(m.endo_contours), nep=len(m.epi_contours)))
         return lines
 
     @staticmethod
