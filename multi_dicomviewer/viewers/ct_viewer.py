@@ -3788,6 +3788,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._commit_draft()
         else:
             self._redraw_geom(which)
+            if (self._lv is not None and self._lv.get("phase") == "contour"
+                    and self._lv.get("target") in ("endo", "epi")):
+                self._redraw_lv(which)         # apex glow as a point nears it
+                self.pane[which].render()
         return False
 
     def _measure_hover(self, which, sx, sy):
@@ -3848,6 +3852,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_geom(e["key"])
         self._redraw_compare(e["key"])
         self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
+        if (self._lv is not None and self._lv.get("phase") == "contour"
+                and m.get("_lv") is not None):
+            self._redraw_lv(e["key"])          # apex glow tracks the edit
+            self.pane[e["key"]].render()
 
     def _lv_live_recapture(self, key, m) -> None:
         """If *m* is an LV endo/epi border being edited on the long-axis pane
@@ -5213,10 +5221,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 break
         if m is None:
             return
-        # Snap any vertex within 3 mm of this surface's apex vertex to it, so
-        # every meridian passes through the shared apex (the displayed border
-        # ends there too — see [[lvef-feature]]).
-        m["pts3d"] = self._lv_snap_apex(m["pts3d"], lv["target"])
+        # Snap vertices within the convergence range (= twice the apex marker
+        # radius) of this surface's apex onto it, so every meridian passes
+        # through the shared apex (the displayed border ends there too).
+        m["pts3d"] = self._lv_snap_apex(
+            m["pts3d"], lv["target"], tol=self._lv_apex_range_mm(pane))
         phi = lv["model"].plane_angles()[lv["plane_idx"]]
         try:
             lv["model"].set_long_axis_contour(phi, m["pts3d"], which=lv["target"])
@@ -6032,8 +6041,50 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if P is None:
             return
+        # GLOW when a border point is within the convergence range (it will snap
+        # to the apex): brighten + enlarge the marker so "収束します" is obvious.
+        glow = self._lv_apex_glow(key)
+        if glow:
+            rgb = tuple(min(255, int(c) + 130) for c in rgb)
+            p.lv_apex_actor.GetProperty().SetPointSize(30.0)
+        else:
+            p.lv_apex_actor.GetProperty().SetPointSize(15.0)
         p.lv_apex_mapper.SetInputData(
             _lv_pts_pd([self._world3d_to_out(key, P)], [rgb], z=0.9))
+
+    def _lv_apex_range_mm(self, key) -> float:
+        """Convergence radius in output-mm = TWICE the apex marker's radius
+        (PointSize 15 → ~7.5 px radius) so it reads as a circle twice the marker
+        (area ×4). Screen-relative, so it tracks zoom."""
+        return self._lv_px_to_mm(key, 15.0)
+
+    def _lv_apex_glow(self, key) -> bool:
+        """True when any ACTIVE-pass border vertex (committed on the current
+        plane, or the live draft) sits within the convergence range of the apex
+        — i.e. it will snap to it. Only on the long-axis (trace) pane."""
+        lv = self._lv
+        if lv is None or key != lv.get("pane"):
+            return False
+        tgt = lv.get("pass")
+        P = (lv["model"].endo_apex if tgt == "endo"
+             else lv["model"].epi_apex if tgt == "epi" else None)
+        if P is None:
+            return False
+        ax0, ay0 = self._world3d_to_out(key, P)
+        rng = self._lv_apex_range_mm(key)
+        idx = lv.get("plane_idx", 0)
+
+        def near(pts):
+            return any(math.hypot(q[0] - ax0, q[1] - ay0) <= rng for q in pts)
+
+        for m in self._measures.get(key, []):
+            tag = m.get("_lv")
+            if (tag is not None and tag[1] == tgt and tag[0] == idx
+                    and near(m.get("pts", []))):
+                return True
+        d = self._draft
+        return bool(d is not None and d.get("pane") == key
+                    and near(d.get("pts", [])))
 
     def _redraw_lv(self, key) -> None:
         """Draw the base-cut line for the current long-axis plane on the LV pane.
@@ -6066,8 +6117,26 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # through the level×meridian border crossings, with the crossing
                 # points themselves marked as fixed-SCREEN-size dots (so they
                 # don't grow when the pane is zoomed).
-                mark_xy = []
+                mark_xy, mark_cols = [], []
                 border_sm = {}
+                # While a long-axis border VERTEX is being dragged, colour the
+                # ONE short-axis crossing that follows it GREEN (of the two yellow
+                # dots on the meridian line) so it's clear which point moves.
+                edit_which, edit_mu = None, None
+                e = getattr(self, "_edit", None)
+                if e is not None and e.get("key") == lv.get("pane"):
+                    em = self._measures[e["key"]][e["mi"]]
+                    etag = em.get("_lv")
+                    if (etag is not None and etag[1] in ("endo", "epi")
+                            and em.get("pts3d")
+                            and 0 <= e["vi"] < len(em["pts3d"])):
+                        Pv = np.asarray(em["pts3d"][e["vi"]], float)
+                        angs2 = lv["model"].plane_angles()
+                        phi = angs2[etag[0] % len(angs2)]
+                        s = float(np.dot(Pv - ax.apex, ax.meridian_dir(phi)))
+                        edit_which = etag[1]
+                        edit_mu = (phi % 360.0) if s >= 0 \
+                            else ((phi + 180.0) % 360.0)
                 show = self._lv_sax_borders()       # single pass, or both
                 for which, mapper in (("endo", p.lv_endo_mapper),
                                       ("epi", p.lv_epi_mapper)):
@@ -6079,7 +6148,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                     xy = [self._world3d_to_out(key, P) for P in sp]
                     sm = _smooth_closed(xy)         # closed Catmull-Rom
                     mapper.SetInputData(_polylines_pd([[tuple(q) for q in sm]]))
+                    cols = [(255, 210, 0)] * len(sp)
+                    if edit_which == which and edit_mu is not None:
+                        bi, bd = None, 1e9
+                        for i, P in enumerate(sp):
+                            d = np.asarray(P, float) - ax.apex
+                            th = math.degrees(math.atan2(
+                                float(d @ ax.binormal),
+                                float(d @ ax.radial0))) % 360.0
+                            dd = min(abs(th - edit_mu), 360.0 - abs(th - edit_mu))
+                            if dd < bd:
+                                bd, bi = dd, i
+                        if bi is not None:
+                            cols[bi] = (64, 220, 64)     # the following point
                     mark_xy.extend(xy)              # the crossing points
+                    mark_cols.extend(cols)
                     border_sm[which] = sm
                 # WALL-THICKNESS colour map: translucent annulus between endo &
                 # epi, each angular sector coloured by its Epi−Endo gap (the same
@@ -6088,10 +6171,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                         and "endo" in border_sm and "epi" in border_sm):
                     self._lv_draw_wall(p, border_sm["endo"], border_sm["epi"])
                 if mark_xy:
-                    # yellow dots (visible on BOTH the red endo and green epi
-                    # lines), fixed screen size (constant under zoom).
-                    p.lv_pts_mapper.SetInputData(
-                        _lv_pts_pd(mark_xy, [(255, 210, 0)] * len(mark_xy)))
+                    # yellow crossing dots (green = the one following an active
+                    # long-axis edit), fixed screen size (constant under zoom).
+                    p.lv_pts_mapper.SetInputData(_lv_pts_pd(mark_xy, mark_cols))
                 # centreline showing the current long-axis plane direction
                 # (rotated by ◀ ▶); it lies in this short-axis plane. A ring
                 # marks the +θ end so the long/short views share an orientation.

@@ -633,9 +633,18 @@ class _Overlay(QWidget):
             else:
                 Pa, argb = None, None
             if Pa is not None:
+                c = S(v._world3d_to_out(key, Pa))
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(*argb))
-                p.drawEllipse(S(v._world3d_to_out(key, Pa)), 6.0, 6.0)
+                # GLOW when a border point is within the convergence range (it
+                # will snap to the apex): translucent halo + brighter, bigger dot.
+                if v._lv_apex_glow(key):
+                    p.setBrush(QColor(argb[0], argb[1], argb[2], 90))
+                    p.drawEllipse(c, 13.0, 13.0)
+                    p.setBrush(QColor(*[min(255, x + 130) for x in argb]))
+                    p.drawEllipse(c, 8.0, 8.0)
+                else:
+                    p.setBrush(QColor(*argb))
+                    p.drawEllipse(c, 6.0, 6.0)
 
         if lv.get("phase") != "contour":
             return                                # only apex markers pre-trace
@@ -644,6 +653,24 @@ class _Overlay(QWidget):
         if lv.get("sax") is not None:
             along0 = float(lv["sax"])
             if key == lv.get("sax_pane"):
+                # While a long-axis border VERTEX is dragged, colour the ONE
+                # crossing that follows it GREEN so it's clear which yellow dot
+                # moves. Identify its meridian from the edited vertex.
+                edit_which, edit_mu = None, None
+                e = getattr(v, "_edit", None)
+                if e is not None and e.get("key") == lv.get("pane"):
+                    em = v._measures[e["key"]][e["mi"]]
+                    etag = em.get("_lv")
+                    if (etag is not None and etag[1] in ("endo", "epi")
+                            and em.get("pts3d")
+                            and 0 <= e["vi"] < len(em["pts3d"])):
+                        Pv = np.asarray(em["pts3d"][e["vi"]], float)
+                        angs2 = lv["model"].plane_angles()
+                        phi = angs2[etag[0] % len(angs2)]
+                        s = float(np.dot(Pv - ax.apex, ax.meridian_dir(phi)))
+                        edit_which = etag[1]
+                        edit_mu = (phi % 360.0) if s >= 0 \
+                            else ((phi + 180.0) % 360.0)
                 border_sm, mark = {}, []
                 for which in v._lv_sax_borders():   # single pass, or both
                     sp = lv["model"].short_axis_border_pts(along0, which)
@@ -651,7 +678,20 @@ class _Overlay(QWidget):
                         continue
                     xy = [v._world3d_to_out(key, P) for P in sp]
                     border_sm[which] = _smooth_closed(xy)
-                    mark.extend(xy)
+                    gi = -1
+                    if edit_which == which and edit_mu is not None:
+                        bd = 1e9
+                        for i, P in enumerate(sp):
+                            d = np.asarray(P, float) - ax.apex
+                            th = math.degrees(math.atan2(
+                                float(d @ ax.binormal),
+                                float(d @ ax.radial0))) % 360.0
+                            dd = min(abs(th - edit_mu),
+                                     360.0 - abs(th - edit_mu))
+                            if dd < bd:
+                                bd, gi = dd, i
+                    for i, q in enumerate(xy):
+                        mark.append((q, i == gi))
                 if v._lv_wall and "endo" in border_sm and "epi" in border_sm:
                     self._paint_lv_wall(p, key, border_sm["endo"],
                                         border_sm["epi"])
@@ -665,9 +705,11 @@ class _Overlay(QWidget):
                     p.setPen(QPen(QColor(*colr), 2.2))
                     p.drawPolyline(QPolygonF([S(q) for q in sm]))
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(yellow)
-                for q in mark:                        # fixed screen-size dots
-                    p.drawEllipse(S(q), 3.5, 3.5)
+                green = QColor(64, 220, 64)
+                for q, is_edit in mark:               # fixed screen-size dots
+                    p.setBrush(green if is_edit else yellow)
+                    p.drawEllipse(S(q), 4.0 if is_edit else 3.5,
+                                  4.0 if is_edit else 3.5)
                 angs = lv["model"].plane_angles()
                 md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
                 u, vv, _n = v._frame[key]
@@ -5863,6 +5905,39 @@ class CTViewer(CPRMixin, AbstractViewer):
                 out.append(tuple(q))
         return out
 
+    def _lv_apex_range_mm(self, key) -> float:
+        """Convergence radius in output-mm = TWICE the apex marker's radius
+        (6 px → 12 px), so it reads as a circle twice the marker (area ×4)."""
+        return self._lv_px_to_mm(key, 12.0)
+
+    def _lv_apex_glow(self, key) -> bool:
+        """True when any ACTIVE-pass border vertex (committed on the current
+        plane, or the live draft) sits within the convergence range of the apex
+        — it will snap to it. Only on the long-axis (trace) pane."""
+        lv = self._lv
+        if lv is None or key != lv.get("pane"):
+            return False
+        tgt = lv.get("pass")
+        P = (lv["model"].endo_apex if tgt == "endo"
+             else lv["model"].epi_apex if tgt == "epi" else None)
+        if P is None:
+            return False
+        ax0, ay0 = self._world3d_to_out(key, P)
+        rng = self._lv_apex_range_mm(key)
+        idx = lv.get("plane_idx", 0)
+
+        def near(pts):
+            return any(math.hypot(q[0] - ax0, q[1] - ay0) <= rng for q in pts)
+
+        for m in self._measures.get(key, []):
+            tag = m.get("_lv")
+            if (tag is not None and tag[1] == tgt and tag[0] == idx
+                    and near(m.get("pts", []))):
+                return True
+        d = self._draft
+        return bool(d is not None and d.get("pane") == key
+                    and near(d.get("pts", [])))
+
     # ---- contour phase: step the rotated long-axis planes, trace this pass ----
     def _lv_enter_contour(self) -> None:
         """Axis + apex are set → trace the ACTIVE pass's border on its rotated
@@ -6094,10 +6169,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 break
         if m is None:
             return
-        # Snap any vertex within 3 mm of this surface's apex vertex onto it, so
-        # every meridian passes through the shared apex (the displayed border
-        # ends there too).
-        m["pts3d"] = self._lv_snap_apex(m["pts3d"], lv["target"])
+        # Snap vertices within the convergence range (= twice the apex marker
+        # radius) of this surface's apex onto it, so every meridian passes
+        # through the shared apex (the displayed border ends there too).
+        m["pts3d"] = self._lv_snap_apex(
+            m["pts3d"], lv["target"], tol=self._lv_apex_range_mm(pane))
         phi = lv["model"].plane_angles()[lv["plane_idx"]]
         try:
             lv["model"].set_long_axis_contour(phi, m["pts3d"],
