@@ -4694,10 +4694,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self.set_side("Bi")
         return True
 
-    def _lv_thick_zero_both(self) -> None:
-        """Slab thickness → 0 mm on both panes (thin slices for tracing)."""
+    def _lv_thick_trace_both(self) -> None:
+        """Slab thickness → 5 mm on both panes (a thin MIP slab helps see the
+        endo/epi border while tracing)."""
         for k in ("A", "B"):
-            self._thick[k] = 0.0
+            self._thick[k] = 5.0
 
     # ---- pass flow: align the view → Set axis → place apex → trace ----------
     def _lv_axis_from_view(self):
@@ -4720,7 +4721,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["phase"] = "align"
         lv["target"] = None
         self.set_side("Bi")
-        self._lv_thick_zero_both()                  # slab 0 both panes
+        self._lv_thick_trace_both()                  # slab 5mm both panes
         # Hide the other pass's border while aligning this one (e.g. the Endo
         # line must vanish once Epi is active) — _lv_show_plane isn't called in
         # the align phase, so set the visibility here.
@@ -4820,7 +4821,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_show_sax_both()
             return
         lv["pass"] = which
-        self._lv_thick_zero_both()
+        self._lv_thick_trace_both()
         ax = m._axis_for(which)
         if ax is None:
             self._lv_enter_align()
