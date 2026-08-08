@@ -4695,10 +4695,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         return True
 
     def _lv_thick_trace_both(self) -> None:
-        """Slab thickness → 5 mm on both panes (a thin MIP slab helps see the
-        endo/epi border while tracing)."""
+        """Slab thickness for the LV panes: 5 mm on the long-axis TRACE pane (a
+        thin MIP slab helps see the endo/epi border), 0 mm on the other
+        (cross-section) pane."""
+        pane = self._lv["pane"] if self._lv is not None else "B"
         for k in ("A", "B"):
-            self._thick[k] = 5.0
+            self._thick[k] = 5.0 if k == pane else 0.0
 
     # ---- pass flow: align the view → Set axis → place apex → trace ----------
     def _lv_axis_from_view(self):
