@@ -1856,21 +1856,39 @@ class XAViewer(AbstractViewer):
 
     # ------------------------------------------------------------- internals
     def _stop_prefetch(self) -> None:
-        """Signal the prefetch thread to stop and detach. We don't block
-        the UI thread waiting for it: prefetch_planes checks
-        ``should_stop`` between every frame (~10-30 ms), so the worker
-        exits on its own. The QThread is parented to the viewer so Qt
-        owns its lifecycle and reaps it cleanly once it returns. A short
-        ``wait`` is kept as a best-effort barrier — long enough to cover
-        a single in-flight decode, short enough that rapid Next/Prev
-        feels instant even when the previous series is mid-prefetch."""
-        if self._prefetch is not None:
-            self._prefetch.stop()
-            # 80 ms is comfortably above one decoded frame on the slow
-            # JPEG paths and well below the user's perceived-instant
-            # ~150 ms threshold for click→action feedback.
-            self._prefetch.wait(80)
-            self._prefetch = None
+        """Signal the prefetch thread to stop AND schedule its destruction,
+        so stepping through many series never accumulates finished threads.
+
+        IMPORTANT: a QThread that is only *parented* to the viewer is NOT
+        reaped when it finishes — Qt destroys children only when the PARENT
+        dies. The viewer is reused for the whole session, so every prefetcher
+        ever created used to survive as a live child, each pinning its series'
+        full decoded frame volumes (the ``np.zeros`` clip buffer) plus the
+        retained pydicom datasets. Stepping through dozens of series with F/A
+        then grew host memory without bound — and left several detached threads
+        decoding at once (JPEG decode holds the GIL) → rendering freeze → crash.
+        Fix: explicitly ``deleteLater()`` the thread — at once if it already
+        stopped, otherwise on its ``finished`` signal — which frees the QThread
+        object and everything it retained as soon as ``run()`` returns.
+
+        We still don't BLOCK the UI thread: prefetch_planes checks
+        ``should_stop`` between frames (~10-30 ms), so a short best-effort
+        ``wait`` covers a single in-flight decode while keeping rapid
+        Next/Prev feeling instant."""
+        pf = self._prefetch
+        self._prefetch = None
+        if pf is None:
+            return
+        pf.stop()
+        # Reap when run() returns (covers the still-decoding case without
+        # blocking here). Safe to also deleteLater() below if it's already
+        # done — Qt collapses repeated deleteLater() into one deletion.
+        pf.finished.connect(pf.deleteLater)
+        # 80 ms is comfortably above one decoded frame on the slow JPEG paths
+        # and well below the user's perceived-instant ~150 ms threshold.
+        pf.wait(80)
+        if not pf.isRunning():
+            pf.deleteLater()
 
     def _refresh_wl_lut(self) -> None:
         """(Re)build the W/L lookup table for the current grayscale

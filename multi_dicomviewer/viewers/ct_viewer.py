@@ -2041,18 +2041,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda d=direction: self._key_arrow(d))
-        # LV: A / F step the long-axis plane. QShortcuts (not keyPressEvent) so
-        # they fire even when a toolbar button (Set axis/Trace/…) has focus.
-        for seq, delta in (("A", -1), ("F", 1)):
-            sc = QShortcut(QKeySequence(seq), self)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(lambda d=delta: self._key_lv_plane(d))
+        # NB: A / F are app-wide ApplicationShortcuts (cine/series nav, see
+        # MainWindow._nav_active). Registering a viewer-level A/F QShortcut here
+        # collides with those → Qt sees two matching shortcuts → "ambiguous" →
+        # NEITHER fires. So LV plane-stepping on A/F is routed the other way:
+        # _nav_active calls lv_nav_key() below FIRST when a CT pane is active.
         self._update_active_frames()
 
-    def _key_lv_plane(self, delta) -> None:
-        """A / F shortcut → step the long-axis plane while tracing."""
+    def lv_nav_key(self, where: str) -> bool:
+        """A / F (via MainWindow._nav_active) step the long-axis plane while
+        LV-tracing, instead of navigating CT series. Returns True if handled."""
         if self._lv is not None and self._lv.get("phase") == "contour":
-            self._lv_step_plane(delta)
+            if where == "prev":
+                self._lv_step_plane(-1)
+                return True
+            if where == "next":
+                self._lv_step_plane(1)
+                return True
+        return False
 
     def showEvent(self, e):
         """Fit and paint the FIRST Render once the pane is actually on screen.
@@ -6227,7 +6233,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                             dd = min(abs(th - edit_mu), 360.0 - abs(th - edit_mu))
                             if dd < bd:
                                 bd, bi = dd, i
-                        if bi is not None:
+                        # Only light the crossing that TRULY corresponds to the
+                        # edited meridian (within half a meridian spacing). When
+                        # this level has no crossing on that meridian (an
+                        # asymmetric trace / apical level where one wall drops
+                        # out — the "missing left dot"), highlight NOTHING rather
+                        # than a different section-line's point, which read as
+                        # "the wrong point got selected".
+                        n_pl = max(1, lv["model"].n_planes)
+                        if bi is not None and bd <= 90.0 / n_pl:
                             hi_xy.append(xy[bi])        # the following point
                     mark_xy.extend(xy)              # the crossing points
                     border_sm[which] = sm
