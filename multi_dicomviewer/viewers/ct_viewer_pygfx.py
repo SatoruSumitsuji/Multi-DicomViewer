@@ -1581,6 +1581,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_wall = False
         self._lv_line_drag = None             # "level"/"meridian" while grabbing
         self._lv_apex_drag = None             # "endo"/"epi" while dragging an apex
+        self._lv_apex_hot = False             # apex glows: cursor in range while
+        #                                       tracing (cleared on point confirm)
         self._lv_line_hi = {"A": False, "B": False}
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
@@ -1932,11 +1934,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # Update the dashed draft preview that follows the cursor.
                 self._clear_hover_handle()
                 self._meas_hover = self._disp_to_world(key, x, y)
+                self._lv_apex_hover(key, x, y)     # glow apex if cursor in range
                 self._overlay[key].update()
                 return
             # Not drawing a draft here → hover-highlight (green) an existing
             # control point so the user sees it will be grabbed before pressing.
             self._measure_hover_handle(key, x, y)
+            self._lv_apex_hover(key, x, y)         # glow apex if cursor in range
             # SAX: with no border point under the cursor, thicken the ○ line
             # handle so the user still sees the level / meridian is grabbable.
             if self._lv_sax_active() and self._meas_hover_handle is None:
@@ -4989,6 +4993,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._commit_draft()
         else:
             self._redraw_geom(which)
+            self._lv_apex_clear_glow()         # a point was confirmed → normal
         return False
 
     def _measure_drag(self, which, sx, sy):
@@ -5914,32 +5919,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         return self._lv_px_to_mm(key, 12.0)
 
     def _lv_apex_glow(self, key) -> bool:
-        """True when any ACTIVE-pass border vertex (committed on the current
-        plane, or the live draft) sits within the convergence range of the apex
-        — it will snap to it. Only on the long-axis (trace) pane."""
+        """True while the tracing CURSOR is inside the convergence range of the
+        apex (a hover cue that the next click will snap there). Cleared once the
+        point is confirmed, so the marker returns to a plain red/green dot."""
         lv = self._lv
-        if lv is None or key != lv.get("pane"):
-            return False
-        tgt = lv.get("pass")
-        P = (lv["model"].endo_apex if tgt == "endo"
-             else lv["model"].epi_apex if tgt == "epi" else None)
-        if P is None:
-            return False
-        ax0, ay0 = self._world3d_to_out(key, P)
-        rng = self._lv_apex_range_mm(key)
-        idx = lv.get("plane_idx", 0)
+        return bool(lv is not None and key == lv.get("pane")
+                    and self._lv_apex_hot)
 
-        def near(pts):
-            return any(math.hypot(q[0] - ax0, q[1] - ay0) <= rng for q in pts)
+    def _lv_apex_hover(self, which, sx, sy) -> None:
+        """Update the apex GLOW from the live cursor while tracing a border."""
+        lv = self._lv
+        hot = False
+        if (lv is not None and lv.get("phase") == "contour"
+                and lv.get("sax") is None and which == lv.get("pane")
+                and lv.get("target") in ("endo", "epi")):
+            tgt = lv["pass"]
+            P = (lv["model"].endo_apex if tgt == "endo"
+                 else lv["model"].epi_apex if tgt == "epi" else None)
+            if P is not None:
+                ax0, ay0 = self._world3d_to_out(which, P)
+                wx, wy = self._disp_to_world(which, sx, sy)
+                hot = (math.hypot(wx - ax0, wy - ay0)
+                       <= self._lv_apex_range_mm(which))
+        if hot != self._lv_apex_hot:
+            self._lv_apex_hot = hot
+            self._overlay[which].update()
 
-        for m in self._measures.get(key, []):
-            tag = m.get("_lv")
-            if (tag is not None and tag[1] == tgt and tag[0] == idx
-                    and near(m.get("pts", []))):
-                return True
-        d = self._draft
-        return bool(d is not None and d.get("pane") == key
-                    and near(d.get("pts", [])))
+    def _lv_apex_clear_glow(self) -> None:
+        """Turn the apex glow off (a point was confirmed / mode changed)."""
+        if self._lv_apex_hot:
+            self._lv_apex_hot = False
+            lv = self._lv
+            if lv is not None and lv.get("pane") is not None:
+                self._overlay[lv["pane"]].update()
 
     # ---- contour phase: step the rotated long-axis planes, trace this pass ----
     def _lv_enter_contour(self) -> None:
@@ -6191,6 +6203,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["smooth"] = True
         self._lv_result_lines = []
         self._draft = None
+        self._lv_apex_hot = False      # border confirmed → marker back to normal
         self._redraw_meas(pane)
         self._lv_redraw_all()
 
