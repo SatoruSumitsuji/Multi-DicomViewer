@@ -1706,6 +1706,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
+        # LV: A / F step the long-axis plane (◀ Prev / ▶ Next); no-op otherwise.
+        for seq, delta in (("A", -1), ("F", 1)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(
+                lambda d=delta: self._lv is not None
+                and self._lv.get("phase") == "contour"
+                and self._lv_step_plane(d))
         # Arrow keys drive the active tool (see _key_arrow). QShortcuts (not
         # keyPressEvent) so they fire over the wgpu canvas' own focus handling.
         for seq, direction in (("Up", "up"), ("Down", "down"),
@@ -5532,7 +5540,7 @@ class CTViewer(CPRMixin, AbstractViewer):
               "view) then trace its border"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         row.addWidget(self._lv_trace_btn)
-        self._lv_prev_btn = FitButton(t("◀ Prev plane"))
+        self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
         row.addWidget(self._lv_prev_btn)
         self._lv_plane_lbl = QLabel("0/6")
@@ -5541,7 +5549,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_plane_lbl.setFont(fl)
         self._lv_plane_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self._lv_plane_lbl)
-        self._lv_next_btn = FitButton(t("▶ Next plane"))
+        self._lv_next_btn = FitButton(t("▶ Next plane (F)"))
         self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
         row.addWidget(self._lv_next_btn)
         self._lv_sax_btn = FitButton(t("SAX"))
@@ -6011,6 +6019,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[pane] = (u, v, n)
         self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
+        self._roll[pane] = 0.0          # long axis EXACTLY vertical: clear any
+        #                                SPIN roll done before Set axis
         first = not lv.get("fitted", False)
         lv["fitted"] = True
         self._view_initial = first
