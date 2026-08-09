@@ -708,8 +708,8 @@ class _Overlay(QWidget):
                 green = QColor(64, 220, 64)
                 for q, is_edit in mark:               # fixed screen-size dots
                     p.setBrush(green if is_edit else yellow)
-                    p.drawEllipse(S(q), 4.0 if is_edit else 3.5,
-                                  4.0 if is_edit else 3.5)
+                    r = 7.0 if is_edit else 3.5       # green = 2× the yellow
+                    p.drawEllipse(S(q), r, r)
                 angs = lv["model"].plane_angles()
                 md = ax.meridian_dir(angs[lv["plane_idx"] % len(angs)])
                 u, vv, _n = v._frame[key]

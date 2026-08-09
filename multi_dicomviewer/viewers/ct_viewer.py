@@ -1287,6 +1287,21 @@ class _Pane:
             lapx.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lapx)
         self.lv_apex_actor = lapx
+        # Highlighted SAX crossing (the one that follows an active long-axis
+        # edit) — green, TWICE the yellow crossing-dot radius (own actor so it
+        # can be a larger point).
+        self.lv_hi_mapper = vtkPolyDataMapper()
+        self.lv_hi_mapper.SetInputData(vtkPolyData())
+        self.lv_hi_mapper.ScalarVisibilityOn()
+        self.lv_hi_mapper.SetScalarModeToUseCellData()
+        self.lv_hi_mapper.SetColorModeToDirectScalars()
+        lhi = vtkActor()
+        lhi.SetMapper(self.lv_hi_mapper)
+        lhi.GetProperty().SetPointSize(16.0)    # 2× the 8 px crossing dots
+        if hasattr(lhi.GetProperty(), "SetRenderPointsAsSpheres"):
+            lhi.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(lhi)
+        self.lv_hi_actor = lhi
         # Captured endo (red) / epi (green) borders — redrawn from the model so
         # a traced border stays visible (and re-appears on revisiting a plane).
         self.lv_endo_mapper = vtkPolyDataMapper()
@@ -6111,6 +6126,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_epi_mapper.SetInputData(vtkPolyData())
         p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
         p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
+        p.lv_hi_mapper.SetInputData(vtkPolyData())      # green edited crossing
         self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
@@ -6129,7 +6145,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # through the level×meridian border crossings, with the crossing
                 # points themselves marked as fixed-SCREEN-size dots (so they
                 # don't grow when the pane is zoomed).
-                mark_xy, mark_cols = [], []
+                mark_xy, hi_xy = [], []
                 border_sm = {}
                 # While a long-axis border VERTEX is being dragged, colour the
                 # ONE short-axis crossing that follows it GREEN (of the two yellow
@@ -6160,7 +6176,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                     xy = [self._world3d_to_out(key, P) for P in sp]
                     sm = _smooth_closed(xy)         # closed Catmull-Rom
                     mapper.SetInputData(_polylines_pd([[tuple(q) for q in sm]]))
-                    cols = [(255, 210, 0)] * len(sp)
                     if edit_which == which and edit_mu is not None:
                         bi, bd = None, 1e9
                         for i, P in enumerate(sp):
@@ -6172,9 +6187,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                             if dd < bd:
                                 bd, bi = dd, i
                         if bi is not None:
-                            cols[bi] = (64, 220, 64)     # the following point
+                            hi_xy.append(xy[bi])        # the following point
                     mark_xy.extend(xy)              # the crossing points
-                    mark_cols.extend(cols)
                     border_sm[which] = sm
                 # WALL-THICKNESS colour map: translucent annulus between endo &
                 # epi, each angular sector coloured by its Epi−Endo gap (the same
@@ -6183,9 +6197,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                         and "endo" in border_sm and "epi" in border_sm):
                     self._lv_draw_wall(p, border_sm["endo"], border_sm["epi"])
                 if mark_xy:
-                    # yellow crossing dots (green = the one following an active
-                    # long-axis edit), fixed screen size (constant under zoom).
-                    p.lv_pts_mapper.SetInputData(_lv_pts_pd(mark_xy, mark_cols))
+                    # yellow crossing dots, fixed screen size (constant under
+                    # zoom); the one following a long-axis edit is overdrawn green
+                    # at 2× radius via lv_hi_mapper.
+                    p.lv_pts_mapper.SetInputData(
+                        _lv_pts_pd(mark_xy, [(255, 210, 0)] * len(mark_xy)))
+                if hi_xy:
+                    p.lv_hi_mapper.SetInputData(
+                        _lv_pts_pd(hi_xy, [(64, 220, 64)] * len(hi_xy), z=0.95))
                 # centreline showing the current long-axis plane direction
                 # (rotated by ◀ ▶); it lies in this short-axis plane. A ring
                 # marks the +θ end so the long/short views share an orientation.
