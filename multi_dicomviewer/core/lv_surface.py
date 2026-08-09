@@ -189,10 +189,10 @@ def _apex_cap_profile(along, rings, n_cap: int = 10):
 
 def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 16):
     """Rounded apex cap whose depth is fixed so the tip lands on the user apex's
-    along *a_tip*. Uses a power-law taper radius = r0·(1 − d/D)^k: k < 1 gives a
-    BLUNT, rounded (U-shaped) apex with a vertical (rounded) tip and no straight
-    cone. The gentler the wall near the apex, the smaller k — so a broad Epi apex
-    comes out ROUNDER than a narrower Endo one, matching the traced borders."""
+    along *a_tip*. A cubic Bézier that LEAVES the deepest ring along the WALL's
+    own tangent (so there is NO shoulder / 'debeso' where the cap meets the wall)
+    and then rounds to a blunt vertical tip. The tangent join is what removes the
+    debeso; the high mid control point (p2) keeps the tip blunt (not a spike)."""
     along = np.asarray(along, float)
     n = len(along)
     a0 = float(along[0])
@@ -206,14 +206,19 @@ def _apex_cap_profile_to(along, rings, a_tip, n_cap: int = 16):
     D = a0 - float(a_tip)
     if D < 0.1:                    # apex ≈ at the (converged) deepest ring →
         return [], float(a_tip)    # no cap rings; caller fans the ring to the tip
-    # bluntness: k<1 = round/blunt. Gentle wall (small m, e.g. epi) → smaller k
-    # → rounder; steeper wall (endo) → nearer a cone but still rounded.
-    k = float(np.clip(0.40 + 0.30 * m, 0.40, 0.95))
+    # (drop d ≥ 0 apical, radius r): leave along the wall tangent (−m) → no
+    # shoulder; p2 high → blunt rounded tip; p3 = the apex (r = 0).
+    p0 = np.array([0.0, r0])
+    p1 = np.array([0.35 * D, max(0.0, r0 - 0.35 * D * m)])
+    p2 = np.array([D, 0.60 * r0])
+    p3 = np.array([D, 0.0])
     prof = []
     for s in range(1, n_cap + 1):
-        frac = s / float(n_cap)
-        scale = (1.0 - frac) ** k
-        prof.append((a0 - D * frac, float(max(0.0, min(1.0, scale)))))
+        t = s / float(n_cap)
+        b = ((1 - t) ** 3 * p0 + 3 * (1 - t) ** 2 * t * p1
+             + 3 * (1 - t) * t ** 2 * p2 + t ** 3 * p3)
+        d, r = float(b[0]), float(max(0.0, b[1]))
+        prof.append((a0 - d, float(min(1.0, r / r0))))
     return prof[:-1], float(a0 - D)
 
 
