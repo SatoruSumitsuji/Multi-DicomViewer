@@ -2212,7 +2212,7 @@ class CTViewer(CPRMixin, AbstractViewer):
               "view) then trace its border"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         row.addWidget(self._lv_trace_btn)
-        self._lv_prev_btn = FitButton(t("◀ Prev plane"))
+        self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
         row.addWidget(self._lv_prev_btn)
@@ -2222,7 +2222,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_plane_lbl.setFont(fl)
         self._lv_plane_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         row.addWidget(self._lv_plane_lbl)
-        self._lv_next_btn = FitButton(t("▶ Next plane"))
+        self._lv_next_btn = FitButton(t("▶ Next plane (F)"))
         self._lv_next_btn.setHelpToolTip(t("Next long-axis plane"))
         self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
         row.addWidget(self._lv_next_btn)
@@ -5020,6 +5020,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 mm["hidden"] = (tag[0] != idx) or (tag[1] != lv.get("pass"))
         self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")   # e.g. 1/6
         self._refresh(reset_cam=first)
+        # Force the long axis EXACTLY vertical: the reslice frame's v = ax.axis,
+        # so reset the camera roll (any SPIN done before Set axis would otherwise
+        # leave the axis diagonal). The output plane is (x=u, y=v), so up=(0,1,0).
+        cam = self.pane[pane].ren.GetActiveCamera()
+        cam.SetViewUp(0.0, 1.0, 0.0)
         # Keep the centreline (crosshair) but drop only the slab-width parallel
         # lines in LV trace mode.
         self.pane[pane].set_overlay_visible(self._cl_btn.isChecked())
@@ -8175,6 +8180,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
             return
+        # LV: A / F step the long-axis plane (◀ Prev / ▶ Next).
+        if self._lv is not None and self._lv.get("phase") == "contour":
+            if e.key() == Qt.Key.Key_A:
+                self._lv_step_plane(-1)
+                return
+            if e.key() == Qt.Key.Key_F:
+                self._lv_step_plane(1)
+                return
         # Angio-parity cine keys in 2-D mode: D = play / ×2 toggle, S = stop.
         # In 3-D, S keeps selecting the Spin tool (MPR-only, so no conflict).
         if self._mode == "2D":
