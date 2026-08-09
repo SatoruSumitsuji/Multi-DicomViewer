@@ -4934,6 +4934,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             self._redraw_geom(which)
+            # Grabbing an LV border vertex → light the linked SAX crossing green
+            # at once (not only after the first drag).
+            if self._lv_sax_active() and self._measures[which][hit[0]].get("_lv"):
+                self._overlay[self._lv["sax_pane"]].update()
             return True
         # A Center-Angle marker point can be dragged just like a polygon vertex.
         ca_hit = None if lv_drawing else self._pick_center_angle(which, sx, sy)
@@ -4986,6 +4990,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 _, _, nrm = self._axes_for(which)
                 P = self._snap_to_lumen(P, nrm)
                 d["pts"][-1] = self._world3d_to_out(which, P)  # keep 2-D in step
+            # LV: if this click is within the apex convergence range, snap it
+            # EXACTLY onto the apex NOW (overlaps the marker immediately, not
+            # only after the finishing double-click).
+            Pa = self._lv_active_apex()
+            if Pa is not None:
+                ax0, ay0 = self._world3d_to_out(which, Pa)
+                if (math.hypot(w[0] - ax0, w[1] - ay0)
+                        <= self._lv_apex_range_mm(which)):
+                    P = np.asarray(Pa, float)
+                    d["pts"][-1] = (ax0, ay0)
             d.setdefault("pts3d", []).append(P)
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
             self._commit_draft()
@@ -5066,6 +5080,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             key = self._edit["key"]
             self._edit = None
             self._redraw_meas(key)
+            if self._lv_sax_active():        # revert the green SAX crossing
+                self._overlay[self._lv["sax_pane"]].update()
 
     def _set_ellipse_handle(self, m, vi, w):
         m["pts"] = _ellipse_drag(m["pts"], vi, w)
@@ -5917,6 +5933,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Convergence radius in output-mm = TWICE the apex marker's radius
         (6 px → 12 px), so it reads as a circle twice the marker (area ×4)."""
         return self._lv_px_to_mm(key, 12.0)
+
+    def _lv_active_apex(self):
+        """The ACTIVE pass's apex vertex (3-D volume mm), or None when not
+        tracing / no apex set."""
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour":
+            return None
+        tgt = lv.get("pass")
+        return (lv["model"].endo_apex if tgt == "endo"
+                else lv["model"].epi_apex if tgt == "epi" else None)
 
     def _lv_apex_glow(self, key) -> bool:
         """True while the tracing CURSOR is inside the convergence range of the
