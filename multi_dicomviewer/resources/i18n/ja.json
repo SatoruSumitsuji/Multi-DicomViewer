@@ -154,6 +154,7 @@
   "How many images stay fully loaded at once. Older panes beyond this become a still snapshot to save memory; click one to reload it. Higher = more interactive at once, but more memory.": "同時にフル読み込みする画像数です。これを超えた古いペインはメモリ節約のため静止画になります(クリックで再読み込み)。多いほど同時に操作できますが、メモリを多く使います。",
   "CT panes": "CTペイン",
   "Angio panes": "アンギオペイン",
+  "Allowing multiple CT panes to display at once may force-quit the app depending on your PC's specs and state. If a problem occurs, set the CT display count back to 1.": "複数のCTペインを表示可能に設定すると、PCのスペック・状況によってアプリが強制終了する可能性があります。問題が発生した場合はCT表示ペイン数を1に戻してください。",
   "  (max {n})": "  (最大 {n})",
   "Settings": "設定",
   "Display count, angio image quality, CT colour map": "表示画像数・アンギオ画質・CTカラーマップ",

@@ -2706,14 +2706,15 @@ class MainWindow(QMainWindow):
         a still and its memory freed — so opening many large CTs / angios can't
         exhaust RAM (the cause of the hard crash when 3 CT + 11 XA were open)."""
         caps = settings.load_live_caps()
-        # The Windows VTK CT viewer cannot render more than ONE live CT at a
-        # time: a 2nd/3rd live CT pane exhausts the GL context/GPU and the
-        # earlier CT panes go BLACK. So CT is HARD-CAPPED to 1 live here,
-        # regardless of the user's "display count" setting — extra CT panes show
-        # a still snapshot (their volume is freed and reloaded when re-activated,
-        # captured while the pane was still rendering, so it is an image not
-        # black). XA (a plain-Qt canvas, no VTK) keeps the user's setting.
-        return {Modality.CT: 1, Modality.XA: caps["XA"]}
+        # Historically CT was HARD-CAPPED to 1 live here: a 2nd/3rd live CT pane
+        # can exhaust the GL context/GPU (earlier CT panes go BLACK) or the RAM
+        # (force-quit). LVEF needs two phases (ED/ES) side by side, so the cap is
+        # now the user's own "Display count → CT panes" setting (default 1),
+        # gated behind an explicit warning in the Settings dialog when they raise
+        # it to ≥2. Over-cap panes still fall back to a memory-light still, and
+        # _free_live_for_incoming + the memory budget still protect against huge
+        # volumes piling up. XA (plain-Qt canvas) is unchanged.
+        return {Modality.CT: caps["CT"], Modality.XA: caps["XA"]}
 
     def _touch_pane(self, pane: ViewerPane) -> None:
         """Stamp *pane* as most-recently-used on the LRU clock."""
