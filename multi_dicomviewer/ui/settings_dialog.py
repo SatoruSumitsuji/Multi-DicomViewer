@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QRadioButton,
     QSpinBox,
@@ -58,6 +59,13 @@ class SettingsDialog(QDialog):
             self._spins[key] = sb
             cform.addRow(label, sb)
         root.addWidget(gb_count)
+        # Warn the FIRST time the user RAISES CT panes to ≥2 (several live CT
+        # volumes can exhaust GPU/RAM → force-quit on modest machines). Connected
+        # AFTER the initial setValue above, so opening the dialog on an already-≥2
+        # setting doesn't nag. Cancel reverts to 1; OK acknowledges for this
+        # dialog session (raising 2→3→4 won't re-prompt).
+        self._ct_multi_ack = int(caps.get("CT", 1)) >= 2
+        self._spins["CT"].valueChanged.connect(self._on_ct_count_changed)
 
         # ---- Angio image quality ------------------------------------------
         gb_q = QGroupBox(t("Angio image quality"))
@@ -135,6 +143,27 @@ class SettingsDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+
+    def _on_ct_count_changed(self, val: int) -> None:
+        """Confirm before enabling multiple live CT panes — the memory/GPU load
+        can force-quit the app on some machines. OK enables it; Cancel snaps the
+        count back to 1."""
+        if val < 2 or self._ct_multi_ack:
+            return
+        ans = QMessageBox.warning(
+            self, t("CT panes"),
+            t("Allowing multiple CT panes to display at once may force-quit the "
+              "app depending on your PC's specs and state. If a problem occurs, "
+              "set the CT display count back to 1."),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel)
+        if ans == QMessageBox.StandardButton.Ok:
+            self._ct_multi_ack = True
+        else:
+            sb = self._spins["CT"]
+            sb.blockSignals(True)
+            sb.setValue(1)
+            sb.blockSignals(False)
 
     def _open_color(self) -> None:
         # Pass THIS dialog as the parent so the colour editor opens modal ON TOP
