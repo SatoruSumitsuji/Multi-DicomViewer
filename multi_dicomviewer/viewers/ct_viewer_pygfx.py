@@ -690,6 +690,13 @@ class _Overlay(QWidget):
                                      360.0 - abs(th - edit_mu))
                             if dd < bd:
                                 bd, gi = dd, i
+                        # Only follow the crossing that TRULY matches the edited
+                        # meridian (within half a meridian spacing). If this
+                        # level has none there (asymmetric/apical "missing left
+                        # dot"), highlight nothing rather than a different
+                        # section-line's point.
+                        if bd > 90.0 / max(1, lv["model"].n_planes):
+                            gi = -1
                     for i, q in enumerate(xy):
                         mark.append((q, i == gi))
                 if v._lv_wall and "endo" in border_sm and "epi" in border_sm:
@@ -1706,14 +1713,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
-        # LV: A / F step the long-axis plane (◀ Prev / ▶ Next); no-op otherwise.
-        for seq, delta in (("A", -1), ("F", 1)):
-            sc = QShortcut(QKeySequence(seq), self)
-            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(
-                lambda d=delta: self._lv is not None
-                and self._lv.get("phase") == "contour"
-                and self._lv_step_plane(d))
+        # NB: A / F are app-wide ApplicationShortcuts (cine/series nav, see
+        # MainWindow._nav_active). A viewer-level A/F QShortcut would collide
+        # (two matching shortcuts → "ambiguous" → NEITHER fires), so LV plane-
+        # stepping is routed via lv_nav_key() (called first by _nav_active).
         # Arrow keys drive the active tool (see _key_arrow). QShortcuts (not
         # keyPressEvent) so they fire over the wgpu canvas' own focus handling.
         for seq, direction in (("Up", "up"), ("Down", "down"),
@@ -6242,6 +6245,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apex_hot = False      # border confirmed → marker back to normal
         self._redraw_meas(pane)
         self._lv_redraw_all()
+
+    def lv_nav_key(self, where: str) -> bool:
+        """A / F (via MainWindow._nav_active) step the long-axis plane while
+        LV-tracing, instead of navigating CT series. Returns True if handled."""
+        if self._lv is not None and self._lv.get("phase") == "contour":
+            if where == "prev":
+                self._lv_step_plane(-1)
+                return True
+            if where == "next":
+                self._lv_step_plane(1)
+                return True
+        return False
 
     def _lv_step_plane(self, delta) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":

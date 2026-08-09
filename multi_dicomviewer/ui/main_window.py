@@ -3015,8 +3015,15 @@ class MainWindow(QMainWindow):
 
     def _nav_active(self, where: str) -> None:
         """F/A/Home/End: navigate by the ACTIVE pane's kind — a CT pane
-        steps through the study's CT series, otherwise the cine list."""
-        if _is_ct(self._active.current_viewer()):
+        steps through the study's CT series, otherwise the cine list.
+
+        Exception: while a CT pane is LV-tracing, A/F (prev/next) step the
+        long-axis plane instead of the series list — the viewer's lv_nav_key
+        claims the key and we stop here."""
+        v = self._active.current_viewer()
+        if _is_ct(v):
+            if hasattr(v, "lv_nav_key") and v.lv_nav_key(where):
+                return
             self._nav_ct(where)
         else:
             self._nav_xa(where)
