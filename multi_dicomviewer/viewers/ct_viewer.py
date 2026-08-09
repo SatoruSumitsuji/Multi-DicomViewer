@@ -2041,7 +2041,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             sc.activated.connect(lambda d=direction: self._key_arrow(d))
+        # LV: A / F step the long-axis plane. QShortcuts (not keyPressEvent) so
+        # they fire even when a toolbar button (Set axis/Trace/…) has focus.
+        for seq, delta in (("A", -1), ("F", 1)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda d=delta: self._key_lv_plane(d))
         self._update_active_frames()
+
+    def _key_lv_plane(self, delta) -> None:
+        """A / F shortcut → step the long-axis plane while tracing."""
+        if self._lv is not None and self._lv.get("phase") == "contour":
+            self._lv_step_plane(delta)
 
     def showEvent(self, e):
         """Fit and paint the FIRST Render once the pane is actually on screen.
@@ -8180,14 +8191,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
             return
-        # LV: A / F step the long-axis plane (◀ Prev / ▶ Next).
-        if self._lv is not None and self._lv.get("phase") == "contour":
-            if e.key() == Qt.Key.Key_A:
-                self._lv_step_plane(-1)
-                return
-            if e.key() == Qt.Key.Key_F:
-                self._lv_step_plane(1)
-                return
         # Angio-parity cine keys in 2-D mode: D = play / ×2 toggle, S = stop.
         # In 3-D, S keeps selecting the Spin tool (MPR-only, so no conflict).
         if self._mode == "2D":
