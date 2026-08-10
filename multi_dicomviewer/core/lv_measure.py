@@ -71,6 +71,39 @@ def _outermost_by_level(items, step):
     return list(best.values())
 
 
+def _resample_wall(samples, levels, e_s, axis, apex_pt):
+    """One 3-D control point per axial *level* on a meridian wall.
+
+    *samples* is [(along, radius, _)] for the wall (from the endo reslice),
+    *levels* the along values from base → apex (evenly spaced). The radius is
+    linearly interpolated at each level; below the deepest sample it tapers to 0,
+    and the apical end snaps to *apex_pt* (the marked apex) when given. Used to
+    reduce the dense promoted Endo border to a few evenly-spaced editable
+    points (base end + interior + apex per wall)."""
+    if len(samples) < 1:
+        return []
+    sa = sorted(samples, key=lambda t: t[0])
+    alo = np.array([s[0] for s in sa], float)
+    rad = np.array([s[1] for s in sa], float)
+    a_deep = float(alo[0])                        # most-apical sampled level
+    a_apex = float(levels[-1])
+    out = []
+    n = len(levels)
+    for i, L in enumerate(levels):
+        L = float(L)
+        if i == n - 1 and apex_pt is not None:
+            out.append(np.asarray(apex_pt, float))
+            continue
+        if L >= a_deep:
+            r = float(np.interp(L, alo, rad))
+        else:                                     # apical of deepest → taper to 0
+            span = a_deep - a_apex
+            frac = (a_deep - L) / span if span > 1e-6 else 1.0
+            r = float(rad[0]) * max(0.0, 1.0 - frac)
+        out.append(axis.apex + L * axis.axis + r * e_s)
+    return out
+
+
 def _planes_to_contours(planes: dict, axis) -> dict:
     """Split each raw 3-D border polyline in *planes* {φ: (N,3)} into the two
     meridian (along, radius) profiles {θ: (T,2)} about *axis*, by the sign of the
@@ -465,7 +498,8 @@ class LVModel:
 
     # -------------------------------------------------- promote endo → epi axis
     def promote_endo_to_epi_axis(self, level_step: float = LV_LEVEL_STEP_MM,
-                                 n_theta: int = LV_RING_POINTS) -> bool:
+                                 n_theta: int = LV_RING_POINTS,
+                                 n_div: int = 6) -> bool:
         """Re-express the traced Endo border on the EPI axis so both borders
         share ONE coordinate frame (common axis + meridians) — the prerequisite
         for editing Endo against Epi on one long-axis plane and for true
@@ -505,7 +539,15 @@ class LVModel:
         rings = [surf.ring_world(k) for k in range(len(surf.along))]
 
         ax = self.epi_axis
-        # 2. Reslice the endo rings along each EPI meridian plane.
+        # Apex level on the epi axis (the marked Endo apex the walls converge to).
+        apex_along = None
+        if self.endo_apex is not None:
+            apex_along = float((np.asarray(self.endo_apex, float) - ax.apex)
+                               @ ax.axis)
+        n_levels = max(2, int(n_div) + 1)   # 6 divisions → 7 points per wall
+        # 2. Reslice the endo rings along each EPI meridian plane, then reduce
+        # each wall to n_levels evenly-spaced control points (base end + interior
+        # + apex) so the promoted Endo has few, tidy editable points.
         new_planes: dict[float, np.ndarray] = {}
         for phi in self.plane_angles():
             _o, e_s, _e_t, nrm = ax.long_axis_basis(phi)   # nrm ⟂ meridian plane
@@ -529,9 +571,19 @@ class LVModel:
             neg = _outermost_by_level(neg, level_step)
             if len(pos) + len(neg) < 3:
                 continue
-            neg.sort(key=lambda r: -r[0])                  # base → apex
-            pos.sort(key=lambda r: r[0])                   # apex → base
-            pts = [P for _a, _r, P in neg] + [P for _a, _r, P in pos]
+            alls = [a for a, _r, _P in pos + neg]
+            base_along = max(alls)
+            a_apex = apex_along if apex_along is not None else min(alls)
+            if base_along - a_apex < 1e-3:
+                continue
+            levels = np.linspace(base_along, a_apex, n_levels)   # base → apex
+            neg_pts = _resample_wall(neg, levels, -e_s, ax, self.endo_apex)
+            pos_pts = _resample_wall(pos, levels, e_s, ax, self.endo_apex)
+            if len(neg_pts) < 2 or len(pos_pts) < 2:
+                continue
+            # one continuous border: φ+180 wall base→apex, then φ wall apex→base
+            # (drop the duplicated shared apex).
+            pts = neg_pts + pos_pts[::-1][1:]
             new_planes[phi] = np.asarray(pts, float)
         if len(new_planes) < 3:
             return False
