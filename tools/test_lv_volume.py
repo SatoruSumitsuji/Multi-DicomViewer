@@ -14,6 +14,7 @@ sys.path.insert(0, r"C:\CC_Product\Multi-DicomViewer")
 import numpy as np  # noqa: E402
 
 from multi_dicomviewer.core.lv_axis import LVAxis          # noqa: E402
+from multi_dicomviewer.core.lv_measure import LVModel      # noqa: E402
 from multi_dicomviewer.core.lv_surface import LVSurface    # noqa: E402
 
 
@@ -112,5 +113,44 @@ assert verts.ndim == 2 and verts.shape[1] == 3
 assert faces.ndim == 2 and faces.shape[1] == 3
 assert faces.max() < len(verts) and faces.min() >= 0
 print(f"mesh: {len(verts)} verts, {len(faces)} faces - OK")
+
+# ---- E: promote Endo onto the Epi axis (independent axes → one frame) -------
+# Endo axis: straight up. Epi axis: apex a few mm more apical + slightly tilted
+# (a genuinely INDEPENDENT axis, as the 2-pass trace produces).
+ax_endo = LVAxis.from_points([15, 0, 80], [-15, 0, 80], [0, 0, 0])
+d = np.array([0.05, 0.03, 1.0]); d = d / np.linalg.norm(d)
+apex_epi = np.array([1.5, -1.0, -4.0])
+base_epi = apex_epi + 84.0 * d
+perp = np.cross(d, [0, 0, 1]); perp = perp / np.linalg.norm(perp)
+ax_epi = LVAxis.from_points(base_epi + 15 * perp, base_epi - 15 * perp, apex_epi)
+
+m = LVModel(n_planes=6)
+m.endo_axis = ax_endo
+m.epi_axis = ax_epi
+m.endo_contours = _ellipsoid_contours(ax_endo, 18.0, 18.0, n_meridians=12)
+m.epi_contours = _ellipsoid_contours(ax_epi, 23.0, 23.0, n_meridians=12)
+m.endo_apex = ax_endo.apex.copy()
+m.epi_apex = ax_epi.apex.copy()
+
+m.build()
+V_endo_pre = m.volume_ml(0.5, "endo")
+endo_apex_before = m.endo_apex.copy()
+
+ok = m.promote_endo_to_epi_axis()
+assert ok, "promotion returned False"
+assert m.endo_axis is m.epi_axis, "endo not on the epi axis after promotion"
+assert np.allclose(m.endo_apex, endo_apex_before), "endo apex point changed"
+assert len(m.endo_contours) >= 3, "too few endo contours after promotion"
+
+m.build()
+V_endo_post = m.volume_ml(0.5, "endo")
+print("E) promote Endo onto the Epi axis:")
+_check("endo volume (pre vs post promote)", V_endo_post, V_endo_pre, 0.10)
+# both borders now share ONE axis → wall (myocardial) volume well-defined > 0
+V_myo = m.myocardial_volume_ml(0.5)
+assert V_myo is not None and V_myo > 0, f"myo volume invalid: {V_myo}"
+# idempotent: a second promotion is a no-op success
+assert m.promote_endo_to_epi_axis() is True
+print(f"   endo→epi axis, apex preserved, myo={V_myo:.1f} mL - OK")
 
 print("\nALL PASS")
