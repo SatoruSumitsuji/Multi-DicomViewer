@@ -5687,6 +5687,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
+        # Remember the numbers so Save can persist them and Load can redisplay.
+        self._lv["vol_endo_ml"] = float(endo_ml)
+        self._lv["vol_myo_ml"] = None if myo_ml is None else float(myo_ml)
         self._lv_sync_buttons()
         self._lv_update_text()
 
@@ -5924,6 +5927,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         data = m.to_dict()
         data["series"] = self._lv_series_meta()      # for the load-time match
+        # Persist the computed volume (if a VALID result is showing — vol_done
+        # is cleared on any edit) so Load can redisplay it.
+        if self._lv.get("vol_done") and self._lv.get("vol_endo_ml") is not None:
+            data["volume"] = {"endo_ml": float(self._lv["vol_endo_ml"]),
+                              "myo_ml": (None if self._lv.get("vol_myo_ml") is None
+                                         else float(self._lv["vol_myo_ml"]))}
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -5968,9 +5977,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                       "may not line up. Load anyway?")) != \
                     QMessageBox.StandardButton.Yes:
                 return
-        self._lv_apply_model(model)
+        self._lv_apply_model(model, volume=data.get("volume"))
 
-    def _lv_apply_model(self, model) -> None:
+    def _lv_apply_model(self, model, volume=None) -> None:
         """Enter LV contour mode with a loaded model (axis + borders from file)
         and re-create the on-screen Endo/Epi border measures from it."""
         if self._meas_on:
@@ -5993,6 +6002,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (len(model.endo_contours) >= 3 or len(model.epi_contours) >= 3):
             self._lv_sax_btn.setChecked(True)
             self._lv_toggle_sax()
+        # Redisplay a SAVED volume result (after SAX entry, which clears the
+        # result panel) and light CalcVol blue — so Load shows the computed EF.
+        if volume and self._lv is not None:
+            lines = [t("Loaded borders: endo {ne} / epi {nep} planes",
+                       ne=len(model.endo_planes), nep=len(model.epi_planes))]
+            ev, mv = volume.get("endo_ml"), volume.get("myo_ml")
+            if ev is not None:
+                lines.append(t("LV cavity volume: {v:.1f} mL", v=float(ev)))
+                self._lv["vol_endo_ml"] = float(ev)
+            if mv is not None:
+                lines.append(t("Myocardial volume: {v:.1f} mL", v=float(mv)))
+                self._lv["vol_myo_ml"] = float(mv)
+            if ev is not None:
+                self._lv["vol_done"] = True
+                self._lv_result_lines = lines
+                self._lv_sync_buttons()
         self._lv_update_text()
 
     def _lv_rebuild_measures(self) -> None:
