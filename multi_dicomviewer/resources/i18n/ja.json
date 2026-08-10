@@ -372,6 +372,7 @@
   "Trace the endo border on at least 3 planes first.": "先に心内膜を最低3断面でトレースしてください。",
   "LV cavity volume (endo): {v:.1f} mL": "左室内腔容積(心内膜): {v:.1f} mL",
   "LV cavity volume: {v:.1f} mL": "左室内腔容積: {v:.1f} mL",
+  "Computing LV volume…": "左室容積を計算中…",
   "Myocardial volume: {v:.1f} mL": "心筋容積: {v:.1f} mL",
   "Myocardial volume (epi-endo): {v:.1f} mL": "心筋容積(心外膜−心内膜): {v:.1f} mL",
   "Myocardial mass: {g:.1f} g": "心筋重量: {g:.1f} g",

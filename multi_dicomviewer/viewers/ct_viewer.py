@@ -5561,8 +5561,16 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_compute_volume(self) -> None:
         """Build the endo/epi surfaces from the traced borders and report the LV
-        cavity volume (voxels inside the endo surface) + myocardial mass."""
-        from PyQt6.QtWidgets import QMessageBox
+        cavity volume (voxels inside the endo surface) + myocardial mass.
+
+        The reconstruction (surface loft + voxel counting) takes several seconds,
+        so it runs on a worker thread behind a busy progress dialog: the click
+        gets IMMEDIATE "computing" feedback (no more "did it even start?"), the
+        window stays painted, and the bar animates because the UI event loop is
+        free. The compute is pure-numpy on the model (no Qt/VTK), so it is safe
+        off the UI thread; results are read back here after it finishes."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         self._lv_capture_current()          # capture any pending trace
@@ -5570,15 +5578,41 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Parent dialogs to the TOP-LEVEL window, not this embedded viewer, to
         # avoid Qt's "must be a top level window" console warning.
         top = self.window()
-        try:
-            m.build()
-        except Exception as exc:                          # noqa: BLE001
+        spacing = max(0.5, float(min(self._dims)))
+
+        result: dict = {}
+
+        class _VolWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    m.build()
+                    result["endo"] = m.volume_ml(spacing, "endo")
+                    result["myo"] = m.myocardial_volume_ml(spacing)
+                except Exception as exc:                  # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Computing LV volume…"), "", 0, 0, top)
+        dlg.setWindowTitle(t("LV EF"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)                 # not cancellable — it's short
+        dlg.setMinimumDuration(0)                 # show at once
+        dlg.setValue(0)
+        worker = _VolWorker()
+        # finished is delivered via the UI event loop that dlg.exec() runs, so
+        # even if the worker finishes before exec() starts, reset() is queued and
+        # closes the dialog (no hang).
+        worker.finished.connect(dlg.reset)
+        worker.start()
+        dlg.exec()
+        worker.wait()
+        worker.deleteLater()
+
+        if "err" in result:
             QMessageBox.information(
                 top, t("LV EF"),
-                t("Could not build the LV surface: {err}", err=str(exc)))
+                t("Could not build the LV surface: {err}", err=result["err"]))
             return
-        spacing = max(0.5, float(min(self._dims)))
-        endo_ml = m.volume_ml(spacing, "endo")
+        endo_ml = result.get("endo")
         if endo_ml is None:
             QMessageBox.information(
                 top, t("LV EF"),
@@ -5588,7 +5622,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # MASS is omitted — density can't be read from the image (only a
         # reference value), so we report volumes only.
         lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
-        myo_ml = m.myocardial_volume_ml(spacing)
+        myo_ml = result.get("myo")
         if myo_ml is not None:
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines

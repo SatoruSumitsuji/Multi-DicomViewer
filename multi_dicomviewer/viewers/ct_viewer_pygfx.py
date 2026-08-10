@@ -6473,28 +6473,58 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._overlay[self._lv["sax_pane"]].update()
 
     def _lv_compute_volume(self) -> None:
-        from PyQt6.QtWidgets import QMessageBox
+        """Build the endo/epi surfaces and report LV cavity + myocardial volume.
+
+        Runs on a worker thread behind a busy progress dialog: the click gets
+        immediate "computing" feedback, the window stays painted, and the bar
+        animates. The compute is pure-numpy on the model (no Qt/GPU), so it is
+        safe off the UI thread."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         self._lv_capture_current()
         m = self._lv["model"]
         top = self.window()
-        try:
-            m.build()
-        except Exception as exc:                          # noqa: BLE001
+        spacing = max(0.5, float(min(self._dims)))
+
+        result: dict = {}
+
+        class _VolWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    m.build()
+                    result["endo"] = m.volume_ml(spacing, "endo")
+                    result["myo"] = m.myocardial_volume_ml(spacing)
+                except Exception as exc:                  # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Computing LV volume…"), "", 0, 0, top)
+        dlg.setWindowTitle(t("LV EF"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        worker = _VolWorker()
+        worker.finished.connect(dlg.reset)
+        worker.start()
+        dlg.exec()
+        worker.wait()
+        worker.deleteLater()
+
+        if "err" in result:
             QMessageBox.information(
                 top, t("LV EF"),
-                t("Could not build the LV surface: {err}", err=str(exc)))
+                t("Could not build the LV surface: {err}", err=result["err"]))
             return
-        spacing = max(0.5, float(min(self._dims)))
-        endo_ml = m.volume_ml(spacing, "endo")
+        endo_ml = result.get("endo")
         if endo_ml is None:
             QMessageBox.information(
                 top, t("LV EF"),
                 t("Trace the endo border on at least 3 planes first."))
             return
         lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
-        myo_ml = m.myocardial_volume_ml(spacing)
+        myo_ml = result.get("myo")
         if myo_ml is not None:
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines
