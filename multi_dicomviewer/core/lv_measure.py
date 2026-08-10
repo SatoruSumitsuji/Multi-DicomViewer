@@ -59,6 +59,18 @@ def _cr_densify_3d(pts: np.ndarray, per_seg: int = 8) -> np.ndarray:
     return np.asarray(out)
 
 
+def _outermost_by_level(items, step):
+    """From [(along, radius, P3d), …] keep the OUTERMOST (largest radius)
+    crossing per axial-level bin (bin width *step* mm). Drops a papillary /
+    inner re-entry so one wall yields one clean point per level."""
+    best: dict = {}
+    for along, rad, P in items:
+        key = int(round(along / max(step, 1e-6)))
+        if key not in best or rad > best[key][1]:
+            best[key] = (along, rad, P)
+    return list(best.values())
+
+
 class LVModel:
     """Holds the LV measurement state for one cardiac phase (ED or ES)."""
 
@@ -393,6 +405,86 @@ class LVModel:
             self.endo.apex_world = self.endo_apex
         if self.epi is not None:
             self.epi.apex_world = self.epi_apex
+
+    # -------------------------------------------------- promote endo → epi axis
+    def promote_endo_to_epi_axis(self, level_step: float = LV_LEVEL_STEP_MM,
+                                 n_theta: int = LV_RING_POINTS) -> bool:
+        """Re-express the traced Endo border on the EPI axis so both borders
+        share ONE coordinate frame (common axis + meridians) — the prerequisite
+        for editing Endo against Epi on one long-axis plane and for true
+        per-ray wall thickness.
+
+        Endo & Epi are traced on INDEPENDENT axes (each through its own apex).
+        Here Endo is 'promoted' onto the Epi axis:
+          1. build the Endo surface on its OWN axis (rings faithful to the trace),
+          2. reslice those rings along each EPI meridian plane → the Endo border
+             curve lying in that plane,
+          3. store it as endo_planes/endo_contours on the EPI axis
+             (``endo_axis := epi_axis``), so from then on Endo & Epi are
+             symmetric and every edit / SAX / build / STL path treats them
+             identically.
+
+        The Endo APEX point is KEPT unchanged as an OFF-AXIS apex the
+        reconstruction still converges to (build() sets
+        ``endo.apex_world = endo_apex`` regardless of axis), so the Endo apex
+        accuracy is preserved even though the Epi axis misses it, and apical wall
+        thickness = the gap between the two apex points.
+
+        Returns True on success, False (no change) if either border isn't traced
+        or the reslice found too few crossings. Idempotent: returns True without
+        change if Endo already shares the Epi axis."""
+        if (self.epi_axis is None or self.endo_axis is None
+                or len(self.endo_contours) < 3 or len(self.epi_contours) < 3):
+            return False
+        if self.endo_axis is self.epi_axis:
+            return True                                    # already promoted
+        # 1. Endo surface on its OWN axis (basal cut judged commonly on epi axis).
+        endo_base, _epi_base = self._common_base()
+        surf = LVSurface.from_meridian_contours(
+            self.endo_axis, self.endo_contours, level_step, n_theta,
+            base_along=endo_base)
+        if surf is None:
+            return False
+        rings = [surf.ring_world(k) for k in range(len(surf.along))]
+
+        ax = self.epi_axis
+        # 2. Reslice the endo rings along each EPI meridian plane.
+        new_planes: dict[float, np.ndarray] = {}
+        for phi in self.plane_angles():
+            _o, e_s, _e_t, nrm = ax.long_axis_basis(phi)   # nrm ⟂ meridian plane
+            pos, neg = [], []                              # +e_s / -e_s sides
+            for ring in rings:
+                b = (ring - ax.apex) @ nrm                 # signed dist to plane
+                m = len(ring)
+                for i in range(m):
+                    j = (i + 1) % m
+                    b0, b1 = float(b[i]), float(b[j])
+                    if b0 == b1:
+                        continue
+                    if (b0 <= 0.0 <= b1) or (b1 <= 0.0 <= b0):
+                        t = b0 / (b0 - b1)
+                        P = ring[i] + t * (ring[j] - ring[i])
+                        dp = P - ax.apex
+                        along = float(dp @ ax.axis)
+                        s = float(dp @ e_s)
+                        (pos if s >= 0.0 else neg).append((along, abs(s), P))
+            pos = _outermost_by_level(pos, level_step)
+            neg = _outermost_by_level(neg, level_step)
+            if len(pos) + len(neg) < 3:
+                continue
+            neg.sort(key=lambda r: -r[0])                  # base → apex
+            pos.sort(key=lambda r: r[0])                   # apex → base
+            pts = [P for _a, _r, P in neg] + [P for _a, _r, P in pos]
+            new_planes[phi] = np.asarray(pts, float)
+        if len(new_planes) < 3:
+            return False
+        # 3. Commit: Endo now lives on the Epi axis; keep the Endo apex point.
+        self.endo_axis = ax
+        self.endo_contours = {}
+        self.endo_planes = {}
+        for phi, pts in new_planes.items():
+            self.set_long_axis_contour(phi, pts, "endo")
+        return True
 
     # ---------------------------------------------------------------- volume
     def volume_ml(self, spacing: float, which: str = "endo") -> float | None:
