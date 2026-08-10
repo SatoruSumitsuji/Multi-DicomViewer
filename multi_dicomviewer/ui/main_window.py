@@ -2640,6 +2640,16 @@ class MainWindow(QMainWindow):
         # change never overrides any pane's plane choice — a pane left on
         # "Bi" keeps showing both planes here too (just smaller).
         self._sync_layout_gate()      # MultiSync menu = only in multi-pane
+        # A layout change re-shows each pane → every visible CT viewer re-runs
+        # its oblique-MPR reslice on the UI thread via showEvent (deferred one
+        # event-loop turn). With 2 live CT that is up to 4 reslices of ~0.7 GB
+        # volumes back-to-back, so the window looks frozen for a beat. Show a
+        # busy cursor that SPANS those deferred reslices — the restore is queued
+        # AFTER each showEvent's singleShot refresh (FIFO), so it clears once
+        # they finish — so the pause reads as "working", not hung.
+        if any(_is_ct(p.current_viewer()) for p in self._shown_panes()):
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            QTimer.singleShot(0, QApplication.restoreOverrideCursor)
 
     def _sync_long_axis_gate(self) -> None:
         """Allow the IVUS long-axis only in the 1x1 layout; disable it in every
