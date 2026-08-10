@@ -3682,9 +3682,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_qt(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
-                    if lv_t not in ("endo", "epi"):
-                        return mi, vi
                     tag = m.get("_lv")
+                    if lv_t not in ("endo", "epi"):
+                        # No Endo/Epi armed → do NOT grab an LV border (endo & epi
+                        # overlap in SAX, so an un-armed grab edits the WRONG one).
+                        # Non-LV measures still grab as before.
+                        if tag is None:
+                            return mi, vi
+                        continue
                     if tag is not None and tag[1] == lv_t:
                         return mi, vi                  # armed border wins
                     if tag is None and fallback is None:
@@ -3930,6 +3935,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_compare(e["key"])
         self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
 
+    def _lv_invalidate_volume(self) -> None:
+        """A border changed → the computed volume is stale: clear the result
+        readout, forget the numbers and turn CalcVol grey. Re-pressing CalcVol
+        recomputes + re-lights blue (and Save then persists the fresh value)."""
+        lv = self._lv
+        if lv is None:
+            return
+        if lv.get("vol_done") or lv.get("vol_endo_ml") is not None \
+                or self._lv_result_lines:
+            lv["vol_done"] = False
+            lv["vol_endo_ml"] = None
+            lv["vol_myo_ml"] = None
+            self._lv_result_lines = []
+            self._lv_sync_buttons()
+            self._lv_update_text()
+
     def _lv_live_recapture(self, key, m) -> None:
         """If *m* is an LV endo/epi border being edited on the long-axis pane
         while short-axis is shown, feed the edited 3-D border back into the model
@@ -3943,9 +3964,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         angs = self._lv["model"].plane_angles()
         self._lv["model"].set_long_axis_contour(
             angs[tag[0] % len(angs)], m["pts3d"], tag[1])
-        if self._lv.get("vol_done"):         # trace edited → volume now stale
-            self._lv["vol_done"] = False
-            self._lv_sync_buttons()
+        self._lv_invalidate_volume()         # edited border → volume stale
         sa = self._lv["sax_pane"]
         self._redraw_lv(sa)
         self.pane[sa].render()
@@ -5351,7 +5370,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["color"] = "#ff4040" if lv["target"] == "endo" else "#40c040"
         m["smooth"] = True             # AUTO-spline the LV border on finish
         #                                (LV traces only; other traces unchanged)
-        self._lv_result_lines = []     # a changed border invalidates the volume
+        self._lv_invalidate_volume()   # a changed border invalidates the volume
         self._draft = None
         self._lv_apex_hot = False      # border confirmed → marker back to normal
         self._redraw_meas(pane)
@@ -5940,7 +5959,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Save failed: {err}", err=str(exc)))
             return
-        self._lv_result_lines = [t("Saved: {p}", p=os.path.basename(path))]
+        # Keep the volume readout on screen after saving (append the saved note,
+        # don't replace it) so the result stays visible.
+        note = t("Saved: {p}", p=os.path.basename(path))
+        lines = []
+        if self._lv.get("vol_done") and self._lv.get("vol_endo_ml") is not None:
+            lines.append(t("LV cavity volume: {v:.1f} mL",
+                           v=float(self._lv["vol_endo_ml"])))
+            if self._lv.get("vol_myo_ml") is not None:
+                lines.append(t("Myocardial volume: {v:.1f} mL",
+                               v=float(self._lv["vol_myo_ml"])))
+        lines.append(note)
+        self._lv_result_lines = lines
         self._lv_update_text()
 
     def _lv_load(self) -> None:
