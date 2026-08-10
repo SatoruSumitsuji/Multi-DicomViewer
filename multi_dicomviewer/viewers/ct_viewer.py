@@ -2258,7 +2258,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lv_sax_btn)
         # Compute the LV volume (voxels inside the endo surface) + myocardial mass.
         self._lv_vol_btn = FitButton(t("Calc Vol"))
-        self._lv_vol_btn.setStyleSheet("background:#1f77b4;color:white;")
+        self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])   # grey until calc
         self._lv_vol_btn.setHelpToolTip(
             t("Compute LV cavity volume (+ myocardial mass) from the traced "
               "endo/epi borders"))
@@ -2315,6 +2315,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         "epi": "QPushButton{background:#2e8b57;color:white;}",
         "setaxis": "QPushButton{background:#b8860b;color:white;}",
         "trace": "QPushButton{background:#c0392b;color:white;}",
+        # CalcVol: grey/black BEFORE a volume is computed, blue/white AFTER
+        # (a valid result is showing). Reset to grey when the trace changes.
+        "vol_todo": "QPushButton{background:#d0d0d0;color:black;}",
+        "vol_done": "QPushButton{background:#1f77b4;color:white;}",
     }
 
     def _lv_set_bar_enabled(self, on: bool) -> None:
@@ -2336,6 +2340,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:                                # not in LV mode
             for b in (endo_btn, epi_btn, setax, trace):
                 b.setStyleSheet("")
+            self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
@@ -2364,6 +2369,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                   self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
                   self._lv_stl_btn):
             b.setEnabled(contour)
+        # CalcVol: blue once a volume has been computed for the CURRENT trace,
+        # grey again after any edit (result stale). See lv["vol_done"].
+        self._lv_vol_btn.setStyleSheet(
+            self._LV_STY["vol_done"] if lv.get("vol_done")
+            else self._LV_STY["vol_todo"])
         self._lv_exit_btn.setEnabled(True)
         self._refresh_tool_availability()   # grey Rotate/Spin/Thick + WB reverse
 
@@ -3914,6 +3924,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         angs = self._lv["model"].plane_angles()
         self._lv["model"].set_long_axis_contour(
             angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+        if self._lv.get("vol_done"):         # trace edited → volume now stale
+            self._lv["vol_done"] = False
+            self._lv_sync_buttons()
         sa = self._lv["sax_pane"]
         self._redraw_lv(sa)
         self.pane[sa].render()
@@ -5626,6 +5639,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if myo_ml is not None:
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines
+        self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
+        self._lv_sync_buttons()
         self._lv_update_text()
 
     # ---- wall-thickness colour map (short axis) ----
