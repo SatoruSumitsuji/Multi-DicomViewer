@@ -71,6 +71,28 @@ def _outermost_by_level(items, step):
     return list(best.values())
 
 
+def _planes_to_contours(planes: dict, axis) -> dict:
+    """Split each raw 3-D border polyline in *planes* {φ: (N,3)} into the two
+    meridian (along, radius) profiles {θ: (T,2)} about *axis*, by the sign of the
+    in-plane radial — the same split ``set_long_axis_contour`` does, but against a
+    GIVEN axis (used to rebuild a stashed Endo trace on reload)."""
+    contours: dict = {}
+    for phi, pts in planes.items():
+        pts = np.asarray(pts, float).reshape(-1, 3)
+        e_s = axis.meridian_dir(phi)
+        d = pts - axis.apex
+        along = d @ axis.axis
+        s = d @ e_s
+        for theta, mask in ((phi % 360.0, s >= 0), ((phi + 180.0) % 360.0, s <= 0)):
+            if not np.any(mask):
+                continue
+            prof = np.column_stack([along[mask], np.abs(s[mask])])
+            prof = prof[np.argsort(prof[:, 0])]
+            keep = np.concatenate(([True], np.diff(prof[:, 0]) > 1e-9))
+            contours[theta] = prof[keep]
+    return contours
+
+
 class LVModel:
     """Holds the LV measurement state for one cardiac phase (ED or ES)."""
 
@@ -100,6 +122,11 @@ class LVModel:
         self.epi_apex: np.ndarray | None = None
         self.endo: LVSurface | None = None
         self.epi: LVSurface | None = None
+        # Non-destructive promotion: when Endo is promoted onto the Epi axis
+        # (promote_endo_to_epi_axis) the ORIGINAL independent-axis Endo trace is
+        # stashed here so "Endo → Trace" can restore it. None = not promoted.
+        # {"axis": LVAxis, "contours": {θ:(T,2)}, "planes": {φ:(N,3)}, "apex": p}
+        self.endo_orig: dict | None = None
 
     # ------------------------------------------------------------------- axis
     def _axis_for(self, which: str) -> "LVAxis | None":
@@ -320,9 +347,14 @@ class LVModel:
 
     def to_dict(self) -> dict:
         """Serialise the Endo/Epi axes + apexes + traced borders as 3-D volume-mm
-        data — enough to fully re-apply them to the same series later."""
-        return {
-            "kind": "mdv-lvef", "version": 3,
+        data — enough to fully re-apply them to the same series later.
+
+        v4 adds ``endo_orig`` — the stashed ORIGINAL independent-axis Endo trace
+        kept when Endo is promoted onto the Epi axis, so a file saved in the
+        promoted (SAX-refined) state still restores to the original Endo trace on
+        'Endo → Trace' after reload. Absent when Endo isn't promoted."""
+        d = {
+            "kind": "mdv-lvef", "version": 4,
             "n_planes": self.n_planes,
             "endo_axis": self._axis_dict(self.endo_axis),
             "epi_axis": self._axis_dict(self.epi_axis),
@@ -335,6 +367,16 @@ class LVModel:
             "epi_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
                            for k, v in self.epi_planes.items()},
         }
+        if self.endo_orig is not None:
+            o = self.endo_orig
+            d["endo_orig"] = {
+                "axis": self._axis_dict(o["axis"]),
+                "apex": (None if o.get("apex") is None
+                         else [float(x) for x in o["apex"]]),
+                "planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
+                           for k, v in o["planes"].items()},
+            }
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "LVModel":
@@ -361,6 +403,21 @@ class LVModel:
             m.set_apex_point("endo", d["endo_apex"])
         if d.get("epi_apex") is not None:
             m.set_apex_point("epi", d["epi_apex"])
+        # v4: rebuild the stashed original independent-axis Endo trace, if any,
+        # so 'Endo → Trace' can still restore it after reload.
+        eo = d.get("endo_orig")
+        if eo and eo.get("axis"):
+            oa = eo["axis"]
+            oax = LVAxis.from_frame(oa["origin"], oa["axis"], oa["radial0"])
+            oplanes = {float(k): np.asarray(v, float).reshape(-1, 3)
+                       for k, v in (eo.get("planes") or {}).items()}
+            m.endo_orig = {
+                "axis": oax,
+                "planes": oplanes,
+                "contours": _planes_to_contours(oplanes, oax),
+                "apex": (None if eo.get("apex") is None
+                         else np.asarray(eo["apex"], float)),
+            }
         return m
 
     def _common_base(self):
@@ -478,12 +535,50 @@ class LVModel:
             new_planes[phi] = np.asarray(pts, float)
         if len(new_planes) < 3:
             return False
-        # 3. Commit: Endo now lives on the Epi axis; keep the Endo apex point.
+        # 3. Stash the ORIGINAL independent-axis Endo trace (non-destructive) so
+        # "Endo → Trace" can restore it, then commit the promoted Endo onto the
+        # Epi axis (keeping the Endo apex point as an off-axis apex).
+        if self.endo_orig is None:
+            self.endo_orig = {
+                "axis": self.endo_axis,
+                "contours": {k: np.asarray(v, float).copy()
+                             for k, v in self.endo_contours.items()},
+                "planes": {k: np.asarray(v, float).copy()
+                           for k, v in self.endo_planes.items()},
+                "apex": (None if self.endo_apex is None
+                         else np.asarray(self.endo_apex, float).copy()),
+            }
         self.endo_axis = ax
         self.endo_contours = {}
         self.endo_planes = {}
         for phi, pts in new_planes.items():
             self.set_long_axis_contour(phi, pts, "endo")
+        return True
+
+    @property
+    def endo_promoted(self) -> bool:
+        """True while Endo has been promoted onto the Epi axis (a stashed
+        original independent-axis trace exists to restore)."""
+        return self.endo_orig is not None
+
+    def restore_endo_original(self) -> bool:
+        """Undo a promotion: restore the ORIGINAL independent-axis Endo trace
+        (axis + contours + planes + apex) that was stashed by
+        promote_endo_to_epi_axis, discarding the promoted (Epi-frame) Endo. The
+        stash is cleared, so the next promotion re-derives from the restored
+        trace. Returns False if Endo was not promoted."""
+        o = self.endo_orig
+        if o is None:
+            return False
+        self.endo_axis = o["axis"]
+        self.endo_contours = {k: np.asarray(v, float).copy()
+                              for k, v in o["contours"].items()}
+        self.endo_planes = {k: np.asarray(v, float).copy()
+                            for k, v in o["planes"].items()}
+        self.endo_apex = (None if o.get("apex") is None
+                          else np.asarray(o["apex"], float).copy())
+        self.endo_orig = None
+        self.endo = None
         return True
 
     # ---------------------------------------------------------------- volume
