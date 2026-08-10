@@ -38,6 +38,27 @@ def _ellipsoid_contours(axis: LVAxis, a_x: float, a_y: float,
     return contours
 
 
+def _ellipsoid_plane_pts(axis, a_x, a_y, phi, length, n=40):
+    """A traced long-axis border polyline (N,3) for the rotation plane *phi* of a
+    prolate ellipsoid (semi-axes a_x, a_y, long = length/2): the φ+180 wall
+    base→apex then the φ wall apex→base (through the apex pole). Mirrors what the
+    viewer captures per plane so the model gets both endo_planes + endo_contours
+    (via set_long_axis_contour)."""
+    c = length / 2.0
+
+    def r_at(theta, t):
+        a = math.radians(theta)
+        denom = math.sqrt((math.cos(a) / a_x) ** 2 + (math.sin(a) / a_y) ** 2)
+        return math.sqrt(max(0.0, 1.0 - (t - c) ** 2 / (c * c))) / denom
+
+    pts = []
+    for t in np.linspace(length, 0.0, n):            # φ+180 wall: base → apex
+        pts.append(axis.to_world(phi + 180.0, r_at(phi + 180.0, t), t))
+    for t in np.linspace(0.0, length, n):            # φ wall: apex → base
+        pts.append(axis.to_world(phi, r_at(phi, t), t))
+    return np.asarray(pts, float)
+
+
 def _check(name, got, want, tol_frac):
     err = abs(got - want) / want
     ok = err <= tol_frac
@@ -116,7 +137,9 @@ print(f"mesh: {len(verts)} verts, {len(faces)} faces - OK")
 
 # ---- E: promote Endo onto the Epi axis (independent axes → one frame) -------
 # Endo axis: straight up. Epi axis: apex a few mm more apical + slightly tilted
-# (a genuinely INDEPENDENT axis, as the 2-pass trace produces).
+# (a genuinely INDEPENDENT axis, as the 2-pass trace produces). Build the model
+# the way the viewer does — set each axis from its view frame, then feed traced
+# 3-D border polylines per plane (populates endo_planes AND endo_contours).
 ax_endo = LVAxis.from_points([15, 0, 80], [-15, 0, 80], [0, 0, 0])
 d = np.array([0.05, 0.03, 1.0]); d = d / np.linalg.norm(d)
 apex_epi = np.array([1.5, -1.0, -4.0])
@@ -125,12 +148,15 @@ perp = np.cross(d, [0, 0, 1]); perp = perp / np.linalg.norm(perp)
 ax_epi = LVAxis.from_points(base_epi + 15 * perp, base_epi - 15 * perp, apex_epi)
 
 m = LVModel(n_planes=6)
-m.endo_axis = ax_endo
-m.epi_axis = ax_epi
-m.endo_contours = _ellipsoid_contours(ax_endo, 18.0, 18.0, n_meridians=12)
-m.epi_contours = _ellipsoid_contours(ax_epi, 23.0, 23.0, n_meridians=12)
-m.endo_apex = ax_endo.apex.copy()
-m.epi_apex = ax_epi.apex.copy()
+m.set_axis_from_frame(ax_endo.apex, ax_endo.axis, ax_endo.radial0, which="endo")
+m.set_axis_from_frame(ax_epi.apex, ax_epi.axis, ax_epi.radial0, which="epi")
+for phi in (0.0, 30.0, 60.0, 90.0, 120.0, 150.0):
+    m.set_long_axis_contour(phi, _ellipsoid_plane_pts(ax_endo, 18, 18, phi, 80.0),
+                            which="endo")
+    m.set_long_axis_contour(phi, _ellipsoid_plane_pts(ax_epi, 23, 23, phi, 84.0),
+                            which="epi")
+m.set_apex_point("endo", ax_endo.apex)
+m.set_apex_point("epi", ax_epi.apex)
 
 m.build()
 V_endo_pre = m.volume_ml(0.5, "endo")
@@ -139,6 +165,7 @@ endo_apex_before = m.endo_apex.copy()
 ok = m.promote_endo_to_epi_axis()
 assert ok, "promotion returned False"
 assert m.endo_axis is m.epi_axis, "endo not on the epi axis after promotion"
+assert m.endo_promoted, "endo_promoted flag not set"
 assert np.allclose(m.endo_apex, endo_apex_before), "endo apex point changed"
 assert len(m.endo_contours) >= 3, "too few endo contours after promotion"
 
@@ -146,11 +173,34 @@ m.build()
 V_endo_post = m.volume_ml(0.5, "endo")
 print("E) promote Endo onto the Epi axis:")
 _check("endo volume (pre vs post promote)", V_endo_post, V_endo_pre, 0.10)
-# both borders now share ONE axis → wall (myocardial) volume well-defined > 0
 V_myo = m.myocardial_volume_ml(0.5)
 assert V_myo is not None and V_myo > 0, f"myo volume invalid: {V_myo}"
-# idempotent: a second promotion is a no-op success
-assert m.promote_endo_to_epi_axis() is True
-print(f"   endo→epi axis, apex preserved, myo={V_myo:.1f} mL - OK")
+assert m.promote_endo_to_epi_axis() is True            # idempotent
+V_promoted = m.volume_ml(0.5, "endo")
+
+# ---- F: non-destructive restore (Endo → original independent-axis trace) ----
+ok2 = m.restore_endo_original()
+assert ok2 and not m.endo_promoted, "restore failed / still promoted"
+assert m.endo_axis is not m.epi_axis, "endo axis not restored to its own"
+m.build()
+print("F) restore original Endo trace:")
+_check("endo volume (restored vs original)", m.volume_ml(0.5, "endo"),
+       V_endo_pre, 0.01)
+
+# ---- G: v4 persistence — save in the PROMOTED state, reload keeps both ------
+import copy  # noqa: E402
+m.promote_endo_to_epi_axis()
+saved = m.to_dict()
+assert saved["version"] == 4 and "endo_orig" in saved, "v4 endo_orig not saved"
+m2 = LVModel.from_dict(copy.deepcopy(saved))
+assert m2.endo_promoted, "promoted stash lost across save/reload"
+m2.build()
+print("G) v4 persistence round-trip (promoted state):")
+_check("reloaded promoted endo volume", m2.volume_ml(0.5, "endo"),
+       V_promoted, 0.02)
+assert m2.restore_endo_original(), "reloaded model can't restore original"
+m2.build()
+_check("reloaded then restored endo volume", m2.volume_ml(0.5, "endo"),
+       V_endo_pre, 0.05)
 
 print("\nALL PASS")
