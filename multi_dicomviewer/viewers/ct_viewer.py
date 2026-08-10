@@ -5194,6 +5194,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             lv["sax_edit"] = None                    # no border armed for editing
             self._lv_apply_target(None)             # no capture in short-axis
             self.set_side("Bi")                      # long-axis + short-axis
+            self._lv_sync_buttons()                  # SAX entry → all 4 buttons
+            #                        neutral grey (Endo/Epi UNARMED — the stale
+            #                        green Epi no longer implies it's editable)
             self._lv_show_sax_both()
         else:
             # SAX is the last-on button → pressing it turns SAX OFF (back to the
