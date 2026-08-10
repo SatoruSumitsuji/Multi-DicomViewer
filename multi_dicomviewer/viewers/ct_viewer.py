@@ -3751,8 +3751,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the boundary band can't balloon when zoomed in and shadow the filled
         # compare region — a click ≥5 px inside the annulus now selects the fill.
         tol = 5.0                              # screen px, each side of the line
+        # STRONGLY honour the armed Endo/Epi selection: when a target is armed,
+        # ONLY that border is a candidate — so right-click "Add point" (and any
+        # outline pick) lands on the SELECTED border, never the nearer other one
+        # (endo & epi overlap in SAX).
+        lv_t = self._lv.get("target") if self._lv is not None else None
         best, bi = tol, None
         for mi, m in enumerate(self._measures[which]):
+            if m.get("hidden"):
+                continue
+            if lv_t in ("endo", "epi"):
+                tag = m.get("_lv")
+                if tag is None or tag[1] != lv_t:
+                    continue
             wpts = [self._world_to_qt(which, q[0], q[1])
                     for q in self._outline(m)]
             for i in range(len(wpts) - 1):
