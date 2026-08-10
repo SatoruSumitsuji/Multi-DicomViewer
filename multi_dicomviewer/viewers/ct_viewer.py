@@ -2319,6 +2319,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # (a valid result is showing). Reset to grey when the trace changes.
         "vol_todo": "QPushButton{background:#d0d0d0;color:black;}",
         "vol_done": "QPushButton{background:#1f77b4;color:white;}",
+        # SAX/refine neutral (grey/black): the 4 trace buttons reset to this on
+        # SAX entry; Endo/Epi re-colour only to show the armed edit target.
+        "neutral": "QPushButton{background:#d0d0d0;color:black;}",
     }
 
     def _lv_set_bar_enabled(self, on: bool) -> None:
@@ -2352,17 +2355,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         # axis is that pass's axis too, switched in _lv_select_pass). Set axis is
         # dark-yellow while its axis is in use (ready/apex/contour); Trace is red
         # while tracing (apex/contour); both go grey when undone.
-        endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
-        epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
-        setax.setStyleSheet(self._LV_STY["setaxis"]
-                            if ph in ("ready", "apex", "contour") else "")
-        trace.setStyleSheet(self._LV_STY["trace"]
-                            if ph in ("apex", "contour") else "")
-        # LIFO enable: you can only turn OFF the LAST button turned on.
-        #   align → Set axis armed (set)         ready → Set axis (undo) + Trace
-        #   apex/contour (SAX off) → Trace (undo) + SAX (on)   SAX on → SAX only
-        setax.setEnabled(ph in ("align", "ready"))
-        trace.setEnabled(ph in ("ready", "apex", "contour") and not sax_on)
+        if sax_on:
+            # SAX / refine mode: neutral bar. Endo/Epi colour only to show which
+            # border is armed for editing (lv["sax_edit"]); Set axis stays off.
+            # Trace is enabled once a border is armed → Endo/Epi + Trace LEAVES
+            # SAX into that pass's long-axis trace (Endo restores its original
+            # independent-axis trace; Epi resumes on its axis).
+            ed = lv.get("sax_edit")
+            endo_btn.setStyleSheet(self._LV_STY["endo"] if ed == "endo"
+                                   else self._LV_STY["neutral"])
+            epi_btn.setStyleSheet(self._LV_STY["epi"] if ed == "epi"
+                                  else self._LV_STY["neutral"])
+            setax.setStyleSheet(self._LV_STY["neutral"])
+            setax.setEnabled(False)
+            trace.setStyleSheet(self._LV_STY["neutral"])
+            trace.setEnabled(ed in ("endo", "epi"))
+        else:
+            endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
+            epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
+            setax.setStyleSheet(self._LV_STY["setaxis"]
+                                if ph in ("ready", "apex", "contour") else "")
+            trace.setStyleSheet(self._LV_STY["trace"]
+                                if ph in ("apex", "contour") else "")
+            # LIFO enable: you can only turn OFF the LAST button turned on.
+            #   align → Set axis armed (set)      ready → Set axis (undo) + Trace
+            #   apex/contour → Trace (undo) + SAX (on)
+            setax.setEnabled(ph in ("align", "ready"))
+            trace.setEnabled(ph in ("ready", "apex", "contour"))
         self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
         for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
@@ -4825,6 +4844,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv = self._lv
         if lv is None:
             return
+        # In SAX: Trace acts on the ARMED border (Endo/Epi button) — LEAVE SAX
+        # into that pass's long-axis trace. For Endo, restore its ORIGINAL
+        # independent-axis trace (undo the Epi-axis promotion, non-destructive)
+        # so re-tracing happens on the axis through the endo apex.
+        if lv.get("sax") is not None:
+            ed = lv.get("sax_edit")
+            if ed not in ("endo", "epi"):
+                return
+            self._lv_leave_sax()
+            if ed == "endo" and lv["model"].endo_promoted:
+                lv["model"].restore_endo_original()
+                self._lv_rebuild_measures()
+            lv["sax_edit"] = None
+            self._lv_select_pass(ed)             # resume that pass's trace
+            return
         ph = lv.get("phase")
         if ph == "ready":
             m = lv["model"]
@@ -4866,16 +4900,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         lv = self._lv
         m = lv["model"]
-        if lv.get("sax") is not None:               # in SAX → isolate this pass
+        if lv.get("sax") is not None:               # in SAX → ARM this border
+            # After promotion both borders live on the Epi axis and both are
+            # shown on the long-axis plane; the Endo/Epi button picks WHICH
+            # border's points are editable (the other is display-only). Endo/Epi
+            # + Trace then leaves SAX into that pass's trace (see _lv_start_trace).
             store = m.endo_contours if which == "endo" else m.epi_contours
             if m._axis_for(which) is not None and len(store) >= 3:
+                lv["sax_edit"] = which
                 lv["pass"] = which
-                lv["sax_which"] = which
-                m.axis = self._lv_sax_axis()
-                lv["fitted_sax"] = False
-                rng = self._lv_common_range() or self._lv_level_range()
-                if rng:
-                    lv["sax"] = 0.5 * (rng[0] + rng[1])
+                self._lv_apply_target(which)        # only this border grabbable
                 self._lv_sync_buttons()
                 self._lv_show_sax_both()
             return
@@ -5082,6 +5116,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             # active/available pass on ITS OWN axis, for reviewing/editing it.
             if endo_ok and epi_ok:
                 which = "both"
+                # Promote Endo onto the Epi axis so both borders share ONE frame
+                # (edit Endo on the Epi plane; true per-ray wall thickness).
+                # Silent + non-destructive (the original endo trace is stashed;
+                # Endo → Trace restores it). Then re-place the on-screen Endo
+                # correction points on the Epi meridian planes.
+                if m.promote_endo_to_epi_axis():
+                    self._lv_rebuild_measures()
+                    self._lv_result_lines = []       # promoted geometry → restate
             elif lv.get("pass") == "endo" and endo_ok:
                 which = "endo"
             elif lv.get("pass") == "epi" and epi_ok:
@@ -5119,6 +5161,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 np.asarray(self._pc[sa]).copy(),
                 self._cross_ang[sa], self._thick[sa])
             lv["fitted_sax"] = False
+            lv["sax_edit"] = None                    # no border armed for editing
             self._lv_apply_target(None)             # no capture in short-axis
             self.set_side("Bi")                      # long-axis + short-axis
             self._lv_show_sax_both()
@@ -5146,14 +5189,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[la] = (u, v, n)
         self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[la] = 0.0
-        # The reference long-axis pane is resliced on the SAX axis; show only the
-        # border that lies in-plane there (the single pass, or epi for 'both').
+        # The reference long-axis pane is resliced on the SAX axis. For a single
+        # pass show only that border; for 'both' (Endo promoted onto the Epi
+        # axis) show BOTH borders of THIS plane so Endo can be edited against
+        # Epi. The Endo/Epi button (lv["target"]) decides which is grabbable.
         w = lv.get("sax_which")
-        ref_which = w if w in ("endo", "epi") else "epi"
+        show_both = w not in ("endo", "epi")
+        ref_which = w if w in ("endo", "epi") else None
         for mm in self._measures[la]:
             tag = mm.get("_lv")
             if tag is not None:
-                mm["hidden"] = (tag[0] != idx) or (tag[1] != ref_which)
+                mm["hidden"] = (tag[0] != idx) or (
+                    not show_both and tag[1] != ref_which)
         self._lv_set_short_frame()                   # short-axis (level) pane
         first = not lv.get("fitted_sax", False)
         lv["fitted_sax"] = True
