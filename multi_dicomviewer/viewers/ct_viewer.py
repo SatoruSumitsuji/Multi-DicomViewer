@@ -4144,6 +4144,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             # the user steps to the next long-axis plane).
             if self._lv is not None and self._lv.get("phase") == "contour":
                 self._lv_on_border_committed()
+                # Force the full re-render so the spline + endo/epi colour appear
+                # AT ONCE — a right-click finish otherwise left the border un-
+                # smoothed / still the draft colour until the next F/A plane step.
+                if not self._lv_sax_active():
+                    self._lv_show_plane()
 
     def _resume_trace(self, which, mi, endpoint_vi):
         """Un-commit polyline *mi* back into the in-progress draft so the user
