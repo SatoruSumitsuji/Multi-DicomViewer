@@ -529,14 +529,19 @@ class LVModel:
             return False
         if self.endo_axis is self.epi_axis:
             return True                                    # already promoted
-        # 1. Endo surface on its OWN axis at its FULL extent — NOT the common
-        # basal cut. Cutting here would DROP the basal Endo points above the
-        # (possibly more-apical) epi base, but those are needed to set the Endo
-        # border at the basal cross-section. So keep them and let them migrate to
-        # the epi frame like every other point. (build() still applies the common
-        # cut later for the comparable myocardial volume.)
+        # 1. Endo surface on its OWN axis to its DEEPEST basal extent — NOT the
+        # default cut (min of the meridians' basal levels), which would delete the
+        # basal / Ao-LA-side Endo points the user placed on the meridians that
+        # reach farther. Build to max(maxs) so every basal point is kept and
+        # migrates to the epi frame; basal levels reached by only some meridians
+        # are filled by angular interpolation (from_meridian_contours). build()
+        # still applies the common cut later for the comparable myo volume.
+        endo_base_full = max(
+            float(np.asarray(c, float).reshape(-1, 2)[:, 0].max())
+            for c in self.endo_contours.values())
         surf = LVSurface.from_meridian_contours(
-            self.endo_axis, self.endo_contours, level_step, n_theta)
+            self.endo_axis, self.endo_contours, level_step, n_theta,
+            base_along=endo_base_full)
         if surf is None:
             return False
         rings = [surf.ring_world(k) for k in range(len(surf.along))]
