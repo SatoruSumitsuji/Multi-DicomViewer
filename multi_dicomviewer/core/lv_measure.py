@@ -104,6 +104,19 @@ def _resample_wall(samples, levels, e_s, axis, apex_pt):
     return out
 
 
+def _wall_levels(base_w: float, a_apex: float, n_div: int = 6) -> np.ndarray:
+    """Axial levels (base → apex) for one meridian wall's control points:
+    the n_div-equal-division points (base end + interior + apex = n_div+1) PLUS
+    a midpoint in the FIRST basal interval and a midpoint in the LAST apical
+    interval — so a 6-division wall gets 9 points (base end, mid, 5 interior,
+    mid, apex). Extra density where the border curves most (basal shelf + apex)."""
+    L = np.linspace(base_w, a_apex, int(n_div) + 1)
+    if len(L) < 3:
+        return L
+    return np.array([L[0], 0.5 * (L[0] + L[1]), *L[1:-1],
+                     0.5 * (L[-2] + L[-1]), L[-1]])
+
+
 def _planes_to_contours(planes: dict, axis) -> dict:
     """Split each raw 3-D border polyline in *planes* {φ: (N,3)} into the two
     meridian (along, radius) profiles {θ: (T,2)} about *axis*, by the sign of the
@@ -552,10 +565,35 @@ class LVModel:
         if self.endo_apex is not None:
             apex_along = float((np.asarray(self.endo_apex, float) - ax.apex)
                                @ ax.axis)
-        n_levels = max(2, int(n_div) + 1)   # 6 divisions → 7 points per wall
+        # Each ORIGINAL endo meridian's own basal extent, expressed on the epi
+        # axis + its world radial direction — so each promoted wall's basal (Ao/
+        # LA-side) point sits at the depth the user actually traced in THAT
+        # direction (left & right may differ; the reslice surface alone would
+        # homogenise them). Used to set a PER-WALL base for the resampling.
+        endo_bases = []                     # (unit world dir, basal-along on epi)
+        for th, c in self.endo_contours.items():
+            cc = np.asarray(c, float).reshape(-1, 2)
+            if len(cc) < 1:
+                continue
+            ai = int(np.argmax(cc[:, 0]))
+            bp = self.endo_axis.to_world(th, float(cc[ai, 1]), float(cc[ai, 0]))
+            endo_bases.append((self.endo_axis.meridian_dir(th),
+                               float((bp - ax.apex) @ ax.axis)))
+
+        def _wall_base(dvec):
+            """Basal along (epi axis) of the ORIGINAL endo meridian whose world
+            direction is closest to *dvec* — the depth to keep for this wall."""
+            best, bw = -2.0, None
+            for wd, b in endo_bases:
+                d = float(wd @ dvec)
+                if d > best:
+                    best, bw = d, b
+            return bw
+
         # 2. Reslice the endo rings along each EPI meridian plane, then reduce
-        # each wall to n_levels evenly-spaced control points (base end + interior
-        # + apex) so the promoted Endo has few, tidy editable points.
+        # each wall to a tidy set of control points (base end + midpoint + 5
+        # interior + midpoint + apex = 9/wall), keeping each wall's OWN basal
+        # depth (Ao/LA-side points preserved, left/right heights may differ).
         new_planes: dict[float, np.ndarray] = {}
         for phi in self.plane_angles():
             _o, e_s, _e_t, nrm = ax.long_axis_basis(phi)   # nrm ⟂ meridian plane
@@ -579,14 +617,24 @@ class LVModel:
             neg = _outermost_by_level(neg, level_step)
             if len(pos) + len(neg) < 3:
                 continue
-            alls = [a for a, _r, _P in pos + neg]
-            base_along = max(alls)
-            a_apex = apex_along if apex_along is not None else min(alls)
-            if base_along - a_apex < 1e-3:
-                continue
-            levels = np.linspace(base_along, a_apex, n_levels)   # base → apex
-            neg_pts = _resample_wall(neg, levels, -e_s, ax, self.endo_apex)
-            pos_pts = _resample_wall(pos, levels, e_s, ax, self.endo_apex)
+            all_a = [a for a, _r, _P in pos + neg]
+            a_apex = apex_along if apex_along is not None else min(all_a)
+
+            def _wall(samples, wall_dir):
+                if len(samples) < 1:
+                    return []
+                smax = max(a for a, _r, _P in samples)
+                base_w = _wall_base(wall_dir)          # ORIGINAL per-wall depth
+                if base_w is None:
+                    base_w = smax
+                base_w = min(base_w, smax)              # can't exceed sliced data
+                if base_w - a_apex < 1e-3:
+                    return []
+                lv = _wall_levels(base_w, a_apex, n_div)
+                return _resample_wall(samples, lv, wall_dir, ax, self.endo_apex)
+
+            neg_pts = _wall(neg, -e_s)                  # φ+180 wall
+            pos_pts = _wall(pos, e_s)                   # φ wall
             if len(neg_pts) < 2 or len(pos_pts) < 2:
                 continue
             # one continuous border: φ+180 wall base→apex, then φ wall apex→base
