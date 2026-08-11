@@ -2272,8 +2272,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Wall-thickness colour map on the short axis (Epi−Endo gap, coloured).
         self._lv_wall_btn = FitButton(t("Wall"))
         self._lv_wall_btn.setCheckable(True)
+        # OFF (not applied): a soft, understated purple outline so it reads as
+        # the wall-map button without shouting. ON: filled purple (border blends).
         self._lv_wall_btn.setStyleSheet(
-            "QPushButton:checked{background:#8e44ad;color:white;}")
+            "QPushButton{border:1px solid #c3addb;}"
+            "QPushButton:checked{background:#8e44ad;color:white;"
+            "border:1px solid #8e44ad;}")
         self._lv_wall_btn.setHelpToolTip(
             t("Short-axis WALL THICKNESS colour map (Epi−Endo), on every level"))
         self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
@@ -2322,7 +2326,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         "trace": "QPushButton{background:#c0392b;color:white;}",
         # CalcVol: grey/black BEFORE a volume is computed, blue/white AFTER
         # (a valid result is showing). Reset to grey when the trace changes.
-        "vol_todo": "QPushButton{background:#d0d0d0;color:black;}",
+        # The pre-calc grey carries a THIN light-blue outline (a subtle hint it
+        # turns blue once computed) to set it apart from the other grey buttons.
+        "vol_todo": ("QPushButton{background:#d0d0d0;color:black;"
+                     "border:1px solid #9ec9f0;}"),
         "vol_done": "QPushButton{background:#1f77b4;color:white;}",
         # SAX/refine neutral (grey/black): the 4 trace buttons reset to this on
         # SAX entry; Endo/Epi re-colour only to show the armed edit target.
