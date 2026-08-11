@@ -2077,8 +2077,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the moved image, see _recenter → _redraw_meas). A plain double-click
         # in Measure mode still finishes the polyline draft.
         if self._meas_on and "Shift" not in (ev.get("modifiers") or ()):
-            self._measure_finish_draft()
-            self._lv_on_border_committed()     # LV: capture the finished border
+            self._measure_finish_draft()       # LV capture handled inside now
             return
         if self._cpr is not None and key == "A":
             return                                # no recenter on the section
@@ -5161,6 +5160,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = self._draft
         if d and d["type"] in ("polyline", "polygon") and len(d["pts"]) >= 2:
             self._commit_draft()
+            # LV EF: capture the finished border to the current target (spline +
+            # endo/epi colour) for BOTH double-click AND right-click finishes, and
+            # force the full re-render so it appears at once (right-click parity).
+            if self._lv is not None and self._lv.get("phase") == "contour":
+                self._lv_on_border_committed()
+                if not self._lv_sax_active():
+                    self._lv_show_plane()
 
     def _resume_trace(self, which, mi, endpoint_vi):
         """Un-commit polyline *mi* back into the in-progress draft so the user
