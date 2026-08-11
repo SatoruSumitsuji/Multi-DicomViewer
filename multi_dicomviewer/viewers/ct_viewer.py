@@ -2046,6 +2046,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # collides with those → Qt sees two matching shortcuts → "ambiguous" →
         # NEITHER fires. So LV plane-stepping on A/F is routed the other way:
         # _nav_active calls lv_nav_key() below FIRST when a CT pane is active.
+        # Ctrl+Z = undo the last few LV border edits (viewer-scoped so a focused
+        # child can't swallow it; no-op outside LV contour mode).
+        sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_undo.activated.connect(self._lv_undo_last)
         self._update_active_frames()
 
     def lv_nav_key(self, where: str) -> bool:
@@ -2276,7 +2281,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_redo_btn = FitButton(t("Clear borders"))
         self._lv_redo_btn.setHelpToolTip(
             t("Discard all traced borders and start again from plane 1"))
-        self._lv_redo_btn.clicked.connect(self._lv_clear_contours)
+        self._lv_redo_btn.clicked.connect(self._lv_clear_confirm)
         row.addWidget(self._lv_redo_btn)
         # Save / load the traced Endo/Epi borders (3-D volume mm) for this series.
         self._lv_save_btn = FitButton(t("Save"))
@@ -2296,7 +2301,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
         row.addWidget(self._lv_stl_btn)
         self._lv_exit_btn = FitButton(t("Exit LV"))
-        self._lv_exit_btn.clicked.connect(self._lv_exit)
+        self._lv_exit_btn.clicked.connect(self._lv_exit_confirm)
         row.addWidget(self._lv_exit_btn)
         row.addStretch(1)               # pack all buttons to the LEFT
         # Controls greyed out until in LV mode (Endo/Epi stay live — they ENTER
@@ -3806,6 +3811,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 hit = None
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
+            if self._lv is not None and self._measures[which][hit[0]].get("_lv"):
+                self._lv_push_undo(which, hit[0])   # snapshot before the drag
             self._redraw_geom(which)            # show the green dot now
             # Grabbing an LV border vertex → light the linked SAX crossing green
             # at once (not only after the first drag).
@@ -3945,6 +3952,50 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_geom(e["key"])
         self._redraw_compare(e["key"])
         self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
+
+    _LV_UNDO_MAX = 5                       # Ctrl+Z depth for LV border edits
+
+    def _lv_reset_undo(self) -> None:
+        from collections import deque
+        self._lv_undo = deque(maxlen=self._LV_UNDO_MAX)
+
+    def _lv_push_undo(self, pane, mi) -> None:
+        """Snapshot an LV border's 3-D points BEFORE an edit (drag / add / delete)
+        so Ctrl+Z can restore it (last few edits, LIFO)."""
+        if self._lv is None or not (0 <= mi < len(self._measures.get(pane, []))):
+            return
+        m = self._measures[pane][mi]
+        tag = m.get("_lv")
+        if tag is None or not m.get("pts3d"):
+            return
+        if not hasattr(self, "_lv_undo"):
+            self._lv_reset_undo()
+        self._lv_undo.append({
+            "pane": pane, "tag": tuple(tag),
+            "pts3d": [list(map(float, P)) for P in m["pts3d"]]})
+
+    def _lv_undo_last(self) -> None:
+        """Ctrl+Z: restore the most recent LV border edit."""
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        stack = getattr(self, "_lv_undo", None)
+        if not stack:
+            return
+        snap = stack.pop()
+        pane, tag = snap["pane"], tuple(snap["tag"])
+        for m in self._measures.get(pane, []):
+            if m.get("_lv") == tag:
+                m["pts3d"] = [np.asarray(P, float) for P in snap["pts3d"]]
+                angs = self._lv["model"].plane_angles()
+                self._lv["model"].set_long_axis_contour(
+                    angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+                self._lv_invalidate_volume()
+                self._redraw_meas(pane)
+                if self._lv_sax_active():
+                    sa = self._lv["sax_pane"]
+                    self._redraw_lv(sa)
+                    self.pane[sa].render()
+                break
 
     def _lv_invalidate_volume(self) -> None:
         """A border changed → the computed volume is stale: clear the result
@@ -4412,6 +4463,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _add_point(self, which, mi, sx, sy):
         m = self._measures[which][mi]
+        if self._lv is not None and m.get("_lv"):
+            self._lv_push_undo(which, mi)       # snapshot before adding a point
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
         if m["type"] == "ellipse":
@@ -4462,6 +4515,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         pts = list(m["pts"])
         if len(pts) <= 2 or not (0 <= vi < len(pts)):
             return
+        if self._lv is not None and m.get("_lv"):
+            self._lv_push_undo(which, mi)       # snapshot before deleting a point
         del pts[vi]
         p3 = m.get("pts3d")
         if p3 and 0 <= vi < len(p3):
@@ -4796,6 +4851,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
+        self._lv_reset_undo()                        # fresh Ctrl+Z stack
         self._lv_btn.setChecked(True)               # internal mode flag
         self.set_side("Bi")
         return True
@@ -5633,16 +5689,33 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_capture_current()
             self._lv_update_text()
 
+    def _lv_clear_confirm(self) -> None:
+        """'Clear borders' button → confirm before discarding the traced borders."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        if QMessageBox.question(
+                self.window(), t("LV EF"),
+                t("Clear all traced borders? This cannot be undone.")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_clear_contours()
+
     def _lv_clear_contours(self) -> None:
         """Discard all captured borders and start tracing again from plane 0
         (the long axis / view is kept)."""
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         pane = self._lv["pane"]
-        self._lv["model"].endo_contours.clear()
-        self._lv["model"].epi_contours.clear()
-        self._measures[pane] = [m for m in self._measures[pane]
-                                if m.get("type") != "polyline"]
+        m = self._lv["model"]
+        m.endo_contours.clear()
+        m.epi_contours.clear()
+        m.endo_planes.clear()               # also drop the raw borders (else SAX
+        m.epi_planes.clear()                # / rebuild would resurrect them)
+        m.endo_orig = None                  # and the promotion stash
+        self._lv_reset_undo()
+        self._measures[pane] = [mm for mm in self._measures[pane]
+                                if mm.get("type") != "polyline"]
         self._draft = None
         self._lv_result_lines = []
         self._lv["plane_idx"] = 0
@@ -6033,6 +6106,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "target": None, "pane": "B", "sax": None,
                     "pass": "epi" if model.epi_axis is not None else "endo",
                     "prev_side": self.current_side()}
+        self._lv_reset_undo()
         self._lv_btn.setChecked(True)
         self._lv_enter_contour()
         self._lv_rebuild_measures()
@@ -6090,10 +6164,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "pts": [self._world3d_to_out(pane, P) for P in p3],
                     "color": col, "smooth": True, "_lv": (idx, which)})
 
+    def _lv_exit_confirm(self) -> None:
+        """'Exit LV' button → confirm before leaving LV analysis."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None:
+            return
+        if QMessageBox.question(
+                self.window(), t("LV EF"),
+                t("Exit LV analysis? Unsaved borders/results are kept only if "
+                  "you Saved them.")) != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_exit()
+
     def _lv_exit(self, from_toggle=False) -> None:
         """Leave LV mode entirely, restoring the normal MPR view."""
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
+        self._lv_reset_undo()
         # Remove the on-screen LV border traces (kept in the model for volume).
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures[k]
