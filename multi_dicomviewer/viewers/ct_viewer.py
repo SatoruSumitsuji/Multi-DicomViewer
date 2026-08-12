@@ -2392,8 +2392,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             # LIFO enable: you can only turn OFF the LAST button turned on.
             #   align → Set axis armed (set)      ready → Set axis (undo) + Trace
             #   apex/contour → Trace (undo) + SAX (on)
-            setax.setEnabled(ph in ("align", "ready"))
-            trace.setEnabled(ph in ("ready", "apex", "contour"))
+            # Set axis / Trace need a pass (Endo/Epi) chosen first — greyed until
+            # then so the current step's usable buttons stand out.
+            has_pass = pas in ("endo", "epi")
+            setax.setEnabled(has_pass and ph in ("align", "ready"))
+            trace.setEnabled(has_pass and ph in ("ready", "apex", "contour"))
         self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
         for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
@@ -2841,6 +2844,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # drop the `and is2d` below to restore WB reverse in 3-D.
         if getattr(self, "_invert_btn", None) is not None:
             self._invert_btn.setEnabled(self._lv is None and is2d)
+        # 2-D image transforms: Rt90/Lt90/Flip-V are native-slice-only (greyed in
+        # 3-D); Flip-H (index 2) also works in 3-D. Applied HERE too (not only in
+        # _set_mode) so the state is right on every refresh / load path.
+        for i, b in enumerate(getattr(self, "_t2d_btns", [])):
+            b.setEnabled(is2d or i == 2)
         if getattr(self, "_slab_spin", None) is not None and self._lv is not None:
             self._slab_spin.setEnabled(False)
 
@@ -5012,6 +5020,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_apply_target(which)        # only this border grabbable
                 self._lv_sync_buttons()
                 self._lv_show_sax_both()
+            return
+        # Toggle OFF before Set axis: clicking the ALREADY-selected pass again
+        # while still aligning (no axis set yet) DESELECTS it → back to the
+        # no-pass state, so Endo/Epi return to their default look and the rest of
+        # the bar (Set axis, …) greys out again.
+        if lv.get("pass") == which and lv.get("phase") == "align":
+            lv["pass"] = None
+            self._lv_apply_target(None)
+            self._lv_sync_buttons()
             return
         lv["pass"] = which
         self._lv_thick_trace_both()
