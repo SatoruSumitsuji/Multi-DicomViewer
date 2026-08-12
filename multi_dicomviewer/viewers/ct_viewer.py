@@ -2836,9 +2836,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 b.setStyleSheet("background:#c0392b;color:white;" if active
                                 else "")
         # WB reverse (grayscale invert) and the slab-thickness spin are disabled
-        # throughout LV mode (thin slices, fixed grayscale).
+        # throughout LV mode (thin slices, fixed grayscale). It is ALSO disabled
+        # in 3-D MPR per user request (not needed for 3DCT for now) — REVIVABLE:
+        # drop the `and is2d` below to restore WB reverse in 3-D.
         if getattr(self, "_invert_btn", None) is not None:
-            self._invert_btn.setEnabled(self._lv is None)
+            self._invert_btn.setEnabled(self._lv is None and is2d)
         if getattr(self, "_slab_spin", None) is not None and self._lv is not None:
             self._slab_spin.setEnabled(False)
 
@@ -7410,9 +7412,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cl_btn.setEnabled(not is2d)
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
-        # The 2-D image transforms only apply to the native slice (2-D mode).
-        for b in self._t2d_btns:
-            b.setEnabled(is2d)
+        # Rt90/Lt90/Flip-V apply only to the native slice (2-D). Flip-H (index 2)
+        # ALSO works in 3-D MPR — it mirrors the active pane left-right — so it
+        # stays enabled in 3-D while the others grey out.
+        for i, b in enumerate(self._t2d_btns):
+            b.setEnabled(is2d or i == 2)
         if is2d:
             if self._tool in _MPR_ONLY_TOOLS:
                 self._set_tool("PAGING")
@@ -7724,7 +7728,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._view_initial = False
             self._refresh(reset_cam=True)
             return
-        if self._mode != "2D" or self._image is None:
+        if self._image is None:
+            return
+        if self._mode != "2D":
+            # 3-D MPR: ONLY Flip-H is meaningful — mirror the ACTIVE pane's
+            # reslice frame left-right (negate u, and n to keep the frame right-
+            # handed), exactly like the short-axis pane's mirror. Coordinate-safe:
+            # traces are stored as absolute 3-D (pts3d) and re-derive to the
+            # mirrored 2-D, so measurements/volumes are unchanged. Rt90/Lt90/
+            # Flip-V stay 2-D-only (their buttons remain disabled in 3-D).
+            if kind == "fliph":
+                k = self._active_pane
+                u, v, n = self._frame[k]
+                self._frame[k] = (-np.asarray(u, float),
+                                  np.asarray(v, float),
+                                  -np.asarray(n, float))
+                self._view_initial = False
+                self._refresh(reset_cam=False)
             return
         u, v = self._axes2d
         if kind == "rt90":          # 90° clockwise
