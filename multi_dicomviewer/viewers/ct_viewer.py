@@ -2255,7 +2255,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_sax_btn = FitButton(t("SAX"))
         self._lv_sax_btn.setCheckable(True)
         self._lv_sax_btn.setStyleSheet(
-            "QPushButton:checked{background:#b8860b;color:white;}")
+            "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
         self._lv_sax_btn.setHelpToolTip(
             t("Short-axis view: show the endo/epi borders on cross-sections ⟂ "
               "the long axis (◀ ▶ scroll the level)"))
@@ -2278,7 +2278,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_wall_btn.setStyleSheet(
             "QPushButton{background:palette(button);border:2px solid #9b59b6;}"
             "QPushButton:checked{background:#8e44ad;color:white;"
-            "border:2px solid #8e44ad;}")
+            "border:2px solid #8e44ad;}" + self._BTN_DIS)
         self._lv_wall_btn.setHelpToolTip(
             t("Short-axis WALL THICKNESS colour map (Epi−Endo), on every level"))
         self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
@@ -2309,6 +2309,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn.clicked.connect(self._lv_exit_confirm)
         row.addWidget(self._lv_exit_btn)
         row.addStretch(1)               # pack all buttons to the LEFT
+        # Plain LV buttons (no colour style of their own): attach the disabled-
+        # grey rule so they clearly grey out when unavailable — a plain button's
+        # native disabled look can be too subtle to read as "unusable".
+        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_redo_btn,
+                  self._lv_save_btn, self._lv_stl_btn, self._lv_load_btn,
+                  self._lv_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
         # Controls greyed out until in LV mode (Endo/Epi stay live — they ENTER
         # LV mode; Load also stays live). _lv_sync_buttons refines by phase.
         self._lv_bar_btns = [
@@ -2319,21 +2326,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_sync_buttons()           # initial (not in LV mode) state
         return self._lv_wrap
 
-    #: LV bar button styles by state (default = plain grey/black).
+    #: Appended to EVERY LV/tool button style so a DISABLED button clearly greys
+    #: out (a custom background otherwise overrides Qt's native disabled look, so
+    #: an unavailable button would keep its colour). Matches the "Show Buttons"
+    #: greyed look the user expects.
+    _BTN_DIS = ("QPushButton:disabled{background:#e6e6e6;color:#a8a8a8;"
+                "border:1px solid #d8d8d8;}")
+
+    #: LV bar button styles by state (default = plain grey/black). Every entry
+    #: carries the disabled-grey rule so unusable buttons read as greyed out.
     _LV_STY = {
-        "endo": "QPushButton{background:#d32f2f;color:white;}",
-        "epi": "QPushButton{background:#2e8b57;color:white;}",
-        "setaxis": "QPushButton{background:#b8860b;color:white;}",
-        "trace": "QPushButton{background:#c0392b;color:white;}",
+        "endo": "QPushButton{background:#d32f2f;color:white;}" + _BTN_DIS,
+        "epi": "QPushButton{background:#2e8b57;color:white;}" + _BTN_DIS,
+        "setaxis": "QPushButton{background:#b8860b;color:white;}" + _BTN_DIS,
+        "trace": "QPushButton{background:#c0392b;color:white;}" + _BTN_DIS,
         # CalcVol: the SAME native background as every other button BEFORE a
         # volume is computed (only a clear blue 2px outline sets it apart — a
         # hint it turns blue once computed); solid blue AFTER (valid result).
         "vol_todo": ("QPushButton{background:palette(button);color:black;"
-                     "border:2px solid #1f77b4;}"),
-        "vol_done": "QPushButton{background:#1f77b4;color:white;}",
+                     "border:2px solid #1f77b4;}" + _BTN_DIS),
+        "vol_done": "QPushButton{background:#1f77b4;color:white;}" + _BTN_DIS,
         # SAX/refine neutral (grey/black): the 4 trace buttons reset to this on
         # SAX entry; Endo/Epi re-colour only to show the armed edit target.
-        "neutral": "QPushButton{background:#d0d0d0;color:black;}",
+        "neutral": "QPushButton{background:#d0d0d0;color:black;}" + _BTN_DIS,
+        # Unselected/default: native background when ENABLED, grey when disabled.
+        "off": _BTN_DIS,
     }
 
     def _lv_set_bar_enabled(self, on: bool) -> None:
@@ -2354,7 +2371,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_load_btn.setEnabled(True)
         if lv is None:                                # not in LV mode
             for b in (endo_btn, epi_btn, setax, trace):
-                b.setStyleSheet("")
+                b.setStyleSheet(self._LV_STY["off"])
             self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
@@ -2383,12 +2400,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             trace.setStyleSheet(self._LV_STY["neutral"])
             trace.setEnabled(ed in ("endo", "epi"))
         else:
-            endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
-            epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
+            off = self._LV_STY["off"]
+            endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else off)
+            epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else off)
             setax.setStyleSheet(self._LV_STY["setaxis"]
-                                if ph in ("ready", "apex", "contour") else "")
+                                if ph in ("ready", "apex", "contour") else off)
             trace.setStyleSheet(self._LV_STY["trace"]
-                                if ph in ("apex", "contour") else "")
+                                if ph in ("apex", "contour") else off)
             # LIFO enable: you can only turn OFF the LAST button turned on.
             #   align → Set axis armed (set)      ready → Set axis (undo) + Trace
             #   apex/contour → Trace (undo) + SAX (on)
@@ -2620,12 +2638,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         ):
             b = FitButton(label)
             b.setHelpToolTip(tip)
+            b.setStyleSheet(self._BTN_DIS)          # clear grey when disabled
             b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
             self._t2d_btns.append(b)
             row2.addWidget(b)
         # Grayscale invert (black↔white negative) — right of Flip-V.
         self._invert_btn = FitButton(t("WB reverse"))
         self._invert_btn.setCheckable(True)
+        self._invert_btn.setStyleSheet(self._BTN_DIS)   # clear grey when disabled
         self._invert_btn.setHelpToolTip(
             t("Invert grayscale (black↔white negative)"))
         self._invert_btn.clicked.connect(self._toggle_invert)
