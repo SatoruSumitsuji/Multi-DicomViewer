@@ -835,6 +835,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 return
             # idle Measure mode → fall through to the tool / crosshair setup
         self._owner._spin_prev = None        # restart SPIN wheel angle
+        # A view-changing drag begins here (crosshair move/rotate OR the active
+        # tool: Zoom/Move/Rotate/Spin/Thick/Paging). Snapshot for Ctrl+Z now;
+        # the gesture is committed as one step on release.
+        self._owner._gesture_begin()
         # Pressing within the (5%) crosshair grab band grabs the centreline
         # (reslice move / rotate), overriding the tool — for ALL tools. The
         # centreline gesture is deliberately ABOVE every tool button: on the
@@ -971,6 +975,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = None
         self._cross = False
         self._owner._spin_prev = None
+        # Commit the drag (Zoom/Move/Rotate/Spin/Thick/Paging or a centreline
+        # move·rotate) as one Ctrl+Z step. A click/double-click recentre records
+        # itself (it leaves _gesture_moved False), so this won't double-record.
+        self._owner._gesture_commit()
         # End the centreline gesture and drop its highlight (a fresh hover will
         # re-preview if the cursor is still on a line).
         self._owner._cross_dragging = None
@@ -1905,6 +1913,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # vessel is bright, snap recovers its DEPTH. Toggle in the trace menu.
         self._snap_lumen = True
         self._slice2d = 0                    # current slice index in 2-D mode
+        self._undo_clear()                   # unified Ctrl+Z / Ctrl+Y state
         self._page_accum = 0.0               # 2-D drag-paging pixel accumulator
         self._side = "Bi"                    # last 3-D Plane choice (Bi/Lt/Rt)
         # 2-D display in-plane axes (output right = U, up = V); rotated/flipped
@@ -2049,12 +2058,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         # collides with those → Qt sees two matching shortcuts → "ambiguous" →
         # NEITHER fires. So LV plane-stepping on A/F is routed the other way:
         # _nav_active calls lv_nav_key() below FIRST when a CT pane is active.
-        # Ctrl+Z = unified undo (image transforms Rt90/Lt90/Flip-H/Flip-V, Spin+,
-        # LV border edits, …) via the _undo stack. Viewer-scoped so a focused
-        # child can't swallow it.
+        # Ctrl+Z = unified undo, Ctrl+Y = redo — covering EVERY view action
+        # (Rt90/Lt90/Flip-H/Flip-V, Spin+, centreline move·rotate, Zoom/Move/
+        # Paging/Thick, recentre) and LV border edits. Viewer-scoped so a focused
+        # child can't swallow them.
         sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
         sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_undo.activated.connect(self._undo_last)
+        sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
+        sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_redo.activated.connect(self._redo_last)
+        # Ctrl+Y is the Windows redo; also bind Ctrl+Shift+Z (the common
+        # alternative) so both habits work.
+        sc_redo2 = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        sc_redo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_redo2.activated.connect(self._redo_last)
         self._update_active_frames()
 
     def lv_nav_key(self, where: str) -> bool:
@@ -4003,51 +4021,164 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_compare(e["key"])
         self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
 
-    _UNDO_MAX = 30                         # Ctrl+Z depth (unified)
+    _UNDO_MAX = 80                         # Ctrl+Z / Ctrl+Y depth (unified)
 
-    # ---- unified undo stack (Ctrl+Z) --------------------------------------
-    # One LIFO of restore-closures covering every undoable action (image
-    # transforms Rt90/Lt90/Flip-H/Flip-V, Spin+, LV border edits, …). Each entry
-    # is a callable that reverts ONE action and returns True if it did (False if
-    # it can't any more — e.g. a border whose LV session is gone — so Ctrl+Z
-    # skips it). Cleared on series load / LV enter·exit·clear so no closure ever
-    # restores into a stale context.
+    # ---- unified undo / redo stack (Ctrl+Z / Ctrl+Y) ----------------------
+    # A single command list + cursor covering EVERY undoable action: image
+    # transforms (Rt90/Lt90/Flip-H/Flip-V), Spin+, centreline move/rotate,
+    # Zoom/Move/Paging/Thick, recentre, and LV border edits. Each command is a
+    # {"undo": fn, "redo": fn} pair — undo() reverts one step, redo() re-applies
+    # it. Most commands snapshot the whole VIEW state (frames, 2-D axes, centre,
+    # per-pane reslice centre, cross angles, thickness, per-pane camera, CPR
+    # transform, 2-D slice) BEFORE and AFTER the action, so undo/redo restore
+    # exactly — no per-action drift (this is why LV-mode Rt90/Lt90 no longer
+    # leaves the measurements shifted after Ctrl+Z). Cleared on series load / 2-D
+    # ↔ 3-D switch / LV enter·exit·clear so no command restores a stale context.
     def _undo_clear(self) -> None:
-        from collections import deque
-        self._undo = deque(maxlen=self._UNDO_MAX)
+        self._undo_cmds = []          # [{"undo": fn, "redo": fn}, …]
+        self._undo_idx = 0            # cmds[:idx] are applied; cmds[idx:] are redoable
+        self._lv_edit_before = None   # stashed LV-border snap during a drag
+        self._gesture_snap = None     # view snap captured at a drag's mouse-press
+        self._gesture_moved = False   # did the current drag actually change anything
 
-    def _undo_push(self, fn) -> None:
-        if not hasattr(self, "_undo"):
+    def _undo_record(self, undo_fn, redo_fn) -> None:
+        """Append one undo/redo command, dropping any redo-future first."""
+        if not hasattr(self, "_undo_cmds"):
             self._undo_clear()
-        self._undo.append(fn)
+        if self._undo_idx < len(self._undo_cmds):
+            del self._undo_cmds[self._undo_idx:]        # a new action forks history
+        self._undo_cmds.append({"undo": undo_fn, "redo": redo_fn})
+        if len(self._undo_cmds) > self._UNDO_MAX:
+            del self._undo_cmds[:len(self._undo_cmds) - self._UNDO_MAX]
+        self._undo_idx = len(self._undo_cmds)
+
+    def _undo_view(self, before, after) -> None:
+        """Record a view-state change from *before* to *after* snapshots."""
+        if before is None or after is None:
+            return
+        self._undo_record(lambda b=before: self._view_restore(b),
+                          lambda a=after: self._view_restore(a))
+
+    def _gesture_begin(self) -> None:
+        """A view-changing mouse drag is starting: snapshot the state so its
+        WHOLE gesture (Zoom/Move/Rotate/Spin/Thick/Paging or a centreline
+        move·rotate) collapses into ONE Ctrl+Z step, committed on release."""
+        self._gesture_snap = self._view_snapshot()
+        self._gesture_moved = False
+
+    def _gesture_commit(self) -> None:
+        """Mouse released: if the drag actually changed the view, record it."""
+        snap = getattr(self, "_gesture_snap", None)
+        if snap is not None and getattr(self, "_gesture_moved", False):
+            self._undo_view(snap, self._view_snapshot())
+        self._gesture_snap = None
+        self._gesture_moved = False
 
     def _undo_last(self) -> None:
-        """Ctrl+Z: revert the most recent undoable action."""
-        stack = getattr(self, "_undo", None)
-        while stack:
-            fn = stack.pop()
-            try:
-                if fn():
-                    return
-            except Exception:                          # noqa: BLE001
-                pass
+        """Ctrl+Z: step one command back."""
+        if not getattr(self, "_undo_cmds", None) or self._undo_idx <= 0:
+            return
+        self._undo_idx -= 1
+        try:
+            self._undo_cmds[self._undo_idx]["undo"]()
+        except Exception:                              # noqa: BLE001
+            pass
+
+    def _redo_last(self) -> None:
+        """Ctrl+Y: step one command forward (re-apply an undone action)."""
+        if not getattr(self, "_undo_cmds", None) \
+                or self._undo_idx >= len(self._undo_cmds):
+            return
+        try:
+            self._undo_cmds[self._undo_idx]["redo"]()
+        except Exception:                              # noqa: BLE001
+            pass
+        self._undo_idx += 1
+
+    def _view_snapshot(self) -> dict:
+        """Capture the full display state so undo/redo can restore it exactly."""
+        def cam(k):
+            c = self.pane[k].ren.GetActiveCamera()
+            return {"vu": tuple(c.GetViewUp()), "fp": tuple(c.GetFocalPoint()),
+                    "pos": tuple(c.GetPosition()),
+                    "ps": float(c.GetParallelScale())}
+        return {
+            "frame": {k: tuple(np.asarray(a, float).copy()
+                               for a in self._frame[k]) for k in ("A", "B")},
+            "axes2d": (None if self._axes2d is None else
+                       (np.asarray(self._axes2d[0], float).copy(),
+                        np.asarray(self._axes2d[1], float).copy())),
+            "center": self._center.copy(),
+            "pc": {k: self._pc[k].copy() for k in ("A", "B")},
+            "cross_ang": dict(self._cross_ang),
+            "thick": dict(self._thick),
+            "slice2d": int(self._slice2d),
+            "cam": {k: cam(k) for k in ("A", "B")},
+            "cpr_T": (None if self._cpr is None else self._cpr["T"].copy()),
+            "cpr_idx": (None if self._cpr is None else self._cpr.get("idx")),
+        }
+
+    def _view_restore(self, snap) -> None:
+        if self._image is None or snap is None:
+            return
+        for k in ("A", "B"):
+            self._frame[k] = tuple(np.asarray(a, float).copy()
+                                   for a in snap["frame"][k])
+            self._pc[k] = snap["pc"][k].copy()
+        if snap.get("axes2d") is not None:
+            self._axes2d = (snap["axes2d"][0].copy(), snap["axes2d"][1].copy())
+        self._center = snap["center"].copy()
+        self._cross_ang = dict(snap["cross_ang"])
+        self._thick = dict(snap["thick"])
+        self._slice2d = int(snap.get("slice2d", self._slice2d))
+        if self._cpr is not None and snap.get("cpr_T") is not None:
+            self._cpr["T"] = np.asarray(snap["cpr_T"], float).copy()
+            if snap.get("cpr_idx") is not None:
+                self._cpr["idx"] = snap["cpr_idx"]
+            self._cpr_apply_xform()
+        if self._mode == "2D":
+            self._apply_2d_axes()
+        for k in ("A", "B"):
+            c = self.pane[k].ren.GetActiveCamera()
+            cc = snap["cam"][k]
+            c.SetViewUp(*cc["vu"])
+            c.SetFocalPoint(*cc["fp"])
+            c.SetPosition(*cc["pos"])
+            c.SetParallelScale(max(1e-3, cc["ps"]))
+        self._view_initial = False
+        self._refresh(reset_cam=False)
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if self._mode == "2D":
+            self._sync_seek()
 
     # LV kept the same public names; they now feed the unified stack.
     def _lv_reset_undo(self) -> None:
         self._undo_clear()
 
-    def _lv_push_undo(self, pane, mi) -> None:
-        """Snapshot an LV border's 3-D points BEFORE an edit (drag / add / delete)
-        so Ctrl+Z can restore it."""
+    def _lv_border_snap(self, pane, mi):
+        """A restorable snapshot of one LV border's 3-D points (or None)."""
         if self._lv is None or not (0 <= mi < len(self._measures.get(pane, []))):
-            return
+            return None
         m = self._measures[pane][mi]
         tag = m.get("_lv")
         if tag is None or not m.get("pts3d"):
-            return
-        snap = {"pane": pane, "tag": tuple(tag),
+            return None
+        return {"pane": pane, "tag": tuple(tag),
                 "pts3d": [list(map(float, P)) for P in m["pts3d"]]}
-        self._undo_push(lambda s=snap: self._lv_restore_border(s))
+
+    def _lv_record_border(self, before, pane, mi) -> None:
+        """Record an LV-border edit (before → after) as one undo/redo command."""
+        after = self._lv_border_snap(pane, mi)
+        if before is None or after is None:
+            return
+        self._undo_record(lambda b=before: self._lv_restore_border(b),
+                          lambda a=after: self._lv_restore_border(a))
+
+    def _lv_push_undo(self, pane, mi) -> None:
+        """Stash an LV border's 3-D points BEFORE a DRAG; committed on release
+        (see _measure_release) once the final points are known."""
+        self._lv_edit_before = self._lv_border_snap(pane, mi)
 
     def _lv_restore_border(self, snap) -> bool:
         if self._lv is None or self._lv.get("phase") != "contour":
@@ -4146,6 +4277,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             if (mi is not None and 0 <= mi < len(self._measures[key])):
                 self._lv_live_recapture(key, self._measures[key][mi])
             self._redraw_meas(key)
+            # Commit an LV-border DRAG (snapshot stashed at mouse-press) as one
+            # undo/redo step, now that the final dragged points are known.
+            if getattr(self, "_lv_edit_before", None) is not None \
+                    and mi is not None:
+                self._lv_record_border(self._lv_edit_before, key, mi)
+        self._lv_edit_before = None
 
     def _set_ellipse_handle(self, m, vi, w):
         # Oblique-ellipse handle drag via the shared pure helper (same logic
@@ -4539,8 +4676,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _add_point(self, which, mi, sx, sy):
         m = self._measures[which][mi]
-        if self._lv is not None and m.get("_lv"):
-            self._lv_push_undo(which, mi)       # snapshot before adding a point
+        _lv_before = (self._lv_border_snap(which, mi)
+                      if self._lv is not None and m.get("_lv") else None)
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
         if m["type"] == "ellipse":
@@ -4571,6 +4708,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             m["pts3d"].insert(best_i + 1, self._out_to_world3d(which, wx, wy))
         self._resnap_center_angle(m)
         self._lv_live_recapture(which, m)     # edited LV border → refresh SAX
+        self._lv_record_border(_lv_before, which, mi)   # Ctrl+Z / Ctrl+Y
 
     def _snap_trace(self, which, mi):
         """Re-snap every vertex of a 3-D trace to the contrast lumen along the
@@ -4591,8 +4729,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         pts = list(m["pts"])
         if len(pts) <= 2 or not (0 <= vi < len(pts)):
             return
-        if self._lv is not None and m.get("_lv"):
-            self._lv_push_undo(which, mi)       # snapshot before deleting a point
+        _lv_before = (self._lv_border_snap(which, mi)
+                      if self._lv is not None and m.get("_lv") else None)
         del pts[vi]
         p3 = m.get("pts3d")
         if p3 and 0 <= vi < len(p3):
@@ -4603,6 +4741,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["pts"] = pts
         self._resnap_center_angle(m)
         self._lv_live_recapture(which, m)     # edited LV border → refresh SAX
+        self._lv_record_border(_lv_before, which, mi)   # Ctrl+Z / Ctrl+Y
 
     # ----- measurement geometry / sampling -----
     def _ellipse_params(self, p0, p1):
@@ -7534,7 +7673,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         nz = self._image.GetDimensions()[2]
         sz = self._dims[2]
-        self._slice2d = int(min(max(self._slice2d + step, 0), max(0, nz - 1)))
+        new_slice = int(min(max(self._slice2d + step, 0), max(0, nz - 1)))
+        if new_slice == self._slice2d:
+            return                      # already at the end — nothing to undo
+        before = self._view_snapshot()
+        self._slice2d = new_slice
         z = self._slice2d * sz if sz > 1e-6 else 0.0
         self._center[2] = z
         self._pc["A"][2] = z
@@ -7542,6 +7685,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh()
         self._sync_seek()
+        self._undo_view(before, self._view_snapshot())
 
     # ------------------------------------------------------ 2-D frame seek bar
     def _build_seek_bar(self) -> QWidget:
@@ -7796,10 +7940,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             M = self._XFORM_2X2.get(kind)
             if M is None:
                 return
+            before = self._view_snapshot()
             self._cpr["T"] = M @ self._cpr["T"]
             self._cpr_apply_xform()
             self._view_initial = False
             self._refresh(reset_cam=True)
+            self._undo_view(before, self._view_snapshot())
             return
         if self._image is None:
             return
@@ -7810,24 +7956,42 @@ class CTViewer(CPRMixin, AbstractViewer):
             # the new 2-D, so measurements/volumes are unchanged). Right-handed is
             # preserved (rotations keep n; mirrors flip n).
             k = self._active_pane
-            prev = tuple(np.asarray(a, float).copy() for a in self._frame[k])
+            before = self._view_snapshot()
+            # The frame flip / rotate mirrors·turns the anatomy about the reslice
+            # CENTRE (output 0,0). On its own that throws the view off-centre when
+            # the reslice centre isn't at the screen centre — which is exactly the
+            # case in the LV long-axis view (reslice centred on the axis, not the
+            # crosshair) and after any pan — so Flip-V appeared to flip about an
+            # offset line. Pivot INSTEAD about the visible centre: move the camera
+            # focal point by the SAME transform, so the world point at the screen
+            # centre stays put and the image flips / rotates in place.
+            cam = self.pane[k].ren.GetActiveCamera()
+            fp = cam.GetFocalPoint()
+            ps = cam.GetPosition()
+            fx, fy = float(fp[0]), float(fp[1])
             u, v, n = (np.asarray(a, float) for a in self._frame[k])
             if kind == "rt90":          # 90° clockwise
                 self._frame[k] = (v, -u, n)
+                nfx, nfy = fy, -fx
             elif kind == "lt90":        # 90° counter-clockwise
                 self._frame[k] = (-v, u, n)
+                nfx, nfy = -fy, fx
             elif kind == "fliph":       # left-right mirror
                 self._frame[k] = (-u, v, -n)
+                nfx, nfy = -fx, fy
             elif kind == "flipv":       # top-bottom flip
                 self._frame[k] = (u, -v, -n)
+                nfx, nfy = fx, -fy
             else:
                 return
-            self._undo_push(lambda kk=k, f=prev: self._undo_restore_frame(kk, f))
+            cam.SetFocalPoint(nfx, nfy, fp[2])
+            cam.SetPosition(nfx, nfy, ps[2])
             self._view_initial = False
             self._refresh(reset_cam=False)
+            self._undo_view(before, self._view_snapshot())
             return
+        before = self._view_snapshot()
         u, v = self._axes2d
-        prev2d = (self._axes2d[0].copy(), self._axes2d[1].copy())
         if kind == "rt90":          # 90° clockwise
             self._axes2d = (v.copy(), (-u).copy())
         elif kind == "lt90":        # 90° counter-clockwise
@@ -7838,32 +8002,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._axes2d = (u.copy(), (-v).copy())
         else:
             return
-        self._undo_push(lambda p=prev2d: self._undo_restore_axes2d(p))
         self._apply_2d_axes()
         self._view_initial = False
         self._refresh(reset_cam=True)   # refit (a 90° turn swaps the aspect)
-
-    def _undo_restore_frame(self, key, frame) -> bool:
-        """Undo a 3-D Rt90/Lt90/Flip-H/Flip-V: put the pane's reslice frame back."""
-        self._frame[key] = tuple(np.asarray(a, float).copy() for a in frame)
-        self._view_initial = False
-        self._refresh(reset_cam=False)
-        return True
-
-    def _undo_restore_axes2d(self, axes) -> bool:
-        """Undo a 2-D Rt90/Lt90/Flip-H/Flip-V: put the native-slice axes back."""
-        self._axes2d = (axes[0].copy(), axes[1].copy())
-        self._apply_2d_axes()
-        self._view_initial = False
-        self._refresh(reset_cam=True)
-        return True
-
-    def _undo_restore_viewup(self, key, vu) -> bool:
-        """Undo a Spin+ : restore the camera roll (view-up) it changed."""
-        self.pane[key].ren.GetActiveCamera().SetViewUp(*vu)
-        self._view_initial = False
-        self._refresh()
-        return True
+        self._undo_view(before, self._view_snapshot())
 
     def _spin_snap(self) -> None:
         """Spin+ : roll the ACTIVE pane's camera so its centreline (crosshair)
@@ -7875,7 +8017,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         key = self._active_pane
         ren = self.pane[key].ren
         cam = ren.GetActiveCamera()
-        prev_vu = tuple(cam.GetViewUp())            # for Ctrl+Z
         ccx, ccy = self._cc(key)
         th = math.radians(self._cross_ang[key])
         uh = (math.cos(th), math.sin(th))          # a crosshair line's direction
@@ -7903,11 +8044,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         delta = ((target - sa + 180.0) % 360.0) - 180.0            # shortest move
         if abs(delta) < 1e-4:
             return
+        before = self._view_snapshot()
         cam.Roll(delta / per)                       # snaps the crossline to target
-        self._undo_push(
-            lambda k=key, vu=prev_vu: self._undo_restore_viewup(k, vu))
         self._view_initial = False
         self._refresh()
+        self._undo_view(before, self._view_snapshot())
 
     def _page_step(self, step):
         """One paging notch (keyboard / arrow): a native slice in 2-D, a
@@ -8012,6 +8153,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if t != "WL":
             self._view_initial = False
+            # This drag changes the view → its gesture becomes one Ctrl+Z step
+            # (WL is not view state, so it stays outside the undo stack).
+            self._gesture_moved = True
         if t == "WL":
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
@@ -8144,6 +8288,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # reslice origin together along this pane's normal. Wheel-up moves
         # toward the other pane's ▲ apex (same sign derivation as PAGING so
         # a crossline-flipped normal can't reverse it).
+        before = self._view_snapshot()
         _, _, n = self._axes_for(which)
         other = "B" if which == "A" else "A"
         s = 1.0 if float(np.dot(n, self._apex_dir3(other))) >= 0.0 else -1.0
@@ -8153,6 +8298,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._clamp_center()
         self._view_initial = False
         self._refresh()
+        self._undo_view(before, self._view_snapshot())
 
     def _screen_center(self, which):
         """Qt-widget pixel position (y down) of the crosshair centre."""
@@ -8190,6 +8336,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         AND the image centre, in BOTH panes."""
         if self._image is None:
             return
+        # A double-click / single-click recentre records its own undo; a
+        # crosshair-CENTRE *drag* is committed by the drag gesture instead (from
+        # its mouse-press snapshot), so skip self-recording then to keep it one
+        # Ctrl+Z step. The distinguishing factor is whether a drag actually moved.
+        before = (None if getattr(self, "_gesture_moved", False)
+                  else self._view_snapshot())
         wx, wy = self._disp_to_world(which, sx, sy)
         m = self._matrix(which)
         vol = m.MultiplyPoint((wx, wy, 0.0, 1.0))
@@ -8207,6 +8359,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # staying frozen on screen.
         for k in ("A", "B"):
             self._redraw_meas(k)
+        if before is not None:
+            self._undo_view(before, self._view_snapshot())
 
     def _couple_companion(self, which, crossdir) -> None:
         """Re-derive the OTHER pane as the plane ⟂ to *which* that contains the
@@ -8464,6 +8618,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # background image stays put (only _center moves, not _pc / the camera).
         # The actual recentre — moving that point to the middle of the screen —
         # happens on RELEASE (see _PaneCanvas.mouseReleaseEvent → _recenter).
+        self._gesture_moved = True             # centreline drag = one Ctrl+Z step
         if self._cross_mode == "center":
             wx, wy = self._disp_to_world(which, sx, sy)
             m = self._matrix(which)
