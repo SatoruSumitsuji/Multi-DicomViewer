@@ -2645,6 +2645,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
             self._t2d_btns.append(b)
             row2.addWidget(b)
+        # Spin+ : snap the active pane's centreline to the nearest vertical /
+        # horizontal (a 45° tie snaps clockwise). Works in 2-D and 3-D.
+        self._spin_snap_btn = FitButton(t("Spin+"))
+        self._spin_snap_btn.setStyleSheet(self._BTN_DIS)
+        self._spin_snap_btn.setHelpToolTip(
+            t("Snap the centreline to the nearest vertical/horizontal "
+              "(45° snaps clockwise)"))
+        self._spin_snap_btn.clicked.connect(self._spin_snap)
+        row2.addWidget(self._spin_snap_btn)
         # Grayscale invert (black↔white negative) — right of Flip-V.
         self._invert_btn = FitButton(t("WB reverse"))
         self._invert_btn.setCheckable(True)
@@ -7800,6 +7809,47 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._apply_2d_axes()
         self._view_initial = False
         self._refresh(reset_cam=True)   # refit (a 90° turn swaps the aspect)
+
+    def _spin_snap(self) -> None:
+        """Spin+ : roll the ACTIVE pane's camera so its centreline (crosshair)
+        snaps to the nearest vertical / horizontal. A 45° tie snaps CLOCKWISE.
+        Works in 2-D and 3-D (it just rotates the on-screen view; the frame /
+        measurements are unchanged)."""
+        if self._image is None:
+            return
+        key = self._active_pane
+        ren = self.pane[key].ren
+        cam = ren.GetActiveCamera()
+        ccx, ccy = self._cc(key)
+        th = math.radians(self._cross_ang[key])
+        uh = (math.cos(th), math.sin(th))          # a crosshair line's direction
+
+        def crossline_angle():
+            """On-screen angle (deg) of the crossline, via the live camera."""
+            ren.SetWorldPoint(ccx, ccy, 0.5, 1.0)
+            ren.WorldToDisplay()
+            a0 = ren.GetDisplayPoint()
+            ren.SetWorldPoint(ccx + uh[0], ccy + uh[1], 0.5, 1.0)
+            ren.WorldToDisplay()
+            a1 = ren.GetDisplayPoint()
+            return math.degrees(math.atan2(a1[1] - a0[1], a1[0] - a0[0]))
+
+        sa = crossline_angle()
+        # Probe the Roll→display-angle sign at runtime (no render needed) so the
+        # snap direction is always correct regardless of VTK's Roll convention.
+        cam.Roll(1.0)
+        per = ((crossline_angle() - sa + 180.0) % 360.0) - 180.0   # display °/1° roll
+        cam.Roll(-1.0)
+        if abs(per) < 1e-6:
+            return
+        # Nearest 90°; a 45° tie rounds DOWN = CLOCKWISE (display CW = decreasing).
+        target = math.ceil(sa / 90.0 - 0.5) * 90.0
+        delta = ((target - sa + 180.0) % 360.0) - 180.0            # shortest move
+        if abs(delta) < 1e-4:
+            return
+        cam.Roll(delta / per)                       # snaps the crossline to target
+        self._view_initial = False
+        self._refresh()
 
     def _page_step(self, step):
         """One paging notch (keyboard / arrow): a native slice in 2-D, a

@@ -373,6 +373,7 @@
   "LV cavity volume (endo): {v:.1f} mL": "左室内腔容積(心内膜): {v:.1f} mL",
   "LV cavity volume: {v:.1f} mL": "左室内腔容積: {v:.1f} mL",
   "Computing LV volume…": "左室容積を計算中…",
+  "Snap the centreline to the nearest vertical/horizontal (45° snaps clockwise)": "センタラインを最も近い縦/横にスナップ（45°は時計回りにスナップ）",
   "Clear all traced borders? This cannot be undone.": "トレースした境界をすべて消去しますか？（元に戻せません）",
   "Exit LV analysis? Unsaved borders/results are kept only if you Saved them.": "LV解析を終了しますか？（保存していない境界・結果は Save したものだけが残ります）",
   "Myocardial volume: {v:.1f} mL": "心筋容積: {v:.1f} mL",
