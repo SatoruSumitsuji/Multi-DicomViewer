@@ -2876,11 +2876,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # drop the `and is2d` below to restore WB reverse in 3-D.
         if getattr(self, "_invert_btn", None) is not None:
             self._invert_btn.setEnabled(self._lv is None and is2d)
-        # 2-D image transforms: Rt90/Lt90/Flip-V are native-slice-only (greyed in
-        # 3-D); Flip-H (index 2) also works in 3-D. Applied HERE too (not only in
-        # _set_mode) so the state is right on every refresh / load path.
-        for i, b in enumerate(getattr(self, "_t2d_btns", [])):
-            b.setEnabled(is2d or i == 2)
+        # Rt90/Lt90/Flip-H/Flip-V all work in BOTH 2-D and 3-D (they transform the
+        # active pane's frame), so keep all four enabled. Applied HERE too (not
+        # only in _set_mode) so the state is right on every refresh / load path.
+        for b in getattr(self, "_t2d_btns", []):
+            b.setEnabled(True)
         if getattr(self, "_slab_spin", None) is not None and self._lv is not None:
             self._slab_spin.setEnabled(False)
 
@@ -7461,11 +7461,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cl_btn.setEnabled(not is2d)
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
-        # Rt90/Lt90/Flip-V apply only to the native slice (2-D). Flip-H (index 2)
-        # ALSO works in 3-D MPR — it mirrors the active pane left-right — so it
-        # stays enabled in 3-D while the others grey out.
-        for i, b in enumerate(self._t2d_btns):
-            b.setEnabled(is2d or i == 2)
+        # Rt90/Lt90/Flip-H/Flip-V all work in BOTH 2-D (native slice) and 3-D MPR
+        # (they transform the ACTIVE pane's frame), so they stay enabled in both.
+        for b in self._t2d_btns:
+            b.setEnabled(True)
         if is2d:
             if self._tool in _MPR_ONLY_TOOLS:
                 self._set_tool("PAGING")
@@ -7780,20 +7779,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._image is None:
             return
         if self._mode != "2D":
-            # 3-D MPR: ONLY Flip-H is meaningful — mirror the ACTIVE pane's
-            # reslice frame left-right (negate u, and n to keep the frame right-
-            # handed), exactly like the short-axis pane's mirror. Coordinate-safe:
-            # traces are stored as absolute 3-D (pts3d) and re-derive to the
-            # mirrored 2-D, so measurements/volumes are unchanged. Rt90/Lt90/
-            # Flip-V stay 2-D-only (their buttons remain disabled in 3-D).
-            if kind == "fliph":
-                k = self._active_pane
-                u, v, n = self._frame[k]
-                self._frame[k] = (-np.asarray(u, float),
-                                  np.asarray(v, float),
-                                  -np.asarray(n, float))
-                self._view_initial = False
-                self._refresh(reset_cam=False)
+            # 3-D MPR: rotate / mirror the ACTIVE pane by transforming its reslice
+            # frame (u, v, n) — the anatomy AND the crosshair turn with it, and it
+            # is coordinate-safe (traces are absolute 3-D pts3d and re-derive to
+            # the new 2-D, so measurements/volumes are unchanged). Right-handed is
+            # preserved (rotations keep n; mirrors flip n).
+            k = self._active_pane
+            u, v, n = (np.asarray(a, float) for a in self._frame[k])
+            if kind == "rt90":          # 90° clockwise
+                self._frame[k] = (v, -u, n)
+            elif kind == "lt90":        # 90° counter-clockwise
+                self._frame[k] = (-v, u, n)
+            elif kind == "fliph":       # left-right mirror
+                self._frame[k] = (-u, v, -n)
+            elif kind == "flipv":       # top-bottom flip
+                self._frame[k] = (u, -v, -n)
+            else:
+                return
+            self._view_initial = False
+            self._refresh(reset_cam=False)
             return
         u, v = self._axes2d
         if kind == "rt90":          # 90° clockwise
