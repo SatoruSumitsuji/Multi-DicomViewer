@@ -5597,12 +5597,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lv_vol_btn)
         self._lv_wall_btn = FitButton(t("Wall"))
         self._lv_wall_btn.setCheckable(True)
-        # OFF (not applied): a soft, understated purple outline so it reads as
-        # the wall-map button without shouting. ON: filled purple (border blends).
+        # OFF (not applied): the SAME native background as the other buttons with
+        # a clear 2px purple outline so it reads as the wall-map button. ON:
+        # filled purple (border blends in).
         self._lv_wall_btn.setStyleSheet(
-            "QPushButton{border:1px solid #c3addb;}"
+            "QPushButton{background:palette(button);border:2px solid #9b59b6;}"
             "QPushButton:checked{background:#8e44ad;color:white;"
-            "border:1px solid #8e44ad;}")
+            "border:2px solid #8e44ad;}")
         self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
         row.addWidget(self._lv_wall_btn)
         self._lv_redo_btn = FitButton(t("Clear borders"))
@@ -5637,12 +5638,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         "epi": "QPushButton{background:#2e8b57;color:white;}",
         "setaxis": "QPushButton{background:#b8860b;color:white;}",
         "trace": "QPushButton{background:#c0392b;color:white;}",
-        # CalcVol: grey/black BEFORE a volume is computed, blue/white AFTER
-        # (a valid result is showing). Reset to grey when the trace changes.
-        # The pre-calc grey carries a THIN light-blue outline (a subtle hint it
-        # turns blue once computed) to set it apart from the other grey buttons.
-        "vol_todo": ("QPushButton{background:#d0d0d0;color:black;"
-                     "border:1px solid #9ec9f0;}"),
+        # CalcVol: the SAME native background as every other button BEFORE a
+        # volume is computed (only a clear blue 2px outline sets it apart — a
+        # hint it turns blue once computed); solid blue AFTER (valid result).
+        "vol_todo": ("QPushButton{background:palette(button);color:black;"
+                     "border:2px solid #1f77b4;}"),
         "vol_done": "QPushButton{background:#1f77b4;color:white;}",
         # SAX/refine neutral (grey/black): the 4 trace buttons reset to this on
         # SAX entry; Endo/Epi re-colour only to show the armed edit target.
