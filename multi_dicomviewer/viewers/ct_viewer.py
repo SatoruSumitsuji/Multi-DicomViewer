@@ -866,8 +866,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # WL / ZOOM / MOVE / THICK → the normal tool drag on this pane.
             p = e.position()
             shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
             self._owner._drag(self._which, p.x() - self._last.x(),
-                              p.y() - self._last.y(), shift, p.x(), p.y())
+                              p.y() - self._last.y(), shift, p.x(), p.y(),
+                              ctrl=ctrl)
             self._last = p
             return
         if self._owner._lv_apex_drag is not None and self._last is not None:
@@ -930,9 +932,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         shift = bool(
             e.modifiers() & Qt.KeyboardModifier.ShiftModifier
         )
+        ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
         self._owner._drag(
             self._which, p.x() - self._last.x(), p.y() - self._last.y(),
-            shift, p.x(), p.y(),
+            shift, p.x(), p.y(), ctrl=ctrl,
         )
         self._last = p
 
@@ -7877,7 +7880,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
 
-    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None):
+    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False):
         if self._image is None:
             return
         t = self._tool
@@ -7988,11 +7991,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                             _SPIN_SIGN * dphi
                         )
         elif t == "ZOOM":
-            # Shift = zoom BOTH panes together, else just this one.
+            # Shift = zoom BOTH panes together, else just this one — EXCEPT while
+            # actively tracing a border, where a plain left-drag is taken by the
+            # trace so Shift is the "run the tool" gate: there Shift alone zooms
+            # only THIS pane (individual L/R zoom), and Ctrl+Shift zooms both.
             # Drag (and arrow) UP = zoom OUT (shrink), DOWN = zoom IN (enlarge):
             # dy<0 (up) → factor>1 → larger ParallelScale → wider view = shrink.
             factor = 1.0 - dy * 0.005
-            keys = ("A", "B") if shift else (which,)
+            tracing = self._meas_on and bool(self._meas_type)
+            both = (shift and ctrl) if tracing else shift
+            keys = ("A", "B") if both else (which,)
             for k in keys:
                 cam = self.pane[k].ren.GetActiveCamera()
                 cam.SetParallelScale(
