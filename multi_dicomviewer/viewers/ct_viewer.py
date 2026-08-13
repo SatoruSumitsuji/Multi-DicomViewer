@@ -2008,6 +2008,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Drawn crosshair rotation per pane (deg); follows the cursor
         # while CrossLine-dragging so the crosshair tracks the drag.
         self._cross_ang = {"A": 0.0, "B": 0.0}
+        # ▲ apex-marker side per pane (±1). Flips on each Flip-H / Flip-V so the
+        # ▲ mirrors WITH the image (the crosshair is drawn in output coords, so
+        # a frame mirror doesn't auto-flip the directed ▲). Rotations don't
+        # change it. Reset to +1 whenever the default frames are rebuilt.
+        self._apex_flip = {"A": 1.0, "B": 1.0}
 
         self.canvas_a = _PaneCanvas(self, "A")
         self.canvas_b = _PaneCanvas(self, "B")
@@ -4327,6 +4332,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "center": self._center.copy(),
             "pc": {k: self._pc[k].copy() for k in ("A", "B")},
             "cross_ang": dict(self._cross_ang),
+            "apex_flip": dict(self._apex_flip),
             "thick": dict(self._thick),
             "slice2d": int(self._slice2d),
             "win": float(self._win),
@@ -4347,6 +4353,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._axes2d = (snap["axes2d"][0].copy(), snap["axes2d"][1].copy())
         self._center = snap["center"].copy()
         self._cross_ang = dict(snap["cross_ang"])
+        if snap.get("apex_flip") is not None:
+            self._apex_flip = dict(snap["apex_flip"])
         self._thick = dict(snap["thick"])
         self._slice2d = int(snap.get("slice2d", self._slice2d))
         if snap.get("win") is not None:
@@ -5179,6 +5187,7 @@ class CTViewer(CPRMixin, AbstractViewer):
     # ------------------------------------------------------- geometry
     def _init_frames(self, native=False):
         """Set the two panes' initial (u=right, v=up, n=normal) frames.
+        Also resets the ▲ apex-marker side to default (fresh unmirrored frames).
 
         3-D MPR default (native=False): orient the panes from the patient
         coordinate system (via patient_basis) rather than the raw volume axes,
@@ -5198,6 +5207,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         downward while the camera puts +V up); these equal the pbasis frames
         for an identity basis, so the pb-None fallback behaves like a
         standard axial supine volume."""
+        self._apex_flip = {"A": 1.0, "B": 1.0}   # fresh frames → default ▲ side
         pb = getattr(self, "_pbasis", None)
         if native or pb is None:
             self._frame = {
@@ -7685,7 +7695,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # −uv side). Visual only — the image/frame, the angle readout and the
         # paging-sense are all unchanged. Applied here in the per-render
         # crosshair update, so it persists through ROTATE/SPIN and every redraw.
-        apex_sgn = -1.0 if key == "A" else 1.0
+        apex_sgn = (-1.0 if key == "A" else 1.0) * self._apex_flip.get(key, 1.0)
         p.tri_mapper.SetInputData(
             _tris_pd([
                 (pt(a, apex_sgn * sz, z), pt(a - 0.6 * sz, 0.0, z),
@@ -8274,6 +8284,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             ca = self._cross_ang[k]
             self._cross_ang[k] = {"rt90": ca - 90.0, "lt90": ca + 90.0,
                                   "fliph": 180.0 - ca, "flipv": -ca}[kind]
+            if kind in ("fliph", "flipv"):     # mirror → flip the ▲ side too
+                self._apex_flip[k] = -self._apex_flip.get(k, 1.0)
             cam.SetFocalPoint(nfx, nfy, fp[2])
             cam.SetPosition(nfx, nfy, ps[2])
             self._view_initial = False
