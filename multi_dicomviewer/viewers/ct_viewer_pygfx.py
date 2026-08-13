@@ -2402,6 +2402,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         ]
         for b, tip in zip(getattr(self, "_t2d_btns", None) or [], t2d_tips):
             b.setHelpToolTip(tip)
+        sb = getattr(self, "_spin_snap_btn", None)
+        if sb is not None:
+            sb.setText(t("Spin+"))
+            sb.setHelpToolTip(t(
+                "Snap the centreline to the nearest vertical/horizontal "
+                "(45° snaps clockwise)"))
         b = getattr(self, "_invert_btn", None)
         if b is not None:
             b.setText(t("WB reverse"))
@@ -2670,7 +2676,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.clicked.connect(lambda _c, k=kind: self._2d_transform(k))
             self._t2d_btns.append(b)
             row2.addWidget(b)
-        # Grayscale invert (black↔white negative) — right of Flip-V.
+        # Spin+ : snap the ACTIVE pane's centreline to the nearest vertical /
+        # horizontal (a 45° tie snaps clockwise). Works in 2-D and 3-D — it just
+        # rolls the on-screen view; the frame / measurements are unchanged.
+        self._spin_snap_btn = FitButton(t("Spin+"))
+        self._spin_snap_btn.setHelpToolTip(t(
+            "Snap the centreline to the nearest vertical/horizontal "
+            "(45° snaps clockwise)"))
+        self._spin_snap_btn.clicked.connect(self._spin_snap)
+        row2.addWidget(self._spin_snap_btn)
+        # Grayscale invert (black↔white negative) — right of Spin+.
         self._invert_btn = FitButton(t("WB reverse"))
         self._invert_btn.setCheckable(True)
         self._invert_btn.setHelpToolTip(
@@ -2747,7 +2762,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # throughout LV mode (thin slices, fixed grayscale).
         in_lv = getattr(self, "_lv", None) is not None
         if getattr(self, "_invert_btn", None) is not None:
-            self._invert_btn.setEnabled(not in_lv)
+            # WB reverse: 2-D only (unneeded in 3-D MPR, disabled in LV) — VTK
+            # parity. Revivable by relaxing this to `not in_lv`.
+            self._invert_btn.setEnabled(is2d and not in_lv)
         if getattr(self, "_slab_spin", None) is not None and in_lv:
             self._slab_spin.setEnabled(False)
 
@@ -2792,9 +2809,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cl_btn.setEnabled(not is2d)
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
-        # The 2-D image transforms only apply to the native slice (2-D mode).
+        # Rt90/Lt90/Flip act on the native slice in 2-D and on the ACTIVE pane's
+        # reslice frame in 3-D MPR — enabled in both (and in CPR).
         for b in self._t2d_btns:
-            b.setEnabled(is2d)
+            b.setEnabled(True)
         if is2d:
             if self._tool in _MPR_ONLY_TOOLS:
                 self._set_tool("PAGING")
@@ -3122,7 +3140,37 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._refresh(reset_cam=True)
             self._undo_view(before, self._view_snapshot())
             return
-        if self._mode != "2D" or self._vol is None:
+        if self._vol is None:
+            return
+        if self._mode != "2D":
+            # 3-D MPR: rotate / mirror the ACTIVE pane by transforming its reslice
+            # frame (u, v, n). Pivot about the VISIBLE centre by transforming the
+            # camera pan the SAME way, so the image flips/rotates in place (else a
+            # panned/LV view would swing off-centre). pygfx derives the camera
+            # from cross(u,v), so a mirror that flips handedness is fine; the
+            # plane normal is kept consistent (rotations keep n, mirrors flip n).
+            k = self._active_pane
+            before = self._view_snapshot()
+            u, v, n = (np.asarray(a, float) for a in self._frame[k])
+            px, py = float(self._pan[k][0]), float(self._pan[k][1])
+            if kind == "rt90":          # 90° clockwise
+                self._frame[k] = (v, -u, n)
+                npx, npy = py, -px
+            elif kind == "lt90":        # 90° counter-clockwise
+                self._frame[k] = (-v, u, n)
+                npx, npy = -py, px
+            elif kind == "fliph":       # left-right mirror
+                self._frame[k] = (-u, v, -n)
+                npx, npy = -px, py
+            elif kind == "flipv":       # top-bottom flip
+                self._frame[k] = (u, -v, -n)
+                npx, npy = px, -py
+            else:
+                return
+            self._pan[k] = np.array([npx, npy])
+            self._view_initial = False
+            self._refresh(reset_cam=False, only=k)
+            self._undo_view(before, self._view_snapshot())
             return
         before = self._view_snapshot()
         u, v = self._axes2d
@@ -3139,6 +3187,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._apply_2d_axes()
         self._view_initial = False
         self._refresh(reset_cam=True)   # refit (a 90° turn swaps the aspect)
+        self._undo_view(before, self._view_snapshot())
+
+    def _spin_snap(self) -> None:
+        """Spin+ : roll the ACTIVE pane's view so its centreline (crosshair)
+        snaps to the nearest vertical / horizontal (a 45° tie snaps CLOCKWISE).
+        The camera roll rotates the on-screen view only — frame / measurements
+        are unchanged. pygfx maps a roll R to on-screen angle = R − base, so the
+        roll delta equals the screen-angle delta measured here."""
+        if self._vol is None:
+            return
+        key = self._active_pane
+        ccx, ccy = self._cc(key)
+        a = math.radians(self._cross_ang[key])
+        uh = (math.cos(a), math.sin(a))            # a crossline dir (output uv)
+        s0 = self._world_to_screen(key, ccx, ccy)
+        s1 = self._world_to_screen(key, ccx + uh[0], ccy + uh[1])
+        sa = math.degrees(math.atan2(s1[1] - s0[1], s1[0] - s0[0]))
+        # Nearest 90°; a 45° tie rounds so it snaps clockwise on screen.
+        target = math.ceil(sa / 90.0 - 0.5) * 90.0
+        delta = ((target - sa + 180.0) % 360.0) - 180.0
+        if abs(delta) < 1e-4:
+            return
+        before = self._view_snapshot()
+        self._roll[key] += delta                    # snaps the crossline
+        self._view_initial = False
+        self._refresh(only=key)
         self._undo_view(before, self._view_snapshot())
 
     def _page_step(self, step):
@@ -7632,8 +7706,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_rot_prev = None
         self._cpr_marker_pts = []
         self._cpr_wrap.setVisible(False)
-        for b in self._t2d_btns:                   # 2-D-only again outside CPR
-            b.setEnabled(self._mode == "2D")
+        for b in self._t2d_btns:                   # work in 2-D and 3-D MPR
+            b.setEnabled(True)
         self._init_frames()                        # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
 
