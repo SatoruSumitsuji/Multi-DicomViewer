@@ -1726,9 +1726,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         # "Ctrl+Shift+Z" ALSO resolved to ⌘⇧Z, so the two collided (ambiguous →
         # NEITHER fired) and ⌘Y wasn't bound at all. Bind ⌘⇧Z (standard) once,
         # plus ⌘Y ("Ctrl+Y") and physical-Ctrl+Y ("Meta+Y") — all distinct.
-        sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)   # ⌘Z on macOS
         sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_undo.activated.connect(self._undo_last)
+        # Also bind physical-Ctrl+Z ("Meta+Z" on macOS) so undo works with the
+        # physical Ctrl key too — Windows-habit users AND remote-desktop (Parsec
+        # from a Windows client) where ⌘ often can't be sent but Ctrl passes
+        # through. (Do NOT add "Ctrl+Z": that == ⌘Z here → ambiguous with above.)
+        sc_undo2 = QShortcut(QKeySequence("Meta+Z"), self)
+        sc_undo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_undo2.activated.connect(self._undo_last)
         sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)   # ⌘⇧Z on macOS
         sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._redo_last)
