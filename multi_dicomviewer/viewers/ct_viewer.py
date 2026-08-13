@@ -4051,6 +4051,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._gesture_moved = False   # did the current drag actually change anything
         self._lv_apex_snap = None     # LV geometry snap while dragging an apex
         self._draft_redo = []         # points popped from an in-progress trace
+        self._lod_drag = False        # interactive low-res reslice while dragging
 
     def _undo_record(self, undo_fn, redo_fn) -> None:
         """Append one undo/redo command, dropping any redo-future first."""
@@ -4078,18 +4079,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._gesture_snap = self._view_snapshot()
         self._gesture_lv = self._lv_scalar_snap()   # None outside LV
         self._gesture_moved = False
+        self._lod_drag = True                       # reslice coarse until release
 
     def _gesture_commit(self) -> None:
         """Mouse released: record the drag as one undo step. The view part is
         recorded only if it actually moved; the LV level/meridian part only if
-        it changed (an SAX line-drag moves no view state, so it lands here)."""
+        it changed (an SAX line-drag moves no view state, so it lands here).
+        Then drop interactive LOD and repaint once at full quality."""
+        moved = getattr(self, "_gesture_moved", False)
         snap = getattr(self, "_gesture_snap", None)
-        if snap is not None and getattr(self, "_gesture_moved", False):
+        if snap is not None and moved:
             self._undo_view(snap, self._view_snapshot())
         self._lv_record_scalar(getattr(self, "_gesture_lv", None))
         self._gesture_snap = None
         self._gesture_lv = None
         self._gesture_moved = False
+        if getattr(self, "_lod_drag", False):
+            self._lod_drag = False
+            if moved and self._image is not None:
+                self._refresh()                     # final full-resolution pass
 
     # ---- LV short-axis LEVEL + shown MERIDIAN (navigation) undo -----------
     def _lv_scalar_snap(self):
@@ -7414,6 +7422,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             box_u = half_u * c + ps * s
             box_v = half_u * s + ps * c
             spacing = max(base_step * 0.05, 2.0 * ps / ph)   # ≈ display pixel
+            # Interactive LOD: while a pan / zoom / rotate / centreline drag is
+            # live (_lod_drag, set in _gesture_begin), reslice at HALF the linear
+            # resolution (¼ the pixels) and sample a thick slab ~3× coarser, then
+            # snap back to full quality once on release (_gesture_commit). A 5 mm
+            # MIP trace-slab resliced at full display resolution EVERY mouse-move
+            # was the "LV-align Move is laggy" cause — the slab multiplies the
+            # per-pixel work by its through-plane sample count.
+            lod = getattr(self, "_lod_drag", False)
+            if lod:
+                spacing *= 2.0
             nu = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_u / spacing) + 1))
             nv = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_v / spacing) + 1))
             p.reslice.SetOutputSpacing(spacing, spacing, base_step)
@@ -7422,12 +7440,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             if th > 0 and hasattr(p.reslice, "SetSlabModeToMax"):
                 p.reslice.SetSlabModeToMax()
                 # Slab depth sampled at the VOXEL pitch (through-plane), not the
-                # fine in-plane display pitch.
+                # fine in-plane display pitch. While dragging, take ~1/3 as many
+                # samples but keep the SAME total depth (spacing-fraction ×3), so
+                # the thick slab stays responsive and snaps sharp on release.
+                slab_frac = 3.0 if lod else 1.0
                 p.reslice.SetSlabNumberOfSlices(
-                    max(1, int(round(th / base_step)))
+                    max(1, int(round(th / (base_step * slab_frac))))
                 )
                 if hasattr(p.reslice, "SetSlabSliceSpacingFraction"):
-                    p.reslice.SetSlabSliceSpacingFraction(1.0)
+                    p.reslice.SetSlabSliceSpacingFraction(slab_frac)
             elif hasattr(p.reslice, "SetSlabNumberOfSlices"):
                 p.reslice.SetSlabNumberOfSlices(1)
             p.reslice.Modified()
