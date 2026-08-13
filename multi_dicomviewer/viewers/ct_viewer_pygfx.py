@@ -1720,19 +1720,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
-        # Ctrl+Z = unified undo, Ctrl+Y (+ Ctrl+Shift+Z) = redo — covering every
-        # view action (transforms, Spin+, centreline move·rotate, Zoom/Move/
-        # Paging/Thick, W/L, angio, recentre, SAX level/meridian, apex) and LV
-        # border edits (drag/add/delete/create/per-point tracing).
+        # Ctrl+Z = unified undo; redo covers every view action + LV border edits.
+        # macOS keybinding note: Qt's portable "Ctrl" maps to ⌘ (Cmd) and "Meta"
+        # to the physical Ctrl key. StandardKey.Redo on macOS is ⌘⇧Z — binding
+        # "Ctrl+Shift+Z" ALSO resolved to ⌘⇧Z, so the two collided (ambiguous →
+        # NEITHER fired) and ⌘Y wasn't bound at all. Bind ⌘⇧Z (standard) once,
+        # plus ⌘Y ("Ctrl+Y") and physical-Ctrl+Y ("Meta+Y") — all distinct.
         sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
         sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_undo.activated.connect(self._undo_last)
-        sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
+        sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)   # ⌘⇧Z on macOS
         sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._redo_last)
-        sc_redo2 = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
-        sc_redo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        sc_redo2.activated.connect(self._redo_last)
+        for _seq in ("Ctrl+Y", "Meta+Y"):          # ⌘Y and physical-Ctrl+Y
+            _scr = QShortcut(QKeySequence(_seq), self)
+            _scr.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            _scr.activated.connect(self._redo_last)
         # NB: A / F are app-wide ApplicationShortcuts (cine/series nav, see
         # MainWindow._nav_active). A viewer-level A/F QShortcut would collide
         # (two matching shortcuts → "ambiguous" → NEITHER fires), so LV plane-
@@ -2023,8 +2026,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._tool == "PAGING":
                 self._cpr_page_drag(dy)
                 return
-        shift = "Shift" in (ev.get("modifiers") or ())
-        self._drag(key, dx, dy, shift, x, y)
+        mods = ev.get("modifiers") or ()
+        shift = "Shift" in mods
+        # Ctrl (or Cmd/Meta on Mac) — used by the ZOOM tool so that WHILE tracing
+        # a border, Shift zooms only THIS pane and Ctrl+Shift zooms both.
+        ctrl = ("Control" in mods) or ("Meta" in mods)
+        self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
@@ -3922,7 +3929,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[k].repaint()
 
     # ----------------------------------------------------------- tools
-    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None):
+    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False):
         if self._vol is None:
             return
         t = self._tool
@@ -4004,9 +4011,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif t == "ZOOM":
             # Drag (and arrow) UP = zoom OUT (shrink), DOWN = zoom IN (enlarge):
             # dy<0 (up) → factor>1 → larger half-height (_ps) → wider view = shrink.
+            # Shift = zoom BOTH panes, else just this one — EXCEPT while actively
+            # tracing a border, where a plain left-drag is taken by the trace so
+            # Shift is the "run the tool" gate: there Shift alone zooms only THIS
+            # pane (individual L/R zoom) and Ctrl+Shift zooms both.
             factor = 1.0 - dy * 0.005
-            only_pane = None if shift else which     # single-pane zoom skips other
-            for k in (("A", "B") if shift else (which,)):
+            tracing = self._meas_on and bool(self._meas_type)
+            both = (shift and ctrl) if tracing else shift
+            only_pane = None if both else which      # single-pane zoom skips other
+            for k in (("A", "B") if both else (which,)):
                 self._ps[k] = max(1e-3, self._ps[k] * factor)
         elif t == "MOVE":
             only_pane = which
