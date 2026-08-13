@@ -3935,6 +3935,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             d = {"type": self._meas_type, "pane": which, "pts": []}
             self._draft = d
         d["pts"].append(w)
+        self._draft_redo = []          # a new point forks the trace's redo history
         # Capture the absolute 3-D position of each polyline vertex (a vessel
         # trace may cross rotated / paged planes). Only polylines in 3-D MPR —
         # the plane doesn't move in 2-D native mode. Optionally snap the depth
@@ -4049,6 +4050,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._gesture_lv = None       # LV level/meridian snap at a drag's press
         self._gesture_moved = False   # did the current drag actually change anything
         self._lv_apex_snap = None     # LV geometry snap while dragging an apex
+        self._draft_redo = []         # points popped from an in-progress trace
 
     def _undo_record(self, undo_fn, redo_fn) -> None:
         """Append one undo/redo command, dropping any redo-future first."""
@@ -4173,26 +4175,129 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._undo_record(lambda b=before: self._lv_geom_restore(b),
                           lambda a=after: self._lv_geom_restore(a))
 
+    # ---- LV border CREATION undo (whole traced border) --------------------
+    def _lv_measure_copy(self, m):
+        """Plain-data copy of an LV border measure (for the create-undo redo)."""
+        rec = {"id": m.get("id"), "type": m.get("type", "polyline"),
+               "pts": [tuple(map(float, p)) for p in m.get("pts", [])],
+               "_lv": tuple(m["_lv"]),
+               "color": m.get("color"),
+               "smooth": bool(m.get("smooth", True))}
+        if m.get("pts3d"):
+            rec["pts3d"] = [list(map(float, P)) for P in m["pts3d"]]
+        return rec
+
+    def _lv_record_create(self, pane, m) -> None:
+        """Record a freshly-captured border: Ctrl+Z removes the WHOLE border
+        (after a confirm), Ctrl+Y recreates it."""
+        if self._lv is None or m.get("_lv") is None:
+            return
+        snap = {"pane": pane, "tag": tuple(m["_lv"]),
+                "rec": self._lv_measure_copy(m)}
+        self._undo_record(lambda s=snap: self._lv_undo_create(s),
+                          lambda s=snap: self._lv_redo_create(s))
+
+    def _lv_undo_create(self, snap) -> bool:
+        """Ctrl+Z on a created border → confirm, then delete it + its contour.
+        Returns False if the user cancels (the border is kept)."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None:
+            return True
+        if QMessageBox.question(
+                self.window(), t("LV EF"),
+                t("This deletes the whole border. OK?")) \
+                != QMessageBox.StandardButton.Yes:
+            return False
+        pane, tag = snap["pane"], tuple(snap["tag"])
+        for i, mm in enumerate(list(self._measures.get(pane, []))):
+            if mm.get("_lv") == tag:
+                self._lv_drop_border(mm)          # clear the model contour too
+                del self._measures[pane][i]
+                break
+        self._lv_invalidate_volume()
+        self._redraw_meas(pane)
+        if self._lv_sax_active():
+            self._redraw_lv(self._lv["sax_pane"])
+            self.pane[self._lv["sax_pane"]].render()
+        return True
+
+    def _lv_redo_create(self, snap) -> bool:
+        """Ctrl+Y after undoing a create → re-add the border + its contour."""
+        if self._lv is None:
+            return True
+        pane, tag = snap["pane"], tuple(snap["tag"])
+        rec = self._lv_measure_copy(snap["rec"])
+        p3 = [np.asarray(P, float) for P in rec.get("pts3d", [])]
+        rec["pts3d"] = p3
+        self._measures[pane] = [mm for mm in self._measures.get(pane, [])
+                                if mm.get("_lv") != tag]
+        self._measures[pane].append(rec)
+        if p3:
+            angs = self._lv["model"].plane_angles()
+            self._lv["model"].set_long_axis_contour(
+                angs[tag[0] % len(angs)], p3, tag[1])
+        self._lv_invalidate_volume()
+        self._redraw_meas(pane)
+        if self._lv_sax_active():
+            self._redraw_lv(self._lv["sax_pane"])
+            self.pane[self._lv["sax_pane"]].render()
+        return True
+
     def _undo_last(self) -> None:
-        """Ctrl+Z: step one command back."""
+        """Ctrl+Z: while tracing, drop the last-placed point; otherwise step one
+        command back. A command whose undo() returns False (e.g. the user
+        cancelled the 'delete the whole border?' prompt) is left applied."""
+        if self._draft is not None and self._draft.get("pts"):
+            self._draft_pop_point()
+            return
         if not getattr(self, "_undo_cmds", None) or self._undo_idx <= 0:
             return
         self._undo_idx -= 1
         try:
-            self._undo_cmds[self._undo_idx]["undo"]()
+            res = self._undo_cmds[self._undo_idx]["undo"]()
         except Exception:                              # noqa: BLE001
-            pass
+            res = None
+        if res is False:                               # refused → keep it applied
+            self._undo_idx += 1
 
     def _redo_last(self) -> None:
-        """Ctrl+Y: step one command forward (re-apply an undone action)."""
+        """Ctrl+Y: while tracing, re-place a point dropped by Ctrl+Z; otherwise
+        step one command forward (re-apply an undone action)."""
+        if self._draft is not None and getattr(self, "_draft_redo", None):
+            self._draft_push_point()
+            return
         if not getattr(self, "_undo_cmds", None) \
                 or self._undo_idx >= len(self._undo_cmds):
             return
         try:
-            self._undo_cmds[self._undo_idx]["redo"]()
+            res = self._undo_cmds[self._undo_idx]["redo"]()
         except Exception:                              # noqa: BLE001
-            pass
-        self._undo_idx += 1
+            res = None
+        if res is not False:
+            self._undo_idx += 1
+
+    def _draft_pop_point(self) -> None:
+        """Ctrl+Z during a trace: remove the last-placed vertex (kept for redo)."""
+        d = self._draft
+        if not d or not d.get("pts"):
+            return
+        pt = d["pts"].pop()
+        p3 = None
+        if d.get("pts3d") and len(d["pts3d"]) > len(d["pts"]):
+            p3 = d["pts3d"].pop()
+        self._draft_redo.append((pt, p3))
+        self._redraw_meas(d["pane"])
+
+    def _draft_push_point(self) -> None:
+        """Ctrl+Y during a trace: re-place the last vertex Ctrl+Z removed."""
+        d = self._draft
+        if not d or not getattr(self, "_draft_redo", None):
+            return
+        pt, p3 = self._draft_redo.pop()
+        d["pts"].append(pt)
+        if p3 is not None:
+            d.setdefault("pts3d", []).append(p3)
+        self._redraw_meas(d["pane"])
 
     def _view_snapshot(self) -> dict:
         """Capture the full display state so undo/redo can restore it exactly."""
@@ -5772,8 +5877,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         #                                (LV traces only; other traces unchanged)
         self._lv_invalidate_volume()   # a changed border invalidates the volume
         self._draft = None
+        self._draft_redo = []          # the trace is consumed
         self._lv_apex_hot = False      # border confirmed → marker back to normal
         self._redraw_meas(pane)
+        self._lv_record_create(pane, m)   # Ctrl+Z removes the whole new border
         self._redraw_all_lv()          # refresh the base-cut line from the model
 
     def _lv_step_plane(self, delta) -> None:
@@ -6357,6 +6464,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("LV EF"),
                                     t("No borders to save yet."))
             return
+        # No valid volume yet → ask whether to save without it or compute first.
+        has_vol = bool(self._lv.get("vol_done")
+                       and self._lv.get("vol_endo_ml") is not None)
+        if not has_vol:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV EF"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Save without volume data?"))
+            b_no = box.addButton(t("Save without volume"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+            b_yes = box.addButton(t("Calculate volume, then save"),
+                                  QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_yes:
+                self._lv_compute_volume()      # runs CalcVol (blocks on its dialog)
+            elif clicked is not b_no:
+                return                         # Cancel / closed → abort the save
         d = self._lv_series_dir()
         default = os.path.join(d, self._lv_default_name()) if d \
             else self._lv_default_name()
