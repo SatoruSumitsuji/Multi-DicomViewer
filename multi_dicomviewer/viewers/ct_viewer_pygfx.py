@@ -548,7 +548,8 @@ class _Overlay(QWidget):
         # −uv side). Visual only — the image/frame, the angle readout and the
         # paging-sense are all unchanged. Painted here every repaint, so it
         # persists through ROTATE/SPIN and reset. (Parity with VTK 948d500.)
-        apex_sgn = -1.0 if key == "A" else 1.0
+        apex_sgn = ((-1.0 if key == "A" else 1.0)
+                    * getattr(v, "_apex_flip", {}).get(key, 1.0))
         p.setBrush(QColor(0, 242, 64))
         p.setPen(Qt.PenStyle.NoPen)
         for sgn in (1.0, -1.0):
@@ -1525,6 +1526,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                   np.array([0.0, 1.0, 0.0])),
         }
         self._cross_ang = {"A": 0.0, "B": 0.0}
+        # ▲ apex-marker side per pane (±1). Flips on each Flip-H / Flip-V so the
+        # ▲ mirrors WITH the image (the crosshair is drawn in output coords, so a
+        # frame mirror doesn't auto-flip the directed ▲); rotations don't change
+        # it. Reset to +1 when the default frames are rebuilt.
+        self._apex_flip = {"A": 1.0, "B": 1.0}
         # Hover/drag centreline highlight: (line 'H'/'V', mode 'move'/'rotate')
         # or None per pane — drives the vivid-yellow highlight + rotate arrow.
         self._cross_hi = {"A": None, "B": None}
@@ -3173,6 +3179,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             ca = self._cross_ang[k]
             self._cross_ang[k] = {"rt90": ca - 90.0, "lt90": ca + 90.0,
                                   "fliph": 180.0 - ca, "flipv": -ca}[kind]
+            if kind in ("fliph", "flipv"):     # mirror → flip the ▲ side too
+                self._apex_flip[k] = -self._apex_flip.get(k, 1.0)
             self._pan[k] = np.array([npx, npy])
             self._view_initial = False
             self._refresh(reset_cam=False, only=k)
@@ -3449,6 +3457,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         downward while the camera puts +V up); these equal the pbasis frames
         for an identity basis, so the pb-None fallback behaves like a
         standard axial supine volume."""
+        self._apex_flip = {"A": 1.0, "B": 1.0}   # fresh frames → default ▲ side
         pb = getattr(self, "_pbasis", None)
         if native or pb is None:
             self._frame = {
@@ -6806,6 +6815,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "pan": {k: np.asarray(self._pan[k], float).copy() for k in ("A", "B")},
             "roll": dict(self._roll),
             "cross_ang": dict(self._cross_ang),
+            "apex_flip": dict(self._apex_flip),
             "thick": dict(self._thick),
             "center": np.asarray(self._center, float).copy(),
             "axes2d": (None if self._axes2d is None else
@@ -6831,6 +6841,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._pan[k] = np.asarray(snap["pan"][k], float).copy()
             self._roll[k] = float(snap["roll"][k])
         self._cross_ang = dict(snap["cross_ang"])
+        if snap.get("apex_flip") is not None:
+            self._apex_flip = dict(snap["apex_flip"])
         self._thick = dict(snap["thick"])
         self._center = np.asarray(snap["center"], float).copy()
         if snap.get("axes2d") is not None:
