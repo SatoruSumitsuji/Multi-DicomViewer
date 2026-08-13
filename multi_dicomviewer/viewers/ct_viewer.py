@@ -8268,6 +8268,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 nfx, nfy = fx, -fy
             else:
                 return
+            # Turn the crosshair WITH the image: keep its world direction fixed
+            # so it re-expresses in the new (u,v) basis (else the centreline stays
+            # put while the anatomy rotates/flips around it).
+            ca = self._cross_ang[k]
+            self._cross_ang[k] = {"rt90": ca - 90.0, "lt90": ca + 90.0,
+                                  "fliph": 180.0 - ca, "flipv": -ca}[kind]
             cam.SetFocalPoint(nfx, nfy, fp[2])
             cam.SetPosition(nfx, nfy, ps[2])
             self._view_initial = False

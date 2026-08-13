@@ -3167,6 +3167,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 npx, npy = px, -py
             else:
                 return
+            # Turn the crosshair WITH the image: keep its world direction fixed
+            # so it re-expresses in the new (u,v) basis (else the centreline stays
+            # put while the anatomy rotates/flips around it).
+            ca = self._cross_ang[k]
+            self._cross_ang[k] = {"rt90": ca - 90.0, "lt90": ca + 90.0,
+                                  "fliph": 180.0 - ca, "flipv": -ca}[kind]
             self._pan[k] = np.array([npx, npy])
             self._view_initial = False
             self._refresh(reset_cam=False, only=k)
