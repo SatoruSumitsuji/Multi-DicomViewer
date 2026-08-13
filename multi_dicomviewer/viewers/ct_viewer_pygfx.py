@@ -1565,6 +1565,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_seq = 0
         self._snap_lumen = True              # snap trace clicks to the lumen
         self._draft = None                   # {type, pane, pts} in progress
+        self._undo_clear()                   # unified Ctrl+Z / Ctrl+Y state
         self._edit = None                    # {key, mi, vi} handle drag
         self._meas_hover_handle = None       # {key, mi, vi, ca} handle under cursor
         self._center_angle_target = None     # {key, mi} during 3-pt pick
@@ -1713,10 +1714,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
-        # Ctrl+Z = undo the last few LV border edits (no-op outside LV contour).
+        # Ctrl+Z = unified undo, Ctrl+Y (+ Ctrl+Shift+Z) = redo — covering every
+        # view action (transforms, Spin+, centreline move·rotate, Zoom/Move/
+        # Paging/Thick, W/L, angio, recentre, SAX level/meridian, apex) and LV
+        # border edits (drag/add/delete/create/per-point tracing).
         sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
         sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        sc_undo.activated.connect(self._lv_undo_last)
+        sc_undo.activated.connect(self._undo_last)
+        sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
+        sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_redo.activated.connect(self._redo_last)
+        sc_redo2 = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        sc_redo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_redo2.activated.connect(self._redo_last)
         # NB: A / F are app-wide ApplicationShortcuts (cine/series nav, see
         # MainWindow._nav_active). A viewer-level A/F QShortcut would collide
         # (two matching shortcuts → "ambiguous" → NEITHER fires), so LV plane-
@@ -1832,6 +1842,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             if r in ("endo", "epi"):
                 self._lv_apex_drag = r
+                # Snapshot apex + borders now so the drag is one Ctrl+Z step.
+                self._lv_apex_snap = self._lv_geom_snap()
                 self._cross_grab = False
                 self._meas_drag = False
                 self._last = (x, y)
@@ -1845,6 +1857,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             kind = self._lv_line_press(key, x, y)
             if kind:
                 self._lv_line_drag = kind
+                # Snapshot SAX level/meridian now → one Ctrl+Z step on release.
+                self._gesture_begin()
                 self._lv_line_set_grabbed(key, True)
                 self._cross_grab = False
                 self._meas_drag = False
@@ -1916,6 +1930,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._tool in ("ROTATE", "SPIN"):
                     self._cpr_rot_start(x, y)
             return
+        # A view-changing drag begins here (crosshair move/rotate OR the active
+        # tool). Snapshot for Ctrl+Z now; committed as one step on release.
+        if self._drag_btn == 1:
+            self._gesture_begin()
         # Pressing within the (now 5%) crosshair grab band grabs the centreline
         # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
         # is small, so SPIN still owns the drag everywhere off the lines; on the
@@ -2003,9 +2021,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y)
 
     def _on_up(self, key, ev):
-        # End an LV apex drag.
+        # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
             self._lv_apex_drag = None
+            self._lv_record_geom(self._lv_apex_snap)
+            self._lv_apex_snap = None
             self._drag_btn = None
             self._last = None
             return
@@ -2014,6 +2034,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_line_drag = None
             self._lv_line_set_grabbed(key, False)
             self._lv_line_hi[key] = False        # re-hover on next move
+            self._gesture_commit()               # commit level/meridian drag
             self._drag_btn = None
             self._last = None
             return
@@ -2027,6 +2048,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the drag jumps to the image centre in both panes (done on RELEASE).
         if self._cross_grab and self._cross_mode == "center":
             self._recenter(key, ev["x"], ev["y"])
+        # Commit the drag (Zoom/Move/Rotate/Spin/Thick/W-L or a centreline
+        # move·rotate) as one Ctrl+Z step. A click/double-click recentre records
+        # itself (leaves _gesture_moved False), so this won't double-record.
+        self._gesture_commit()
         self._meas_drag = False
         self._shift_tool = False
         self._drag_btn = None
@@ -2756,6 +2781,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if mode not in ("3D", "2D") or self._vol is None:
             return
         prev = getattr(self, "_mode", None)
+        if prev is not None and prev != mode:
+            self._undo_clear()              # 2-D↔3-D: drop stale view undos
         self._mode = mode
         for k, b in self._mode_btns.items():
             b.setChecked(k == mode)
@@ -2813,7 +2840,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         nz = self._vol.shape[0]
         sz = self._dims[2]
-        self._slice2d = int(min(max(self._slice2d + step, 0), max(0, nz - 1)))
+        new_slice = int(min(max(self._slice2d + step, 0), max(0, nz - 1)))
+        if new_slice == self._slice2d:
+            return                          # at the end → nothing to page/undo
+        before = self._view_snapshot()
+        self._slice2d = new_slice
         z = self._slice2d * sz if sz > 1e-6 else 0.0
         self._center[2] = z
         self._pc["A"][2] = z
@@ -2821,6 +2852,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh()
         self._sync_seek()
+        self._undo_view(before, self._view_snapshot())
 
     # ------------------------------------------------------ 2-D frame seek bar
     def _build_seek_bar(self) -> QWidget:
@@ -3083,13 +3115,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             M = self._XFORM_2X2.get(kind)
             if M is None:
                 return
+            before = self._view_snapshot()
             self._cpr["T"] = M @ self._cpr["T"]
             self._cpr_apply_xform()
             self._view_initial = False
             self._refresh(reset_cam=True)
+            self._undo_view(before, self._view_snapshot())
             return
         if self._mode != "2D" or self._vol is None:
             return
+        before = self._view_snapshot()
         u, v = self._axes2d
         if kind == "rt90":          # 90° clockwise
             self._axes2d = (v.copy(), (-u).copy())
@@ -3104,6 +3139,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._apply_2d_axes()
         self._view_initial = False
         self._refresh(reset_cam=True)   # refit (a 90° turn swaps the aspect)
+        self._undo_view(before, self._view_snapshot())
 
     def _page_step(self, step):
         """One paging notch: a native slice in 2-D, a wheel step in 3-D."""
@@ -3181,6 +3217,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and self._loaded_uid == new_uid):
             return
         self._loaded_uid = new_uid
+        self._undo_clear()                   # fresh Ctrl+Z history for the series
 
         # A genuinely new series → leave any LV mode and clear its state (the
         # borders/axis are tied to the previous series' volume coordinates).
@@ -3620,7 +3657,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
 
-    def _refresh(self, reset_cam=False, lod=False):
+    def _refresh(self, reset_cam=False, lod=False, only=None):
+        # only="A"/"B" re-renders JUST that pane (single-pane drags: Move / Spin /
+        # Thick / single-pane Zoom), where the companion cannot have changed — so
+        # re-rendering (and rebuilding its slab MIP) every mouse-move was waste.
         # lod=True is an INTERACTIVE refresh (drag / wheel-page): the CPU slab-
         # MIP is built at REDUCED quality (coarse columns + fewer planes) rather
         # than skipped, so the THICK image keeps its slab look while staying
@@ -3639,6 +3679,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # high-res slab build, so bump the generation to discard a late result.
         self._slab_gen += 1
         for key in ("A", "B"):
+            if only is not None and key != only:
+                continue
             p = self.pane[key]
             if p.material is None:
                 continue
@@ -3815,12 +3857,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if t != "WL":
             self._view_initial = False
+        # This drag changes the view (W/L included, captured in the snapshot) →
+        # its whole gesture becomes one Ctrl+Z step. Single-pane tools also skip
+        # re-rendering the companion each move (only_pane).
+        self._gesture_moved = True
+        only_pane = None
         if t == "WL":
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
         elif t == "PAGING":
             if self._mode == "2D":
                 # 2-D: page integer native slices, ~6 px of drag per slice.
+                # _page2d records each step itself → don't ALSO gesture-record.
+                self._gesture_moved = False
                 self._page_accum -= dy
                 ppx = 6.0
                 while self._page_accum >= ppx:
@@ -3842,6 +3891,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._pc[which] = self._pc[which] + mv
             self._clamp_center()
         elif t == "THICK":
+            only_pane = which
             self._thick[which] = max(0.0, self._thick[which] + (dx - dy) * 0.3)
             if which == self._active_pane:
                 self._sync_slab_spin()
@@ -3866,13 +3916,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Drag (and arrow) UP = zoom OUT (shrink), DOWN = zoom IN (enlarge):
             # dy<0 (up) → factor>1 → larger half-height (_ps) → wider view = shrink.
             factor = 1.0 - dy * 0.005
+            only_pane = None if shift else which     # single-pane zoom skips other
             for k in (("A", "B") if shift else (which,)):
                 self._ps[k] = max(1e-3, self._ps[k] * factor)
         elif t == "MOVE":
+            only_pane = which
             sc = self._ps[which] * 0.003
             px, py = self._pan[which]
             self._pan[which] = np.array([px - dx * sc, py + dy * sc])
         elif t == "SPIN":
+            only_pane = which
             # Roll the camera by how far the cursor sweeps about the crosshair
             # centre (screen px, y-down) — image AND overlay rotate together.
             if sx is not None:
@@ -3890,7 +3943,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Build a reduced-quality slab MIP mid-drag for smoothness (the thick
         # image keeps its look; full quality returns when the drag settles).
         # THICK included: the coarse slab still updates live as it's adjusted.
-        self._refresh(lod=True)
+        self._refresh(lod=True, only=only_pane)
 
     def _wheel(self, which, delta):
         if self._vol is None:
@@ -3903,6 +3956,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._mode == "2D":
             self._page2d(1 if delta > 0 else -1)
             return
+        before = self._view_snapshot()
         _, _, n = self._axes_for(which)
         # Wheel up = toward the ▲ apex (same convention as drag-paging).
         d = 1.0 if delta > 0 else -1.0
@@ -3912,6 +3966,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._clamp_center()
         self._view_initial = False
         self._refresh(lod=True)            # smooth wheel-paging (slab MIP defers)
+        self._undo_view(before, self._view_snapshot())
 
     def _paging_sign(self, which):
         """+1/-1 so that moving _center by +n advances the OTHER pane's
@@ -4127,6 +4182,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measure_hover_clear(key)
 
     def _cross_move(self, which, sx, sy):
+        self._gesture_moved = True             # centreline drag = one Ctrl+Z step
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, n = self._frame[which]
         other = "B" if which == "A" else "A"
@@ -4202,6 +4258,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         image centre in both panes."""
         if self._vol is None:
             return
+        # A click / double-click recentre records its own undo; a crosshair-CENTRE
+        # drag is committed by the gesture instead (leaves _gesture_moved True),
+        # so skip self-recording then to keep it one Ctrl+Z step.
+        before = (None if getattr(self, "_gesture_moved", False)
+                  else self._view_snapshot())
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, _n = self._frame[which]
         self._center = self._pc[which] + wx * u + wy * v
@@ -4210,6 +4271,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
         self._view_initial = False
         self._refresh()
+        if before is not None:
+            self._undo_view(before, self._view_snapshot())
 
     def _angio_angle(self, key) -> str:
         """C-arm angle (LAO/RAO·CRA/CAU) of this pane's projection direction.
@@ -4283,6 +4346,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         the ROTATE tool."""
         if self._vol is None or self._mode != "3D":
             return
+        before = self._view_snapshot()
         self._frame[which] = self._frame_from_angio(prim_deg, sec_deg)
         uw, _vw, nw = self._frame[which]
         other = "B" if which == "A" else "A"
@@ -4296,6 +4360,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         self._view_initial = False
         self._refresh()
+        self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def _angio_hit(self, which, x, y):
         """True if canvas point (x, y) is over the bottom-centre angio readout
@@ -5005,6 +5070,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             d = {"type": self._meas_type, "pane": which, "pts": []}
             self._draft = d
         d["pts"].append(w)
+        self._draft_redo = []          # a new point forks the trace's redo history
         # Capture the ABSOLUTE 3-D position of each click on the plane active
         # when it was made (world mm), so a polyline traced across rotated /
         # paged planes lifts to a correct 3-D centreline (Short-axis / CPR) —
@@ -5108,10 +5174,16 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _measure_release(self):
         if self._edit:
             key = self._edit["key"]
+            mi = self._edit.get("mi")
             self._edit = None
             self._redraw_meas(key)
             if self._lv_sax_active():        # revert the green SAX crossing
                 self._overlay[self._lv["sax_pane"]].update()
+            # Commit an LV-border DRAG (snapshot stashed at press) as one step.
+            if getattr(self, "_lv_edit_before", None) is not None \
+                    and mi is not None:
+                self._lv_record_border(self._lv_edit_before, key, mi)
+        self._lv_edit_before = None
 
     def _set_ellipse_handle(self, m, vi, w):
         m["pts"] = _ellipse_drag(m["pts"], vi, w)
@@ -5446,8 +5518,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _add_point(self, which, mi, sx, sy):
         m = self._measures[which][mi]
-        if self._lv is not None and m.get("_lv"):
-            self._lv_push_undo(which, mi)       # snapshot before adding a point
+        _lv_before = (self._lv_border_snap(which, mi)
+                      if self._lv is not None and m.get("_lv") else None)
         wx, wy = self._disp_to_world(which, sx, sy)
         pt = (wx, wy)
         # 3-D lift of the new point on the CURRENT plane, so a trace that carries
@@ -5486,6 +5558,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             m["pts3d"].insert(best_i + 1, p3d)
         self._resnap_center_angle(m)
         self._lv_after_point_edit(which, m)
+        self._lv_record_border(_lv_before, which, mi)   # Ctrl+Z / Ctrl+Y
 
     def _delete_point(self, which, mi, vi):
         m = self._measures[which][mi]
@@ -5494,8 +5567,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         pts = list(m["pts"])
         if len(pts) <= 2 or not (0 <= vi < len(pts)):
             return
-        if self._lv is not None and m.get("_lv"):
-            self._lv_push_undo(which, mi)       # snapshot before deleting a point
+        _lv_before = (self._lv_border_snap(which, mi)
+                      if self._lv is not None and m.get("_lv") else None)
         del pts[vi]
         if m.get("pts3d") and 0 <= vi < len(m["pts3d"]):
             del m["pts3d"][vi]
@@ -5504,6 +5577,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["pts"] = pts
         self._resnap_center_angle(m)
         self._lv_after_point_edit(which, m)
+        self._lv_record_border(_lv_before, which, mi)   # Ctrl+Z / Ctrl+Y
 
     def _lv_after_point_edit(self, which, m) -> None:
         """After Add/Delete point on an LV border, push the reshaped trace back
@@ -6335,9 +6409,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["smooth"] = True
         self._lv_invalidate_volume()   # a changed border invalidates the volume
         self._draft = None
+        self._draft_redo = []          # the trace is consumed
         self._lv_apex_hot = False      # border confirmed → marker back to normal
         self._redraw_meas(pane)
         self._lv_redraw_all()
+        self._lv_record_create(pane, m)   # Ctrl+Z removes the whole new border
 
     def lv_nav_key(self, where: str) -> bool:
         """A / F (via MainWindow._nav_active) step the long-axis plane while
@@ -6355,8 +6431,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         if self._lv.get("sax") is not None:
+            before = self._lv_scalar_snap()
             self._lv["plane_idx"] += int(delta)
             self._lv_show_sax_both()
+            self._lv_record_scalar(before)         # Ctrl+Z / Ctrl+Y
             return
         self._lv_capture_current()
         pane = self._lv["pane"]
@@ -6417,10 +6495,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         rng = self._lv_level_range()
         if rng is None:
             return
+        before = self._lv_scalar_snap()
         step = (rng[1] - rng[0]) / 24.0
         self._lv["sax"] = min(rng[1], max(
             rng[0], float(self._lv["sax"]) + float(delta) * step))
         self._lv_reslice_short()
+        self._lv_record_scalar(before)             # Ctrl+Z / Ctrl+Y
 
     def _lv_drag_level(self, dy) -> None:
         rng = self._lv_level_range()
@@ -6567,39 +6647,271 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return True
         return False
 
-    _LV_UNDO_MAX = 5                       # Ctrl+Z depth for LV border edits
+    _UNDO_MAX = 80                         # Ctrl+Z / Ctrl+Y depth (unified)
 
-    def _lv_reset_undo(self) -> None:
-        from collections import deque
-        self._lv_undo = deque(maxlen=self._LV_UNDO_MAX)
+    # ---- unified undo / redo stack (Ctrl+Z / Ctrl+Y) ----------------------
+    # A single command list + cursor covering EVERY undoable action: image
+    # transforms, Spin+, centreline move/rotate, Zoom/Move/Paging/Thick, W/L,
+    # angio-angle, recentre, SAX level / meridian, apex drag, and LV border
+    # edits (drag / add / delete / create / per-point tracing). Each command is
+    # {"undo": fn, "redo": fn}. Most snapshot the whole VIEW state (frames,
+    # pc, zoom/pan/roll, cross angles, thickness, W/L, 2-D axes/slice, CPR)
+    # before AND after, so undo/redo restore exactly. Cleared on series load /
+    # 2-D↔3-D switch / LV enter·exit·clear so no command restores a stale view.
+    def _undo_clear(self) -> None:
+        self._undo_cmds = []
+        self._undo_idx = 0
+        self._lv_edit_before = None   # stashed LV-border snap during a drag
+        self._gesture_snap = None     # view snap captured at a drag's press
+        self._gesture_lv = None       # LV level/meridian snap at a drag's press
+        self._gesture_moved = False   # did the current drag change anything
+        self._lv_apex_snap = None     # LV geometry snap while dragging an apex
+        self._draft_redo = []         # points popped from an in-progress trace
 
-    def _lv_push_undo(self, pane, mi) -> None:
-        """Snapshot an LV border's 3-D points BEFORE an edit so Ctrl+Z can
-        restore it (last few edits, LIFO)."""
-        if self._lv is None or not (0 <= mi < len(self._measures.get(pane, []))):
+    def _undo_record(self, undo_fn, redo_fn) -> None:
+        if not hasattr(self, "_undo_cmds"):
+            self._undo_clear()
+        if self._undo_idx < len(self._undo_cmds):
+            del self._undo_cmds[self._undo_idx:]
+        self._undo_cmds.append({"undo": undo_fn, "redo": redo_fn})
+        if len(self._undo_cmds) > self._UNDO_MAX:
+            del self._undo_cmds[:len(self._undo_cmds) - self._UNDO_MAX]
+        self._undo_idx = len(self._undo_cmds)
+
+    def _undo_view(self, before, after) -> None:
+        if before is None or after is None:
             return
+        self._undo_record(lambda b=before: self._view_restore(b),
+                          lambda a=after: self._view_restore(a))
+
+    def _undo_last(self) -> None:
+        """Ctrl+Z: while tracing drop the last point; else step one command
+        back. A command whose undo() returns False (cancelled confirm) is kept."""
+        if self._draft is not None and self._draft.get("pts"):
+            self._draft_pop_point()
+            return
+        if not getattr(self, "_undo_cmds", None) or self._undo_idx <= 0:
+            return
+        self._undo_idx -= 1
+        try:
+            res = self._undo_cmds[self._undo_idx]["undo"]()
+        except Exception:                              # noqa: BLE001
+            res = None
+        if res is False:
+            self._undo_idx += 1
+
+    def _redo_last(self) -> None:
+        """Ctrl+Y: while tracing re-place a dropped point; else step forward."""
+        if self._draft is not None and getattr(self, "_draft_redo", None):
+            self._draft_push_point()
+            return
+        if not getattr(self, "_undo_cmds", None) \
+                or self._undo_idx >= len(self._undo_cmds):
+            return
+        try:
+            res = self._undo_cmds[self._undo_idx]["redo"]()
+        except Exception:                              # noqa: BLE001
+            res = None
+        if res is not False:
+            self._undo_idx += 1
+
+    def _view_snapshot(self) -> dict:
+        """Full display state — pygfx configures the camera each frame from these
+        scalars (_ps/_pan/_roll), so capturing them restores zoom/pan/roll."""
+        return {
+            "frame": {k: tuple(np.asarray(a, float).copy()
+                               for a in self._frame[k]) for k in ("A", "B")},
+            "pc": {k: np.asarray(self._pc[k], float).copy() for k in ("A", "B")},
+            "ps": dict(self._ps),
+            "pan": {k: np.asarray(self._pan[k], float).copy() for k in ("A", "B")},
+            "roll": dict(self._roll),
+            "cross_ang": dict(self._cross_ang),
+            "thick": dict(self._thick),
+            "center": np.asarray(self._center, float).copy(),
+            "axes2d": (None if self._axes2d is None else
+                       (np.asarray(self._axes2d[0], float).copy(),
+                        np.asarray(self._axes2d[1], float).copy())),
+            "slice2d": int(self._slice2d),
+            "win": float(self._win), "lvl": float(self._lvl),
+            "side": self._side,
+            "cpr_T": (None if self._cpr is None
+                      else np.asarray(self._cpr["T"], float).copy()),
+            "cpr_rot": (None if self._cpr is None else self._cpr.get("rot")),
+            "cpr_idx": (None if self._cpr is None else self._cpr.get("idx")),
+        }
+
+    def _view_restore(self, snap) -> None:
+        if self._vol is None or snap is None:
+            return
+        for k in ("A", "B"):
+            self._frame[k] = tuple(np.asarray(a, float).copy()
+                                   for a in snap["frame"][k])
+            self._pc[k] = np.asarray(snap["pc"][k], float).copy()
+            self._ps[k] = float(snap["ps"][k])
+            self._pan[k] = np.asarray(snap["pan"][k], float).copy()
+            self._roll[k] = float(snap["roll"][k])
+        self._cross_ang = dict(snap["cross_ang"])
+        self._thick = dict(snap["thick"])
+        self._center = np.asarray(snap["center"], float).copy()
+        if snap.get("axes2d") is not None:
+            self._axes2d = (snap["axes2d"][0].copy(), snap["axes2d"][1].copy())
+        self._slice2d = int(snap.get("slice2d", self._slice2d))
+        self._win = float(snap.get("win", self._win))
+        self._lvl = float(snap.get("lvl", self._lvl))
+        self._side = snap.get("side", self._side)
+        if self._cpr is not None and snap.get("cpr_T") is not None:
+            self._cpr["T"] = np.asarray(snap["cpr_T"], float).copy()
+            if snap.get("cpr_rot") is not None:
+                self._cpr["rot"] = snap["cpr_rot"]
+            if snap.get("cpr_idx") is not None:
+                self._cpr["idx"] = snap["cpr_idx"]
+            self._cpr_apply_xform()
+        if self._mode == "2D":
+            self._apply_2d_axes()
+        self._view_initial = False
+        self._refresh(reset_cam=False)
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if self._lv is not None:
+            self._lv_redraw_all()
+        if self._mode == "2D":
+            self._sync_seek()
+
+    def _gesture_begin(self) -> None:
+        """A view-changing drag starts: snapshot so its whole gesture collapses
+        into ONE Ctrl+Z step, committed on release."""
+        self._gesture_snap = self._view_snapshot()
+        self._gesture_lv = self._lv_scalar_snap()   # None outside LV
+        self._gesture_moved = False
+
+    def _gesture_commit(self) -> None:
+        """Drag released: record the view change (only if it moved) and the LV
+        level/meridian change (only if it changed) as one step each."""
+        snap = getattr(self, "_gesture_snap", None)
+        if snap is not None and getattr(self, "_gesture_moved", False):
+            self._undo_view(snap, self._view_snapshot())
+        self._lv_record_scalar(getattr(self, "_gesture_lv", None))
+        self._gesture_snap = None
+        self._gesture_lv = None
+        self._gesture_moved = False
+
+    # ---- LV short-axis LEVEL + shown MERIDIAN (navigation) undo -----------
+    def _lv_scalar_snap(self):
+        if self._lv is None:
+            return None
+        return {"sax": self._lv.get("sax"),
+                "plane_idx": self._lv.get("plane_idx")}
+
+    def _lv_scalar_restore(self, snap) -> bool:
+        if self._lv is None or snap is None:
+            return False
+        if snap.get("sax") is not None:
+            self._lv["sax"] = snap["sax"]
+        if snap.get("plane_idx") is not None:
+            self._lv["plane_idx"] = snap["plane_idx"]
+        if self._lv_sax_active():
+            self._lv_show_sax_both()
+        return True
+
+    def _lv_record_scalar(self, before) -> None:
+        if before is None:
+            return
+        after = self._lv_scalar_snap()
+        if after is None or before == after:
+            return
+        self._undo_record(lambda b=before: self._lv_scalar_restore(b),
+                          lambda a=after: self._lv_scalar_restore(a))
+
+    # ---- LV apex-drag undo (apex point + the borders that follow it) ------
+    def _lv_geom_snap(self):
+        if self._lv is None:
+            return None
+        model = self._lv["model"]
+        borders = {}
+        for pane in ("A", "B"):
+            for m in self._measures.get(pane, []):
+                tag = m.get("_lv")
+                if tag is not None and m.get("pts3d"):
+                    borders[(pane, tuple(tag))] = [list(map(float, P))
+                                                   for P in m["pts3d"]]
+        return {
+            "endo_apex": (None if model.endo_apex is None
+                          else list(map(float, model.endo_apex))),
+            "epi_apex": (None if model.epi_apex is None
+                         else list(map(float, model.epi_apex))),
+            "borders": borders,
+        }
+
+    def _lv_geom_restore(self, snap) -> bool:
+        if self._lv is None or snap is None:
+            return False
+        model = self._lv["model"]
+        if snap.get("endo_apex") is not None:
+            model.set_apex_point("endo", np.asarray(snap["endo_apex"], float))
+        if snap.get("epi_apex") is not None:
+            model.set_apex_point("epi", np.asarray(snap["epi_apex"], float))
+        angs = model.plane_angles()
+        for (pane, tag), pts in snap["borders"].items():
+            for m in self._measures.get(pane, []):
+                if m.get("_lv") == tag:
+                    m["pts3d"] = [np.asarray(P, float) for P in pts]
+                    m["pts"] = [self._world3d_to_out(pane, P)
+                                for P in m["pts3d"]]
+                    model.set_long_axis_contour(
+                        angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+                    break
+        self._lv_invalidate_volume()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        self._lv_redraw_all()
+        return True
+
+    def _lv_record_geom(self, before) -> None:
+        if before is None:
+            return
+        after = self._lv_geom_snap()
+        if after is None or before == after:
+            return
+        self._undo_record(lambda b=before: self._lv_geom_restore(b),
+                          lambda a=after: self._lv_geom_restore(a))
+
+    # ---- LV border edits (drag / add / delete) ---------------------------
+    def _lv_reset_undo(self) -> None:
+        self._undo_clear()
+
+    def _lv_border_snap(self, pane, mi):
+        if self._lv is None or not (0 <= mi < len(self._measures.get(pane, []))):
+            return None
         m = self._measures[pane][mi]
         tag = m.get("_lv")
         if tag is None or not m.get("pts3d"):
-            return
-        if not hasattr(self, "_lv_undo"):
-            self._lv_reset_undo()
-        self._lv_undo.append({
-            "pane": pane, "tag": tuple(tag),
-            "pts3d": [list(map(float, P)) for P in m["pts3d"]]})
+            return None
+        return {"pane": pane, "tag": tuple(tag),
+                "pts3d": [list(map(float, P)) for P in m["pts3d"]]}
 
-    def _lv_undo_last(self) -> None:
-        """Ctrl+Z: restore the most recent LV border edit."""
+    def _lv_record_border(self, before, pane, mi) -> None:
+        after = self._lv_border_snap(pane, mi)
+        if before is None or after is None:
+            return
+        self._undo_record(lambda b=before: self._lv_restore_border(b),
+                          lambda a=after: self._lv_restore_border(a))
+
+    def _lv_push_undo(self, pane, mi) -> None:
+        """Stash an LV border BEFORE a DRAG; committed on release."""
+        self._lv_edit_before = self._lv_border_snap(pane, mi)
+
+    def _lv_restore_border(self, snap) -> bool:
         if self._lv is None or self._lv.get("phase") != "contour":
-            return
-        stack = getattr(self, "_lv_undo", None)
-        if not stack:
-            return
-        snap = stack.pop()
+            return False
         pane, tag = snap["pane"], tuple(snap["tag"])
         for m in self._measures.get(pane, []):
             if m.get("_lv") == tag:
                 m["pts3d"] = [np.asarray(P, float) for P in snap["pts3d"]]
+                # Regenerate the 2-D pts to MATCH — add/delete change the count,
+                # and the re-projection only runs when counts already agree.
+                m["pts"] = [self._world3d_to_out(pane, P) for P in m["pts3d"]]
+                if len(m["pts"]) >= 3:
+                    m["type"] = "polyline"
                 angs = self._lv["model"].plane_angles()
                 self._lv["model"].set_long_axis_contour(
                     angs[tag[0] % len(angs)], m["pts3d"], tag[1])
@@ -6607,7 +6919,88 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._redraw_meas(pane)
                 if self._lv_sax_active():
                     self._overlay[self._lv["sax_pane"]].update()
+                return True
+        return False
+
+    # ---- LV border CREATION undo (whole traced border) -------------------
+    def _lv_measure_copy(self, m):
+        rec = {"id": m.get("id"), "type": m.get("type", "polyline"),
+               "pts": [tuple(map(float, p)) for p in m.get("pts", [])],
+               "_lv": tuple(m["_lv"]),
+               "color": m.get("color"),
+               "smooth": bool(m.get("smooth", True))}
+        if m.get("pts3d"):
+            rec["pts3d"] = [list(map(float, P)) for P in m["pts3d"]]
+        return rec
+
+    def _lv_record_create(self, pane, m) -> None:
+        if self._lv is None or m.get("_lv") is None:
+            return
+        snap = {"pane": pane, "tag": tuple(m["_lv"]),
+                "rec": self._lv_measure_copy(m)}
+        self._undo_record(lambda s=snap: self._lv_undo_create(s),
+                          lambda s=snap: self._lv_redo_create(s))
+
+    def _lv_undo_create(self, snap) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None:
+            return True
+        if QMessageBox.question(
+                self.window(), t("LV EF"),
+                t("This deletes the whole border. OK?")) \
+                != QMessageBox.StandardButton.Yes:
+            return False
+        pane, tag = snap["pane"], tuple(snap["tag"])
+        for i, mm in enumerate(list(self._measures.get(pane, []))):
+            if mm.get("_lv") == tag:
+                self._lv_drop_border(mm)
+                del self._measures[pane][i]
                 break
+        self._lv_invalidate_volume()
+        self._redraw_meas(pane)
+        self._lv_redraw_all()
+        return True
+
+    def _lv_redo_create(self, snap) -> bool:
+        if self._lv is None:
+            return True
+        pane, tag = snap["pane"], tuple(snap["tag"])
+        rec = self._lv_measure_copy(snap["rec"])
+        p3 = [np.asarray(P, float) for P in rec.get("pts3d", [])]
+        rec["pts3d"] = p3
+        self._measures[pane] = [mm for mm in self._measures.get(pane, [])
+                                if mm.get("_lv") != tag]
+        self._measures[pane].append(rec)
+        if p3:
+            angs = self._lv["model"].plane_angles()
+            self._lv["model"].set_long_axis_contour(
+                angs[tag[0] % len(angs)], p3, tag[1])
+        self._lv_invalidate_volume()
+        self._redraw_meas(pane)
+        self._lv_redraw_all()
+        return True
+
+    # ---- in-progress trace: per-point Ctrl+Z / Ctrl+Y --------------------
+    def _draft_pop_point(self) -> None:
+        d = self._draft
+        if not d or not d.get("pts"):
+            return
+        pt = d["pts"].pop()
+        p3 = None
+        if d.get("pts3d") and len(d["pts3d"]) > len(d["pts"]):
+            p3 = d["pts3d"].pop()
+        self._draft_redo.append((pt, p3))
+        self._redraw_meas(d["pane"])
+
+    def _draft_push_point(self) -> None:
+        d = self._draft
+        if not d or not getattr(self, "_draft_redo", None):
+            return
+        pt, p3 = self._draft_redo.pop()
+        d["pts"].append(pt)
+        if p3 is not None:
+            d.setdefault("pts3d", []).append(p3)
+        self._redraw_meas(d["pane"])
 
     def _lv_invalidate_volume(self) -> None:
         """A border changed → the computed volume is stale: clear the result
@@ -6863,6 +7256,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("LV EF"),
                                     t("No borders to save yet."))
             return
+        # No valid volume yet → ask whether to save without it or compute first.
+        has_vol = bool(self._lv.get("vol_done")
+                       and self._lv.get("vol_endo_ml") is not None)
+        if not has_vol:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV EF"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Save without volume data?"))
+            b_no = box.addButton(t("Save without volume"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+            b_yes = box.addButton(t("Calculate volume, then save"),
+                                  QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_yes:
+                self._lv_compute_volume()      # runs CalcVol (blocks on its dialog)
+            elif clicked is not b_no:
+                return                         # Cancel / closed → abort the save
         d = self._lv_series_dir()
         default = os.path.join(d, self._lv_default_name()) if d \
             else self._lv_default_name()
@@ -7454,13 +7866,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             # refits the camera.
             self._set_mode(self._mode, reset_cam=True)
         else:
+            before = self._view_snapshot()
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
+            self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def _apply_preset(self, name):
         if name in CT_WL_PRESETS:
+            before = self._view_snapshot()
             self._win, self._lvl = (float(x) for x in CT_WL_PRESETS[name])
             self._refresh()
+            self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def _key_toggle_color(self):
         """C shortcut → toggle the HU colormap (keep the toolbar button synced)."""
