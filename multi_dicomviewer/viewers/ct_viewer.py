@@ -4409,6 +4409,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         for m in self._measures.get(pane, []):
             if m.get("_lv") == tag:
                 m["pts3d"] = [np.asarray(P, float) for P in snap["pts3d"]]
+                # Regenerate the 2-D points to MATCH — add/delete change the point
+                # count, and _redraw_geom only re-projects pts3d when the counts
+                # already agree, so without this an add/delete undo restored the
+                # 3-D border but left the on-screen polyline unchanged.
+                m["pts"] = [self._world3d_to_out(pane, P) for P in m["pts3d"]]
+                if len(m["pts"]) >= 3:
+                    m["type"] = "polyline"
                 angs = self._lv["model"].plane_angles()
                 self._lv["model"].set_long_axis_contour(
                     angs[tag[0] % len(angs)], m["pts3d"], tag[1])
