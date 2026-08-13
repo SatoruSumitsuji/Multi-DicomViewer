@@ -619,6 +619,10 @@ _HU_LO, _HU_HI = -1000.0, 2000.0
 #: this resolution over the whole FOV so magnified band boundaries stay smooth
 #: curves instead of a voxel-grid staircase. Grayscale keeps voxel resolution.
 _RESLICE_NPX_CAP = 2048
+#: Tighter per-side cap used ONLY during an interactive drag (pan/zoom/rotate),
+#: so a zoomed-out thick-slab MPR stays responsive; the full cap returns on
+#: release when _refresh() repaints at full quality.
+_RESLICE_DRAG_NPX_CAP = 1024
 
 
 def _smooth_lut_edges(col: np.ndarray, alpha: np.ndarray, sigma: float = 5.0):
@@ -7336,11 +7340,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         else:
             p.colors.SetInputConnection(p.reslice.GetOutputPort())
 
-    def _refresh(self, reset_cam=False):
+    def _refresh(self, reset_cam=False, only=None):
+        """Rebuild the reslice(s) + overlays. *only* = "A"/"B" reslices JUST that
+        pane and skips the other — used for single-pane drags (Move / single Zoom
+        / Spin / Thick), where the companion's image can't have changed, so
+        re-reslicing it every mouse-move was pure waste. A full _refresh() on
+        release repaints both."""
         if self._image is None:
             return
         base_step = max(1e-3, min(self._dims))
         for key in ("A", "B"):
+            if only is not None and key != only:
+                continue
             p = self.pane[key]
             # Pane A in short-axis (CPR) mode: reslice the cross-section plane
             # with a tight FOV instead of the normal MPR matrix.
@@ -7430,10 +7441,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             # was the "LV-align Move is laggy" cause — the slab multiplies the
             # per-pixel work by its through-plane sample count.
             lod = getattr(self, "_lod_drag", False)
+            # While dragging, halve the linear resolution AND cap the reslice at
+            # 1024 px/side (vs 2048): a zoomed-out view otherwise samples up to
+            # 2048² × slab-slices per pane every mouse-move. Full cap on release.
+            npx_cap = _RESLICE_DRAG_NPX_CAP if lod else _RESLICE_NPX_CAP
             if lod:
                 spacing *= 2.0
-            nu = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_u / spacing) + 1))
-            nv = min(_RESLICE_NPX_CAP, max(64, int(2.0 * box_v / spacing) + 1))
+            nu = min(npx_cap, max(64, int(2.0 * box_u / spacing) + 1))
+            nv = min(npx_cap, max(64, int(2.0 * box_v / spacing) + 1))
             p.reslice.SetOutputSpacing(spacing, spacing, base_step)
             p.reslice.SetOutputOrigin(fx - box_u, fy - box_v, 0.0)
             p.reslice.SetOutputExtent(0, nu - 1, 0, nv - 1, 0, 0)
@@ -7467,6 +7482,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 m.get("pts3d") for kk in ("A", "B")
                 for m in self._measures[kk]):
             for kk in ("A", "B"):
+                if only is not None and kk != only:
+                    continue
                 # In CPR, pane A is the cross-section (its overlay is the
                 # control-point markers, drawn separately) — don't overwrite it.
                 if self._cpr is not None and kk == "A":
@@ -7475,6 +7492,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # LV EF axis + points re-project onto the (possibly moved) planes too.
         if self._lv is not None:
             for kk in ("A", "B"):
+                if only is not None and kk != only:
+                    continue
                 self._redraw_lv(kk)
 
     def _fit_pane(self, key):
@@ -8414,6 +8433,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # This drag changes the view (W/L included, now captured in the
         # snapshot) → its whole gesture becomes one Ctrl+Z step.
         self._gesture_moved = True
+        # Single-pane tools (Move / Spin / Thick / single-pane Zoom) leave the
+        # companion pane untouched → reslice ONLY the dragged pane each move.
+        only_pane = None
         if t == "WL":
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
@@ -8451,6 +8473,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._pc[which] = self._pc[which] + mv
             self._clamp_center()
         elif t == "THICK":
+            only_pane = which
             self._thick[which] = max(
                 0.0, self._thick[which] + (dx - dy) * 0.3
             )
@@ -8500,6 +8523,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                         self.pane[which].ren.GetActiveCamera().Roll(
                             _SPIN_SIGN * dphi
                         )
+            only_pane = which                       # SPIN rolls only this pane
         elif t == "ZOOM":
             # Shift = zoom BOTH panes together, else just this one — EXCEPT while
             # actively tracing a border, where a plain left-drag is taken by the
@@ -8511,12 +8535,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             tracing = self._meas_on and bool(self._meas_type)
             both = (shift and ctrl) if tracing else shift
             keys = ("A", "B") if both else (which,)
+            only_pane = None if both else which     # single-pane zoom → skip other
             for k in keys:
                 cam = self.pane[k].ren.GetActiveCamera()
                 cam.SetParallelScale(
                     max(1e-3, cam.GetParallelScale() * factor)
                 )
         elif t == "MOVE":
+            only_pane = which
             cam = self.pane[which].ren.GetActiveCamera()
             sc = cam.GetParallelScale() * 0.003
             cam.SetFocalPoint(
@@ -8529,7 +8555,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cam.GetPosition()[1] + dy * sc,
                 cam.GetPosition()[2],
             )
-        self._refresh()
+        self._refresh(only=only_pane)
 
     def _wheel(self, which, delta):
         if self._image is None:
