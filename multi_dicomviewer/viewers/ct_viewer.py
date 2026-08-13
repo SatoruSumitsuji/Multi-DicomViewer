@@ -788,6 +788,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 return
             if r in ("endo", "epi"):
                 self._owner._lv_apex_drag = r
+                # Snapshot apex + borders now so the drag is one Ctrl+Z step.
+                self._owner._lv_apex_snap = self._owner._lv_geom_snap()
                 self._cross = False
                 self._meas_drag = False
                 self._lv_line = False
@@ -804,6 +806,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y())
             if kind:
                 self._owner._lv_line_drag = kind
+                # Snapshot the SAX level/meridian now → one Ctrl+Z step on release.
+                self._owner._gesture_begin()
                 self._owner._lv_line_set_grabbed(self._which, True)
                 self._lv_line = True
                 self._cross = False
@@ -946,6 +950,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
     def mouseReleaseEvent(self, e):
         if self._owner._lv_apex_drag is not None:
             self._owner._lv_apex_drag = None
+            self._owner._lv_record_geom(self._owner._lv_apex_snap)  # Ctrl+Z step
+            self._owner._lv_apex_snap = None
             self._last = None
             return
         if getattr(self, "_lv_line", False):
@@ -953,6 +959,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._owner._lv_line_set_grabbed(self._which, False)
             self._owner._lv_line_hi[self._which] = False   # re-hover next move
             self._lv_line = False
+            self._owner._gesture_commit()      # commit the SAX level/meridian drag
             self._last = None
             return
         if self._owner._cpr_drag is not None:
@@ -4039,7 +4046,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._undo_idx = 0            # cmds[:idx] are applied; cmds[idx:] are redoable
         self._lv_edit_before = None   # stashed LV-border snap during a drag
         self._gesture_snap = None     # view snap captured at a drag's mouse-press
+        self._gesture_lv = None       # LV level/meridian snap at a drag's press
         self._gesture_moved = False   # did the current drag actually change anything
+        self._lv_apex_snap = None     # LV geometry snap while dragging an apex
 
     def _undo_record(self, undo_fn, redo_fn) -> None:
         """Append one undo/redo command, dropping any redo-future first."""
@@ -4061,18 +4070,108 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _gesture_begin(self) -> None:
         """A view-changing mouse drag is starting: snapshot the state so its
-        WHOLE gesture (Zoom/Move/Rotate/Spin/Thick/Paging or a centreline
-        move·rotate) collapses into ONE Ctrl+Z step, committed on release."""
+        WHOLE gesture (Zoom/Move/Rotate/Spin/Thick/Paging/WL, a centreline
+        move·rotate, or an LV level/meridian drag) collapses into ONE Ctrl+Z
+        step, committed on release."""
         self._gesture_snap = self._view_snapshot()
+        self._gesture_lv = self._lv_scalar_snap()   # None outside LV
         self._gesture_moved = False
 
     def _gesture_commit(self) -> None:
-        """Mouse released: if the drag actually changed the view, record it."""
+        """Mouse released: record the drag as one undo step. The view part is
+        recorded only if it actually moved; the LV level/meridian part only if
+        it changed (an SAX line-drag moves no view state, so it lands here)."""
         snap = getattr(self, "_gesture_snap", None)
         if snap is not None and getattr(self, "_gesture_moved", False):
             self._undo_view(snap, self._view_snapshot())
+        self._lv_record_scalar(getattr(self, "_gesture_lv", None))
         self._gesture_snap = None
+        self._gesture_lv = None
         self._gesture_moved = False
+
+    # ---- LV short-axis LEVEL + shown MERIDIAN (navigation) undo -----------
+    def _lv_scalar_snap(self):
+        """Snapshot the SAX level + shown meridian (or None outside LV)."""
+        if self._lv is None:
+            return None
+        return {"sax": self._lv.get("sax"), "plane_idx": self._lv.get("plane_idx")}
+
+    def _lv_scalar_restore(self, snap) -> bool:
+        if self._lv is None or snap is None:
+            return False
+        if snap.get("sax") is not None:
+            self._lv["sax"] = snap["sax"]
+        if snap.get("plane_idx") is not None:
+            self._lv["plane_idx"] = snap["plane_idx"]
+        # Re-derive the SAX view: _lv_show_sax_both re-slices BOTH the long-axis
+        # meridian (plane_idx) and the short-axis level (sax) pane.
+        if self._lv_sax_active():
+            self._lv_show_sax_both()
+        return True
+
+    def _lv_record_scalar(self, before) -> None:
+        if before is None:
+            return
+        after = self._lv_scalar_snap()
+        if after is None or before == after:
+            return
+        self._undo_record(lambda b=before: self._lv_scalar_restore(b),
+                          lambda a=after: self._lv_scalar_restore(a))
+
+    # ---- LV apex-drag undo (apex point + the borders that follow it) ------
+    def _lv_geom_snap(self):
+        """Snapshot both apex points + every LV border's 3-D points. Used for
+        the apex drag, which also carries the border points that converged to
+        the apex (so restoring only the apex would leave the borders shifted)."""
+        if self._lv is None:
+            return None
+        model = self._lv["model"]
+        borders = {}
+        for pane in ("A", "B"):
+            for m in self._measures.get(pane, []):
+                tag = m.get("_lv")
+                if tag is not None and m.get("pts3d"):
+                    borders[(pane, tuple(tag))] = [list(map(float, P))
+                                                   for P in m["pts3d"]]
+        return {
+            "endo_apex": (None if model.endo_apex is None
+                          else list(map(float, model.endo_apex))),
+            "epi_apex": (None if model.epi_apex is None
+                         else list(map(float, model.epi_apex))),
+            "borders": borders,
+        }
+
+    def _lv_geom_restore(self, snap) -> bool:
+        if self._lv is None or snap is None:
+            return False
+        model = self._lv["model"]
+        if snap.get("endo_apex") is not None:
+            model.set_apex_point("endo", np.asarray(snap["endo_apex"], float))
+        if snap.get("epi_apex") is not None:
+            model.set_apex_point("epi", np.asarray(snap["epi_apex"], float))
+        angs = model.plane_angles()
+        for (pane, tag), pts in snap["borders"].items():
+            for m in self._measures.get(pane, []):
+                if m.get("_lv") == tag:
+                    m["pts3d"] = [np.asarray(P, float) for P in pts]
+                    model.set_long_axis_contour(
+                        angs[tag[0] % len(angs)], m["pts3d"], tag[1])
+                    break
+        self._lv_invalidate_volume()
+        self._redraw_all_lv()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+            self.pane[k].render()
+        return True
+
+    def _lv_record_geom(self, before) -> None:
+        if before is None:
+            return
+        after = self._lv_geom_snap()
+        if after is None or before == after:
+            return
+        self._undo_record(lambda b=before: self._lv_geom_restore(b),
+                          lambda a=after: self._lv_geom_restore(a))
 
     def _undo_last(self) -> None:
         """Ctrl+Z: step one command back."""
@@ -4113,6 +4212,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             "cross_ang": dict(self._cross_ang),
             "thick": dict(self._thick),
             "slice2d": int(self._slice2d),
+            "win": float(self._win),
+            "lvl": float(self._lvl),
             "cam": {k: cam(k) for k in ("A", "B")},
             "cpr_T": (None if self._cpr is None else self._cpr["T"].copy()),
             "cpr_idx": (None if self._cpr is None else self._cpr.get("idx")),
@@ -4131,6 +4232,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cross_ang = dict(snap["cross_ang"])
         self._thick = dict(snap["thick"])
         self._slice2d = int(snap.get("slice2d", self._slice2d))
+        if snap.get("win") is not None:
+            self._win = float(snap["win"])
+        if snap.get("lvl") is not None:
+            self._lvl = float(snap["lvl"])
         if self._cpr is not None and snap.get("cpr_T") is not None:
             self._cpr["T"] = np.asarray(snap["cpr_T"], float).copy()
             if snap.get("cpr_idx") is not None:
@@ -5679,8 +5784,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # against the matching image) and the short-axis centreline rotates; the
         # short-axis LEVEL is unchanged. Level itself moves by paging/mouse-drag.
         if self._lv.get("sax") is not None:
+            before = self._lv_scalar_snap()
             self._lv["plane_idx"] += int(delta)
             self._lv_show_sax_both()       # reslice long-axis to the new meridian
+            self._lv_record_scalar(before)     # Ctrl+Z / Ctrl+Y
             return
         self._lv_capture_current()
         pane = self._lv["pane"]
@@ -5759,10 +5866,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         rng = self._lv_level_range()
         if rng is None:
             return
+        before = self._lv_scalar_snap()
         step = (rng[1] - rng[0]) / 24.0            # ~24 levels apex→base
         self._lv["sax"] = min(rng[1], max(
             rng[0], float(self._lv["sax"]) + float(delta) * step))
         self._lv_reslice_short()
+        self._lv_record_scalar(before)             # Ctrl+Z / Ctrl+Y
 
     def _lv_drag_level(self, dy) -> None:
         """Move the short-axis LEVEL by a mouse drag (Paging tool): drag down →
@@ -7540,6 +7649,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         the ROTATE tool — so the pair stays consistent."""
         if self._image is None or self._mode != "3D":
             return
+        before = self._view_snapshot()
         self._frame[which] = self._frame_from_angio(prim_deg, sec_deg)
         uw, _vw, nw = self._frame[which]
         other = "B" if which == "A" else "A"
@@ -7553,6 +7663,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pc = {"A": self._center.copy(), "B": self._center.copy()}
         self._view_initial = False
         self._refresh()
+        self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def _angio_hit(self, which, x, y, w, h):
         """True if widget point (x, y) (Qt px, y-down) is over the bottom-centre
@@ -8153,9 +8264,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if t != "WL":
             self._view_initial = False
-            # This drag changes the view → its gesture becomes one Ctrl+Z step
-            # (WL is not view state, so it stays outside the undo stack).
-            self._gesture_moved = True
+        # This drag changes the view (W/L included, now captured in the
+        # snapshot) → its whole gesture becomes one Ctrl+Z step.
+        self._gesture_moved = True
         if t == "WL":
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
@@ -8730,8 +8841,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             # refits the camera.
             self._set_mode(self._mode, reset_cam=True)
         else:
+            before = self._view_snapshot()
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
+            self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def _patient_axis_vol(self, p):
         """A patient-LPS direction (e.g. (1,0,0)=Left) expressed in volume
@@ -8786,8 +8899,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _apply_preset(self, name):
         if name in CT_WL_PRESETS:
+            before = self._view_snapshot()
             self._win, self._lvl = (float(x) for x in CT_WL_PRESETS[name])
             self._refresh()
+            self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
     def keyPressEvent(self, e):
         # Arrow keys are handled by QShortcuts (see __init__) so a focused
