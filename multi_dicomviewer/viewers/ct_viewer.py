@@ -2697,6 +2697,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Invert grayscale (black↔white negative)"))
         self._invert_btn.clicked.connect(self._toggle_invert)
         row2.addWidget(self._invert_btn)
+        # Undo / Redo buttons — set off to the right of WB reverse (same gap the
+        # transforms have from WL). The shortcut in the label is platform-correct
+        # (Ctrl on Windows/Linux, Cmd on macOS) so the hint matches the actual
+        # key. Mouse-clickable → works over remote desktop where ⌘ can't be sent.
+        import sys as _sys
+        _mod = "Cmd" if _sys.platform == "darwin" else "Ctrl"
+        row2.addSpacing(12)
+        self._undo_btn = FitButton(f"Undo ({_mod}+Z)")
+        self._undo_btn.setStyleSheet(self._BTN_DIS)
+        self._undo_btn.setHelpToolTip(t("Undo the last action"))
+        self._undo_btn.clicked.connect(self._undo_last)
+        row2.addWidget(self._undo_btn)
+        self._redo_btn = FitButton(f"Redo ({_mod}+Y)")
+        self._redo_btn.setStyleSheet(self._BTN_DIS)
+        self._redo_btn.setHelpToolTip(t("Redo the last undone action"))
+        self._redo_btn.clicked.connect(self._redo_last)
+        row2.addWidget(self._redo_btn)
         row2.addStretch(1)
         # (LV EF entry lives in the LV bar below as "Trace" — see _build_lv_bar.)
 
