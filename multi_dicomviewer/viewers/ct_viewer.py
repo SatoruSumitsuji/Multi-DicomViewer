@@ -2272,6 +2272,15 @@ class CTViewer(CPRMixin, AbstractViewer):
               "view) then trace its border"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         row.addWidget(self._lv_trace_btn)
+        # EXPERIMENTAL (feature/lv-auto-trace): auto-PROPOSE the endo cavity
+        # outline on THIS long-axis plane (contrast blood pool → outer envelope)
+        # as an editable border. Select Endo/Epi first; then hand-tweak.
+        self._lv_auto_btn = FitButton(t("Auto ✎"))
+        self._lv_auto_btn.setHelpToolTip(
+            t("Auto-trace the cavity (contrast blood pool) on this plane as an "
+              "editable border — pick Endo/Epi first (experimental)"))
+        self._lv_auto_btn.clicked.connect(self._lv_auto_trace)
+        row.addWidget(self._lv_auto_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
@@ -2357,10 +2366,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Controls greyed out until in LV mode (Endo/Epi stay live — they ENTER
         # LV mode; Load also stays live). _lv_sync_buttons refines by phase.
         self._lv_bar_btns = [
-            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
-            self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
-            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_stl_btn, self._lv_exit_btn]
+            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_auto_btn,
+            self._lv_prev_btn, self._lv_next_btn, self._lv_sax_btn,
+            self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
+            self._lv_save_btn, self._lv_stl_btn, self._lv_exit_btn]
         self._lv_sync_buttons()           # initial (not in LV mode) state
         return self._lv_wrap
 
@@ -5305,6 +5314,95 @@ class CTViewer(CPRMixin, AbstractViewer):
         u, v, _n = self._axes_for(which)
         d = np.asarray(P, dtype=float) - self._pc[which]
         return (float(np.dot(d, u)), float(np.dot(d, v)))
+
+    # ---- EXPERIMENTAL: auto-trace the LV cavity on the long-axis plane -------
+    def _trilinear_grid(self, pts):
+        """Vectorised trilinear HU at an (M,3) array of world-mm points.
+        Out-of-volume samples read −2000 (see _hu_along)."""
+        sx, sy, sz = self._dims
+        fx = pts[:, 0] / sx
+        fy = pts[:, 1] / sy
+        fz = pts[:, 2] / sz
+        nz, ny, nx = self._vol.shape
+        inb = ((fx >= 0) & (fx <= nx - 1) & (fy >= 0) & (fy <= ny - 1)
+               & (fz >= 0) & (fz <= nz - 1))
+        out = np.full(len(pts), -2000.0)
+        if not inb.any():
+            return out
+        x0 = np.clip(np.floor(fx).astype(int), 0, nx - 2)
+        y0 = np.clip(np.floor(fy).astype(int), 0, ny - 2)
+        z0 = np.clip(np.floor(fz).astype(int), 0, nz - 2)
+        tx, ty, tz = fx - x0, fy - y0, fz - z0
+        V = self._vol
+        val = np.zeros(len(pts))
+        for dz in (0, 1):
+            for dy in (0, 1):
+                for dx in (0, 1):
+                    w = ((tx if dx else 1 - tx) * (ty if dy else 1 - ty)
+                         * (tz if dz else 1 - tz))
+                    val += w * V[z0 + dz, y0 + dy, x0 + dx]
+        out[inb] = val[inb]
+        return out
+
+    def _lv_sample_plane(self, la, half_mm=60.0, step=0.5):
+        """HU image of the long-axis plane *la*, centred on the crosshair. Pixel
+        (row i, col j) maps to output (ox = ox0 + j*step, oy = oy0 + i*step)."""
+        if self._vol is None:
+            return None
+        u, v, _n = self._axes_for(la)
+        pc = np.asarray(self._pc[la], float)
+        ccx, ccy = self._cc(la)
+        n = max(48, int(2.0 * half_mm / step))
+        idx = (np.arange(n) - n / 2.0) * step
+        ox0, oy0 = ccx + float(idx[0]), ccy + float(idx[0])
+        OX = ccx + idx
+        OY = ccy + idx
+        u = np.asarray(u, float); v = np.asarray(v, float)
+        P = (pc[None, None, :]
+             + OX[None, :, None] * u[None, None, :]
+             + OY[:, None, None] * v[None, None, :])       # (n, n, 3)
+        hu = self._trilinear_grid(P.reshape(-1, 3)).reshape(n, n)
+        return hu, ox0, oy0, step
+
+    def _lv_auto_trace(self):
+        """EXPERIMENTAL: propose the endo cavity outline on the current long-axis
+        plane from the contrast blood pool, as an editable border for the armed
+        Endo/Epi target."""
+        from PyQt6.QtWidgets import QMessageBox
+        from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
+        lv = self._lv
+        if lv is None or lv.get("phase") != "contour" or self._vol is None:
+            return
+        if lv.get("target") not in ("endo", "epi"):
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Pick Endo or Epi first, then Auto."))
+            return
+        la = lv["pane"]
+        samp = self._lv_sample_plane(la)
+        if samp is None:
+            return
+        hu, ox0, oy0, step = samp
+        n = hu.shape[0]
+        cnt = auto_cavity_contour(hu, (n // 2, n // 2),
+                                  roi_radius_px=n * 0.48, n_points=64)
+        if cnt is None:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Auto-trace couldn't find the cavity here — trace by hand."))
+            return
+        pts2d, pts3d = [], []
+        for (px, py) in cnt:
+            ox = ox0 + float(px) * step
+            oy = oy0 + float(py) * step
+            pts2d.append((ox, oy))
+            pts3d.append(self._out_to_world3d(la, ox, oy))
+        self._meas_seq += 1
+        self._measures[la].append({"id": self._meas_seq, "type": "polyline",
+                                    "pts": pts2d, "pts3d": pts3d})
+        self._draft = None
+        self._lv_capture_current()          # tag/colour/spline + make editable
+        self._lv_show_plane()
 
     # ------------------------------------------------ LV EF (Phase 1)
     def _toggle_lv(self) -> None:
