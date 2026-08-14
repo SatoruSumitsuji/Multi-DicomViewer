@@ -4030,8 +4030,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Shift is the "run the tool" gate: there Shift alone zooms only THIS
             # pane (individual L/R zoom) and Ctrl+Shift zooms both.
             factor = 1.0 - dy * 0.005
-            tracing = self._meas_on and bool(self._meas_type)
-            both = (shift and ctrl) if tracing else shift
+            # While tracing a border OR anywhere in LV mode (align / SAX / trace,
+            # so the two panes can be zoomed independently), Shift zooms only THIS
+            # pane; add Ctrl (or Cmd/Meta on macOS) for both. Outside LV, Shift =
+            # both, as before.
+            indiv = ((self._meas_on and bool(self._meas_type))
+                     or self._lv is not None)
+            both = (shift and ctrl) if indiv else shift
             only_pane = None if both else which      # single-pane zoom skips other
             for k in (("A", "B") if both else (which,)):
                 self._ps[k] = max(1e-3, self._ps[k] * factor)
