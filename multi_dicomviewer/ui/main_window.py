@@ -2739,10 +2739,24 @@ class MainWindow(QMainWindow):
         s = getattr(pane, "_series_ref", None)
         return s.modality if s is not None else None
 
+    def _pane_lv_busy(self, p) -> bool:
+        """True if the pane's live viewer is in an active LV analysis session.
+        Such a pane must NOT be auto-demoted to a still: the LV state (mode,
+        long axis, traced borders, computed volume) isn't captured by the
+        snapshot, so demoting garbles the frozen image and loses the whole
+        session (reported when a 3rd CT pushed an LV pane over the live cap)."""
+        v = getattr(p, "_cur_viewer", None)
+        try:
+            return bool(v is not None and hasattr(v, "lv_active")
+                        and v.lv_active())
+        except Exception:
+            return False
+
     def _enforce_live_caps(self, keep: ViewerPane) -> None:
         """Demote least-recently-used live panes to frozen stills until each
         modality is within its _LIVE_CAP. *keep* (the just-loaded/active pane)
-        is never demoted. A pane with a load in flight is left alone."""
+        is never demoted, nor is a pane mid-LV-analysis. A pane with a load in
+        flight is left alone."""
         for mod, cap in self._live_cap.items():
             live = [p for p in self._panes
                     if self._pane_live_modality(p) == mod
@@ -2755,8 +2769,8 @@ class MainWindow(QMainWindow):
             for p in list(live):
                 if len(live) <= cap:
                     break
-                if p is keep:
-                    continue
+                if p is keep or self._pane_lv_busy(p):
+                    continue                      # protect the active LV session
                 if p.demote_to_still(getattr(p, "_series_ref", None)):
                     live.remove(p)
 
@@ -2782,7 +2796,8 @@ class MainWindow(QMainWindow):
         others = [p for p in self._panes
                   if p is not incoming_pane
                   and self._pane_live_modality(p) == modality
-                  and p not in self._loads]
+                  and p not in self._loads
+                  and not self._pane_lv_busy(p)]    # never demote an LV session
         others.sort(key=lambda p: self._pane_touch.get(p, 0))   # oldest first
 
         def _demote_oldest() -> bool:
