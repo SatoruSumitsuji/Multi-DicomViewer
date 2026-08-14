@@ -376,6 +376,8 @@
   "Snap the centreline to the nearest vertical/horizontal (45° snaps clockwise)": "センタラインを最も近い縦/横にスナップ（45°は時計回りにスナップ）",
   "Clear all traced borders? This cannot be undone.": "トレースした境界をすべて消去しますか？（元に戻せません）",
   "This deletes the whole border. OK?": "境界全てを消去します。いいですか？",
+  "Undo the last action": "直前の操作を取り消す（元に戻す）",
+  "Redo the last undone action": "取り消した操作をやり直す",
   "Save without volume data?": "Volデータなしで保存しますか？",
   "Save without volume": "Volなし",
   "Calculate volume, then save": "Volあり",

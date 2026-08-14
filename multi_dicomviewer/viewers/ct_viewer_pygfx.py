@@ -1720,29 +1720,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
-        # Ctrl+Z = unified undo; redo covers every view action + LV border edits.
-        # macOS keybinding note: Qt's portable "Ctrl" maps to ⌘ (Cmd) and "Meta"
-        # to the physical Ctrl key. StandardKey.Redo on macOS is ⌘⇧Z — binding
-        # "Ctrl+Shift+Z" ALSO resolved to ⌘⇧Z, so the two collided (ambiguous →
-        # NEITHER fired) and ⌘Y wasn't bound at all. Bind ⌘⇧Z (standard) once,
-        # plus ⌘Y ("Ctrl+Y") and physical-Ctrl+Y ("Meta+Y") — all distinct.
+        # Ctrl+Z = unified undo, Ctrl+Y = redo. macOS note: Qt's portable "Ctrl"
+        # maps to ⌘, so StandardKey.Undo/Redo are ⌘Z / ⌘⇧Z and "Ctrl+Y" is ⌘Y.
+        # Physical-Ctrl ("Meta") shortcuts are NOT bound: on macOS a physical
+        # Ctrl+letter is a control character, not a shortcut, so those never fire
+        # (verified on device) — the toolbar Undo/Redo buttons cover the mouse /
+        # remote-desktop case instead.
         sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)   # ⌘Z on macOS
         sc_undo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_undo.activated.connect(self._undo_last)
-        # Also bind physical-Ctrl+Z ("Meta+Z" on macOS) so undo works with the
-        # physical Ctrl key too — Windows-habit users AND remote-desktop (Parsec
-        # from a Windows client) where ⌘ often can't be sent but Ctrl passes
-        # through. (Do NOT add "Ctrl+Z": that == ⌘Z here → ambiguous with above.)
-        sc_undo2 = QShortcut(QKeySequence("Meta+Z"), self)
-        sc_undo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        sc_undo2.activated.connect(self._undo_last)
         sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)   # ⌘⇧Z on macOS
         sc_redo.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_redo.activated.connect(self._redo_last)
-        for _seq in ("Ctrl+Y", "Meta+Y"):          # ⌘Y and physical-Ctrl+Y
-            _scr = QShortcut(QKeySequence(_seq), self)
-            _scr.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            _scr.activated.connect(self._redo_last)
+        sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)         # ⌘Y on macOS
+        sc_redo2.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        sc_redo2.activated.connect(self._redo_last)
         # NB: A / F are app-wide ApplicationShortcuts (cine/series nav, see
         # MainWindow._nav_active). A viewer-level A/F QShortcut would collide
         # (two matching shortcuts → "ambiguous" → NEITHER fires), so LV plane-
@@ -2712,6 +2704,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Invert grayscale (black↔white negative)"))
         self._invert_btn.clicked.connect(self._toggle_invert)
         row2.addWidget(self._invert_btn)
+        # Undo / Redo buttons — set off to the right of WB reverse (same gap the
+        # transforms have from WL). Mouse-clickable, so undo/redo works over
+        # remote desktop (Parsec) where ⌘ can't reliably be sent. The shortcut in
+        # the label is platform-correct (Cmd on macOS).
+        import sys as _sys
+        _mod = "Cmd" if _sys.platform == "darwin" else "Ctrl"
+        row2.addSpacing(12)
+        self._undo_btn = FitButton(f"Undo ({_mod}+Z)")
+        self._undo_btn.setHelpToolTip(t("Undo the last action"))
+        self._undo_btn.clicked.connect(self._undo_last)
+        row2.addWidget(self._undo_btn)
+        self._redo_btn = FitButton(f"Redo ({_mod}+Y)")
+        self._redo_btn.setHelpToolTip(t("Redo the last undone action"))
+        self._redo_btn.clicked.connect(self._redo_last)
+        row2.addWidget(self._redo_btn)
         row2.addStretch(1)
 
         col.addLayout(row)
