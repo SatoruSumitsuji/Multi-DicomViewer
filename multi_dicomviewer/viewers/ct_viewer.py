@@ -5131,6 +5131,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         nz = self._image.GetDimensions()[2]
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
+    def lv_active(self) -> bool:
+        """True while an LV analysis session is in progress. The shell must NOT
+        auto-demote such a pane to a memory-saving 'still': the LV state (mode,
+        long axis, traced borders, computed volume) isn't captured by the still
+        snapshot, so demoting garbles the image and loses the whole session."""
+        return getattr(self, "_lv", None) is not None
+
     def snapshot(self):
         """A QPixmap of just the image frames — no toolbars — for the shell's
         memory-saving 'still' pane.
