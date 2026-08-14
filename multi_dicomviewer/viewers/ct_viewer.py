@@ -5365,44 +5365,77 @@ class CTViewer(CPRMixin, AbstractViewer):
         return hu, ox0, oy0, step
 
     def _lv_auto_trace(self):
-        """EXPERIMENTAL: propose the endo cavity outline on the current long-axis
-        plane from the contrast blood pool, as an editable border for the armed
-        Endo/Epi target."""
+        """EXPERIMENTAL (Phase 1): propose the endo cavity outline on the current
+        long-axis plane from the contrast blood pool and draw it as a CLOSED
+        overlay (yellow polygon) for visual evaluation. Not yet wired into the
+        volume model — this pass only tests whether the segmentation finds the
+        cavity. Ctrl+Z removes it. Any failure is surfaced in a dialog so the
+        cause is visible (this line is intentionally verbose for the prototype)."""
         from PyQt6.QtWidgets import QMessageBox
-        from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
-        lv = self._lv
-        if lv is None or lv.get("phase") != "contour" or self._vol is None:
-            return
-        if lv.get("target") not in ("endo", "epi"):
-            QMessageBox.information(
-                self.window(), t("LV EF"),
-                t("Pick Endo or Epi first, then Auto."))
-            return
-        la = lv["pane"]
-        samp = self._lv_sample_plane(la)
-        if samp is None:
-            return
-        hu, ox0, oy0, step = samp
-        n = hu.shape[0]
-        cnt = auto_cavity_contour(hu, (n // 2, n // 2),
-                                  roi_radius_px=n * 0.48, n_points=64)
-        if cnt is None:
-            QMessageBox.information(
-                self.window(), t("LV EF"),
-                t("Auto-trace couldn't find the cavity here — trace by hand."))
-            return
-        pts2d, pts3d = [], []
-        for (px, py) in cnt:
-            ox = ox0 + float(px) * step
-            oy = oy0 + float(py) * step
-            pts2d.append((ox, oy))
-            pts3d.append(self._out_to_world3d(la, ox, oy))
-        self._meas_seq += 1
-        self._measures[la].append({"id": self._meas_seq, "type": "polyline",
-                                    "pts": pts2d, "pts3d": pts3d})
-        self._draft = None
-        self._lv_capture_current()          # tag/colour/spline + make editable
-        self._lv_show_plane()
+        try:
+            from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
+            lv = self._lv
+            if lv is None or self._vol is None:
+                QMessageBox.information(
+                    self.window(), t("LV EF"),
+                    t("Auto-trace needs a CT volume in LV mode."))
+                return
+            if lv.get("phase") != "contour":
+                QMessageBox.information(
+                    self.window(), t("LV EF"),
+                    t("Set the axis and place the apex first (enter Trace), "
+                      "then press Auto."))
+                return
+            la = lv["pane"]
+            samp = self._lv_sample_plane(la)
+            if samp is None:
+                QMessageBox.information(self.window(), t("LV EF"),
+                                       t("Could not sample this plane."))
+                return
+            hu, ox0, oy0, step = samp
+            n = hu.shape[0]
+            seed_hu = float(hu[n // 2, n // 2])
+            cnt = auto_cavity_contour(hu, (n // 2, n // 2),
+                                      roi_radius_px=n * 0.48, n_points=64)
+            if cnt is None:
+                QMessageBox.information(
+                    self.window(), t("LV EF"),
+                    t("Auto-trace couldn't find the cavity here.\n"
+                      "Seed HU = {v:.0f} (needs to sit in the bright contrast "
+                      "pool). Trace by hand or re-centre the crosshair.")
+                    .format(v=seed_hu))
+                return
+            pts2d, pts3d = [], []
+            for (px, py) in cnt:
+                ox = ox0 + float(px) * step
+                oy = oy0 + float(py) * step
+                pts2d.append((ox, oy))
+                pts3d.append(self._out_to_world3d(la, ox, oy))
+            self._meas_seq += 1
+            m = {"id": self._meas_seq, "type": "polygon",
+                 "pts": pts2d, "pts3d": pts3d, "color": "#ffd700",
+                 "_auto": True}
+            self._measures[la].append(m)
+            self._redraw_meas(la)
+            # Ctrl+Z removes the auto contour; Ctrl+Y re-adds it.
+            mid = m["id"]
+            def _rm(_la=la, _mid=mid):
+                self._measures[_la] = [q for q in self._measures.get(_la, [])
+                                       if q.get("id") != _mid]
+                self._redraw_meas(_la)
+                return True
+            def _add(_la=la, _m=m):
+                if all(q.get("id") != _m["id"]
+                       for q in self._measures.get(_la, [])):
+                    self._measures[_la].append(_m)
+                self._redraw_meas(_la)
+                return True
+            self._undo_record(_rm, _add)
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(
+                self.window(), t("LV EF (auto-trace error)"),
+                traceback.format_exc() or repr(exc))
 
     # ------------------------------------------------ LV EF (Phase 1)
     def _toggle_lv(self) -> None:
