@@ -8574,8 +8574,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Drag (and arrow) UP = zoom OUT (shrink), DOWN = zoom IN (enlarge):
             # dy<0 (up) → factor>1 → larger ParallelScale → wider view = shrink.
             factor = 1.0 - dy * 0.005
-            tracing = self._meas_on and bool(self._meas_type)
-            both = (shift and ctrl) if tracing else shift
+            # Individual (single-pane) Shift-zoom while tracing a border OR
+            # anywhere in LV mode (align/SAX/trace) so the two panes can be zoomed
+            # independently; Ctrl+Shift zooms both. Outside LV, Shift = both.
+            indiv = ((self._meas_on and bool(self._meas_type))
+                     or self._lv is not None)
+            both = (shift and ctrl) if indiv else shift
             keys = ("A", "B") if both else (which,)
             only_pane = None if both else which     # single-pane zoom → skip other
             for k in keys:
