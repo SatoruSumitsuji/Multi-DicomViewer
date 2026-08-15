@@ -2277,8 +2277,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # as an editable border. Select Endo/Epi first; then hand-tweak.
         self._lv_auto_btn = FitButton(t("Auto ✎"))
         self._lv_auto_btn.setHelpToolTip(
-            t("Auto-trace the cavity (contrast blood pool) on this plane as an "
-              "editable border — pick Endo/Epi first (experimental)"))
+            t("Auto-trace the cavity on short-axis levels: first press asks for "
+              "the base point, then the apex→base axis is split into levels and "
+              "each is auto-traced on the left short-axis pane; ◀/▶ page the "
+              "levels (experimental)"))
         self._lv_auto_btn.clicked.connect(self._lv_auto_trace)
         row.addWidget(self._lv_auto_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
@@ -5364,16 +5366,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         hu = self._trilinear_grid(P.reshape(-1, 3)).reshape(n, n)
         return hu, ox0, oy0, step
 
+    #: number of apex→base divisions for auto short-axis extraction (13 levels:
+    #: 0 = apex (no contour) … N = base).
+    _LV_AUTO_N = 12
+
     def _lv_auto_trace(self):
-        """EXPERIMENTAL (Phase 1): propose the endo cavity outline on the current
-        long-axis plane from the contrast blood pool and draw it as a CLOSED
-        overlay (yellow polygon) for visual evaluation. Not yet wired into the
-        volume model — this pass only tests whether the segmentation finds the
-        cavity. Ctrl+Z removes it. Any failure is surfaced in a dialog so the
-        cause is visible (this line is intentionally verbose for the prototype)."""
+        """EXPERIMENTAL (Phase 2): auto-extract the endo cavity on SHORT-AXIS
+        levels. Flow: apex is already placed → first Auto press asks for the
+        BASE point (click on the long-axis pane); once set, the apex→base axis
+        is divided into _LV_AUTO_N parts and the cavity is auto-traced on each of
+        the N non-apex short-axis planes, shown on the LEFT (short-axis) pane.
+        ◀/▶ Prev/Next plane then pages the N+1 levels (apex + N)."""
         from PyQt6.QtWidgets import QMessageBox
         try:
-            from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
             lv = self._lv
             if lv is None or self._vol is None:
                 QMessageBox.information(
@@ -5386,56 +5391,198 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("Set the axis and place the apex first (enter Trace), "
                       "then press Auto."))
                 return
-            la = lv["pane"]
-            samp = self._lv_sample_plane(la)
-            if samp is None:
+            tgt = lv.get("pass") or "endo"
+            apex = (lv["model"].endo_apex if tgt == "endo"
+                    else lv["model"].epi_apex)
+            if apex is None:
                 QMessageBox.information(self.window(), t("LV EF"),
-                                       t("Could not sample this plane."))
+                                       t("Place the apex point first."))
                 return
-            hu, ox0, oy0, step = samp
-            n = hu.shape[0]
-            seed_hu = float(hu[n // 2, n // 2])
-            cnt = auto_cavity_contour(hu, (n // 2, n // 2),
-                                      roi_radius_px=n * 0.48, n_points=64)
-            if cnt is None:
+            if lv.get("base_pt") is None:
+                # First Auto press → arm base-point placement (see _lv_apex_press).
+                lv["base_await"] = True
                 QMessageBox.information(
                     self.window(), t("LV EF"),
-                    t("Auto-trace couldn't find the cavity here.\n"
-                      "Seed HU = {v:.0f} (needs to sit in the bright contrast "
-                      "pool). Trace by hand or re-centre the crosshair.")
-                    .format(v=seed_hu))
+                    t("Click the BASE point on the long-axis (right) image."))
                 return
-            pts2d, pts3d = [], []
-            for (px, py) in cnt:
-                ox = ox0 + float(px) * step
-                oy = oy0 + float(py) * step
-                pts2d.append((ox, oy))
-                pts3d.append(self._out_to_world3d(la, ox, oy))
-            self._meas_seq += 1
-            m = {"id": self._meas_seq, "type": "polygon",
-                 "pts": pts2d, "pts3d": pts3d, "color": "#ffd700",
-                 "_auto": True}
-            self._measures[la].append(m)
-            self._redraw_meas(la)
-            # Ctrl+Z removes the auto contour; Ctrl+Y re-adds it.
-            mid = m["id"]
-            def _rm(_la=la, _mid=mid):
-                self._measures[_la] = [q for q in self._measures.get(_la, [])
-                                       if q.get("id") != _mid]
-                self._redraw_meas(_la)
-                return True
-            def _add(_la=la, _m=m):
-                if all(q.get("id") != _m["id"]
-                       for q in self._measures.get(_la, [])):
-                    self._measures[_la].append(_m)
-                self._redraw_meas(_la)
-                return True
-            self._undo_record(_rm, _add)
+            self._lv_auto_run()
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(
                 self.window(), t("LV EF (auto-trace error)"),
                 traceback.format_exc() or repr(exc))
+
+    def _lv_place_base(self, which, sx, sy) -> bool:
+        """Place the BASE point (armed by the first Auto press) at the clicked
+        long-axis point, then run the short-axis auto-extraction."""
+        lv = self._lv
+        if lv is None or not lv.get("base_await") or which != lv.get("pane"):
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        lv["base_pt"] = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        lv["base_await"] = False
+        self._lv_auto_run()
+        return True
+
+    def _lv_sample_sax(self, ax, along, half_mm=45.0, step=0.5):
+        """HU image of the SHORT-AXIS plane *along* mm from the apex, centred on
+        the axis. Returns (hu, o, ex, ey, step, n); pixel (row i, col j) maps to
+        world o + (j-n/2)*step*ex + (i-n/2)*step*ey."""
+        o, ex, ey, _nn = ax.short_axis_basis(float(along))
+        o = np.asarray(o, float); ex = np.asarray(ex, float)
+        ey = np.asarray(ey, float)
+        n = max(48, int(2.0 * half_mm / step))
+        idx = (np.arange(n) - n / 2.0) * step
+        P = (o[None, None, :]
+             + idx[None, :, None] * ex[None, None, :]
+             + idx[:, None, None] * ey[None, None, :])       # (n, n, 3)
+        hu = self._trilinear_grid(P.reshape(-1, 3)).reshape(n, n)
+        return hu, o, ex, ey, step, n
+
+    def _lv_auto_run(self):
+        """Build the apex→base axis, then auto-trace the cavity on the N non-apex
+        short-axis levels and enter the paging display (left = short axis)."""
+        from PyQt6.QtWidgets import QMessageBox
+        from multi_dicomviewer.core.lv_axis import LVAxis
+        from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
+        lv = self._lv
+        m = lv["model"]
+        tgt = lv.get("pass") or "endo"
+        apex = np.asarray(m.endo_apex if tgt == "endo" else m.epi_apex, float)
+        base = np.asarray(lv.get("base_pt"), float)
+        axdir = base - apex
+        L = float(np.linalg.norm(axdir))
+        if L < 5.0:
+            lv["base_pt"] = None
+            QMessageBox.information(self.window(), t("LV EF"),
+                                   t("Base point is too close to the apex."))
+            return
+        axdir = axdir / L
+        # radial0 ⟂ the new axis (reuse the current axis' reference if possible).
+        old = m._axis_for(tgt)
+        r0 = np.asarray(old.radial0, float) if old is not None else None
+        if r0 is None or abs(float(np.dot(r0, axdir))) > 0.999:
+            ref = np.array([1.0, 0.0, 0.0])
+            if abs(float(np.dot(ref, axdir))) > 0.9:
+                ref = np.array([0.0, 1.0, 0.0])
+            r0 = ref
+        r0 = r0 - float(np.dot(r0, axdir)) * axdir
+        r0 = r0 / (np.linalg.norm(r0) or 1.0)
+        binm = np.cross(axdir, r0)
+        new_ax = LVAxis(apex=apex, base_center=base, axis=axdir,
+                        radial0=r0, binormal=binm, length_mm=L)
+        if tgt == "endo":
+            m.endo_axis = new_ax
+        else:
+            m.epi_axis = new_ax
+        m.axis = new_ax
+        # Auto-trace each non-apex short-axis level.
+        N = self._LV_AUTO_N
+        contours, fails = {}, []
+        for k in range(1, N + 1):
+            along = (k / float(N)) * L
+            hu, o, ex, ey, step, n = self._lv_sample_sax(new_ax, along)
+            cnt = auto_cavity_contour(hu, (n // 2, n // 2),
+                                      roi_radius_px=n * 0.48, n_points=64)
+            if cnt is None:
+                fails.append(k)
+                continue
+            contours[k] = [tuple(map(float,
+                            o + (float(cx) - n / 2.0) * step * ex
+                              + (float(cy) - n / 2.0) * step * ey))
+                           for (cx, cy) in cnt]
+        sa = "A" if lv["pane"] == "B" else "B"
+        lv["auto"] = {"level": 0, "n": N, "L": L, "contours": contours,
+                      "pane": sa, "tgt": tgt, "fitted": False}
+        # Right (long-axis) pane: reslice to the apex→base long axis (meridian 0)
+        # so it stays a stable reference while the left pane pages levels.
+        la = lv["pane"]
+        u, v, nrm = self._ortho(new_ax.meridian_dir(0.0), new_ax.axis)
+        self._frame[la] = (u, v, nrm)
+        self._pc[la] = new_ax.apex + 0.5 * L * new_ax.axis
+        self._cross_ang[la] = 0.0
+        self.set_side("Bi")
+        self._lv_auto_show_level(0)
+        if fails:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Auto-traced {ok}/{n} short-axis levels. Not found: {f}")
+                .format(ok=len(contours), n=N, f=", ".join(map(str, fails))))
+
+    def _lv_auto_show_level(self, k) -> None:
+        """Show short-axis level *k* (0 = apex … N = base) on the LEFT pane with
+        its auto contour, and mark the level on the right long-axis pane."""
+        lv = self._lv
+        auto = lv.get("auto")
+        if auto is None:
+            return
+        ax = lv["model"].axis
+        N, L = auto["n"], auto["L"]
+        k = max(0, min(N, int(k)))
+        auto["level"] = k
+        along = (k / float(N)) * L
+        sa, la = auto["pane"], lv["pane"]
+        # Left pane → short-axis at this level (apex→base view: mirror x + n).
+        o, ex, ey, nn = ax.short_axis_basis(along)
+        self._frame[sa] = (-np.asarray(ex, float), np.asarray(ey, float),
+                           -np.asarray(nn, float))
+        self._pc[sa] = np.asarray(o, float)
+        self._cross_ang[sa] = 0.0
+        self._thick[sa] = 0.0
+        # Rebuild the auto overlays (drop previous ones on both panes).
+        for key in (sa, la):
+            self._measures[key] = [q for q in self._measures.get(key, [])
+                                   if not q.get("_auto")]
+        cnt3 = auto["contours"].get(k)
+        if cnt3:
+            pts2d = [self._world3d_to_out(sa, np.asarray(P, float))
+                     for P in cnt3]
+            self._meas_seq += 1
+            self._measures[sa].append(
+                {"id": self._meas_seq, "type": "polygon", "pts": pts2d,
+                 "pts3d": [tuple(map(float, P)) for P in cnt3],
+                 "color": "#ffd700", "_auto": True})
+        # Right pane → a dashed level line across the axis at this along.
+        r0 = np.asarray(ax.radial0, float)
+        p_a = np.asarray(o, float) - 40.0 * r0
+        p_b = np.asarray(o, float) + 40.0 * r0
+        self._meas_seq += 1
+        self._measures[la].append(
+            {"id": self._meas_seq, "type": "line",
+             "pts": [self._world3d_to_out(la, p_a),
+                     self._world3d_to_out(la, p_b)],
+             "pts3d": [tuple(map(float, p_a)), tuple(map(float, p_b))],
+             "color": "#ffd700", "_auto": True})
+        self._lv_plane_lbl.setText(
+            t("apex") if k == 0 else t("SAX {k}/{n}", k=k, n=N))
+        first = not auto.get("fitted", False)
+        auto["fitted"] = True
+        self._view_initial = first
+        self._refresh(reset_cam=first)
+        for key in (sa, la):
+            self.pane[key].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[key].set_slab_visible(False)
+        self._redraw_meas(sa)
+        self._redraw_meas(la)
+        for key in ("A", "B"):
+            self.pane[key].render()
+
+    def _lv_auto_active(self) -> bool:
+        return self._lv is not None and self._lv.get("auto") is not None
+
+    def _lv_auto_clear(self) -> None:
+        """Leave auto short-axis mode: drop the overlays and state."""
+        lv = self._lv
+        if lv is None:
+            return
+        lv["auto"] = None
+        lv["base_pt"] = None
+        lv["base_await"] = False
+        for key in ("A", "B"):
+            self._measures[key] = [q for q in self._measures.get(key, [])
+                                   if not q.get("_auto")]
+            self._redraw_meas(key)
 
     # ------------------------------------------------ LV EF (Phase 1)
     def _toggle_lv(self) -> None:
@@ -5460,6 +5607,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv = {"model": LVModel(n_planes=6), "phase": "align",
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
+                    "auto": None, "base_pt": None, "base_await": False,
                     "prev_side": self.current_side()}
         self._lv_reset_undo()                        # fresh Ctrl+Z stack
         self._lv_btn.setChecked(True)               # internal mode flag
@@ -5729,6 +5877,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv = self._lv
         if lv is None or lv.get("phase") not in ("apex", "contour"):
             return None
+        if lv.get("base_await"):                      # Auto armed a base click
+            if shift or which != lv.get("pane"):
+                return None
+            return "place" if self._lv_place_base(which, sx, sy) else None
         if lv.get("phase") == "apex" and lv.get("apex_target") is not None:
             if shift:                               # adjust the view, don't place
                 return None
@@ -6100,6 +6252,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_step_plane(self, delta) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":
             return
+        # Auto short-axis mode: ◀ ▶ pages the N+1 levels (apex + N) on the LEFT
+        # short-axis pane.
+        if self._lv.get("auto") is not None:
+            self._lv_auto_show_level(self._lv["auto"]["level"] + int(delta))
+            return
         # Short-axis mode: ◀ ▶ ROTATE — step the meridian. The LONG-AXIS pane
         # (right) reslices to that meridian plane (so its border can be edited
         # against the matching image) and the short-axis centreline rotates; the
@@ -6353,6 +6510,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("LV EF"),
                 t("Clear all traced borders? This cannot be undone.")) \
                 != QMessageBox.StandardButton.Yes:
+            return
+        if self._lv_auto_active():
+            self._lv_auto_clear()             # also leave auto short-axis mode
+            self._lv_show_plane()
             return
         self._lv_clear_contours()
 
