@@ -779,6 +779,15 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
+        # LV blood-pool volume: consume an armed apex / threshold-reference
+        # click. Only consumes while armed, so drawing the valve Ellipse still
+        # works normally.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._lvv is not None
+                and self._owner._lvv.get("await")):
+            if self._owner._lvv_press(
+                    self._which, e.position().x(), e.position().y()) == "place":
+                return
         # LV apex points: place the two apex vertices (apex phase) or grab an
         # existing marker to drag it. Checked before Measure so a click near a
         # marker moves the apex instead of adding a trace point; _lv_apex_press
@@ -1973,6 +1982,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # {"model": LVModel, "phase": "contour", "plane_idx": int,
         # "target": "endo"|"epi", "plane_done": bool, "prev_side": str}.
         self._lv = None
+        self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2052,6 +2062,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
         lay.addWidget(self._build_lv_bar())
+        lay.addWidget(self._build_lvv_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -2363,6 +2374,266 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_stl_btn, self._lv_exit_btn]
         self._lv_sync_buttons()           # initial (not in LV mode) state
         return self._lv_wrap
+
+    # ==================================================================
+    # LV blood-pool volume (LVEF) — region = apex + aortic/mitral valve
+    # planes; count contrast voxels (HU >= threshold) connected to a cavity
+    # seed. ED/ES volumes -> EF. Separate mode from the contour LV bar.
+    # ==================================================================
+    def _build_lvv_bar(self) -> QWidget:
+        self._lvv_wrap = QWidget()
+        self._lvv_wrap._mdv_keep_on_max = True
+        row = QHBoxLayout(self._lvv_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(4)
+        cap = QLabel(t("LV Vol:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        row.addWidget(cap)
+        self._lvv_start_btn = FitButton(t("Start"))
+        self._lvv_start_btn.setCheckable(True)
+        self._lvv_start_btn.setHelpToolTip(
+            t("Enter/leave LV blood-pool volume (LVEF) mode"))
+        self._lvv_start_btn.clicked.connect(self._lvv_toggle)
+        row.addWidget(self._lvv_start_btn)
+        self._lvv_apex_btn = FitButton(t("Apex"))
+        self._lvv_apex_btn.setHelpToolTip(t("Click the LV apex on the image"))
+        self._lvv_apex_btn.clicked.connect(lambda: self._lvv_arm("apex"))
+        row.addWidget(self._lvv_apex_btn)
+        self._lvv_aov_btn = FitButton(t("AoV plane"))
+        self._lvv_aov_btn.setHelpToolTip(
+            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
+              "press this to capture its plane"))
+        self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
+        row.addWidget(self._lvv_aov_btn)
+        self._lvv_mv_btn = FitButton(t("MV plane"))
+        self._lvv_mv_btn.setHelpToolTip(
+            t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
+              "press this to capture its plane"))
+        self._lvv_mv_btn.clicked.connect(lambda: self._lvv_capture_valve("mitral"))
+        row.addWidget(self._lvv_mv_btn)
+        self._lvv_thr_btn = FitButton(t("Threshold"))
+        self._lvv_thr_btn.setHelpToolTip(
+            t("Click a reference point in the cavity — its HU sets the blood "
+              "threshold (also the connectivity seed)"))
+        self._lvv_thr_btn.clicked.connect(lambda: self._lvv_arm("thr"))
+        row.addWidget(self._lvv_thr_btn)
+        self._lvv_thr_lbl = QLabel(t("心室内腔CT値閾値"))
+        self._lvv_thr_spin = QSpinBox()
+        self._lvv_thr_spin.setRange(-1000, 3000)
+        self._lvv_thr_spin.setSingleStep(10)
+        self._lvv_thr_spin.setSuffix(" HU")
+        self._lvv_thr_spin.setKeyboardTracking(False)
+        self._lvv_thr_spin.valueChanged.connect(self._lvv_thr_changed)
+        row.addWidget(self._lvv_thr_lbl)
+        row.addWidget(self._lvv_thr_spin)
+        self._lvv_calc_btn = FitButton(t("CalcVol"))
+        self._lvv_calc_btn.setHelpToolTip(
+            t("Compute the LV blood-pool volume in the region"))
+        self._lvv_calc_btn.clicked.connect(self._lvv_calc)
+        row.addWidget(self._lvv_calc_btn)
+        self._lvv_vol_lbl = QLabel("--")
+        fv = self._lvv_vol_lbl.font(); fv.setBold(True)
+        self._lvv_vol_lbl.setFont(fv)
+        self._lvv_vol_lbl.setMinimumWidth(90)
+        row.addWidget(self._lvv_vol_lbl)
+        self._lvv_ed_btn = FitButton(t("Set ED"))
+        self._lvv_ed_btn.setHelpToolTip(t("Store the current volume as EDV"))
+        self._lvv_ed_btn.clicked.connect(lambda: self._lvv_set_phase("ed"))
+        row.addWidget(self._lvv_ed_btn)
+        self._lvv_es_btn = FitButton(t("Set ES"))
+        self._lvv_es_btn.setHelpToolTip(t("Store the current volume as ESV"))
+        self._lvv_es_btn.clicked.connect(lambda: self._lvv_set_phase("es"))
+        row.addWidget(self._lvv_es_btn)
+        self._lvv_ef_lbl = QLabel("EF --")
+        fe = self._lvv_ef_lbl.font(); fe.setBold(True)
+        self._lvv_ef_lbl.setFont(fe)
+        self._lvv_ef_lbl.setMinimumWidth(190)
+        row.addWidget(self._lvv_ef_lbl)
+        self._lvv_exit_btn = FitButton(t("Exit"))
+        self._lvv_exit_btn.clicked.connect(self._lvv_toggle)
+        row.addWidget(self._lvv_exit_btn)
+        row.addStretch(1)
+        self._lvv_ctrl_btns = [
+            self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
+            self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_ed_btn,
+            self._lvv_es_btn, self._lvv_exit_btn]
+        self._lvv_edv = None                 # persist across series (ED vs ES)
+        self._lvv_esv = None
+        self._lvv_sync()
+        return self._lvv_wrap
+
+    def _lvv_sync(self) -> None:
+        on = self._lvv is not None
+        self._lvv_start_btn.setChecked(on)
+        for b in self._lvv_ctrl_btns:
+            b.setEnabled(on)
+        showthr = on and self._lvv.get("thr") is not None
+        self._lvv_thr_lbl.setVisible(showthr)
+        self._lvv_thr_spin.setVisible(showthr)
+        self._lvv_update_ef()
+
+    def _lvv_toggle(self) -> None:
+        if self._lvv is None:
+            if self._image is None:
+                return
+            if self._lv is not None:              # leave contour LV mode first
+                self._lv_exit()
+            self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                         "thr": None, "seed": None, "await": None,
+                         "last_ml": None}
+        else:
+            self._lvv_clear_markers()
+            self._lvv = None
+        self._lvv_sync()
+
+    def _lvv_arm(self, what) -> None:
+        """Arm an apex / threshold reference click."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lvv is None:
+            return
+        self._lvv["await"] = what
+        msg = (t("Click the LV apex on the image.") if what == "apex"
+               else t("Click a reference point inside the cavity (its HU sets "
+                      "the blood threshold)."))
+        QMessageBox.information(self.window(), t("LV Vol"), msg)
+
+    def _lvv_press(self, which, sx, sy) -> str | None:
+        """Consume an armed apex / threshold click. Returns 'place' if used."""
+        lvv = self._lvv
+        if lvv is None or not lvv.get("await"):
+            return None
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        what = lvv["await"]
+        lvv["await"] = None
+        if what == "apex":
+            lvv["apex"] = P
+            self._lvv_add_marker("apex", which, wx, wy, "#ff4040")
+        else:                                     # threshold reference + seed
+            lvv["seed"] = P
+            hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
+            lvv["thr"] = hu
+            self._lvv_thr_spin.blockSignals(True)
+            self._lvv_thr_spin.setValue(int(round(hu)))
+            self._lvv_thr_spin.blockSignals(False)
+            self._lvv_add_marker("seed", which, wx, wy, "#40c0ff")
+            self._lvv_sync()
+        return "place"
+
+    def _lvv_add_marker(self, tag, which, wx, wy, color) -> None:
+        self._measures[which] = [m for m in self._measures.get(which, [])
+                                 if m.get("_lvv") != tag]
+        self._meas_seq += 1
+        self._measures[which].append(
+            {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
+             "color": color, "_lvv": tag})
+        self._redraw_meas(which)
+
+    def _lvv_capture_valve(self, valve) -> None:
+        """Capture the most-recent Ellipse on the active pane as this valve's
+        plane (centre + the pane's current normal)."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lvv is None:
+            return
+        # Newest Ellipse across BOTH panes (drawn on either side).
+        m, which = None, None
+        best = -1
+        for k in ("A", "B"):
+            for cand in self._measures.get(k, []):
+                if cand.get("type") == "ellipse" and cand.get("id", -1) > best:
+                    best = cand.get("id", -1)
+                    m, which = cand, k
+        if m is None:
+            QMessageBox.information(
+                self.window(), t("LV Vol"),
+                t("Draw an Ellipse on the {v} annulus first (Measure→Ellipse).")
+                .format(v=t("aortic") if valve == "aortic" else t("mitral")))
+            return
+        cx, cy = self._shape_center(m)
+        center = np.asarray(self._out_to_world3d(which, cx, cy), float)
+        _u, _v, n = self._axes_for(which)
+        self._lvv[valve] = (center, np.asarray(n, float))
+        m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
+        m["_lvv"] = valve
+        self._redraw_meas(which)
+        QMessageBox.information(
+            self.window(), t("LV Vol"),
+            t("{v} plane captured.").format(
+                v=t("Aortic") if valve == "aortic" else t("Mitral")))
+
+    def _lvv_thr_changed(self, val) -> None:
+        if self._lvv is None:
+            return
+        self._lvv["thr"] = float(val)
+
+    def _lvv_calc(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            lvv = self._lvv
+            if lvv is None or self._vol is None:
+                return
+            miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
+                    "aortic"), (t("mitral plane"), "mitral"),
+                    (t("threshold"), "thr")) if lvv.get(k) is None]
+            if miss:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Set these first: {m}").format(m=", ".join(miss)))
+                return
+            from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume
+            seed = lvv.get("seed") if lvv.get("seed") is not None else lvv["apex"]
+            res = bloodpool_volume(
+                self._vol, self._dims, tuple(lvv["apex"]),
+                [lvv["aortic"], lvv["mitral"]], float(lvv["thr"]), tuple(seed))
+            if res is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("No cavity found — the threshold may be too high, or the "
+                      "reference point is outside the blood pool."))
+                return
+            lvv["last_ml"] = res["volume_ml"]
+            self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_set_phase(self, phase) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lvv is None or self._lvv.get("last_ml") is None:
+            QMessageBox.information(self.window(), t("LV Vol"),
+                                   t("Press CalcVol first."))
+            return
+        if phase == "ed":
+            self._lvv_edv = float(self._lvv["last_ml"])
+        else:
+            self._lvv_esv = float(self._lvv["last_ml"])
+        self._lvv_update_ef()
+
+    def _lvv_update_ef(self) -> None:
+        ed, es = getattr(self, "_lvv_edv", None), getattr(self, "_lvv_esv", None)
+        parts = []
+        if ed is not None:
+            parts.append(f"EDV {ed:.1f}")
+        if es is not None:
+            parts.append(f"ESV {es:.1f}")
+        if ed and es is not None and ed > 0:
+            ef = (ed - es) / ed * 100.0
+            parts.append(f"SV {ed - es:.1f}")
+            parts.append(f"EF {ef:.1f}%")
+        self._lvv_ef_lbl.setText("  ".join(parts) if parts else "EF --")
+
+    def _lvv_clear_markers(self) -> None:
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures.get(k, [])
+                                 if m.get("_lvv") is None]
+            self._redraw_meas(k)
+
+    def _active_pane(self) -> str:
+        """The pane the user is working in (current side; default B)."""
+        s = self.current_side() if hasattr(self, "current_side") else "Bi"
+        return "A" if s == "Lt" else "B"
 
     #: Appended to EVERY LV/tool button style so a DISABLED button clearly greys
     #: out (a custom background otherwise overrides Qt's native disabled look, so
@@ -5103,6 +5374,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._set_play2d_speed(1.0)              # back to 1× for a new series
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
+        self._lvv = None                         # drop LV blood-pool session
+        # (EDV/ESV persist across series so ED then ES gives EF)
+        if hasattr(self, "_lvv_start_btn"):
+            self._lvv_sync()
         self._cpr_wrap.setVisible(False)
 
         b = self._bounds
@@ -5179,6 +5454,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
+        self._lvv = None                         # drop LV blood-pool session
+        # (EDV/ESV persist across series so ED then ES gives EF)
+        if hasattr(self, "_lvv_start_btn"):
+            self._lvv_sync()
         self._cpr_wrap.setVisible(False)
         self._vol = None
         self._image = None
