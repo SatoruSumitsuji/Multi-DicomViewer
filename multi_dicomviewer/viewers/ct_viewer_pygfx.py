@@ -6002,6 +6002,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             origin, axis_dir, radial0 = self._lv_axis_from_view()
             lv["model"].set_axis_from_frame(origin, axis_dir, radial0,
                                             which=which)
+            # Snap the global CrossLine centre onto the axis origin so the
+            # crosshair COINCIDES with the LV long axis. Otherwise the crosshair
+            # stays at the stale _center (off the axis after aligning) while the
+            # apex is constrained to the axis (output x=0) — placing the apex
+            # would then land visibly offset from the crosshair (the reported
+            # "心尖部点がズレる"). With this, clicking on the crosshair puts the
+            # apex under the cursor.
+            self._center = np.asarray(origin, dtype=float).copy()
             lv["phase"] = "ready"
             lv["plane_idx"] = 0
             self._lv_sync_buttons()
