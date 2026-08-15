@@ -2297,6 +2297,23 @@ class CTViewer(CPRMixin, AbstractViewer):
               "levels (experimental)"))
         self._lv_auto_btn.clicked.connect(self._lv_auto_trace)
         row.addWidget(self._lv_auto_btn)
+        # LV cavity HU threshold: appears (with the picked value) once the
+        # threshold reference is clicked; editing it re-runs the extraction so
+        # the operator can fine-tune how tightly the border hugs the blood pool.
+        self._lv_thr_lbl = QLabel(t("心室内腔CT値閾値"))
+        self._lv_thr_spin = QSpinBox()
+        self._lv_thr_spin.setRange(-1000, 3000)
+        self._lv_thr_spin.setSingleStep(10)
+        self._lv_thr_spin.setSuffix(" HU")
+        self._lv_thr_spin.setKeyboardTracking(False)   # emit only on commit
+        self._lv_thr_spin.setToolTip(
+            t("Pixels with HU at/above this value are taken as blood pool; "
+              "editing re-runs the auto extraction"))
+        self._lv_thr_spin.valueChanged.connect(self._lv_thr_changed)
+        self._lv_thr_lbl.setVisible(False)
+        self._lv_thr_spin.setVisible(False)
+        row.addWidget(self._lv_thr_lbl)
+        row.addWidget(self._lv_thr_spin)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
@@ -5472,6 +5489,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                 traceback.format_exc() or repr(exc))
         return True
 
+    def _lv_thr_changed(self, val) -> None:
+        """心室内腔CT値閾値 spinbox → set the HU threshold and re-run the auto
+        short-axis extraction (keeps the current level; no summary dialog)."""
+        lv = self._lv
+        if lv is None or lv.get("auto") is None:
+            return
+        lv["auto_thr"] = float(val)
+        try:
+            self._lv_auto_run(announce=False)
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                self.window(), t("LV EF (auto-run error)"),
+                traceback.format_exc() or repr(exc))
+
     def _lv_sample_sax(self, ax, along, half_mm=45.0, step=0.5):
         """HU image of the SHORT-AXIS plane *along* mm from the apex, centred on
         the axis. Returns (hu, o, ex, ey, step, n); pixel (row i, col j) maps to
@@ -5487,9 +5520,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         hu = self._trilinear_grid(P.reshape(-1, 3)).reshape(n, n)
         return hu, o, ex, ey, step, n
 
-    def _lv_auto_run(self):
+    def _lv_auto_run(self, announce=True):
         """Build the apex→base axis, then auto-trace the cavity on the N non-apex
-        short-axis levels and enter the paging display (left = short axis)."""
+        short-axis levels and enter the paging display (left = short axis). On a
+        threshold re-run (*announce* False) the current level and the long-axis
+        reference view are kept and the summary dialog is suppressed."""
         from PyQt6.QtWidgets import QMessageBox
         from multi_dicomviewer.core.lv_axis import LVAxis
         from multi_dicomviewer.core.lv_autotrace import auto_cavity_contour
@@ -5541,28 +5576,44 @@ class CTViewer(CPRMixin, AbstractViewer):
                               + (float(cy) - n / 2.0) * step * ey))
                            for (cx, cy) in cnt]
         sa = "A" if lv["pane"] == "B" else "B"
-        lv["auto"] = {"level": 0, "n": N, "L": L, "contours": contours,
-                      "pane": sa, "tgt": tgt, "fitted": False}
-        # Right (long-axis) pane: reslice to the apex→base long axis (meridian 0)
-        # so it stays a stable reference while the left pane pages levels.
-        la = lv["pane"]
-        u, v, nrm = self._ortho(new_ax.meridian_dir(0.0), new_ax.axis)
-        self._frame[la] = (u, v, nrm)
-        self._pc[la] = new_ax.apex + 0.5 * L * new_ax.axis
-        self._cross_ang[la] = 0.0
-        self.set_side("Bi")
-        # Open on the first level that actually has a contour (skip the empty
-        # apex) so a result is visible immediately.
-        start = min(contours) if contours else 0
+        prev = lv.get("auto")
+        lv["auto"] = {"level": (prev["level"] if prev else 0),
+                      "n": N, "L": L, "contours": contours, "pane": sa,
+                      "tgt": tgt, "fitted": bool(prev and prev.get("fitted"))}
+        if prev is None:
+            # First run: reslice the right (long-axis) pane to the apex→base long
+            # axis (meridian 0) as a stable reference while the left pane pages.
+            la = lv["pane"]
+            u, v, nrm = self._ortho(new_ax.meridian_dir(0.0), new_ax.axis)
+            self._frame[la] = (u, v, nrm)
+            self._pc[la] = new_ax.apex + 0.5 * L * new_ax.axis
+            self._cross_ang[la] = 0.0
+            self.set_side("Bi")
+        # Show the current level (kept across re-runs); on the first run open on
+        # the first level that actually has a contour (skip the empty apex).
+        if prev is not None:
+            start = prev["level"]
+        else:
+            start = min(contours) if contours else 0
         self._lv_auto_show_level(start)
-        msg = t("Auto-traced {ok}/{n} short-axis levels.").format(
-            ok=len(contours), n=N)
+        # Reveal + sync the threshold spinbox (without re-triggering a run).
         if thr is not None:
-            msg += "\n" + t("Threshold HU ≥ {v:.0f}.").format(v=thr)
-        if fails:
-            msg += "\n" + t("Not found: {f}").format(f=", ".join(map(str, fails)))
-        msg += "\n" + t("Use the Prev/Next plane buttons to page the levels.")
-        QMessageBox.information(self.window(), t("LV EF"), msg)
+            self._lv_thr_spin.blockSignals(True)
+            self._lv_thr_spin.setValue(int(round(thr)))
+            self._lv_thr_spin.blockSignals(False)
+            self._lv_thr_lbl.setVisible(True)
+            self._lv_thr_spin.setVisible(True)
+        if announce:
+            msg = t("Auto-traced {ok}/{n} short-axis levels.").format(
+                ok=len(contours), n=N)
+            if thr is not None:
+                msg += "\n" + t("Threshold HU ≥ {v:.0f}.").format(v=thr)
+            if fails:
+                msg += "\n" + t("Not found: {f}").format(
+                    f=", ".join(map(str, fails)))
+            msg += "\n" + t("Fine-tune with the 心室内腔CT値閾値 box; "
+                            "page levels with Prev/Next plane.")
+            QMessageBox.information(self.window(), t("LV EF"), msg)
 
     def _lv_auto_show_level(self, k) -> None:
         """Show short-axis level *k* (0 = apex … N = base) on the LEFT pane with
@@ -5635,6 +5686,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["base_await"] = False
         lv["auto_thr"] = None
         lv["thr_await"] = False
+        self._lv_thr_lbl.setVisible(False)
+        self._lv_thr_spin.setVisible(False)
         for key in ("A", "B"):
             self._measures[key] = [q for q in self._measures.get(key, [])
                                    if not q.get("_auto")]
@@ -7085,6 +7138,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Leave LV mode entirely, restoring the normal MPR view."""
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
+        if self._lv is not None:
+            self._lv_auto_clear()          # drop auto overlays/marker + hide box
         self._lv_reset_undo()
         # Remove the on-screen LV border traces (kept in the model for volume).
         for k in ("A", "B"):
