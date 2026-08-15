@@ -5419,7 +5419,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self.window(), t("LV EF"),
                     t("Click the BASE point on the long-axis (right) image."))
                 return
-            self._lv_auto_run()
+            # Base already set → (re)pick the HU threshold reference so the
+            # cavity extraction hugs the bright blood pool. Pressing Auto again
+            # re-picks the threshold and re-runs (easy tuning).
+            lv["thr_await"] = True
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Click a threshold reference point in the cavity — pixels "
+                  "with HU ABOVE it are taken as blood pool (lumen)."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(
@@ -5427,8 +5434,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 traceback.format_exc() or repr(exc))
 
     def _lv_place_base(self, which, sx, sy) -> bool:
-        """Place the BASE point (armed by the first Auto press) at the clicked
-        long-axis point, then run the short-axis auto-extraction."""
+        """Place the BASE point (armed by the first Auto press), then arm the
+        threshold-reference click."""
+        from PyQt6.QtWidgets import QMessageBox
         lv = self._lv
         if lv is None or not lv.get("base_await") or which != lv.get("pane"):
             return False
@@ -5436,6 +5444,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
         lv["base_pt"] = np.array([vol[0], vol[1], vol[2]], dtype=float)
         lv["base_await"] = False
+        lv["thr_await"] = True
+        QMessageBox.information(
+            self.window(), t("LV EF"),
+            t("Click a threshold reference point in the cavity — pixels with "
+              "HU ABOVE it are taken as blood pool (lumen)."))
+        return True
+
+    def _lv_place_thr(self, which, sx, sy) -> bool:
+        """Sample the HU at the clicked point as the extraction threshold, then
+        run the short-axis auto-extraction with it."""
+        lv = self._lv
+        if lv is None or not lv.get("thr_await"):
+            return False
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        lv["auto_thr"] = float(self._trilinear_grid(P.reshape(1, 3))[0])
+        lv["thr_await"] = False
         try:
             self._lv_auto_run()
         except Exception as exc:                        # noqa: BLE001
@@ -5500,11 +5526,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         m.axis = new_ax
         # Auto-trace each non-apex short-axis level.
         N = self._LV_AUTO_N
+        thr = lv.get("auto_thr")                 # user HU threshold (None = Otsu)
         contours, fails = {}, []
         for k in range(1, N + 1):
             along = (k / float(N)) * L
             hu, o, ex, ey, step, n = self._lv_sample_sax(new_ax, along)
-            cnt = auto_cavity_contour(hu, (n // 2, n // 2),
+            cnt = auto_cavity_contour(hu, (n // 2, n // 2), thr=thr,
                                       roi_radius_px=n * 0.48, n_points=64)
             if cnt is None:
                 fails.append(k)
@@ -5530,6 +5557,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_auto_show_level(start)
         msg = t("Auto-traced {ok}/{n} short-axis levels.").format(
             ok=len(contours), n=N)
+        if thr is not None:
+            msg += "\n" + t("Threshold HU ≥ {v:.0f}.").format(v=thr)
         if fails:
             msg += "\n" + t("Not found: {f}").format(f=", ".join(map(str, fails)))
         msg += "\n" + t("Use the Prev/Next plane buttons to page the levels.")
@@ -5604,6 +5633,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["auto"] = None
         lv["base_pt"] = None
         lv["base_await"] = False
+        lv["auto_thr"] = None
+        lv["thr_await"] = False
         for key in ("A", "B"):
             self._measures[key] = [q for q in self._measures.get(key, [])
                                    if not q.get("_auto")]
@@ -5634,6 +5665,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
                     "auto": None, "base_pt": None, "base_await": False,
+                    "auto_thr": None, "thr_await": False,
                     "prev_side": self.current_side()}
         self._lv_reset_undo()                        # fresh Ctrl+Z stack
         self._lv_btn.setChecked(True)               # internal mode flag
@@ -5907,6 +5939,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             if shift or which != lv.get("pane"):
                 return None
             return "place" if self._lv_place_base(which, sx, sy) else None
+        if lv.get("thr_await"):                        # Auto armed a threshold click
+            if shift:
+                return None
+            return "place" if self._lv_place_thr(which, sx, sy) else None
         if lv.get("phase") == "apex" and lv.get("apex_target") is not None:
             if shift:                               # adjust the view, don't place
                 return None
