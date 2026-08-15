@@ -3760,7 +3760,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         meas_lines = ([] if self._results_hidden
                       else [self._metrics_text(key, m)
                             for m in self._measures[key]
-                            if m.get("_lv") is None])
+                            if m.get("_lv") is None and not m.get("_auto")])
         lines = self._lv_status_lines() + meas_lines
         self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
         # Confine the result block to ~40% width (right) by word-wrapping it to
@@ -5422,7 +5422,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
         lv["base_pt"] = np.array([vol[0], vol[1], vol[2]], dtype=float)
         lv["base_await"] = False
-        self._lv_auto_run()
+        try:
+            self._lv_auto_run()
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(
+                self.window(), t("LV EF (auto-run error)"),
+                traceback.format_exc() or repr(exc))
         return True
 
     def _lv_sample_sax(self, ax, along, half_mm=45.0, step=0.5):
@@ -5503,12 +5510,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pc[la] = new_ax.apex + 0.5 * L * new_ax.axis
         self._cross_ang[la] = 0.0
         self.set_side("Bi")
-        self._lv_auto_show_level(0)
+        # Open on the first level that actually has a contour (skip the empty
+        # apex) so a result is visible immediately.
+        start = min(contours) if contours else 0
+        self._lv_auto_show_level(start)
+        msg = t("Auto-traced {ok}/{n} short-axis levels.").format(
+            ok=len(contours), n=N)
         if fails:
-            QMessageBox.information(
-                self.window(), t("LV EF"),
-                t("Auto-traced {ok}/{n} short-axis levels. Not found: {f}")
-                .format(ok=len(contours), n=N, f=", ".join(map(str, fails))))
+            msg += "\n" + t("Not found: {f}").format(f=", ".join(map(str, fails)))
+        msg += "\n" + t("Use the Prev/Next plane buttons to page the levels.")
+        QMessageBox.information(self.window(), t("LV EF"), msg)
 
     def _lv_auto_show_level(self, k) -> None:
         """Show short-axis level *k* (0 = apex … N = base) on the LEFT pane with
@@ -6255,7 +6266,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Auto short-axis mode: ◀ ▶ pages the N+1 levels (apex + N) on the LEFT
         # short-axis pane.
         if self._lv.get("auto") is not None:
-            self._lv_auto_show_level(self._lv["auto"]["level"] + int(delta))
+            try:
+                self._lv_auto_show_level(
+                    self._lv["auto"]["level"] + int(delta))
+            except Exception as exc:                    # noqa: BLE001
+                import traceback
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    self.window(), t("LV EF (auto paging error)"),
+                    traceback.format_exc() or repr(exc))
             return
         # Short-axis mode: ◀ ▶ ROTATE — step the meridian. The LONG-AXIS pane
         # (right) reslices to that meridian plane (so its border can be edited
