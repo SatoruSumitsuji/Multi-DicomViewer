@@ -1309,6 +1309,20 @@ class _Pane:
             lapx.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lapx)
         self.lv_apex_actor = lapx
+        # LV auto short-axis BASE marker (blue) — the apex→base end point the
+        # user clicks; drawn on the long-axis pane opposite the red apex.
+        self.lv_base_mapper = vtkPolyDataMapper()
+        self.lv_base_mapper.SetInputData(vtkPolyData())
+        self.lv_base_mapper.ScalarVisibilityOn()
+        self.lv_base_mapper.SetScalarModeToUseCellData()
+        self.lv_base_mapper.SetColorModeToDirectScalars()
+        lbase = vtkActor()
+        lbase.SetMapper(self.lv_base_mapper)
+        lbase.GetProperty().SetPointSize(15.0)
+        if hasattr(lbase.GetProperty(), "SetRenderPointsAsSpheres"):
+            lbase.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(lbase)
+        self.lv_base_actor = lbase
         # Highlighted SAX crossing (the one that follows an active long-axis
         # edit) — green, TWICE the yellow crossing-dot radius (own actor so it
         # can be a larger point).
@@ -5593,6 +5607,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for key in ("A", "B"):
             self._measures[key] = [q for q in self._measures.get(key, [])
                                    if not q.get("_auto")]
+            self.pane[key].lv_base_mapper.SetInputData(vtkPolyData())
             self._redraw_meas(key)
 
     # ------------------------------------------------ LV EF (Phase 1)
@@ -7189,6 +7204,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv = self._lv
         if lv is None or lv["model"].axis is None:
             return
+        # Auto short-axis BASE marker (blue) on the long-axis pane — set or
+        # clear it here so it tracks every LV redraw like the apex marker.
+        base = lv.get("base_pt") if lv.get("auto") is not None else None
+        if base is not None and key == lv.get("pane"):
+            p.lv_base_mapper.SetInputData(
+                _lv_pts_pd([self._world3d_to_out(key, np.asarray(base, float))],
+                           [(60, 150, 255)], z=0.95))
+        else:
+            p.lv_base_mapper.SetInputData(vtkPolyData())
         if key not in (lv.get("pane"), lv.get("sax_pane")):
             return
         tgt = lv.get("pass")
