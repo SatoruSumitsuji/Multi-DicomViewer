@@ -897,18 +897,27 @@ class ViewerPane(QFrame):
         self.activated.emit(self)
 
     def mouseDoubleClickEvent(self, _event) -> None:
-        # Double-click landing directly on the pane frame → 1×1. (Child
-        # widgets — title band, image — are handled in eventFilter.) Only
-        # outside 1×1, so a double-click that commits a measurement in the
-        # maximised view isn't hijacked.
-        if not self._full_bleed:
-            self.maximize_requested.emit(self)
+        # Double-clicking the bare pane frame does NOT maximise: switching to
+        # 1×1 is reserved for a double-click on the header band ("● Pane N …",
+        # handled in eventFilter). A double-click on the image must stay with
+        # the viewer (e.g. move the CT centreline) instead of collapsing the
+        # multi-pane layout.
+        pass
 
-    def _is_titlebar_button(self, obj) -> bool:
-        """True only for the title-bar ✕ button — it keeps its own click
-        action. Everything else, including the dark title band and its
-        draggable label, double-clicks to 1×1 (window-title metaphor)."""
-        return obj is self._close_btn
+    def _is_titlebar(self, obj) -> bool:
+        """True if *obj* is the pane's header band ("● Pane N …") or a widget
+        inside it — EXCEPT the ✕ close button (which keeps its own click
+        action). Only a double-click on the header maximises to 1×1; a
+        double-click on the image or controls must fall through to the viewer
+        (so it moves the CT centreline instead of collapsing the layout)."""
+        if obj is self._close_btn:
+            return False
+        w = obj
+        while isinstance(w, QWidget):
+            if w is self._title_bar:
+                return True
+            w = w.parentWidget()
+        return False
 
     def _install_dnd(self, widget) -> None:
         """Make *widget* and every descendant forward drags to this pane.
@@ -994,11 +1003,13 @@ class ViewerPane(QFrame):
             # must still reach the viewer (measure, crosshair, etc.).
             self.activated.emit(self)
         elif t == QEvent.Type.MouseButtonDblClick:
-            # Double-click anywhere on the pane (the dark title band, the
-            # image, the placeholder) maximises to 1×1 — only the 1×1 / ✕
-            # buttons are exempt. Suppressed in 1×1 so viewer double-click
-            # actions (e.g. committing a polygon measurement) still work.
-            if not self._full_bleed and not self._is_titlebar_button(obj):
+            # Maximise to 1×1 ONLY when the double-click lands on the header
+            # band ("● Pane N …"). A double-click on the image / controls /
+            # placeholder must fall through to the viewer (e.g. move the CT
+            # centreline intersection) rather than collapse the multi-pane
+            # view. Suppressed in 1×1 so viewer double-click actions (e.g.
+            # committing a polygon measurement) still work.
+            if not self._full_bleed and self._is_titlebar(obj):
                 self.maximize_requested.emit(self)
                 return True
         return super().eventFilter(obj, event)
