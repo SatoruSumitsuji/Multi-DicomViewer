@@ -2466,7 +2466,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         contour = ph == "contour"
         for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
                   self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-                  self._lv_stl_btn):
+                  self._lv_stl_btn, self._lv_auto_btn):
             b.setEnabled(contour)
         # CalcVol: blue once a volume has been computed for the CURRENT trace,
         # grey again after any edit (result stale). See lv["vol_done"].
