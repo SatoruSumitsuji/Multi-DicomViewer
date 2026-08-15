@@ -5550,18 +5550,40 @@ class CTViewer(CPRMixin, AbstractViewer):
                     pass
 
     def _lv_place_apex(self, which, sx, sy) -> bool:
-        """Place the ACTIVE pass's apex at the clicked point (phase 'apex'),
-        constrained to the pass's long axis, then start tracing. Returns True if
-        the click was consumed."""
+        """Place the ACTIVE pass's apex at the clicked point (phase 'apex') and
+        pin the long axis to pass THROUGH it, then start tracing. Returns True if
+        the click was consumed.
+
+        The apex marks the true ventricular tip, so it must land exactly under
+        the cursor — NOT be projected onto the axis line set before the tip was
+        known (that made a tip clicked off the axis snap sideways onto it, the
+        reported "心尖部点がズレる"). We keep the view-aligned axis DIRECTION and
+        radial reference but move the axis ORIGIN to the clicked point, so the
+        apex stays ON the rotation axis (meridians converge there) while sitting
+        where the user clicked."""
         lv = self._lv
         if (lv is None or lv.get("phase") != "apex"
                 or lv.get("apex_target") is None or which != lv.get("pane")):
             return False
         tgt = lv["apex_target"]
-        P = self._lv_apex_on_axis(tgt, sx, sy)
-        if P is None:
+        ax = lv["model"]._axis_for(tgt)
+        if ax is None:
             return False
+        # Full clicked 3-D point in the long-axis plane (u,v through _pc).
+        wx, wy = self._disp_to_world(which, sx, sy)
+        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
+        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        # Re-pin the axis through the tip: same direction + radial0, new origin.
+        new_ax = type(ax).from_frame(P, ax.axis, ax.radial0)
+        if tgt == "endo":
+            lv["model"].endo_axis = new_ax
+        else:
+            lv["model"].epi_axis = new_ax
+        lv["model"].axis = new_ax
         lv["model"].set_apex_point(tgt, P)
+        # Snap the CrossLine centre onto the tip so the crosshair coincides with
+        # the axis through it (crosshair, axis and apex marker all agree).
+        self._center = P.copy()
         self._lv_result_lines = []                 # invalidate any volume result
         lv["apex_target"] = None
         self._lv_enter_contour()                   # apex set → trace this pass
