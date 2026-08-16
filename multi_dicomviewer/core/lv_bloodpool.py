@@ -94,16 +94,30 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, planes, thr, seed_xyz,
     lo_a, hi_a = anchors.min(0), anchors.max(0)
     spac = np.array([sz, sy, sx])
 
-    # Adaptive bounding box: the LV cavity extends laterally well past the
-    # on-axis anchors by an unknown radius, so grow the work sub-box until the
-    # connected blood component no longer touches a (non-volume-edge) face.
-    pad = float(pad_mm)
-    comp = None
-    z0 = y0 = x0 = 0
-    while True:
-        p = np.array([pad, pad, pad]) / spac
+    # Safety cap on the work sub-box so a threshold/plane mistake that lets the
+    # cavity 'leak' into the aorta/whole heart can't grow the box until it
+    # exhausts memory and hard-crashes the app. When the region is genuinely
+    # small (correct planes) the box stays well under this.
+    MAX_VOXELS = 40_000_000
+
+    def _box(pad_val):
+        p = np.array([pad_val, pad_val, pad_val]) / spac
         lo = np.maximum(np.floor(lo_a - p).astype(int), 0)
         hi = np.minimum(np.ceil(hi_a + p).astype(int), [nz, ny, nx])
+        return lo, hi, int(np.prod(np.maximum(hi - lo, 0)))
+
+    # Adaptive bounding box: the LV cavity extends laterally past the on-axis
+    # anchors by an unknown radius, so grow until the connected blood component
+    # no longer touches a (non-volume-edge) face — but never past MAX_VOXELS.
+    pad = float(pad_mm)
+    lo, hi, box = _box(pad)
+    while box > MAX_VOXELS and pad > 1.0:               # rare: shrink to fit
+        pad *= 0.5
+        lo, hi, box = _box(pad)
+    comp = None
+    z0 = y0 = x0 = 0
+    clamped = False
+    while True:
         if np.any(hi <= lo):
             return None
         z0, y0, x0 = (int(v) for v in lo)
@@ -127,20 +141,23 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, planes, thr, seed_xyz,
         if not mask[si]:
             return None                                 # seed off the blood pool
         comp = _seed_component(mask, si)
-        # Grow if the component reaches a sub-box face that is not the volume
-        # edge (i.e. it was clipped by the box, not by anatomy).
         touch = ((comp[0].any() and z0 > 0) or (comp[-1].any() and z1 < nz)
                  or (comp[:, 0].any() and y0 > 0) or (comp[:, -1].any() and y1 < ny)
                  or (comp[:, :, 0].any() and x0 > 0)
                  or (comp[:, :, -1].any() and x1 < nx))
-        if touch and pad < 80.0:
-            pad = min(80.0, pad * 1.8)
-            continue
-        break
+        if not touch or pad >= 60.0:
+            clamped = bool(touch)
+            break
+        nlo, nhi, nbox = _box(min(60.0, pad * 1.8))
+        if nbox > MAX_VOXELS:                           # growing would blow up
+            clamped = True                              # → stop, flag a leak
+            break
+        pad = min(60.0, pad * 1.8)
+        lo, hi = nlo, nhi
 
     count = int(comp.sum())
     voxel_ml = (sx * sy * sz) / 1000.0
     return {"volume_ml": count * voxel_ml, "count": count,
-            "voxel_ml": voxel_ml, "bbox": (z0, comp.shape[0] + z0,
-                                           y0, comp.shape[1] + y0,
-                                           x0, comp.shape[2] + x0)}
+            "voxel_ml": voxel_ml, "clamped": clamped,
+            "bbox": (z0, comp.shape[0] + z0, y0, comp.shape[1] + y0,
+                     x0, comp.shape[2] + x0)}
