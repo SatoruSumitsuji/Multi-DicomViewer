@@ -2472,19 +2472,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thr_spin.setVisible(showthr)
         self._lvv_update_ef()
 
-    def _lvv_toggle(self) -> None:
-        if self._lvv is None:
-            if self._image is None:
-                return
-            if self._lv is not None:              # leave contour LV mode first
-                self._lv_exit()
-            self._lvv = {"apex": None, "aortic": None, "mitral": None,
-                         "thr": None, "seed": None, "await": None,
-                         "last_ml": None}
-        else:
-            self._lvv_clear_markers()
-            self._lvv = None
-        self._lvv_sync()
+    def _lvv_toggle(self, *args) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            if self._lvv is None:
+                if self._image is None:
+                    QMessageBox.information(
+                        self.window(), t("LV Vol"),
+                        t("Load a CT first (no volume in this pane)."))
+                    return
+                if self._lv is not None:          # leave contour LV mode first
+                    self._lv_exit()
+                self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                             "thr": None, "seed": None, "await": None,
+                             "last_ml": None}
+            else:
+                self._lvv_clear_markers()
+                self._lvv = None
+            self._lvv_sync()
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (toggle error)"),
+                                 traceback.format_exc() or repr(exc))
 
     def _lvv_arm(self, what) -> None:
         """Arm an apex / threshold reference click."""
