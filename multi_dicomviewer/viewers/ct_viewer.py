@@ -2603,6 +2603,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
         m["_lvv"] = valve
         self._redraw_meas(which)
+        # Turn Measure OFF so the user can navigate to the next landmark without
+        # a click starting a new ellipse (they re-arm Measure→Ellipse for the
+        # next valve).
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
         if valve == "aortic":
             self._lvv["step"] = "mv"
             self._lvv_sync()
@@ -2648,6 +2654,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
+            if res.get("clamped"):
+                QMessageBox.warning(
+                    self.window(), t("LV Vol"),
+                    t("The blood region reached the size limit — it may be "
+                      "leaking past the valve planes (into the aorta/atrium) "
+                      "or the threshold is too low. The volume ({v:.1f} mL) is "
+                      "likely an OVER-estimate; re-check the valve planes and "
+                      "raise 心室内腔CT値閾値.").format(v=res["volume_ml"]))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (error)"),
