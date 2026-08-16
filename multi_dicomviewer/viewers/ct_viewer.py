@@ -750,16 +750,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
-        # LV blood-pool volume: while an apex / threshold point is armed, a
-        # RIGHT-click offers "confirm here" (left double-click is reserved for
-        # recentring the crosshair, so it can't place the point).
-        if (e.button() == Qt.MouseButton.RightButton
-                and self._owner._lvv is not None
-                and self._owner._lvv.get("await") in ("apex", "thr")):
-            self._owner._lvv_context(
-                self._which, e.position().x(), e.position().y(),
-                e.globalPosition().toPoint())
-            return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
         # first, in any tool/measure mode, since it's a fixed screen target.
@@ -2399,8 +2389,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_start_btn.clicked.connect(self._lvv_toggle)
         row.addWidget(self._lvv_start_btn)
         self._lvv_apex_btn = FitButton(t("Apex"))
-        self._lvv_apex_btn.setHelpToolTip(t("Click the LV apex on the image"))
-        self._lvv_apex_btn.clicked.connect(lambda: self._lvv_arm("apex"))
+        self._lvv_apex_btn.setHelpToolTip(
+            t("Confirm the LV apex at the crosshair (move it there first)"))
+        self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
         row.addWidget(self._lvv_apex_btn)
         self._lvv_aov_btn = FitButton(t("AoV plane"))
         self._lvv_aov_btn.setHelpToolTip(
@@ -2416,9 +2407,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lvv_mv_btn)
         self._lvv_thr_btn = FitButton(t("Threshold"))
         self._lvv_thr_btn.setHelpToolTip(
-            t("Click a reference point in the cavity — its HU sets the blood "
-              "threshold (also the connectivity seed)"))
-        self._lvv_thr_btn.clicked.connect(lambda: self._lvv_arm("thr"))
+            t("Confirm the blood threshold from the crosshair HU (move the "
+              "crosshair into the cavity first); also the connectivity seed"))
+        self._lvv_thr_btn.clicked.connect(self._lvv_confirm_thr)
         row.addWidget(self._lvv_thr_btn)
         self._lvv_thr_lbl = QLabel(t("心室内腔CT値閾値"))
         self._lvv_thr_spin = QSpinBox()
@@ -2520,12 +2511,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._lv is not None:          # leave contour LV mode first
                     self._lv_exit()
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
-                             "thr": None, "seed": None, "await": "apex",
+                             "thr": None, "seed": None,
                              "step": "apex", "last_ml": None}
                 self._lvv_sync()
                 self._lvv_prompt(
-                    t("Specify the LV apex: right-click it on the image and "
-                      "choose Confirm (single-click drags still navigate)."))
+                    t("Move the crosshair onto the LV apex (left double-click "
+                      "recentres), then press the Apex button."))
                 return
             else:
                 self._lvv_clear_markers()
@@ -2536,79 +2527,54 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.critical(self.window(), t("LV Vol (toggle error)"),
                                  traceback.format_exc() or repr(exc))
 
-    def _lvv_arm(self, what) -> None:
-        """Arm an apex / threshold reference click."""
-        from PyQt6.QtWidgets import QMessageBox
-        if self._lvv is None:
-            return
-        self._lvv["await"] = what
-        msg = (t("Right-click the LV apex and choose Confirm.") if what == "apex"
-               else t("Right-click a reference point inside the cavity and "
-                      "choose Confirm (its HU sets the blood threshold)."))
-        QMessageBox.information(self.window(), t("LV Vol"), msg)
-
-    def _lvv_context(self, which, sx, sy, gpos) -> None:
-        """Right-click menu while an apex / threshold point is armed: confirm the
-        point at the click (left double-click is reserved for recentring)."""
-        from PyQt6.QtWidgets import QMenu
+    def _lvv_confirm_apex(self) -> None:
+        """Apex button → confirm the apex at the current crosshair centre."""
         lvv = self._lvv
-        if lvv is None or lvv.get("await") not in ("apex", "thr"):
+        if lvv is None or self._center is None:
             return
-        what = lvv["await"]
-        menu = QMenu(self.pane[which].canvas)
-        act_ok = menu.addAction(
-            t("Confirm apex here") if what == "apex"
-            else t("Confirm threshold reference here"))
-        menu.addAction(t("Cancel"))
-        if menu.exec(gpos) is act_ok:
-            self._lvv_press(which, sx, sy)
+        P = np.asarray(self._center, float).copy()
+        lvv["apex"] = P
+        self._lvv_add_marker("apex", P, "#ff4040")
+        lvv["step"] = "aov"
+        self._lvv_sync()
+        self._lvv_prompt(
+            t("Identify the aortic valve: draw an Ellipse on the AoV annulus "
+              "(Measure→Ellipse), then press 'AoV plane'."))
 
-    def _lvv_press(self, which, sx, sy) -> str | None:
-        """Consume an armed apex / threshold point. Returns 'place' if used."""
+    def _lvv_confirm_thr(self) -> None:
+        """Threshold button → set the blood threshold (and connectivity seed)
+        from the HU at the current crosshair centre."""
         lvv = self._lvv
-        if lvv is None or not lvv.get("await"):
-            return None
-        wx, wy = self._disp_to_world(which, sx, sy)
-        vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
-        P = np.array([vol[0], vol[1], vol[2]], dtype=float)
-        what = lvv["await"]
-        lvv["await"] = None
-        if what == "apex":
-            lvv["apex"] = P
-            self._lvv_add_marker("apex", which, P, "#ff4040")
-            lvv["step"] = "aov"
-            self._lvv_sync()
-            self._lvv_prompt(
-                t("Identify the aortic valve: draw an Ellipse on the AoV "
-                  "annulus (Measure→Ellipse), then press 'AoV plane'."))
-        else:                                     # threshold reference + seed
-            lvv["seed"] = P
-            hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
-            lvv["thr"] = hu
-            self._lvv_thr_spin.blockSignals(True)
-            self._lvv_thr_spin.setValue(int(round(hu)))
-            self._lvv_thr_spin.blockSignals(False)
-            self._lvv_add_marker("seed", which, P, "#40c0ff")
-            lvv["step"] = "ready"
-            self._lvv_sync()
-            self._lvv_prompt(
-                t("Threshold set. Fine-tune 心室内腔CT値閾値 if needed, then "
-                  "press CalcVol."))
-        return "place"
+        if lvv is None or self._center is None:
+            return
+        P = np.asarray(self._center, float).copy()
+        lvv["seed"] = P
+        hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
+        lvv["thr"] = hu
+        self._lvv_thr_spin.blockSignals(True)
+        self._lvv_thr_spin.setValue(int(round(hu)))
+        self._lvv_thr_spin.blockSignals(False)
+        self._lvv_add_marker("seed", P, "#40c0ff")
+        lvv["step"] = "ready"
+        self._lvv_sync()
+        self._lvv_prompt(
+            t("Threshold set to {v:.0f} HU. Fine-tune 心室内腔CT値閾値 if "
+              "needed, then press CalcVol.").format(v=hu))
 
-    def _lvv_add_marker(self, tag, which, P3, color) -> None:
-        """Add a 3-D-anchored marker (apex / seed). Stored with pts3d so it is
-        re-projected onto the current plane on every redraw (stays fixed to the
-        anatomy when the MPR is panned / recentred / rotated)."""
+    def _lvv_add_marker(self, tag, P3, color) -> None:
+        """Add a 3-D-anchored marker (apex / seed) on BOTH panes. Stored with
+        pts3d so it is re-projected onto the current plane on every redraw (stays
+        fixed to the anatomy when the MPR is panned / recentred / rotated)."""
         P3 = np.asarray(P3, float)
-        self._measures[which] = [m for m in self._measures.get(which, [])
-                                 if m.get("_lvv") != tag]
-        wx, wy = self._world3d_to_out(which, P3)
-        self._meas_seq += 1
-        self._measures[which].append(
-            {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
-             "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
-        self._redraw_meas(which)
+        for which in ("A", "B"):
+            self._measures[which] = [m for m in self._measures.get(which, [])
+                                     if m.get("_lvv") != tag]
+            wx, wy = self._world3d_to_out(which, P3)
+            self._meas_seq += 1
+            self._measures[which].append(
+                {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
+                 "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
+            self._redraw_meas(which)
 
     def _lvv_capture_valve(self, valve) -> None:
         """Capture the most-recent Ellipse on the active pane as this valve's
@@ -2645,12 +2611,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                   "an Ellipse on the MV annulus, then press 'MV plane'."))
         else:
             self._lvv["step"] = "thr"
-            self._lvv["await"] = "thr"
             self._lvv_sync()
             self._lvv_prompt(
-                t("Mitral plane captured. Now right-click a reference point "
-                  "inside the cavity and choose Confirm to set the blood "
-                  "threshold."))
+                t("Mitral plane captured. Move the crosshair into the cavity, "
+                  "then press the Threshold button to set the blood threshold."))
 
     def _lvv_thr_changed(self, val) -> None:
         if self._lvv is None:
