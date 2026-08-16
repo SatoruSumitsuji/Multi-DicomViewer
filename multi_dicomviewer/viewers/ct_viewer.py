@@ -2539,7 +2539,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lvv["await"] = None
         if what == "apex":
             lvv["apex"] = P
-            self._lvv_add_marker("apex", which, wx, wy, "#ff4040")
+            self._lvv_add_marker("apex", which, P, "#ff4040")
         else:                                     # threshold reference + seed
             lvv["seed"] = P
             hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
@@ -2547,17 +2547,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_thr_spin.blockSignals(True)
             self._lvv_thr_spin.setValue(int(round(hu)))
             self._lvv_thr_spin.blockSignals(False)
-            self._lvv_add_marker("seed", which, wx, wy, "#40c0ff")
+            self._lvv_add_marker("seed", which, P, "#40c0ff")
         self._lvv_sync()                           # refresh 'done' colours
         return "place"
 
-    def _lvv_add_marker(self, tag, which, wx, wy, color) -> None:
+    def _lvv_add_marker(self, tag, which, P3, color) -> None:
+        """Add a 3-D-anchored marker (apex / seed). Stored with pts3d so it is
+        re-projected onto the current plane on every redraw (stays fixed to the
+        anatomy when the MPR is panned / recentred / rotated)."""
+        P3 = np.asarray(P3, float)
         self._measures[which] = [m for m in self._measures.get(which, [])
                                  if m.get("_lvv") != tag]
+        wx, wy = self._world3d_to_out(which, P3)
         self._meas_seq += 1
         self._measures[which].append(
             {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
-             "color": color, "_lvv": tag})
+             "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
         self._redraw_meas(which)
 
     def _lvv_capture_valve(self, valve) -> None:
@@ -3816,7 +3821,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._mode == "3D":
             for m in self._measures[key]:
                 p3 = m.get("pts3d")
-                if p3 and m["type"] == "polyline" and len(p3) == len(m["pts"]):
+                if (p3 and m["type"] in ("polyline", "point")
+                        and len(p3) == len(m["pts"])):
                     m["pts"] = [self._world3d_to_out(key, P) for P in p3]
             d = self._draft
             if (d is not None and d.get("pane") == key and d.get("pts3d")
