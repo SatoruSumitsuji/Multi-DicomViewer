@@ -779,15 +779,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
-        # LV blood-pool volume: consume an armed apex / threshold-reference
-        # click. Only consumes while armed, so drawing the valve Ellipse still
-        # works normally.
-        if (e.button() == Qt.MouseButton.LeftButton
-                and self._owner._lvv is not None
-                and self._owner._lvv.get("await")):
-            if self._owner._lvv_press(
-                    self._which, e.position().x(), e.position().y()) == "place":
-                return
+        # (LV blood-pool volume apex/threshold points are placed by DOUBLE-click
+        # — see mouseDoubleClickEvent — so single-click still navigates.)
         # LV apex points: place the two apex vertices (apex phase) or grab an
         # existing marker to drag it. Checked before Measure so a click near a
         # marker moves the apex instead of adding a trace point; _lv_apex_press
@@ -1013,6 +1006,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mouseDoubleClickEvent(self, e):
         _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        # LV blood-pool volume: a double-click COMMITS the armed apex / threshold
+        # point (single-click drags still navigate). Only while armed, so drawing
+        # the valve Ellipse is unaffected.
+        if (self._owner._lvv is not None
+                and self._owner._lvv.get("await") in ("apex", "thr")):
+            if self._owner._lvv_press(
+                    self._which, e.position().x(), e.position().y()) == "place":
+                return
         # Shift+double-click recentres even while Measuring (the trace follows
         # the moved image, see _recenter → _redraw_meas). A plain double-click
         # in Measure mode still finishes the polyline draft.
@@ -2471,8 +2472,18 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_sync(self) -> None:
         on = self._lvv is not None
         self._lvv_start_btn.setChecked(on)
-        for b in self._lvv_ctrl_btns:
-            b.setEnabled(on)
+        g = (lambda k: on and self._lvv.get(k) is not None)
+        apex_done, aov_done = g("apex"), g("aortic")
+        mv_done, thr_done = g("mitral"), g("thr")
+        # Wizard: enable only the next step (previous steps stay live for redo).
+        self._lvv_apex_btn.setEnabled(on)
+        self._lvv_aov_btn.setEnabled(on and apex_done)
+        self._lvv_mv_btn.setEnabled(on and aov_done)
+        self._lvv_thr_btn.setEnabled(on and mv_done)
+        self._lvv_calc_btn.setEnabled(on and thr_done)
+        self._lvv_ed_btn.setEnabled(on and thr_done)
+        self._lvv_es_btn.setEnabled(on and thr_done)
+        self._lvv_exit_btn.setEnabled(on)
 
         def _done(btn, is_set, color):
             """Colour *btn* when its landmark is set (still greys when off)."""
@@ -2483,15 +2494,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 btn.setStyleSheet(self._BTN_DIS)
 
-        g = (lambda k: on and self._lvv.get(k) is not None)
-        _done(self._lvv_apex_btn, g("apex"), "#d32f2f")     # apex red
-        _done(self._lvv_aov_btn, g("aortic"), "#b8860b")    # aortic amber
-        _done(self._lvv_mv_btn, g("mitral"), "#2b6cb0")     # mitral blue
-        _done(self._lvv_thr_btn, g("thr"), "#2e8b57")       # threshold green
-        showthr = g("thr")
-        self._lvv_thr_lbl.setVisible(showthr)
-        self._lvv_thr_spin.setVisible(showthr)
+        _done(self._lvv_apex_btn, apex_done, "#d32f2f")     # apex red
+        _done(self._lvv_aov_btn, aov_done, "#b8860b")       # aortic amber
+        _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
+        _done(self._lvv_thr_btn, thr_done, "#2e8b57")       # threshold green
+        self._lvv_thr_lbl.setVisible(thr_done)
+        self._lvv_thr_spin.setVisible(thr_done)
         self._lvv_update_ef()
+
+    def _lvv_prompt(self, text) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self.window(), t("LV Vol"), text)
 
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -2505,8 +2518,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._lv is not None:          # leave contour LV mode first
                     self._lv_exit()
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
-                             "thr": None, "seed": None, "await": None,
-                             "last_ml": None}
+                             "thr": None, "seed": None, "await": "apex",
+                             "step": "apex", "last_ml": None}
+                self._lvv_sync()
+                self._lvv_prompt(
+                    t("Specify the LV apex: double-click it on the image."))
+                return
             else:
                 self._lvv_clear_markers()
                 self._lvv = None
@@ -2522,9 +2539,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lvv is None:
             return
         self._lvv["await"] = what
-        msg = (t("Click the LV apex on the image.") if what == "apex"
-               else t("Click a reference point inside the cavity (its HU sets "
-                      "the blood threshold)."))
+        msg = (t("Double-click the LV apex on the image.") if what == "apex"
+               else t("Double-click a reference point inside the cavity (its HU "
+                      "sets the blood threshold)."))
         QMessageBox.information(self.window(), t("LV Vol"), msg)
 
     def _lvv_press(self, which, sx, sy) -> str | None:
@@ -2540,6 +2557,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if what == "apex":
             lvv["apex"] = P
             self._lvv_add_marker("apex", which, P, "#ff4040")
+            lvv["step"] = "aov"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Identify the aortic valve: draw an Ellipse on the AoV "
+                  "annulus (Measure→Ellipse), then press 'AoV plane'."))
         else:                                     # threshold reference + seed
             lvv["seed"] = P
             hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
@@ -2548,7 +2570,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_thr_spin.setValue(int(round(hu)))
             self._lvv_thr_spin.blockSignals(False)
             self._lvv_add_marker("seed", which, P, "#40c0ff")
-        self._lvv_sync()                           # refresh 'done' colours
+            lvv["step"] = "ready"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Threshold set. Fine-tune 心室内腔CT値閾値 if needed, then "
+                  "press CalcVol."))
         return "place"
 
     def _lvv_add_marker(self, tag, which, P3, color) -> None:
@@ -2592,11 +2618,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
         m["_lvv"] = valve
         self._redraw_meas(which)
-        self._lvv_sync()                          # refresh 'done' colours
-        QMessageBox.information(
-            self.window(), t("LV Vol"),
-            t("{v} plane captured.").format(
-                v=t("Aortic") if valve == "aortic" else t("Mitral")))
+        if valve == "aortic":
+            self._lvv["step"] = "mv"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Aortic plane captured. Now identify the mitral valve: draw "
+                  "an Ellipse on the MV annulus, then press 'MV plane'."))
+        else:
+            self._lvv["step"] = "thr"
+            self._lvv["await"] = "thr"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Mitral plane captured. Now double-click a reference point "
+                  "inside the cavity to set the blood threshold."))
 
     def _lvv_thr_changed(self, val) -> None:
         if self._lvv is None:
