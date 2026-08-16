@@ -2457,6 +2457,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_ed_btn,
             self._lvv_es_btn, self._lvv_exit_btn]
+        # Clear disabled-grey so the enabled/disabled state reads at a glance;
+        # Start turns green while the mode is active.
+        for b in self._lvv_ctrl_btns:
+            b.setStyleSheet(self._BTN_DIS)
+        self._lvv_start_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
         self._lvv_edv = None                 # persist across series (ED vs ES)
         self._lvv_esv = None
         self._lvv_sync()
@@ -2474,10 +2480,6 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
-        QMessageBox.information(                         # TEMP diagnostic
-            self.window(), "LVV DEBUG",
-            "Start fired. image=%s  session=%s"
-            % (self._image is not None, self._lvv is not None))
         try:
             if self._lvv is None:
                 if self._image is None:
