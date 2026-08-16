@@ -750,6 +750,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
+        # LV blood-pool volume: while an apex / threshold point is armed, a
+        # RIGHT-click offers "confirm here" (left double-click is reserved for
+        # recentring the crosshair, so it can't place the point).
+        if (e.button() == Qt.MouseButton.RightButton
+                and self._owner._lvv is not None
+                and self._owner._lvv.get("await") in ("apex", "thr")):
+            self._owner._lvv_context(
+                self._which, e.position().x(), e.position().y(),
+                e.globalPosition().toPoint())
+            return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
         # first, in any tool/measure mode, since it's a fixed screen target.
@@ -1006,14 +1016,6 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mouseDoubleClickEvent(self, e):
         _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        # LV blood-pool volume: a double-click COMMITS the armed apex / threshold
-        # point (single-click drags still navigate). Only while armed, so drawing
-        # the valve Ellipse is unaffected.
-        if (self._owner._lvv is not None
-                and self._owner._lvv.get("await") in ("apex", "thr")):
-            if self._owner._lvv_press(
-                    self._which, e.position().x(), e.position().y()) == "place":
-                return
         # Shift+double-click recentres even while Measuring (the trace follows
         # the moved image, see _recenter → _redraw_meas). A plain double-click
         # in Measure mode still finishes the polyline draft.
@@ -2522,7 +2524,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                              "step": "apex", "last_ml": None}
                 self._lvv_sync()
                 self._lvv_prompt(
-                    t("Specify the LV apex: double-click it on the image."))
+                    t("Specify the LV apex: right-click it on the image and "
+                      "choose Confirm (single-click drags still navigate)."))
                 return
             else:
                 self._lvv_clear_markers()
@@ -2539,13 +2542,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lvv is None:
             return
         self._lvv["await"] = what
-        msg = (t("Double-click the LV apex on the image.") if what == "apex"
-               else t("Double-click a reference point inside the cavity (its HU "
-                      "sets the blood threshold)."))
+        msg = (t("Right-click the LV apex and choose Confirm.") if what == "apex"
+               else t("Right-click a reference point inside the cavity and "
+                      "choose Confirm (its HU sets the blood threshold)."))
         QMessageBox.information(self.window(), t("LV Vol"), msg)
 
+    def _lvv_context(self, which, sx, sy, gpos) -> None:
+        """Right-click menu while an apex / threshold point is armed: confirm the
+        point at the click (left double-click is reserved for recentring)."""
+        from PyQt6.QtWidgets import QMenu
+        lvv = self._lvv
+        if lvv is None or lvv.get("await") not in ("apex", "thr"):
+            return
+        what = lvv["await"]
+        menu = QMenu(self.pane[which].canvas)
+        act_ok = menu.addAction(
+            t("Confirm apex here") if what == "apex"
+            else t("Confirm threshold reference here"))
+        menu.addAction(t("Cancel"))
+        if menu.exec(gpos) is act_ok:
+            self._lvv_press(which, sx, sy)
+
     def _lvv_press(self, which, sx, sy) -> str | None:
-        """Consume an armed apex / threshold click. Returns 'place' if used."""
+        """Consume an armed apex / threshold point. Returns 'place' if used."""
         lvv = self._lvv
         if lvv is None or not lvv.get("await"):
             return None
@@ -2629,8 +2648,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv["await"] = "thr"
             self._lvv_sync()
             self._lvv_prompt(
-                t("Mitral plane captured. Now double-click a reference point "
-                  "inside the cavity to set the blood threshold."))
+                t("Mitral plane captured. Now right-click a reference point "
+                  "inside the cavity and choose Confirm to set the blood "
+                  "threshold."))
 
     def _lvv_thr_changed(self, val) -> None:
         if self._lvv is None:
