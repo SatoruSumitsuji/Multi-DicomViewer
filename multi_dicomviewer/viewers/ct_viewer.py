@@ -2474,6 +2474,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(                         # TEMP diagnostic
+            self.window(), "LVV DEBUG",
+            "Start fired. image=%s  session=%s"
+            % (self._image is not None, self._lvv is not None))
         try:
             if self._lvv is None:
                 if self._image is None:
