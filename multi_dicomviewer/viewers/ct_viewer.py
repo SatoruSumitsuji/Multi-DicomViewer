@@ -2473,7 +2473,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_start_btn.setChecked(on)
         for b in self._lvv_ctrl_btns:
             b.setEnabled(on)
-        showthr = on and self._lvv.get("thr") is not None
+
+        def _done(btn, is_set, color):
+            """Colour *btn* when its landmark is set (still greys when off)."""
+            if on and is_set:
+                btn.setStyleSheet(
+                    "QPushButton{background:%s;color:white;}%s"
+                    % (color, self._BTN_DIS))
+            else:
+                btn.setStyleSheet(self._BTN_DIS)
+
+        g = (lambda k: on and self._lvv.get(k) is not None)
+        _done(self._lvv_apex_btn, g("apex"), "#d32f2f")     # apex red
+        _done(self._lvv_aov_btn, g("aortic"), "#b8860b")    # aortic amber
+        _done(self._lvv_mv_btn, g("mitral"), "#2b6cb0")     # mitral blue
+        _done(self._lvv_thr_btn, g("thr"), "#2e8b57")       # threshold green
+        showthr = g("thr")
         self._lvv_thr_lbl.setVisible(showthr)
         self._lvv_thr_spin.setVisible(showthr)
         self._lvv_update_ef()
@@ -2533,7 +2548,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_thr_spin.setValue(int(round(hu)))
             self._lvv_thr_spin.blockSignals(False)
             self._lvv_add_marker("seed", which, wx, wy, "#40c0ff")
-            self._lvv_sync()
+        self._lvv_sync()                           # refresh 'done' colours
         return "place"
 
     def _lvv_add_marker(self, tag, which, wx, wy, color) -> None:
@@ -2572,6 +2587,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
         m["_lvv"] = valve
         self._redraw_meas(which)
+        self._lvv_sync()                          # refresh 'done' colours
         QMessageBox.information(
             self.window(), t("LV Vol"),
             t("{v} plane captured.").format(
