@@ -64,8 +64,9 @@ def _oriented_normal(center, normal, apex) -> np.ndarray:
     return n
 
 
-def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
-                     seed_xyz, apex_margin_mm: float = 8.0, pad_mm: float = 3.0):
+def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes,
+                     hu_lo, hu_hi, seed_xyz, apex_margin_mm: float = 8.0,
+                     pad_mm: float = 3.0):
     """Blood-pool volume (mL) of the LV cavity inside a "loose bag" envelope.
 
     The envelope is a finite region so a threshold/plane mistake can't let the
@@ -74,8 +75,8 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
         mid-cavity bulge is never clipped — size it from the valve annuli),
       * capped basally by the two valve *planes* (apex side kept),
       * capped apically a little below the apex (apex_margin_mm).
-    Within it the counted voxels are HU >= *thr* (blood) and 3-D connected to
-    *seed_xyz*.
+    Within it the counted voxels are hu_lo <= HU <= hu_hi (blood range) and 3-D
+    connected to *seed_xyz*.
 
     *vol*        : (nz, ny, nx) HU array, indexed vol[z, y, x].
     *spacing_xyz*: (sx, sy, sz) mm per voxel.
@@ -84,7 +85,7 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
                    valve-ellipse centres).
     *r_max*      : cylinder radius mm (valve annulus size × a bulge factor).
     *planes*     : iterable of (center_xyz, normal_xyz) valve planes.
-    *thr*        : blood HU threshold. *seed_xyz*: connectivity seed (mm).
+    *hu_lo/hu_hi*: blood HU range. *seed_xyz*: connectivity seed (mm).
 
     Returns dict(volume_ml, count, voxel_ml, bbox) or None if the seed is not in
     the thresholded region inside the envelope.
@@ -129,7 +130,7 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
     dx, dy, dz = xc - apex[0], yc - apex[1], zc - apex[2]
     along = dx * axis[0] + dy * axis[1] + dz * axis[2]
     perp2 = (dx * dx) + (dy * dy) + (dz * dz) - along * along
-    mask = sub >= float(thr)
+    mask = (sub >= float(hu_lo)) & (sub <= float(hu_hi))
     mask &= (perp2 <= r_max * r_max)
     mask &= (along >= -float(apex_margin_mm))
     mask &= (along <= L + float(apex_margin_mm))

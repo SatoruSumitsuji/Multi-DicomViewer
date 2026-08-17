@@ -2405,21 +2405,31 @@ class CTViewer(CPRMixin, AbstractViewer):
               "press this to capture its plane"))
         self._lvv_mv_btn.clicked.connect(lambda: self._lvv_capture_valve("mitral"))
         row.addWidget(self._lvv_mv_btn)
-        self._lvv_thr_btn = FitButton(t("Threshold"))
+        self._lvv_thr_btn = FitButton(t("内腔ROI"))
         self._lvv_thr_btn.setHelpToolTip(
-            t("Confirm the blood threshold from the crosshair HU (move the "
-              "crosshair into the cavity first); also the connectivity seed"))
-        self._lvv_thr_btn.clicked.connect(self._lvv_confirm_thr)
+            t("Draw a Polygon inside the LV cavity (Measure→Polygon), then press "
+              "this: it colours the ROI, seeds it, and sets the HU range from "
+              "the pixels inside — adjust 下限/上限 below."))
+        self._lvv_thr_btn.clicked.connect(self._lvv_capture_roi)
         row.addWidget(self._lvv_thr_btn)
-        self._lvv_thr_lbl = QLabel(t("心室内腔CT値閾値"))
-        self._lvv_thr_spin = QSpinBox()
-        self._lvv_thr_spin.setRange(-1000, 3000)
-        self._lvv_thr_spin.setSingleStep(10)
-        self._lvv_thr_spin.setSuffix(" HU")
-        self._lvv_thr_spin.setKeyboardTracking(False)
-        self._lvv_thr_spin.valueChanged.connect(self._lvv_thr_changed)
-        row.addWidget(self._lvv_thr_lbl)
-        row.addWidget(self._lvv_thr_spin)
+        # Blood HU RANGE (lower / upper) for the cavity — suggested from the ROI
+        # polygon, then adjustable. Applied on CalcVol.
+        self._lvv_lo_lbl = QLabel(t("下限"))
+        self._lvv_lo_spin = QSpinBox()
+        self._lvv_lo_spin.setRange(-1000, 4000)
+        self._lvv_lo_spin.setSingleStep(10)
+        self._lvv_lo_spin.setSuffix(" HU")
+        self._lvv_lo_spin.setKeyboardTracking(False)
+        self._lvv_hi_lbl = QLabel(t("上限"))
+        self._lvv_hi_spin = QSpinBox()
+        self._lvv_hi_spin.setRange(-1000, 4000)
+        self._lvv_hi_spin.setSingleStep(10)
+        self._lvv_hi_spin.setValue(3000)
+        self._lvv_hi_spin.setSuffix(" HU")
+        self._lvv_hi_spin.setKeyboardTracking(False)
+        for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
+                   self._lvv_hi_lbl, self._lvv_hi_spin):
+            row.addWidget(_w)
         # "Bag" radius = valve annulus size × this %. Larger = looser envelope
         # (won't clip the mid-cavity); applied on CalcVol.
         self._lvv_bag_lbl = QLabel(t("袋径%"))
@@ -2481,15 +2491,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_start_btn.setChecked(on)
         g = (lambda k: on and self._lvv.get(k) is not None)
         apex_done, aov_done = g("apex"), g("aortic")
-        mv_done, thr_done = g("mitral"), g("thr")
+        mv_done, roi_done = g("mitral"), g("seed")
         # Wizard: enable only the next step (previous steps stay live for redo).
         self._lvv_apex_btn.setEnabled(on)
         self._lvv_aov_btn.setEnabled(on and apex_done)
         self._lvv_mv_btn.setEnabled(on and aov_done)
         self._lvv_thr_btn.setEnabled(on and mv_done)
-        self._lvv_calc_btn.setEnabled(on and thr_done)
-        self._lvv_ed_btn.setEnabled(on and thr_done)
-        self._lvv_es_btn.setEnabled(on and thr_done)
+        self._lvv_calc_btn.setEnabled(on and roi_done)
+        self._lvv_ed_btn.setEnabled(on and roi_done)
+        self._lvv_es_btn.setEnabled(on and roi_done)
         self._lvv_exit_btn.setEnabled(on)
 
         def _done(btn, is_set, color):
@@ -2504,9 +2514,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         _done(self._lvv_apex_btn, apex_done, "#d32f2f")     # apex red
         _done(self._lvv_aov_btn, aov_done, "#b8860b")       # aortic amber
         _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
-        _done(self._lvv_thr_btn, thr_done, "#2e8b57")       # threshold green
-        self._lvv_thr_lbl.setVisible(thr_done)
-        self._lvv_thr_spin.setVisible(thr_done)
+        _done(self._lvv_thr_btn, roi_done, "#2e8b57")       # ROI green
+        for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
+                  self._lvv_hi_lbl, self._lvv_hi_spin):
+            w.setVisible(roi_done)
         self._lvv_update_ef()
 
     def _lvv_prompt(self, text) -> None:
@@ -2525,7 +2536,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._lv is not None:          # leave contour LV mode first
                     self._lv_exit()
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
-                             "thr": None, "seed": None,
+                             "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None}
                 self._lvv_sync()
                 self._lvv_prompt(
@@ -2575,36 +2586,84 @@ class CTViewer(CPRMixin, AbstractViewer):
         iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
         return float(self._vol[iz, iy, ix])
 
-    def _lvv_confirm_thr(self) -> None:
-        """Threshold button → set the blood threshold (and connectivity seed)
-        from the HU at the current crosshair centre."""
+    def _lvv_polygon_hu(self, m, which):
+        """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
+        pane *which*. Returns a 1-D array of HU (empty if none)."""
+        import cv2
+        pts = np.asarray(m["pts"], float)
+        if len(pts) < 3:
+            return np.array([])
+        ox0, oy0 = float(pts[:, 0].min()), float(pts[:, 1].min())
+        ox1, oy1 = float(pts[:, 0].max()), float(pts[:, 1].max())
+        step = 0.6
+        gw = max(2, int((ox1 - ox0) / step) + 1)
+        gh = max(2, int((oy1 - oy0) / step) + 1)
+        poly = np.round((pts - [ox0, oy0]) / step).astype(np.int32)
+        mask = np.zeros((gh, gw), np.uint8)
+        cv2.fillPoly(mask, [poly], 1)
+        ys, xs = np.where(mask > 0)
+        hus = []
+        for gx, gy in zip(xs, ys):
+            P = self._out_to_world3d(which, ox0 + gx * step, oy0 + gy * step)
+            hus.append(self._lvv_hu_at(P))
+        return np.asarray(hus, float)
+
+    def _lvv_capture_roi(self) -> None:
+        """内腔ROI button → capture the latest Polygon as the LV cavity ROI:
+        colour it, seed connectivity at its centroid, and suggest the blood HU
+        range (下限/上限) from the pixels inside it (then user-adjustable)."""
         from PyQt6.QtWidgets import QMessageBox
         try:
             lvv = self._lvv
-            if lvv is None or self._center is None:
+            if lvv is None:
                 return
-            self._lvv_dbg("confirm_thr ENTER center=%s" % (self._center,))
-            P = np.asarray(self._center, float).copy()
-            lvv["seed"] = P
-            hu = self._lvv_hu_at(P)
-            self._lvv_dbg("confirm_thr hu=%.1f" % hu)
-            lvv["thr"] = hu
-            self._lvv_thr_spin.blockSignals(True)
-            self._lvv_thr_spin.setValue(int(round(hu)))
-            self._lvv_thr_spin.blockSignals(False)
-            self._lvv_dbg("confirm_thr add_marker")
-            self._lvv_add_marker("seed", P, "#40c0ff")
+            m, which, best = None, None, -1
+            for k in ("A", "B"):
+                for cand in self._measures.get(k, []):
+                    if (cand.get("type") == "polygon"
+                            and cand.get("id", -1) > best):
+                        best = cand.get("id", -1)
+                        m, which = cand, k
+            if m is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Draw a Polygon inside the LV cavity first "
+                      "(Measure→Polygon)."))
+                return
+            cx, cy = self._shape_center(m)
+            seed = np.asarray(self._out_to_world3d(which, cx, cy), float)
+            hus = self._lvv_polygon_hu(m, which)
+            if hus.size < 4:
+                QMessageBox.information(self.window(), t("LV Vol"),
+                                       t("ROI too small — draw a larger Polygon."))
+                return
+            lo = float(np.percentile(hus, 2))
+            hi = float(np.percentile(hus, 99))
+            lvv["seed"] = seed
+            lvv["hu_lo"] = lo
+            lvv["hu_hi"] = hi
+            m["color"] = "#40c0ff"                       # ROI tint
+            m["_lvv"] = "roi"
+            self._lvv_lo_spin.blockSignals(True)
+            self._lvv_lo_spin.setValue(int(round(lo)))
+            self._lvv_lo_spin.blockSignals(False)
+            self._lvv_hi_spin.blockSignals(True)
+            self._lvv_hi_spin.setValue(int(round(hi)))
+            self._lvv_hi_spin.blockSignals(False)
+            self._redraw_meas(which)
+            if self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
             lvv["step"] = "ready"
-            self._lvv_dbg("confirm_thr sync")
             self._lvv_sync()
-            self._lvv_dbg("confirm_thr DONE")
             self._lvv_prompt(
-                t("Threshold set to {v:.0f} HU. Fine-tune 心室内腔CT値閾値 if "
-                  "needed, then press CalcVol.").format(v=hu))
+                t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
+                  "the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if "
+                  "needed, then press CalcVol.").format(
+                    lo=lo, hi=hi, mn=float(hus.min()), mx=float(hus.max())))
         except Exception as exc:                        # noqa: BLE001
             import traceback
-            self._lvv_dbg("confirm_thr EXCEPTION " + traceback.format_exc())
-            QMessageBox.critical(self.window(), t("LV Vol (threshold error)"),
+            QMessageBox.critical(self.window(), t("LV Vol (ROI error)"),
                                  traceback.format_exc() or repr(exc))
 
     def _lvv_add_marker(self, tag, P3, color) -> None:
@@ -2667,13 +2726,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv["step"] = "thr"
             self._lvv_sync()
             self._lvv_prompt(
-                t("Mitral plane captured. Move the crosshair into the cavity, "
-                  "then press the Threshold button to set the blood threshold."))
-
-    def _lvv_thr_changed(self, val) -> None:
-        if self._lvv is None:
-            return
-        self._lvv["thr"] = float(val)
+                t("Mitral plane captured. Draw a Polygon inside the LV cavity "
+                  "(Measure→Polygon), then press the 内腔ROI button."))
 
     def _lvv_calc(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -2683,37 +2737,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
                     "aortic"), (t("mitral plane"), "mitral"),
-                    (t("threshold"), "thr")) if lvv.get(k) is None]
+                    (t("ROI"), "seed")) if lvv.get(k) is None]
             if miss:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
                     t("Set these first: {m}").format(m=", ".join(miss)))
                 return
             from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume
-            seed = lvv.get("seed") if lvv.get("seed") is not None else lvv["apex"]
+            seed = lvv["seed"]
+            hu_lo = float(self._lvv_lo_spin.value())
+            hu_hi = float(self._lvv_hi_spin.value())
             c_a, n_a, r_a = lvv["aortic"]
             c_m, n_m, r_m = lvv["mitral"]
             base_center = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
             factor = self._lvv_bag_spin.value() / 100.0
             r_max = max(float(r_a), float(r_m)) * factor
-            # Diagnostic log written BEFORE the compute so a hard crash still
-            # leaves the sizes on disk (~/.mdv_lvv_debug.log).
-            try:
-                import os
-                axis_len = float(np.linalg.norm(
-                    base_center - np.asarray(lvv["apex"], float)))
-                with open(os.path.expanduser("~/.mdv_lvv_debug.log"), "a",
-                          encoding="utf-8") as _fh:
-                    _fh.write(
-                        "CalcVol dims=%s r_a=%.1f r_m=%.1f factor=%.2f "
-                        "r_max=%.1f L=%.1f thr=%.0f\n"
-                        % (self._vol.shape, r_a, r_m, factor, r_max, axis_len,
-                           float(lvv["thr"])))
-            except Exception:                           # noqa: BLE001
-                pass
             res = bloodpool_volume(
                 self._vol, self._dims, tuple(lvv["apex"]), tuple(base_center),
-                r_max, [(c_a, n_a), (c_m, n_m)], float(lvv["thr"]), tuple(seed))
+                r_max, [(c_a, n_a), (c_m, n_m)], hu_lo, hu_hi, tuple(seed))
             if res is None:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
