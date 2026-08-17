@@ -112,6 +112,12 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
                     [nz, ny, nx]).astype(int)
     if np.any(hi <= lo):
         return None
+    # Hard ceiling so a mis-scaled radius / axis can never allocate a huge
+    # sub-volume and OOM-crash the app (converted to a caller-visible error).
+    box = int(np.prod(np.maximum(hi - lo, 0)))
+    if box > 50_000_000:
+        return {"error": "too_large", "voxels": box, "r_max": float(r_max),
+                "L": float(L)}
     z0, y0, x0 = (int(v) for v in lo)
     z1, y1, x1 = (int(v) for v in hi)
     sub = vol[z0:z1, y0:y1, x0:x1]

@@ -2664,6 +2664,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             base_center = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
             factor = self._lvv_bag_spin.value() / 100.0
             r_max = max(float(r_a), float(r_m)) * factor
+            # Diagnostic log written BEFORE the compute so a hard crash still
+            # leaves the sizes on disk (~/.mdv_lvv_debug.log).
+            try:
+                import os
+                axis_len = float(np.linalg.norm(
+                    base_center - np.asarray(lvv["apex"], float)))
+                with open(os.path.expanduser("~/.mdv_lvv_debug.log"), "a",
+                          encoding="utf-8") as _fh:
+                    _fh.write(
+                        "CalcVol dims=%s r_a=%.1f r_m=%.1f factor=%.2f "
+                        "r_max=%.1f L=%.1f thr=%.0f\n"
+                        % (self._vol.shape, r_a, r_m, factor, r_max, axis_len,
+                           float(lvv["thr"])))
+            except Exception:                           # noqa: BLE001
+                pass
             res = bloodpool_volume(
                 self._vol, self._dims, tuple(lvv["apex"]), tuple(base_center),
                 r_max, [(c_a, n_a), (c_m, n_m)], float(lvv["thr"]), tuple(seed))
@@ -2672,6 +2687,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self.window(), t("LV Vol"),
                     t("No cavity found — the threshold may be too high, or the "
                       "reference point is outside the blood pool."))
+                return
+            if res.get("error") == "too_large":
+                QMessageBox.warning(
+                    self.window(), t("LV Vol"),
+                    t("Region too large to compute safely ({v:,} voxels, "
+                      "r_max={r:.0f} mm, axis={L:.0f} mm) — likely a mis-placed "
+                      "valve/apex or an over-large 袋径%. Lower 袋径% or re-check "
+                      "the landmarks.").format(
+                        v=res["voxels"], r=res["r_max"], L=res["L"]))
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
