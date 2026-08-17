@@ -83,10 +83,12 @@ def main():
     assert got < analytic_ml + 0.5 * aorta_ml, "descending-aorta blob leaked in"
     print("OK: disconnected aorta excluded")
 
-    # Threshold too high (above blood HU) -> seed off pool -> None.
-    assert bloodpool_volume(vol, spacing, apex, base, r_max, planes,
-                            hu_lo=500.0, hu_hi=3000.0, seed_xyz=seed) is None
-    print("OK: over-high threshold returns None")
+    # Threshold too high (above blood HU) -> seed off pool -> seed_out/hu error.
+    r_hi = bloodpool_volume(vol, spacing, apex, base, r_max, planes,
+                            hu_lo=500.0, hu_hi=3000.0, seed_xyz=seed)
+    assert r_hi is not None and r_hi.get("error") == "seed_out" \
+        and r_hi.get("reason") == "hu", r_hi
+    print("OK: over-high threshold -> seed_out(hu)")
 
     # A tilted valve plane must clip MORE (smaller volume) than the flat cut.
     n_tilt = np.array([0.25, 0.0, 1.0]); n_tilt /= np.linalg.norm(n_tilt)
