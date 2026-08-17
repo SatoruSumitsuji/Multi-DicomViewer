@@ -63,7 +63,7 @@ def build():
 def main():
     vol, spacing, apex, base, r_max, planes, seed, g = build()
     res = bloodpool_volume(vol, spacing, apex, base, r_max, planes,
-                           thr=250.0, seed_xyz=seed)
+                           hu_lo=250.0, hu_hi=3000.0, seed_xyz=seed)
     assert res is not None, "seed not in region"
 
     # Analytic: cylinder from apex_z to base_z (both planes ~ z=base_z through
@@ -85,7 +85,7 @@ def main():
 
     # Threshold too high (above blood HU) -> seed off pool -> None.
     assert bloodpool_volume(vol, spacing, apex, base, r_max, planes,
-                            thr=500.0, seed_xyz=seed) is None
+                            hu_lo=500.0, hu_hi=3000.0, seed_xyz=seed) is None
     print("OK: over-high threshold returns None")
 
     # A tilted valve plane must clip MORE (smaller volume) than the flat cut.
@@ -93,13 +93,13 @@ def main():
     tilted = [((g["cx"], g["cy"], g["base_z"]), tuple(n_tilt)),
               ((g["cx"], g["cy"], g["base_z"]), (0.0, 0.0, 1.0))]
     res_t = bloodpool_volume(vol, spacing, apex, base, r_max, tilted,
-                             thr=250.0, seed_xyz=seed)
+                             hu_lo=250.0, hu_hi=3000.0, seed_xyz=seed)
     assert res_t is not None and res_t["volume_ml"] < got, "tilt did not clip"
     print(f"OK: tilted plane clips more ({res_t['volume_ml']:.1f} < {got:.1f} mL)")
 
     # A too-small bag radius must clip the cavity (smaller vol + hit_wall flag).
     res_s = bloodpool_volume(vol, spacing, apex, base, g["R"] * 0.5, planes,
-                             thr=250.0, seed_xyz=seed)
+                             hu_lo=250.0, hu_hi=3000.0, seed_xyz=seed)
     assert res_s is not None and res_s["volume_ml"] < got and res_s["hit_wall"]
     print(f"OK: small bag clips ({res_s['volume_ml']:.1f} mL, hit_wall=True)")
     print("PASS")
