@@ -2420,6 +2420,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thr_spin.valueChanged.connect(self._lvv_thr_changed)
         row.addWidget(self._lvv_thr_lbl)
         row.addWidget(self._lvv_thr_spin)
+        # "Bag" radius = valve annulus size × this %. Larger = looser envelope
+        # (won't clip the mid-cavity); applied on CalcVol.
+        self._lvv_bag_lbl = QLabel(t("袋径%"))
+        self._lvv_bag_spin = QSpinBox()
+        self._lvv_bag_spin.setRange(100, 400)
+        self._lvv_bag_spin.setSingleStep(10)
+        self._lvv_bag_spin.setValue(150)
+        self._lvv_bag_spin.setSuffix(" %")
+        self._lvv_bag_spin.setKeyboardTracking(False)
+        self._lvv_bag_spin.setToolTip(
+            t("Envelope radius = valve annulus × this %. Increase if CalcVol "
+              "warns the bag clipped the cavity."))
+        row.addWidget(self._lvv_bag_lbl)
+        row.addWidget(self._lvv_bag_spin)
         self._lvv_calc_btn = FitButton(t("CalcVol"))
         self._lvv_calc_btn.setHelpToolTip(
             t("Compute the LV blood-pool volume in the region"))
@@ -2599,7 +2613,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         cx, cy = self._shape_center(m)
         center = np.asarray(self._out_to_world3d(which, cx, cy), float)
         _u, _v, n = self._axes_for(which)
-        self._lvv[valve] = (center, np.asarray(n, float))
+        ecx, ecy, ea, eb = self._ellipse_cab(m)          # semi-axes (mm)
+        radius = float(max(ea, eb))
+        self._lvv[valve] = (center, np.asarray(n, float), radius)
         m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
         m["_lvv"] = valve
         self._redraw_meas(which)
@@ -2643,9 +2659,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume
             seed = lvv.get("seed") if lvv.get("seed") is not None else lvv["apex"]
+            c_a, n_a, r_a = lvv["aortic"]
+            c_m, n_m, r_m = lvv["mitral"]
+            base_center = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
+            factor = self._lvv_bag_spin.value() / 100.0
+            r_max = max(float(r_a), float(r_m)) * factor
             res = bloodpool_volume(
-                self._vol, self._dims, tuple(lvv["apex"]),
-                [lvv["aortic"], lvv["mitral"]], float(lvv["thr"]), tuple(seed))
+                self._vol, self._dims, tuple(lvv["apex"]), tuple(base_center),
+                r_max, [(c_a, n_a), (c_m, n_m)], float(lvv["thr"]), tuple(seed))
             if res is None:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
@@ -2654,14 +2675,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
-            if res.get("clamped"):
+            if res.get("hit_wall"):
                 QMessageBox.warning(
                     self.window(), t("LV Vol"),
-                    t("The blood region reached the size limit — it may be "
-                      "leaking past the valve planes (into the aorta/atrium) "
-                      "or the threshold is too low. The volume ({v:.1f} mL) is "
-                      "likely an OVER-estimate; re-check the valve planes and "
-                      "raise 心室内腔CT値閾値.").format(v=res["volume_ml"]))
+                    t("The cavity touched the envelope wall — the bag may be "
+                      "too small and clipping it (volume {v:.1f} mL may be an "
+                      "UNDER-estimate). Increase 袋径% and press CalcVol again.")
+                    .format(v=res["volume_ml"]))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (error)"),

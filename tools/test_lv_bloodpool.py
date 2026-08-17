@@ -46,7 +46,9 @@ def build():
     vol[aorta] = 420.0
 
     apex = (cx, cy, apex_z)
+    base = (cx, cy, base_z)                              # axis end (valve centres)
     seed = (cx, cy, (apex_z + base_z) / 2.0)            # mid-cavity
+    r_max = R * 1.5                                      # generous bag radius
 
     # Two valve planes at z=base_z (flat, normal +z) so the analytic flat-cut
     # volume is exact. bloodpool_volume orients normals toward the apex
@@ -54,13 +56,14 @@ def build():
     planes = [((cx, cy, base_z), (0.0, 0.0, 1.0)),
               ((cx, cy, base_z), (0.0, 0.0, 1.0))]
 
-    return vol, (sx, sy, sz), apex, planes, seed, dict(
+    return vol, (sx, sy, sz), apex, base, r_max, planes, seed, dict(
         cx=cx, cy=cy, R=R, apex_z=apex_z, base_z=base_z)
 
 
 def main():
-    vol, spacing, apex, planes, seed, g = build()
-    res = bloodpool_volume(vol, spacing, apex, planes, thr=250.0, seed_xyz=seed)
+    vol, spacing, apex, base, r_max, planes, seed, g = build()
+    res = bloodpool_volume(vol, spacing, apex, base, r_max, planes,
+                           thr=250.0, seed_xyz=seed)
     assert res is not None, "seed not in region"
 
     # Analytic: cylinder from apex_z to base_z (both planes ~ z=base_z through
@@ -81,18 +84,24 @@ def main():
     print("OK: disconnected aorta excluded")
 
     # Threshold too high (above blood HU) -> seed off pool -> None.
-    assert bloodpool_volume(vol, spacing, apex, planes, thr=500.0,
-                            seed_xyz=seed) is None
+    assert bloodpool_volume(vol, spacing, apex, base, r_max, planes,
+                            thr=500.0, seed_xyz=seed) is None
     print("OK: over-high threshold returns None")
 
     # A tilted valve plane must clip MORE (smaller volume) than the flat cut.
     n_tilt = np.array([0.25, 0.0, 1.0]); n_tilt /= np.linalg.norm(n_tilt)
     tilted = [((g["cx"], g["cy"], g["base_z"]), tuple(n_tilt)),
               ((g["cx"], g["cy"], g["base_z"]), (0.0, 0.0, 1.0))]
-    res_t = bloodpool_volume(vol, spacing, apex, tilted, thr=250.0,
-                             seed_xyz=seed)
+    res_t = bloodpool_volume(vol, spacing, apex, base, r_max, tilted,
+                             thr=250.0, seed_xyz=seed)
     assert res_t is not None and res_t["volume_ml"] < got, "tilt did not clip"
     print(f"OK: tilted plane clips more ({res_t['volume_ml']:.1f} < {got:.1f} mL)")
+
+    # A too-small bag radius must clip the cavity (smaller vol + hit_wall flag).
+    res_s = bloodpool_volume(vol, spacing, apex, base, g["R"] * 0.5, planes,
+                             thr=250.0, seed_xyz=seed)
+    assert res_s is not None and res_s["volume_ml"] < got and res_s["hit_wall"]
+    print(f"OK: small bag clips ({res_s['volume_ml']:.1f} mL, hit_wall=True)")
     print("PASS")
 
 

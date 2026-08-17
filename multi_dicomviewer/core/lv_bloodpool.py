@@ -64,100 +64,89 @@ def _oriented_normal(center, normal, apex) -> np.ndarray:
     return n
 
 
-def bloodpool_volume(vol, spacing_xyz, apex_xyz, planes, thr, seed_xyz,
-                     pad_mm: float = 15.0):
-    """Blood-pool volume (mL) of the LV cavity.
+def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes, thr,
+                     seed_xyz, apex_margin_mm: float = 8.0, pad_mm: float = 3.0):
+    """Blood-pool volume (mL) of the LV cavity inside a "loose bag" envelope.
+
+    The envelope is a finite region so a threshold/plane mistake can't let the
+    cavity leak into the aorta/whole heart (no runaway growth, no OOM crash):
+      * a CYLINDER of radius *r_max* around the apex→base axis (generous, so the
+        mid-cavity bulge is never clipped — size it from the valve annuli),
+      * capped basally by the two valve *planes* (apex side kept),
+      * capped apically a little below the apex (apex_margin_mm).
+    Within it the counted voxels are HU >= *thr* (blood) and 3-D connected to
+    *seed_xyz*.
 
     *vol*        : (nz, ny, nx) HU array, indexed vol[z, y, x].
     *spacing_xyz*: (sx, sy, sz) mm per voxel.
-    *apex_xyz*   : (x, y, z) mm apex point.
-    *planes*     : iterable of (center_xyz, normal_xyz) — the aortic & mitral
-                   valve planes (normal orientation is fixed internally so the
-                   apex side is kept).
-    *thr*        : blood HU threshold (voxels with HU >= thr are blood).
-    *seed_xyz*   : (x, y, z) mm seed inside the cavity (connectivity anchor).
-    *pad_mm*     : margin added around {apex, seed, plane centres} for the work
-                   sub-volume.
+    *apex_xyz*   : (x, y, z) mm apex point (axis start).
+    *base_xyz*   : (x, y, z) mm base point (axis end; e.g. midpoint of the two
+                   valve-ellipse centres).
+    *r_max*      : cylinder radius mm (valve annulus size × a bulge factor).
+    *planes*     : iterable of (center_xyz, normal_xyz) valve planes.
+    *thr*        : blood HU threshold. *seed_xyz*: connectivity seed (mm).
 
-    Returns dict(volume_ml, count, voxel_ml, bbox) or None if the seed does not
-    fall inside the thresholded region (e.g. threshold too high / off cavity).
+    Returns dict(volume_ml, count, voxel_ml, bbox) or None if the seed is not in
+    the thresholded region inside the envelope.
     """
     vol = np.asarray(vol)
     sx, sy, sz = (float(s) for s in spacing_xyz)
     nz, ny, nx = vol.shape
+    apex = np.asarray(apex_xyz, float)
+    base = np.asarray(base_xyz, float)
+    axis = base - apex
+    L = float(np.linalg.norm(axis))
+    if L < 1e-3:
+        return None
+    axis = axis / L
+    r_max = float(r_max)
 
-    def to_ijk(p):                                       # (x,y,z) mm -> (z,y,x) idx
-        return np.array([p[2] / sz, p[1] / sy, p[0] / sx], float)
+    # Work sub-box: the capped cylinder's extent = the apex/base span padded by
+    # the radius on every side (a hard, finite bound — no growth).
+    ext = r_max + float(pad_mm)
+    lo_w = np.minimum(apex, base) - ext
+    hi_w = np.maximum(apex, base) + ext
+    lo = np.maximum(np.floor([lo_w[2] / sz, lo_w[1] / sy, lo_w[0] / sx]),
+                    0).astype(int)
+    hi = np.minimum(np.ceil([hi_w[2] / sz, hi_w[1] / sy, hi_w[0] / sx]),
+                    [nz, ny, nx]).astype(int)
+    if np.any(hi <= lo):
+        return None
+    z0, y0, x0 = (int(v) for v in lo)
+    z1, y1, x1 = (int(v) for v in hi)
+    sub = vol[z0:z1, y0:y1, x0:x1]
+    zc = (np.arange(z0, z1) * sz).reshape(-1, 1, 1)
+    yc = (np.arange(y0, y1) * sy).reshape(1, -1, 1)
+    xc = (np.arange(x0, x1) * sx).reshape(1, 1, -1)
 
-    anchors = np.array(
-        [to_ijk(p) for p in ([apex_xyz, seed_xyz] + [c for (c, _n) in planes])])
-    lo_a, hi_a = anchors.min(0), anchors.max(0)
-    spac = np.array([sz, sy, sx])
+    # Envelope: cylinder about the axis + apical/basal caps + valve planes.
+    dx, dy, dz = xc - apex[0], yc - apex[1], zc - apex[2]
+    along = dx * axis[0] + dy * axis[1] + dz * axis[2]
+    perp2 = (dx * dx) + (dy * dy) + (dz * dz) - along * along
+    mask = sub >= float(thr)
+    mask &= (perp2 <= r_max * r_max)
+    mask &= (along >= -float(apex_margin_mm))
+    mask &= (along <= L + float(apex_margin_mm))
+    for (c, nrm) in planes:
+        c = np.asarray(c, float)
+        n = _oriented_normal(c, nrm, apex)
+        d = (xc - c[0]) * n[0] + (yc - c[1]) * n[1] + (zc - c[2]) * n[2]
+        mask &= (d >= 0.0)
 
-    # Safety cap on the work sub-box so a threshold/plane mistake that lets the
-    # cavity 'leak' into the aorta/whole heart can't grow the box until it
-    # exhausts memory and hard-crashes the app. When the region is genuinely
-    # small (correct planes) the box stays well under this.
-    MAX_VOXELS = 40_000_000
-
-    def _box(pad_val):
-        p = np.array([pad_val, pad_val, pad_val]) / spac
-        lo = np.maximum(np.floor(lo_a - p).astype(int), 0)
-        hi = np.minimum(np.ceil(hi_a + p).astype(int), [nz, ny, nx])
-        return lo, hi, int(np.prod(np.maximum(hi - lo, 0)))
-
-    # Adaptive bounding box: the LV cavity extends laterally past the on-axis
-    # anchors by an unknown radius, so grow until the connected blood component
-    # no longer touches a (non-volume-edge) face — but never past MAX_VOXELS.
-    pad = float(pad_mm)
-    lo, hi, box = _box(pad)
-    while box > MAX_VOXELS and pad > 1.0:               # rare: shrink to fit
-        pad *= 0.5
-        lo, hi, box = _box(pad)
-    comp = None
-    z0 = y0 = x0 = 0
-    clamped = False
-    while True:
-        if np.any(hi <= lo):
-            return None
-        z0, y0, x0 = (int(v) for v in lo)
-        z1, y1, x1 = (int(v) for v in hi)
-        sub = vol[z0:z1, y0:y1, x0:x1]
-        zc = (np.arange(z0, z1) * sz).reshape(-1, 1, 1)
-        yc = (np.arange(y0, y1) * sy).reshape(1, -1, 1)
-        xc = (np.arange(x0, x1) * sx).reshape(1, 1, -1)
-        mask = sub >= float(thr)
-        for (c, nrm) in planes:
-            c = np.asarray(c, float)
-            n = _oriented_normal(c, nrm, apex_xyz)
-            d = (xc - c[0]) * n[0] + (yc - c[1]) * n[1] + (zc - c[2]) * n[2]
-            mask &= (d >= 0.0)
-        si = (int(round(seed_xyz[2] / sz)) - z0,
-              int(round(seed_xyz[1] / sy)) - y0,
-              int(round(seed_xyz[0] / sx)) - x0)
-        if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
-                and 0 <= si[2] < sub.shape[2]):
-            return None
-        if not mask[si]:
-            return None                                 # seed off the blood pool
-        comp = _seed_component(mask, si)
-        touch = ((comp[0].any() and z0 > 0) or (comp[-1].any() and z1 < nz)
-                 or (comp[:, 0].any() and y0 > 0) or (comp[:, -1].any() and y1 < ny)
-                 or (comp[:, :, 0].any() and x0 > 0)
-                 or (comp[:, :, -1].any() and x1 < nx))
-        if not touch or pad >= 60.0:
-            clamped = bool(touch)
-            break
-        nlo, nhi, nbox = _box(min(60.0, pad * 1.8))
-        if nbox > MAX_VOXELS:                           # growing would blow up
-            clamped = True                              # → stop, flag a leak
-            break
-        pad = min(60.0, pad * 1.8)
-        lo, hi = nlo, nhi
-
+    si = (int(round(seed_xyz[2] / sz)) - z0,
+          int(round(seed_xyz[1] / sy)) - y0,
+          int(round(seed_xyz[0] / sx)) - x0)
+    if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
+            and 0 <= si[2] < sub.shape[2]):
+        return None
+    if not mask[si]:
+        return None                                     # seed off the blood pool
+    comp = _seed_component(mask, si)
     count = int(comp.sum())
     voxel_ml = (sx * sy * sz) / 1000.0
+    # The region can still hit the cylinder wall if r_max is too small for the
+    # true cavity — flag it so the caller can suggest enlarging the bag.
+    hit_wall = bool(((perp2 > (r_max - max(sx, sy, sz)) ** 2) & comp).any())
     return {"volume_ml": count * voxel_ml, "count": count,
-            "voxel_ml": voxel_ml, "clamped": clamped,
-            "bbox": (z0, comp.shape[0] + z0, y0, comp.shape[1] + y0,
-                     x0, comp.shape[2] + x0)}
+            "voxel_ml": voxel_ml, "hit_wall": hit_wall,
+            "bbox": (z0, z1, y0, y1, x0, x1)}
