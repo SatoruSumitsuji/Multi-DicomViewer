@@ -2838,6 +2838,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("No cavity found — the threshold may be too high, or the "
                       "reference point is outside the blood pool."))
                 return
+            if res.get("error") == "seed_out":
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Could not measure — {m}.\nAdjust 下限/上限 or 袋径%, move "
+                      "the ROI to a clearly-contrast part of the cavity, or "
+                      "re-check the apex / AoV / MV.").format(m=res["msg"]))
+                return
             if res.get("error") == "too_large":
                 QMessageBox.warning(
                     self.window(), t("LV Vol"),

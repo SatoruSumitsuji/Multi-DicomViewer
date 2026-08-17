@@ -145,9 +145,40 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes,
           int(round(seed_xyz[0] / sx)) - x0)
     if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
             and 0 <= si[2] < sub.shape[2]):
-        return None
+        return {"error": "seed_out", "reason": "box",
+                "msg": "seed is outside the work box"}
     if not mask[si]:
-        return None                                     # seed off the blood pool
+        # Diagnose WHICH envelope condition the seed fails, so the caller can
+        # give an actionable message instead of a vague "no cavity".
+        seed = np.asarray(seed_xyz, float)
+        hu_seed = float(sub[si])
+        dv = seed - apex
+        along_s = float(dv @ axis)
+        perp_s = float(np.sqrt(max(0.0, dv @ dv - along_s * along_s)))
+        plane_bad = False
+        for (c, nrm) in planes:
+            c = np.asarray(c, float)
+            n = _oriented_normal(c, nrm, apex)
+            if float((seed - c) @ n) < 0:
+                plane_bad = True
+        if not (hu_lo <= hu_seed <= hu_hi):
+            reason, msg = "hu", ("seed HU %.0f is outside the range %.0f-%.0f"
+                                 % (hu_seed, hu_lo, hu_hi))
+        elif perp_s > r_max:
+            reason, msg = "radius", ("seed is %.0f mm off the axis, beyond the "
+                                     "bag radius %.0f mm" % (perp_s, r_max))
+        elif along_s < -apex_margin_mm or along_s > L + apex_margin_mm:
+            reason, msg = "along", ("seed is beyond the apex/base extent "
+                                    "(%.0f mm along a %.0f mm axis)"
+                                    % (along_s, L))
+        elif plane_bad:
+            reason, msg = "plane", ("seed is on the far (non-apex) side of a "
+                                    "valve plane — re-check AoV/MV placement")
+        else:
+            reason, msg = "other", "seed not in the region"
+        return {"error": "seed_out", "reason": reason, "msg": msg,
+                "hu": hu_seed, "perp": perp_s, "r_max": float(r_max),
+                "along": along_s, "L": float(L)}
     comp = _seed_component(mask, si)
     count = int(comp.sum())
     voxel_ml = (sx * sy * sz) / 1000.0
