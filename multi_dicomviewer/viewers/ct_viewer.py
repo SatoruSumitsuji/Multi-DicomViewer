@@ -2565,6 +2565,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                               # noqa: BLE001
             pass
 
+    def _lvv_hu_at(self, P) -> float:
+        """Nearest-voxel HU at world point *P* (mm) in self._vol (indexed
+        vol[z, y, x], world = index × spacing = self._dims)."""
+        sx, sy, sz = self._dims
+        nz, ny, nx = self._vol.shape
+        ix = min(max(int(round(P[0] / sx)), 0), nx - 1)
+        iy = min(max(int(round(P[1] / sy)), 0), ny - 1)
+        iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
+        return float(self._vol[iz, iy, ix])
+
     def _lvv_confirm_thr(self) -> None:
         """Threshold button → set the blood threshold (and connectivity seed)
         from the HU at the current crosshair centre."""
@@ -2576,7 +2586,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_dbg("confirm_thr ENTER center=%s" % (self._center,))
             P = np.asarray(self._center, float).copy()
             lvv["seed"] = P
-            hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
+            hu = self._lvv_hu_at(P)
             self._lvv_dbg("confirm_thr hu=%.1f" % hu)
             lvv["thr"] = hu
             self._lvv_thr_spin.blockSignals(True)
