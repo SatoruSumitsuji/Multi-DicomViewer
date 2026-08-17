@@ -2555,25 +2555,47 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Identify the aortic valve: draw an Ellipse on the AoV annulus "
               "(Measure→Ellipse), then press 'AoV plane'."))
 
+    def _lvv_dbg(self, msg) -> None:
+        """Append a diagnostic line to ~/.mdv_lvv_debug.log (survives a crash)."""
+        try:
+            import os
+            with open(os.path.expanduser("~/.mdv_lvv_debug.log"), "a",
+                      encoding="utf-8") as fh:
+                fh.write(str(msg) + "\n")
+        except Exception:                               # noqa: BLE001
+            pass
+
     def _lvv_confirm_thr(self) -> None:
         """Threshold button → set the blood threshold (and connectivity seed)
         from the HU at the current crosshair centre."""
-        lvv = self._lvv
-        if lvv is None or self._center is None:
-            return
-        P = np.asarray(self._center, float).copy()
-        lvv["seed"] = P
-        hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
-        lvv["thr"] = hu
-        self._lvv_thr_spin.blockSignals(True)
-        self._lvv_thr_spin.setValue(int(round(hu)))
-        self._lvv_thr_spin.blockSignals(False)
-        self._lvv_add_marker("seed", P, "#40c0ff")
-        lvv["step"] = "ready"
-        self._lvv_sync()
-        self._lvv_prompt(
-            t("Threshold set to {v:.0f} HU. Fine-tune 心室内腔CT値閾値 if "
-              "needed, then press CalcVol.").format(v=hu))
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            lvv = self._lvv
+            if lvv is None or self._center is None:
+                return
+            self._lvv_dbg("confirm_thr ENTER center=%s" % (self._center,))
+            P = np.asarray(self._center, float).copy()
+            lvv["seed"] = P
+            hu = float(self._trilinear_grid(P.reshape(1, 3))[0])
+            self._lvv_dbg("confirm_thr hu=%.1f" % hu)
+            lvv["thr"] = hu
+            self._lvv_thr_spin.blockSignals(True)
+            self._lvv_thr_spin.setValue(int(round(hu)))
+            self._lvv_thr_spin.blockSignals(False)
+            self._lvv_dbg("confirm_thr add_marker")
+            self._lvv_add_marker("seed", P, "#40c0ff")
+            lvv["step"] = "ready"
+            self._lvv_dbg("confirm_thr sync")
+            self._lvv_sync()
+            self._lvv_dbg("confirm_thr DONE")
+            self._lvv_prompt(
+                t("Threshold set to {v:.0f} HU. Fine-tune 心室内腔CT値閾値 if "
+                  "needed, then press CalcVol.").format(v=hu))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            self._lvv_dbg("confirm_thr EXCEPTION " + traceback.format_exc())
+            QMessageBox.critical(self.window(), t("LV Vol (threshold error)"),
+                                 traceback.format_exc() or repr(exc))
 
     def _lvv_add_marker(self, tag, P3, color) -> None:
         """Add a 3-D-anchored marker (apex / seed) on BOTH panes. Stored with
