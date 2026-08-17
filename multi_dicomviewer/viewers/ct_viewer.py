@@ -591,6 +591,37 @@ def _placeholder_image() -> vtkImageData:
     return img
 
 
+def _lvv_transparent_lut() -> vtkLookupTable:
+    """A fully transparent LUT (the LV Vol highlight overlay is invisible until
+    a HU range is armed)."""
+    lut = vtkLookupTable()
+    lut.SetNumberOfTableValues(2)
+    lut.SetTableRange(-1000.0, 3000.0)
+    lut.SetTableValue(0, 0.0, 0.0, 0.0, 0.0)
+    lut.SetTableValue(1, 0.0, 0.0, 0.0, 0.0)
+    lut.Build()
+    return lut
+
+
+def _lvv_highlight_lut(lo: float, hi: float,
+                       rgb=(0.1, 0.9, 1.0), alpha: float = 0.45) -> vtkLookupTable:
+    """LUT that tints only HU in [lo, hi] (semi-transparent), rest transparent —
+    the LV Vol in-range voxel highlight over the grayscale reslice."""
+    lut = vtkLookupTable()
+    lo_r, hi_r = -1000.0, 3000.0
+    n = 400
+    lut.SetNumberOfTableValues(n)
+    lut.SetTableRange(lo_r, hi_r)
+    for i in range(n):
+        hu = lo_r + (hi_r - lo_r) * i / (n - 1)
+        if lo <= hu <= hi:
+            lut.SetTableValue(i, rgb[0], rgb[1], rgb[2], alpha)
+        else:
+            lut.SetTableValue(i, 0.0, 0.0, 0.0, 0.0)
+    lut.Build()
+    return lut
+
+
 def _gray_lut(width: float, level: float, invert: bool = False) -> vtkLookupTable:
     lut = vtkLookupTable()
     lut.SetHueRange(0.0, 0.0)
@@ -1074,10 +1105,25 @@ class _Pane:
         # reslice smooths the pixels instead of showing a hard nearest-neighbour
         # staircase at the band boundaries.
         self.actor.SetInterpolate(True)
+        # LV Vol HU-range HIGHLIGHT overlay: a second colour mapper on the SAME
+        # reslice output (so it tracks the plane for free), tinting only voxels
+        # whose HU is in the chosen blood range. Transparent LUT until armed.
+        self.colors_hl = vtkImageMapToColors()
+        self.colors_hl.SetOutputFormatToRGBA()
+        self.colors_hl.SetLookupTable(_lvv_transparent_lut())
+        self.colors_hl.SetInputConnection(self.reslice.GetOutputPort())
+        self.actor_hl = vtkImageActor()
+        self.actor_hl.GetMapper().SetInputConnection(
+            self.colors_hl.GetOutputPort())
+        self.actor_hl.SetInterpolate(False)
+        # Just in front of the grayscale (z=0) but behind the crosshair (0.5) /
+        # markers, so the tint sits on the image without z-fighting.
+        self.actor_hl.SetPosition(0.0, 0.0, 0.05)
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.0, 0.0, 0.0)
         self.ren.GetActiveCamera().ParallelProjectionOn()
         self.ren.AddActor(self.actor)
+        self.ren.AddActor(self.actor_hl)              # drawn over the grayscale
 
         self.cross = []
         self._overlay_actors = []
@@ -2439,9 +2485,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hi_spin.setValue(3000)
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
+        self._lvv_lo_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
+        self._lvv_hi_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
             row.addWidget(_w)
+        # Toggle the in-range voxel highlight overlay (default on).
+        self._lvv_hl_on = True
+        self._lvv_hl_btn = FitButton(t("範囲色"))
+        self._lvv_hl_btn.setCheckable(True)
+        self._lvv_hl_btn.setChecked(True)
+        self._lvv_hl_btn.setHelpToolTip(
+            t("Tint voxels whose HU is in the 下限–上限 range (in-range = blood)"))
+        self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
+        row.addWidget(self._lvv_hl_btn)
         # "Bag" radius = valve annulus size × this %. Larger = looser envelope
         # (won't clip the mid-cavity); applied on CalcVol.
         self._lvv_bag_lbl = QLabel(t("袋径%"))
@@ -2530,7 +2589,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
         _done(self._lvv_thr_btn, roi_done, "#2e8b57")       # ROI green
         for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
-                  self._lvv_hi_lbl, self._lvv_hi_spin):
+                  self._lvv_hi_lbl, self._lvv_hi_spin, self._lvv_hl_btn):
             w.setVisible(roi_done)
         self._lvv_update_ef()
 
@@ -2662,6 +2721,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             if render:
                 p.render()
 
+    def _lvv_update_highlight(self) -> None:
+        """Tint the in-range (blood) voxels on both panes via the overlay LUT."""
+        on = (self._lvv is not None and self._lvv.get("seed") is not None
+              and getattr(self, "_lvv_hl_on", True))
+        if on:
+            lut = _lvv_highlight_lut(float(self._lvv_lo_spin.value()),
+                                     float(self._lvv_hi_spin.value()))
+        else:
+            lut = _lvv_transparent_lut()
+        for k in ("A", "B"):
+            self.pane[k].colors_hl.SetLookupTable(lut)
+            self.pane[k].colors_hl.Modified()
+            self.pane[k].render()
+
+    def _lvv_toggle_highlight(self, *args) -> None:
+        self._lvv_hl_on = self._lvv_hl_btn.isChecked()
+        self._lvv_update_highlight()
+
     def _lvv_polygon_hu(self, m, which):
         """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
         pane *which*. Returns a 1-D array of HU (empty if none)."""
@@ -2733,6 +2810,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv["step"] = "ready"
             self._lvv_sync()
             self._lvv_show_envelope()                    # dotted bag preview
+            self._lvv_update_highlight()                 # in-range voxel tint
             self._lvv_prompt(
                 t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
                   "the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if "
@@ -2898,6 +2976,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
             self.pane[k].lvv_env_mapper.SetInputData(vtkPolyData())
+            self.pane[k].colors_hl.SetLookupTable(_lvv_transparent_lut())
+            self.pane[k].colors_hl.Modified()
             self._redraw_meas(k)
 
     def _active_pane(self) -> str:
