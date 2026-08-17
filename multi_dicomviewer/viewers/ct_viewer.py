@@ -1311,6 +1311,18 @@ class _Pane:
             lapx.GetProperty().SetRenderPointsAsSpheres(True)
         self.ren.AddActor(lapx)
         self.lv_apex_actor = lapx
+        # LV Vol envelope ("loose bag") preview: dotted boundary of the region
+        # near this pane's plane. Small yellow points; own actor.
+        self.lvv_env_mapper = vtkPolyDataMapper()
+        self.lvv_env_mapper.SetInputData(vtkPolyData())
+        self.lvv_env_mapper.ScalarVisibilityOn()
+        self.lvv_env_mapper.SetScalarModeToUseCellData()
+        self.lvv_env_mapper.SetColorModeToDirectScalars()
+        lenv = vtkActor()
+        lenv.SetMapper(self.lvv_env_mapper)
+        lenv.GetProperty().SetPointSize(3.0)
+        self.ren.AddActor(lenv)
+        self.lvv_env_actor = lenv
         # Highlighted SAX crossing (the one that follows an active long-axis
         # edit) — green, TWICE the yellow crossing-dot radius (own actor so it
         # can be a larger point).
@@ -2442,6 +2454,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_bag_spin.setToolTip(
             t("Envelope radius = valve annulus × this %. Increase if CalcVol "
               "warns the bag clipped the cavity."))
+        self._lvv_bag_spin.valueChanged.connect(
+            lambda _v: self._lvv_show_envelope())
         row.addWidget(self._lvv_bag_lbl)
         row.addWidget(self._lvv_bag_spin)
         self._lvv_calc_btn = FitButton(t("CalcVol"))
@@ -2586,6 +2600,68 @@ class CTViewer(CPRMixin, AbstractViewer):
         iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
         return float(self._vol[iz, iy, ix])
 
+    def _lvv_envelope_pts(self):
+        """(N,3) boundary sample points on the loose-bag cylinder surface within
+        the envelope (apex-side of both valve planes), or None."""
+        lvv = self._lvv
+        if lvv is None or lvv.get("seed") is None or lvv.get("aortic") is None \
+                or lvv.get("mitral") is None:
+            return None
+        apex = np.asarray(lvv["apex"], float)
+        c_a, n_a, r_a = lvv["aortic"]
+        c_m, n_m, r_m = lvv["mitral"]
+        base = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
+        axis = base - apex
+        L = float(np.linalg.norm(axis))
+        if L < 1e-3:
+            return None
+        axis /= L
+        factor = self._lvv_bag_spin.value() / 100.0
+        r_max = max(float(r_a), float(r_m)) * factor
+        e1 = np.cross(axis, np.array([0.0, 0.0, 1.0]))
+        if np.linalg.norm(e1) < 1e-3:
+            e1 = np.cross(axis, np.array([0.0, 1.0, 0.0]))
+        e1 /= (np.linalg.norm(e1) or 1.0)
+        e2 = np.cross(axis, e1)
+        planes = []
+        for (c, n) in ((c_a, n_a), (c_m, n_m)):
+            c = np.asarray(c, float); n = np.asarray(n, float)
+            n = n / (np.linalg.norm(n) or 1.0)
+            if np.dot(apex - c, n) < 0:
+                n = -n
+            planes.append((c, n))
+        pts = []
+        for a in np.linspace(0.0, L, 32):
+            ctr = apex + a * axis
+            for th in np.linspace(0.0, 2 * np.pi, 48, endpoint=False):
+                P = ctr + r_max * (np.cos(th) * e1 + np.sin(th) * e2)
+                if all(np.dot(P - c, n) >= 0 for (c, n) in planes):
+                    pts.append(P)
+        return np.asarray(pts, float) if pts else None
+
+    def _lvv_show_envelope(self, render=True) -> None:
+        """Draw the envelope boundary as dotted points near each pane's plane."""
+        pts = self._lvv_envelope_pts()
+        for key in ("A", "B"):
+            p = self.pane[key]
+            if pts is None:
+                p.lvv_env_mapper.SetInputData(vtkPolyData())
+            else:
+                _u, _v, n = self._axes_for(key)
+                n = np.asarray(n, float)
+                o = np.asarray(self._pc[key], float)
+                dist = (pts - o) @ n
+                tol = 0.75 * max(self._dims)
+                near = pts[np.abs(dist) <= tol]
+                if len(near):
+                    out = [self._world3d_to_out(key, P) for P in near]
+                    p.lvv_env_mapper.SetInputData(
+                        _lv_pts_pd(out, [(255, 216, 60)] * len(out), z=0.7))
+                else:
+                    p.lvv_env_mapper.SetInputData(vtkPolyData())
+            if render:
+                p.render()
+
     def _lvv_polygon_hu(self, m, which):
         """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
         pane *which*. Returns a 1-D array of HU (empty if none)."""
@@ -2656,6 +2732,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._toggle_measure()
             lvv["step"] = "ready"
             self._lvv_sync()
+            self._lvv_show_envelope()                    # dotted bag preview
             self._lvv_prompt(
                 t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
                   "the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if "
@@ -2813,6 +2890,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
+            self.pane[k].lvv_env_mapper.SetInputData(vtkPolyData())
             self._redraw_meas(k)
 
     def _active_pane(self) -> str:
@@ -8031,6 +8109,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if only is not None and kk != only:
                     continue
                 self._redraw_lv(kk)
+        # LV Vol envelope preview follows plane/zoom changes (data only; the
+        # per-pane render below/around _refresh paints it).
+        if self._lvv is not None and self._lvv.get("seed") is not None:
+            self._lvv_show_envelope(render=False)
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
