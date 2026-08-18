@@ -2919,9 +2919,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             hu_hi = float(self._lvv_hi_spin.value())
             c_a, n_a, _r_a = lvv["aortic"]
             c_m, n_m, _r_m = lvv["mitral"]
+            epi = self._lvv_epi_surf
             res = bloodpool_volume_epi(
-                self._vol, self._dims, self._lvv_epi_surf._all_ring_points(),
-                self._lvv_epi_surf.contains, [(c_a, n_a), (c_m, n_m)],
+                self._vol, self._dims, epi._all_ring_points(),
+                lambda p: epi.contains(p, extend_base=True),
+                [(c_a, n_a), (c_m, n_m)],
                 tuple(lvv["apex"]), hu_lo, hu_hi, tuple(seed))
             if res is None:
                 QMessageBox.information(

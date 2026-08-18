@@ -64,6 +64,26 @@ def main():
     assert err < 0.10, f"off by {err*100:.1f}%"
     print("OK: epi-bounded blood volume matches (myocardium + aorta excluded)")
 
+    # extend_base: an Epi traced only to z=70 (along 50) but valve planes at
+    # z=85 → without extend the region caps at z=70; with extend it reaches the
+    # valve plane (bigger volume).
+    alongs_s = np.linspace(0.0, 50.0, 11)                # apex..z=70
+    cont_s = {float(t): np.column_stack([alongs_s, np.full_like(alongs_s, 20.0)])
+              for t in range(0, 360, 30)}
+    epi_s = LVSurface.from_meridian_contours(ax, cont_s, level_step=2.0,
+                                             n_theta=48)
+    planes_hi = [((cx, cy, 85.0), (0.0, 0.0, 1.0)),
+                 ((cx, cy, 85.0), (0.0, 0.0, 1.0))]
+    v_noext = bloodpool_volume_epi(
+        vol, (sx, sy, sz), epi_s._all_ring_points(), epi_s.contains, planes_hi,
+        apex, hu_lo=250.0, hu_hi=3000.0, seed_xyz=seed)["volume_ml"]
+    v_ext = bloodpool_volume_epi(
+        vol, (sx, sy, sz), epi_s._all_ring_points(),
+        lambda p: epi_s.contains(p, extend_base=True), planes_hi,
+        apex, hu_lo=250.0, hu_hi=3000.0, seed_xyz=seed)["volume_ml"]
+    assert v_ext > v_noext * 1.15, (v_ext, v_noext)
+    print(f"OK: extend_base reaches the valve ({v_ext:.1f} > {v_noext:.1f} mL)")
+
     # Over-high range -> seed_out(hu).
     r_hi = bloodpool_volume_epi(
         vol, (sx, sy, sz), epi._all_ring_points(), epi.contains, planes,

@@ -428,17 +428,26 @@ class LVSurface:
         ml = count * (spacing ** 3) / 1000.0
         return (ml, count) if return_count else ml
 
-    def contains(self, pts) -> np.ndarray:
+    def contains(self, pts, extend_base: bool = False) -> np.ndarray:
         """Boolean mask (N,) — which world points (N,3) fall inside the closed
         surface (per-axial-level point-in-polygon, concave-safe). Same test as
-        voxel_volume_ml, exposed for external masking (e.g. LV blood-pool)."""
+        voxel_volume_ml, exposed for external masking (e.g. LV blood-pool).
+
+        *extend_base*: keep points BEYOND the basal cut too, testing them against
+        the most-basal ring (extends the surface basally as a prism of the basal
+        cross-section). Used when an external plane (the valve plane) provides
+        the real basal cut, so a short Epi trace doesn't clip the base."""
         pts = np.asarray(pts, float).reshape(-1, 3)
         along, px, py = self.axis.project_array(pts)
         lo_a = float(self.along[0])
         hi_a = float(self.along[-1])
         step = (hi_a - lo_a) / max(1, self.n_levels - 1)
         inside = np.zeros(len(pts), dtype=bool)
-        in_range = (along >= lo_a) & (along <= hi_a)
+        in_range = (along >= lo_a)
+        if not extend_base:
+            in_range &= (along <= hi_a)
+        # Points above the base cut clip to the last ring (extend_base) ; below
+        # the apex are already excluded by the along >= lo_a guard.
         lvl = np.clip(np.round((along - lo_a) / max(1e-9, step)).astype(int),
                       0, self.n_levels - 1)
         sa = np.column_stack([px, py])
