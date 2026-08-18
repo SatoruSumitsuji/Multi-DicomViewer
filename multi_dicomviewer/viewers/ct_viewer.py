@@ -622,10 +622,11 @@ def _lvv_highlight_lut(lo: float, hi: float,
     return lut
 
 
-def _lvv_mask_lut(on: bool, rgb=(1.0, 0.35, 0.35),
-                  alpha: float = 0.5) -> vtkLookupTable:
+def _lvv_mask_lut(on: bool, rgb=(1.0, 0.5, 0.5),
+                  alpha: float = 0.82) -> vtkLookupTable:
     """LUT for the measured-region mask reslice: value 1 → light red (when on),
-    value 0 → transparent."""
+    value 0 → transparent. Alpha is high so the red DOMINATES the blood tint
+    where both overlays are on ('全面表示' — red on top)."""
     lut = vtkLookupTable()
     lut.SetNumberOfTableValues(2)
     lut.SetTableRange(0.0, 1.0)
