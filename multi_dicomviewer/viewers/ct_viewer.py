@@ -622,11 +622,11 @@ def _lvv_highlight_lut(lo: float, hi: float,
     return lut
 
 
-def _lvv_mask_lut(on: bool, rgb=(1.0, 0.5, 0.5),
-                  alpha: float = 0.82) -> vtkLookupTable:
-    """LUT for the measured-region mask reslice: value 1 → light red (when on),
-    value 0 → transparent. Alpha is high so the red DOMINATES the blood tint
-    where both overlays are on ('全面表示' — red on top)."""
+def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
+                  alpha: float = 0.9) -> vtkLookupTable:
+    """LUT for the measured-region mask reslice: value 1 → red (when on), value
+    0 → transparent. Alpha is high and the colour saturated so the red clearly
+    DOMINATES the cyan blood tint below ('全面表示' — red on top)."""
     lut = vtkLookupTable()
     lut.SetNumberOfTableValues(2)
     lut.SetTableRange(0.0, 1.0)
@@ -2727,7 +2727,24 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_toggle_highlight(self, *args) -> None:
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        self._lvv_apply_slab()
         self._lvv_update_highlight()
+
+    def _lvv_apply_slab(self) -> None:
+        """While 血流領域表示 is on, thin the RIGHT pane (B) to a 0 mm slab so its
+        blood tint reflects the true plane (not a 5 mm MIP); restore on off."""
+        on = (self._lvv is not None and self._lvv.get("seed") is not None
+              and getattr(self, "_lvv_hl_on", False))
+        if on:
+            if getattr(self, "_lvv_saved_thick_b", None) is None:
+                self._lvv_saved_thick_b = float(self._thick.get("B", 0.0))
+            if self._thick.get("B", 0.0) != 0.0:
+                self._thick["B"] = 0.0
+                self._refresh()
+        elif getattr(self, "_lvv_saved_thick_b", None) is not None:
+            self._thick["B"] = self._lvv_saved_thick_b
+            self._lvv_saved_thick_b = None
+            self._refresh()
 
     def _lvv_style_toggle(self, btn, color, text="white") -> None:
         """Colour a checkable overlay button by its checked state."""
@@ -2821,6 +2838,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._toggle_measure()
             lvv["step"] = "ready"
             self._lvv_sync()
+            self._lvv_apply_slab()                       # thin the right pane
             self._lvv_update_highlight()                 # in-range voxel tint
             self._lvv_prompt(
                 t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
@@ -2997,6 +3015,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_clear_markers(self) -> None:
         self._lvv_mask_vol = None
         self._lvv_mask_on = False
+        # Restore the right-pane slab thinned by 血流領域表示.
+        if getattr(self, "_lvv_saved_thick_b", None) is not None:
+            self._thick["B"] = self._lvv_saved_thick_b
+            self._lvv_saved_thick_b = None
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
