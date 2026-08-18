@@ -2657,6 +2657,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
         return float(self._vol[iz, iy, ix])
 
+    def _lvv_update_highlight(self) -> None:
+        """Tint the in-range (blood) voxels on both panes via the overlay LUT."""
+        on = (self._lvv is not None and self._lvv.get("seed") is not None
+              and getattr(self, "_lvv_hl_on", True))
+        if on:
+            lut = _lvv_highlight_lut(float(self._lvv_lo_spin.value()),
+                                     float(self._lvv_hi_spin.value()))
+        else:
+            lut = _lvv_transparent_lut()
+        for k in ("A", "B"):
+            self.pane[k].colors_hl.SetLookupTable(lut)
+            self.pane[k].colors_hl.Modified()
+            self.pane[k].render()
+
+    def _lvv_toggle_highlight(self, *args) -> None:
+        self._lvv_hl_on = self._lvv_hl_btn.isChecked()
+        self._lvv_update_highlight()
+
     def _lvv_polygon_hu(self, m, which):
         """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
         pane *which*. Returns a 1-D array of HU (empty if none)."""
