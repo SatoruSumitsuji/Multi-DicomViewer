@@ -28,7 +28,7 @@ import math
 import os
 
 import numpy as np
-from PyQt6.QtCore import QPoint as QtPoint, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint as QtPoint, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QColorDialog,
@@ -1089,6 +1089,24 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             and getattr(o, "_view_initial", False)
         ):
             o._fit_pane(self._which)
+
+
+class _LvvWorker(QThread):
+    """Runs the (few-second) LV blood-pool volume computation off the UI thread
+    so a busy progress bar can animate; emits the result dict."""
+    finished_result = pyqtSignal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            res = self._fn()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            res = {"error": "exc", "msg": traceback.format_exc()}
+        self.finished_result.emit(res)
 
 
 class _Pane:
@@ -2932,21 +2950,59 @@ class CTViewer(CPRMixin, AbstractViewer):
                                        t("No Epi surface — trace Epi first."))
                 return
             from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume_epi
-            seed = lvv["seed"]
+            from PyQt6.QtWidgets import QProgressDialog
+            seed = tuple(lvv["seed"])
             hu_lo = float(self._lvv_lo_spin.value())
             hu_hi = float(self._lvv_hi_spin.value())
             c_a, n_a, _r_a = lvv["aortic"]
             c_m, n_m, _r_m = lvv["mitral"]
             epi = self._lvv_epi_surf
-            res = bloodpool_volume_epi(
-                self._vol, self._dims, epi._all_ring_points(),
-                lambda p: epi.contains(p, extend_base=True),
-                [(c_a, n_a), (c_m, n_m)],
-                tuple(lvv["apex"]), hu_lo, hu_hi, tuple(seed))
+            apex = tuple(lvv["apex"])
+            vol, dims = self._vol, self._dims
+
+            def _job():
+                return bloodpool_volume_epi(
+                    vol, dims, epi._all_ring_points(),
+                    lambda p: epi.contains(p, extend_base=True),
+                    [(c_a, n_a), (c_m, n_m)], apex, hu_lo, hu_hi, seed)
+
+            # Busy progress bar while the (few-second) volume runs off-thread.
+            dlg = QProgressDialog(t("Measuring LV volume…"), None, 0, 0,
+                                  self.window())
+            dlg.setWindowTitle(t("LV Vol"))
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
+            dlg.setCancelButton(None)
+            dlg.setMinimumDuration(0)
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            self._lvv_calc_btn.setEnabled(False)
+            dlg.show()
+            worker = _LvvWorker(_job, self)
+            self._lvv_worker = worker            # keep a ref so it isn't GC'd
+            worker.finished_result.connect(
+                lambda res: self._lvv_calc_finish(res, dlg))
+            worker.start()
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_calc_finish(self, res, dlg) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            dlg.close()
+            self._lvv_calc_btn.setEnabled(True)
+            lvv = self._lvv
+            if lvv is None:
+                return
             if res is None:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
                     t("No cavity found — check the HU range and the ROI."))
+                return
+            if res.get("error") == "exc":
+                QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                     res.get("msg", "error"))
                 return
             if res.get("error") == "seed_out":
                 QMessageBox.information(
