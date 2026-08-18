@@ -2034,6 +2034,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # "target": "endo"|"epi", "plane_done": bool, "prev_side": str}.
         self._lv = None
         self._lvv = None                 # LV blood-pool volume (LVEF) session
+        self._lvv_epi_surf = None        # Epi surface captured from contour mode
+        self._lvv_epi_apex = None
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2451,18 +2453,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Confirm the LV apex at the crosshair (move it there first)"))
         self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
         row.addWidget(self._lvv_apex_btn)
-        self._lvv_aov_btn = FitButton(t("AoV plane"))
-        self._lvv_aov_btn.setHelpToolTip(
-            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
-              "press this to capture its plane"))
-        self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
-        row.addWidget(self._lvv_aov_btn)
         self._lvv_mv_btn = FitButton(t("MV plane"))
         self._lvv_mv_btn.setHelpToolTip(
             t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
               "press this to capture its plane"))
         self._lvv_mv_btn.clicked.connect(lambda: self._lvv_capture_valve("mitral"))
         row.addWidget(self._lvv_mv_btn)
+        self._lvv_aov_btn = FitButton(t("AoV plane"))
+        self._lvv_aov_btn.setHelpToolTip(
+            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
+              "press this to capture its plane"))
+        self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
+        row.addWidget(self._lvv_aov_btn)
         self._lvv_thr_btn = FitButton(t("内腔ROI"))
         self._lvv_thr_btn.setHelpToolTip(
             t("Draw a Polygon inside the LV cavity (Measure→Polygon), then press "
@@ -2492,34 +2494,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
             row.addWidget(_w)
-        # Toggle the in-range voxel highlight overlay (default on).
+        # "血流領域表示" toggle: tint ALL in-range (blood) voxels across the whole
+        # image so the operator can optimise 下限/上限 (default on).
         self._lvv_hl_on = True
-        self._lvv_hl_btn = FitButton(t("範囲色"))
+        self._lvv_hl_btn = FitButton(t("血流領域表示"))
         self._lvv_hl_btn.setCheckable(True)
         self._lvv_hl_btn.setChecked(True)
         self._lvv_hl_btn.setHelpToolTip(
-            t("Tint voxels whose HU is in the 下限–上限 range (in-range = blood)"))
+            t("Tint every voxel whose HU is in the 下限–上限 range on both panes "
+              "(in-range = blood); adjust 下限/上限 to optimise"))
         self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
         row.addWidget(self._lvv_hl_btn)
-        # "Bag" radius = valve annulus size × this %. Larger = looser envelope
-        # (won't clip the mid-cavity); applied on CalcVol.
-        self._lvv_bag_lbl = QLabel(t("袋径%"))
-        self._lvv_bag_spin = QSpinBox()
-        self._lvv_bag_spin.setRange(100, 400)
-        self._lvv_bag_spin.setSingleStep(10)
-        self._lvv_bag_spin.setValue(150)
-        self._lvv_bag_spin.setSuffix(" %")
-        self._lvv_bag_spin.setKeyboardTracking(False)
-        self._lvv_bag_spin.setToolTip(
-            t("Envelope radius = valve annulus × this %. Increase if CalcVol "
-              "warns the bag clipped the cavity."))
-        self._lvv_bag_spin.valueChanged.connect(
-            lambda _v: self._lvv_show_envelope())
-        row.addWidget(self._lvv_bag_lbl)
-        row.addWidget(self._lvv_bag_spin)
-        self._lvv_calc_btn = FitButton(t("CalcVol"))
+        self._lvv_calc_btn = FitButton(t("LV Vol計測"))
         self._lvv_calc_btn.setHelpToolTip(
-            t("Compute the LV blood-pool volume in the region"))
+            t("Measure the blood volume inside the Epi surface, apex-side of "
+              "MV/AoV, within the 下限–上限 HU range"))
         self._lvv_calc_btn.clicked.connect(self._lvv_calc)
         row.addWidget(self._lvv_calc_btn)
         self._lvv_vol_lbl = QLabel("--")
@@ -2566,10 +2555,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         apex_done, aov_done = g("apex"), g("aortic")
         mv_done, roi_done = g("mitral"), g("seed")
         # Wizard: enable only the next step (previous steps stay live for redo).
+        # Order: Apex → MV → AoV → 内腔ROI.
         self._lvv_apex_btn.setEnabled(on)
-        self._lvv_aov_btn.setEnabled(on and apex_done)
-        self._lvv_mv_btn.setEnabled(on and aov_done)
-        self._lvv_thr_btn.setEnabled(on and mv_done)
+        self._lvv_mv_btn.setEnabled(on and apex_done)
+        self._lvv_aov_btn.setEnabled(on and mv_done)
+        self._lvv_thr_btn.setEnabled(on and aov_done)
         self._lvv_calc_btn.setEnabled(on and roi_done)
         self._lvv_ed_btn.setEnabled(on and roi_done)
         self._lvv_es_btn.setEnabled(on and roi_done)
@@ -2608,13 +2598,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return
                 if self._lv is not None:          # leave contour LV mode first
                     self._lv_exit()
+                if self._lvv_epi_surf is None:
+                    QMessageBox.information(
+                        self.window(), t("LV Vol"),
+                        t("Trace the EPI border first (contour LV mode: Epi → "
+                          "Set axis → Trace), then Exit LV and start LV Vol."))
+                    return
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None}
                 self._lvv_sync()
                 self._lvv_prompt(
-                    t("Move the crosshair onto the LV apex (left double-click "
-                      "recentres), then press the Apex button."))
+                    t("Epi border loaded. Move the crosshair onto the LV apex "
+                      "(left double-click recentres), then press Apex. (This "
+                      "apex is for the valve orientation — it can differ from "
+                      "the Epi apex.)"))
                 return
             else:
                 self._lvv_clear_markers()
@@ -2633,11 +2631,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         P = np.asarray(self._center, float).copy()
         lvv["apex"] = P
         self._lvv_add_marker("apex", P, "#ff4040")
-        lvv["step"] = "aov"
+        lvv["step"] = "mv"
         self._lvv_sync()
         self._lvv_prompt(
-            t("Identify the aortic valve: draw an Ellipse on the AoV annulus "
-              "(Measure→Ellipse), then press 'AoV plane'."))
+            t("Identify the mitral valve: draw an Ellipse on the MV annulus "
+              "(Measure→Ellipse), then press 'MV plane'."))
 
     def _lvv_dbg(self, msg) -> None:
         """Append a diagnostic line to ~/.mdv_lvv_debug.log (survives a crash)."""
@@ -2658,86 +2656,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         iy = min(max(int(round(P[1] / sy)), 0), ny - 1)
         iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
         return float(self._vol[iz, iy, ix])
-
-    def _lvv_envelope_pts(self):
-        """(N,3) boundary sample points on the loose-bag cylinder surface within
-        the envelope (apex-side of both valve planes), or None."""
-        lvv = self._lvv
-        if lvv is None or lvv.get("seed") is None or lvv.get("aortic") is None \
-                or lvv.get("mitral") is None:
-            return None
-        apex = np.asarray(lvv["apex"], float)
-        c_a, n_a, r_a = lvv["aortic"]
-        c_m, n_m, r_m = lvv["mitral"]
-        base = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
-        axis = base - apex
-        L = float(np.linalg.norm(axis))
-        if L < 1e-3:
-            return None
-        axis /= L
-        factor = self._lvv_bag_spin.value() / 100.0
-        r_max = max(float(r_a), float(r_m)) * factor
-        e1 = np.cross(axis, np.array([0.0, 0.0, 1.0]))
-        if np.linalg.norm(e1) < 1e-3:
-            e1 = np.cross(axis, np.array([0.0, 1.0, 0.0]))
-        e1 /= (np.linalg.norm(e1) or 1.0)
-        e2 = np.cross(axis, e1)
-        planes = []
-        for (c, n) in ((c_a, n_a), (c_m, n_m)):
-            c = np.asarray(c, float); n = np.asarray(n, float)
-            n = n / (np.linalg.norm(n) or 1.0)
-            if np.dot(apex - c, n) < 0:
-                n = -n
-            planes.append((c, n))
-        pts = []
-        for a in np.linspace(0.0, L, 32):
-            ctr = apex + a * axis
-            for th in np.linspace(0.0, 2 * np.pi, 48, endpoint=False):
-                P = ctr + r_max * (np.cos(th) * e1 + np.sin(th) * e2)
-                if all(np.dot(P - c, n) >= 0 for (c, n) in planes):
-                    pts.append(P)
-        return np.asarray(pts, float) if pts else None
-
-    def _lvv_show_envelope(self, render=True) -> None:
-        """Draw the envelope boundary as dotted points near each pane's plane."""
-        pts = self._lvv_envelope_pts()
-        for key in ("A", "B"):
-            p = self.pane[key]
-            if pts is None:
-                p.lvv_env_mapper.SetInputData(vtkPolyData())
-            else:
-                _u, _v, n = self._axes_for(key)
-                n = np.asarray(n, float)
-                o = np.asarray(self._pc[key], float)
-                dist = (pts - o) @ n
-                tol = 0.75 * max(self._dims)
-                near = pts[np.abs(dist) <= tol]
-                if len(near):
-                    out = [self._world3d_to_out(key, P) for P in near]
-                    p.lvv_env_mapper.SetInputData(
-                        _lv_pts_pd(out, [(255, 216, 60)] * len(out), z=0.7))
-                else:
-                    p.lvv_env_mapper.SetInputData(vtkPolyData())
-            if render:
-                p.render()
-
-    def _lvv_update_highlight(self) -> None:
-        """Tint the in-range (blood) voxels on both panes via the overlay LUT."""
-        on = (self._lvv is not None and self._lvv.get("seed") is not None
-              and getattr(self, "_lvv_hl_on", True))
-        if on:
-            lut = _lvv_highlight_lut(float(self._lvv_lo_spin.value()),
-                                     float(self._lvv_hi_spin.value()))
-        else:
-            lut = _lvv_transparent_lut()
-        for k in ("A", "B"):
-            self.pane[k].colors_hl.SetLookupTable(lut)
-            self.pane[k].colors_hl.Modified()
-            self.pane[k].render()
-
-    def _lvv_toggle_highlight(self, *args) -> None:
-        self._lvv_hl_on = self._lvv_hl_btn.isChecked()
-        self._lvv_update_highlight()
 
     def _lvv_polygon_hu(self, m, which):
         """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
@@ -2809,7 +2727,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._toggle_measure()
             lvv["step"] = "ready"
             self._lvv_sync()
-            self._lvv_show_envelope()                    # dotted bag preview
             self._lvv_update_highlight()                 # in-range voxel tint
             self._lvv_prompt(
                 t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
@@ -2871,17 +2788,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
-        if valve == "aortic":
-            self._lvv["step"] = "mv"
+        if valve == "mitral":
+            self._lvv["step"] = "aov"
             self._lvv_sync()
             self._lvv_prompt(
-                t("Aortic plane captured. Now identify the mitral valve: draw "
-                  "an Ellipse on the MV annulus, then press 'MV plane'."))
+                t("Mitral plane captured. Now identify the aortic valve: draw "
+                  "an Ellipse on the AoV annulus, then press 'AoV plane'."))
         else:
             self._lvv["step"] = "thr"
             self._lvv_sync()
             self._lvv_prompt(
-                t("Mitral plane captured. Draw a Polygon inside the LV cavity "
+                t("Aortic plane captured. Draw a Polygon inside the LV cavity "
                   "(Measure→Polygon), then press the 内腔ROI button."))
 
     def _lvv_calc(self) -> None:
@@ -2898,49 +2815,40 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self.window(), t("LV Vol"),
                     t("Set these first: {m}").format(m=", ".join(miss)))
                 return
-            from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume
+            if self._lvv_epi_surf is None:
+                QMessageBox.information(self.window(), t("LV Vol"),
+                                       t("No Epi surface — trace Epi first."))
+                return
+            from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume_epi
             seed = lvv["seed"]
             hu_lo = float(self._lvv_lo_spin.value())
             hu_hi = float(self._lvv_hi_spin.value())
-            c_a, n_a, r_a = lvv["aortic"]
-            c_m, n_m, r_m = lvv["mitral"]
-            base_center = (np.asarray(c_a, float) + np.asarray(c_m, float)) / 2.0
-            factor = self._lvv_bag_spin.value() / 100.0
-            r_max = max(float(r_a), float(r_m)) * factor
-            res = bloodpool_volume(
-                self._vol, self._dims, tuple(lvv["apex"]), tuple(base_center),
-                r_max, [(c_a, n_a), (c_m, n_m)], hu_lo, hu_hi, tuple(seed))
+            c_a, n_a, _r_a = lvv["aortic"]
+            c_m, n_m, _r_m = lvv["mitral"]
+            res = bloodpool_volume_epi(
+                self._vol, self._dims, self._lvv_epi_surf._all_ring_points(),
+                self._lvv_epi_surf.contains, [(c_a, n_a), (c_m, n_m)],
+                tuple(lvv["apex"]), hu_lo, hu_hi, tuple(seed))
             if res is None:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
-                    t("No cavity found — the threshold may be too high, or the "
-                      "reference point is outside the blood pool."))
+                    t("No cavity found — check the HU range and the ROI."))
                 return
             if res.get("error") == "seed_out":
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
-                    t("Could not measure — {m}.\nAdjust 下限/上限 or 袋径%, move "
-                      "the ROI to a clearly-contrast part of the cavity, or "
-                      "re-check the apex / AoV / MV.").format(m=res["msg"]))
+                    t("Could not measure — {m}.\nAdjust 下限/上限, move the ROI "
+                      "to a clearly-contrast part of the cavity, or re-check "
+                      "the Epi / MV / AoV.").format(m=res["msg"]))
                 return
             if res.get("error") == "too_large":
                 QMessageBox.warning(
                     self.window(), t("LV Vol"),
-                    t("Region too large to compute safely ({v:,} voxels, "
-                      "r_max={r:.0f} mm, axis={L:.0f} mm) — likely a mis-placed "
-                      "valve/apex or an over-large 袋径%. Lower 袋径% or re-check "
-                      "the landmarks.").format(
-                        v=res["voxels"], r=res["r_max"], L=res["L"]))
+                    t("Region too large to compute ({v:,} voxels) — re-check "
+                      "the Epi surface.").format(v=res["voxels"]))
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
-            if res.get("hit_wall"):
-                QMessageBox.warning(
-                    self.window(), t("LV Vol"),
-                    t("The cavity touched the envelope wall — the bag may be "
-                      "too small and clipping it (volume {v:.1f} mL may be an "
-                      "UNDER-estimate). Increase 袋径% and press CalcVol again.")
-                    .format(v=res["volume_ml"]))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (error)"),
@@ -2950,7 +2858,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox
         if self._lvv is None or self._lvv.get("last_ml") is None:
             QMessageBox.information(self.window(), t("LV Vol"),
-                                   t("Press CalcVol first."))
+                                   t("Press LV Vol計測 first."))
             return
         if phase == "ed":
             self._lvv_edv = float(self._lvv["last_ml"])
@@ -7353,6 +7261,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Leave LV mode entirely, restoring the normal MPR view."""
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
+        # Stash the traced EPI surface so LV Vol mode can use it as the outer
+        # bound (Epi border → myocardial envelope). Only when Epi was traced.
+        try:
+            if self._lv is not None:
+                model = self._lv["model"]
+                if (model.epi_axis is not None
+                        and len(model.epi_contours) >= 3):
+                    model.build()
+                    if model.epi is not None:
+                        self._lvv_epi_surf = model.epi
+                        self._lvv_epi_apex = np.asarray(
+                            model.epi_axis.apex, float)
+        except Exception:                               # noqa: BLE001
+            pass
         self._lv_reset_undo()
         # Remove the on-screen LV border traces (kept in the model for volume).
         for k in ("A", "B"):
@@ -8196,11 +8118,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if only is not None and kk != only:
                     continue
                 self._redraw_lv(kk)
-        # LV Vol envelope preview follows plane/zoom changes (data only; the
-        # per-pane render below/around _refresh paints it).
-        if self._lvv is not None and self._lvv.get("seed") is not None:
-            self._lvv_show_envelope(render=False)
-
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
         into the viewport, not the oversized diagonal-sized FOV square.
