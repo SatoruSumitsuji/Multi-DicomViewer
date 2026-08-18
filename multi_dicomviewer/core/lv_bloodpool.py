@@ -188,3 +188,80 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes,
     return {"volume_ml": count * voxel_ml, "count": count,
             "voxel_ml": voxel_ml, "hit_wall": hit_wall,
             "bbox": (z0, z1, y0, y1, x0, x1)}
+
+
+def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
+                         apex_xyz, hu_lo, hu_hi, seed_xyz, pad_mm: float = 2.0):
+    """LV blood-pool volume bounded by the EPICARDIAL surface (instead of the
+    loose-bag cylinder): count voxels that are inside the epi surface, on the
+    apex side of both valve *planes*, with hu_lo <= HU <= hu_hi, and 3-D
+    connected to *seed_xyz*.
+
+    *epi_ring_pts* : (M,3) world points on the epi surface (for the work box).
+    *epi_contains* : callable pts(N,3) -> bool mask (points inside the surface).
+    *planes*       : ((center, normal), …) valve planes (oriented to apex here).
+    Returns dict(volume_ml, count, …) or an {"error": …} dict.
+    """
+    vol = np.asarray(vol)
+    sx, sy, sz = (float(s) for s in spacing_xyz)
+    nz, ny, nx = vol.shape
+    apex = np.asarray(apex_xyz, float)
+    verts = np.asarray(epi_ring_pts, float).reshape(-1, 3)
+    lo_w = verts.min(0) - float(pad_mm)
+    hi_w = verts.max(0) + float(pad_mm)
+    lo = np.maximum(np.floor([lo_w[2] / sz, lo_w[1] / sy, lo_w[0] / sx]),
+                    0).astype(int)
+    hi = np.minimum(np.ceil([hi_w[2] / sz, hi_w[1] / sy, hi_w[0] / sx]),
+                    [nz, ny, nx]).astype(int)
+    if np.any(hi <= lo):
+        return None
+    if int(np.prod(hi - lo)) > 60_000_000:
+        return {"error": "too_large", "voxels": int(np.prod(hi - lo))}
+    z0, y0, x0 = (int(v) for v in lo)
+    z1, y1, x1 = (int(v) for v in hi)
+    sub = vol[z0:z1, y0:y1, x0:x1]
+
+    # Orient valve normals toward the apex once.
+    oplanes = [(np.asarray(c, float), _oriented_normal(c, nrm, apex))
+               for (c, nrm) in planes]
+
+    # Only the HU-in-range voxels need the (costly) inside-epi / plane tests.
+    hu_mask = (sub >= float(hu_lo)) & (sub <= float(hu_hi))
+    zz, yy, xx = np.where(hu_mask)
+    mask = np.zeros(sub.shape, dtype=bool)
+    if len(zz):
+        world = np.column_stack([(x0 + xx) * sx, (y0 + yy) * sy, (z0 + zz) * sz])
+        keep = np.asarray(epi_contains(world), bool)
+        for (c, n) in oplanes:
+            keep &= ((world - c) @ n) >= 0.0
+        mask[zz[keep], yy[keep], xx[keep]] = True
+
+    si = (int(round(seed_xyz[2] / sz)) - z0,
+          int(round(seed_xyz[1] / sy)) - y0,
+          int(round(seed_xyz[0] / sx)) - x0)
+    if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
+            and 0 <= si[2] < sub.shape[2]):
+        return {"error": "seed_out", "reason": "box",
+                "msg": "seed is outside the epicardial box"}
+    if not mask[si]:
+        seed = np.asarray(seed_xyz, float)
+        hu_seed = float(sub[si])
+        in_epi = bool(np.asarray(epi_contains(seed.reshape(1, 3)), bool)[0])
+        plane_bad = any(float((seed - c) @ n) < 0 for (c, n) in oplanes)
+        if not (hu_lo <= hu_seed <= hu_hi):
+            reason, msg = "hu", ("seed HU %.0f is outside the range %.0f-%.0f"
+                                 % (hu_seed, hu_lo, hu_hi))
+        elif not in_epi:
+            reason, msg = "epi", ("seed is outside the epicardial surface — "
+                                  "move the ROI inside it / re-trace Epi")
+        elif plane_bad:
+            reason, msg = "plane", ("seed is on the far (non-apex) side of a "
+                                    "valve plane — re-check MV/AoV")
+        else:
+            reason, msg = "other", "seed not in the region"
+        return {"error": "seed_out", "reason": reason, "msg": msg}
+    comp = _seed_component(mask, si)
+    count = int(comp.sum())
+    voxel_ml = (sx * sy * sz) / 1000.0
+    return {"volume_ml": count * voxel_ml, "count": count, "voxel_ml": voxel_ml,
+            "bbox": (z0, z1, y0, y1, x0, x1)}

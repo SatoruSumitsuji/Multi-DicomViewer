@@ -428,6 +428,26 @@ class LVSurface:
         ml = count * (spacing ** 3) / 1000.0
         return (ml, count) if return_count else ml
 
+    def contains(self, pts) -> np.ndarray:
+        """Boolean mask (N,) — which world points (N,3) fall inside the closed
+        surface (per-axial-level point-in-polygon, concave-safe). Same test as
+        voxel_volume_ml, exposed for external masking (e.g. LV blood-pool)."""
+        pts = np.asarray(pts, float).reshape(-1, 3)
+        along, px, py = self.axis.project_array(pts)
+        lo_a = float(self.along[0])
+        hi_a = float(self.along[-1])
+        step = (hi_a - lo_a) / max(1, self.n_levels - 1)
+        inside = np.zeros(len(pts), dtype=bool)
+        in_range = (along >= lo_a) & (along <= hi_a)
+        lvl = np.clip(np.round((along - lo_a) / max(1e-9, step)).astype(int),
+                      0, self.n_levels - 1)
+        sa = np.column_stack([px, py])
+        for k in range(self.n_levels):
+            sel = in_range & (lvl == k)
+            if np.any(sel):
+                inside[sel] = _points_in_polygon(sa[sel], self.rings[k])
+        return inside
+
     # ---------------------------------------------------------------- meshing
     def _rings_world(self, rings, along=None):
         """World points ((len(rings))*Nθ, 3) for an explicit ring stack (may be a
