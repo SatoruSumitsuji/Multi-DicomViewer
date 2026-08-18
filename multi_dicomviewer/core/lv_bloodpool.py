@@ -206,7 +206,10 @@ def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
     sx, sy, sz = (float(s) for s in spacing_xyz)
     nz, ny, nx = vol.shape
     apex = np.asarray(apex_xyz, float)
-    verts = np.asarray(epi_ring_pts, float).reshape(-1, 3)
+    # Include the valve-plane centres in the work box so the basally-extended
+    # region (epi_contains extend_base) up to the valves is covered.
+    verts = np.vstack([np.asarray(epi_ring_pts, float).reshape(-1, 3),
+                       np.array([np.asarray(c, float) for (c, _n) in planes])])
     lo_w = verts.min(0) - float(pad_mm)
     hi_w = verts.max(0) + float(pad_mm)
     lo = np.maximum(np.floor([lo_w[2] / sz, lo_w[1] / sy, lo_w[0] / sx]),
