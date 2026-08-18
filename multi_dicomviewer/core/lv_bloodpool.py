@@ -264,4 +264,4 @@ def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
     count = int(comp.sum())
     voxel_ml = (sx * sy * sz) / 1000.0
     return {"volume_ml": count * voxel_ml, "count": count, "voxel_ml": voxel_ml,
-            "bbox": (z0, z1, y0, y1, x0, x1)}
+            "bbox": (z0, z1, y0, y1, x0, x1), "comp": comp}

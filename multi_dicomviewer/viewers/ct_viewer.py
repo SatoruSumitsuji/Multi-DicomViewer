@@ -622,6 +622,19 @@ def _lvv_highlight_lut(lo: float, hi: float,
     return lut
 
 
+def _lvv_mask_lut(on: bool, rgb=(1.0, 0.35, 0.35),
+                  alpha: float = 0.5) -> vtkLookupTable:
+    """LUT for the measured-region mask reslice: value 1 → light red (when on),
+    value 0 → transparent."""
+    lut = vtkLookupTable()
+    lut.SetNumberOfTableValues(2)
+    lut.SetTableRange(0.0, 1.0)
+    lut.SetTableValue(0, 0.0, 0.0, 0.0, 0.0)
+    lut.SetTableValue(1, rgb[0], rgb[1], rgb[2], alpha if on else 0.0)
+    lut.Build()
+    return lut
+
+
 def _gray_lut(width: float, level: float, invert: bool = False) -> vtkLookupTable:
     lut = vtkLookupTable()
     lut.SetHueRange(0.0, 0.0)
@@ -1119,11 +1132,28 @@ class _Pane:
         # Just in front of the grayscale (z=0) but behind the crosshair (0.5) /
         # markers, so the tint sits on the image without z-fighting.
         self.actor_hl.SetPosition(0.0, 0.0, 0.05)
+        # LV Vol MEASURED-region overlay: reslice a separate 0/1 mask volume on
+        # the SAME plane and tint the 1s light red. Drawn above the blood tint.
+        self.reslice_mask = vtkImageReslice()
+        self.reslice_mask.SetInputData(_placeholder_image())
+        self.reslice_mask.SetOutputDimensionality(2)
+        self.reslice_mask.SetInterpolationModeToNearestNeighbor()
+        self.reslice_mask.SetBackgroundLevel(0.0)
+        self.colors_mask = vtkImageMapToColors()
+        self.colors_mask.SetOutputFormatToRGBA()
+        self.colors_mask.SetLookupTable(_lvv_mask_lut(False))
+        self.colors_mask.SetInputConnection(self.reslice_mask.GetOutputPort())
+        self.actor_mask = vtkImageActor()
+        self.actor_mask.GetMapper().SetInputConnection(
+            self.colors_mask.GetOutputPort())
+        self.actor_mask.SetInterpolate(False)
+        self.actor_mask.SetPosition(0.0, 0.0, 0.10)
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.0, 0.0, 0.0)
         self.ren.GetActiveCamera().ParallelProjectionOn()
         self.ren.AddActor(self.actor)
-        self.ren.AddActor(self.actor_hl)              # drawn over the grayscale
+        self.ren.AddActor(self.actor_hl)              # blood tint over grayscale
+        self.ren.AddActor(self.actor_mask)           # measured region (red) on top
 
         self.cross = []
         self._overlay_actors = []
@@ -2036,6 +2066,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_apex = None
+        self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
+        self._lvv_mask_on = False        # red measured-region overlay visible
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2505,6 +2537,14 @@ class CTViewer(CPRMixin, AbstractViewer):
               "(in-range = blood); adjust 下限/上限 to optimise"))
         self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
         row.addWidget(self._lvv_hl_btn)
+        # "計測領域" toggle: show the measured region (red) after LV Vol計測.
+        self._lvv_mask_btn = FitButton(t("計測領域"))
+        self._lvv_mask_btn.setCheckable(True)
+        self._lvv_mask_btn.setChecked(True)
+        self._lvv_mask_btn.setHelpToolTip(
+            t("Show the measured LV blood region (red) — independent of 血流領域表示"))
+        self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
+        row.addWidget(self._lvv_mask_btn)
         self._lvv_calc_btn = FitButton(t("LV Vol計測"))
         self._lvv_calc_btn.setHelpToolTip(
             t("Measure the blood volume inside the Epi surface, apex-side of "
@@ -2581,6 +2621,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                   self._lvv_hi_lbl, self._lvv_hi_spin, self._lvv_hl_btn):
             w.setVisible(roi_done)
+        # 血流領域表示 button colours cyan while active.
+        if roi_done:
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        # LV Vol計測 button turns light-red once a volume is measured; the
+        # 計測領域 (red overlay) toggle appears then and is independently on/off.
+        measured = on and self._lvv.get("last_ml") is not None
+        self._lvv_calc_btn.setStyleSheet(
+            ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+            if measured else self._BTN_DIS)
+        self._lvv_mask_btn.setVisible(measured)
+        if measured:
+            self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
         self._lvv_update_ef()
 
     def _lvv_prompt(self, text) -> None:
@@ -2673,7 +2725,30 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_toggle_highlight(self, *args) -> None:
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_update_highlight()
+
+    def _lvv_style_toggle(self, btn, color, text="white") -> None:
+        """Colour a checkable overlay button by its checked state."""
+        if btn.isChecked():
+            btn.setStyleSheet("QPushButton{background:%s;color:%s;}%s"
+                              % (color, text, self._BTN_DIS))
+        else:
+            btn.setStyleSheet(self._BTN_DIS)
+
+    def _lvv_update_mask(self) -> None:
+        """Show/hide the measured-region (red) overlay on both panes."""
+        on = (self._lvv_mask_vol is not None
+              and getattr(self, "_lvv_mask_on", False))
+        for k in ("A", "B"):
+            self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(on))
+            self.pane[k].colors_mask.Modified()
+            self.pane[k].render()
+
+    def _lvv_toggle_mask(self, *args) -> None:
+        self._lvv_mask_on = self._lvv_mask_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+        self._lvv_update_mask()
 
     def _lvv_polygon_hu(self, m, which):
         """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
@@ -2867,6 +2942,25 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
+            # Build the measured-region mask volume (0/1) for the red overlay.
+            comp = res.get("comp")
+            if comp is not None:
+                z0, z1, y0, y1, x0, x1 = res["bbox"]
+                full = np.zeros(self._vol.shape, np.float32)
+                full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
+                sx, sy, sz = self._dims
+                self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
+                for k in ("A", "B"):
+                    self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
+                self._lvv_mask_on = True
+                self._lvv_mask_btn.setChecked(True)
+                self._refresh()                          # reslice the mask now
+                self._lvv_update_mask()
+            # LV Vol計測 button → light red once measured.
+            self._lvv_calc_btn.setStyleSheet(
+                "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+            self._lvv_sync()
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (error)"),
@@ -2898,12 +2992,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_ef_lbl.setText("  ".join(parts) if parts else "EF --")
 
     def _lvv_clear_markers(self) -> None:
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
             self.pane[k].lvv_env_mapper.SetInputData(vtkPolyData())
             self.pane[k].colors_hl.SetLookupTable(_lvv_transparent_lut())
             self.pane[k].colors_hl.Modified()
+            self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(False))
+            self.pane[k].reslice_mask.SetInputData(_placeholder_image())
+            self.pane[k].colors_mask.Modified()
             self._redraw_meas(k)
 
     def _active_pane(self) -> str:
@@ -8108,6 +8207,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             elif hasattr(p.reslice, "SetSlabNumberOfSlices"):
                 p.reslice.SetSlabNumberOfSlices(1)
             p.reslice.Modified()
+            # Keep the measured-region mask reslice on the SAME plane/output so
+            # the red overlay tracks the image (only when a mask is loaded).
+            if getattr(self, "_lvv_mask_vol", None) is not None:
+                p.reslice_mask.SetResliceAxes(self._matrix(key))
+                p.reslice_mask.SetOutputSpacing(spacing, spacing, base_step)
+                p.reslice_mask.SetOutputOrigin(fx - box_u, fy - box_v, 0.0)
+                p.reslice_mask.SetOutputExtent(0, nu - 1, 0, nv - 1, 0, 0)
+                if hasattr(p.reslice_mask, "SetSlabNumberOfSlices"):
+                    p.reslice_mask.SetSlabNumberOfSlices(1)
+                p.reslice_mask.Modified()
             p.colors.SetLookupTable(self._lut())
             p.colors.Modified()
             self._wire_color_smoothing(p, spacing)
