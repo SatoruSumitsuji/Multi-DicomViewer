@@ -2565,6 +2565,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Show the measured LV blood region (red) — independent of 血流領域表示"))
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
         row.addWidget(self._lvv_mask_btn)
+        # "Epi境界" toggle: draw the Epi surface where it crosses each pane
+        # (green) — to judge whether coronary voxels contaminate the cavity.
+        self._lvv_epi_show = False
+        self._lvv_epi_btn = FitButton(t("Epi境界"))
+        self._lvv_epi_btn.setCheckable(True)
+        self._lvv_epi_btn.setHelpToolTip(
+            t("Show the Epi border on both panes (green)"))
+        self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
+        row.addWidget(self._lvv_epi_btn)
+        # Per-pane slab thickness (mm) for LV Vol viewing — freely adjustable
+        # (e.g. right pane 0 mm for a true thin plane instead of the 5 mm MIP).
+        self._lvv_slab_a = QSpinBox()
+        self._lvv_slab_a.setRange(0, 20); self._lvv_slab_a.setSuffix(" mm")
+        self._lvv_slab_a.setPrefix(t("左Slab "))
+        self._lvv_slab_a.setKeyboardTracking(False)
+        self._lvv_slab_a.valueChanged.connect(self._lvv_slab_changed)
+        self._lvv_slab_b = QSpinBox()
+        self._lvv_slab_b.setRange(0, 20); self._lvv_slab_b.setValue(5)
+        self._lvv_slab_b.setSuffix(" mm"); self._lvv_slab_b.setPrefix(t("右Slab "))
+        self._lvv_slab_b.setKeyboardTracking(False)
+        self._lvv_slab_b.valueChanged.connect(self._lvv_slab_changed)
+        row.addWidget(self._lvv_slab_a)
+        row.addWidget(self._lvv_slab_b)
         self._lvv_calc_btn = FitButton(t("LV Vol計測"))
         self._lvv_calc_btn.setHelpToolTip(
             t("Measure the blood volume inside the Epi surface, apex-side of "
@@ -2648,6 +2671,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.setVisible(measured)
         if measured:
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+        # Epi-border toggle + per-pane slab controls: available in the mode.
+        has_epi = on and self._lvv_epi_surf is not None
+        self._lvv_epi_btn.setVisible(has_epi)
+        for w in (self._lvv_slab_a, self._lvv_slab_b):
+            w.setVisible(on)
 
     def _lvv_prompt(self, text) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -2673,6 +2701,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None}
+                for spin, key in ((self._lvv_slab_a, "A"),
+                                  (self._lvv_slab_b, "B")):
+                    spin.blockSignals(True)
+                    spin.setValue(int(round(self._thick.get(key, 0.0))))
+                    spin.blockSignals(False)
                 self._lvv_sync()
                 self._lvv_prompt(
                     t("Epi border loaded. Move the crosshair onto the LV apex "
@@ -2740,24 +2773,46 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_toggle_highlight(self, *args) -> None:
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-        self._lvv_apply_slab()
         self._lvv_update_highlight()
 
-    def _lvv_apply_slab(self) -> None:
-        """While 血流領域表示 is on, thin the RIGHT pane (B) to a 0 mm slab so its
-        blood tint reflects the true plane (not a 5 mm MIP); restore on off."""
-        on = (self._lvv is not None and self._lvv.get("seed") is not None
-              and getattr(self, "_lvv_hl_on", False))
-        if on:
-            if getattr(self, "_lvv_saved_thick_b", None) is None:
-                self._lvv_saved_thick_b = float(self._thick.get("B", 0.0))
-            if self._thick.get("B", 0.0) != 0.0:
-                self._thick["B"] = 0.0
-                self._refresh()
-        elif getattr(self, "_lvv_saved_thick_b", None) is not None:
-            self._thick["B"] = self._lvv_saved_thick_b
-            self._lvv_saved_thick_b = None
-            self._refresh()
+    def _lvv_slab_changed(self, *args) -> None:
+        """左Slab / 右Slab spinboxes → set each pane's slab thickness (mm)."""
+        if self._lvv is None:
+            return
+        self._thick["A"] = float(self._lvv_slab_a.value())
+        self._thick["B"] = float(self._lvv_slab_b.value())
+        self._refresh()
+
+    def _lvv_show_epi(self, render=True) -> None:
+        """Draw the Epi surface where it crosses each pane (green dots), so the
+        operator can see the Epi border and judge coronary contamination."""
+        on = (self._lvv is not None and self._lvv_epi_surf is not None
+              and getattr(self, "_lvv_epi_show", False))
+        pts = self._lvv_epi_surf._all_ring_points() if on else None
+        for key in ("A", "B"):
+            p = self.pane[key]
+            if pts is None:
+                p.lvv_env_mapper.SetInputData(vtkPolyData())
+            else:
+                _u, _v, n = self._axes_for(key)
+                n = np.asarray(n, float)
+                o = np.asarray(self._pc[key], float)
+                dist = (pts - o) @ n
+                tol = 0.75 * max(self._dims)
+                near = pts[np.abs(dist) <= tol]
+                if len(near):
+                    out = [self._world3d_to_out(key, P) for P in near]
+                    p.lvv_env_mapper.SetInputData(
+                        _lv_pts_pd(out, [(80, 220, 80)] * len(out), z=0.72))
+                else:
+                    p.lvv_env_mapper.SetInputData(vtkPolyData())
+            if render:
+                p.render()
+
+    def _lvv_toggle_epi(self, *args) -> None:
+        self._lvv_epi_show = self._lvv_epi_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+        self._lvv_show_epi()
 
     def _lvv_style_toggle(self, btn, color, text="white") -> None:
         """Colour a checkable overlay button by its checked state."""
@@ -2851,7 +2906,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._toggle_measure()
             lvv["step"] = "ready"
             self._lvv_sync()
-            self._lvv_apply_slab()                       # thin the right pane
             self._lvv_update_highlight()                 # in-range voxel tint
             self._lvv_prompt(
                 t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
@@ -3167,7 +3221,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_vol_lbl.setText(
                     t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
             self._lvv_sync()
-            self._lvv_apply_slab()
             self._lvv_update_highlight()
             QMessageBox.information(
                 self.window(), t("LV Vol"),
@@ -3180,10 +3233,7 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_clear_markers(self) -> None:
         self._lvv_mask_vol = None
         self._lvv_mask_on = False
-        # Restore the right-pane slab thinned by 血流領域表示.
-        if getattr(self, "_lvv_saved_thick_b", None) is not None:
-            self._thick["B"] = self._lvv_saved_thick_b
-            self._lvv_saved_thick_b = None
+        self._lvv_epi_show = False
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
@@ -8438,6 +8488,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if only is not None and kk != only:
                     continue
                 self._redraw_lv(kk)
+        # LV Vol Epi-border dots follow plane/zoom changes (data only).
+        if self._lvv is not None and getattr(self, "_lvv_epi_show", False):
+            self._lvv_show_epi(render=False)
+
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
         into the viewport, not the oversized diagonal-sized FOV square.
