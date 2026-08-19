@@ -2574,20 +2574,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Show the Epi border on both panes (green)"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
         row.addWidget(self._lvv_epi_btn)
-        # Per-pane slab thickness (mm) for LV Vol viewing — freely adjustable
-        # (e.g. right pane 0 mm for a true thin plane instead of the 5 mm MIP).
-        self._lvv_slab_a = QSpinBox()
-        self._lvv_slab_a.setRange(0, 20); self._lvv_slab_a.setSuffix(" mm")
-        self._lvv_slab_a.setPrefix(t("左Slab "))
-        self._lvv_slab_a.setKeyboardTracking(False)
-        self._lvv_slab_a.valueChanged.connect(self._lvv_slab_changed)
-        self._lvv_slab_b = QSpinBox()
-        self._lvv_slab_b.setRange(0, 20); self._lvv_slab_b.setValue(5)
-        self._lvv_slab_b.setSuffix(" mm"); self._lvv_slab_b.setPrefix(t("右Slab "))
-        self._lvv_slab_b.setKeyboardTracking(False)
-        self._lvv_slab_b.valueChanged.connect(self._lvv_slab_changed)
-        row.addWidget(self._lvv_slab_a)
-        row.addWidget(self._lvv_slab_b)
+        # (Per-pane slab thickness is changed with the toolbar "Slab(mm)"
+        # control — it sets the ACTIVE pane's slab, so click a pane then adjust;
+        # it stays enabled in LV Vol mode. No dedicated spinboxes here.)
         self._lvv_calc_btn = FitButton(t("LV Vol計測"))
         self._lvv_calc_btn.setHelpToolTip(
             t("Measure the blood volume inside the Epi surface, apex-side of "
@@ -2671,11 +2660,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.setVisible(measured)
         if measured:
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
-        # Epi-border toggle + per-pane slab controls: available in the mode.
-        has_epi = on and self._lvv_epi_surf is not None
-        self._lvv_epi_btn.setVisible(has_epi)
-        for w in (self._lvv_slab_a, self._lvv_slab_b):
-            w.setVisible(on)
+        # Epi-border toggle: available in the mode.
+        self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
 
     def _lvv_prompt(self, text) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -2701,11 +2687,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None}
-                for spin, key in ((self._lvv_slab_a, "A"),
-                                  (self._lvv_slab_b, "B")):
-                    spin.blockSignals(True)
-                    spin.setValue(int(round(self._thick.get(key, 0.0))))
-                    spin.blockSignals(False)
                 self._lvv_sync()
                 self._lvv_prompt(
                     t("Epi border loaded. Move the crosshair onto the LV apex "
@@ -2774,14 +2755,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_update_highlight()
-
-    def _lvv_slab_changed(self, *args) -> None:
-        """左Slab / 右Slab spinboxes → set each pane's slab thickness (mm)."""
-        if self._lvv is None:
-            return
-        self._thick["A"] = float(self._lvv_slab_a.value())
-        self._thick["B"] = float(self._lvv_slab_b.value())
-        self._refresh()
 
     def _lvv_show_epi(self, render=True) -> None:
         """Draw the Epi surface where it crosses each pane (green dots), so the
@@ -3819,8 +3792,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # only in _set_mode) so the state is right on every refresh / load path.
         for b in getattr(self, "_t2d_btns", []):
             b.setEnabled(True)
-        if getattr(self, "_slab_spin", None) is not None and self._lv is not None:
-            self._slab_spin.setEnabled(False)
+        # Slab(mm) is disabled in the contour LV mode (its slab is fixed per
+        # pass); enabled otherwise in 3-D — incl. LV Vol mode — so the operator
+        # sets each pane's slab there. RE-enable when leaving contour LV.
+        if getattr(self, "_slab_spin", None) is not None:
+            self._slab_spin.setEnabled(self._lv is None and self._mode == "3D")
 
     # --------------------------------------------------- CenterLine
     def _style_cl(self):
