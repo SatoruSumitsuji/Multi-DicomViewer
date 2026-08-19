@@ -2085,6 +2085,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_apex = None
+        self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._meas_on = False
@@ -2568,42 +2569,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_calc_btn.setHelpToolTip(
             t("Measure the blood volume inside the Epi surface, apex-side of "
               "MV/AoV, within the 下限–上限 HU range"))
-        self._lvv_calc_btn.clicked.connect(self._lvv_calc)
+        self._lvv_calc_btn.clicked.connect(lambda: self._lvv_calc())
         row.addWidget(self._lvv_calc_btn)
         self._lvv_vol_lbl = QLabel("--")
         fv = self._lvv_vol_lbl.font(); fv.setBold(True)
         self._lvv_vol_lbl.setFont(fv)
         self._lvv_vol_lbl.setMinimumWidth(90)
         row.addWidget(self._lvv_vol_lbl)
-        self._lvv_ed_btn = FitButton(t("Set ED"))
-        self._lvv_ed_btn.setHelpToolTip(t("Store the current volume as EDV"))
-        self._lvv_ed_btn.clicked.connect(lambda: self._lvv_set_phase("ed"))
-        row.addWidget(self._lvv_ed_btn)
-        self._lvv_es_btn = FitButton(t("Set ES"))
-        self._lvv_es_btn.setHelpToolTip(t("Store the current volume as ESV"))
-        self._lvv_es_btn.clicked.connect(lambda: self._lvv_set_phase("es"))
-        row.addWidget(self._lvv_es_btn)
-        self._lvv_ef_lbl = QLabel("EF --")
-        fe = self._lvv_ef_lbl.font(); fe.setBold(True)
-        self._lvv_ef_lbl.setFont(fe)
-        self._lvv_ef_lbl.setMinimumWidth(190)
-        row.addWidget(self._lvv_ef_lbl)
+        self._lvv_save_btn = FitButton(t("Save"))
+        self._lvv_save_btn.setHelpToolTip(
+            t("Save the LV Vol landmarks, HU range, Epi surface and volume"))
+        self._lvv_save_btn.clicked.connect(self._lvv_save)
+        row.addWidget(self._lvv_save_btn)
+        self._lvv_load_btn = FitButton(t("Load"))
+        self._lvv_load_btn.setHelpToolTip(t("Load a saved LV Vol dataset"))
+        self._lvv_load_btn.clicked.connect(self._lvv_load)
+        row.addWidget(self._lvv_load_btn)
         self._lvv_exit_btn = FitButton(t("Exit"))
         self._lvv_exit_btn.clicked.connect(self._lvv_toggle)
         row.addWidget(self._lvv_exit_btn)
         row.addStretch(1)
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
-            self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_ed_btn,
-            self._lvv_es_btn, self._lvv_exit_btn]
+            self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
+            self._lvv_exit_btn]
         # Clear disabled-grey so the enabled/disabled state reads at a glance;
         # Start turns green while the mode is active.
         for b in self._lvv_ctrl_btns:
             b.setStyleSheet(self._BTN_DIS)
+        self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
         self._lvv_start_btn.setStyleSheet(
             "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._lvv_edv = None                 # persist across series (ED vs ES)
-        self._lvv_esv = None
         self._lvv_sync()
         return self._lvv_wrap
 
@@ -2620,8 +2616,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_aov_btn.setEnabled(on and mv_done)
         self._lvv_thr_btn.setEnabled(on and aov_done)
         self._lvv_calc_btn.setEnabled(on and roi_done)
-        self._lvv_ed_btn.setEnabled(on and roi_done)
-        self._lvv_es_btn.setEnabled(on and roi_done)
+        self._lvv_save_btn.setEnabled(on and roi_done)
+        self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
 
         def _done(btn, is_set, color):
@@ -2652,7 +2648,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.setVisible(measured)
         if measured:
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
-        self._lvv_update_ef()
 
     def _lvv_prompt(self, text) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -2931,7 +2926,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 t("Aortic plane captured. Draw a Polygon inside the LV cavity "
                   "(Measure→Polygon), then press the 内腔ROI button."))
 
-    def _lvv_calc(self) -> None:
+    def _lvv_calc(self, then=None) -> None:
         from PyQt6.QtWidgets import QMessageBox
         try:
             lvv = self._lvv
@@ -2976,6 +2971,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             dlg.setAutoClose(False)
             dlg.setAutoReset(False)
             self._lvv_calc_btn.setEnabled(False)
+            self._lvv_calc_then = then           # run after a successful measure
             dlg.show()
             worker = _LvvWorker(_job, self)
             self._lvv_worker = worker            # keep a ref so it isn't GC'd
@@ -3038,35 +3034,144 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
             self._lvv_sync()
+            then = getattr(self, "_lvv_calc_then", None)
+            self._lvv_calc_then = None
+            if then is not None:
+                then()                               # e.g. continue to Save
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (error)"),
                                  traceback.format_exc() or repr(exc))
 
-    def _lvv_set_phase(self, phase) -> None:
+    def _lvv_save(self) -> None:
+        """Save the LV Vol dataset. If no volume yet, offer to save without it,
+        compute-then-save, or cancel (mirrors the contour LV Save)."""
         from PyQt6.QtWidgets import QMessageBox
-        if self._lvv is None or self._lvv.get("last_ml") is None:
+        lvv = self._lvv
+        if lvv is None or lvv.get("seed") is None:
             QMessageBox.information(self.window(), t("LV Vol"),
-                                   t("Press LV Vol計測 first."))
+                                   t("Set the ROI first."))
             return
-        if phase == "ed":
-            self._lvv_edv = float(self._lvv["last_ml"])
-        else:
-            self._lvv_esv = float(self._lvv["last_ml"])
-        self._lvv_update_ef()
+        if lvv.get("last_ml") is None:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV Vol"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Save without volume data?"))
+            b_no = box.addButton(t("Save without volume"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+            b_yes = box.addButton(t("Calculate volume, then save"),
+                                  QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_yes:
+                self._lvv_calc(then=self._lvv_do_save)   # compute → then save
+            elif clicked is b_no:
+                self._lvv_do_save()
+            return
+        self._lvv_do_save()
 
-    def _lvv_update_ef(self) -> None:
-        ed, es = getattr(self, "_lvv_edv", None), getattr(self, "_lvv_esv", None)
-        parts = []
-        if ed is not None:
-            parts.append(f"EDV {ed:.1f}")
-        if es is not None:
-            parts.append(f"ESV {es:.1f}")
-        if ed and es is not None and ed > 0:
-            ef = (ed - es) / ed * 100.0
-            parts.append(f"SV {ed - es:.1f}")
-            parts.append(f"EF {ef:.1f}%")
-        self._lvv_ef_lbl.setText("  ".join(parts) if parts else "EF --")
+    def _lvv_do_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        lvv = self._lvv
+        if lvv is None or lvv.get("seed") is None:
+            return
+        c_a, n_a, r_a = lvv["aortic"]
+        c_m, n_m, r_m = lvv["mitral"]
+        data = {
+            "type": "lvvol",
+            "series": (self._lv_series_meta()
+                       if hasattr(self, "_lv_series_meta") else {}),
+            "apex": list(map(float, lvv["apex"])),
+            "seed": list(map(float, lvv["seed"])),
+            "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
+                       "r": float(r_a)},
+            "mitral": {"c": list(map(float, c_m)), "n": list(map(float, n_m)),
+                       "r": float(r_m)},
+            "hu_lo": float(self._lvv_lo_spin.value()),
+            "hu_hi": float(self._lvv_hi_spin.value()),
+            "volume_ml": (None if lvv.get("last_ml") is None
+                          else float(lvv["last_ml"])),
+            "epi_model": self._lvv_epi_model_dict,
+        }
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        default = os.path.join(d, "lvvol") if d else "lvvol"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save LV Vol"), default,
+            "LV Vol (*.lvvol.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".lvvol.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV Vol"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        QMessageBox.information(self.window(), t("LV Vol"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _lvv_load(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core.lv_measure import LVModel
+        import json
+        if self._image is None:
+            return
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load LV Vol"), d,
+            "LV Vol (*.lvvol.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            model = LVModel.from_dict(data["epi_model"])
+            model.build()
+            if model.epi is None:
+                raise ValueError("no Epi surface in file")
+            self._lvv_epi_surf = model.epi
+            self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+            self._lvv_epi_model_dict = data["epi_model"]
+            if self._lvv is None:
+                self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                             "hu_lo": None, "hu_hi": None, "seed": None,
+                             "step": "apex", "last_ml": None}
+            lvv = self._lvv
+            lvv["apex"] = np.asarray(data["apex"], float)
+            lvv["seed"] = np.asarray(data["seed"], float)
+            a, m = data["aortic"], data["mitral"]
+            lvv["aortic"] = (np.asarray(a["c"], float), np.asarray(a["n"], float),
+                             float(a.get("r", 20.0)))
+            lvv["mitral"] = (np.asarray(m["c"], float), np.asarray(m["n"], float),
+                             float(m.get("r", 20.0)))
+            lvv["hu_lo"] = float(data["hu_lo"])
+            lvv["hu_hi"] = float(data["hu_hi"])
+            lvv["last_ml"] = data.get("volume_ml")
+            lvv["step"] = "ready"
+            for spin, v in ((self._lvv_lo_spin, data["hu_lo"]),
+                            (self._lvv_hi_spin, data["hu_hi"])):
+                spin.blockSignals(True)
+                spin.setValue(int(round(float(v))))
+                spin.blockSignals(False)
+            self._lvv_add_marker("apex", lvv["apex"], "#ff4040")
+            if lvv.get("last_ml") is not None:
+                self._lvv_vol_lbl.setText(
+                    t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
+            self._lvv_sync()
+            self._lvv_apply_slab()
+            self._lvv_update_highlight()
+            QMessageBox.information(
+                self.window(), t("LV Vol"),
+                t("Loaded. Press LV Vol計測 to (re)compute the volume."))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (load error)"),
+                                 traceback.format_exc() or repr(exc))
 
     def _lvv_clear_markers(self) -> None:
         self._lvv_mask_vol = None
@@ -5832,7 +5937,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
         self._lvv = None                         # drop LV blood-pool session
-        # (EDV/ESV persist across series so ED then ES gives EF)
+        self._lvv_epi_surf = None                # a new series invalidates the Epi
+        self._lvv_epi_model_dict = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
@@ -5912,7 +6018,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
         self._lvv = None                         # drop LV blood-pool session
-        # (EDV/ESV persist across series so ED then ES gives EF)
+        self._lvv_epi_surf = None                # a new series invalidates the Epi
+        self._lvv_epi_model_dict = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
@@ -7471,6 +7578,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                         self._lvv_epi_surf = model.epi
                         self._lvv_epi_apex = np.asarray(
                             model.epi_axis.apex, float)
+                        self._lvv_epi_model_dict = model.to_dict()
         except Exception:                               # noqa: BLE001
             pass
         self._lv_reset_undo()
