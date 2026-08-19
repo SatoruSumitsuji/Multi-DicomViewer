@@ -3097,7 +3097,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             "epi_model": self._lvv_epi_model_dict,
         }
         d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
-        default = os.path.join(d, "lvvol") if d else "lvvol"
+        # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "lvvol")
+        name = stem + ".lvvol.json"
+        default = os.path.join(d, name) if d else name
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save LV Vol"), default,
             "LV Vol (*.lvvol.json);;JSON (*.json)")
