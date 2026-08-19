@@ -1178,8 +1178,12 @@ class MainWindow(QMainWindow):
         # the live total (incl. the incoming one) would exceed it, so small
         # series still use the full count cap while big ones can't pile up.
         # Actual footprint ≈ 2-3× the raw bytes (numpy + VTK float copy).
-        self._live_bytes_budget = {
-            Modality.CT: 1_100_000_000, Modality.XA: 2_000_000_000}
+        # The CT budget SCALES with the user's CT count cap: raising the cap to
+        # 2 (e.g. LVEF MD+ES side by side) is an explicit "I want two live CTs"
+        # signal, so ~one-big-CT worth of budget per allowed pane — otherwise a
+        # 1.1 GB budget froze the first CT the moment the second big one loaded
+        # even though the count cap allowed two.
+        self._live_bytes_budget = self._ct_budget_for_cap()
 
         self._grid_host = QWidget()
         self._grid = QGridLayout(self._grid_host)
@@ -2736,6 +2740,16 @@ class MainWindow(QMainWindow):
         # _free_live_for_incoming + the memory budget still protect against huge
         # volumes piling up. XA (plain-Qt canvas) is unchanged.
         return {Modality.CT: caps["CT"], Modality.XA: caps["XA"]}
+
+    #: Raw-bytes budget per allowed live CT (≈ one big CT + headroom).
+    _CT_BUDGET_PER = 1_100_000_000
+
+    def _ct_budget_for_cap(self) -> dict:
+        """Live-volume memory budget, with the CT budget scaled by the CT count
+        cap so a user who raised the cap actually gets that many live CTs."""
+        ct_cap = int(self._live_cap.get(Modality.CT, 1) or 1)
+        return {Modality.CT: self._CT_BUDGET_PER * max(1, ct_cap),
+                Modality.XA: 2_000_000_000}
 
     def _touch_pane(self, pane: ViewerPane) -> None:
         """Stamp *pane* as most-recently-used on the LRU clock."""
@@ -4578,6 +4592,7 @@ class MainWindow(QMainWindow):
         vals = dlg.caps()
         settings.save_live_caps(vals)
         self._live_cap = {Modality.CT: vals["CT"], Modality.XA: vals["XA"]}
+        self._live_bytes_budget = self._ct_budget_for_cap()   # scale with cap
         self._enforce_live_caps(keep=self._active)
         # Angio quality: merge into the persisted prefs, then push to every
         # loaded XA viewer (updates its canvases + S-Cine/S-Zoom/Denoise
