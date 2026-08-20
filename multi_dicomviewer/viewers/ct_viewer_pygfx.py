@@ -38,7 +38,7 @@ import numpy as np
 import pygfx as gfx
 import pylinalg as la
 from PyQt6.QtCore import (
-    QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal,
+    QEvent, QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen,
@@ -371,6 +371,25 @@ def _compute_slab_qimage(p):
     return QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
 
 
+class _LvvWorker(QThread):
+    """Runs the (few-second) LV blood-pool volume computation off the UI thread
+    so a busy progress bar can animate; emits the result dict. Ported verbatim
+    from the VTK viewer — the compute is pure-numpy so it is safe off-thread."""
+    finished_result = pyqtSignal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self._fn = fn
+
+    def run(self):
+        try:
+            res = self._fn()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            res = {"error": "exc", "msg": traceback.format_exc()}
+        self.finished_result.emit(res)
+
+
 # ----------------------------------------------------------------- pane
 class _PygfxPane:
     """One MPR pane: a wgpu canvas + scene + ortho camera + a Volume whose
@@ -477,6 +496,16 @@ class _Overlay(QWidget):
         mip = v._mip_img.get(key)
         if mip is not None:
             p.drawImage(self.rect(), mip)
+        # LV Vol voxel tints: cyan (in-range blood, 血流領域表示) then red
+        # (measured region, 計測領域) drawn OVER the grayscale but UNDER the
+        # crosshair / measures / markers. Cached RGBA images (see _refresh).
+        if v._lvv is not None:
+            cyan = v._lvv_cyan_img.get(key)
+            if cyan is not None:
+                p.drawImage(self.rect(), cyan)
+            red = v._lvv_red_img.get(key)
+            if red is not None:
+                p.drawImage(self.rect(), red)
         # Short-axis (CPR): pane A shows a centred crosshair + the editable
         # control-point marker instead of the normal MPR crosshair / measures.
         if v._cpr is not None and key == "A":
@@ -488,6 +517,8 @@ class _Overlay(QWidget):
         self._paint_measures(p, key, w, h)
         if v._lv is not None:
             self._paint_lv(p, key, w, h)
+        if v._lvv is not None:
+            self._paint_lvv(p, key, w, h)
         self._paint_info(p, key, w, h)
 
     def _paint_cpr(self, p, w, h):
@@ -799,6 +830,52 @@ class _Overlay(QWidget):
             _draw_outlined_text(p, QRectF(34, y - lh, 200, lh), fl, lab,
                                 _white, 1.0, _black)
             y += lh
+
+    # -- LV Vol (blood-pool LVEF) markers: apex (red) / seed (cyan) 3-D dots,
+    #    and the Epi border (green) where it crosses the pane. The cyan/red
+    #    voxel TINTS are drawn as RGBA images in paintEvent; this draws the
+    #    point markers on top. Mirrors the VTK viewer's _lvv_add_marker /
+    #    _lvv_show_epi (re-expressed as QPainter dots). --------------------
+    def _paint_lvv(self, p, key, w, h):
+        v = self._v
+        lvv = v._lvv
+        if lvv is None:
+            return
+
+        def Sd(P3):
+            ox, oy = v._world3d_to_out(key, P3)
+            sx, sy = v._world_to_screen(key, ox, oy)
+            return QPointF(sx, sy)
+
+        # Epi border (green dots) where the surface crosses this pane.
+        if getattr(v, "_lvv_epi_show", False) and v._lvv_epi_surf is not None:
+            try:
+                pts = np.asarray(v._lvv_epi_surf._all_ring_points(), float)
+            except Exception:                            # noqa: BLE001
+                pts = None
+            if pts is not None and len(pts):
+                _u, _vv, n = v._axes_for(key)
+                n = np.asarray(n, float)
+                o = np.asarray(v._pc[key], float)
+                dist = (pts - o) @ n
+                tol = 0.75 * max(v._dims)
+                near = pts[np.abs(dist) <= tol]
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(80, 220, 80))
+                for P in near:
+                    p.drawEllipse(Sd(P), 2.0, 2.0)
+
+        # Apex (red) and seed (cyan) landmark dots.
+        apex = lvv.get("apex")
+        if apex is not None:
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(QColor(255, 64, 64))
+            p.drawEllipse(Sd(np.asarray(apex, float)), 6.0, 6.0)
+        seed = lvv.get("seed")
+        if seed is not None:
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(QColor(64, 192, 255))
+            p.drawEllipse(Sd(np.asarray(seed, float)), 5.0, 5.0)
 
     def _paint_measures(self, p, key, w, h):
         v = self._v
@@ -1598,6 +1675,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apex_hot = False             # apex glows: cursor in range while
         #                                       tracing (cleared on point confirm)
         self._lv_line_hi = {"A": False, "B": False}
+        # LV Vol (blood-pool LVEF) mode, ported from the VTK viewer. self._lvv is
+        # None when off, else a dict of landmarks (apex/aortic/mitral/seed/…). The
+        # Epi surface (outer bound) is stashed from contour-LV mode on Exit LV, or
+        # rebuilt on Load. Rendering is QPainter (markers) + cached RGBA tint
+        # images (cyan in-range blood, red measured region) drawn in the overlay.
+        self._lvv = None
+        self._lvv_epi_surf = None             # LVSurface (Epi outer bound)
+        self._lvv_epi_apex = None             # Epi apex (world mm)
+        self._lvv_epi_model_dict = None       # LVModel dict for Save
+        self._lvv_hl_on = True                # 血流領域表示 (in-range tint) on
+        self._lvv_epi_show = False            # Epi境界 (green border) on
+        self._lvv_mask_on = False             # 計測領域 (red region) on
+        self._lvv_mask_vol = None             # measured-region mask (0/1 float32)
+        self._lvv_cyan_img = {"A": None, "B": None}   # in-range tint RGBA per pane
+        self._lvv_red_img = {"A": None, "B": None}    # measured-region RGBA per pane
+        self._lvv_worker = None               # keep the compute thread ref
+        self._lvv_calc_then = None            # chained action after a measure
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
         self._overlay_font_pt = TAG_FONT_PT_DEFAULT
@@ -1686,6 +1780,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addLayout(imgrow, 1)
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_lv_bar())
+        lay.addWidget(self._build_lvv_bar())
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
 
@@ -3340,6 +3435,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_sax_btn.setChecked(False)
                 self._lv_plane_lbl.setText("0/6")
                 self._lv_sync_buttons()          # reset colours + grey the bar
+        # A new series → drop any LV Vol state (landmarks/Epi/mask are in the
+        # previous series' voxel coordinates).
+        self._lvv_reset_state()
 
         vol = np.ascontiguousarray(loaded.volume, dtype=np.float32)  # (z,y,x)
         self._vol = vol
@@ -3428,6 +3526,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cancel_lod()
         self._lod_pending = False
+        self._lvv_reset_state()
         self._vol = None
         self._header = None
         self._measures = {"A": [], "B": []}
@@ -3839,6 +3938,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 p.mesh.visible = True
                 self._mip_img[key] = None
+            # LV Vol voxel tints follow the plane on any view change (recentre /
+            # move / rotate / spin / page), so rebuild them whenever the pane is
+            # refreshed while in LV Vol mode.
+            if self._lvv is not None:
+                self._lvv_refresh_overlays(key)
             p.render()
             self._overlay[key].update()
         # Whenever a slab is on screen, (re)arm the off-thread NATIVE-resolution
@@ -5851,10 +5955,771 @@ class CTViewer(CPRMixin, AbstractViewer):
         "neutral": "QPushButton{background:#d0d0d0;color:black;}",
     }
 
+    #: Appended to LV Vol button styles so a DISABLED button clearly greys out
+    #: (a custom background otherwise overrides Qt's native disabled look).
+    _BTN_DIS = ("QPushButton:disabled{background:#e6e6e6;color:#a8a8a8;"
+                "border:1px solid #d8d8d8;}")
+
     def _lv_set_bar_enabled(self, on: bool) -> None:
         """Enable/disable the non-entry LV controls (Endo/Epi/Load stay live)."""
         for b in getattr(self, "_lv_bar_btns", []):
             b.setEnabled(bool(on))
+
+    # ================================================================= LV Vol
+    # Blood-pool LVEF: trace Epi (contour LV mode), Exit LV, then measure the
+    # blood volume inside the Epi surface, apex-side of the MV/AoV planes, in a
+    # HU (contrast) range and 3-D connected to a seed. Ported method-for-method
+    # from the VTK viewer; VTK reslice/LUT overlays are re-expressed as QPainter
+    # markers + cached RGBA tint images (see _paint_lvv / _lvv_plane_rgba). The
+    # heavy volume runs off-thread (_LvvWorker) behind a busy progress bar.
+    def _build_lvv_bar(self) -> QWidget:
+        self._lvv_wrap = QWidget()
+        self._lvv_wrap._mdv_keep_on_max = True
+        row = QHBoxLayout(self._lvv_wrap)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(4)
+        cap = QLabel(t("LV Vol:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        row.addWidget(cap)
+        self._lvv_start_btn = FitButton(t("Start"))
+        self._lvv_start_btn.setCheckable(True)
+        self._lvv_start_btn.setHelpToolTip(
+            t("Enter/leave LV blood-pool volume (LVEF) mode"))
+        self._lvv_start_btn.clicked.connect(self._lvv_toggle)
+        row.addWidget(self._lvv_start_btn)
+        self._lvv_apex_btn = FitButton(t("Apex"))
+        self._lvv_apex_btn.setHelpToolTip(
+            t("Confirm the LV apex at the crosshair (move it there first)"))
+        self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
+        row.addWidget(self._lvv_apex_btn)
+        self._lvv_mv_btn = FitButton(t("MV plane"))
+        self._lvv_mv_btn.setHelpToolTip(
+            t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
+              "press this to capture its plane"))
+        self._lvv_mv_btn.clicked.connect(lambda: self._lvv_capture_valve("mitral"))
+        row.addWidget(self._lvv_mv_btn)
+        self._lvv_aov_btn = FitButton(t("AoV plane"))
+        self._lvv_aov_btn.setHelpToolTip(
+            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
+              "press this to capture its plane"))
+        self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
+        row.addWidget(self._lvv_aov_btn)
+        self._lvv_thr_btn = FitButton(t("内腔ROI"))
+        self._lvv_thr_btn.setHelpToolTip(
+            t("Draw a Polygon inside the LV cavity (Measure→Polygon), then press "
+              "this: it colours the ROI, seeds it, and sets the HU range from "
+              "the pixels inside — adjust 下限/上限 below."))
+        self._lvv_thr_btn.clicked.connect(self._lvv_capture_roi)
+        row.addWidget(self._lvv_thr_btn)
+        # Blood HU RANGE (lower / upper) for the cavity — suggested from the ROI
+        # polygon, then adjustable. Applied on CalcVol.
+        self._lvv_lo_lbl = QLabel(t("下限"))
+        self._lvv_lo_spin = QSpinBox()
+        self._lvv_lo_spin.setRange(-1000, 4000)
+        self._lvv_lo_spin.setSingleStep(10)
+        self._lvv_lo_spin.setSuffix(" HU")
+        self._lvv_lo_spin.setKeyboardTracking(False)
+        self._lvv_hi_lbl = QLabel(t("上限"))
+        self._lvv_hi_spin = QSpinBox()
+        self._lvv_hi_spin.setRange(-1000, 4000)
+        self._lvv_hi_spin.setSingleStep(10)
+        self._lvv_hi_spin.setValue(3000)
+        self._lvv_hi_spin.setSuffix(" HU")
+        self._lvv_hi_spin.setKeyboardTracking(False)
+        self._lvv_lo_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
+        self._lvv_hi_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
+        for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
+                   self._lvv_hi_lbl, self._lvv_hi_spin):
+            row.addWidget(_w)
+        # "血流領域表示" toggle: tint ALL in-range (blood) voxels across the whole
+        # image so the operator can optimise 下限/上限 (default on).
+        self._lvv_hl_on = True
+        self._lvv_hl_btn = FitButton(t("血流領域表示"))
+        self._lvv_hl_btn.setCheckable(True)
+        self._lvv_hl_btn.setChecked(True)
+        self._lvv_hl_btn.setHelpToolTip(
+            t("Tint every voxel whose HU is in the 下限–上限 range on both panes "
+              "(in-range = blood); adjust 下限/上限 to optimise"))
+        self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
+        row.addWidget(self._lvv_hl_btn)
+        # "計測領域" toggle: show the measured region (red) after LV Vol計測.
+        self._lvv_mask_btn = FitButton(t("計測領域"))
+        self._lvv_mask_btn.setCheckable(True)
+        self._lvv_mask_btn.setChecked(True)
+        self._lvv_mask_btn.setHelpToolTip(
+            t("Show the measured LV blood region (red) — independent of 血流領域表示"))
+        self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
+        row.addWidget(self._lvv_mask_btn)
+        # "Epi境界" toggle: draw the Epi surface where it crosses each pane
+        # (green) — to judge whether coronary voxels contaminate the cavity.
+        self._lvv_epi_show = False
+        self._lvv_epi_btn = FitButton(t("Epi境界"))
+        self._lvv_epi_btn.setCheckable(True)
+        self._lvv_epi_btn.setHelpToolTip(
+            t("Show the Epi border on both panes (green)"))
+        self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
+        row.addWidget(self._lvv_epi_btn)
+        # (Per-pane slab thickness is changed with the toolbar "Slab(mm)"
+        # control — it stays enabled in LV Vol mode. No dedicated spinboxes.)
+        self._lvv_calc_btn = FitButton(t("LV Vol計測"))
+        self._lvv_calc_btn.setHelpToolTip(
+            t("Measure the blood volume inside the Epi surface, apex-side of "
+              "MV/AoV, within the 下限–上限 HU range"))
+        self._lvv_calc_btn.clicked.connect(lambda: self._lvv_calc())
+        row.addWidget(self._lvv_calc_btn)
+        self._lvv_vol_lbl = QLabel("--")
+        fv = self._lvv_vol_lbl.font(); fv.setBold(True)
+        self._lvv_vol_lbl.setFont(fv)
+        self._lvv_vol_lbl.setMinimumWidth(90)
+        row.addWidget(self._lvv_vol_lbl)
+        self._lvv_save_btn = FitButton(t("Save"))
+        self._lvv_save_btn.setHelpToolTip(
+            t("Save the LV Vol landmarks, HU range, Epi surface and volume"))
+        self._lvv_save_btn.clicked.connect(self._lvv_save)
+        row.addWidget(self._lvv_save_btn)
+        self._lvv_load_btn = FitButton(t("Load"))
+        self._lvv_load_btn.setHelpToolTip(t("Load a saved LV Vol dataset"))
+        self._lvv_load_btn.clicked.connect(self._lvv_load)
+        row.addWidget(self._lvv_load_btn)
+        self._lvv_exit_btn = FitButton(t("Exit"))
+        self._lvv_exit_btn.clicked.connect(self._lvv_toggle)
+        row.addWidget(self._lvv_exit_btn)
+        row.addStretch(1)
+        self._lvv_ctrl_btns = [
+            self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
+            self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
+            self._lvv_exit_btn]
+        # Clear disabled-grey so the enabled/disabled state reads at a glance;
+        # Start turns green while the mode is active.
+        for b in self._lvv_ctrl_btns:
+            b.setStyleSheet(self._BTN_DIS)
+        self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
+        self._lvv_start_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._lvv_sync()
+        return self._lvv_wrap
+
+    def _lvv_sync(self) -> None:
+        on = self._lvv is not None
+        self._lvv_start_btn.setChecked(on)
+        g = (lambda k: on and self._lvv.get(k) is not None)
+        apex_done, aov_done = g("apex"), g("aortic")
+        mv_done, roi_done = g("mitral"), g("seed")
+        # Wizard: enable only the next step (previous steps stay live for redo).
+        # Order: Apex → MV → AoV → 内腔ROI.
+        self._lvv_apex_btn.setEnabled(on)
+        self._lvv_mv_btn.setEnabled(on and apex_done)
+        self._lvv_aov_btn.setEnabled(on and mv_done)
+        self._lvv_thr_btn.setEnabled(on and aov_done)
+        self._lvv_calc_btn.setEnabled(on and roi_done)
+        self._lvv_save_btn.setEnabled(on and roi_done)
+        self._lvv_load_btn.setEnabled(self._vol is not None)
+        self._lvv_exit_btn.setEnabled(on)
+
+        def _done(btn, is_set, color):
+            """Colour *btn* when its landmark is set (still greys when off)."""
+            if on and is_set:
+                btn.setStyleSheet(
+                    "QPushButton{background:%s;color:white;}%s"
+                    % (color, self._BTN_DIS))
+            else:
+                btn.setStyleSheet(self._BTN_DIS)
+
+        _done(self._lvv_apex_btn, apex_done, "#d32f2f")     # apex red
+        _done(self._lvv_aov_btn, aov_done, "#b8860b")       # aortic amber
+        _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
+        _done(self._lvv_thr_btn, roi_done, "#2e8b57")       # ROI green
+        for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
+                  self._lvv_hi_lbl, self._lvv_hi_spin, self._lvv_hl_btn):
+            w.setVisible(roi_done)
+        # 血流領域表示 button colours cyan while active.
+        if roi_done:
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        # LV Vol計測 button turns light-red once a volume is measured; the
+        # 計測領域 (red overlay) toggle appears then and is independently on/off.
+        measured = on and self._lvv.get("last_ml") is not None
+        self._lvv_calc_btn.setStyleSheet(
+            ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+            if measured else self._BTN_DIS)
+        self._lvv_mask_btn.setVisible(measured)
+        if measured:
+            self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+        # Epi-border toggle: available in the mode.
+        self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
+
+    def _lvv_prompt(self, text) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self.window(), t("LV Vol"), text)
+
+    def _lvv_toggle(self, *args) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            if self._lvv is None:
+                if self._vol is None:
+                    QMessageBox.information(
+                        self.window(), t("LV Vol"),
+                        t("Load a CT first (no volume in this pane)."))
+                    return
+                if self._lv is not None:          # leave contour LV mode first
+                    self._lv_exit()
+                if self._lvv_epi_surf is None:
+                    QMessageBox.information(
+                        self.window(), t("LV Vol"),
+                        t("Trace the EPI border first (contour LV mode: Epi → "
+                          "Set axis → Trace), then Exit LV and start LV Vol."))
+                    return
+                self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                             "hu_lo": None, "hu_hi": None, "seed": None,
+                             "step": "apex", "last_ml": None}
+                self._lvv_sync()
+                for k in ("A", "B"):
+                    self._overlay[k].update()
+                self._lvv_prompt(
+                    t("Epi border loaded. Move the crosshair onto the LV apex "
+                      "(left double-click recentres), then press Apex. (This "
+                      "apex is for the valve orientation — it can differ from "
+                      "the Epi apex.)"))
+                return
+            else:
+                self._lvv_clear_markers()
+                self._lvv = None
+            self._lvv_sync()
+            for k in ("A", "B"):
+                self._overlay[k].update()
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (toggle error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_confirm_apex(self) -> None:
+        """Apex button → confirm the apex at the current crosshair centre."""
+        lvv = self._lvv
+        if lvv is None or self._center is None:
+            return
+        P = np.asarray(self._center, float).copy()
+        lvv["apex"] = P
+        lvv["step"] = "mv"
+        self._lvv_sync()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        self._lvv_prompt(
+            t("Identify the mitral valve: draw an Ellipse on the MV annulus "
+              "(Measure→Ellipse), then press 'MV plane'."))
+
+    def _lvv_hu_at(self, P) -> float:
+        """Nearest-voxel HU at world point *P* (mm) in self._vol (indexed
+        vol[z, y, x], world = index × spacing = self._dims). Clamped to the
+        volume (mirrors the VTK viewer's _lvv_hu_at)."""
+        sx, sy, sz = self._dims
+        nz, ny, nx = self._vol.shape
+        ix = min(max(int(round(P[0] / sx)), 0), nx - 1)
+        iy = min(max(int(round(P[1] / sy)), 0), ny - 1)
+        iz = min(max(int(round(P[2] / sz)), 0), nz - 1)
+        return float(self._vol[iz, iy, ix])
+
+    def _lvv_plane_rgba(self, key, kind):
+        """Per-pane RGBA tint image sampled on the pane's current oblique plane:
+        kind='cyan' tints voxels with hu_lo<=HU<=hu_hi (blood); kind='red' tints
+        the measured-region mask (self._lvv_mask_vol) voxels. Drawn stretched
+        over the pane in paintEvent. Returns None if nothing to tint. Mirrors
+        _compute_slab_qimage's plane geometry (single centre plane)."""
+        if self._vol is None:
+            return None
+        par = self._slab_params(key)
+        u, v, n = par["u"], par["v"], par["n"]
+        pc = par["pc"]
+        sx, sy, sz = par["dims"]
+        px, py = par["pan"]
+        pw, ph, iw, ih = par["pw"], par["ph"], par["iw"], par["ih"]
+        scale = ph / (2.0 * max(1e-3, par["ps"]))
+        a = math.radians(par["roll"])
+        ca, sa = math.cos(a), math.sin(a)
+        SX, SY = np.meshgrid(np.linspace(0.0, pw, iw), np.linspace(0.0, ph, ih))
+        aa = (SX - pw / 2.0) / scale
+        bb = (ph / 2.0 - SY) / scale
+        WX = px + aa * ca - bb * sa
+        WY = py + aa * sa + bb * ca
+        bx = pc[0] + WX * u[0] + WY * v[0]
+        by = pc[1] + WX * u[1] + WY * v[1]
+        bz = pc[2] + WX * u[2] + WY * v[2]
+        vx = bx / sx; vy = by / sy; vz = bz / sz
+        nz, ny, nx = self._vol.shape
+        oob = ((vx < 0) | (vx > nx - 1) | (vy < 0) | (vy > ny - 1)
+               | (vz < 0) | (vz > nz - 1))
+        if kind == "cyan":
+            lo = float(self._lvv_lo_spin.value())
+            hi = float(self._lvv_hi_spin.value())
+            hu = _trilinear_sample(self._vol, vx, vy, vz)
+            inmask = (hu >= lo) & (hu <= hi) & ~oob
+            col = (26, 230, 255, 115)          # cyan (0.1,0.9,1.0,0.45)
+        else:
+            if self._lvv_mask_vol is None:
+                return None
+            mv = _trilinear_sample(self._lvv_mask_vol, vx, vy, vz)
+            inmask = (mv >= 0.5) & ~oob
+            col = (255, 64, 64, 205)           # red (1,0.25,0.25,~0.8)
+        if not inmask.any():
+            return None
+        rgba = np.zeros((ih, iw, 4), np.uint8)
+        rgba[inmask] = col
+        rgba = np.ascontiguousarray(rgba)
+        return QImage(rgba.data, iw, ih, 4 * iw,
+                      QImage.Format.Format_RGBA8888).copy()
+
+    def _lvv_refresh_overlays(self, key) -> None:
+        """(Re)build the cyan (in-range blood) and red (measured region) tint
+        images for one pane from the current toggles. Called per pane from
+        _refresh and from the toggle/spin handlers."""
+        cyan = red = None
+        if self._lvv is not None:
+            if self._lvv.get("seed") is not None and self._lvv_hl_on:
+                cyan = self._lvv_plane_rgba(key, "cyan")
+            if self._lvv_mask_vol is not None and self._lvv_mask_on:
+                red = self._lvv_plane_rgba(key, "red")
+        self._lvv_cyan_img[key] = cyan
+        self._lvv_red_img[key] = red
+
+    def _lvv_redraw(self) -> None:
+        for k in ("A", "B"):
+            self._lvv_refresh_overlays(k)
+            self._overlay[k].update()
+
+    def _lvv_update_highlight(self) -> None:
+        """Rebuild the in-range (blood) voxel tint on both panes."""
+        self._lvv_redraw()
+
+    def _lvv_toggle_highlight(self, *args) -> None:
+        self._lvv_hl_on = self._lvv_hl_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        self._lvv_update_highlight()
+
+    def _lvv_toggle_epi(self, *args) -> None:
+        self._lvv_epi_show = self._lvv_epi_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _lvv_style_toggle(self, btn, color, text="white") -> None:
+        """Colour a checkable overlay button by its checked state."""
+        if btn.isChecked():
+            btn.setStyleSheet("QPushButton{background:%s;color:%s;}%s"
+                              % (color, text, self._BTN_DIS))
+        else:
+            btn.setStyleSheet(self._BTN_DIS)
+
+    def _lvv_update_mask(self) -> None:
+        """Rebuild the measured-region (red) overlay on both panes."""
+        self._lvv_redraw()
+
+    def _lvv_toggle_mask(self, *args) -> None:
+        self._lvv_mask_on = self._lvv_mask_btn.isChecked()
+        self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+        self._lvv_update_mask()
+
+    def _lvv_polygon_hu(self, m, which):
+        """Sample HU (from self._vol) at grid points inside polygon *m* drawn on
+        pane *which*. Returns a 1-D array of HU (empty if none)."""
+        import cv2
+        pts = np.asarray(m["pts"], float)
+        if len(pts) < 3:
+            return np.array([])
+        ox0, oy0 = float(pts[:, 0].min()), float(pts[:, 1].min())
+        ox1, oy1 = float(pts[:, 0].max()), float(pts[:, 1].max())
+        step = 0.6
+        gw = max(2, int((ox1 - ox0) / step) + 1)
+        gh = max(2, int((oy1 - oy0) / step) + 1)
+        poly = np.round((pts - [ox0, oy0]) / step).astype(np.int32)
+        mask = np.zeros((gh, gw), np.uint8)
+        cv2.fillPoly(mask, [poly], 1)
+        ys, xs = np.where(mask > 0)
+        hus = []
+        for gx, gy in zip(xs, ys):
+            P = self._out_to_world3d(which, ox0 + gx * step, oy0 + gy * step)
+            hus.append(self._lvv_hu_at(P))
+        return np.asarray(hus, float)
+
+    def _lvv_capture_roi(self) -> None:
+        """内腔ROI button → capture the latest Polygon as the LV cavity ROI:
+        colour it, seed connectivity at its centroid, and suggest the blood HU
+        range (下限/上限) from the pixels inside it (then user-adjustable)."""
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            lvv = self._lvv
+            if lvv is None:
+                return
+            m, which, best = None, None, -1
+            for k in ("A", "B"):
+                for cand in self._measures.get(k, []):
+                    if (cand.get("type") == "polygon"
+                            and cand.get("id", -1) > best):
+                        best = cand.get("id", -1)
+                        m, which = cand, k
+            if m is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Draw a Polygon inside the LV cavity first "
+                      "(Measure→Polygon)."))
+                return
+            cx, cy = self._shape_center(m)
+            seed = np.asarray(self._out_to_world3d(which, cx, cy), float)
+            hus = self._lvv_polygon_hu(m, which)
+            if hus.size < 4:
+                QMessageBox.information(self.window(), t("LV Vol"),
+                                       t("ROI too small — draw a larger Polygon."))
+                return
+            lo = float(np.percentile(hus, 2))
+            hi = float(np.percentile(hus, 99))
+            lvv["seed"] = seed
+            lvv["hu_lo"] = lo
+            lvv["hu_hi"] = hi
+            m["color"] = "#40c0ff"                       # ROI tint
+            m["_lvv"] = "roi"
+            self._lvv_lo_spin.blockSignals(True)
+            self._lvv_lo_spin.setValue(int(round(lo)))
+            self._lvv_lo_spin.blockSignals(False)
+            self._lvv_hi_spin.blockSignals(True)
+            self._lvv_hi_spin.setValue(int(round(hi)))
+            self._lvv_hi_spin.blockSignals(False)
+            self._redraw_meas(which)
+            if self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            lvv["step"] = "ready"
+            self._lvv_sync()
+            self._lvv_update_highlight()                 # in-range voxel tint
+            self._lvv_prompt(
+                t("ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from "
+                  "the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if "
+                  "needed, then press CalcVol.").format(
+                    lo=lo, hi=hi, mn=float(hus.min()), mx=float(hus.max())))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (ROI error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_capture_valve(self, valve) -> None:
+        """Capture the most-recent Ellipse on either pane as this valve's plane
+        (centre + the pane's current normal)."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lvv is None:
+            return
+        # Newest Ellipse across BOTH panes (drawn on either side).
+        m, which = None, None
+        best = -1
+        for k in ("A", "B"):
+            for cand in self._measures.get(k, []):
+                if cand.get("type") == "ellipse" and cand.get("id", -1) > best:
+                    best = cand.get("id", -1)
+                    m, which = cand, k
+        if m is None:
+            QMessageBox.information(
+                self.window(), t("LV Vol"),
+                t("Draw an Ellipse on the {v} annulus first (Measure→Ellipse).")
+                .format(v=t("aortic") if valve == "aortic" else t("mitral")))
+            return
+        cx, cy = self._shape_center(m)
+        center = np.asarray(self._out_to_world3d(which, cx, cy), float)
+        _u, _v, n = self._axes_for(which)
+        ecx, ecy, ea, eb = self._ellipse_cab(m)          # semi-axes (mm)
+        radius = float(max(ea, eb))
+        self._lvv[valve] = (center, np.asarray(n, float), radius)
+        m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
+        m["_lvv"] = valve
+        self._redraw_meas(which)
+        # Turn Measure OFF so the user can navigate to the next landmark without
+        # a click starting a new ellipse (they re-arm Measure→Ellipse next).
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        if valve == "mitral":
+            self._lvv["step"] = "aov"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Mitral plane captured. Now identify the aortic valve: draw "
+                  "an Ellipse on the AoV annulus, then press 'AoV plane'."))
+        else:
+            self._lvv["step"] = "thr"
+            self._lvv_sync()
+            self._lvv_prompt(
+                t("Aortic plane captured. Draw a Polygon inside the LV cavity "
+                  "(Measure→Polygon), then press the 内腔ROI button."))
+
+    def _lvv_calc(self, then=None) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            lvv = self._lvv
+            if lvv is None or self._vol is None:
+                return
+            miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
+                    "aortic"), (t("mitral plane"), "mitral"),
+                    (t("ROI"), "seed")) if lvv.get(k) is None]
+            if miss:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Set these first: {m}").format(m=", ".join(miss)))
+                return
+            if self._lvv_epi_surf is None:
+                QMessageBox.information(self.window(), t("LV Vol"),
+                                       t("No Epi surface — trace Epi first."))
+                return
+            from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume_epi
+            from PyQt6.QtWidgets import QProgressDialog
+            seed = tuple(lvv["seed"])
+            hu_lo = float(self._lvv_lo_spin.value())
+            hu_hi = float(self._lvv_hi_spin.value())
+            c_a, n_a, _r_a = lvv["aortic"]
+            c_m, n_m, _r_m = lvv["mitral"]
+            epi = self._lvv_epi_surf
+            apex = tuple(lvv["apex"])
+            vol, dims = self._vol, self._dims
+
+            def _job():
+                return bloodpool_volume_epi(
+                    vol, dims, epi._all_ring_points(),
+                    lambda p: epi.contains(p, extend_base=True),
+                    [(c_a, n_a), (c_m, n_m)], apex, hu_lo, hu_hi, seed)
+
+            # Busy progress bar while the (few-second) volume runs off-thread.
+            dlg = QProgressDialog(t("Measuring LV volume…"), None, 0, 0,
+                                  self.window())
+            dlg.setWindowTitle(t("LV Vol"))
+            dlg.setWindowModality(Qt.WindowModality.WindowModal)
+            dlg.setCancelButton(None)
+            dlg.setMinimumDuration(0)
+            dlg.setAutoClose(False)
+            dlg.setAutoReset(False)
+            self._lvv_calc_btn.setEnabled(False)
+            self._lvv_calc_then = then           # run after a successful measure
+            dlg.show()
+            worker = _LvvWorker(_job, self)
+            self._lvv_worker = worker            # keep a ref so it isn't GC'd
+            worker.finished_result.connect(
+                lambda res: self._lvv_calc_finish(res, dlg))
+            worker.start()
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_calc_finish(self, res, dlg) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            dlg.close()
+            self._lvv_calc_btn.setEnabled(True)
+            lvv = self._lvv
+            if lvv is None:
+                return
+            if res is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("No cavity found — check the HU range and the ROI."))
+                return
+            if res.get("error") == "exc":
+                QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                     res.get("msg", "error"))
+                return
+            if res.get("error") == "seed_out":
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Could not measure — {m}.\nAdjust 下限/上限, move the ROI "
+                      "to a clearly-contrast part of the cavity, or re-check "
+                      "the Epi / MV / AoV.").format(m=res["msg"]))
+                return
+            if res.get("error") == "too_large":
+                QMessageBox.warning(
+                    self.window(), t("LV Vol"),
+                    t("Region too large to compute ({v:,} voxels) — re-check "
+                      "the Epi surface.").format(v=res["voxels"]))
+                return
+            lvv["last_ml"] = res["volume_ml"]
+            self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
+            # Build the measured-region mask volume (0/1 float32) for the red
+            # overlay — a plain numpy array sampled by _lvv_plane_rgba (no VTK).
+            comp = res.get("comp")
+            if comp is not None:
+                z0, z1, y0, y1, x0, x1 = res["bbox"]
+                full = np.zeros(self._vol.shape, np.float32)
+                full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
+                self._lvv_mask_vol = full
+                self._lvv_mask_on = True
+                self._lvv_mask_btn.setChecked(True)
+                self._lvv_update_mask()                  # build + show red now
+            self._lvv_sync()
+            then = getattr(self, "_lvv_calc_then", None)
+            self._lvv_calc_then = None
+            if then is not None:
+                then()                               # e.g. continue to Save
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_save(self) -> None:
+        """Save the LV Vol dataset. If no volume yet, offer to save without it,
+        compute-then-save, or cancel (mirrors the contour LV Save)."""
+        from PyQt6.QtWidgets import QMessageBox
+        lvv = self._lvv
+        if lvv is None or lvv.get("seed") is None:
+            QMessageBox.information(self.window(), t("LV Vol"),
+                                   t("Set the ROI first."))
+            return
+        if lvv.get("last_ml") is None:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV Vol"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Save without volume data?"))
+            b_no = box.addButton(t("Save without volume"),
+                                 QMessageBox.ButtonRole.AcceptRole)
+            b_yes = box.addButton(t("Calculate volume, then save"),
+                                  QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_yes:
+                self._lvv_calc(then=self._lvv_do_save)   # compute → then save
+            elif clicked is b_no:
+                self._lvv_do_save()
+            return
+        self._lvv_do_save()
+
+    def _lvv_do_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        lvv = self._lvv
+        if lvv is None or lvv.get("seed") is None:
+            return
+        c_a, n_a, r_a = lvv["aortic"]
+        c_m, n_m, r_m = lvv["mitral"]
+        data = {
+            "type": "lvvol",
+            "series": (self._lv_series_meta()
+                       if hasattr(self, "_lv_series_meta") else {}),
+            "apex": list(map(float, lvv["apex"])),
+            "seed": list(map(float, lvv["seed"])),
+            "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
+                       "r": float(r_a)},
+            "mitral": {"c": list(map(float, c_m)), "n": list(map(float, n_m)),
+                       "r": float(r_m)},
+            "hu_lo": float(self._lvv_lo_spin.value()),
+            "hu_hi": float(self._lvv_hi_spin.value()),
+            "volume_ml": (None if lvv.get("last_ml") is None
+                          else float(lvv["last_ml"])),
+            "epi_model": self._lvv_epi_model_dict,
+        }
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "lvvol")
+        name = stem + ".lvvol.json"
+        default = os.path.join(d, name) if d else name
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save LV Vol"), default,
+            "LV Vol (*.lvvol.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".lvvol.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV Vol"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        QMessageBox.information(self.window(), t("LV Vol"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _lvv_load(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core.lv_measure import LVModel
+        import json
+        if self._vol is None:
+            return
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load LV Vol"), d,
+            "LV Vol (*.lvvol.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            model = LVModel.from_dict(data["epi_model"])
+            model.build()
+            if model.epi is None:
+                raise ValueError("no Epi surface in file")
+            self._lvv_epi_surf = model.epi
+            self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+            self._lvv_epi_model_dict = data["epi_model"]
+            if self._lvv is None:
+                self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                             "hu_lo": None, "hu_hi": None, "seed": None,
+                             "step": "apex", "last_ml": None}
+            lvv = self._lvv
+            lvv["apex"] = np.asarray(data["apex"], float)
+            lvv["seed"] = np.asarray(data["seed"], float)
+            a, m = data["aortic"], data["mitral"]
+            lvv["aortic"] = (np.asarray(a["c"], float), np.asarray(a["n"], float),
+                             float(a.get("r", 20.0)))
+            lvv["mitral"] = (np.asarray(m["c"], float), np.asarray(m["n"], float),
+                             float(m.get("r", 20.0)))
+            lvv["hu_lo"] = float(data["hu_lo"])
+            lvv["hu_hi"] = float(data["hu_hi"])
+            lvv["last_ml"] = data.get("volume_ml")
+            lvv["step"] = "ready"
+            for spin, vv in ((self._lvv_lo_spin, data["hu_lo"]),
+                             (self._lvv_hi_spin, data["hu_hi"])):
+                spin.blockSignals(True)
+                spin.setValue(int(round(float(vv))))
+                spin.blockSignals(False)
+            if lvv.get("last_ml") is not None:
+                self._lvv_vol_lbl.setText(
+                    t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
+            self._lvv_sync()
+            self._lvv_update_highlight()
+            for k in ("A", "B"):
+                self._overlay[k].update()
+            QMessageBox.information(
+                self.window(), t("LV Vol"),
+                t("Loaded. Press LV Vol計測 to (re)compute the volume."))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (load error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lvv_clear_markers(self) -> None:
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
+        self._lvv_epi_show = False
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures.get(k, [])
+                                 if m.get("_lvv") is None]
+            self._lvv_cyan_img[k] = None
+            self._lvv_red_img[k] = None
+            self._redraw_meas(k)
+
+    def _lvv_reset_state(self) -> None:
+        """Drop ALL LV Vol state (mode + stashed Epi surface) — used when a new
+        series is loaded or the viewer is cleared, since every landmark and the
+        mask are in the old series' voxel coordinates."""
+        if getattr(self, "_lvv", None) is not None:
+            self._lvv_clear_markers()
+        self._lvv = None
+        self._lvv_epi_surf = None
+        self._lvv_epi_apex = None
+        self._lvv_epi_model_dict = None
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
+        self._lvv_epi_show = False
+        for k in ("A", "B"):
+            self._lvv_cyan_img[k] = None
+            self._lvv_red_img[k] = None
+        if getattr(self, "_lvv_start_btn", None) is not None:
+            self._lvv_vol_lbl.setText("--")
+            self._lvv_sync()
 
     def _lv_sync_buttons(self) -> None:
         """Colour + enable the LV bar by the current pass/phase (mirror the VTK
@@ -7583,6 +8448,21 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_exit(self, from_toggle=False) -> None:
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
+        # Stash the traced EPI surface so LV Vol mode can use it as the outer
+        # bound (Epi border → myocardial envelope). Only when Epi was traced.
+        try:
+            if self._lv is not None:
+                model = self._lv["model"]
+                if (model.epi_axis is not None
+                        and len(model.epi_contours) >= 3):
+                    model.build()
+                    if model.epi is not None:
+                        self._lvv_epi_surf = model.epi
+                        self._lvv_epi_apex = np.asarray(
+                            model.epi_axis.apex, float)
+                        self._lvv_epi_model_dict = model.to_dict()
+        except Exception:                               # noqa: BLE001
+            pass
         self._lv_reset_undo()
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures[k]
