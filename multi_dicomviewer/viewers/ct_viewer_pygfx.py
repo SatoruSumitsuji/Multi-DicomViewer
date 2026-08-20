@@ -7549,6 +7549,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not mins:
             return None
         lo, hi = min(mins), min(maxs)     # apex = deepest, base = common
+        # Let the level scroll all the way to the DRAWN base-cut line even when
+        # the shortest meridian of the shown store stops a touch short of it
+        # (reported on Mac: SAX scroll halted just before the base cut). The cut
+        # line is at along_range(endo|epi)[1] — which may use the OTHER border
+        # than the one shown in SAX, so its base can sit beyond this store's
+        # common base. Extend hi to reach it; never shrink below the common base.
+        m = self._lv["model"]
+        br = m.along_range("endo") or m.along_range("epi")
+        if br is not None:
+            hi = max(hi, float(br[1]))
         return (lo, hi) if hi > lo else None
 
     def _lv_common_range(self):
