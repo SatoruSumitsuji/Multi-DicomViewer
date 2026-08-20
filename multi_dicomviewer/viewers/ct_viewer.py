@@ -2539,10 +2539,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hi_spin.setValue(3000)
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
-        self._lvv_lo_spin.valueChanged.connect(
-            lambda _v: self._lvv_update_highlight())
-        self._lvv_hi_spin.valueChanged.connect(
-            lambda _v: self._lvv_update_highlight())
+        self._lvv_lo_spin.valueChanged.connect(self._lvv_hu_changed)
+        self._lvv_hi_spin.valueChanged.connect(self._lvv_hu_changed)
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
             row.addWidget(_w)
@@ -2651,12 +2649,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # 血流領域表示 button colours cyan while active.
         if roi_done:
             self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-        # LV Vol計測 button turns light-red once a volume is measured; the
-        # 計測領域 (red overlay) toggle appears then and is independently on/off.
+        # Once a volume is measured the LV Vol計測 button acts as the red
+        # measured-region on/off toggle (no recompute): light-red WHILE the red
+        # overlay is showing, plain when hidden. The separate 計測領域 toggle
+        # mirrors the same state.
         measured = on and self._lvv.get("last_ml") is not None
+        showing = measured and getattr(self, "_lvv_mask_on", False)
         self._lvv_calc_btn.setStyleSheet(
             ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
-            if measured else self._BTN_DIS)
+            if showing else self._BTN_DIS)
         self._lvv_mask_btn.setVisible(measured)
         if measured:
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
@@ -2708,6 +2709,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lvv = self._lvv
         if lvv is None or self._center is None:
             return
+        self._lvv_invalidate_result()      # apex moved → old volume is stale
         P = np.asarray(self._center, float).copy()
         lvv["apex"] = P
         self._lvv_add_marker("apex", P, "#ff4040")
@@ -2755,6 +2757,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_update_highlight()
+
+    def _lvv_hu_changed(self, _v=None) -> None:
+        """HU 下限/上限 changed → the measured region is now stale, so drop the
+        stored result (the next LV Vol計測 press recomputes) and refresh the
+        blood tint."""
+        self._lvv_invalidate_result()
+        self._lvv_update_highlight()
+
+    def _lvv_invalidate_result(self) -> None:
+        """Clear a stored measurement so the next LV Vol計測 press recomputes.
+        Called when an input (HU range / apex / valve / ROI) changes — the old
+        volume and red region no longer match. No-op if nothing is measured."""
+        lvv = self._lvv
+        if lvv is None or lvv.get("last_ml") is None:
+            return
+        lvv["last_ml"] = None
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
+        for k in ("A", "B"):
+            self.pane[k].reslice_mask.SetInputData(vtkImageData())
+        if getattr(self, "_lvv_mask_btn", None) is not None:
+            self._lvv_mask_btn.setChecked(False)
+        if getattr(self, "_lvv_vol_lbl", None) is not None:
+            self._lvv_vol_lbl.setText("--")
+        self._lvv_update_mask()
+        self._lvv_sync()
 
     def _lvv_show_epi(self, render=True) -> None:
         """Draw the Epi surface where it crosses each pane (green dots), so the
@@ -2840,6 +2868,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv = self._lvv
             if lvv is None:
                 return
+            self._lvv_invalidate_result()   # ROI/seed changed → old volume stale
             m, which, best = None, None, -1
             for k in ("A", "B"):
                 for cand in self._measures.get(k, []):
@@ -2911,6 +2940,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox
         if self._lvv is None:
             return
+        self._lvv_invalidate_result()      # valve plane changed → volume stale
         # Newest Ellipse across BOTH panes (drawn on either side).
         m, which = None, None
         best = -1
@@ -2958,6 +2988,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         try:
             lvv = self._lvv
             if lvv is None or self._vol is None:
+                return
+            # Already measured with the CURRENT inputs? Then this button no longer
+            # recomputes — it just toggles the red measured-region overlay on/off
+            # (the data is kept). Changing the HU range / apex / valve / ROI clears
+            # the stored result (see _lvv_invalidate_result) so the next press
+            # recomputes. The Save path (then) just proceeds — the data is present.
+            if lvv.get("last_ml") is not None and self._lvv_mask_vol is not None:
+                if then is not None:
+                    then()
+                    return
+                self._lvv_mask_on = not self._lvv_mask_on
+                self._lvv_mask_btn.setChecked(self._lvv_mask_on)
+                self._lvv_update_mask()
+                self._lvv_sync()
                 return
             miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
                     "aortic"), (t("mitral plane"), "mitral"),
