@@ -3210,6 +3210,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            # (B) Warn on a series mismatch — the apex/seed/valve/Epi are all in
+            # THIS series' volume mm, so a file saved for another series won't
+            # line up. Let the user override (same as the contour LV load).
+            saved = (data.get("series") or {}).get("series_uid", "")
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if saved and cur and saved != cur:
+                if QMessageBox.question(
+                        self.window(), t("LV Vol"),
+                        t("This file was saved for a DIFFERENT series — the "
+                          "landmarks and Epi may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return
+            # (C) Contour LV and LV Vol are mutually exclusive: leave contour LV
+            # first so both modes can't be active at once (this used to leave
+            # self._lv AND self._lvv set). _lv_exit stashes the contour Epi, but
+            # we overwrite _lvv_epi_surf with THIS file's Epi just below, so the
+            # loaded file stays the single Epi source — (A).
+            if self._lv is not None:
+                self._lv_exit()
+            # Drop any prior LV Vol overlay/markers so a reload doesn't stack.
+            if self._lvv is not None:
+                self._lvv_clear_markers()
             model = LVModel.from_dict(data["epi_model"])
             model.build()
             if model.epi is None:
@@ -3244,9 +3267,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
             self._lvv_sync()
             self._lvv_update_highlight()
+            # (A) Make the Epi source explicit, and (B) remind about the two-file
+            # drift: the Epi lives in BOTH the .lv and .lvvol files, so an edit
+            # in one must be re-saved to the other to stay in sync.
             QMessageBox.information(
                 self.window(), t("LV Vol"),
-                t("Loaded. Press LV Vol計測 to (re)compute the volume."))
+                t("Loaded — the volume is measured against the Epi border stored "
+                  "in THIS .lvvol file. If you later edit the Epi in contour LV "
+                  "and re-save the .lv file, re-save the .lvvol too so they stay "
+                  "in sync. Press LV Vol計測 to (re)compute the volume."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (load error)"),
