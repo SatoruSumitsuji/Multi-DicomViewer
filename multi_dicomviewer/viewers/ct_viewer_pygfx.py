@@ -6031,8 +6031,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hi_spin.setValue(3000)
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
-        self._lvv_lo_spin.valueChanged.connect(self._lvv_hu_changed)
-        self._lvv_hi_spin.valueChanged.connect(self._lvv_hu_changed)
+        self._lvv_lo_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
+        self._lvv_hi_spin.valueChanged.connect(
+            lambda _v: self._lvv_update_highlight())
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
             row.addWidget(_w)
@@ -6178,7 +6180,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
-                             "step": "apex", "last_ml": None}
+                             "step": "apex", "last_ml": None, "calc_sig": None}
                 self._lvv_sync()
                 for k in ("A", "B"):
                     self._overlay[k].update()
@@ -6204,7 +6206,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         lvv = self._lvv
         if lvv is None or self._center is None:
             return
-        self._lvv_invalidate_result()      # apex moved → old volume is stale
         P = np.asarray(self._center, float).copy()
         lvv["apex"] = P
         lvv["step"] = "mv"
@@ -6297,29 +6298,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Rebuild the in-range (blood) voxel tint on both panes."""
         self._lvv_redraw()
 
-    def _lvv_hu_changed(self, _v=None) -> None:
-        """HU 下限/上限 changed → the measured region is now stale, so drop the
-        stored result (the next LV Vol計測 press recomputes) and refresh the
-        blood tint."""
-        self._lvv_invalidate_result()
-        self._lvv_update_highlight()
-
-    def _lvv_invalidate_result(self) -> None:
-        """Clear a stored measurement so the next LV Vol計測 press recomputes.
-        Called when an input (HU range / apex / valve / ROI) changes — the old
-        volume and red region no longer match. No-op if nothing is measured."""
+    def _lvv_signature(self):
+        """Hashable snapshot of the inputs that define the measured region: apex,
+        AoV & MV planes (centre + normal), ROI seed, and the HU range read LIVE
+        from the spins. Stored at each successful measure (lvv['calc_sig']) and
+        compared on the next LV Vol計測 press — equal → toggle the red overlay
+        only (no recompute); different → recompute. Returns None if incomplete."""
         lvv = self._lvv
-        if lvv is None or lvv.get("last_ml") is None:
-            return
-        lvv["last_ml"] = None
-        self._lvv_mask_vol = None
-        self._lvv_mask_on = False
-        if getattr(self, "_lvv_mask_btn", None) is not None:
-            self._lvv_mask_btn.setChecked(False)
-        if getattr(self, "_lvv_vol_lbl", None) is not None:
-            self._lvv_vol_lbl.setText("--")
-        self._lvv_redraw()
-        self._lvv_sync()
+        if lvv is None:
+            return None
+
+        def rt(v, nd=3):
+            return tuple(round(float(x), nd)
+                         for x in np.asarray(v, float).ravel())
+        try:
+            apex, seed = lvv["apex"], lvv["seed"]
+            aortic, mitral = lvv["aortic"], lvv["mitral"]
+            if apex is None or seed is None or aortic is None or mitral is None:
+                return None
+            c_a, n_a = aortic[0], aortic[1]
+            c_m, n_m = mitral[0], mitral[1]
+        except (KeyError, TypeError, IndexError):
+            return None
+        lo = round(float(self._lvv_lo_spin.value()), 3)
+        hi = round(float(self._lvv_hi_spin.value()), 3)
+        return (rt(apex), rt(c_a), rt(n_a, 4), rt(c_m), rt(n_m, 4),
+                rt(seed), lo, hi)
 
     def _lvv_toggle_highlight(self, *args) -> None:
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
@@ -6380,7 +6384,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv = self._lvv
             if lvv is None:
                 return
-            self._lvv_invalidate_result()   # ROI/seed changed → old volume stale
             m, which, best = None, None, -1
             for k in ("A", "B"):
                 for cand in self._measures.get(k, []):
@@ -6437,7 +6440,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox
         if self._lvv is None:
             return
-        self._lvv_invalidate_result()      # valve plane changed → volume stale
         # Newest Ellipse across BOTH panes (drawn on either side).
         m, which = None, None
         best = -1
@@ -6485,12 +6487,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv = self._lvv
             if lvv is None or self._vol is None:
                 return
-            # Already measured with the CURRENT inputs? Then this button no longer
-            # recomputes — it just toggles the red measured-region overlay on/off
-            # (the data is kept). Changing the HU range / apex / valve / ROI clears
-            # the stored result (see _lvv_invalidate_result) so the next press
-            # recomputes. The Save path (then) just proceeds — the data is present.
-            if lvv.get("last_ml") is not None and self._lvv_mask_vol is not None:
+            # Already measured AND the inputs are unchanged since that measure
+            # (region + HU range signature matches)? Then this button does NOT
+            # recompute — it just toggles the red measured-region overlay on/off
+            # (the data is kept). If the region or HU range changed, fall through
+            # and recompute. The Save path (then) saves directly when unchanged.
+            have = (lvv.get("last_ml") is not None
+                    and self._lvv_mask_vol is not None)
+            sig = lvv.get("calc_sig")
+            if have and sig is not None and self._lvv_signature() == sig:
                 if then is not None:
                     then()
                     return
@@ -6581,6 +6586,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                       "the Epi surface.").format(v=res["voxels"]))
                 return
             lvv["last_ml"] = res["volume_ml"]
+            lvv["calc_sig"] = self._lvv_signature()      # inputs at this measure
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
             # Build the measured-region mask volume (0/1 float32) for the red
             # overlay — a plain numpy array sampled by _lvv_plane_rgba (no VTK).
@@ -6704,7 +6710,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._lvv is None:
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
-                             "step": "apex", "last_ml": None}
+                             "step": "apex", "last_ml": None, "calc_sig": None}
             lvv = self._lvv
             lvv["apex"] = np.asarray(data["apex"], float)
             lvv["seed"] = np.asarray(data["seed"], float)
