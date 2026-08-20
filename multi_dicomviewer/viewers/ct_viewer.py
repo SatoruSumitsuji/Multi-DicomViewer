@@ -2789,7 +2789,8 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_show_epi(self, render=True) -> None:
         """Draw the Epi surface where it crosses each pane (green dots), so the
         operator can see the Epi border and judge coronary contamination."""
-        on = (self._lvv is not None and self._lvv_epi_surf is not None
+        on = (self._lvv is not None and self._lv is None
+              and self._lvv_epi_surf is not None
               and getattr(self, "_lvv_epi_show", False))
         pts = self._lvv_epi_surf._all_ring_points() if on else None
         for key in ("A", "B"):
@@ -3265,6 +3266,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].reslice_mask.SetInputData(_placeholder_image())
             self.pane[k].colors_mask.Modified()
             self._redraw_meas(k)
+
+    def _lvv_deactivate(self) -> None:
+        """Fully leave LV Vol mode: clear its overlays (Epi dots / blood tint /
+        red region) and drop the mode. Called when entering contour LV so a
+        loaded .lvvol dataset's Epi border can't linger on-screen there — its
+        display belongs to the LV Vol bar's Epi button only."""
+        if self._lvv is None:
+            return
+        self._lvv_clear_markers()
+        self._lvv = None
+        self._lvv_sync()
 
     def _active_pane(self) -> str:
         """The pane the user is working in (current side; default B)."""
@@ -4855,6 +4867,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                  "pts3d": [P] if P is not None else []})
             self._redraw_meas(which)
             return False
+        # Line: support press-drag-release (the natural gesture for a straight
+        # line) ON TOP of click-click. The first press starts a rubber-band line
+        # whose 2nd point tracks the drag; a release that actually moved commits
+        # it, one that didn't falls back to two-click (see _measure_drag /
+        # _measure_release). Nothing here is LV-gated, so Line works in LV Vol
+        # (and everywhere) by either gesture.
+        if self._meas_type == "line" and (
+                self._draft is None or self._draft.get("pane") != which
+                or self._draft.get("type") != "line"):
+            self._draft = {"type": "line", "pane": which, "pts": [w, w],
+                           "_drag_new": True}
+            self._draft_redo = []
+            self._redraw_geom(which)
+            return True                    # caller keeps the drag (_meas_drag)
         # LV mode: a NEW polyline may start ONLY when Endo or Epi is active AND
         # that border isn't captured yet. So it's blocked when neither Endo nor
         # Epi is selected (a click does nothing), while the short-axis is shown
@@ -4937,6 +4963,12 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _measure_drag(self, which, sx, sy):
         e = self._edit
         if not e:
+            # Rubber-band the 2nd point of a Line being press-dragged.
+            d = self._draft
+            if (d is not None and d.get("_drag_new")
+                    and d.get("type") == "line" and d.get("pane") == which):
+                d["pts"][1] = self._disp_to_world(which, sx, sy)
+                self._redraw_geom(which)
             return
         w = self._disp_to_world(e["key"], sx, sy)
         m = self._measures[e["key"]][e["mi"]]
@@ -5447,6 +5479,20 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(self, "_lv_edit_before", None) is not None \
                     and mi is not None:
                 self._lv_record_border(self._lv_edit_before, key, mi)
+            self._lv_edit_before = None
+            return
+        # Line press-drag-release: a real drag commits the 2-point line; a press
+        # with (almost) no movement reverts to a 1-point draft so the classic
+        # click-click still finishes it on the next click.
+        d = self._draft
+        if d is not None and d.get("_drag_new") and d.get("type") == "line":
+            p0, p1 = d["pts"][0], d["pts"][1]
+            d.pop("_drag_new", None)
+            if abs(p0[0] - p1[0]) + abs(p0[1] - p1[1]) > 1e-6:
+                self._commit_draft()
+            else:
+                d["pts"] = [p0]
+                self._redraw_geom(d["pane"])
         self._lv_edit_before = None
 
     def _set_ellipse_handle(self, m, vi, w):
@@ -6247,6 +6293,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
+        self._lvv_deactivate()            # contour LV and LV Vol are exclusive
         self._lv = {"model": LVModel(n_planes=6), "phase": "align",
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
@@ -7576,6 +7623,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
+        self._lvv_deactivate()            # contour LV and LV Vol are exclusive
         self._lv = {"model": model, "phase": "contour", "plane_idx": 0,
                     "target": None, "pane": "B", "sax": None,
                     "pass": "epi" if model.epi_axis is not None else "endo",
@@ -7693,6 +7741,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
             self.pane[k].set_slab_visible(True)
         self._lv_update_text()
+        # Re-enable the tools/controls that contour LV greyed out (esp. the
+        # Slab(mm) spin) — _refresh_tool_availability only ever DISABLED them in
+        # LV and nothing re-ran it on the way out, so entering LV Vol afterwards
+        # left the slab stuck disabled.
+        self._refresh_tool_availability()
         self._refresh(reset_cam=True)
         self._redraw_all_lv()
 
