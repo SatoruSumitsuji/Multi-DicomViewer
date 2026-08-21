@@ -7284,7 +7284,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             dx, dy = float(np.dot(md, u)), float(np.dot(md, v))
             nrm = math.hypot(dx, dy) or 1.0
             dx, dy = dx / nrm, dy / nrm
-            ex, ey = self._lv_ring_xy(which, 0.0, 0.0, dx, dy)
+            cx, cy = self._lv_view_center(which)   # same anchor as the drawn line
+            ex, ey = self._lv_ring_xy(which, cx, cy, dx, dy)
             if math.hypot(wx - ex, wy - ey) <= rgrab:
                 return "meridian"
         return None
@@ -8297,13 +8298,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 nrm = math.hypot(dx, dy) or 1.0
                 dx, dy = dx / nrm, dy / nrm
                 X = float(getattr(self, "_half", 100.0))
-                # centreline + ○ handle, both clipped to the visible rect so the
-                # handle stays reachable AND on the drawn line at any zoom / pan.
+                # centreline + ○ handle: anchor the meridian line at the VISIBLE
+                # CENTRE (focal point), not the axis origin, so it always passes
+                # through the middle of the pane → a consistent FULL-SPAN line
+                # edge-to-edge with the ○ near one edge (a line through an
+                # off-centre origin cut a short, angle-dependent chord — the
+                # "lengths vary" report). Direction (dx,dy) still shows the plane.
+                cx, cy = self._lv_view_center(key)
                 (sx0, sy0), (ex, ey), _ok = self._lv_line_clip(
-                    key, 0.0, 0.0, dx, dy)
+                    key, cx, cy, dx, dy)
                 cr = self._lv_ring_radius(key)
                 line = ([(sx0, sy0), (ex, ey)] if _ok
-                        else [(-dx * X, -dy * X), (dx * X, dy * X)])
+                        else [(cx - dx * X, cy - dy * X),
+                              (cx + dx * X, cy + dy * X)])
                 p.lv_line_mapper.SetInputData(_polylines_pd([
                     line, self._circle_poly(ex, ey, cr)]))
             elif key == lv.get("pane"):
