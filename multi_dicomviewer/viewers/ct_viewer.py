@@ -2493,10 +2493,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
         gb.addWidget(self._lvv_mask_btn)
         self._lvv_epi_show = False
-        self._lvv_epi_btn = FitButton(t("Epi境界"))
+        # Epi読み込み: ALWAYS pick an EpiLv.json (replace the in-memory Epi).
+        self._lvv_epi_load_btn = FitButton(t("Epi読み込み"))
+        self._lvv_epi_load_btn.setHelpToolTip(
+            t("Load an EpiLv.json as the Epi surface bounding the Blood region "
+              "(replaces the current Epi)"))
+        self._lvv_epi_load_btn.clicked.connect(self._lvv_epi_load_click)
+        gb.addWidget(self._lvv_epi_load_btn)
+        # Epi表示: toggle the green Epi border; if none in memory, load one first.
+        self._lvv_epi_btn = FitButton(t("Epi表示"))
         self._lvv_epi_btn.setCheckable(True)
         self._lvv_epi_btn.setHelpToolTip(
-            t("Show the Epi border on both panes (green)"))
+            t("Show the Epi border on both panes (green); loads an EpiLv.json "
+              "first if none is in memory"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
         gb.addWidget(self._lvv_epi_btn)
         row1.addWidget(self._lv_grp_blood)
@@ -2753,8 +2762,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.setVisible(measured)
         if measured:
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
-        # Epi-border toggle: available in the mode.
-        self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
+        # Epi buttons: both available throughout Blood mode. Epi読み込み always
+        # picks a file; Epi表示 toggles the border (and loads one first if none
+        # is in memory), so it stays enabled even before an Epi is loaded.
+        self._lvv_epi_load_btn.setVisible(on)
+        self._lvv_epi_btn.setVisible(on)
+        self._lvv_epi_btn.setChecked(bool(getattr(self, "_lvv_epi_show", False)))
+        self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
         self._lv_update_submode_ui()        # show only the active sub-mode's group
 
     def _lvv_prompt(self, text) -> None:
@@ -2963,7 +2977,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             if render:
                 p.render()
 
+    def _lvv_epi_load_click(self, *args) -> None:
+        """Epi読み込み: always pick an EpiLv.json (replace the in-memory Epi). On
+        success, show the border and refresh."""
+        if self._lvv_load_epi():
+            self._lvv_epi_show = True
+            self._lvv_epi_btn.setChecked(True)
+            self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+            self._lvv_show_epi()
+            self._lvv_sync()
+
     def _lvv_toggle_epi(self, *args) -> None:
+        # Epi表示: turning ON with no Epi in memory → load one first; if that is
+        # cancelled/fails, leave the toggle off.
+        if self._lvv_epi_btn.isChecked() and self._lvv_epi_surf is None:
+            if not self._lvv_load_epi():
+                self._lvv_epi_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+                return
+            self._lvv_sync()
         self._lvv_epi_show = self._lvv_epi_btn.isChecked()
         self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
         self._lvv_show_epi()
