@@ -2599,7 +2599,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.setStyleSheet(self._BTN_DIS)
         self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
         self._lvv_start_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
+            "QPushButton:checked{background:#2e8b57;color:white;}" + self._BTN_DIS)
         self._lv_sync_buttons()           # initial (not in LV mode) state
         self._lvv_sync()
         self._lv_update_submode_ui()
@@ -2624,15 +2624,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         Blood are mutually exclusive for now — switching to one ends the other
         (finish + Save a sub-mode before switching). Coexistence is the next
         planned increment."""
+        cur = self._lv_current_submode()
+        # Re-click the ACTIVE sub-mode → DESELECT it (un-greys the other two so
+        # you can pick another — e.g. trace Epi after Endo). The traced borders
+        # stay in the model; only the pass selection is cleared.
+        if sm == cur:
+            if sm == "blood":
+                self._lvv_toggle()                    # leave Blood
+            elif self._lv is not None and self._lv.get("sax") is None:
+                self._lv["pass"] = None               # keep the traced borders
+                self._lv_apply_target(None)
+                self._lv_sync_buttons()
+            else:
+                # In SAX, re-click ARMS this border for editing (existing flow).
+                self._lv_select_pass(sm)
+            self._lv_update_submode_ui()
+            return
+        # Switch to a DIFFERENT sub-mode.
         if sm in ("endo", "epi"):
             if self._lvv is not None:                 # leave Blood first
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
-            self._lv_select_pass(sm)                  # existing enter/arm contour
+            self._lv_select_pass(sm)                  # enter/arm this pass
         elif sm == "blood":
-            if self._lvv is None:
-                self._lvv_toggle()                    # existing start (exits contour)
+            self._lvv_toggle()                        # start Blood (needs Epi)
         self._lv_update_submode_ui()
 
     def _lv_exit_all(self) -> None:
@@ -2652,12 +2668,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         comes from _lv_sync_buttons / _lvv_sync."""
         if not hasattr(self, "_lv_grp_trace"):
             return
-        contour = self._lv is not None
-        blood = self._lvv is not None
-        self._lv_grp_trace.setVisible(contour)
-        self._lv_grp_blood.setVisible(blood)
-        self._lv_grp_r2_trace.setVisible(contour)
-        self._lv_grp_r2_blood.setVisible(blood)
+        sm = self._lv_current_submode()               # 'endo'/'epi'/'blood'/None
+        endoepi = sm in ("endo", "epi")
+        blood = sm == "blood"
+
+        # Idempotent show/hide: only toggle a group's visibility when it actually
+        # changes. Calling setVisible every sync (many per view manipulation)
+        # churned the layout and could momentarily drop the trace buttons
+        # mid-align (reported: Set axis vanished while orienting the view).
+        def _vis(w, on):
+            if w.isVisible() != on:
+                w.setVisible(on)
+        _vis(self._lv_grp_trace, endoepi)
+        _vis(self._lv_grp_blood, blood)
+        _vis(self._lv_grp_r2_trace, endoepi)
+        _vis(self._lv_grp_r2_blood, blood)
+        # Sub-mode selector: once one is chosen, grey the other two (only the
+        # active one stays clickable — re-click it to deselect and bring the
+        # others back). All three live when nothing is selected. Runs AFTER
+        # _lv_sync_buttons / _lvv_sync (which enable them), so this wins.
+        self._lv_endo_btn.setEnabled(sm in (None, "endo"))
+        self._lv_epi_btn.setEnabled(sm in (None, "epi"))
+        self._lvv_start_btn.setEnabled(sm in (None, "blood"))
         # Keep the Blood selector's checked look in step even if it was clicked
         # while already active (the checkable button toggles itself on click).
         if self._lvv_start_btn.isChecked() != blood:
