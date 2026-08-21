@@ -6826,6 +6826,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[pane] = (u, v, n)
         self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
+        # Just after Set axis (ready): sync the cross-section pane's reslice
+        # centre to the crosshair (_center), like a recenter does
+        # (self._pc[other] = self._center). Set axis moves _center onto the axis
+        # but did NOT re-cut the other pane, so its section was stale until the
+        # user nudged the level (reported: right crosshair vs left section
+        # mismatch on entry). Only in 'ready' — contour keeps its own section.
+        if lv.get("phase") == "ready":
+            other = "A" if pane == "B" else "B"
+            self._pc[other] = np.asarray(self._center, float).copy()
         # Fit the view only the FIRST time; keep the user's zoom/pan when they
         # step planes (angle change) afterwards.
         first = not lv.get("fitted", False)
