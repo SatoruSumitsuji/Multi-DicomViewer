@@ -5526,9 +5526,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return
         if lv.get("vol_done") or lv.get("vol_endo_ml") is not None \
-                or self._lv_result_lines:
+                or lv.get("vol_epi_ml") is not None or self._lv_result_lines:
             lv["vol_done"] = False
             lv["vol_endo_ml"] = None
+            lv["vol_epi_ml"] = None
             lv["vol_myo_ml"] = None
             self._lv_result_lines = []
             self._lv_sync_buttons()
@@ -7373,6 +7374,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_capture_current()          # capture any pending trace
         m = self._lv["model"]
+        # Per-sub-mode: Calc Vol computes the ACTIVE pass's own enclosed volume
+        # (Endo → LV cavity, Epi → epicardial). Myocardium / EF (Epi − Endo) is a
+        # separate cross-file tool, so this no longer needs BOTH borders.
+        pas = self._lv.get("pass")
+        if pas not in ("endo", "epi"):
+            pas = "endo" if m.endo_planes else "epi"
+        planes = m.endo_planes if pas == "endo" else m.epi_planes
+        if len(planes) < 3:
+            QMessageBox.information(
+                self.window(), t("LV Volume"),
+                t("Trace the {p} border on at least 3 planes first.").format(
+                    p=pas.capitalize()))
+            return
         # Parent dialogs to the TOP-LEVEL window, not this embedded viewer, to
         # avoid Qt's "must be a top level window" console warning.
         top = self.window()
@@ -7384,13 +7398,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    result["endo"] = m.volume_ml(spacing, "endo")
-                    result["myo"] = m.myocardial_volume_ml(spacing)
+                    result["vol"] = m.volume_ml(spacing, pas)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
         dlg = QProgressDialog(t("Computing LV volume…"), "", 0, 0, top)
-        dlg.setWindowTitle(t("LV EF"))
+        dlg.setWindowTitle(t("LV Volume"))
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setCancelButton(None)                 # not cancellable — it's short
         dlg.setMinimumDuration(0)                 # show at once
@@ -7407,27 +7420,27 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         if "err" in result:
             QMessageBox.information(
-                top, t("LV EF"),
+                top, t("LV Volume"),
                 t("Could not build the LV surface: {err}", err=result["err"]))
             return
-        endo_ml = result.get("endo")
-        if endo_ml is None:
+        vol_ml = result.get("vol")
+        if vol_ml is None:
             QMessageBox.information(
-                top, t("LV EF"),
-                t("Trace the endo border on at least 3 planes first."))
+                top, t("LV Volume"),
+                t("Trace the {p} border on at least 3 planes first.").format(
+                    p=pas.capitalize()))
             return
-        # Show the result in the pane's RESULT block (not a dialog). Myocardial
-        # MASS is omitted — density can't be read from the image (only a
-        # reference value), so we report volumes only.
-        lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
-        myo_ml = result.get("myo")
-        if myo_ml is not None:
-            lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
-        self._lv_result_lines = lines
+        # Show the result in the pane's RESULT block (not a dialog), labelled by
+        # sub-mode: "Endo-LV Volume:" or "Epi-LV Volume:".
+        label = (t("Endo-LV Volume: {v:.1f} mL") if pas == "endo"
+                 else t("Epi-LV Volume: {v:.1f} mL"))
+        self._lv_result_lines = [label.format(v=vol_ml)]
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
-        # Remember the numbers so Save can persist them and Load can redisplay.
-        self._lv["vol_endo_ml"] = float(endo_ml)
-        self._lv["vol_myo_ml"] = None if myo_ml is None else float(myo_ml)
+        # Remember the number so Save can persist it and Load can redisplay.
+        if pas == "endo":
+            self._lv["vol_endo_ml"] = float(vol_ml)
+        else:
+            self._lv["vol_epi_ml"] = float(vol_ml)
         self._lv_sync_buttons()
         self._lv_update_text()
 
@@ -7663,11 +7676,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 t("No {p} border to save yet.").format(p=pas.capitalize()))
             return
         # No valid volume yet → ask whether to save without it or compute first.
+        vol_key = "vol_endo_ml" if pas == "endo" else "vol_epi_ml"
         has_vol = bool(self._lv.get("vol_done")
-                       and self._lv.get("vol_endo_ml") is not None)
+                       and self._lv.get(vol_key) is not None)
         if not has_vol:
             box = QMessageBox(self.window())
-            box.setWindowTitle(t("LV EF"))
+            box.setWindowTitle(t("LV Volume"))
             box.setIcon(QMessageBox.Icon.Question)
             box.setText(t("Save without volume data?"))
             b_no = box.addButton(t("Save without volume"),
@@ -7706,29 +7720,27 @@ class CTViewer(CPRMixin, AbstractViewer):
             data["endo_planes"] = {}
             data.pop("endo_orig", None)
         data["series"] = self._lv_series_meta()      # for the load-time match
-        # Persist the computed volume (if a VALID result is showing — vol_done
-        # is cleared on any edit) so Load can redisplay it.
-        if self._lv.get("vol_done") and self._lv.get("vol_endo_ml") is not None:
-            data["volume"] = {"endo_ml": float(self._lv["vol_endo_ml"]),
-                              "myo_ml": (None if self._lv.get("vol_myo_ml") is None
-                                         else float(self._lv["vol_myo_ml"]))}
+        # Persist THIS sub-mode's computed volume (if a VALID result is showing —
+        # vol_done is cleared on any edit) so Load can redisplay it.
+        vv = self._lv.get(vol_key)
+        if self._lv.get("vol_done") and vv is not None:
+            data["volume"] = {("endo_ml" if pas == "endo" else "epi_ml"):
+                              float(vv)}
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
         except Exception as exc:                          # noqa: BLE001
-            QMessageBox.warning(self.window(), t("LV EF"),
+            QMessageBox.warning(self.window(), t("LV Volume"),
                                 t("Save failed: {err}", err=str(exc)))
             return
         # Keep the volume readout on screen after saving (append the saved note,
         # don't replace it) so the result stays visible.
         note = t("Saved: {p}", p=os.path.basename(path))
         lines = []
-        if self._lv.get("vol_done") and self._lv.get("vol_endo_ml") is not None:
-            lines.append(t("LV cavity volume: {v:.1f} mL",
-                           v=float(self._lv["vol_endo_ml"])))
-            if self._lv.get("vol_myo_ml") is not None:
-                lines.append(t("Myocardial volume: {v:.1f} mL",
-                               v=float(self._lv["vol_myo_ml"])))
+        if self._lv.get("vol_done") and vv is not None:
+            label = (t("Endo-LV Volume: {v:.1f} mL") if pas == "endo"
+                     else t("Epi-LV Volume: {v:.1f} mL"))
+            lines.append(label.format(v=float(vv)))
         lines.append(note)
         self._lv_result_lines = lines
         self._lv_update_text()
@@ -7795,18 +7807,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_sax_btn.setChecked(True)
             self._lv_toggle_sax()
         # Redisplay a SAVED volume result (after SAX entry, which clears the
-        # result panel) and light CalcVol blue — so Load shows the computed EF.
+        # result panel) and light CalcVol blue — so Load shows the computed value.
         if volume and self._lv is not None:
             lines = [t("Loaded borders: endo {ne} / epi {nep} planes",
                        ne=len(model.endo_planes), nep=len(model.epi_planes))]
-            ev, mv = volume.get("endo_ml"), volume.get("myo_ml")
+            ev = volume.get("endo_ml")
+            pv = volume.get("epi_ml")
             if ev is not None:
-                lines.append(t("LV cavity volume: {v:.1f} mL", v=float(ev)))
+                lines.append(t("Endo-LV Volume: {v:.1f} mL", v=float(ev)))
                 self._lv["vol_endo_ml"] = float(ev)
-            if mv is not None:
-                lines.append(t("Myocardial volume: {v:.1f} mL", v=float(mv)))
-                self._lv["vol_myo_ml"] = float(mv)
-            if ev is not None:
+            if pv is not None:
+                lines.append(t("Epi-LV Volume: {v:.1f} mL", v=float(pv)))
+                self._lv["vol_epi_ml"] = float(pv)
+            if ev is not None or pv is not None:
                 self._lv["vol_done"] = True
                 self._lv_result_lines = lines
                 self._lv_sync_buttons()
@@ -7916,19 +7929,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         lines = list(getattr(self, "_lv_result_lines", []))
         pas = lv.get("pass")
         if pas is None:
-            lines.append(t("LV EF — choose Endo or Epi to start a pass"))
+            lines.append(t("LV — choose Endo or Epi to start a pass"))
             return lines
         name = t("Endo (lumen)") if pas == "endo" else t("Epi (myocardial)")
         if lv.get("phase") == "align":
-            lines.append(t("LV EF [{p} pass] — align the {p} long-axis view, "
+            lines.append(t("LV [{p} pass] — align the {p} long-axis view, "
                            "then press 'Set axis'", p=name))
             return lines
         if lv.get("phase") == "ready":
-            lines.append(t("LV EF [{p} pass] — axis set. Final Zoom/Move, then "
+            lines.append(t("LV [{p} pass] — axis set. Final Zoom/Move, then "
                            "press 'Trace'", p=name))
             return lines
         if lv.get("phase") == "apex":
-            lines.append(t("LV EF [{p} pass] — click the {p} apex "
+            lines.append(t("LV [{p} pass] — click the {p} apex "
                            "(Shift-click to adjust the view first)", p=name))
             return lines
         if lv.get("phase") == "contour":
@@ -7937,7 +7950,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     if pas == "endo"
                     else t("tracing Epi (green) — double-click to finish"))
             lines.append(
-                t("LV EF [{p} pass] — {head}\ncaptured: endo {ne} / epi {nep} "
+                t("LV [{p} pass] — {head}\ncaptured: endo {ne} / epi {nep} "
                   "meridians", p=name, head=head,
                   ne=len(m.endo_contours), nep=len(m.epi_contours)))
         return lines
