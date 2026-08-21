@@ -3264,18 +3264,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             "epi_model": self._lvv_epi_model_dict,
         }
         d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
-        # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
+        # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
-                else "lvvol")
-        name = stem + ".lvvol.json"
+                else "BldLv")
+        name = stem + ".BldLv.json"
         default = os.path.join(d, name) if d else name
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save LV Vol"), default,
-            "LV Vol (*.lvvol.json);;JSON (*.json)")
+            "Blood LV (*.BldLv.json);;JSON (*.json)")
         if not path:
             return
         if not path.endswith(".json"):
-            path += ".lvvol.json"
+            path += ".BldLv.json"
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -3295,7 +3295,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV Vol"), d,
-            "LV Vol (*.lvvol.json);;JSON (*.json)")
+            "Blood LV (*.BldLv.json);;JSON (*.json)")
         if not path:
             return
         try:
@@ -3359,14 +3359,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
             self._lvv_update_highlight()
             # (A) Make the Epi source explicit, and (B) remind about the two-file
-            # drift: the Epi lives in BOTH the .lv and .lvvol files, so an edit
+            # drift: the Epi lives in BOTH the EpiLv and BldLv files, so an edit
             # in one must be re-saved to the other to stay in sync.
             QMessageBox.information(
                 self.window(), t("LV Vol"),
                 t("Loaded — the volume is measured against the Epi border stored "
-                  "in THIS .lvvol file. If you later edit the Epi in contour LV "
-                  "and re-save the .lv file, re-save the .lvvol too so they stay "
-                  "in sync. Press LV Vol計測 to (re)compute the volume."))
+                  "in THIS BldLv file. If you later edit the Epi and re-save the "
+                  "EpiLv file, re-save the BldLv too so they stay in sync. "
+                  "Press Calc Vol to (re)compute the volume."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (load error)"),
@@ -7651,9 +7651,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_capture_current()
         m = self._lv["model"]
-        if not (m.endo_planes or m.epi_planes):
-            QMessageBox.information(self.window(), t("LV EF"),
-                                    t("No borders to save yet."))
+        # Save the ACTIVE sub-mode's border only (Endo → EndoLv.json, Epi →
+        # EpiLv.json). Pick the pass; require it to have a border.
+        pas = self._lv.get("pass")
+        if pas not in ("endo", "epi"):
+            pas = "endo" if m.endo_planes else "epi"
+        planes = m.endo_planes if pas == "endo" else m.epi_planes
+        if not planes:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("No {p} border to save yet.").format(p=pas.capitalize()))
             return
         # No valid volume yet → ask whether to save without it or compute first.
         has_vol = bool(self._lv.get("vol_done")
@@ -7674,15 +7681,30 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_compute_volume()      # runs CalcVol (blocks on its dialog)
             elif clicked is not b_no:
                 return                         # Cancel / closed → abort the save
+        suffix = ".EndoLv.json" if pas == "endo" else ".EpiLv.json"
         d = self._lv_series_dir()
-        default = os.path.join(d, self._lv_default_name()) if d \
-            else self._lv_default_name()
+        fname = self._lv_default_stem() + suffix
+        default = os.path.join(d, fname) if d else fname
+        flt = (("Endo LV (*.EndoLv.json)" if pas == "endo"
+                else "Epi LV (*.EpiLv.json)") + ";;JSON (*.json)")
         path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save LV borders"), default,
-            "LV (*.lv.json);;JSON (*.json)")
+            self.window(), t("Save LV borders"), default, flt)
         if not path:
             return
+        if not path.endswith(".json"):
+            path += suffix
+        # EndoLv.json = endo only, EpiLv.json = epi only: filter the combined
+        # model dict down to just this sub-mode's border.
         data = m.to_dict()
+        if pas == "endo":
+            data["epi_axis"] = None
+            data["epi_apex"] = None
+            data["epi_planes"] = {}
+        else:
+            data["endo_axis"] = None
+            data["endo_apex"] = None
+            data["endo_planes"] = {}
+            data.pop("endo_orig", None)
         data["series"] = self._lv_series_meta()      # for the load-time match
         # Persist the computed volume (if a VALID result is showing — vol_done
         # is cleared on any edit) so Load can redisplay it.
@@ -7719,7 +7741,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV borders"), self._lv_series_dir(),
-            "LV (*.lv.json *.lvef.json);;JSON (*.json)")
+            "LV border (*.EndoLv.json *.EpiLv.json);;JSON (*.json)")
         if not path:
             return
         try:
