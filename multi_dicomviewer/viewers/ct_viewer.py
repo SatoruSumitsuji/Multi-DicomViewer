@@ -3964,11 +3964,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # only in _set_mode) so the state is right on every refresh / load path.
         for b in getattr(self, "_t2d_btns", []):
             b.setEnabled(True)
-        # Slab(mm) is disabled in the contour LV mode (its slab is fixed per
-        # pass); enabled otherwise in 3-D — incl. LV Vol mode — so the operator
-        # sets each pane's slab there. RE-enable when leaving contour LV.
+        # Slab(mm) is available in ALL 3-D LV sub-modes (Endo/Epi AND Blood) so
+        # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
+        # right 5 mm (set on pass entry) but may be changed. Disabled only in 2-D.
         if getattr(self, "_slab_spin", None) is not None:
-            self._slab_spin.setEnabled(self._lv is None and self._mode == "3D")
+            self._slab_spin.setEnabled(self._mode == "3D")
 
     # --------------------------------------------------- CenterLine
     def _style_cl(self):
