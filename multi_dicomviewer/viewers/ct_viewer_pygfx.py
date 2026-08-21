@@ -2889,13 +2889,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             # WB reverse: 2-D only (unneeded in 3-D MPR, disabled in LV) — VTK
             # parity. Revivable by relaxing this to `not in_lv`.
             self._invert_btn.setEnabled(is2d and not in_lv)
-        # Slab spin: disabled in contour-LV (thin fixed slices) and in 2-D, but
-        # ENABLED in LV Vol mode (self._lvv) so the user can slab the MPR while
-        # measuring. Re-enable here — this used to only ever disable, so exiting
-        # contour LV into LV Vol left it stuck off with no mode switch to revive
-        # it (VTK parity: self._lv is None and self._mode == "3D").
+        # Slab spin: available in ALL 3-D LV sub-modes (Endo/Epi AND Blood) so
+        # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
+        # right 5 mm but may be changed. Disabled only in 2-D (VTK parity).
         if getattr(self, "_slab_spin", None) is not None:
-            self._slab_spin.setEnabled(not in_lv and not is2d)
+            self._slab_spin.setEnabled(not is2d)
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
