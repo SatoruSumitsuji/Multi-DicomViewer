@@ -6852,6 +6852,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam.SetViewUp(0.0, 1.0, 0.0)
         if first:
             cam.SetParallelScale(ps0)                # keep the aligned zoom
+            # The ▲ markers are sized 0.024·ParallelScale in _update_cross, which
+            # ran during _refresh at the pre-restore (fitted) scale — leaving them
+            # oversized. Re-size them for the restored scale.
+            self._update_cross(pane)
         # Keep the centreline (crosshair) but drop only the slab-width parallel
         # lines in LV trace mode.
         self.pane[pane].set_overlay_visible(self._cl_btn.isChecked())
