@@ -6839,12 +6839,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             if tag is not None:
                 mm["hidden"] = (tag[0] != idx) or (tag[1] != lv.get("pass"))
         self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")   # e.g. 1/6
+        # Preserve the ZOOM the user aligned at: the first show (right after Set
+        # axis) fits the camera, which would otherwise rescale (shrink) the image.
+        # Keep the parallel scale across that fit so the scale never changes on
+        # Set axis; the fit still recenters the plane. (Reported: image shrinks.)
+        cam = self.pane[pane].ren.GetActiveCamera()
+        ps0 = float(cam.GetParallelScale())
         self._refresh(reset_cam=first)
         # Force the long axis EXACTLY vertical: the reslice frame's v = ax.axis,
         # so reset the camera roll (any SPIN done before Set axis would otherwise
         # leave the axis diagonal). The output plane is (x=u, y=v), so up=(0,1,0).
-        cam = self.pane[pane].ren.GetActiveCamera()
         cam.SetViewUp(0.0, 1.0, 0.0)
+        if first:
+            cam.SetParallelScale(ps0)                # keep the aligned zoom
         # Keep the centreline (crosshair) but drop only the slab-width parallel
         # lines in LV trace mode.
         self.pane[pane].set_overlay_visible(self._cl_btn.isChecked())
