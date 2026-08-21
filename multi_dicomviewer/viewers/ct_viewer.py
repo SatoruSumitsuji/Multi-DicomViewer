@@ -2167,7 +2167,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
         lay.addWidget(self._build_lv_bar())
-        lay.addWidget(self._build_lvv_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -2344,68 +2343,80 @@ class CTViewer(CPRMixin, AbstractViewer):
         return self._cpr_wrap
 
     def _build_lv_bar(self) -> QWidget:
-        """LV EF bar (always visible, below the image): Trace toggles LV mode;
-        the rest step the rotated long-axis planes and trace endo/epi. The
-        non-Trace controls are enabled only while in LV mode. Survives
-        'Max Image'. Buttons pack from the LEFT (stretch at the end)."""
+        """Unified LV bar (2 rows, always visible below the image). Row 1: the
+        LV: caption, the Endo/Epi/Blood SUB-MODE selector, then ONLY the active
+        sub-mode's operation group (Endo/Epi tracing controls, or Blood volume
+        controls). Row 2: the shared file/measure controls (Calc Vol / Save /
+        Load / STL / Clear / Exit), showing the active sub-mode's set. Survives
+        'Max Image'. Endo/Epi/Blood ENTER their sub-mode; Exit leaves LV."""
         self._lv_wrap = QWidget()
         self._lv_wrap._mdv_keep_on_max = True
-        row = QHBoxLayout(self._lv_wrap)
-        row.setContentsMargins(8, 2, 8, 2)
-        row.setSpacing(4)
+        outer = QVBoxLayout(self._lv_wrap)
+        outer.setContentsMargins(8, 2, 8, 2)
+        outer.setSpacing(2)
+        row1 = QHBoxLayout(); row1.setSpacing(4)
+        row2 = QHBoxLayout(); row2.setSpacing(4)
+        outer.addLayout(row1)
+        outer.addLayout(row2)
+
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
-        row.addWidget(cap)
-        # Internal mode flag (no visible toggle any more — Endo/Epi enter LV mode,
-        # Exit LV leaves). Kept for the many `_lv_btn.isChecked()` state checks.
+        row1.addWidget(cap)
+        # Internal mode flag (hidden) — kept for the many _lv_btn.isChecked()
+        # state checks throughout the viewer.
         self._lv_btn = FitButton(t("Trace"))
         self._lv_btn.setCheckable(True)
         self._lv_btn.setVisible(False)
-        # Endo / Epi = choose (and ENTER) the analysis pass. Each is traced on its
-        # own long axis. Endo→red, Epi→green when selected / done.
+
+        # ---- Sub-mode selector: Endo / Epi / Blood (always visible) ----
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.setHelpToolTip(
             t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
-        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_pass("endo"))
-        row.addWidget(self._lv_endo_btn)
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
+        row1.addWidget(self._lv_endo_btn)
         self._lv_epi_btn = FitButton(t("Epi"))
         self._lv_epi_btn.setHelpToolTip(
             t("Epi (myocardial) pass — align its long-axis view, Set axis, then "
               "Trace"))
-        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_pass("epi"))
-        row.addWidget(self._lv_epi_btn)
-        # Set axis: capture the current view as the active pass's long axis.
+        self._lv_epi_btn.clicked.connect(lambda: self._lv_select_submode("epi"))
+        row1.addWidget(self._lv_epi_btn)
+        self._lvv_start_btn = FitButton(t("Blood"))
+        self._lvv_start_btn.setCheckable(True)
+        self._lvv_start_btn.setHelpToolTip(
+            t("Blood-pool volume sub-mode (needs a traced/loaded Epi border)"))
+        self._lvv_start_btn.clicked.connect(lambda: self._lv_select_submode("blood"))
+        row1.addWidget(self._lvv_start_btn)
+        row1.addSpacing(8)
+
+        # ================= Endo/Epi operation group (row 1) =================
+        self._lv_grp_trace = QWidget()
+        gt = QHBoxLayout(self._lv_grp_trace)
+        gt.setContentsMargins(0, 0, 0, 0); gt.setSpacing(4)
         self._lv_setaxis_btn = FitButton(t("Set axis"))
         self._lv_setaxis_btn.setHelpToolTip(
             t("Use the current long-axis view as this pass's rotation axis"))
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
-        row.addWidget(self._lv_setaxis_btn)
-        # Trace: place this pass's apex (first click; Shift-click to adjust the
-        # view instead) then trace its border.
+        gt.addWidget(self._lv_setaxis_btn)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.setHelpToolTip(
             t("Place this pass's apex (first click; Shift-click to adjust the "
               "view) then trace its border"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
-        row.addWidget(self._lv_trace_btn)
+        gt.addWidget(self._lv_trace_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.setHelpToolTip(t("Previous long-axis plane"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
-        row.addWidget(self._lv_prev_btn)
+        gt.addWidget(self._lv_prev_btn)
         self._lv_plane_lbl = QLabel("0/6")     # 0/6 until a pass is started
         self._lv_plane_lbl.setMinimumWidth(78)
         fl = self._lv_plane_lbl.font(); fl.setBold(True)
         self._lv_plane_lbl.setFont(fl)
         self._lv_plane_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        row.addWidget(self._lv_plane_lbl)
+        gt.addWidget(self._lv_plane_lbl)
         self._lv_next_btn = FitButton(t("▶ Next plane (F)"))
         self._lv_next_btn.setHelpToolTip(t("Next long-axis plane"))
         self._lv_next_btn.clicked.connect(lambda: self._lv_step_plane(1))
-        row.addWidget(self._lv_next_btn)
-        # Short-axis display FIRST in the flow (trace → SAX check/edit → Calc):
-        # reslice ⟂ the rotation axis and draw the endo/epi borders (splined
-        # through the 12 meridian points) at each level; ◀▶ then rotate the
-        # meridian instead of stepping the long-axis plane.
+        gt.addWidget(self._lv_next_btn)
         self._lv_sax_btn = FitButton(t("SAX"))
         self._lv_sax_btn.setCheckable(True)
         self._lv_sax_btn.setStyleSheet(
@@ -2414,118 +2425,37 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Short-axis view: show the endo/epi borders on cross-sections ⟂ "
               "the long axis (◀ ▶ scroll the level)"))
         self._lv_sax_btn.clicked.connect(self._lv_toggle_sax)
-        row.addWidget(self._lv_sax_btn)
-        # Compute the LV volume (voxels inside the endo surface) + myocardial mass.
-        self._lv_vol_btn = FitButton(t("Calc Vol"))
-        self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])   # grey until calc
-        self._lv_vol_btn.setHelpToolTip(
-            t("Compute LV cavity volume (+ myocardial mass) from the traced "
-              "endo/epi borders"))
-        self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
-        row.addWidget(self._lv_vol_btn)
-        # Wall-thickness colour map on the short axis (Epi−Endo gap, coloured).
-        self._lv_wall_btn = FitButton(t("Wall"))
-        self._lv_wall_btn.setCheckable(True)
-        # OFF (not applied): the SAME native background as the other buttons with
-        # a clear 2px purple outline so it reads as the wall-map button. ON:
-        # filled purple (border blends in).
-        self._lv_wall_btn.setStyleSheet(
-            "QPushButton{background:palette(button);border:2px solid #9b59b6;}"
-            "QPushButton:checked{background:#8e44ad;color:white;"
-            "border:2px solid #8e44ad;}" + self._BTN_DIS)
-        self._lv_wall_btn.setHelpToolTip(
-            t("Short-axis WALL THICKNESS colour map (Epi−Endo), on every level"))
-        self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
-        row.addWidget(self._lv_wall_btn)
-        self._lv_redo_btn = FitButton(t("Clear borders"))
-        self._lv_redo_btn.setHelpToolTip(
-            t("Discard all traced borders and start again from plane 1"))
-        self._lv_redo_btn.clicked.connect(self._lv_clear_confirm)
-        row.addWidget(self._lv_redo_btn)
-        # Save / load the traced Endo/Epi borders (3-D volume mm) for this series.
-        self._lv_save_btn = FitButton(t("Save"))
-        self._lv_save_btn.setHelpToolTip(
-            t("Save the Endo/Epi 3-D borders to a file (re-apply after reloading "
-              "this series)"))
-        self._lv_save_btn.clicked.connect(self._lv_save)
-        row.addWidget(self._lv_save_btn)
-        self._lv_load_btn = FitButton(t("Load"))
-        self._lv_load_btn.setHelpToolTip(
-            t("Load previously-saved Endo/Epi 3-D borders and apply them"))
-        self._lv_load_btn.clicked.connect(self._lv_load)
-        row.addWidget(self._lv_load_btn)
-        self._lv_stl_btn = FitButton(t("STL"))
-        self._lv_stl_btn.setHelpToolTip(
-            t("Export the reconstructed Endo/Epi surfaces as STL (mm scale)"))
-        self._lv_stl_btn.clicked.connect(self._lv_export_stl)
-        row.addWidget(self._lv_stl_btn)
-        self._lv_exit_btn = FitButton(t("Exit LV"))
-        self._lv_exit_btn.clicked.connect(self._lv_exit_confirm)
-        row.addWidget(self._lv_exit_btn)
-        row.addStretch(1)               # pack all buttons to the LEFT
-        # Plain LV buttons (no colour style of their own): attach the disabled-
-        # grey rule so they clearly grey out when unavailable — a plain button's
-        # native disabled look can be too subtle to read as "unusable".
-        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_redo_btn,
-                  self._lv_save_btn, self._lv_stl_btn, self._lv_load_btn,
-                  self._lv_exit_btn):
-            b.setStyleSheet(self._BTN_DIS)
-        # Controls greyed out until in LV mode (Endo/Epi stay live — they ENTER
-        # LV mode; Load also stays live). _lv_sync_buttons refines by phase.
-        self._lv_bar_btns = [
-            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
-            self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
-            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_stl_btn, self._lv_exit_btn]
-        self._lv_sync_buttons()           # initial (not in LV mode) state
-        return self._lv_wrap
+        gt.addWidget(self._lv_sax_btn)
+        row1.addWidget(self._lv_grp_trace)
 
-    # ==================================================================
-    # LV blood-pool volume (LVEF) — region = apex + aortic/mitral valve
-    # planes; count contrast voxels (HU >= threshold) connected to a cavity
-    # seed. ED/ES volumes -> EF. Separate mode from the contour LV bar.
-    # ==================================================================
-    def _build_lvv_bar(self) -> QWidget:
-        self._lvv_wrap = QWidget()
-        self._lvv_wrap._mdv_keep_on_max = True
-        row = QHBoxLayout(self._lvv_wrap)
-        row.setContentsMargins(8, 2, 8, 2)
-        row.setSpacing(4)
-        cap = QLabel(t("LV Vol:"))
-        f = cap.font(); f.setBold(True); cap.setFont(f)
-        row.addWidget(cap)
-        self._lvv_start_btn = FitButton(t("Start"))
-        self._lvv_start_btn.setCheckable(True)
-        self._lvv_start_btn.setHelpToolTip(
-            t("Enter/leave LV blood-pool volume (LVEF) mode"))
-        self._lvv_start_btn.clicked.connect(self._lvv_toggle)
-        row.addWidget(self._lvv_start_btn)
+        # ================= Blood operation group (row 1) =================
+        self._lv_grp_blood = QWidget()
+        gb = QHBoxLayout(self._lv_grp_blood)
+        gb.setContentsMargins(0, 0, 0, 0); gb.setSpacing(4)
         self._lvv_apex_btn = FitButton(t("Apex"))
         self._lvv_apex_btn.setHelpToolTip(
             t("Confirm the LV apex at the crosshair (move it there first)"))
         self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
-        row.addWidget(self._lvv_apex_btn)
+        gb.addWidget(self._lvv_apex_btn)
         self._lvv_mv_btn = FitButton(t("MV plane"))
         self._lvv_mv_btn.setHelpToolTip(
             t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
               "press this to capture its plane"))
         self._lvv_mv_btn.clicked.connect(lambda: self._lvv_capture_valve("mitral"))
-        row.addWidget(self._lvv_mv_btn)
+        gb.addWidget(self._lvv_mv_btn)
         self._lvv_aov_btn = FitButton(t("AoV plane"))
         self._lvv_aov_btn.setHelpToolTip(
             t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
               "press this to capture its plane"))
         self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
-        row.addWidget(self._lvv_aov_btn)
+        gb.addWidget(self._lvv_aov_btn)
         self._lvv_thr_btn = FitButton(t("内腔ROI"))
         self._lvv_thr_btn.setHelpToolTip(
             t("Draw a Polygon inside the LV cavity (Measure→Polygon), then press "
               "this: it colours the ROI, seeds it, and sets the HU range from "
               "the pixels inside — adjust 下限/上限 below."))
         self._lvv_thr_btn.clicked.connect(self._lvv_capture_roi)
-        row.addWidget(self._lvv_thr_btn)
-        # Blood HU RANGE (lower / upper) for the cavity — suggested from the ROI
-        # polygon, then adjustable. Applied on CalcVol.
+        gb.addWidget(self._lvv_thr_btn)
         self._lvv_lo_lbl = QLabel(t("下限"))
         self._lvv_lo_spin = QSpinBox()
         self._lvv_lo_spin.setRange(-1000, 4000)
@@ -2545,9 +2475,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lambda _v: self._lvv_update_highlight())
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
-            row.addWidget(_w)
-        # "血流領域表示" toggle: tint ALL in-range (blood) voxels across the whole
-        # image so the operator can optimise 下限/上限 (default on).
+            gb.addWidget(_w)
         self._lvv_hl_on = True
         self._lvv_hl_btn = FitButton(t("血流領域表示"))
         self._lvv_hl_btn.setCheckable(True)
@@ -2556,64 +2484,184 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Tint every voxel whose HU is in the 下限–上限 range on both panes "
               "(in-range = blood); adjust 下限/上限 to optimise"))
         self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
-        row.addWidget(self._lvv_hl_btn)
-        # "計測領域" toggle: show the measured region (red) after LV Vol計測.
+        gb.addWidget(self._lvv_hl_btn)
         self._lvv_mask_btn = FitButton(t("計測領域"))
         self._lvv_mask_btn.setCheckable(True)
         self._lvv_mask_btn.setChecked(True)
         self._lvv_mask_btn.setHelpToolTip(
             t("Show the measured LV blood region (red) — independent of 血流領域表示"))
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
-        row.addWidget(self._lvv_mask_btn)
-        # "Epi境界" toggle: draw the Epi surface where it crosses each pane
-        # (green) — to judge whether coronary voxels contaminate the cavity.
+        gb.addWidget(self._lvv_mask_btn)
         self._lvv_epi_show = False
         self._lvv_epi_btn = FitButton(t("Epi境界"))
         self._lvv_epi_btn.setCheckable(True)
         self._lvv_epi_btn.setHelpToolTip(
             t("Show the Epi border on both panes (green)"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
-        row.addWidget(self._lvv_epi_btn)
-        # (Per-pane slab thickness is changed with the toolbar "Slab(mm)"
-        # control — it sets the ACTIVE pane's slab, so click a pane then adjust;
-        # it stays enabled in LV Vol mode. No dedicated spinboxes here.)
-        self._lvv_calc_btn = FitButton(t("LV Vol計測"))
+        gb.addWidget(self._lvv_epi_btn)
+        row1.addWidget(self._lv_grp_blood)
+        row1.addStretch(1)
+
+        # ================= Row 2: shared file / measure controls =========
+        # Endo/Epi set: Calc Vol / Save / Load / STL / Clear / Exit.
+        self._lv_grp_r2_trace = QWidget()
+        r2t = QHBoxLayout(self._lv_grp_r2_trace)
+        r2t.setContentsMargins(0, 0, 0, 0); r2t.setSpacing(4)
+        self._lv_vol_btn = FitButton(t("Calc Vol"))
+        self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])   # grey until calc
+        self._lv_vol_btn.setHelpToolTip(
+            t("Compute the volume enclosed by this sub-mode's traced border"))
+        self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
+        r2t.addWidget(self._lv_vol_btn)
+        # Wall button: kept (referenced by _lv_sync_buttons) but NOT shown in the
+        # bar — wall-thickness moves to the Tools「心機能」tool (planned).
+        self._lv_wall_btn = FitButton(t("Wall"))
+        self._lv_wall_btn.setCheckable(True)
+        self._lv_wall_btn.setStyleSheet(
+            "QPushButton{background:palette(button);border:2px solid #9b59b6;}"
+            "QPushButton:checked{background:#8e44ad;color:white;"
+            "border:2px solid #8e44ad;}" + self._BTN_DIS)
+        self._lv_wall_btn.setHelpToolTip(
+            t("Short-axis WALL THICKNESS colour map (Epi−Endo), on every level"))
+        self._lv_wall_btn.clicked.connect(self._lv_toggle_wall)
+        self._lv_wall_btn.setVisible(False)
+        self._lv_save_btn = FitButton(t("Save"))
+        self._lv_save_btn.setHelpToolTip(
+            t("Save this sub-mode's border to a file"))
+        self._lv_save_btn.clicked.connect(self._lv_save)
+        r2t.addWidget(self._lv_save_btn)
+        self._lv_load_btn = FitButton(t("Load"))
+        self._lv_load_btn.setHelpToolTip(
+            t("Load a previously-saved border and apply it"))
+        self._lv_load_btn.clicked.connect(self._lv_load)
+        r2t.addWidget(self._lv_load_btn)
+        self._lv_stl_btn = FitButton(t("STL"))
+        self._lv_stl_btn.setHelpToolTip(
+            t("Export the reconstructed surface as STL (mm scale)"))
+        self._lv_stl_btn.clicked.connect(self._lv_export_stl)
+        r2t.addWidget(self._lv_stl_btn)
+        self._lv_redo_btn = FitButton(t("Clear"))
+        self._lv_redo_btn.setHelpToolTip(
+            t("Discard all traced borders and start again from plane 1"))
+        self._lv_redo_btn.clicked.connect(self._lv_clear_confirm)
+        r2t.addWidget(self._lv_redo_btn)
+        self._lv_exit_btn = FitButton(t("Exit"))
+        self._lv_exit_btn.clicked.connect(self._lv_exit_all)
+        r2t.addWidget(self._lv_exit_btn)
+        row2.addWidget(self._lv_grp_r2_trace)
+
+        # Blood set: Calc Vol / (mL) / Save / Load / Exit. (STL/Clear come with
+        # the 3-file split in the next increment.)
+        self._lv_grp_r2_blood = QWidget()
+        r2b = QHBoxLayout(self._lv_grp_r2_blood)
+        r2b.setContentsMargins(0, 0, 0, 0); r2b.setSpacing(4)
+        self._lvv_calc_btn = FitButton(t("Calc Vol"))
         self._lvv_calc_btn.setHelpToolTip(
             t("Measure the blood volume inside the Epi surface, apex-side of "
               "MV/AoV, within the 下限–上限 HU range"))
         self._lvv_calc_btn.clicked.connect(lambda: self._lvv_calc())
-        row.addWidget(self._lvv_calc_btn)
+        r2b.addWidget(self._lvv_calc_btn)
         self._lvv_vol_lbl = QLabel("--")
         fv = self._lvv_vol_lbl.font(); fv.setBold(True)
         self._lvv_vol_lbl.setFont(fv)
         self._lvv_vol_lbl.setMinimumWidth(90)
-        row.addWidget(self._lvv_vol_lbl)
+        r2b.addWidget(self._lvv_vol_lbl)
         self._lvv_save_btn = FitButton(t("Save"))
         self._lvv_save_btn.setHelpToolTip(
             t("Save the LV Vol landmarks, HU range, Epi surface and volume"))
         self._lvv_save_btn.clicked.connect(self._lvv_save)
-        row.addWidget(self._lvv_save_btn)
+        r2b.addWidget(self._lvv_save_btn)
         self._lvv_load_btn = FitButton(t("Load"))
         self._lvv_load_btn.setHelpToolTip(t("Load a saved LV Vol dataset"))
         self._lvv_load_btn.clicked.connect(self._lvv_load)
-        row.addWidget(self._lvv_load_btn)
+        r2b.addWidget(self._lvv_load_btn)
         self._lvv_exit_btn = FitButton(t("Exit"))
-        self._lvv_exit_btn.clicked.connect(self._lvv_toggle)
-        row.addWidget(self._lvv_exit_btn)
-        row.addStretch(1)
+        self._lvv_exit_btn.clicked.connect(self._lv_exit_all)
+        r2b.addWidget(self._lvv_exit_btn)
+        row2.addWidget(self._lv_grp_r2_blood)
+        row2.addStretch(1)
+
+        # Plain-button disabled-grey + the button lists the sync methods use.
+        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_redo_btn,
+                  self._lv_save_btn, self._lv_stl_btn, self._lv_load_btn,
+                  self._lv_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
+        self._lv_bar_btns = [
+            self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
+            self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
+            self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
+            self._lv_stl_btn, self._lv_exit_btn]
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
             self._lvv_exit_btn]
-        # Clear disabled-grey so the enabled/disabled state reads at a glance;
-        # Start turns green while the mode is active.
         for b in self._lvv_ctrl_btns:
             b.setStyleSheet(self._BTN_DIS)
         self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
         self._lvv_start_btn.setStyleSheet(
             "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._lv_sync_buttons()           # initial (not in LV mode) state
         self._lvv_sync()
-        return self._lvv_wrap
+        self._lv_update_submode_ui()
+        return self._lv_wrap
+
+    # ==================================================================
+    # LV blood-pool volume (LVEF) — region = apex + aortic/mitral valve
+    # planes; count contrast voxels (HU >= threshold) connected to a cavity
+    # seed. The "Blood" sub-mode of the unified LV bar (buttons built in
+    # _build_lv_bar above).
+    # ==================================================================
+    def _lv_current_submode(self):
+        """Which sub-mode is active: 'blood', 'endo', 'epi', or None."""
+        if self._lvv is not None:
+            return "blood"
+        if self._lv is not None:
+            return self._lv.get("pass")           # 'endo' / 'epi' / None
+        return None
+
+    def _lv_select_submode(self, sm) -> None:
+        """Enter/resume a sub-mode from the Endo/Epi/Blood selector. Endo/Epi and
+        Blood are mutually exclusive for now — switching to one ends the other
+        (finish + Save a sub-mode before switching). Coexistence is the next
+        planned increment."""
+        if sm in ("endo", "epi"):
+            if self._lvv is not None:                 # leave Blood first
+                self._lvv_clear_markers()
+                self._lvv = None
+                self._lvv_sync()
+            self._lv_select_pass(sm)                  # existing enter/arm contour
+        elif sm == "blood":
+            if self._lvv is None:
+                self._lvv_toggle()                    # existing start (exits contour)
+        self._lv_update_submode_ui()
+
+    def _lv_exit_all(self) -> None:
+        """Exit the whole LV mode (both the contour and the Blood sub-modes)."""
+        if self._lvv is not None:
+            self._lvv_clear_markers()
+            self._lvv = None
+            self._lvv_sync()
+        if self._lv is not None:
+            self._lv_exit_confirm()
+        self._lv_update_submode_ui()
+
+    def _lv_update_submode_ui(self) -> None:
+        """Show ONLY the active sub-mode's operation group (row 1) and file
+        controls (row 2): Endo/Epi share the trace group, Blood has its own.
+        The within-group grey-out (step availability + existing rules) still
+        comes from _lv_sync_buttons / _lvv_sync."""
+        if not hasattr(self, "_lv_grp_trace"):
+            return
+        contour = self._lv is not None
+        blood = self._lvv is not None
+        self._lv_grp_trace.setVisible(contour)
+        self._lv_grp_blood.setVisible(blood)
+        self._lv_grp_r2_trace.setVisible(contour)
+        self._lv_grp_r2_blood.setVisible(blood)
+        # Keep the Blood selector's checked look in step even if it was clicked
+        # while already active (the checkable button toggles itself on click).
+        if self._lvv_start_btn.isChecked() != blood:
+            self._lvv_start_btn.setChecked(blood)
 
     def _lvv_sync(self) -> None:
         on = self._lvv is not None
@@ -2665,6 +2713,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
         # Epi-border toggle: available in the mode.
         self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
+        self._lv_update_submode_ui()        # show only the active sub-mode's group
 
     def _lvv_prompt(self, text) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -3362,6 +3411,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
+            self._lv_update_submode_ui()             # hide the trace group
             return
         ph = lv.get("phase")
         pas = lv.get("pass")
@@ -3414,6 +3464,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             else self._LV_STY["vol_todo"])
         self._lv_exit_btn.setEnabled(True)
         self._refresh_tool_availability()   # grey Rotate/Spin/Thick + WB reverse
+        self._lv_update_submode_ui()        # show only the active sub-mode's group
 
     # -------------------------------------------- plane bar (below the image)
     def _build_plane_bar(self) -> QWidget:
