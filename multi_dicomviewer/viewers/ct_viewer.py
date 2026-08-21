@@ -2761,6 +2761,48 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox
         QMessageBox.information(self.window(), t("LV Vol"), text)
 
+    def _lvv_load_epi(self) -> bool:
+        """Load an EpiLv.json as the Epi surface that bounds the Blood region.
+        Returns True on success. Folder defaults to the 3DCT series folder; warns
+        on a series-UID mismatch (same as the other loads)."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core.lv_measure import LVModel
+        import json
+        if self._image is None:
+            return False
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load Epi data"), d,
+            "Epi LV (*.EpiLv.json);;JSON (*.json)")
+        if not path:
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved = (data.get("series") or {}).get("series_uid", "")
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if saved and cur and saved != cur:
+                if QMessageBox.question(
+                        self.window(), t("LV Vol"),
+                        t("This Epi file was saved for a DIFFERENT series — it "
+                          "may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return False
+            model = LVModel.from_dict(data)
+            model.build()
+            if model.epi is None:
+                raise ValueError("no Epi surface in file")
+            self._lvv_epi_surf = model.epi
+            self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+            self._lvv_epi_model_dict = data
+            return True
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV Vol (Epi load error)"),
+                                 traceback.format_exc() or repr(exc))
+            return False
+
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
         try:
@@ -2773,11 +2815,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._lv is not None:          # leave contour LV mode first
                     self._lv_exit()
                 if self._lvv_epi_surf is None:
-                    QMessageBox.information(
-                        self.window(), t("LV Vol"),
-                        t("Trace the EPI border first (contour LV mode: Epi → "
-                          "Set axis → Trace), then Exit LV and start LV Vol."))
-                    return
+                    # Blood needs an Epi surface as the outer bound. Offer to
+                    # load an EpiLv.json or switch to Epi tracing.
+                    box = QMessageBox(self.window())
+                    box.setWindowTitle(t("LV Vol"))
+                    box.setIcon(QMessageBox.Icon.Information)
+                    box.setText(t("Blood mode needs Epi data."))
+                    b_load = box.addButton(t("Load Epi data"),
+                                           QMessageBox.ButtonRole.AcceptRole)
+                    b_make = box.addButton(t("Create Epi data"),
+                                           QMessageBox.ButtonRole.ActionRole)
+                    box.addButton(QMessageBox.StandardButton.Cancel)
+                    box.exec()
+                    clicked = box.clickedButton()
+                    if clicked is b_load:
+                        if not self._lvv_load_epi():
+                            return                # load cancelled/failed → abort
+                        # Epi now in memory → fall through and start Blood.
+                    elif clicked is b_make:
+                        self._lv_select_submode("epi")   # go trace Epi instead
+                        return
+                    else:
+                        return                     # Cancel
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
