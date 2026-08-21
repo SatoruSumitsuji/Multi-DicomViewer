@@ -2687,9 +2687,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         # active one stays clickable — re-click it to deselect and bring the
         # others back). All three live when nothing is selected. Runs AFTER
         # _lv_sync_buttons / _lvv_sync (which enable them), so this wins.
-        self._lv_endo_btn.setEnabled(sm in (None, "endo"))
-        self._lv_epi_btn.setEnabled(sm in (None, "epi"))
-        self._lvv_start_btn.setEnabled(sm in (None, "blood"))
+        # EXCEPTION — in SAX you may switch which traced border you edit, so keep
+        # Endo/Epi clickable there (whichever has a border); Blood stays greyed.
+        if self._lv is not None and self._lv.get("sax") is not None:
+            m = self._lv["model"]
+            self._lv_endo_btn.setEnabled(
+                m.endo_axis is not None and len(m.endo_contours) >= 3)
+            self._lv_epi_btn.setEnabled(
+                m.epi_axis is not None and len(m.epi_contours) >= 3)
+            self._lvv_start_btn.setEnabled(False)
+        else:
+            self._lv_endo_btn.setEnabled(sm in (None, "endo"))
+            self._lv_epi_btn.setEnabled(sm in (None, "epi"))
+            self._lvv_start_btn.setEnabled(sm in (None, "blood"))
         # Keep the Blood selector's checked look in step even if it was clicked
         # while already active (the checkable button toggles itself on click).
         if self._lvv_start_btn.isChecked() != blood:
@@ -6845,8 +6855,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 np.asarray(self._pc[sa]).copy(),
                 self._cross_ang[sa], self._thick[sa])
             lv["fitted_sax"] = False
-            lv["sax_edit"] = None                    # no border armed for editing
-            self._lv_apply_target(None)             # no capture in short-axis
+            # Arm the CURRENTLY-SELECTED pass for editing right away, so the user
+            # can correct its border in SAX without re-clicking Endo/Epi first
+            # (that extra step is now skipped). Only if that pass has a border.
+            armed = lv.get("pass") if lv.get("pass") in ("endo", "epi") else None
+            if armed == "endo" and not endo_ok:
+                armed = None
+            elif armed == "epi" and not epi_ok:
+                armed = None
+            lv["sax_edit"] = armed
+            self._lv_apply_target(armed)            # arm that border for editing
             self.set_side("Bi")                      # long-axis + short-axis
             self._lv_sync_buttons()                  # SAX entry → all 4 buttons
             #                        neutral grey (Endo/Epi UNARMED — the stale
