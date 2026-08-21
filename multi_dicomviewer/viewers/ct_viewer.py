@@ -3260,6 +3260,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
             self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
             self._lvv_sync()
+            self._lv_update_text()     # show "Blood-Volume:" in the result block
             then = getattr(self, "_lvv_calc_then", None)
             self._lvv_calc_then = None
             if then is not None:
@@ -3417,6 +3418,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
             self._lvv_sync()
             self._lvv_update_highlight()
+            self._lv_update_text()     # show "Blood-Volume:" in the result block
             # (A) Make the Epi source explicit, and (B) remind about the two-file
             # drift: the Epi lives in BOTH the EpiLv and BldLv files, so an edit
             # in one must be re-saved to the other to stay in sync.
@@ -7982,6 +7984,13 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_status_lines(self) -> list:
         """Result-block lines for LV mode: the computed volume result (if any),
         then the current tracing guidance. Empty when not in LV mode."""
+        # Blood sub-mode: show the measured volume in the SAME pane result block
+        # as Endo/Epi (consistent overlay), labelled "Blood-Volume:".
+        lvv = self._lvv
+        if lvv is not None:
+            if lvv.get("last_ml") is not None:
+                return [t("Blood-Volume: {v:.1f} mL", v=float(lvv["last_ml"]))]
+            return []
         lv = self._lv
         if lv is None:
             return []
