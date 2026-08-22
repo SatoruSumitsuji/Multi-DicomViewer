@@ -7079,7 +7079,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["fitted_sax"] = True
         self._view_initial = first
         self._lv_update_sax_label()
+        # Keep the LONG-AXIS pane's zoom on SAX entry — the fit would otherwise
+        # rescale (shrink/grow) it like Set axis did (reported). The SHORT-AXIS
+        # pane still fits (it's a fresh view). Restore the long-axis parallel
+        # scale after the fit and re-size its ▲ markers for that scale.
+        la_cam = self.pane[la].ren.GetActiveCamera()
+        la_ps0 = float(la_cam.GetParallelScale())
         self._refresh(reset_cam=first)
+        if first:
+            la_cam.SetParallelScale(la_ps0)
+            self._update_cross(la)
         for k in (la, sa):
             self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
             self.pane[k].set_slab_visible(False)
