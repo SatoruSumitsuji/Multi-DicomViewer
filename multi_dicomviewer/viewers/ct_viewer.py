@@ -3221,6 +3221,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv["hu_hi"] = hi
             m["color"] = "#40c0ff"                       # ROI tint
             m["_lvv"] = "roi"
+            # Anchor to its 3-D anatomical position (re-projects with the view)
+            # and draw at 50% so the ROI outline doesn't dominate the image.
+            m["pts3d"] = [self._out_to_world3d(which, wx, wy)
+                          for (wx, wy) in m["pts"]]
+            m["transp"] = 50
             self._lvv_lo_spin.blockSignals(True)
             self._lvv_lo_spin.setValue(int(round(lo)))
             self._lvv_lo_spin.blockSignals(False)
@@ -3285,6 +3290,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_valves[which] = (center, np.asarray(n, float), radius)
         m["color"] = "#ffd24d" if which == "aortic" else "#4dd0ff"
         m["_lv_valve"] = which
+        # Anchor the ellipse to its 3-D anatomical position (re-projects as the
+        # view moves) and draw it at 50% so it doesn't dominate the image.
+        m["pts3d"] = [self._out_to_world3d(key, wx, wy) for (wx, wy) in m["pts"]]
+        m["transp"] = 50
         self._redraw_meas(key)
         if self._meas_on:                       # so the next click doesn't draw
             self._meas_btn.setChecked(False)
@@ -3412,6 +3421,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv[valve] = (center, np.asarray(n, float), radius)
         m["color"] = "#ffd24d" if valve == "aortic" else "#4dd0ff"
         m["_lvv"] = valve
+        m["pts3d"] = [self._out_to_world3d(which, wx, wy) for (wx, wy) in m["pts"]]
+        m["transp"] = 50                     # anchored + 50% (not dominating)
         self._redraw_meas(which)
         # Turn Measure OFF so the user can navigate to the next landmark without
         # a click starting a new ellipse (they re-arm Measure→Ellipse for the
@@ -4933,7 +4944,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._mode == "3D":
             for m in self._measures[key]:
                 p3 = m.get("pts3d")
-                if (p3 and m["type"] in ("polyline", "point")
+                # Re-derive 2-D from the absolute 3-D points on the CURRENT plane
+                # so the shape follows the anatomy when the plane is rotated /
+                # paged. Ellipse/Polygon (MV/AoV valve rings, Blood ROI) are
+                # anchored this way too — their handles/vertices carry pts3d.
+                if (p3 and m["type"] in ("polyline", "point", "ellipse",
+                                         "polygon")
                         and len(p3) == len(m["pts"])):
                     m["pts"] = [self._world3d_to_out(key, P) for P in p3]
             d = self._draft
