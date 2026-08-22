@@ -3198,8 +3198,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("Set these first: {m}").format(m=", ".join(miss)))
                 return
             if self._lvv_epi_surf is None:
-                QMessageBox.information(self.window(), t("LV Vol"),
-                                       t("No Epi surface — trace Epi first."))
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("No Epi surface — press 'Epi読み込み' to load an EpiLv.json "
+                      "(or trace Epi in the Epi sub-mode) first."))
                 return
             from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume_epi
             from PyQt6.QtWidgets import QProgressDialog
@@ -3353,8 +3355,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             "hu_hi": float(self._lvv_hi_spin.value()),
             "volume_ml": (None if lvv.get("last_ml") is None
                           else float(lvv["last_ml"])),
-            "epi_model": self._lvv_epi_model_dict,
         }
+        # The Epi surface is NOT embedded — it lives in its own EpiLv.json and is
+        # loaded via "Epi読み込み"/"Epi表示". Record the Epi source's series (if
+        # known) so a mismatch can be flagged, but the geometry stays single-
+        # source in the EpiLv file (no drift between two copies).
+        em = getattr(self, "_lvv_epi_model_dict", None)
+        if isinstance(em, dict) and em.get("series"):
+            data["epi_series"] = em.get("series")
         d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -3380,7 +3388,6 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_load(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        from multi_dicomviewer.core.lv_measure import LVModel
         import json
         if self._image is None:
             return
@@ -3403,26 +3410,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if QMessageBox.question(
                         self.window(), t("LV Vol"),
                         t("This file was saved for a DIFFERENT series — the "
-                          "landmarks and Epi may not line up. Load anyway?")) \
+                          "landmarks may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return
-            # (C) Contour LV and LV Vol are mutually exclusive: leave contour LV
-            # first so both modes can't be active at once (this used to leave
-            # self._lv AND self._lvv set). _lv_exit stashes the contour Epi, but
-            # we overwrite _lvv_epi_surf with THIS file's Epi just below, so the
-            # loaded file stays the single Epi source — (A).
+            # Contour LV and LV Vol are mutually exclusive: leave contour LV first
+            # so both modes can't be active at once. _lv_exit stashes the contour
+            # Epi into _lvv_epi_surf, which the Blood measure then uses.
             if self._lv is not None:
                 self._lv_exit()
             # Drop any prior LV Vol overlay/markers so a reload doesn't stack.
             if self._lvv is not None:
                 self._lvv_clear_markers()
-            model = LVModel.from_dict(data["epi_model"])
-            model.build()
-            if model.epi is None:
-                raise ValueError("no Epi surface in file")
-            self._lvv_epi_surf = model.epi
-            self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
-            self._lvv_epi_model_dict = data["epi_model"]
+            # BldLv.json no longer embeds the Epi — the Epi lives in its own
+            # EpiLv.json (single source). Keep whatever Epi is already in memory
+            # (from an Epi trace or a previous Epi読み込み); if there is none, the
+            # user must load one via Epi読み込み before Calc Vol can run.
             if self._lvv is None:
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
@@ -3451,15 +3453,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
             self._lvv_update_highlight()
             self._lv_update_text()     # show "Blood-Volume:" in the result block
-            # (A) Make the Epi source explicit, and (B) remind about the two-file
-            # drift: the Epi lives in BOTH the EpiLv and BldLv files, so an edit
-            # in one must be re-saved to the other to stay in sync.
-            QMessageBox.information(
-                self.window(), t("LV Vol"),
-                t("Loaded — the volume is measured against the Epi border stored "
-                  "in THIS BldLv file. If you later edit the Epi and re-save the "
-                  "EpiLv file, re-save the BldLv too so they stay in sync. "
-                  "Press Calc Vol to (re)compute the volume."))
+            # The Epi is NOT in this file. If none is in memory, tell the user to
+            # load one (Epi読み込み) before Calc Vol; otherwise the current Epi is
+            # used.
+            if self._lvv_epi_surf is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Loaded the Blood landmarks. This file does not contain the "
+                      "Epi border — press 'Epi読み込み' to load the matching "
+                      "EpiLv.json, then Calc Vol."))
+            else:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Loaded. The Epi currently in memory will be used — press "
+                      "'Epi読み込み' to use a different EpiLv.json. Press Calc Vol "
+                      "to (re)compute the volume."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (load error)"),
