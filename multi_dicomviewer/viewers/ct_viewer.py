@@ -2655,10 +2655,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             == QMessageBox.StandardButton.Yes
 
     def _lv_select_submode(self, sm) -> None:
-        """Enter/resume a sub-mode from the Endo/Epi/Blood selector. Endo/Epi and
-        Blood are mutually exclusive for now — switching to one ends the other
-        (finish + Save a sub-mode before switching). Coexistence is the next
-        planned increment."""
+        """Enter/resume a sub-mode from the Endo/Epi/Blood selector. All three are
+        INDEPENDENT (each its own session + its own EndoLv/EpiLv/BldLv file);
+        switching ends the current one, warning first if it has unsaved work.
+        Wall thickness / EF (which need both borders) are combined later in the
+        Tools「心機能」tool from the saved files."""
         cur = self._lv_current_submode()
         # Re-click the ACTIVE sub-mode → DESELECT it (un-greys the other two so
         # you can pick another — e.g. trace Epi after Endo). The traced borders
@@ -2678,9 +2679,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_select_pass(sm)
             self._lv_update_submode_ui()
             return
-        # Switch to a DIFFERENT sub-mode. Warn before a switch that DISCARDS the
-        # active sub-mode's unsaved work (contour ↔ Blood; Endo↔Epi keep the
-        # shared model, so no warning there).
+        # Switch to a DIFFERENT sub-mode. Endo / Epi / Blood are all INDEPENDENT
+        # (each its own session and its own EndoLv/EpiLv/BldLv file); switching
+        # ends the current one. Warn first if it has unsaved work.
         if sm in ("endo", "epi"):
             if self._lvv is not None:                 # leaving Blood
                 if not self._lv_confirm_drop("blood"):
@@ -2688,6 +2689,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
+            elif self._lv is not None:
+                m = self._lv["model"]
+                other_planes = (m.endo_planes if sm == "epi"
+                                else m.epi_planes)
+                if other_planes:
+                    # The model still holds the OTHER pass — start a FRESH
+                    # session for this one (Endo/Epi are independent), warning if
+                    # the current pass is unsaved.
+                    if not self._lv_confirm_drop("contour"):
+                        return
+                    self._lv_switch_pass_independent(sm)
+                    self._lv_update_submode_ui()
+                    return
             self._lv_select_pass(sm)                  # enter/arm this pass
         elif sm == "blood":
             if self._lv is not None:                  # leaving contour
@@ -2707,6 +2721,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv is not None:
             self._lv_exit_confirm()                  # has its own confirm
         self._lv_update_submode_ui()
+
+    def _lv_switch_pass_independent(self, sm) -> None:
+        """Endo and Epi are independent sub-modes — one border per session, each
+        saved to its own EndoLv/EpiLv file (wall thickness / EF are combined
+        later in the 心機能 tool). Replace the model with a fresh one, drop the
+        old on-screen borders, and enter the new pass's Align."""
+        from multi_dicomviewer.core.lv_measure import LVModel
+        lv = self._lv
+        lv["model"] = LVModel(n_planes=lv["model"].n_planes)
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures[k]
+                                 if mm.get("_lv") is None]
+        lv["pass"] = None
+        lv["sax"] = None
+        lv["sax_edit"] = None
+        lv["plane_idx"] = 0
+        lv["phase"] = "align"
+        lv["fitted"] = False
+        self._lv_dirty = False
+        self._lv_result_lines = []
+        if getattr(self, "_lv_sax_btn", None) is not None:
+            self._lv_sax_btn.setChecked(False)
+        self._lv_reset_undo()
+        self._lv_select_pass(sm)                      # → fresh Align for this pass
 
     def _lv_update_submode_ui(self) -> None:
         """Show ONLY the active sub-mode's operation group (row 1) and file
