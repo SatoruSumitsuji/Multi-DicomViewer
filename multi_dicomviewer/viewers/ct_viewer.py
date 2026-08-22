@@ -2661,31 +2661,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         Wall thickness / EF (which need both borders) are combined later in the
         Tools「心機能」tool from the saved files."""
         cur = self._lv_current_submode()
-        # Re-click the ACTIVE sub-mode → DESELECT it (un-greys the other two so
-        # you can pick another — e.g. trace Epi after Endo). The traced borders
-        # stay in the model; only the pass selection is cleared.
+        # Re-click the ACTIVE sub-mode → DEACTIVATE it. Because the selector greys
+        # the other two while one is active, this 2nd click is the ONLY way to
+        # leave a sub-mode, so the "unsaved data will be lost" warning belongs
+        # HERE (the moment it goes inactive) — not later when another button is
+        # picked. On confirm the data is dropped so the sub-mode is fully clear.
         if sm == cur:
             if sm == "blood":
-                # Re-click Blood → leave it; that discards the Blood data.
                 if not self._lv_confirm_drop("blood"):
                     return
-                self._lvv_toggle()                    # leave Blood
+                self._lvv_toggle()                    # leave Blood (drops it)
             elif self._lv is not None and self._lv.get("sax") is None:
-                self._lv["pass"] = None               # keep the traced borders
-                self._lv_apply_target(None)
-                self._lv_sync_buttons()
+                m = self._lv["model"]
+                if bool(m.endo_planes or m.epi_planes):
+                    if not self._lv_confirm_drop("contour"):
+                        return
+                    self._lv_reset_contour_empty()    # drop the pass's data
+                else:
+                    self._lv["pass"] = None           # nothing traced → just clear
+                    self._lv_apply_target(None)
+                    self._lv_sync_buttons()
             else:
                 # In SAX, re-click ARMS this border for editing (existing flow).
                 self._lv_select_pass(sm)
             self._lv_update_submode_ui()
             return
-        # Switch to a DIFFERENT sub-mode. Endo / Epi / Blood are all INDEPENDENT
-        # (each its own session and its own EndoLv/EpiLv/BldLv file); switching
-        # ends the current one. Warn first if it has unsaved work.
+        # Switch to a DIFFERENT sub-mode. The current one is already inactive
+        # (deactivated by its own 2nd click, warned there), so no warning here —
+        # just start the new one. Any stray leftover is cleared without a prompt.
         if sm in ("endo", "epi"):
-            if self._lvv is not None:                 # leaving Blood
-                if not self._lv_confirm_drop("blood"):
-                    return
+            if self._lvv is not None:                 # (defensive) leftover Blood
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
@@ -2693,20 +2698,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 m = self._lv["model"]
                 other_planes = (m.endo_planes if sm == "epi"
                                 else m.epi_planes)
-                if other_planes:
-                    # The model still holds the OTHER pass — start a FRESH
-                    # session for this one (Endo/Epi are independent), warning if
-                    # the current pass is unsaved.
-                    if not self._lv_confirm_drop("contour"):
-                        return
+                if other_planes:                      # (defensive) fresh session
                     self._lv_switch_pass_independent(sm)
                     self._lv_update_submode_ui()
                     return
             self._lv_select_pass(sm)                  # enter/arm this pass
         elif sm == "blood":
-            if self._lv is not None:                  # leaving contour
-                if not self._lv_confirm_drop("contour"):
-                    return
             self._lvv_toggle()                        # start Blood (needs Epi)
         self._lv_update_submode_ui()
 
@@ -2722,11 +2719,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_exit_confirm()                  # has its own confirm
         self._lv_update_submode_ui()
 
-    def _lv_switch_pass_independent(self, sm) -> None:
-        """Endo and Epi are independent sub-modes — one border per session, each
-        saved to its own EndoLv/EpiLv file (wall thickness / EF are combined
-        later in the 心機能 tool). Replace the model with a fresh one, drop the
-        old on-screen borders, and enter the new pass's Align."""
+    def _lv_reset_contour_empty(self) -> None:
+        """Drop the current pass's model + on-screen borders and return to the
+        no-pass state (still in LV mode). Used when a pass is DEACTIVATED (its
+        data is discarded then) and before starting a fresh independent pass."""
         from multi_dicomviewer.core.lv_measure import LVModel
         lv = self._lv
         lv["model"] = LVModel(n_planes=lv["model"].n_planes)
@@ -2743,7 +2739,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_result_lines = []
         if getattr(self, "_lv_sax_btn", None) is not None:
             self._lv_sax_btn.setChecked(False)
+        self._lv_apply_target(None)
         self._lv_reset_undo()
+        self._lv_sync_buttons()
+        self._redraw_all_lv()
+
+    def _lv_switch_pass_independent(self, sm) -> None:
+        """Endo and Epi are independent sub-modes — one border per session, each
+        saved to its own EndoLv/EpiLv file (wall thickness / EF are combined
+        later in the 心機能 tool). Reset to an empty model, then enter the new
+        pass's Align."""
+        self._lv_reset_contour_empty()
         self._lv_select_pass(sm)                      # → fresh Align for this pass
 
     def _lv_update_submode_ui(self) -> None:
