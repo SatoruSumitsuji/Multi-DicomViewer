@@ -2082,6 +2082,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # {"model": LVModel, "phase": "contour", "plane_idx": int,
         # "target": "endo"|"epi", "plane_done": bool, "prev_side": str}.
         self._lv = None
+        # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base.
+        # Each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
+        self._lv_valves = {"mitral": None, "aortic": None}
         self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_apex = None
@@ -2368,6 +2371,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_btn.setCheckable(True)
         self._lv_btn.setVisible(False)
 
+        # ---- Common valve planes (MV / AoV): set ONCE at the start, shared by
+        # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
+        # and the Blood region's basal bound. Saved to their own MVLv.json /
+        # AoVLv.json (single source, one per 3DCT phase). ----
+        self._lv_mv_btn = FitButton(t("MV plane"))
+        self._lv_mv_btn.setHelpToolTip(
+            t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
+              "press this to set the COMMON MV plane (shared by Endo/Epi/Blood)"))
+        self._lv_mv_btn.clicked.connect(
+            lambda: self._lv_capture_valve_common("mitral"))
+        row1.addWidget(self._lv_mv_btn)
+        self._lv_aov_btn = FitButton(t("AoV plane"))
+        self._lv_aov_btn.setHelpToolTip(
+            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
+              "press this to set the COMMON AoV plane (shared by Endo/Epi/Blood)"))
+        self._lv_aov_btn.clicked.connect(
+            lambda: self._lv_capture_valve_common("aortic"))
+        row1.addWidget(self._lv_aov_btn)
+        row1.addSpacing(8)
+
         # ---- Sub-mode selector: Endo / Epi / Blood (always visible) ----
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.setHelpToolTip(
@@ -2588,6 +2611,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_exit_btn.clicked.connect(self._lv_exit_all)
         r2b.addWidget(self._lvv_exit_btn)
         row2.addWidget(self._lv_grp_r2_blood)
+
+        # Valve-setup row-2 group: shown when NO sub-mode is active (the initial
+        # "set the common MV / AoV planes" step). Save/Load the two valve files.
+        self._lv_grp_r2_valves = QWidget()
+        r2v = QHBoxLayout(self._lv_grp_r2_valves)
+        r2v.setContentsMargins(0, 0, 0, 0); r2v.setSpacing(4)
+        self._lv_mv_save_btn = FitButton(t("Save MV"))
+        self._lv_mv_save_btn.setHelpToolTip(t("Save the MV plane to MVLv.json"))
+        self._lv_mv_save_btn.clicked.connect(lambda: self._lv_save_valve("mitral"))
+        r2v.addWidget(self._lv_mv_save_btn)
+        self._lv_mv_load_btn = FitButton(t("Load MV"))
+        self._lv_mv_load_btn.setHelpToolTip(t("Load an MVLv.json"))
+        self._lv_mv_load_btn.clicked.connect(lambda: self._lv_load_valve("mitral"))
+        r2v.addWidget(self._lv_mv_load_btn)
+        self._lv_aov_save_btn = FitButton(t("Save AoV"))
+        self._lv_aov_save_btn.setHelpToolTip(t("Save the AoV plane to AoVLv.json"))
+        self._lv_aov_save_btn.clicked.connect(lambda: self._lv_save_valve("aortic"))
+        r2v.addWidget(self._lv_aov_save_btn)
+        self._lv_aov_load_btn = FitButton(t("Load AoV"))
+        self._lv_aov_load_btn.setHelpToolTip(t("Load an AoVLv.json"))
+        self._lv_aov_load_btn.clicked.connect(lambda: self._lv_load_valve("aortic"))
+        r2v.addWidget(self._lv_aov_load_btn)
+        for b in (self._lv_mv_save_btn, self._lv_mv_load_btn,
+                  self._lv_aov_save_btn, self._lv_aov_load_btn):
+            b.setStyleSheet(self._BTN_DIS)
+        row2.addWidget(self._lv_grp_r2_valves)
         row2.addStretch(1)
 
         # Plain-button disabled-grey + the button lists the sync methods use.
@@ -2774,6 +2823,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         _vis(self._lv_grp_blood, blood)
         _vis(self._lv_grp_r2_trace, endoepi)
         _vis(self._lv_grp_r2_blood, blood)
+        # Valve-setup file controls (row 2) show when NO sub-mode is active — the
+        # initial "set the common MV / AoV planes" step. The MV/AoV capture
+        # buttons (row 1) stay visible always.
+        if getattr(self, "_lv_grp_r2_valves", None) is not None:
+            _vis(self._lv_grp_r2_valves, sm is None)
+        self._lv_update_valve_buttons()
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
         # others back). All three live when nothing is selected. Runs AFTER
@@ -3021,7 +3076,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                          for x in np.asarray(v, float).ravel())
         try:
             apex, seed = lvv["apex"], lvv["seed"]
-            aortic, mitral = lvv["aortic"], lvv["mitral"]
+            # Effective valves: common MV/AoV if set, else the Blood-wizard ones.
+            aortic = self._lv_valves.get("aortic") or lvv.get("aortic")
+            mitral = self._lv_valves.get("mitral") or lvv.get("mitral")
             if apex is None or seed is None or aortic is None or mitral is None:
                 return None
             c_a, n_a = aortic[0], aortic[1]
@@ -3202,6 +3259,131 @@ class CTViewer(CPRMixin, AbstractViewer):
                  "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
             self._redraw_meas(which)
 
+    def _lv_capture_valve_common(self, which) -> None:
+        """Set the COMMON MV/AoV plane from the latest Ellipse (centre + the
+        pane's normal). Shared by Endo/Epi/Blood; independent of any sub-mode."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._image is None:
+            return
+        m, key, best = None, None, -1
+        for k in ("A", "B"):
+            for cand in self._measures.get(k, []):
+                if cand.get("type") == "ellipse" and cand.get("id", -1) > best:
+                    best = cand.get("id", -1)
+                    m, key = cand, k
+        if m is None:
+            QMessageBox.information(
+                self.window(), t("LV"),
+                t("Draw an Ellipse on the {v} annulus first (Measure→Ellipse).")
+                .format(v=t("aortic") if which == "aortic" else t("mitral")))
+            return
+        cx, cy = self._shape_center(m)
+        center = np.asarray(self._out_to_world3d(key, cx, cy), float)
+        _u, _v, n = self._axes_for(key)
+        _ecx, _ecy, ea, eb = self._ellipse_cab(m)
+        radius = float(max(ea, eb))
+        self._lv_valves[which] = (center, np.asarray(n, float), radius)
+        m["color"] = "#ffd24d" if which == "aortic" else "#4dd0ff"
+        m["_lv_valve"] = which
+        self._redraw_meas(key)
+        if self._meas_on:                       # so the next click doesn't draw
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_update_valve_buttons()
+
+    def _lv_update_valve_buttons(self) -> None:
+        """Colour the common MV / AoV buttons blue/amber once each plane is set."""
+        if getattr(self, "_lv_mv_btn", None) is None:
+            return
+        for which, btn, color in (("mitral", self._lv_mv_btn, "#2b6cb0"),
+                                   ("aortic", self._lv_aov_btn, "#b8860b")):
+            if self._lv_valves.get(which) is not None:
+                btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                                  % (color, self._BTN_DIS))
+            else:
+                btn.setStyleSheet(self._BTN_DIS)
+
+    def _lv_save_valve(self, which) -> None:
+        """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        v = self._lv_valves.get(which)
+        if v is None:
+            QMessageBox.information(
+                self.window(), t("LV"),
+                t("Set the {w} plane first.").format(
+                    w="MV" if which == "mitral" else "AoV"))
+            return
+        c, n, r = v
+        data = {"type": "valve", "valve": which,
+                "series": (self._lv_series_meta()
+                           if hasattr(self, "_lv_series_meta") else {}),
+                "c": list(map(float, c)), "n": list(map(float, n)),
+                "r": float(r)}
+        suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "valve")
+        default = os.path.join(d, stem + suffix) if d else stem + suffix
+        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+                else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save valve plane"), default, flt)
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += suffix
+        self._unlink_case_variant(path)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        QMessageBox.information(self.window(), t("LV"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _lv_load_valve(self, which) -> None:
+        """Load an MVLv.json / AoVLv.json into the common valve planes."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        if self._image is None:
+            return
+        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+                else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load valve plane"), d, flt)
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved = (data.get("series") or {}).get("series_uid", "")
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if saved and cur and saved != cur:
+                if QMessageBox.question(
+                        self.window(), t("LV"),
+                        t("This valve file was saved for a DIFFERENT series — it "
+                          "may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return
+            self._lv_valves[which] = (np.asarray(data["c"], float),
+                                      np.asarray(data["n"], float),
+                                      float(data.get("r", 20.0)))
+            self._lv_update_valve_buttons()
+            QMessageBox.information(
+                self.window(), t("LV"),
+                t("Loaded the {w} plane.").format(
+                    w="MV" if which == "mitral" else "AoV"))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV (valve load error)"),
+                                 traceback.format_exc() or repr(exc))
+
     def _lvv_capture_valve(self, valve) -> None:
         """Capture the most-recent Ellipse on the active pane as this valve's
         plane (centre + the pane's current normal)."""
@@ -3273,9 +3455,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_update_mask()
                 self._lvv_sync()
                 return
-            miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
-                    "aortic"), (t("mitral plane"), "mitral"),
-                    (t("ROI"), "seed")) if lvv.get(k) is None]
+            # Valve planes: prefer the COMMON MV/AoV (shared step); fall back to
+            # any captured in the Blood wizard itself.
+            av = self._lv_valves.get("aortic") or lvv.get("aortic")
+            mv = self._lv_valves.get("mitral") or lvv.get("mitral")
+            miss = [n for n, val in ((t("apex"), lvv.get("apex")),
+                    (t("aortic plane"), av), (t("mitral plane"), mv),
+                    (t("ROI"), lvv.get("seed"))) if val is None]
             if miss:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
@@ -3292,8 +3478,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             seed = tuple(lvv["seed"])
             hu_lo = float(self._lvv_lo_spin.value())
             hu_hi = float(self._lvv_hi_spin.value())
-            c_a, n_a, _r_a = lvv["aortic"]
-            c_m, n_m, _r_m = lvv["mitral"]
+            c_a, n_a, _r_a = av
+            c_m, n_m, _r_m = mv
             epi = self._lvv_epi_surf
             apex = tuple(lvv["apex"])
             vol, dims = self._vol, self._dims
@@ -6454,6 +6640,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
+        self._lv_valves = {"mitral": None, "aortic": None}   # new series → clear
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi
         self._lvv_epi_model_dict = None
