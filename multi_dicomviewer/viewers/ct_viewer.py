@@ -3376,6 +3376,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if not path.endswith(".json"):
             path += ".BldLv.json"
+        self._unlink_case_variant(path)      # force BldLv exact casing
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -7693,6 +7694,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return d
         return ""
 
+    @staticmethod
+    def _unlink_case_variant(path) -> None:
+        """Remove any file in *path*'s folder whose name matches case-
+        INSENSITIVELY but differs in exact case, so a following write creates the
+        entry with *path*'s intended casing. Windows preserves an existing
+        entry's case on overwrite, so a stale 'Epilv.json' would otherwise keep
+        its lowercase 'l' when saving 'EpiLv.json'."""
+        import os
+        try:
+            d = os.path.dirname(path) or "."
+            base = os.path.basename(path)
+            for nm in os.listdir(d):
+                if nm != base and nm.lower() == base.lower():
+                    os.remove(os.path.join(d, nm))
+        except Exception:                               # noqa: BLE001
+            pass
+
     def _lv_default_stem(self) -> str:
         """Series-named file stem, e.g. 'ARIFIN;20260629_Se006' — the base for
         the .lv.json and the exported _Endo/_Epi/_EndoEpi.stl filenames."""
@@ -7854,6 +7872,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv.get("vol_done") and vv is not None:
             data["volume"] = {("endo_ml" if pas == "endo" else "epi_ml"):
                               float(vv)}
+        self._unlink_case_variant(path)      # force EndoLv/EpiLv exact casing
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
