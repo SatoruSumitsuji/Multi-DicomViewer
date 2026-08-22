@@ -3456,6 +3456,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._bounds = (0.0, (nx - 1) * sx, 0.0, (ny - 1) * sy,
                         0.0, (nz - 1) * szz)
         self._header = loaded.header
+        self._src_dir = getattr(loaded, "source_dir", "") or ""   # data folder
         pb = loaded.patient_basis
         self._pbasis = (np.asarray(pb, dtype=np.float64)
                         if pb is not None else np.eye(3))
@@ -8314,6 +8315,11 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_series_dir(self) -> str:
         import os
+        # Prefer the folder recorded at load time (dirname of the series' first
+        # file) — reliable for every modality; fall back to the header filename.
+        sd = getattr(self, "_src_dir", "") or ""
+        if sd and os.path.isdir(sd):
+            return sd
         h = self._header
         fn = getattr(h, "filename", None) if h is not None else None
         if fn:
