@@ -6855,6 +6855,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         wx, wy = self._disp_to_world(which, sx, sy)
         vol = self._matrix(which).MultiplyPoint((wx, wy, 0.0, 1.0))
         P = np.array([vol[0], vol[1], vol[2]], dtype=float)
+        # Preserve the long-axis VIEW across the axis re-pin: remember the world
+        # point at the view centre now. Re-pinning moves the plane centre (_pc)
+        # to the new axis midpoint, which — with the camera unchanged — shifted
+        # the anatomy so it looked smaller (reported: image shrinks on apex).
+        cam = self.pane[which].ren.GetActiveCamera()
+        fp0 = cam.GetFocalPoint()
+        try:
+            wc = self._out_to_world3d(which, float(fp0[0]), float(fp0[1]))
+        except Exception:                          # noqa: BLE001
+            wc = None
         # Re-pin the axis through the tip: same direction + radial0, new origin.
         new_ax = type(ax).from_frame(P, ax.axis, ax.radial0)
         if tgt == "endo":
@@ -6869,6 +6879,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_result_lines = []                 # invalidate any volume result
         lv["apex_target"] = None
         self._lv_enter_contour()                   # apex set → trace this pass
+        # Re-centre the long-axis pane on the SAME world point so the view (size
+        # AND position) is unchanged by the apex placement.
+        if wc is not None:
+            try:
+                ox, oy = self._world3d_to_out(which, wc)
+                pos = cam.GetPosition()
+                fp = cam.GetFocalPoint()
+                cam.SetFocalPoint(ox, oy, fp[2])
+                cam.SetPosition(ox, oy, pos[2])
+                self._refresh(only=which)          # reslice around the new centre
+                self._update_cross(which)
+                self.pane[which].render()
+            except Exception:                      # noqa: BLE001
+                pass
         return True
 
     def _lv_apex_press(self, which, sx, sy, shift=False):
