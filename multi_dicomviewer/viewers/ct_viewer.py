@@ -6259,6 +6259,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._image = numpy_to_vtk_image(vol, sc, sr, sz)
         self._bounds = self._image.GetBounds()
         self._header = loaded.header
+        self._src_dir = getattr(loaded, "source_dir", "") or ""   # data folder
         # voxel-axis -> patient-LPS rotation (cols=x, rows=y, slices=z).
         # None -> standard axial supine head-first (x=Left, y=Post, z=Head).
         pb = loaded.patient_basis
@@ -7671,6 +7672,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Folder the displayed CT series was read from (where the .lvef.json is
         kept), so Save/Load open there. '' if unknown."""
         import os
+        # Prefer the folder recorded at load time (dirname of the series' first
+        # file) — reliable for every modality; fall back to the header filename.
+        sd = getattr(self, "_src_dir", "") or ""
+        if sd and os.path.isdir(sd):
+            return sd
         h = self._header
         fn = getattr(h, "filename", None) if h is not None else None
         if fn:

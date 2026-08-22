@@ -938,6 +938,9 @@ class LoadedSeries:
     #: UID, as the cache/dedup key, or different split rows collapse to
     #: a single "same series, skip reload" decision.
     series_uid: str = ""
+    #: Folder the series' files were read from (dirname of files[0]), so
+    #: viewers can default Save/Load/Export dialogs to where the data lives.
+    source_dir: str = ""
 
 
 def _imager_spacing(ds) -> Optional[tuple[float, float]]:
@@ -1968,19 +1971,30 @@ def load_series(
     progress: Optional[Callable[[str, int, int], None]] = None,
 ) -> LoadedSeries:
     if series.modality == Modality.SR:
-        return load_sr(series, progress)
-    if series.modality == Modality.CT:
+        loaded = load_sr(series, progress)
+    elif series.modality == Modality.CT:
         # Secondary Capture (reports / electronic film / 3-D snapshots) are
         # tagged CT but are not HU data — show them in the image viewer with
         # colour + auto window instead of the grayscale CT MPR.
         if _series_is_secondary_capture(series):
-            return load_secondary_capture(series, progress)
-        return load_ct(series, progress)
+            loaded = load_secondary_capture(series, progress)
+        else:
+            loaded = load_ct(series, progress)
     # MR / NM multi-image series are stored one single-frame file per frame, so
     # stack them into a 2-D cine (one page per file, like a Secondary-Capture
     # stack) instead of treating each file as an independent "plane" — load_xa
     # would otherwise show only one file and stall on "Buffering…".
-    if (series.dicom_modality or "").upper() in ("MR", "NM") \
+    elif (series.dicom_modality or "").upper() in ("MR", "NM") \
             and len(series.files) > 1:
-        return load_secondary_capture(series, progress)
-    return load_xa(series, progress)
+        loaded = load_secondary_capture(series, progress)
+    else:
+        loaded = load_xa(series, progress)
+    # Record where the data lives so viewers can default their Save/Load/Export
+    # dialogs to that folder, whatever the modality.
+    try:
+        files = list(getattr(series, "files", []) or [])
+        if files:
+            loaded.source_dir = os.path.dirname(os.path.abspath(files[0]))
+    except Exception:                                     # noqa: BLE001
+        pass
+    return loaded
