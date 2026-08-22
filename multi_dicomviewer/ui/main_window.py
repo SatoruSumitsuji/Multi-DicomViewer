@@ -2899,6 +2899,11 @@ class MainWindow(QMainWindow):
         for key, fn in (
             ("F", lambda: self._nav_active("next")),
             ("A", lambda: self._nav_active("prev")),
+            # Shift = jump to the END / START of the series list (like Home/End),
+            # so F/A step one and Shift+F/Shift+A go to last/first. No conflict:
+            # Shift+F/Shift+A are otherwise unused (Ctrl+Shift+A is Anonymize).
+            ("Shift+F", lambda: self._nav_active("last")),
+            ("Shift+A", lambda: self._nav_active("first")),
             ("Home", lambda: self._nav_active("first")),
             ("End", lambda: self._nav_active("last")),
         ):
@@ -3789,8 +3794,17 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # Default the picker to the folder the source file(s) live in, whatever
+        # the modality — so Export opens where the data already is.
+        start_dir = ""
+        try:
+            f0 = series_list[0].files[0] if series_list[0].files else ""
+            if f0:
+                start_dir = os.path.dirname(os.path.abspath(f0))
+        except Exception:                                 # noqa: BLE001
+            start_dir = ""
         out_dir = QFileDialog.getExistingDirectory(
-            self, t("Choose output folder for export")
+            self, t("Choose output folder for export"), start_dir
         )
         if not out_dir:
             return
