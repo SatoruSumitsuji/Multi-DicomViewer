@@ -2628,6 +2628,32 @@ class CTViewer(CPRMixin, AbstractViewer):
             return self._lv.get("pass")           # 'endo' / 'epi' / None
         return None
 
+    def _lv_mode_has_unsaved(self, mode) -> bool:
+        """True if *mode* holds traced/measured data not saved since the last
+        change (see the _lv_dirty / _lvv_dirty flags). Used to warn before a
+        sub-mode switch discards it (sub-modes are mutually exclusive)."""
+        if mode == "blood":
+            return (self._lvv is not None
+                    and (self._lvv.get("seed") is not None
+                         or self._lvv.get("last_ml") is not None)
+                    and getattr(self, "_lvv_dirty", False))
+        # contour (endo/epi share one model/session)
+        return (self._lv is not None
+                and bool(self._lv["model"].endo_planes
+                         or self._lv["model"].epi_planes)
+                and getattr(self, "_lv_dirty", False))
+
+    def _lv_confirm_drop(self, mode) -> bool:
+        """If *mode* has unsaved data, ask before discarding it. Returns True to
+        proceed (nothing unsaved, or the user confirmed), False to cancel."""
+        from PyQt6.QtWidgets import QMessageBox
+        if not self._lv_mode_has_unsaved(mode):
+            return True
+        return QMessageBox.question(
+            self.window(), t("LV"),
+            t("This sub-mode has unsaved data. Switch without saving?")) \
+            == QMessageBox.StandardButton.Yes
+
     def _lv_select_submode(self, sm) -> None:
         """Enter/resume a sub-mode from the Endo/Epi/Blood selector. Endo/Epi and
         Blood are mutually exclusive for now — switching to one ends the other
@@ -2639,6 +2665,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # stay in the model; only the pass selection is cleared.
         if sm == cur:
             if sm == "blood":
+                # Re-click Blood → leave it; that discards the Blood data.
+                if not self._lv_confirm_drop("blood"):
+                    return
                 self._lvv_toggle()                    # leave Blood
             elif self._lv is not None and self._lv.get("sax") is None:
                 self._lv["pass"] = None               # keep the traced borders
@@ -2649,25 +2678,34 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_select_pass(sm)
             self._lv_update_submode_ui()
             return
-        # Switch to a DIFFERENT sub-mode.
+        # Switch to a DIFFERENT sub-mode. Warn before a switch that DISCARDS the
+        # active sub-mode's unsaved work (contour ↔ Blood; Endo↔Epi keep the
+        # shared model, so no warning there).
         if sm in ("endo", "epi"):
-            if self._lvv is not None:                 # leave Blood first
+            if self._lvv is not None:                 # leaving Blood
+                if not self._lv_confirm_drop("blood"):
+                    return
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
             self._lv_select_pass(sm)                  # enter/arm this pass
         elif sm == "blood":
+            if self._lv is not None:                  # leaving contour
+                if not self._lv_confirm_drop("contour"):
+                    return
             self._lvv_toggle()                        # start Blood (needs Epi)
         self._lv_update_submode_ui()
 
     def _lv_exit_all(self) -> None:
         """Exit the whole LV mode (both the contour and the Blood sub-modes)."""
         if self._lvv is not None:
+            if not self._lv_confirm_drop("blood"):   # warn on unsaved Blood
+                return
             self._lvv_clear_markers()
             self._lvv = None
             self._lvv_sync()
         if self._lv is not None:
-            self._lv_exit_confirm()
+            self._lv_exit_confirm()                  # has its own confirm
         self._lv_update_submode_ui()
 
     def _lv_update_submode_ui(self) -> None:
@@ -2854,6 +2892,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
+                self._lvv_dirty = False              # fresh Blood session
                 self._lvv_sync()
                 self._lvv_prompt(
                     t("Epi border loaded. Move the crosshair onto the LV apex "
@@ -3076,6 +3115,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lo = float(np.percentile(hus, 2))
             hi = float(np.percentile(hus, 99))
             lvv["seed"] = seed
+            self._lvv_dirty = True         # ROI/seed set → unsaved Blood work
             lvv["hu_lo"] = lo
             lvv["hu_hi"] = hi
             m["color"] = "#40c0ff"                       # ROI tint
@@ -3273,6 +3313,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                       "the Epi surface.").format(v=res["voxels"]))
                 return
             lvv["last_ml"] = res["volume_ml"]
+            self._lvv_dirty = True         # a fresh measure is unsaved
             lvv["calc_sig"] = self._lvv_signature()      # inputs at this measure
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
             # Build the measured-region mask volume (0/1) for the red overlay.
@@ -3384,6 +3425,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV Vol"),
                                 t("Save failed: {err}", err=str(exc)))
             return
+        self._lvv_dirty = False              # Blood saved → no unsaved-switch warn
         QMessageBox.information(self.window(), t("LV Vol"),
                                t("Saved: {p}", p=os.path.basename(path)))
 
@@ -3430,6 +3472,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
+            self._lvv_dirty = False              # loaded = matches the file
             lvv = self._lvv
             lvv["apex"] = np.asarray(data["apex"], float)
             lvv["seed"] = np.asarray(data["seed"], float)
@@ -6524,6 +6567,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
+        self._lv_dirty = False                       # nothing traced yet
         self._lv_reset_undo()                        # fresh Ctrl+Z stack
         self._lv_btn.setChecked(True)               # internal mode flag
         self.set_side("Bi")
@@ -7172,6 +7216,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lv["model"].set_long_axis_contour(phi, m["pts3d"], which=lv["target"])
         except Exception:
             return
+        self._lv_dirty = True          # a traced/changed border is now unsaved
         tag = (lv["plane_idx"], lv["target"])
         # re-trace: drop the previous captured border for this (plane, target)
         self._measures[pane] = [mm for mm in self._measures[pane]
@@ -7880,6 +7925,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV Volume"),
                                 t("Save failed: {err}", err=str(exc)))
             return
+        self._lv_dirty = False               # borders saved → no unsaved-switch warn
         # Keep the volume readout on screen after saving (append the saved note,
         # don't replace it) so the result stays visible.
         note = t("Saved: {p}", p=os.path.basename(path))
@@ -7939,6 +7985,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "target": None, "pane": "B", "sax": None,
                     "pass": "epi" if model.epi_axis is not None else "endo",
                     "prev_side": self.current_side()}
+        self._lv_dirty = False                       # loaded = matches the file
         self._lv_reset_undo()
         self._lv_btn.setChecked(True)
         self._lv_enter_contour()
