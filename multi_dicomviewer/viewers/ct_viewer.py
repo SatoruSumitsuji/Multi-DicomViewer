@@ -7130,6 +7130,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the anatomy so it looked smaller (reported: image shrinks on apex).
         cam = self.pane[which].ren.GetActiveCamera()
         fp0 = cam.GetFocalPoint()
+        ps_keep = float(cam.GetParallelScale())    # keep the exact zoom too
         try:
             wc = self._out_to_world3d(which, float(fp0[0]), float(fp0[1]))
         except Exception:                          # noqa: BLE001
@@ -7152,6 +7153,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # AND position) is unchanged by the apex placement.
         if wc is not None:
             try:
+                cam.SetParallelScale(ps_keep)      # guarantee no zoom change
                 ox, oy = self._world3d_to_out(which, wc)
                 pos = cam.GetPosition()
                 fp = cam.GetFocalPoint()
@@ -7162,6 +7164,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.pane[which].render()
             except Exception:                      # noqa: BLE001
                 pass
+        else:
+            cam.SetParallelScale(ps_keep)          # at least keep the zoom
+            self._refresh(only=which)
+            self._update_cross(which)
+            self.pane[which].render()
         return True
 
     def _lv_apex_press(self, which, sx, sy, shift=False):
