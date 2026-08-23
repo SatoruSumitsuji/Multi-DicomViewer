@@ -3305,13 +3305,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         _ecx, _ecy, ea, eb = self._ellipse_cab(m)
         radius = float(max(ea, eb))
         self._lv_valves[which] = (center, np.asarray(n, float), radius)
-        m["color"] = "#ffd24d" if which == "aortic" else "#4dd0ff"
+        color = "#ffd24d" if which == "aortic" else "#4dd0ff"
+        m["color"] = color
         m["_lv_valve"] = which
         # Anchor the ellipse to its 3-D anatomical position (re-projects as the
         # view moves) and draw it at 50% so it doesn't dominate the image.
-        m["pts3d"] = [self._out_to_world3d(key, wx, wy) for (wx, wy) in m["pts"]]
+        pts3d = [self._out_to_world3d(key, wx, wy) for (wx, wy) in m["pts"]]
+        m["pts3d"] = pts3d
         m["transp"] = 50
+        # Also show the valve on the OTHER pane (its plane projected there), so it
+        # appears on both panes regardless of which one it was drawn on. A mirror
+        # copy with the SAME 3-D anchor, re-projected onto that pane.
+        other = "B" if key == "A" else "A"
+        self._meas_seq += 1
+        self._measures[other].append({
+            "id": self._meas_seq, "type": "ellipse",
+            "pts": [self._world3d_to_out(other, P) for P in pts3d],
+            "pts3d": list(pts3d), "color": color, "_lv_valve": which,
+            "transp": 50})
         self._redraw_meas(key)
+        self._redraw_meas(other)
         if self._meas_on:                       # so the next click doesn't draw
             self._meas_btn.setChecked(False)
             self._toggle_measure()
