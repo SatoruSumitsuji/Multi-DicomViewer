@@ -10327,17 +10327,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif t == "MOVE":
             only_pane = which
             cam = self.pane[which].ren.GetActiveCamera()
-            sc = cam.GetParallelScale() * 0.003
-            cam.SetFocalPoint(
-                cam.GetFocalPoint()[0] - dx * sc,
-                cam.GetFocalPoint()[1] + dy * sc,
-                cam.GetFocalPoint()[2],
-            )
-            cam.SetPosition(
-                cam.GetPosition()[0] - dx * sc,
-                cam.GetPosition()[1] + dy * sc,
-                cam.GetPosition()[2],
-            )
+            fp = cam.GetFocalPoint()
+            pos = cam.GetPosition()
+            if sx is not None and sy is not None:
+                # Pan by the ACTUAL screen→output mapping (via DisplayToWorld) so
+                # the image always follows the cursor regardless of any Flip /
+                # mirror / camera side. A fixed-sign formula inverted the pan on a
+                # mirrored pane (reported: right pane up/down + left/right
+                # reversed). Move the focal opposite the cursor's world delta.
+                wx1, wy1 = self._disp_to_world(which, sx, sy)
+                wx0, wy0 = self._disp_to_world(which, sx - dx, sy - dy)
+                ddx, ddy = wx1 - wx0, wy1 - wy0
+                cam.SetFocalPoint(fp[0] - ddx, fp[1] - ddy, fp[2])
+                cam.SetPosition(pos[0] - ddx, pos[1] - ddy, pos[2])
+            else:
+                sc = cam.GetParallelScale() * 0.003
+                cam.SetFocalPoint(fp[0] - dx * sc, fp[1] + dy * sc, fp[2])
+                cam.SetPosition(pos[0] - dx * sc, pos[1] + dy * sc, pos[2])
         self._refresh(only=only_pane)
 
     def _wheel(self, which, delta):
