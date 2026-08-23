@@ -2787,6 +2787,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["plane_idx"] = 0
         lv["phase"] = "align"
         lv["fitted"] = False
+        lv.pop("up_sign", None)                  # re-derived at the next Set axis
         self._lv_dirty = False
         self._lv_result_lines = []
         if getattr(self, "_lv_sax_btn", None) is not None:
@@ -6937,6 +6938,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             # "心尖部点がズレる"). With this, clicking on the crosshair puts the
             # apex under the cursor.
             self._center = np.asarray(origin, dtype=float).copy()
+            # Remember which world direction is UP on screen RIGHT NOW (robust to
+            # any pane mirror, via the actual display mapping), so _lv_show_plane
+            # keeps that vertical sense instead of forcing apex→base-up — which
+            # flipped the view up/down on Set axis (reported, esp. Epi).
+            pane = lv["pane"]
+            try:
+                cw = self.pane[pane].canvas.width()
+                ch = self.pane[pane].canvas.height()
+                w_c = np.asarray(self._out_to_world3d(
+                    pane, *self._disp_to_world(pane, cw / 2.0, ch / 2.0)), float)
+                w_up = np.asarray(self._out_to_world3d(
+                    pane, *self._disp_to_world(pane, cw / 2.0, ch / 2.0 - 10.0)),
+                    float)
+                self._lv_up_ref = w_up - w_c
+            except Exception:                        # noqa: BLE001
+                self._lv_up_ref = None
             lv["phase"] = "ready"
             lv["plane_idx"] = 0
             self._lv_sync_buttons()
@@ -7264,7 +7281,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Force the long axis EXACTLY vertical: the reslice frame's v = ax.axis,
         # so reset the camera roll (any SPIN done before Set axis would otherwise
         # leave the axis diagonal). The output plane is (x=u, y=v), so up=(0,1,0).
-        cam.SetViewUp(0.0, 1.0, 0.0)
+        # Keep the vertical SENSE the user aligned at. At Set axis _lv_up_ref
+        # holds the on-screen up direction; pick the ViewUp sign so that stays
+        # up (exactly vertical still), and persist it (lv['up_sign']) across
+        # plane steps so they don't re-flip.
+        up = getattr(self, "_lv_up_ref", None)
+        if up is not None:
+            dv = float(np.dot(np.asarray(up, float), v))
+            lv["up_sign"] = 1.0 if dv >= 0 else -1.0
+            self._lv_up_ref = None
+        cam.SetViewUp(0.0, float(lv.get("up_sign", 1.0)), 0.0)
         if first:
             cam.SetParallelScale(ps0)                # keep the aligned zoom
             # The ▲ markers are sized 0.024·ParallelScale in _update_cross, which
