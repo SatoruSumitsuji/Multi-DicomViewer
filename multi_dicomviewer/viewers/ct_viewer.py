@@ -2085,6 +2085,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base.
         # Each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
         self._lv_valves = {"mitral": None, "aortic": None}
+        # Whether each valve's ellipse is currently SHOWN (its button toggles it
+        # once the plane is set, so it can be hidden while tracing Endo/Epi).
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
         self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_apex = None
@@ -3270,18 +3273,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox
         if self._image is None:
             return
+        # Newest FRESH (untagged) ellipse — a new Measure→Ellipse to (re)capture.
         m, key, best = None, None, -1
         for k in ("A", "B"):
             for cand in self._measures.get(k, []):
-                if cand.get("type") == "ellipse" and cand.get("id", -1) > best:
+                if (cand.get("type") == "ellipse"
+                        and cand.get("_lv_valve") is None
+                        and cand.get("id", -1) > best):
                     best = cand.get("id", -1)
                     m, key = cand, k
         if m is None:
+            # No fresh ellipse. If this valve is already set, the button just
+            # toggles its ellipse's visibility (hide it while tracing Endo/Epi).
+            if self._lv_valves.get(which) is not None:
+                self._lv_toggle_valve_visibility(which)
+                return
             QMessageBox.information(
                 self.window(), t("LV"),
                 t("Draw an Ellipse on the {v} annulus first (Measure→Ellipse).")
                 .format(v=t("aortic") if which == "aortic" else t("mitral")))
             return
+        # A fresh ellipse → (re)capture this valve; make it shown.
+        self._lv_valve_shown[which] = True
+        # Drop any previous ellipse for this valve so only the newest remains.
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm.get("_lv_valve") != which]
         cx, cy = self._shape_center(m)
         center = np.asarray(self._out_to_world3d(key, cx, cy), float)
         _u, _v, n = self._axes_for(key)
@@ -3300,17 +3317,35 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._toggle_measure()
         self._lv_update_valve_buttons()
 
+    def _lv_toggle_valve_visibility(self, which) -> None:
+        """Show/hide this valve's ellipse (button toggle once the plane is set),
+        so MV/AoV can be hidden while tracing Endo/Epi. The valve plane geometry
+        is unaffected."""
+        shown = not self._lv_valve_shown.get(which, True)
+        self._lv_valve_shown[which] = shown
+        for k in ("A", "B"):
+            for mm in self._measures.get(k, []):
+                if mm.get("_lv_valve") == which:
+                    mm["hidden"] = not shown
+            self._redraw_meas(k)
+        self._lv_update_valve_buttons()
+
     def _lv_update_valve_buttons(self) -> None:
-        """Colour the common MV / AoV buttons blue/amber once each plane is set."""
+        """MV / AoV buttons: plain when unset; solid blue/amber when set AND
+        shown; a coloured outline when set but hidden (toggled off for tracing)."""
         if getattr(self, "_lv_mv_btn", None) is None:
             return
         for which, btn, color in (("mitral", self._lv_mv_btn, "#2b6cb0"),
                                    ("aortic", self._lv_aov_btn, "#b8860b")):
-            if self._lv_valves.get(which) is not None:
+            if self._lv_valves.get(which) is None:
+                btn.setStyleSheet(self._BTN_DIS)
+            elif self._lv_valve_shown.get(which, True):
                 btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
                                   % (color, self._BTN_DIS))
             else:
-                btn.setStyleSheet(self._BTN_DIS)
+                btn.setStyleSheet(
+                    "QPushButton{background:palette(button);color:%s;"
+                    "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
 
     def _lv_save_valve(self, which) -> None:
         """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
@@ -6657,6 +6692,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
         self._lv_valves = {"mitral": None, "aortic": None}   # new series → clear
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi
         self._lvv_epi_model_dict = None
