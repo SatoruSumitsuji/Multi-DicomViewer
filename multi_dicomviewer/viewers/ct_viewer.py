@@ -2680,6 +2680,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             return self._lv.get("pass")           # 'endo' / 'epi' / None
         return None
 
+    def _lv_valves_ready(self) -> bool:
+        """Both common valve planes (MV + AoV) are set — the prerequisite for any
+        LV sub-mode (they anchor the base for Epi/Endo/Blood)."""
+        return (self._lv_valves.get("mitral") is not None
+                and self._lv_valves.get("aortic") is not None)
+
     def _lv_mode_has_unsaved(self, mode) -> bool:
         """True if *mode* holds traced/measured data not saved since the last
         change (see the _lv_dirty / _lvv_dirty flags). Used to warn before a
@@ -2737,6 +2743,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # In SAX, re-click ARMS this border for editing (existing flow).
                 self._lv_select_pass(sm)
             self._lv_update_submode_ui()
+            return
+        # PREREQUISITE: the common MV/AoV valve planes must be set before any
+        # sub-mode (they anchor the LV base). Guide the user to set them instead
+        # of entering. (The selector buttons are also greyed until then.)
+        if not self._lv_valves_ready():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self.window(), t("LV"),
+                t("Set the MV and AoV planes first. Draw an Ellipse on each "
+                  "annulus and press MV plane / AoV plane (or Load them); then "
+                  "Endo / Epi / Blood become available."))
             return
         # Switch to a DIFFERENT sub-mode. The current one is already inactive
         # (deactivated by its own 2nd click, warned there), so no warning here —
@@ -2839,7 +2856,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # _lv_sync_buttons / _lvv_sync (which enable them), so this wins.
         # EXCEPTION — in SAX you may switch which traced border you edit, so keep
         # Endo/Epi clickable there (whichever has a border); Blood stays greyed.
-        if self._lv is not None and self._lv.get("sax") is not None:
+        ready = self._lv_valves_ready()
+        if not ready:
+            # Valve planes not set yet → Endo/Epi/Blood are unavailable (only the
+            # active one, if any, stays clickable to deactivate).
+            self._lv_endo_btn.setEnabled(sm == "endo")
+            self._lv_epi_btn.setEnabled(sm == "epi")
+            self._lvv_start_btn.setEnabled(sm == "blood")
+        elif self._lv is not None and self._lv.get("sax") is not None:
             m = self._lv["model"]
             self._lv_endo_btn.setEnabled(
                 m.endo_axis is not None and len(m.endo_contours) >= 3)
@@ -3283,16 +3307,33 @@ class CTViewer(CPRMixin, AbstractViewer):
                         and cand.get("id", -1) > best):
                     best = cand.get("id", -1)
                     m, key = cand, k
+        vname = "AoV" if which == "aortic" else "MV"
         if m is None:
             # No fresh ellipse. If this valve is already set, the button just
             # toggles its ellipse's visibility (hide it while tracing Endo/Epi).
             if self._lv_valves.get(which) is not None:
                 self._lv_toggle_valve_visibility(which)
                 return
-            QMessageBox.information(
-                self.window(), t("LV"),
-                t("Draw an Ellipse on the {v} annulus first (Measure→Ellipse).")
-                .format(v=t("aortic") if which == "aortic" else t("mitral")))
+            # Not set yet → offer Load (a saved MVLv/AoVLv) or Create (draw an
+            # Ellipse) — mirrors the Blood "Load Epi / Create Epi" flow.
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV"))
+            box.setIcon(QMessageBox.Icon.Information)
+            box.setText(t("Set the {v} plane:").format(v=vname))
+            b_load = box.addButton(t("Load"),
+                                   QMessageBox.ButtonRole.AcceptRole)
+            b_make = box.addButton(t("Create (draw Ellipse)"),
+                                   QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_load:
+                self._lv_load_valve(which)
+            elif clicked is b_make:
+                QMessageBox.information(
+                    self.window(), t("LV"),
+                    t("Draw an Ellipse on the {v} annulus (Measure→Ellipse), "
+                      "then press {v} plane again.").format(v=vname))
             return
         # A fresh ellipse → (re)capture this valve; make it shown.
         self._lv_valve_shown[which] = True
@@ -3330,6 +3371,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()            # both valves set → un-grey selectors
 
     def _lv_toggle_valve_visibility(self, which) -> None:
         """Show/hide this valve's ellipse (button toggle once the plane is set),
@@ -3433,6 +3475,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                       np.asarray(data["n"], float),
                                       float(data.get("r", 20.0)))
             self._lv_update_valve_buttons()
+            self._lv_update_submode_ui()        # both valves set → un-grey
             QMessageBox.information(
                 self.window(), t("LV"),
                 t("Loaded the {w} plane.").format(
