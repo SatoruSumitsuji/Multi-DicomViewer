@@ -8793,7 +8793,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         # +dir: a real positive offset for a line through the centre, so the ○ can
         # never collapse onto the centre dot the way the old edge-clip could.
         R = max(0.0, min(_lim(ux, ax, cx, hw), _lim(uy, ay, cy, hh)))
-        return (ax + ux * R, ay + uy * R)
+        rx, ry = ax + ux * R, ay + uy * R
+        # Bulletproof: the focal/parallel-scale rect can be momentarily out of
+        # step with what's actually on screen (e.g. mid-trace before a fit), which
+        # let the ○ drift off-pane. Clamp to the REAL visible pixels via the live
+        # camera projection so the marker is always inside the pane.
+        try:
+            p = self.pane[key]
+            qx, qy = self._world_to_qt(key, rx, ry)
+            m_px = 16.0
+            qx = min(max(m_px, qx), max(m_px, p.canvas.width() - m_px))
+            qy = min(max(m_px, qy), max(m_px, p.canvas.height() - m_px))
+            rx, ry = self._disp_to_world(key, qx, qy)
+        except Exception:                               # noqa: BLE001
+            pass
+        return (rx, ry)
 
     def _lv_draw_apex_markers(self, key, p) -> None:
         """Draw ONLY the ACTIVE pass's apex marker (endo=red / epi=green) on the
@@ -8997,12 +9011,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # off-centre origin cut a short, angle-dependent chord — the
                 # "lengths vary" report). Direction (dx,dy) still shows the plane.
                 cx, cy = self._lv_view_center(key)
-                (sx0, sy0), (ex, ey), _ok = self._lv_line_clip(
-                    key, cx, cy, dx, dy)
                 cr = self._lv_ring_radius(key)
-                line = ([(sx0, sy0), (ex, ey)] if _ok
-                        else [(cx - dx * X, cy - dy * X),
-                              (cx + dx * X, cy + dy * X)])
+                # Draw the centreline the FULL FOV length through the visible
+                # centre so it always spans the pane (VTK clips it to the
+                # viewport); the edge-clip rect could fall short at some zooms.
+                XL = max(X, 4.0 * max(self._lv_view_half(key)))
+                line = [(cx - dx * XL, cy - dy * XL),
+                        (cx + dx * XL, cy + dy * XL)]
                 rx, ry = self._lv_ring_pos(key, cx, cy, dx, dy)  # always visible ○
                 p.lv_line_mapper.SetInputData(_polylines_pd([
                     line, self._circle_poly(rx, ry, cr)]))
@@ -9014,12 +9029,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 _, y = self._world3d_to_out(key, ax.apex + along0 * ax.axis)
                 X = float(getattr(self, "_half", 100.0))
                 cr = self._lv_ring_radius(key)
-                # level line + ○ handle, clipped to the visible rect so the ○
-                # sits near the visible right edge, on the line, at any zoom / pan.
-                (lx0, ly0), (hx, hy), _ok = self._lv_line_clip(
-                    key, 0.0, y, 1.0, 0.0)
-                line = [(lx0, ly0), (hx, hy)] if _ok else [(-X, y), (X, y)]
-                rx, ry = self._lv_ring_pos(key, 0.0, y, 1.0, 0.0)  # always visible
+                # level line (⟂ axis at output-y = level): draw FULL FOV width
+                # through the visible centre so it always spans the pane at any
+                # zoom / pan (VTK clips it to the viewport); ○ handle at the edge.
+                cx, _cy = self._lv_view_center(key)
+                XL = max(X, 4.0 * max(self._lv_view_half(key)))
+                line = [(cx - XL, y), (cx + XL, y)]
+                rx, ry = self._lv_ring_pos(key, cx, y, 1.0, 0.0)  # always visible
                 p.lv_line_mapper.SetInputData(_polylines_pd([
                     line, self._circle_poly(rx, ry, cr)]))
             return
