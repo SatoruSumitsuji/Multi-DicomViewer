@@ -2394,12 +2394,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         row1.addWidget(self._lv_aov_btn)
         row1.addSpacing(8)
 
-        # ---- Sub-mode selector: Endo / Epi / Blood (always visible) ----
-        self._lv_endo_btn = FitButton(t("Endo"))
-        self._lv_endo_btn.setHelpToolTip(
-            t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
-        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
-        row1.addWidget(self._lv_endo_btn)
+        # ---- Sub-mode selector, in operation order: Epi → Blood → Endo ----
         self._lv_epi_btn = FitButton(t("Epi"))
         self._lv_epi_btn.setHelpToolTip(
             t("Epi (myocardial) pass — align its long-axis view, Set axis, then "
@@ -2412,6 +2407,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Blood-pool volume sub-mode (needs a traced/loaded Epi border)"))
         self._lvv_start_btn.clicked.connect(lambda: self._lv_select_submode("blood"))
         row1.addWidget(self._lvv_start_btn)
+        self._lv_endo_btn = FitButton(t("Endo"))
+        self._lv_endo_btn.setHelpToolTip(
+            t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
+        self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
+        row1.addWidget(self._lv_endo_btn)
         row1.addSpacing(8)
 
         # ================= Endo/Epi operation group (row 1) =================
