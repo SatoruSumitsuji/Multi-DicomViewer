@@ -7841,7 +7841,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if which == lv.get("pane"):
             _, y = self._world3d_to_out(
                 which, ax.apex + float(lv["sax"]) * ax.axis)
-            hx, hy = self._lv_ring_xy(which, 0.0, y, 1.0, 0.0)
+            hx, hy = self._lv_ring_pos(which, 0.0, y, 1.0, 0.0)
             if math.hypot(wx - hx, wy - hy) <= rgrab:
                 return "level"
         elif which == lv.get("sax_pane"):
@@ -7852,7 +7852,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             nrm = math.hypot(dx, dy) or 1.0
             dx, dy = dx / nrm, dy / nrm
             cx, cy = self._lv_view_center(which)   # same anchor as the drawn line
-            ex, ey = self._lv_ring_xy(which, cx, cy, dx, dy)
+            ex, ey = self._lv_ring_pos(which, cx, cy, dx, dy)
             if math.hypot(wx - ex, wy - ey) <= rgrab:
                 return "meridian"
         return None
@@ -8730,6 +8730,38 @@ class CTViewer(CPRMixin, AbstractViewer):
         _p0, p1, _ok = self._lv_line_clip(key, ax0, ay0, ux, uy)
         return p1
 
+    def _lv_ring_pos(self, key, ax0, ay0, ux, uy):
+        """Output-mm (x, y) of the ○ section-direction handle on the line through
+        (ax0, ay0) in direction (ux, uy). Placed near the +dir VISIBLE edge but
+        ALWAYS fully inside the pane AND never collapsed onto the centre dot — so
+        the marker stays visible at EVERY orientation / zoom / pan (the edge-clip
+        alone could degenerate to the centre for some section directions, hiding
+        the ○ under the crosshair). Used for both drawing and hit-testing."""
+        hw, hh = self._lv_view_half(key)
+        cx, cy = self._lv_view_center(key)
+        cr = self._lv_ring_radius(key)
+        mg = min(1.8 * cr, 0.40 * min(hw, hh))     # keep the rect non-degenerate
+        nrm = math.hypot(ux, uy) or 1.0
+        ux, uy = ux / nrm, uy / nrm
+        # Clamp the anchor into the margined visible rect, then walk +dir to the
+        # nearest edge; for a line THROUGH an off-centre anchor this is edge-
+        # independent of the anchor's free coordinate.
+        ax = min(cx + hw - mg, max(cx - hw + mg, ax0))
+        ay = min(cy + hh - mg, max(cy - hh + mg, ay0))
+        INF = 1e18
+
+        def _lim(d, a, c, half):
+            if d > 1e-9:
+                return (c + half - mg - a) / d
+            if d < -1e-9:
+                return (c - half + mg - a) / d
+            return INF
+        # Distance from the (clamped, in-rect) anchor to the nearest edge along
+        # +dir: a real positive offset for a line through the centre, so the ○ can
+        # never collapse onto the centre dot the way the old edge-clip could.
+        R = max(0.0, min(_lim(ux, ax, cx, hw), _lim(uy, ay, cy, hh)))
+        return (ax + ux * R, ay + uy * R)
+
     def _lv_draw_apex_markers(self, key, p) -> None:
         """Draw ONLY the ACTIVE pass's apex marker (endo=red / epi=green) on the
         long-axis (trace) pane and, while short-axis is shown, on the short-axis
@@ -8938,8 +8970,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 line = ([(sx0, sy0), (ex, ey)] if _ok
                         else [(cx - dx * X, cy - dy * X),
                               (cx + dx * X, cy + dy * X)])
+                rx, ry = self._lv_ring_pos(key, cx, cy, dx, dy)  # always visible ○
                 p.lv_line_mapper.SetInputData(_polylines_pd([
-                    line, self._circle_poly(ex, ey, cr)]))
+                    line, self._circle_poly(rx, ry, cr)]))
             elif key == lv.get("pane"):
                 # the long-axis pane: the movable LEVEL line ⟂ the axis (a
                 # horizontal line at output-y = the current cross-section level).
@@ -8953,8 +8986,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 (lx0, ly0), (hx, hy), _ok = self._lv_line_clip(
                     key, 0.0, y, 1.0, 0.0)
                 line = [(lx0, ly0), (hx, hy)] if _ok else [(-X, y), (X, y)]
+                rx, ry = self._lv_ring_pos(key, 0.0, y, 1.0, 0.0)  # always visible
                 p.lv_line_mapper.SetInputData(_polylines_pd([
-                    line, self._circle_poly(hx, hy, cr)]))
+                    line, self._circle_poly(rx, ry, cr)]))
             return
         if key != lv.get("pane"):
             return
