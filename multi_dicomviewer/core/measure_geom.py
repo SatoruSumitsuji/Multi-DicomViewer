@@ -357,13 +357,18 @@ def ellipse_from_major(p0, p1, minor_ratio: float = 0.5):
             (cx - b * px, cy - b * py), (cx + b * px, cy + b * py)]
 
 
-def ellipse_drag(pts, vi, w):
+def ellipse_drag(pts, vi, w, circle=False):
     """New oblique-ellipse points ``[maj0, maj1, min0, min1]`` after dragging
     handle *vi* to world point *w*. Shared by every viewer's
     ``_set_ellipse_handle`` so XA/IVUS and both CT renderers edit identically:
     a MAJOR endpoint (vi 0/1) moves freely (resize + rotate) keeping the
     current minor width; a MINOR endpoint (vi 2/3) changes only the minor width
-    along the perpendicular through the centre."""
+    along the perpendicular through the centre.
+
+    *circle* True locks the shape to a TRUE CIRCLE (minor = major) through every
+    edit: dragging a major endpoint resizes/rotates about the centre with the
+    minor kept equal, and dragging a minor endpoint resizes the whole circle
+    uniformly (major re-fit to the same radius, direction and centre kept)."""
     e1, e2, m1, m2 = (list(q) for q in pts)
     if vi == 0:
         e1 = [w[0], w[1]]
@@ -372,11 +377,16 @@ def ellipse_drag(pts, vi, w):
     cx, cy = (e1[0] + e2[0]) / 2.0, (e1[1] + e2[1]) / 2.0
     dx, dy = e2[0] - e1[0], e2[1] - e1[1]
     L = math.hypot(dx, dy) or 1e-6
-    vx, vy = -dy / L, dx / L                       # minor (perpendicular) dir
+    ux, uy = dx / L, dy / L                        # major (axis) dir
+    vx, vy = -uy, ux                               # minor (perpendicular) dir
     if vi in (0, 1):
-        b = math.hypot(m2[0] - m1[0], m2[1] - m1[1]) / 2.0   # keep width
+        b = (L / 2.0 if circle                     # circle: minor = major
+             else math.hypot(m2[0] - m1[0], m2[1] - m1[1]) / 2.0)  # keep width
     else:
         b = max(abs((w[0] - cx) * vx + (w[1] - cy) * vy), 1e-3)
+        if circle:                                 # uniform resize about centre
+            e1 = [cx - b * ux, cy - b * uy]
+            e2 = [cx + b * ux, cy + b * uy]
     m1 = [cx - b * vx, cy - b * vy]
     m2 = [cx + b * vx, cy + b * vy]
     return [tuple(e1), tuple(e2), tuple(m1), tuple(m2)]
