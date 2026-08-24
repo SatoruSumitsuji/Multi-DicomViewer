@@ -2779,6 +2779,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return
             self._lv_select_pass(sm)                  # enter/arm this pass
         elif sm == "blood":
+            # Carry a still-live (traced/loaded) Epi surface into Blood so it can
+            # be used as the outer bound without a re-load (Epi読み込み).
+            if self._lv is not None:
+                self._lv_stash_epi_for_blood(self._lv["model"])
             self._lvv_toggle()                        # start Blood (needs Epi)
         self._lv_update_submode_ui()
 
@@ -2794,12 +2798,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_exit_confirm()                  # has its own confirm
         self._lv_update_submode_ui()
 
+    def _lv_stash_epi_for_blood(self, model) -> None:
+        """Build + stash the Epi surface from *model* so Blood can use it as the
+        outer bound WITHOUT re-loading (same stash full LV Exit makes). No-op
+        unless Epi is traced/loaded (≥3 meridians). Called when the Epi pass is
+        dropped/left, so a live (traced or loaded) Epi survives into Blood."""
+        try:
+            if (model is not None and model.epi_axis is not None
+                    and len(model.epi_contours) >= 3):
+                model.build()
+                if model.epi is not None:
+                    self._lvv_epi_surf = model.epi
+                    self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+                    self._lvv_epi_model_dict = model.to_dict()
+        except Exception:                               # noqa: BLE001
+            pass
+
     def _lv_reset_contour_empty(self) -> None:
         """Drop the current pass's model + on-screen borders and return to the
         no-pass state (still in LV mode). Used when a pass is DEACTIVATED (its
         data is discarded then) and before starting a fresh independent pass."""
         from multi_dicomviewer.core.lv_measure import LVModel
         lv = self._lv
+        # Before wiping, keep any Epi surface so Blood can still use it.
+        self._lv_stash_epi_for_blood(lv["model"])
         lv["model"] = LVModel(n_planes=lv["model"].n_planes)
         for k in ("A", "B"):
             self._measures[k] = [mm for mm in self._measures[k]
@@ -8573,21 +8595,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Leave LV mode entirely, restoring the normal MPR view."""
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
-        # Stash the traced EPI surface so LV Vol mode can use it as the outer
-        # bound (Epi border → myocardial envelope). Only when Epi was traced.
-        try:
-            if self._lv is not None:
-                model = self._lv["model"]
-                if (model.epi_axis is not None
-                        and len(model.epi_contours) >= 3):
-                    model.build()
-                    if model.epi is not None:
-                        self._lvv_epi_surf = model.epi
-                        self._lvv_epi_apex = np.asarray(
-                            model.epi_axis.apex, float)
-                        self._lvv_epi_model_dict = model.to_dict()
-        except Exception:                               # noqa: BLE001
-            pass
+        # Stash the traced EPI surface so Blood can use it as the outer bound.
+        if self._lv is not None:
+            self._lv_stash_epi_for_blood(self._lv["model"])
         self._lv_reset_undo()
         # Remove the on-screen LV border traces (kept in the model for volume).
         for k in ("A", "B"):
