@@ -428,6 +428,42 @@ class LVSurface:
         ml = count * (spacing ** 3) / 1000.0
         return (ml, count) if return_count else ml
 
+    def voxel_volume_ml_valves(self, spacing: float, planes, apex_xyz):
+        """LV cavity/epicardial volume (mL) bounded BASALLY by the valve *planes*
+        (the apex side kept) instead of the traced basal extent — the clinical
+        'valve-to-apex' cavity. Mirrors the blood-pool engine (same plane cut) so
+        the geometric and thresholded volumes are measured over the same region.
+
+        *planes*   : iterable of (center_xyz, normal_xyz) valve planes.
+        *apex_xyz* : the LV apex — orients each plane normal (apex on + side).
+
+        The surface is EXTENDED basally (a prism of the most-basal ring) up to the
+        valves, so a trace that stops short of the annulus still fills to the
+        valve, and a trace that runs past it is cut at the valve. With no planes
+        this is the plain voxel volume (flat basal cut)."""
+        planes = [(np.asarray(c, float), np.asarray(n, float))
+                  for (c, n) in (planes or [])]
+        if not planes:
+            return self.voxel_volume_ml(spacing)
+        apex = np.asarray(apex_xyz, float)
+        verts = self._all_ring_points()
+        centres = np.array([c for (c, _n) in planes])
+        lo = np.minimum(verts.min(axis=0), centres.min(axis=0)) - spacing
+        hi = np.maximum(verts.max(axis=0), centres.max(axis=0)) + spacing
+        gx = np.arange(lo[0], hi[0] + spacing, spacing)
+        gy = np.arange(lo[1], hi[1] + spacing, spacing)
+        gz = np.arange(lo[2], hi[2] + spacing, spacing)
+        X, Y, Z = np.meshgrid(gx, gy, gz, indexing="ij")
+        pts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
+        inside = self.contains(pts, extend_base=True)
+        for (c, nrm) in planes:                        # keep the apex side
+            n = nrm / (np.linalg.norm(nrm) or 1.0)
+            if float(np.dot(apex - c, n)) < 0.0:
+                n = -n
+            inside &= ((pts - c) @ n >= 0.0)
+        count = int(np.count_nonzero(inside))
+        return count * (spacing ** 3) / 1000.0
+
     def contains(self, pts, extend_base: bool = False) -> np.ndarray:
         """Boolean mask (N,) — which world points (N,3) fall inside the closed
         surface (per-axial-level point-in-polygon, concave-safe). Same test as

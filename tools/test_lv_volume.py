@@ -203,4 +203,23 @@ m2.build()
 _check("reloaded then restored endo volume", m2.volume_ml(0.5, "endo"),
        V_endo_pre, 0.05)
 
+# ---- H: valve-plane clip (valve-to-apex volume) ----------------------------
+# A prolate spheroid (radial 20, long semi 40, apex→base 0..80). A valve plane
+# ⟂ the axis at along=60 keeps the apex side (along 0..60). Analytic cap volume
+#   ∫₀⁶⁰ π·400·(1-((t-40)/40)²) dt = π·18000 mm³ = 56.55 mL.
+axH = LVAxis.from_points([15, 0, 80], [-15, 0, 80], [0, 0, 0])
+surfH = LVSurface.from_meridian_contours(axH, _ellipsoid_contours(axH, 20.0, 20.0))
+V_full = surfH.voxel_volume_ml(0.5)
+c_valve = np.array([0.0, 0.0, 60.0])
+n_valve = np.array([0.0, 0.0, 1.0])
+V_clip = surfH.voxel_volume_ml_valves(0.5, [(c_valve, n_valve)], apex_xyz=[0, 0, 0])
+print("H) valve-plane clip (valve-to-apex):")
+_check("clipped volume", V_clip, math.pi * 18000 / 1000.0, 0.03)
+assert V_clip < V_full, "valve clip did not reduce the volume"
+# a flipped normal must give the SAME apex-side region (orientation-invariant)
+V_flip = surfH.voxel_volume_ml_valves(0.5, [(c_valve, -n_valve)], apex_xyz=[0, 0, 0])
+assert abs(V_flip - V_clip) < 1e-9, "valve normal sign changed the result"
+# no planes → identical to the plain volume
+assert abs(surfH.voxel_volume_ml_valves(0.5, [], [0, 0, 0]) - V_full) < 1e-9
+
 print("\nALL PASS")

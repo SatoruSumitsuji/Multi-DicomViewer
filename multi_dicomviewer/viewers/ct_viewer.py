@@ -7993,6 +7993,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # avoid Qt's "must be a top level window" console warning.
         top = self.window()
         spacing = max(0.5, float(min(self._dims)))
+        # Bound the volume BASALLY by the common MV/AoV valve planes (apex side)
+        # — 'valve-to-apex', the same region the Blood volume uses — so Endo/Epi
+        # aren't cut at wherever the trace happened to stop. Both valves are a
+        # prerequisite of the sub-mode, so they are normally set; fall back to the
+        # plain (trace-extent) volume if a plane is somehow missing.
+        planes = [(v[0], v[1]) for v in (self._lv_valves.get("aortic"),
+                                         self._lv_valves.get("mitral"))
+                  if v is not None]
 
         result: dict = {}
 
@@ -8000,7 +8008,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    result["vol"] = m.volume_ml(spacing, pas)
+                    result["vol"] = (m.volume_ml_valves(spacing, pas, planes)
+                                     if planes else m.volume_ml(spacing, pas))
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 

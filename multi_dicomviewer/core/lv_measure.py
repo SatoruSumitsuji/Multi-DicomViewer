@@ -696,6 +696,20 @@ class LVModel:
         surf = self.endo if which == "endo" else self.epi
         return None if surf is None else surf.voxel_volume_ml(spacing)
 
+    def volume_ml_valves(self, spacing: float, which: str, planes
+                         ) -> float | None:
+        """Endo/Epi volume (mL) bounded BASALLY by the valve *planes* (apex side)
+        instead of the traced basal extent — 'valve-to-apex', the same region the
+        blood-pool volume uses. *planes* = iterable of (center, normal). Falls
+        back to the plain volume if no planes are given. None if not built."""
+        surf = self.endo if which == "endo" else self.epi
+        if surf is None:
+            return None
+        apex = getattr(surf, "apex_world", None)
+        if apex is None:
+            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
+        return surf.voxel_volume_ml_valves(spacing, planes, apex)
+
     def myocardial_volume_ml(self, spacing: float) -> float | None:
         """Myocardial volume = epi − endo (mL), or None if either is missing."""
         if self.endo is None or self.epi is None:
