@@ -3373,6 +3373,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_valve_buttons()
         self._lv_update_submode_ui()            # both valves set → un-grey selectors
 
+    def _lv_valve_show_from_geom(self, which) -> None:
+        """(Re)create the on-screen valve ring on BOTH panes from the stored
+        geometry (centre, normal, radius) — a circle on the valve plane, anchored
+        in 3-D and re-projected per pane. Used after Load, which restores only the
+        geometry (no drawn ellipse)."""
+        v = self._lv_valves.get(which)
+        if v is None or self._image is None:
+            return
+        c, n, r = v
+        c = np.asarray(c, float)
+        n = np.asarray(n, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(float(n[0])) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        u = np.cross(n, ref)
+        u = u / (np.linalg.norm(u) or 1.0)
+        w = np.cross(n, u)
+        ths = np.linspace(0.0, 2.0 * np.pi, 33)[:-1]
+        pts3d = [tuple(map(float, c + r * np.cos(t) * u + r * np.sin(t) * w))
+                 for t in ths]
+        color = "#ffd24d" if which == "aortic" else "#4dd0ff"
+        hidden = not self._lv_valve_shown.get(which, True)
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm.get("_lv_valve") != which]
+            self._meas_seq += 1
+            self._measures[k].append({
+                "id": self._meas_seq, "type": "polygon",
+                "pts": [self._world3d_to_out(k, P) for P in pts3d],
+                "pts3d": list(pts3d), "color": color, "_lv_valve": which,
+                "transp": 50, "hidden": hidden})
+            self._redraw_meas(k)
+
     def _lv_toggle_valve_visibility(self, which) -> None:
         """Show/hide this valve's ellipse (button toggle once the plane is set),
         so MV/AoV can be hidden while tracing Endo/Epi. The valve plane geometry
@@ -3474,6 +3507,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_valves[which] = (np.asarray(data["c"], float),
                                       np.asarray(data["n"], float),
                                       float(data.get("r", 20.0)))
+            self._lv_valve_shown[which] = True
+            self._lv_valve_show_from_geom(which)   # draw the ring on both panes
             self._lv_update_valve_buttons()
             self._lv_update_submode_ui()        # both valves set → un-grey
             QMessageBox.information(
