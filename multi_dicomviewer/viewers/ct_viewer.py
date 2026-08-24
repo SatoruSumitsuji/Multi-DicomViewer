@@ -6195,8 +6195,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _set_ellipse_handle(self, m, vi, w):
         # Oblique-ellipse handle drag via the shared pure helper (same logic
-        # used by the XA/IVUS canvas and the pygfx CT viewer).
-        m["pts"] = _ellipse_drag(m["pts"], vi, w)
+        # used by the XA/IVUS canvas and the pygfx CT viewer). A circle-locked
+        # ellipse (Ctrl-drawn) stays a true circle through every edit.
+        m["pts"] = _ellipse_drag(m["pts"], vi, w, circle=bool(m.get("circle")))
 
     def _commit_draft(self):
         d = self._draft
@@ -6228,6 +6229,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("color", "smooth", "transp"):
             if d.get(k) is not None:
                 rec[k] = d[k]
+        # A Ctrl-drawn ellipse is a TRUE CIRCLE; remember it so later handle
+        # edits (resize / move) keep it circular (see _set_ellipse_handle).
+        if d["type"] == "ellipse" and d.get("circle"):
+            rec["circle"] = True
         # Carry the absolute 3-D trace (vessel centreline control points) so a
         # later Short-axis MPR uses the real geometry regardless of how the
         # plane was moved while tracing.
