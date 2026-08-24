@@ -3750,8 +3750,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         lvv = self._lvv
         if lvv is None or lvv.get("seed") is None:
             return
-        c_a, n_a, r_a = lvv["aortic"]
-        c_m, n_m, r_m = lvv["mitral"]
+        # Prefer the COMMON MV/AoV planes (Blood now measures against them and no
+        # longer captures its own), falling back to any captured in the wizard.
+        av = self._lv_valves.get("aortic") or lvv.get("aortic")
+        mv = self._lv_valves.get("mitral") or lvv.get("mitral")
+        if av is None or mv is None:
+            QMessageBox.information(
+                self.window(), t("LV Vol"),
+                t("Set the MV and AoV planes first, then Save."))
+            return
+        c_a, n_a, r_a = av
+        c_m, n_m, r_m = mv
         data = {
             "type": "lvvol",
             "series": (self._lv_series_meta()
