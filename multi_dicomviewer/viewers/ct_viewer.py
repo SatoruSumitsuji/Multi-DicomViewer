@@ -881,6 +881,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # which is why the tools are only greyed once a type is selected.
             capturing = (bool(self._owner._meas_type)
                          or self._owner._center_angle_target is not None)
+            # Ctrl held while placing an Ellipse point → constrain to a TRUE
+            # CIRCLE (正円). Shift is already the tool-passthrough modifier, so
+            # the circle lock rides on Ctrl. Read here (the press has the
+            # modifiers) and consumed by the ellipse commit.
+            self._owner._meas_circle = bool(
+                e.modifiers() & Qt.KeyboardModifier.ControlModifier)
             started = self._owner._measure_left(
                 self._which, e.position().x(), e.position().y()
             )
@@ -4410,7 +4416,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_measure_hint_lbl", None) is not None:
             self._measure_hint_lbl.setText(
                 t("  Left-click = add point /"
-                  " right-click finishes Polyline / Polygon"))
+                  " right-click finishes Polyline / Polygon"
+                  " / Ctrl+Ellipse = true circle"))
         # ---- seek bar (2-D native-slice scrubber) ----
         if getattr(self, "_seek_frame_lbl", None) is not None:
             self._seek_frame_lbl.setText(t("Frame:"))
@@ -4554,7 +4561,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(clr)
         self._measure_hint_lbl = QLabel(
             t("  Left-click = add point /"
-              " right-click finishes Polyline / Polygon")
+              " right-click finishes Polyline / Polygon"
+              " / Ctrl+Ellipse = true circle")
         )
         row.addWidget(self._measure_hint_lbl)
         row.addStretch(1)
@@ -5558,6 +5566,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     d["pts"][-1] = (ax0, ay0)
             d.setdefault("pts3d", []).append(P)
         if d["type"] in ("line", "ellipse") and len(d["pts"]) >= 2:
+            if d["type"] == "ellipse":       # Ctrl on this click → 正円
+                d["circle"] = bool(getattr(self, "_meas_circle", False))
             self._commit_draft()
         elif d["type"] == "angle" and len(d["pts"]) >= 3:
             self._commit_draft()
@@ -6142,8 +6152,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if d["type"] == "ellipse":
             # First two clicks are the MAJOR-axis endpoints (an oblique drag
             # makes an oblique ellipse); the minor radius starts at half the
-            # major and is tuned afterwards via the minor handles.
-            pts = _ellipse_from_major(d["pts"][0], d["pts"][1])
+            # major and is tuned afterwards via the minor handles. With Ctrl held
+            # (d["circle"]) the minor equals the major → a TRUE CIRCLE (正円).
+            pts = _ellipse_from_major(
+                d["pts"][0], d["pts"][1],
+                minor_ratio=1.0 if d.get("circle") else 0.5)
         elif d["type"] == "line":
             pts = d["pts"][:2]
         else:
