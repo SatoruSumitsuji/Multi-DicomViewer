@@ -5181,20 +5181,26 @@ class CTViewer(CPRMixin, AbstractViewer):
                                    ca0["pts"][2], ca0["pts"][1])
                 if len(arc) >= 2:
                     arc_lines.append(arc)
+            # MV/AoV valve rings are LOCKED: they need no editing, so draw the
+            # outline ONLY — no vertex handles, no long/short-diameter lines and
+            # no id label (they'd read as editable). To change a valve, redraw an
+            # Ellipse and press MV/AoV plane again, then Save.
+            is_valve = bool(m.get("_lv_valve"))
             # Off-plane point dots: a trace vertex > 1 mm off this plane is
             # drawn faint (50%) via the separate off-plane points actor.
-            for vi, q in enumerate(self._handles(m)):
-                if mi == edit_mi and not edit_ca and vi == edit_vi:
-                    edit_pts.append(q)
-                elif not hov_ca and mi == hov_mi and vi == hov_vi:
-                    edit_pts.append(q)            # hovered → green
-                elif (off_flag is not None and vi < len(off_flag)
-                      and off_flag[vi]):
-                    off_pts.append(q)
-                else:
-                    handles.append(q)
-            labels.append((str(m["id"]), self._anchor(m)))
-            if m["type"] in ("ellipse", "polygon"):
+            if not is_valve:
+                for vi, q in enumerate(self._handles(m)):
+                    if mi == edit_mi and not edit_ca and vi == edit_vi:
+                        edit_pts.append(q)
+                    elif not hov_ca and mi == hov_mi and vi == hov_vi:
+                        edit_pts.append(q)            # hovered → green
+                    elif (off_flag is not None and vi < len(off_flag)
+                          and off_flag[vi]):
+                        off_pts.append(q)
+                    else:
+                        handles.append(q)
+                labels.append((str(m["id"]), self._anchor(m)))
+            if m["type"] in ("ellipse", "polygon") and not is_valve:
                 maj, mnr, _, _ = self._major_minor(m)
                 # Long/short-diameter lines wear the polygon-vertex colour
                 # (yellow) so they read as part of the shape.
@@ -5346,7 +5352,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Skip HIDDEN measures — their handles aren't drawn, so picking one
             # would grab an invisible point (another pass/plane's border
             # reprojected here) and shadow the visible point you meant to edit.
-            if self._results_hidden or m.get("hidden"):
+            # MV/AoV valve rings are LOCKED (no handles drawn) → never pickable.
+            if self._results_hidden or m.get("hidden") or m.get("_lv_valve"):
                 continue
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_qt(which, q[0], q[1])
@@ -5427,7 +5434,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv_t = self._lv.get("target") if self._lv is not None else None
         best, bi = tol, None
         for mi, m in enumerate(self._measures[which]):
-            if m.get("hidden"):
+            if m.get("hidden") or m.get("_lv_valve"):    # locked valve ring
                 continue
             if lv_t in ("endo", "epi"):
                 tag = m.get("_lv")
