@@ -464,6 +464,51 @@ class LVSurface:
         count = int(np.count_nonzero(inside))
         return count * (spacing ** 3) / 1000.0
 
+    def inside_mask_bbox(self, spacing_xyz, shape, planes, apex_xyz,
+                         pad_mm: float = 2.0):
+        """Boolean mask of the voxels this surface ENCLOSES on the native
+        (anisotropic) DICOM grid — extended basally and cut by the valve *planes*
+        (apex side), i.e. exactly the region voxel_volume_ml_valves counts. For
+        the red 'measured region' overlay (mirrors the blood-pool mask).
+
+        *spacing_xyz* (sx, sy, sz) mm; *shape* (nz, ny, nx). A world voxel centre
+        (x, y, z) maps to index (x/sx, y/sy, z/sz). Returns (comp[dz,dy,dx] bool,
+        (z0, z1, y0, y1, x0, x1)) over a tight sub-box, or (None, None) if empty.
+        """
+        sx, sy, sz = spacing_xyz
+        nz, ny, nx = shape
+        planes = [(np.asarray(c, float), np.asarray(n, float))
+                  for (c, n) in (planes or [])]
+        apex = np.asarray(apex_xyz, float)
+        refs = [self._all_ring_points()]
+        if planes:
+            refs.append(np.array([c for (c, _n) in planes]))
+        allp = np.vstack(refs)
+        lo = allp.min(axis=0) - pad_mm
+        hi = allp.max(axis=0) + pad_mm
+        x0 = max(0, int(np.floor(lo[0] / sx)))
+        x1 = min(nx, int(np.ceil(hi[0] / sx)) + 1)
+        y0 = max(0, int(np.floor(lo[1] / sy)))
+        y1 = min(ny, int(np.ceil(hi[1] / sy)) + 1)
+        z0 = max(0, int(np.floor(lo[2] / sz)))
+        z1 = min(nz, int(np.ceil(hi[2] / sz)) + 1)
+        if x1 <= x0 or y1 <= y0 or z1 <= z0:
+            return None, None
+        zz, yy, xx = np.meshgrid(np.arange(z0, z1), np.arange(y0, y1),
+                                 np.arange(x0, x1), indexing="ij")
+        pts = np.column_stack([xx.ravel() * sx, yy.ravel() * sy,
+                               zz.ravel() * sz])
+        inside = self.contains(pts, extend_base=True)
+        for (c, nrm) in planes:                        # keep the apex side
+            n = nrm / (np.linalg.norm(nrm) or 1.0)
+            if float(np.dot(apex - c, n)) < 0.0:
+                n = -n
+            inside &= ((pts - c) @ n >= 0.0)
+        comp = inside.reshape(z1 - z0, y1 - y0, x1 - x0)
+        if not comp.any():
+            return None, None
+        return comp, (z0, z1, y0, y1, x0, x1)
+
     def contains(self, pts, extend_base: bool = False) -> np.ndarray:
         """Boolean mask (N,) — which world points (N,3) fall inside the closed
         surface (per-axial-level point-in-polygon, concave-safe). Same test as

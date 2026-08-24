@@ -2813,6 +2813,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv.pop("up_sign", None)                  # re-derived at the next Set axis
         self._lv_dirty = False
         self._lv_result_lines = []
+        self._lv_clear_measured_mask()           # drop this pass's red region
         if getattr(self, "_lv_sax_btn", None) is not None:
             self._lv_sax_btn.setChecked(False)
         self._lv_apply_target(None)
@@ -6053,8 +6054,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             lv["vol_epi_ml"] = None
             lv["vol_myo_ml"] = None
             self._lv_result_lines = []
+            self._lv_clear_measured_mask()       # stale red region → clear it
             self._lv_sync_buttons()
             self._lv_update_text()
+
+    def _lv_clear_measured_mask(self) -> None:
+        """Hide + drop the red measured-region overlay (Endo/Epi Calc Vol)."""
+        if getattr(self, "_lvv_mask_vol", None) is None:
+            return
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
+        for k in ("A", "B"):
+            self.pane[k].reslice_mask.SetInputData(_placeholder_image())
+            self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(False))
+            self.pane[k].colors_mask.Modified()
+            self.pane[k].render()
 
     def _lv_live_recapture(self, key, m) -> None:
         """If *m* is an LV endo/epi border being edited on the long-axis pane
@@ -8014,6 +8028,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         planes = [(v[0], v[1]) for v in (self._lv_valves.get("aortic"),
                                          self._lv_valves.get("mitral"))
                   if v is not None]
+        dims = self._dims
+        shape = self._vol.shape
 
         result: dict = {}
 
@@ -8023,6 +8039,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     m.build()
                     result["vol"] = (m.volume_ml_valves(spacing, pas, planes)
                                      if planes else m.volume_ml(spacing, pas))
+                    # The measured region as a native-grid 0/1 mask (bbox) for the
+                    # red overlay — the SAME region the volume counts.
+                    result["mask"] = m.inside_mask(dims, shape, pas, planes)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
@@ -8065,8 +8084,28 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv["vol_endo_ml"] = float(vol_ml)
         else:
             self._lv["vol_epi_ml"] = float(vol_ml)
+        # Paint the measured region RED on both panes — same overlay channel as
+        # the Blood volume (a native-grid 0/1 mask resliced onto each plane).
+        self._lv_show_measured_mask(result.get("mask"))
         self._lv_sync_buttons()
         self._lv_update_text()
+
+    def _lv_show_measured_mask(self, mask) -> None:
+        """Show the Endo/Epi measured region as the red overlay (reuses the
+        blood-pool mask channel). *mask* = (comp bool[dz,dy,dx], bbox) or None."""
+        if not mask or mask[0] is None:
+            return
+        comp, bbox = mask
+        z0, z1, y0, y1, x0, x1 = bbox
+        full = np.zeros(self._vol.shape, np.float32)
+        full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
+        sx, sy, sz = self._dims
+        self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
+        for k in ("A", "B"):
+            self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
+        self._lvv_mask_on = True
+        self._refresh()                                  # reslice the mask now
+        self._lvv_update_mask()
 
     # ---- wall-thickness colour map (short axis) ----
     def _lv_toggle_wall(self) -> None:
@@ -8538,6 +8577,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if m.get("_lv") is None]
         self._lv = None
         self._lv_result_lines = []
+        self._lv_clear_measured_mask()          # drop the red measured region
         self._lv_wall = False
         self._lv_wall_btn.setChecked(False)
         self._lv_sax_btn.setChecked(False)  # leave short-axis display
