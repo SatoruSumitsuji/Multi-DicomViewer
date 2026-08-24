@@ -3335,38 +3335,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                     t("Draw an Ellipse on the {v} annulus (Measure→Ellipse), "
                       "then press {v} plane again.").format(v=vname))
             return
-        # A fresh ellipse → (re)capture this valve; make it shown.
+        # A fresh ellipse → capture this valve as a TRUE CIRCLE (正円). The
+        # annulus plane is defined by its centre, the pane normal and one radius;
+        # a circle (not the free-hand ellipse) is stored and drawn, so any plane
+        # obliqueness shows up as foreshortening — a circle read face-on stays
+        # round, but an oblique view flattens it to an obvious ellipse.
         self._lv_valve_shown[which] = True
-        # Drop any previous ellipse for this valve so only the newest remains.
-        for k in ("A", "B"):
-            self._measures[k] = [mm for mm in self._measures.get(k, [])
-                                 if mm.get("_lv_valve") != which]
         cx, cy = self._shape_center(m)
         center = np.asarray(self._out_to_world3d(key, cx, cy), float)
         _u, _v, n = self._axes_for(key)
         _ecx, _ecy, ea, eb = self._ellipse_cab(m)
-        radius = float(max(ea, eb))
+        radius = float(max(ea, eb))             # semi-major → un-foreshortened
         self._lv_valves[which] = (center, np.asarray(n, float), radius)
-        color = "#ffd24d" if which == "aortic" else "#4dd0ff"
-        m["color"] = color
-        m["_lv_valve"] = which
-        # Anchor the ellipse to its 3-D anatomical position (re-projects as the
-        # view moves) and draw it at 50% so it doesn't dominate the image.
-        pts3d = [self._out_to_world3d(key, wx, wy) for (wx, wy) in m["pts"]]
-        m["pts3d"] = pts3d
-        m["transp"] = 50
-        # Also show the valve on the OTHER pane (its plane projected there), so it
-        # appears on both panes regardless of which one it was drawn on. A mirror
-        # copy with the SAME 3-D anchor, re-projected onto that pane.
-        other = "B" if key == "A" else "A"
-        self._meas_seq += 1
-        self._measures[other].append({
-            "id": self._meas_seq, "type": "ellipse",
-            "pts": [self._world3d_to_out(other, P) for P in pts3d],
-            "pts3d": list(pts3d), "color": color, "_lv_valve": which,
-            "transp": 50})
-        self._redraw_meas(key)
-        self._redraw_meas(other)
+        # Drop the just-drawn free-hand ellipse and any previous ring for this
+        # valve; the circle is (re)built from the stored geometry on both panes.
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm is not m and mm.get("_lv_valve") != which]
+        self._lv_valve_show_from_geom(which)    # true circle, both panes, 50%
         if self._meas_on:                       # so the next click doesn't draw
             self._meas_btn.setChecked(False)
             self._toggle_measure()
