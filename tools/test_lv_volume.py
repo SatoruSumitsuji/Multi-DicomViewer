@@ -222,4 +222,18 @@ assert abs(V_flip - V_clip) < 1e-9, "valve normal sign changed the result"
 # no planes → identical to the plain volume
 assert abs(surfH.voxel_volume_ml_valves(0.5, [], [0, 0, 0]) - V_full) < 1e-9
 
+# ---- H2: native-grid measured MASK matches the valve-clipped volume --------
+# Same shape placed fully in POSITIVE coords (native voxel indices are >= 0).
+axM = LVAxis.from_points([45, 30, 80], [15, 30, 80], [30, 30, 0])
+surfM = LVSurface.from_meridian_contours(axM, _ellipsoid_contours(axM, 20.0, 20.0))
+c_vM = np.array([30.0, 30.0, 60.0])
+n_vM = np.array([0.0, 0.0, 1.0])
+V_clipM = surfM.voxel_volume_ml_valves(0.5, [(c_vM, n_vM)], apex_xyz=[30, 30, 0])
+comp, bbox = surfM.inside_mask_bbox(
+    (0.5, 0.5, 0.5), (180, 130, 130), [(c_vM, n_vM)], apex_xyz=[30, 30, 0])
+assert comp is not None, "mask came back empty"
+mask_ml = int(comp.sum()) * (0.5 ** 3) / 1000.0
+print("H2) native-grid measured mask (red overlay):")
+_check("mask volume", mask_ml, V_clipM, 0.05)
+
 print("\nALL PASS")

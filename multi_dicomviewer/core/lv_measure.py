@@ -710,6 +710,19 @@ class LVModel:
             apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
         return surf.voxel_volume_ml_valves(spacing, planes, apex)
 
+    def inside_mask(self, spacing_xyz, shape, which: str, planes):
+        """Boolean voxel mask (comp, bbox) of the Endo/Epi region measured by
+        volume_ml_valves, on the native DICOM grid — for the red overlay. Cut by
+        the valve *planes* = iterable of (center, normal). (None, None) if not
+        built or empty."""
+        surf = self.endo if which == "endo" else self.epi
+        if surf is None:
+            return None, None
+        apex = getattr(surf, "apex_world", None)
+        if apex is None:
+            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
+        return surf.inside_mask_bbox(spacing_xyz, shape, planes, apex)
+
     def myocardial_volume_ml(self, spacing: float) -> float | None:
         """Myocardial volume = epi − endo (mL), or None if either is missing."""
         if self.endo is None or self.epi is None:
