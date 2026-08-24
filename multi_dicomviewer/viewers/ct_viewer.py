@@ -2892,12 +2892,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         g = (lambda k: on and self._lvv.get(k) is not None)
         apex_done, aov_done = g("apex"), g("aortic")
         mv_done, roi_done = g("mitral"), g("seed")
+        # The COMMON MV/AoV planes (set once at the top of LV mode) are what Blood
+        # measures against, so its OWN MV/AoV capture steps are redundant when they
+        # are set — HIDE them and let ROI follow the Apex directly. Only when no
+        # common valves exist does Blood fall back to capturing its own.
+        common_valves = self._lv_valves_ready()
+        self._lvv_mv_btn.setVisible(on and not common_valves)
+        self._lvv_aov_btn.setVisible(on and not common_valves)
         # Wizard: enable only the next step (previous steps stay live for redo).
-        # Order: Apex → MV → AoV → 内腔ROI.
+        # Order: Apex → [MV → AoV] → 内腔ROI (the valve steps drop out when the
+        # common planes are already set).
+        valves_ok = common_valves or aov_done
         self._lvv_apex_btn.setEnabled(on)
         self._lvv_mv_btn.setEnabled(on and apex_done)
         self._lvv_aov_btn.setEnabled(on and mv_done)
-        self._lvv_thr_btn.setEnabled(on and aov_done)
+        self._lvv_thr_btn.setEnabled(on and apex_done and valves_ok)
         self._lvv_calc_btn.setEnabled(on and roi_done)
         self._lvv_save_btn.setEnabled(on and roi_done)
         self._lvv_load_btn.setEnabled(self._image is not None)
