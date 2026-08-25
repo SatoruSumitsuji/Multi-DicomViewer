@@ -6302,7 +6302,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return None
             mv = _trilinear_sample(self._lvv_mask_vol, vx, vy, vz)
             inmask = (mv >= 0.5) & ~oob
-            col = (255, 64, 64, 205)           # red (1,0.25,0.25,~0.8)
+            col = (255, 64, 64, 128)           # red (1,0.25,0.25) at 50% opacity
         if not inmask.any():
             return None
         rgba = np.zeros((ih, iw, 4), np.uint8)
