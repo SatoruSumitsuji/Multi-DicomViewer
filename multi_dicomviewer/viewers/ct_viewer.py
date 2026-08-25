@@ -7805,17 +7805,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                 maxs.append(float(a.max()))
         if not mins:
             return None
-        lo, hi = min(mins), min(maxs)     # apex = deepest, base = common
-        # Let the level scroll all the way to the DRAWN base-cut line even when
-        # the shortest meridian of the shown store stops a touch short of it
-        # (reported on Mac: SAX scroll halted just before the base cut). The cut
-        # line is at along_range(endo|epi)[1] — which may use the OTHER border
-        # than the one shown in SAX, so its base can sit beyond this store's
-        # common base. Extend hi to reach it; never shrink below the common base.
+        # apex = the most-apical traced point (min of minima); base = the most-
+        # BASAL traced point (max of maxima) so the level scrolls over the FULL
+        # drawn span. Using the COMMON base (min of maxima) stopped the scroll at
+        # the shortest of the 6 meridians — reported as "the level halts partway
+        # toward the base". Beyond the common base only some meridians still
+        # cross (the SAX border draws partial), which is fine for scrolling.
+        lo, hi = min(mins), max(maxs)
         m = self._lv["model"]
         br = m.along_range("endo") or m.along_range("epi")
         if br is not None:
             hi = max(hi, float(br[1]))
+        # If the valve planes are set (Epi is valve-bounded), let the level reach
+        # them too, so it can scroll up to the anatomical base even if the trace
+        # stopped short of the annulus.
+        ax = self._lv_sax_axis()
+        if ax is not None:
+            for v in (self._lv_valves.get("aortic"),
+                      self._lv_valves.get("mitral")):
+                if v is not None:
+                    a_v = float(np.dot(np.asarray(v[0], float) - ax.apex,
+                                       ax.axis))
+                    hi = max(hi, a_v)
         return (lo, hi) if hi > lo else None
 
     def _lv_common_range(self):
