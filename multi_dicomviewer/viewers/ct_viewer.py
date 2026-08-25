@@ -2987,7 +2987,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         import json
         if self._image is None:
             return False
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load Epi data"), d,
             "Epi LV (*.EpiLv.json);;JSON (*.json)")
@@ -3510,7 +3510,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         flt = (("MV plane (*.MVLv.json)" if which == "mitral"
                 else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load valve plane"), d, flt)
         if not path:
@@ -3835,7 +3835,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         import json
         if self._image is None:
             return
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV Vol"), d,
             "Blood LV (*.BldLv.json);;JSON (*.json)")
@@ -8279,10 +8279,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ""
 
     def _lv_save_dir(self) -> str:
-        """Default folder for SAVE / EXPORT dialogs = the PARENT of the source-
-        data folder (one level ABOVE where the CT series was read), per user
-        preference. Falls back to the source folder if it has no parent. Load
-        dialogs keep _lv_series_dir (the source folder itself)."""
+        """Default folder for SAVE / EXPORT / LOAD dialogs = the PARENT of the
+        source-data folder (one level ABOVE where the CT series was read), per
+        user preference. Falls back to the source folder if it has no parent."""
         import os
         d = self._lv_series_dir()
         if not d:
@@ -8496,7 +8495,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._image is None:
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.window(), t("Load LV borders"), self._lv_series_dir(),
+            self.window(), t("Load LV borders"), self._lv_save_dir(),
             "LV border (*.EndoLv.json *.EpiLv.json);;JSON (*.json)")
         if not path:
             return
