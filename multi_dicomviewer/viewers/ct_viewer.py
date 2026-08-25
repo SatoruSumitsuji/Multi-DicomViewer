@@ -3433,8 +3433,36 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_toggle_valve_visibility(self, which) -> None:
         """Show/hide this valve's ellipse (button toggle once the plane is set),
         so MV/AoV can be hidden while tracing Endo/Epi. The valve plane geometry
-        is unaffected."""
+        is unaffected. RE-SHOWING the MV plane offers a MV-perpendicular view
+        (left pane = MV face-on circle, right pane = MV edge-on line) — the ideal
+        setup for tracing the border against the mitral-annulus base."""
         shown = not self._lv_valve_shown.get(which, True)
+        if (which == "mitral" and shown
+                and self._lv_valves.get("mitral") is not None):
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("MV plane"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Show the MV plane:"))
+            b_asis = box.addButton(t("As-is"),
+                                   QMessageBox.ButtonRole.AcceptRole)
+            b_perp = box.addButton(t("MV-perpendicular view"),
+                                   QMessageBox.ButtonRole.ActionRole)
+            b_cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_cancel or clicked is None:
+                return                              # keep it hidden
+            self._lv_valve_shown["mitral"] = True
+            for k in ("A", "B"):
+                for mm in self._measures.get(k, []):
+                    if mm.get("_lv_valve") == "mitral":
+                        mm["hidden"] = False
+                self._redraw_meas(k)
+            self._lv_update_valve_buttons()
+            if clicked is b_perp:
+                self._lv_view_mv_perpendicular()
+            return
         self._lv_valve_shown[which] = shown
         for k in ("A", "B"):
             for mm in self._measures.get(k, []):
@@ -3442,6 +3470,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                     mm["hidden"] = not shown
             self._redraw_meas(k)
         self._lv_update_valve_buttons()
+
+    def _lv_view_mv_perpendicular(self) -> None:
+        """Reorient both panes to view the MV plane perpendicular: the LEFT pane
+        (A) looks straight down the MV normal → the MV ring is a true CIRCLE
+        face-on; the RIGHT pane (B) contains the MV normal → the MV ring is a
+        straight LINE edge-on. Centres both panes on the MV centre. A viewing aid
+        for setting the Epi/Endo base against the mitral annulus."""
+        mv = self._lv_valves.get("mitral")
+        if mv is None or self._image is None:
+            return
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        # Two orthonormal in-plane axes (a, b) spanning the MV plane.
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(float(n[0])) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        a = np.cross(n, ref)
+        a = a / (np.linalg.norm(a) or 1.0)
+        b = np.cross(n, a)
+        # A: face-on (view along n) → circle. B: plane spanned by (a, n) contains
+        # n → the MV plane cuts it along 'a' → edge-on line; up = n.
+        self._frame["A"] = self._ortho(a, b)
+        self._frame["B"] = self._ortho(a, n)
+        self._pc["A"] = c.copy()
+        self._pc["B"] = c.copy()
+        self._center = c.copy()
+        self._cross_ang = {"A": 0.0, "B": 0.0}
+        self.set_side("Bi")
+        self._view_initial = True
+        self._refresh(reset_cam=True)
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lv_update_valve_buttons(self) -> None:
         """MV / AoV buttons: plain when unset; solid blue/amber when set AND
@@ -8043,6 +8103,47 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_show_plane()
         self._redraw_meas(pane)
 
+    def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0) -> bool:
+        """Move each traced long-axis plane's two BASAL end-points of the *pas*
+        border onto the common MV plane (orthogonal projection = drop a
+        perpendicular to the plane), so the border reaches the mitral-annulus
+        base exactly. Only ends within *guard_mm* of the plane snap (the apex end
+        is a whole LV away, so it's never caught). Edits are undoable and the
+        on-screen trace + model are updated. Returns True if anything moved."""
+        if self._lv is None:
+            return False
+        mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return False
+        m = self._lv["model"]
+        ax = m._axis_for(pas)
+        store = m.endo_planes if pas == "endo" else m.epi_planes
+        if ax is None or not store:
+            return False
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        before = self._lv_geom_snap()
+        moved = False
+        for phi, arr in list(store.items()):
+            P = np.asarray(arr, float).reshape(-1, 3).copy()
+            if len(P) < 2:
+                continue
+            hit = False
+            for e in (0, len(P) - 1):               # the two basal ends
+                d = float((P[e] - c) @ n)
+                if abs(d) <= guard_mm:
+                    P[e] = P[e] - d * n             # ⟂ projection onto the plane
+                    hit = True
+            if hit:
+                m.set_long_axis_contour(phi, P, which=pas)
+                moved = True
+        if moved:
+            self._lv_rebuild_measures()             # redraw the moved trace
+            self._lv_show_plane()
+            self._lv_record_geom(before)            # one Ctrl+Z step
+        return moved
+
     def _lv_compute_volume(self) -> None:
         """Build the endo/epi surfaces from the traced borders and report the LV
         cavity volume (voxels inside the endo surface) + myocardial mass.
@@ -8065,6 +8166,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         pas = self._lv.get("pass")
         if pas not in ("endo", "epi"):
             pas = "endo" if m.endo_planes else "epi"
+        # Snap each traced plane's two BASAL ends onto the common MV plane (the
+        # mitral-annulus base) so the border reaches the base EXACTLY even when a
+        # point was placed a touch short — no prism gap, base = MV plane.
+        self._lv_snap_base_to_mv(pas)
         planes = m.endo_planes if pas == "endo" else m.epi_planes
         if len(planes) < 3:
             QMessageBox.information(
