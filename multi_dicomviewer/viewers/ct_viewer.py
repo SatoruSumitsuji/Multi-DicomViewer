@@ -623,10 +623,10 @@ def _lvv_highlight_lut(lo: float, hi: float,
 
 
 def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
-                  alpha: float = 0.9) -> vtkLookupTable:
-    """LUT for the measured-region mask reslice: value 1 → red (when on), value
-    0 → transparent. Alpha is high and the colour saturated so the red clearly
-    DOMINATES the cyan blood tint below ('全面表示' — red on top)."""
+                  alpha: float = 0.5) -> vtkLookupTable:
+    """LUT for the measured-region mask reslice: value 1 → red at 50% opacity
+    (when on), value 0 → transparent. The half-transparent red marks the counted
+    region while still letting the CT underneath show through."""
     lut = vtkLookupTable()
     lut.SetNumberOfTableValues(2)
     lut.SetTableRange(0.0, 1.0)
