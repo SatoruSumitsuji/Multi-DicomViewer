@@ -29,6 +29,8 @@ point (x, y, z) maps to voxel index (x/sx, y/sy, z/sz) and the mask is indexed
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 
@@ -37,6 +39,80 @@ def _disk(radius_px: float) -> np.ndarray:
     r = int(max(1, round(radius_px)))
     y, x = np.ogrid[-r:r + 1, -r:r + 1]
     return (x * x + y * y) <= r * r
+
+
+def _envelope_radius(env: np.ndarray, ctr: int, dx: float, dy: float,
+                     grid_mm: float) -> float:
+    """Radius (mm) of the *env* boolean SAX grid along the ray (dx, dy) from the
+    centre pixel *ctr* — the OUTERMOST True along that direction (the envelope is
+    filled, so that is its boundary). env is indexed [row=v, col=u]; dx is the u
+    (column) step, dy the v (row) step. 0 if the ray hits nothing."""
+    npix = env.shape[0]
+    last = 0
+    s = 1
+    while True:
+        j = int(round(ctr + s * dx))
+        i = int(round(ctr + s * dy))
+        if not (0 <= i < npix and 0 <= j < npix):
+            break
+        if env[i, j]:
+            last = s
+        s += 1
+    return last * grid_mm
+
+
+def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
+                             n_meridians, along_apex, along_base,
+                             sax_step_mm=1.0, close_mm=4.0, half_mm=60.0,
+                             grid_mm=0.6):
+    """Per-meridian (along, radius) profiles of the ENDOCARDIAL ENVELOPE derived
+    from the blood pool — the compact-layer inner surface (papillary/trabeculae
+    INCLUDED in the cavity), ready to load as an editable Endo border.
+
+    For each short-axis level the blood is filled (enclosed papillary islands)
+    and closed (wall-attached notches) into the smooth envelope; its radial
+    extent is then measured along each of *n_meridians* directions (θ=0 along
+    *radial0*, matching LVModel's meridian convention).
+
+    Returns ``{theta_deg: np.ndarray[(along, radius), …]}`` for the meridian
+    angles ``i*360/n_meridians`` (only those with ≥2 samples), or
+    ``{'error': 'no_scipy'}`` if SciPy is unavailable.
+    """
+    try:
+        from scipy import ndimage
+    except Exception:                                   # noqa: BLE001
+        return {"error": "no_scipy"}
+
+    apex = np.asarray(apex_xyz, float)
+    n = np.asarray(axis_dir, float)
+    n = n / (np.linalg.norm(n) or 1.0)
+    u = np.asarray(radial0, float)
+    u = u - u.dot(n) * n
+    u = u / (np.linalg.norm(u) or 1.0)
+    v = np.cross(n, u)
+    se = _disk(close_mm / grid_mm)
+    thetas = [360.0 * i / n_meridians for i in range(int(n_meridians))]
+    rays = [(th, math.cos(math.radians(th)), math.sin(math.radians(th)))
+            for th in thetas]
+    out: dict = {th: [] for th in thetas}
+    slab = float(sax_step_mm)
+    t = float(along_apex)
+    while t <= float(along_base) + 1e-6:
+        centre = apex + t * n
+        g, _cell = _sample_on_plane(blood, spacing_xyz, centre, u, v,
+                                    half_mm, grid_mm)
+        if g.any():
+            env = ndimage.binary_fill_holes(g)
+            env = ndimage.binary_closing(env, structure=se)
+            env = ndimage.binary_fill_holes(env)
+            ctr = env.shape[0] // 2                      # (u,v)=(0,0) pixel
+            for th, dx, dy in rays:
+                r = _envelope_radius(env, ctr, dx, dy, grid_mm)
+                if r > 0.0:
+                    out[th].append((float(t), r))
+        t += slab
+    return {th: np.asarray(vals, float)
+            for th, vals in out.items() if len(vals) >= 2}
 
 
 def _sample_on_plane(blood, spacing_xyz, centre, u, v, half_mm, grid_mm):
