@@ -6726,7 +6726,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         import json
         if self._vol is None:
             return
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV Vol"), d,
             "LV Vol (*.lvvol.json);;JSON (*.json)")
@@ -8329,9 +8329,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ""
 
     def _lv_save_dir(self) -> str:
-        """Default folder for SAVE / EXPORT dialogs = the PARENT of the source-
-        data folder (one level ABOVE where the CT series was read). Load dialogs
-        keep _lv_series_dir (the source folder itself)."""
+        """Default folder for SAVE / EXPORT / LOAD dialogs = the PARENT of the
+        source-data folder (one level ABOVE where the CT series was read)."""
         import os
         d = self._lv_series_dir()
         if not d:
@@ -8501,7 +8500,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._vol is None:
             return
         path, _ = QFileDialog.getOpenFileName(
-            self.window(), t("Load LV borders"), self._lv_series_dir(),
+            self.window(), t("Load LV borders"), self._lv_save_dir(),
             "LV (*.lv.json *.lvef.json);;JSON (*.json)")
         if not path:
             return
