@@ -8186,9 +8186,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # aren't cut at wherever the trace happened to stop. Both valves are a
         # prerequisite of the sub-mode, so they are normally set; fall back to the
         # plain (trace-extent) volume if a plane is somehow missing.
-        planes = [(v[0], v[1]) for v in (self._lv_valves.get("aortic"),
-                                         self._lv_valves.get("mitral"))
-                  if v is not None]
+        av = self._lv_valves.get("aortic")
+        mv = self._lv_valves.get("mitral")
+        planes = [(v[0], v[1]) for v in (av, mv) if v is not None]
+        # MV-only set → measure how much the AoV plane removes (diagnostic), so
+        # the AoV's effect on this Epi/Endo volume is shown as an explicit number.
+        mv_only = [(mv[0], mv[1])] if mv is not None else []
         dims = self._dims
         shape = self._vol.shape
 
@@ -8203,6 +8206,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     # The measured region as a native-grid 0/1 mask (bbox) for the
                     # red overlay — the SAME region the volume counts.
                     result["mask"] = m.inside_mask(dims, shape, pas, planes)
+                    # AoV contribution: volume WITHOUT the AoV cut (MV-only) minus
+                    # the value above = how many mL the AoV plane trims.
+                    if av is not None and mv_only:
+                        result["vol_mv_only"] = m.volume_ml_valves(
+                            spacing, pas, mv_only)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
@@ -8238,7 +8246,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         # sub-mode: "Endo-LV Volume:" or "Epi-LV Volume:".
         label = (t("Endo-LV Volume: {v:.1f} mL") if pas == "endo"
                  else t("Epi-LV Volume: {v:.1f} mL"))
-        self._lv_result_lines = [label.format(v=vol_ml)]
+        lines = [label.format(v=vol_ml)]
+        # Diagnostic: how much the AoV plane trims from this volume (MV-only −
+        # both). Shows the AoV's exact effect; ~0 mL means AoV isn't clipping.
+        vmv = result.get("vol_mv_only")
+        if vmv is not None:
+            aov_cut = float(vmv) - float(vol_ml)
+            if abs(aov_cut) >= 0.1:
+                lines.append(t("  (AoV plane trims −{d:.1f} mL)").format(d=aov_cut))
+            else:
+                lines.append(t("  (AoV plane: no effect)"))
+        self._lv_result_lines = lines
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the number so Save can persist it and Load can redisplay.
         if pas == "endo":
