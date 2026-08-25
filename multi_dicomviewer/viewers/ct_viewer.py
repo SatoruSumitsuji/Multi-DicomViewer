@@ -9681,14 +9681,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         return hu, hv
 
     def _lv_cross_suppressed(self) -> bool:
-        """The global CrossLine is hidden + non-interactive once the LV long axis
-        is Set (phase ready/contour = Trace / SAX editing): the plane is then
-        pinned to the LV axis and driven only by ◀▶ / the SAX handles, so the
-        crosshair is neither used nor referenced and could only corrupt a trace.
-        It returns automatically in ALIGN (Set-axis undo, sub-mode deactivate) or
-        outside LV (Exit) — all of which leave this phase."""
+        """The global CrossLine is hidden + non-interactive once TRACING begins
+        (phase 'contour' = Trace / SAX editing): the plane is then driven only by
+        ◀▶ / the SAX handles, so the crosshair is neither used nor referenced and
+        could only corrupt a trace. It stays ACTIVE through 'align' AND 'ready'
+        (after Set axis, before Trace) so the view can still be adjusted, and
+        returns automatically on Trace undo, sub-mode deactivate or Exit."""
         return (self._lv is not None
-                and self._lv.get("phase") in ("ready", "contour"))
+                and self._lv.get("phase") == "contour")
 
     def _update_cross(self, key):
         """Crosshair at world (0,0) — the projected CrossLine center,
@@ -9699,9 +9699,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         slab-MIP, the two dashed slab-width lines — all rotating with
         the crosshair."""
         p = self.pane[key]
-        # LV Trace / SAX: hide the crosshair overlay and skip drawing it (so it
-        # can't be grabbed). Self-correcting: when the phase leaves ready/contour
-        # (→ align / Exit) the overlay is restored to the CenterLine button.
+        # LV Trace / SAX (phase 'contour'): hide the crosshair overlay and skip
+        # drawing it (so it can't be grabbed). Self-correcting: when the phase
+        # leaves 'contour' (→ align / ready / Exit) the overlay is restored to the
+        # CenterLine button. Stays visible through align AND ready (Set axis done,
+        # before Trace) so the view can still be adjusted.
         if self._lv_cross_suppressed():
             p.set_overlay_visible(False)
             return
