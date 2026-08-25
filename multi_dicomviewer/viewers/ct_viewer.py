@@ -2103,6 +2103,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_blood_comp = None      # last Blood mask (bbox sub-volume, bool)
         self._lvv_blood_bbox = None      # its (z0,z1,y0,y1,x0,x1) in the volume
+        self._lvv_blood_apex = None      # apex used for that Blood measure
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2543,15 +2544,6 @@ class CTViewer(CPRMixin, AbstractViewer):
               "first if none is in memory"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
         gb.addWidget(self._lvv_epi_btn)
-        # 自動Endo作成: derive the endocardial envelope (compact-layer inner
-        # surface, papillary-included) from the measured blood pool, then open it
-        # as an editable Endo border.
-        self._lvv_auto_endo_btn = FitButton(t("自動Endo作成"))
-        self._lvv_auto_endo_btn.setHelpToolTip(
-            t("Derive an Endo border from the measured blood region (papillary/"
-              "trabeculae filled) and open it in the Endo sub-mode for editing"))
-        self._lvv_auto_endo_btn.clicked.connect(self._lvv_auto_endo)
-        gb.addWidget(self._lvv_auto_endo_btn)
         row1.addWidget(self._lv_grp_blood)
         row1.addStretch(1)
 
@@ -2776,6 +2768,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Switch to a DIFFERENT sub-mode. The current one is already inactive
         # (deactivated by its own 2nd click, warned there), so no warning here —
         # just start the new one. Any stray leftover is cleared without a prompt.
+        # Endo: a FRESH entry goes through the gate (require MV/AoV/Epi/Blood)
+        # and the Auto / Manual / Cancel choice; resuming an already-traced Endo
+        # enters directly for editing.
+        if sm == "endo":
+            has_endo = (self._lv is not None
+                        and len(self._lv["model"].endo_contours) >= 3)
+            if not has_endo:
+                if self._lv_endo_entry():             # gate + auto/manual entry
+                    self._lv_update_submode_ui()
+                return                                # blocked/cancelled → stay
         if sm in ("endo", "epi"):
             if self._lvv is not None:                 # (defensive) leftover Blood
                 self._lvv_clear_markers()
@@ -2943,10 +2945,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thr_btn.setEnabled(on and apex_done and valves_ok)
         self._lvv_calc_btn.setEnabled(on and roi_done)
         self._lvv_save_btn.setEnabled(on and roi_done)
-        # 自動Endo作成: needs a measured blood mask (from LV Vol計測).
-        if getattr(self, "_lvv_auto_endo_btn", None) is not None:
-            self._lvv_auto_endo_btn.setEnabled(
-                on and self._lvv_blood_comp is not None)
         self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
 
@@ -3673,30 +3671,65 @@ class CTViewer(CPRMixin, AbstractViewer):
                 t("Aortic plane captured. Draw a Polygon inside the LV cavity "
                   "(Measure→Polygon), then press the 内腔ROI button."))
 
-    def _lvv_auto_endo(self, *args) -> None:
-        """Derive an editable Endo border from the measured blood pool: the
-        compact-layer inner surface (papillary/trabeculae filled) per meridian,
-        opened in the Endo sub-mode for editing + Calc Vol. Needs a Blood measure
-        (mask), the Epi surface (axis), the apex and the MV plane (base)."""
+    def _lv_endo_entry(self) -> bool:
+        """Endo sub-mode entry gate. Require MV / AoV / Epi / Blood to all be
+        ready (else name what's missing and block). When ready, offer Auto (build
+        from the blood pool) / Manual (trace) / Cancel. Returns True if Endo was
+        entered, False if blocked or cancelled."""
+        from PyQt6.QtWidgets import QMessageBox
+        missing = []
+        if self._lv_valves.get("mitral") is None:
+            missing.append(t("MV plane"))
+        if self._lv_valves.get("aortic") is None:
+            missing.append(t("AoV plane"))
+        if getattr(self, "_lvv_epi_surf", None) is None:
+            missing.append(t("Epi data"))
+        if getattr(self, "_lvv_blood_comp", None) is None:
+            missing.append(t("Blood data"))
+        if missing:
+            QMessageBox.information(
+                self.window(), t("Endo"),
+                t("Endo needs MV, AoV, Epi and Blood. Missing: {m}. Set/measure "
+                  "them first, then enter Endo.").format(m=", ".join(missing)))
+            return False
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Endo"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("Create the Endo border:"))
+        b_auto = box.addButton(t("Auto (from Blood)"),
+                               QMessageBox.ButtonRole.AcceptRole)
+        b_manual = box.addButton(t("Manual"),
+                                 QMessageBox.ButtonRole.ActionRole)
+        b_cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is b_auto:
+            return self._lv_auto_endo_from_blood()
+        if clicked is b_manual:
+            self._lv_select_pass("endo")
+            return True
+        return False                                   # Cancel / closed
+
+    def _lv_auto_endo_from_blood(self) -> bool:
+        """Build an editable Endo border from the retained blood pool: the
+        compact-layer envelope (papillary/trabeculae filled), sampled at 7 along-
+        levels per wall — apex, ⅛, ¼, ½, ¾, ⅞, base — so each long-axis plane has
+        13 edit handles (the apex is shared). Opens it in the Endo sub-mode.
+        Returns True on success."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         from multi_dicomviewer.core.lv_measure import LVModel
         from multi_dicomviewer.core.lv_compact import endo_contours_from_blood
-        lvv = self._lvv
-        if (lvv is None or self._vol is None or self._lvv_blood_comp is None
-                or self._lvv_blood_bbox is None):
-            QMessageBox.information(
-                self.window(), t("LV"),
-                t("Measure the Blood region first — 自動Endo needs a blood mask."))
-            return
         epi = getattr(self, "_lvv_epi_surf", None)
-        apex = lvv.get("apex")
-        mv = self._lv_valves.get("mitral") or lvv.get("mitral")
-        if epi is None or apex is None or mv is None:
+        apex = getattr(self, "_lvv_blood_apex", None)
+        mv = self._lv_valves.get("mitral")
+        if (self._vol is None or self._lvv_blood_comp is None
+                or self._lvv_blood_bbox is None or epi is None
+                or apex is None or mv is None):
             QMessageBox.information(
                 self.window(), t("LV"),
-                t("Need the Epi surface, apex and MV plane before 自動Endo."))
-            return
+                t("自動Endo needs Blood, Epi, apex and the MV plane."))
+            return False
         ax = epi.axis
         apex = np.asarray(apex, float)
         axis_dir = np.asarray(ax.axis, float)
@@ -3708,8 +3741,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(
                 self.window(), t("LV"),
                 t("The MV plane is not basal to the apex — re-check apex / MV."))
-            return
-        # Reconstruct the blood bool volume from the stored bbox sub-volume.
+            return False
         z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
@@ -3721,14 +3753,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 try:
                     result["prof"] = endo_contours_from_blood(
                         blood, dims, apex, axis_dir, radial0, 2 * n_planes,
-                        along_apex=2.0, along_base=along_base - 1.0,
-                        sax_step_mm=1.5, close_mm=5.0, half_mm=70.0, grid_mm=0.8)
+                        along_apex=1.0, along_base=along_base - 0.5,
+                        sax_step_mm=1.0, close_mm=5.0, half_mm=70.0, grid_mm=0.8)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
         dlg = QProgressDialog(t("Deriving Endo from blood…"), "", 0, 0,
                               self.window())
-        dlg.setWindowTitle(t("自動Endo作成"))
+        dlg.setWindowTitle(t("Endo (Auto)"))
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
@@ -3747,8 +3779,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("LV"),
                 t("Could not derive Endo from the blood pool: {e}").format(
                     e=result.get("err") or (prof or {}).get("error", "empty")))
-            return
-        # Build an Endo-only model on the Epi axis, then open it for editing.
+            return False
+        # 7 along-levels per wall (fractions of apex→base); the apex is shared, so
+        # 6 non-apex per wall + 1 apex = 13 handles per plane.
+        fracs = [0.125, 0.25, 0.5, 0.75, 0.875, 1.0]
+        levels = [f * along_base for f in fracs]
+
+        def _r_at(prof_theta, al):
+            return float(np.interp(al, prof_theta[:, 0], prof_theta[:, 1]))
+
         model = LVModel(n_planes=n_planes)
         model.set_axis_from_frame(apex, axis_dir, radial0, which="endo")
         axm = model._axis_for("endo")
@@ -3759,10 +3798,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             pp, pn = prof.get(pos), prof.get(neg)
             if pp is None or pn is None or len(pp) < 2 or len(pn) < 2:
                 continue
-            pts = [axm.to_world(neg, float(r), float(al))
-                   for al, r in sorted(pn.tolist(), key=lambda x: -x[0])]
-            pts += [axm.to_world(pos, float(r), float(al))
-                    for al, r in sorted(pp.tolist(), key=lambda x: x[0])]
+            pts = [axm.to_world(neg, _r_at(pn, L), L)
+                   for L in reversed(levels)]         # base → just above apex
+            pts.append(tuple(map(float, apex)))       # shared apex
+            pts += [axm.to_world(pos, _r_at(pp, L), L)
+                    for L in levels]                  # just above apex → base
             model.set_long_axis_contour(phi, np.asarray(pts, float), which="endo")
             built += 1
         if built < 3:
@@ -3770,13 +3810,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("LV"),
                 t("Too few meridians recovered from the blood pool ({n}). Re-check "
                   "the blood measure / thresholds.").format(n=built))
-            return
+            return False
         model.set_apex_point("endo", apex)
-        self._lv_apply_model(model)          # leaves Blood, opens Endo for editing
+        self._lv_apply_model(model)          # opens Endo for editing (13 handles)
         QMessageBox.information(
             self.window(), t("LV"),
             t("Auto-Endo created from the blood pool on {n} planes (papillary "
-              "filled). Edit as needed, then Calc Vol.").format(n=built))
+              "filled; 13 handles/plane). Edit as needed, then Calc Vol.").format(
+                  n=built))
+        return True
 
     def _lvv_calc(self, then=None) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -3898,10 +3940,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 z0, z1, y0, y1, x0, x1 = res["bbox"]
                 full = np.zeros(self._vol.shape, np.float32)
                 full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
-                # Keep the blood mask (bbox sub-volume) so 自動Endo作成 can derive
-                # the endocardial envelope from it without re-measuring.
+                # Keep the blood mask (bbox sub-volume) + apex so 自動Endo can
+                # derive the endocardial envelope later (even after leaving Blood).
                 self._lvv_blood_comp = np.asarray(comp, bool)
                 self._lvv_blood_bbox = tuple(res["bbox"])
+                if lvv.get("apex") is not None:
+                    self._lvv_blood_apex = np.asarray(lvv["apex"], float)
                 sx, sy, sz = self._dims
                 self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
                 self._lvv_mask_alpha = 0.8            # Blood red = 20% transparent
@@ -4108,10 +4152,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  traceback.format_exc() or repr(exc))
 
     def _lvv_clear_markers(self) -> None:
+        # NOTE: the retained blood mask (_lvv_blood_comp) is intentionally NOT
+        # dropped here — it must survive leaving Blood so 自動Endo can use it when
+        # the user later enters the Endo sub-mode. It is cleared on a new series.
         self._lvv_mask_vol = None
         self._lvv_mask_on = False
-        self._lvv_blood_comp = None       # drop the retained blood mask too
-        self._lvv_blood_bbox = None
         self._lvv_epi_show = False
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
@@ -6961,6 +7006,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi
         self._lvv_epi_model_dict = None
+        self._lvv_blood_comp = None              # and its blood mask
+        self._lvv_blood_bbox = None
+        self._lvv_blood_apex = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
@@ -7044,6 +7092,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi
         self._lvv_epi_model_dict = None
+        self._lvv_blood_comp = None              # and its blood mask
+        self._lvv_blood_bbox = None
+        self._lvv_blood_apex = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
