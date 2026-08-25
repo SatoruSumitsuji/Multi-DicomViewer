@@ -2100,6 +2100,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
         self._lvv_mask_on = False        # red measured-region overlay visible
+        self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -3215,11 +3216,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             btn.setStyleSheet(self._BTN_DIS)
 
     def _lvv_update_mask(self) -> None:
-        """Show/hide the measured-region (red) overlay on both panes."""
+        """Show/hide the measured-region (red) overlay on both panes. The opacity
+        depends on the source (set when the mask is built): Blood is more solid
+        (its cavity tint sits under it), the Epi/Endo contour region is lighter."""
         on = (self._lvv_mask_vol is not None
               and getattr(self, "_lvv_mask_on", False))
+        alpha = getattr(self, "_lvv_mask_alpha", 0.5)
         for k in ("A", "B"):
-            self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(on))
+            self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(on, alpha=alpha))
             self.pane[k].colors_mask.Modified()
             self.pane[k].render()
 
@@ -3776,6 +3780,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
                 sx, sy, sz = self._dims
                 self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
+                self._lvv_mask_alpha = 0.8            # Blood red = 20% transparent
                 for k in ("A", "B"):
                     self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
                 self._lvv_mask_on = True
@@ -8280,6 +8285,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
         sx, sy, sz = self._dims
         self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
+        self._lvv_mask_alpha = 0.5            # Epi/Endo red = 50% transparent
         for k in ("A", "B"):
             self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
         self._lvv_mask_on = True
