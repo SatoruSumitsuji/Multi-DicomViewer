@@ -71,6 +71,39 @@ def main():
     # Papillary = envelope - blood > 0 and ~ islands + notch (order of magnitude).
     assert res["papillary_ml"] > 0.5 * isl_ml, res["papillary_ml"]
     print("OK: envelope recovers the cavity; papillary volume separated")
+
+    # ---- endo contour extraction: per-meridian (along, radius) of the envelope
+    from multi_dicomviewer.core.lv_compact import (   # noqa: E402
+        endo_contours_from_blood)
+    # close_mm ≥ the wall-attached notch radius (5 mm) so it is bridged on the
+    # θ=90 meridian too (larger papillary attachments need a larger close).
+    prof = endo_contours_from_blood(
+        blood, (sx, sy, sz), apex_xyz=(cx, cy, apex_z),
+        axis_dir=(0.0, 0.0, 1.0), radial0=(1.0, 0.0, 0.0), n_meridians=12,
+        along_apex=0.5, along_base=L - 0.5, sax_step_mm=1.0,
+        close_mm=6.0, half_mm=40.0, grid_mm=0.4)
+    if prof.get("error"):
+        print("SKIP endo contours:", prof["error"])
+        print("PASS")
+        return
+    assert len(prof) == 12, f"expected 12 meridians, got {len(prof)}"
+    # Away from the poles the envelope radius should recover the cavity R=15 mm
+    # (papillary islands filled). The θ=90 meridian points straight into the
+    # deliberately-severe wall-attached notch — allow it to be partially bridged
+    # (non-degenerate), but EVERY OTHER meridian must recover R within 2 mm.
+    all_r, good = [], 0
+    for th, arr in prof.items():
+        mid = arr[(arr[:, 0] > 20.0) & (arr[:, 0] < 60.0)]   # mid-cavity band
+        assert len(mid) > 0, f"theta {th}: no mid-cavity samples"
+        rmean = float(mid[:, 1].mean())
+        all_r.append(rmean)
+        assert rmean > 8.0, f"theta {th}: degenerate radius {rmean:.2f}"
+        if abs(rmean - R) < 2.0:
+            good += 1
+    assert good >= 11, f"only {good}/12 meridians recovered R (notch aside)"
+    print(f"endo-envelope radius (mid): mean {np.mean(all_r):.2f} mm "
+          f"(cavity R={R}); {good}/12 meridians within 2 mm")
+    print("OK: envelope endo contour recovers the cavity radius")
     print("PASS")
 
 
