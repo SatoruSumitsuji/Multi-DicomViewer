@@ -3479,7 +3479,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "c": list(map(float, c)), "n": list(map(float, n)),
                 "r": float(r)}
         suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "valve")
         default = os.path.join(d, stem + suffix) if d else stem + suffix
@@ -3805,7 +3805,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         em = getattr(self, "_lvv_epi_model_dict", None)
         if isinstance(em, dict) and em.get("series"):
             data["epi_series"] = em.get("series")
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "BldLv")
@@ -8278,6 +8278,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return d
         return ""
 
+    def _lv_save_dir(self) -> str:
+        """Default folder for SAVE / EXPORT dialogs = the PARENT of the source-
+        data folder (one level ABOVE where the CT series was read), per user
+        preference. Falls back to the source folder if it has no parent. Load
+        dialogs keep _lv_series_dir (the source folder itself)."""
+        import os
+        d = self._lv_series_dir()
+        if not d:
+            return d
+        parent = os.path.dirname(d.rstrip("\\/"))
+        return parent if parent and os.path.isdir(parent) else d
+
     @staticmethod
     def _unlink_case_variant(path) -> None:
         """Remove any file in *path*'s folder whose name matches case-
@@ -8344,12 +8356,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                   "no surface to export yet."))
             return
         stem = self._lv_default_stem()
-        dlg = LVStlExportDialog(self._lv_series_dir(), stem,
+        dlg = LVStlExportDialog(self._lv_save_dir(), stem,
                                 endo is not None, epi is not None, self.window())
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         ch = dlg.choices()
-        outdir = dlg.out_dir() or self._lv_series_dir() or os.getcwd()
+        outdir = dlg.out_dir() or self._lv_save_dir() or os.getcwd()
         if not os.path.isdir(outdir):
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Output folder does not exist."))
@@ -8426,7 +8438,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             elif clicked is not b_no:
                 return                         # Cancel / closed → abort the save
         suffix = ".EndoLv.json" if pas == "endo" else ".EpiLv.json"
-        d = self._lv_series_dir()
+        d = self._lv_save_dir()
         fname = self._lv_default_stem() + suffix
         default = os.path.join(d, fname) if d else fname
         flt = (("Endo LV (*.EndoLv.json)" if pas == "endo"
@@ -9668,6 +9680,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                     hv = max(hv, abs(float(np.dot(p, v))))
         return hu, hv
 
+    def _lv_cross_suppressed(self) -> bool:
+        """The global CrossLine is hidden + non-interactive once the LV long axis
+        is Set (phase ready/contour = Trace / SAX editing): the plane is then
+        pinned to the LV axis and driven only by ◀▶ / the SAX handles, so the
+        crosshair is neither used nor referenced and could only corrupt a trace.
+        It returns automatically in ALIGN (Set-axis undo, sub-mode deactivate) or
+        outside LV (Exit) — all of which leave this phase."""
+        return (self._lv is not None
+                and self._lv.get("phase") in ("ready", "contour"))
+
     def _update_cross(self, key):
         """Crosshair at world (0,0) — the projected CrossLine center,
         kept at the pane middle by the symmetric FOV. While the user
@@ -9677,6 +9699,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         slab-MIP, the two dashed slab-width lines — all rotating with
         the crosshair."""
         p = self.pane[key]
+        # LV Trace / SAX: hide the crosshair overlay and skip drawing it (so it
+        # can't be grabbed). Self-correcting: when the phase leaves ready/contour
+        # (→ align / Exit) the overlay is restored to the CenterLine button.
+        if self._lv_cross_suppressed():
+            p.set_overlay_visible(False)
+            return
+        # Not suppressed → keep the overlay in step with the CenterLine button so
+        # the crosshair reappears the moment LV leaves Trace/SAX (→ align / Exit).
+        p.set_overlay_visible(self._cl_btn.isChecked())
         h = self._half
         zc = 0.5
         th = math.radians(self._cross_ang[key])
@@ -10824,6 +10855,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         lands on a crossline rotates/moves that line (and couples the other pane
         via the now-smooth _rotate_companion_by), while a press OFF the crosshair
         falls through to SPIN (whole-pane roll, other pane untouched)."""
+        if self._lv_cross_suppressed():           # crosshair hidden in Trace/SAX
+            return False
         caught, line, mode = self._cross_zone(which, sx, sy)
         if not caught:
             return False
@@ -10863,6 +10896,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         here would grab the centreline (vivid highlight + rotate arrow) or fall
         through to the active tool (normal crosshair)."""
         if self._cross_dragging is not None or self._image is None:
+            return
+        if self._lv_cross_suppressed():           # no crosshair to preview
+            self._set_cross_highlight(which, None, None)
             return
         caught, line, mode = self._cross_zone(which, sx, sy)
         if caught:

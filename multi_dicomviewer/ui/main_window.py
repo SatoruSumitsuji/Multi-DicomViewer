@@ -3794,13 +3794,15 @@ class MainWindow(QMainWindow):
             )
             return
 
-        # Default the picker to the folder the source file(s) live in, whatever
-        # the modality — so Export opens where the data already is.
+        # Default the picker to the PARENT of the folder the source file(s) live
+        # in (one level ABOVE the data folder), per user preference.
         start_dir = ""
         try:
             f0 = series_list[0].files[0] if series_list[0].files else ""
             if f0:
-                start_dir = os.path.dirname(os.path.abspath(f0))
+                src = os.path.dirname(os.path.abspath(f0))
+                parent = os.path.dirname(src.rstrip("\\/"))
+                start_dir = parent if parent and os.path.isdir(parent) else src
         except Exception:                                 # noqa: BLE001
             start_dir = ""
         out_dir = QFileDialog.getExistingDirectory(

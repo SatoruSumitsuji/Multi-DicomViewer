@@ -6697,7 +6697,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                           else float(lvv["last_ml"])),
             "epi_model": self._lvv_epi_model_dict,
         }
-        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "lvvol")
@@ -8328,6 +8328,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return d
         return ""
 
+    def _lv_save_dir(self) -> str:
+        """Default folder for SAVE / EXPORT dialogs = the PARENT of the source-
+        data folder (one level ABOVE where the CT series was read). Load dialogs
+        keep _lv_series_dir (the source folder itself)."""
+        import os
+        d = self._lv_series_dir()
+        if not d:
+            return d
+        parent = os.path.dirname(d.rstrip("\\/"))
+        return parent if parent and os.path.isdir(parent) else d
+
     def _lv_default_stem(self) -> str:
         """Series-named file stem, e.g. 'ARIFIN;20260629_Se006' — the base for
         the .lv.json and the exported _Endo/_Epi/_EndoEpi.stl filenames."""
@@ -8373,12 +8384,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                   "no surface to export yet."))
             return
         stem = self._lv_default_stem()
-        dlg = LVStlExportDialog(self._lv_series_dir(), stem,
+        dlg = LVStlExportDialog(self._lv_save_dir(), stem,
                                 endo is not None, epi is not None, self.window())
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         ch = dlg.choices()
-        outdir = dlg.out_dir() or self._lv_series_dir() or os.getcwd()
+        outdir = dlg.out_dir() or self._lv_save_dir() or os.getcwd()
         if not os.path.isdir(outdir):
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Output folder does not exist."))
@@ -8446,7 +8457,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_compute_volume()      # runs CalcVol (blocks on its dialog)
             elif clicked is not b_no:
                 return                         # Cancel / closed → abort the save
-        d = self._lv_series_dir()
+        d = self._lv_save_dir()
         default = os.path.join(d, self._lv_default_name()) if d \
             else self._lv_default_name()
         path, _ = QFileDialog.getSaveFileName(
