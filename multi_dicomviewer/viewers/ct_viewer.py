@@ -7449,7 +7449,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._update_cross(pane)
         # Keep the centreline (crosshair) but drop only the slab-width parallel
         # lines in LV trace mode.
-        self.pane[pane].set_overlay_visible(self._cl_btn.isChecked())
+        self.pane[pane].set_overlay_visible(self._cross_overlay_on())
         self.pane[pane].set_slab_visible(False)
         self.pane[pane].render()
         self._lv_update_text()
@@ -7586,7 +7586,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             la_cam.SetParallelScale(la_ps0)
             self._update_cross(la)
         for k in (la, sa):
-            self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[k].set_overlay_visible(self._cross_overlay_on())
             self.pane[k].set_slab_visible(False)
             self.pane[k].render()
 
@@ -7631,7 +7631,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh()                  # long-axis frame unchanged → image fixed
         for k in (lv["pane"], lv["sax_pane"]):
-            self.pane[k].set_overlay_visible(self._cl_btn.isChecked())
+            self.pane[k].set_overlay_visible(self._cross_overlay_on())
             self.pane[k].set_slab_visible(False)
             self.pane[k].render()
 
@@ -9681,14 +9681,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         return hu, hv
 
     def _lv_cross_suppressed(self) -> bool:
-        """The global CrossLine is hidden + non-interactive once TRACING begins
-        (phase 'contour' = Trace / SAX editing): the plane is then driven only by
-        ◀▶ / the SAX handles, so the crosshair is neither used nor referenced and
-        could only corrupt a trace. It stays ACTIVE through 'align' AND 'ready'
-        (after Set axis, before Trace) so the view can still be adjusted, and
-        returns automatically on Trace undo, sub-mode deactivate or Exit."""
-        return (self._lv is not None
-                and self._lv.get("phase") == "contour")
+        """The global CrossLine is hidden + non-interactive once the active pass's
+        APEX is placed (tracing has truly begun): from there the plane is driven
+        only by ◀▶ / the SAX handles and the crosshair could only corrupt a
+        trace. It stays ACTIVE through 'align', 'ready' (after Set axis) AND the
+        start of Trace up to the first apex click (which lands ON the crosshair),
+        and returns automatically on Trace/apex undo, sub-mode deactivate or
+        Exit. (_lv_active_apex already returns None unless phase == 'contour'.)"""
+        return self._lv_active_apex() is not None
+
+    def _cross_overlay_on(self) -> bool:
+        """Whether the crosshair overlay should be visible now: the CenterLine
+        button is ON and the LV crosshair is not suppressed. Used everywhere the
+        overlay is toggled so an LV SAX reslice can't re-show a suppressed
+        crosshair (the 'dragging the level/meridian line brings it back' bug)."""
+        return self._cl_btn.isChecked() and not self._lv_cross_suppressed()
 
     def _update_cross(self, key):
         """Crosshair at world (0,0) — the projected CrossLine center,
