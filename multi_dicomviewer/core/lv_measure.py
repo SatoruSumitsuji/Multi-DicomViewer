@@ -785,36 +785,37 @@ class LVModel:
 
     def volume_ml_valves(self, spacing: float, which: str, mv=None, aov=None
                          ) -> float | None:
-        """Endo/Epi volume (mL) integrated in slices PARALLEL to the MV plane, from
-        the apex up to the MV plane (the base) — so the base follows the mitral
-        annulus with no ⟂-axis-vs-tilted-plane mismatch. *mv*/*aov* are (center,
-        normal[, r]) valve tuples or None; AoV, if given, additionally clips the
-        outflow side. Falls back to the plain (⟂-LV-axis) volume if MV is missing.
-        None if not built."""
-        if mv is None:
+        """Endo/Epi volume (mL): the FAITHFUL ⟂-LV-axis surface (built to its
+        deepest traced extent, no vertical extrapolation — max radius stays at the
+        trace) clipped by the MV (and, if set, AoV) plane on the apex side. Since
+        the basal ends are snapped onto the MV plane while tracing, the clip
+        follows the mitral annulus and the region never exceeds the drawn border.
+        *mv*/*aov* are (center, normal[, r]) tuples or None. None if not built."""
+        planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
+        if not planes:
             surf = self.endo if which == "endo" else self.epi
             return None if surf is None else surf.voxel_volume_ml(spacing)
-        surf = self._mv_parallel_surface(which, mv[0], mv[1])
+        surf = self._full_surface(which)
         if surf is None:
             return None
-        if aov is None:
-            return surf.voxel_volume_ml(spacing)       # flat cut = MV plane
-        return surf.voxel_volume_ml_valves(spacing, [(aov[0], aov[1])],
-                                           surf.apex_world)
+        apex = getattr(surf, "apex_world", None)
+        if apex is None:
+            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
+        return surf.voxel_volume_ml_valves(spacing, planes, apex)
 
     def inside_mask(self, spacing_xyz, shape, which: str, mv=None, aov=None):
         """Boolean voxel mask (comp, bbox) of the region volume_ml_valves counts —
-        MV-parallel slices to the MV plane, AoV-clipped — on the native DICOM
+        the faithful surface clipped by the MV (+AoV) plane — on the native DICOM
         grid, for the red overlay. (None, None) if not built/empty."""
-        if mv is None:
-            surf = self.endo if which == "endo" else self.epi
-            return (None, None) if surf is None else \
-                surf.inside_mask_bbox(spacing_xyz, shape, [], surf.axis.apex)
-        surf = self._mv_parallel_surface(which, mv[0], mv[1])
+        planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
+        surf = self._full_surface(which) if planes else (
+            self.endo if which == "endo" else self.epi)
         if surf is None:
             return None, None
-        planes = [(aov[0], aov[1])] if aov is not None else []
-        return surf.inside_mask_bbox(spacing_xyz, shape, planes, surf.apex_world)
+        apex = getattr(surf, "apex_world", None)
+        if apex is None:
+            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
+        return surf.inside_mask_bbox(spacing_xyz, shape, planes, apex)
 
     def myocardial_volume_ml(self, spacing: float) -> float | None:
         """Myocardial volume = epi − endo (mL), or None if either is missing."""
