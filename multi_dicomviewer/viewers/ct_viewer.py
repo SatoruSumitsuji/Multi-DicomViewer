@@ -6004,12 +6004,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                     _, _, nrm = self._axes_for(e["key"])
                     P = self._snap_to_lumen(P, nrm)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
-                # LV border: keep the point on its own wall (don't let it cross
-                # the LV axis) — the sign-based meridian split would otherwise
-                # reassign it to the opposite wall, corrupting the reconstruction.
-                if m.get("_lv") is not None and self._lv is not None:
-                    P = self._lv_clamp_border_point(P, m["_lv"],
-                                                    e.get("lv_side"))
+                # LV border on the LONG-AXIS pane: keep the point on its own wall
+                # (don't let it cross the LV axis) — the sign-based meridian split
+                # would otherwise reassign it to the opposite wall, corrupting the
+                # reconstruction. Wall side is read from the point's PRE-update
+                # position each step (robust). Only on the long-axis pane, where
+                # the meridian direction IS the pane's radial (on the short-axis
+                # pane the point moves angularly, which is legitimate).
+                if (m.get("_lv") is not None and self._lv is not None
+                        and e["key"] == self._lv.get("pane")):
+                    side = self._lv_border_side(m, e["vi"])
+                    P = self._lv_clamp_border_point(P, m["_lv"], side)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
                 m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
