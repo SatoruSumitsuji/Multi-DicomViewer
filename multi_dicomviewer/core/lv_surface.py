@@ -437,25 +437,25 @@ class LVSurface:
         *planes*   : iterable of (center_xyz, normal_xyz) valve planes.
         *apex_xyz* : the LV apex — orients each plane normal (apex on + side).
 
-        The surface is EXTENDED basally (a prism of the most-basal ring) up to the
-        valves, so a trace that stops short of the annulus still fills to the
-        valve, and a trace that runs past it is cut at the valve. With no planes
-        this is the plain voxel volume (flat basal cut)."""
+        The region is STRICTLY inside the traced surface (NO basal prism
+        extension) and additionally cut by the valve planes (apex side), so it can
+        never protrude beyond the drawn border — the base follows the trace (which
+        is snapped onto the MV plane while tracing). With no planes this is the
+        plain voxel volume (flat basal cut)."""
         planes = [(np.asarray(c, float), np.asarray(n, float))
                   for (c, n) in (planes or [])]
         if not planes:
             return self.voxel_volume_ml(spacing)
         apex = np.asarray(apex_xyz, float)
         verts = self._all_ring_points()
-        centres = np.array([c for (c, _n) in planes])
-        lo = np.minimum(verts.min(axis=0), centres.min(axis=0)) - spacing
-        hi = np.maximum(verts.max(axis=0), centres.max(axis=0)) + spacing
+        lo = verts.min(axis=0) - spacing
+        hi = verts.max(axis=0) + spacing
         gx = np.arange(lo[0], hi[0] + spacing, spacing)
         gy = np.arange(lo[1], hi[1] + spacing, spacing)
         gz = np.arange(lo[2], hi[2] + spacing, spacing)
         X, Y, Z = np.meshgrid(gx, gy, gz, indexing="ij")
         pts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
-        inside = self.contains(pts, extend_base=True)
+        inside = self.contains(pts, extend_base=False)
         for (c, nrm) in planes:                        # keep the apex side
             n = nrm / (np.linalg.norm(nrm) or 1.0)
             if float(np.dot(apex - c, n)) < 0.0:
@@ -466,10 +466,11 @@ class LVSurface:
 
     def inside_mask_bbox(self, spacing_xyz, shape, planes, apex_xyz,
                          pad_mm: float = 2.0):
-        """Boolean mask of the voxels this surface ENCLOSES on the native
-        (anisotropic) DICOM grid — extended basally and cut by the valve *planes*
-        (apex side), i.e. exactly the region voxel_volume_ml_valves counts. For
-        the red 'measured region' overlay (mirrors the blood-pool mask).
+        """Boolean mask of the voxels STRICTLY inside the traced surface on the
+        native (anisotropic) DICOM grid — NO basal prism extension — additionally
+        cut by the valve *planes* (apex side). Exactly the region
+        voxel_volume_ml_valves counts, so the red overlay never protrudes past the
+        drawn border.
 
         *spacing_xyz* (sx, sy, sz) mm; *shape* (nz, ny, nx). A world voxel centre
         (x, y, z) maps to index (x/sx, y/sy, z/sz). Returns (comp[dz,dy,dx] bool,
@@ -480,10 +481,7 @@ class LVSurface:
         planes = [(np.asarray(c, float), np.asarray(n, float))
                   for (c, n) in (planes or [])]
         apex = np.asarray(apex_xyz, float)
-        refs = [self._all_ring_points()]
-        if planes:
-            refs.append(np.array([c for (c, _n) in planes]))
-        allp = np.vstack(refs)
+        allp = self._all_ring_points()          # tight to the traced surface only
         lo = allp.min(axis=0) - pad_mm
         hi = allp.max(axis=0) + pad_mm
         x0 = max(0, int(np.floor(lo[0] / sx)))
@@ -498,7 +496,7 @@ class LVSurface:
                                  np.arange(x0, x1), indexing="ij")
         pts = np.column_stack([xx.ravel() * sx, yy.ravel() * sy,
                                zz.ravel() * sz])
-        inside = self.contains(pts, extend_base=True)
+        inside = self.contains(pts, extend_base=False)
         for (c, nrm) in planes:                        # keep the apex side
             n = nrm / (np.linalg.norm(nrm) or 1.0)
             if float(np.dot(apex - c, n)) < 0.0:
