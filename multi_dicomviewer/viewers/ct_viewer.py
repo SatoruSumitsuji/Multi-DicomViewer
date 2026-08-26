@@ -7796,6 +7796,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._lv_sax_btn.isChecked():
             self._lv_capture_current()
+            # Snap basal ends onto the MV plane before building the short-axis, so
+            # the base sits on the mitral annulus in the cross-sections too.
+            for _p in ("endo", "epi"):
+                store = (lv["model"].endo_planes if _p == "endo"
+                         else lv["model"].epi_planes)
+                if store:
+                    self._lv_snap_base_to_mv(_p)
             m = lv["model"]
             endo_ok = m.endo_axis is not None and len(m.endo_contours) >= 3
             epi_ok = m.epi_axis is not None and len(m.epi_contours) >= 3
@@ -8082,6 +8089,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_record_scalar(before)     # Ctrl+Z / Ctrl+Y
             return
         self._lv_capture_current()
+        # Snap the just-traced plane's basal ends onto the MV plane before moving
+        # on, so the base stays on the mitral annulus as you trace plane by plane.
+        pas = self._lv.get("pass")
+        if pas in ("endo", "epi"):
+            self._lv_snap_base_to_mv(pas)
         pane = self._lv["pane"]
         # drop any leftover un-captured scratch polyline (plain, untagged)
         self._measures[pane] = [
