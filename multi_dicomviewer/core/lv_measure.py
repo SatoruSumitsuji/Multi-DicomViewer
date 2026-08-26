@@ -696,13 +696,40 @@ class LVModel:
         surf = self.endo if which == "endo" else self.epi
         return None if surf is None else surf.voxel_volume_ml(spacing)
 
+    def _full_surface(self, which: str,
+                      level_step: float = LV_LEVEL_STEP_MM,
+                      n_theta: int = LV_RING_POINTS):
+        """Surface for *which* built to its DEEPEST traced basal extent (max of
+        per-meridian maxima), NOT the flat common cut. A tilted valve-plane clip
+        can then trim it to the annulus on EVERY meridian without a flat
+        min-level cut falling short of the (tilted) MV plane. Converges to the
+        pass's apex. None if not traceable."""
+        axis = self._axis_for(which)
+        contours = self.endo_contours if which == "endo" else self.epi_contours
+        if axis is None or len(contours) < 3:
+            return None
+        base_full = max(
+            float(np.asarray(c, float).reshape(-1, 2)[:, 0].max())
+            for c in contours.values())
+        surf = LVSurface.from_meridian_contours(
+            axis, contours, level_step, n_theta, base_along=base_full)
+        if surf is not None:
+            surf.apex_world = (self.endo_apex if which == "endo"
+                               else self.epi_apex)
+        return surf
+
     def volume_ml_valves(self, spacing: float, which: str, planes
                          ) -> float | None:
-        """Endo/Epi volume (mL) bounded BASALLY by the valve *planes* (apex side)
-        instead of the traced basal extent — 'valve-to-apex', the same region the
-        blood-pool volume uses. *planes* = iterable of (center, normal). Falls
-        back to the plain volume if no planes are given. None if not built."""
-        surf = self.endo if which == "endo" else self.epi
+        """Endo/Epi volume (mL) bounded BASALLY by the valve *planes* (apex side).
+        The surface is built to its DEEPEST traced extent and clipped by the
+        (possibly tilted) planes, so the base follows the MV annulus on every
+        meridian without protruding past the trace. *planes* = iterable of
+        (center, normal). Falls back to the plain volume with no planes. None if
+        not built."""
+        if not planes:
+            surf = self.endo if which == "endo" else self.epi
+            return None if surf is None else surf.voxel_volume_ml(spacing)
+        surf = self._full_surface(which)
         if surf is None:
             return None
         apex = getattr(surf, "apex_world", None)
@@ -712,10 +739,11 @@ class LVModel:
 
     def inside_mask(self, spacing_xyz, shape, which: str, planes):
         """Boolean voxel mask (comp, bbox) of the Endo/Epi region measured by
-        volume_ml_valves, on the native DICOM grid — for the red overlay. Cut by
-        the valve *planes* = iterable of (center, normal). (None, None) if not
-        built or empty."""
-        surf = self.endo if which == "endo" else self.epi
+        volume_ml_valves, on the native DICOM grid — for the red overlay. Uses the
+        deepest-extent surface clipped by the valve *planes* = iterable of
+        (center, normal). (None, None) if not built or empty."""
+        surf = self._full_surface(which) if planes else (
+            self.endo if which == "endo" else self.epi)
         if surf is None:
             return None, None
         apex = getattr(surf, "apex_world", None)
