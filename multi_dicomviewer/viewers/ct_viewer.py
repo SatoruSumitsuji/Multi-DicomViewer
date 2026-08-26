@@ -8470,10 +8470,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         # plain (trace-extent) volume if a plane is somehow missing.
         av = self._lv_valves.get("aortic")
         mv = self._lv_valves.get("mitral")
-        planes = [(v[0], v[1]) for v in (av, mv) if v is not None]
-        # MV-only set → measure how much the AoV plane removes (diagnostic), so
-        # the AoV's effect on this Epi/Endo volume is shown as an explicit number.
-        mv_only = [(mv[0], mv[1])] if mv is not None else []
         dims = self._dims
         shape = self._vol.shape
 
@@ -8483,16 +8479,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    result["vol"] = (m.volume_ml_valves(spacing, pas, planes)
-                                     if planes else m.volume_ml(spacing, pas))
-                    # The measured region as a native-grid 0/1 mask (bbox) for the
-                    # red overlay — the SAME region the volume counts.
-                    result["mask"] = m.inside_mask(dims, shape, pas, planes)
-                    # AoV contribution: volume WITHOUT the AoV cut (MV-only) minus
-                    # the value above = how many mL the AoV plane trims.
-                    if av is not None and mv_only:
+                    # Integrate in slices PARALLEL to the MV plane (base = MV
+                    # plane), AoV clipping the outflow. The red mask is the SAME
+                    # region.
+                    result["vol"] = m.volume_ml_valves(spacing, pas, mv, av)
+                    result["mask"] = m.inside_mask(dims, shape, pas, mv, av)
+                    # AoV contribution: MV-only minus (MV+AoV) = mL the AoV trims.
+                    if av is not None and mv is not None:
                         result["vol_mv_only"] = m.volume_ml_valves(
-                            spacing, pas, mv_only)
+                            spacing, pas, mv, None)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
