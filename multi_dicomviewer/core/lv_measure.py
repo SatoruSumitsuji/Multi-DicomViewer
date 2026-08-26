@@ -342,10 +342,14 @@ class LVModel:
                               which: str = "endo") -> None:
         """Store a border traced on the long-axis plane at *plane_angle*.
 
-        *pts3d* is an (N,3) array of volume-mm points along the border. It is
-        split into the φ and φ+180° meridian profiles by the sign of the
-        in-plane radial coordinate, each stored as (along, radius) sorted by
-        along. *which* is "endo" or "epi"."""
+        *pts3d* is an (N,3) array of volume-mm points along the border (drawn as
+        one polyline base→apex→base). It is split into the φ and φ+180° meridian
+        profiles at the APEX (the turning point) by TRACE ORDER — NOT by the sign
+        of the radial — so a point that strays across the axis stays on its own
+        wall (a sign split would reassign it to the opposite meridian, corrupting
+        that wall's profile → the LV volume's unfill / protrusion). Each wall is
+        stored as (along, radius=|radial|) sorted by along. *which* is
+        "endo"/"epi"."""
         ax = self._axis_for(which)
         if ax is None:
             raise RuntimeError("set_axis() before adding contours")
@@ -361,18 +365,44 @@ class LVModel:
         pos_theta = plane_angle % 360.0
         neg_theta = (plane_angle + 180.0) % 360.0
         store = self.endo_contours if which == "endo" else self.epi_contours
-        # On-axis points (s ≈ 0: the apex/base poles) belong to BOTH walls, so
-        # each meridian reaches the pole — otherwise a pole assigned to only one
-        # wall shortens the other meridian's along-range (a false apex/base cut).
-        for theta, mask in ((pos_theta, s >= 0), (neg_theta, s <= 0)):
-            if not np.any(mask):
-                continue
-            prof = np.column_stack([along[mask], np.abs(s[mask])])
-            prof = prof[np.argsort(prof[:, 0])]
-            # Keep the RAW (along, radius) samples (strictly-increasing along) —
-            # short_axis_border_pts intersects them with the level directly.
-            keep = np.concatenate(([True], np.diff(prof[:, 0]) > 1e-9))
-            store[theta] = prof[keep]
+
+        def _store_sign_split():          # fallback: split by radial sign
+            for theta, mask in ((pos_theta, s >= 0), (neg_theta, s <= 0)):
+                if not np.any(mask):
+                    continue
+                prof = np.column_stack([along[mask], np.abs(s[mask])])
+                prof = prof[np.argsort(prof[:, 0])]
+                keep = np.concatenate(([True], np.diff(prof[:, 0]) > 1e-9))
+                store[theta] = prof[keep]
+
+        # Turning point = the apex end of the polyline: the marked apex if set
+        # (nearest vertex), else the most-apical (min-along) vertex.
+        apex_pt = self.endo_apex if which == "endo" else self.epi_apex
+        if len(pts) >= 3:
+            if apex_pt is not None:
+                api = int(np.argmin(np.linalg.norm(
+                    pts - np.asarray(apex_pt, float), axis=1)))
+            else:
+                api = int(np.argmin(along))
+            idx_a = np.arange(0, api + 1)             # wall A (incl. apex)
+            idx_b = np.arange(api, len(pts))          # wall B (incl. apex)
+            # Assign each wall to a meridian by its dominant radial side.
+            def _mean_s(idx):
+                nz = s[idx][np.abs(s[idx]) > 1e-6]
+                return float(np.mean(nz)) if len(nz) else 0.0
+            sa, sb = _mean_s(idx_a), _mean_s(idx_b)
+            theta_a = pos_theta if sa >= 0 else neg_theta
+            theta_b = neg_theta if theta_a == pos_theta else pos_theta
+            if theta_a == theta_b or min(len(idx_a), len(idx_b)) < 2:
+                _store_sign_split()       # degenerate → fall back
+            else:
+                for theta, idx in ((theta_a, idx_a), (theta_b, idx_b)):
+                    prof = np.column_stack([along[idx], np.abs(s[idx])])
+                    prof = prof[np.argsort(prof[:, 0])]
+                    keep = np.concatenate(([True], np.diff(prof[:, 0]) > 1e-9))
+                    store[theta] = prof[keep]
+        else:
+            _store_sign_split()
 
     def clear_contour(self, plane_angle: float, which: str = "endo") -> None:
         store = self.endo_contours if which == "endo" else self.epi_contours
