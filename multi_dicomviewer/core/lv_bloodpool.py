@@ -34,6 +34,35 @@ def _seed_component(mask: np.ndarray, seed_ijk) -> np.ndarray:
         return _flood(mask, seed_ijk)
 
 
+def _largest_component(mask: np.ndarray) -> np.ndarray:
+    """Boolean array: the LARGEST connected component of *mask* (26-connectivity
+    via SciPy, else a numpy flood-fill from the mask's own densest seed). Used
+    when no explicit seed is given — the LV cavity is the biggest in-range,
+    inside-Epi blood pool, so this auto-picks it without a manual ROI. Empty if
+    *mask* has no True voxels."""
+    if not mask.any():
+        return np.zeros_like(mask)
+    try:
+        from scipy import ndimage                      # fast C labelling
+        lbl, n = ndimage.label(mask, structure=np.ones((3, 3, 3), bool))
+        if n == 0:
+            return np.zeros_like(mask)
+        # bincount over labels 1..n; label 0 is background.
+        counts = np.bincount(lbl.ravel())
+        counts[0] = 0
+        return lbl == int(counts.argmax())
+    except Exception:                                   # noqa: BLE001
+        # Fallback: flood from the centroid of the mask (guaranteed in-mask by
+        # snapping to the nearest True voxel along each axis is overkill here —
+        # the centroid of a single dominant blob is essentially always inside).
+        zz, yy, xx = np.where(mask)
+        ci = (int(round(zz.mean())), int(round(yy.mean())),
+              int(round(xx.mean())))
+        if not mask[ci]:
+            ci = (int(zz[0]), int(yy[0]), int(xx[0]))
+        return _flood(mask, ci)
+
+
 def _flood(mask: np.ndarray, seed_ijk) -> np.ndarray:
     """6-connectivity flood-fill of *mask* from *seed_ijk* (numpy fallback)."""
     cur = np.zeros_like(mask)
@@ -191,15 +220,19 @@ def bloodpool_volume(vol, spacing_xyz, apex_xyz, base_xyz, r_max, planes,
 
 
 def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
-                         apex_xyz, hu_lo, hu_hi, seed_xyz, pad_mm: float = 2.0):
+                         apex_xyz, hu_lo, hu_hi, seed_xyz=None,
+                         pad_mm: float = 2.0):
     """LV blood-pool volume bounded by the EPICARDIAL surface (instead of the
     loose-bag cylinder): count voxels that are inside the epi surface, on the
     apex side of both valve *planes*, with hu_lo <= HU <= hu_hi, and 3-D
-    connected to *seed_xyz*.
+    connected together.
 
     *epi_ring_pts* : (M,3) world points on the epi surface (for the work box).
     *epi_contains* : callable pts(N,3) -> bool mask (points inside the surface).
     *planes*       : ((center, normal), …) valve planes (oriented to apex here).
+    *seed_xyz*     : connectivity seed (mm). If ``None`` the LARGEST connected
+                     in-range/inside-Epi component is used automatically (no
+                     manual ROI needed — the LV cavity is the dominant pool).
     Returns dict(volume_ml, count, …) or an {"error": …} dict.
     """
     vol = np.asarray(vol)
@@ -239,31 +272,40 @@ def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
             keep &= ((world - c) @ n) >= 0.0
         mask[zz[keep], yy[keep], xx[keep]] = True
 
-    si = (int(round(seed_xyz[2] / sz)) - z0,
-          int(round(seed_xyz[1] / sy)) - y0,
-          int(round(seed_xyz[0] / sx)) - x0)
-    if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
-            and 0 <= si[2] < sub.shape[2]):
-        return {"error": "seed_out", "reason": "box",
-                "msg": "seed is outside the epicardial box"}
-    if not mask[si]:
-        seed = np.asarray(seed_xyz, float)
-        hu_seed = float(sub[si])
-        in_epi = bool(np.asarray(epi_contains(seed.reshape(1, 3)), bool)[0])
-        plane_bad = any(float((seed - c) @ n) < 0 for (c, n) in oplanes)
-        if not (hu_lo <= hu_seed <= hu_hi):
-            reason, msg = "hu", ("seed HU %.0f is outside the range %.0f-%.0f"
-                                 % (hu_seed, hu_lo, hu_hi))
-        elif not in_epi:
-            reason, msg = "epi", ("seed is outside the epicardial surface — "
-                                  "move the ROI inside it / re-trace Epi")
-        elif plane_bad:
-            reason, msg = "plane", ("seed is on the far (non-apex) side of a "
-                                    "valve plane — re-check MV/AoV")
-        else:
-            reason, msg = "other", "seed not in the region"
-        return {"error": "seed_out", "reason": reason, "msg": msg}
-    comp = _seed_component(mask, si)
+    if seed_xyz is None:
+        # No manual ROI: auto-pick the LARGEST connected in-range/inside-Epi
+        # component = the LV cavity (papillary holes are filled downstream).
+        if not mask.any():
+            return {"error": "seed_out", "reason": "hu",
+                    "msg": ("no in-range blood inside the Epi surface — "
+                            "adjust the 下限/上限 HU range")}
+        comp = _largest_component(mask)
+    else:
+        si = (int(round(seed_xyz[2] / sz)) - z0,
+              int(round(seed_xyz[1] / sy)) - y0,
+              int(round(seed_xyz[0] / sx)) - x0)
+        if not (0 <= si[0] < sub.shape[0] and 0 <= si[1] < sub.shape[1]
+                and 0 <= si[2] < sub.shape[2]):
+            return {"error": "seed_out", "reason": "box",
+                    "msg": "seed is outside the epicardial box"}
+        if not mask[si]:
+            seed = np.asarray(seed_xyz, float)
+            hu_seed = float(sub[si])
+            in_epi = bool(np.asarray(epi_contains(seed.reshape(1, 3)), bool)[0])
+            plane_bad = any(float((seed - c) @ n) < 0 for (c, n) in oplanes)
+            if not (hu_lo <= hu_seed <= hu_hi):
+                reason, msg = "hu", ("seed HU %.0f is outside the range "
+                                     "%.0f-%.0f" % (hu_seed, hu_lo, hu_hi))
+            elif not in_epi:
+                reason, msg = "epi", ("seed is outside the epicardial surface — "
+                                      "move the ROI inside it / re-trace Epi")
+            elif plane_bad:
+                reason, msg = "plane", ("seed is on the far (non-apex) side of a "
+                                        "valve plane — re-check MV/AoV")
+            else:
+                reason, msg = "other", "seed not in the region"
+            return {"error": "seed_out", "reason": reason, "msg": msg}
+        comp = _seed_component(mask, si)
     count = int(comp.sum())
     voxel_ml = (sx * sy * sz) / 1000.0
     return {"volume_ml": count * voxel_ml, "count": count, "voxel_ml": voxel_ml,
