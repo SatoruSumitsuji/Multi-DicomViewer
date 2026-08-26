@@ -315,6 +315,25 @@ def _polylines_pd(polylines, z=0.72) -> vtkPolyData:
     return pd
 
 
+def _filled_quad_pd(x0, x1, y0, y1, z=0.55) -> vtkPolyData:
+    """A single filled quad (polygon cell) in output-plane coords — used for the
+    translucent LV axis 'keep-out' band on the long-axis trace pane."""
+    from vtkmodules.vtkCommonDataModel import vtkPolygon
+    pd = vtkPolyData()
+    pts = vtkPoints()
+    for (x, y) in ((x0, y0), (x1, y0), (x1, y1), (x0, y1)):
+        pts.InsertNextPoint(float(x), float(y), float(z))
+    poly = vtkPolygon()
+    poly.GetPointIds().SetNumberOfIds(4)
+    for i in range(4):
+        poly.GetPointIds().SetId(i, i)
+    cells = vtkCellArray()
+    cells.InsertNextCell(poly)
+    pd.SetPoints(pts)
+    pd.SetPolys(cells)
+    return pd
+
+
 def _lv_pts_pd(pts_xy, colors, z=0.8) -> vtkPolyData:
     """Vert-cell polydata for the LV axis pick markers — one point per (x, y)
     output-plane coord with a per-cell RGB colour (apex vs basal)."""
@@ -1374,6 +1393,17 @@ class _Pane:
         self.ren.AddActor(lla)
         self.lv_line_actor = lla       # kept so the SAX level/centre line can be
         self.lv_line_w = 2.4           # thickened while grabbed (see _lv_line_*)
+        # LV tracing guide: a translucent green band ±2.5 mm around the LV axis on
+        # the long-axis trace pane — the 'keep-out' zone (place border points to
+        # one side; a point across the axis is auto-corrected at capture).
+        self.lv_guide_mapper = vtkPolyDataMapper()
+        self.lv_guide_mapper.SetInputData(vtkPolyData())
+        lgd = vtkActor()
+        lgd.SetMapper(self.lv_guide_mapper)
+        lgd.GetProperty().SetColor(0.30, 1.0, 0.30)
+        lgd.GetProperty().SetOpacity(0.22)          # ~78% transparent
+        self.ren.AddActor(lgd)
+        self.lv_guide_actor = lgd
         # LV wall-thickness colour map (translucent annulus fill between the
         # short-axis endo & epi borders; per-cell RGBA set by _redraw_lv).
         self.lv_wall_mapper = vtkPolyDataMapper()
@@ -8070,6 +8100,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # through the shared apex (the displayed border ends there too).
         m["pts3d"] = self._lv_snap_apex(
             m["pts3d"], lv["target"], tol=self._lv_apex_range_mm(pane))
+        # Move any point that strayed across the LV axis back onto its own wall
+        # (≥ 2.5 mm), so the captured border never crosses — whichever point (even
+        # the first) strayed — and can't bulge the reconstruction.
+        m["pts3d"] = self._lv_axis_correct(m["pts3d"], lv["target"])
+        m["pts"] = [self._world3d_to_out(pane, P) for P in m["pts3d"]]
         phi = lv["model"].plane_angles()[lv["plane_idx"]]
         try:
             lv["model"].set_long_axis_contour(phi, m["pts3d"], which=lv["target"])
@@ -8437,6 +8472,48 @@ class CTViewer(CPRMixin, AbstractViewer):
         if abs(s_cl - s) > 1e-9:
             P = P + (s_cl - s) * e_s
         return P
+
+    def _lv_axis_correct(self, pts3d, target, s_min: float = 2.5):
+        """Return *pts3d* with any point that strayed ACROSS the LV axis moved
+        back onto its OWN wall (≥ s_min mm from the axis). Wall membership is by
+        trace ORDER (apex split), matching set_long_axis_contour — so a point on
+        the wrong side isn't kept as a large-radius bulge on the opposite
+        meridian (the source of the residual protrusion). Run at border capture
+        so the FINAL border never crosses, whichever point strayed."""
+        if self._lv is None:
+            return pts3d
+        ax = self._lv["model"]._axis_for(target)
+        P = np.asarray(pts3d, float).reshape(-1, 3)
+        if ax is None or len(P) < 3:
+            return pts3d
+        phi = self._lv["model"].plane_angles()[self._lv["plane_idx"]]
+        e_s = np.asarray(ax.meridian_dir(phi), float)
+        apex = np.asarray(ax.apex, float)
+        along = (P - apex) @ ax.axis
+        apex_pt = (self._lv["model"].endo_apex if target == "endo"
+                   else self._lv["model"].epi_apex)
+        if apex_pt is not None:
+            api = int(np.argmin(np.linalg.norm(
+                P - np.asarray(apex_pt, float), axis=1)))
+        else:
+            api = int(np.argmin(along))
+
+        def _dom(idx):                       # dominant radial side of a wall
+            ss = ((P[idx] - apex) @ e_s)
+            nz = ss[np.abs(ss) > 1e-6]
+            return 1.0 if (len(nz) == 0 or float(np.mean(nz)) >= 0) else -1.0
+        sA = _dom(np.arange(0, api + 1))
+        out = P.copy()
+        for idx, wsign in ((np.arange(0, api + 1), sA),
+                           (np.arange(api, len(P)), -sA)):
+            for i in idx:
+                if i == api:                 # apex is shared → leave near the axis
+                    continue
+                si = float((out[i] - apex) @ e_s)
+                tgt = wsign * max(s_min, wsign * si)   # own side, |s| ≥ s_min
+                if abs(tgt - si) > 1e-9:
+                    out[i] = out[i] + (tgt - si) * e_s
+        return [tuple(map(float, p)) for p in out]
 
     def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0) -> bool:
         """Move each traced long-axis plane's two BASAL end-points of the *pas*
@@ -9384,9 +9461,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_wall_mapper.SetInputData(vtkPolyData())    # wall-thickness colour map
         p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
         p.lv_hi_mapper.SetInputData(vtkPolyData())      # green edited crossing
+        p.lv_guide_mapper.SetInputData(vtkPolyData())   # axis keep-out band
         self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
+        # Axis keep-out band (±2.5 mm) on the long-axis TRACE pane while a border
+        # is being placed/edited: guides the user to keep points to one side of
+        # the apex line (a stray point is auto-corrected at capture anyway).
+        if (key == lv.get("pane") and lv.get("phase") == "contour"
+                and lv.get("target") in ("endo", "epi")
+                and lv.get("sax") is None):
+            X = float(getattr(self, "_half", 100.0))
+            p.lv_guide_mapper.SetInputData(_filled_quad_pd(-2.5, 2.5, -X, X))
         # Apex markers stay visible in EVERY LV phase once an axis exists (so the
         # endo apex remains on screen while the epi pass is being set up).
         if lv["model"].axis is not None:
