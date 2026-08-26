@@ -6043,8 +6043,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # pane the point moves angularly, which is legitimate).
                 if (m.get("_lv") is not None and self._lv is not None
                         and e["key"] == self._lv.get("pane")):
-                    side = self._lv_border_side(m, e["vi"])
-                    P = self._lv_clamp_border_point(P, m["_lv"], side)
+                    npts = len(m["pts3d"])
+                    if e["vi"] in (0, npts - 1):
+                        # The two BASAL endpoints (trace ends) ride ON the MV
+                        # plane: no base<->apex (plane-normal) motion — only
+                        # in-plane (radial) sliding. Project the dragged point
+                        # back onto the MV plane so the mouse's along-axis
+                        # component is discarded.
+                        P = self._lv_project_to_mv(P)
+                    else:
+                        side = self._lv_border_side(m, e["vi"])
+                        P = self._lv_clamp_border_point(P, m["_lv"], side)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
                 m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
@@ -8451,6 +8460,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         e_s = np.asarray(ax.meridian_dir(angs[idx % len(angs)]), float)
         s = float((np.asarray(m["pts3d"][vi], float) - ax.apex) @ e_s)
         return 1.0 if s >= 0.0 else -1.0
+
+    def _lv_project_to_mv(self, P):
+        """Project *P* onto the MV (mitral) valve plane, discarding the plane-
+        normal (base<->apex) component so the point rides ON the plane. In-plane
+        (radial) motion is preserved. If no MV plane is set, *P* is returned
+        unchanged."""
+        mv = None
+        if getattr(self, "_lv_valves", None):
+            mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return P
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        P = np.asarray(P, float)
+        return P - float((P - c) @ n) * n
 
     def _lv_clamp_border_point(self, P, tag, side, s_min: float = 2.5):
         """Keep an LV-border point on its own wall: clamp its in-plane radial so
