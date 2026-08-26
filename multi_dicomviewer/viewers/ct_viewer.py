@@ -2914,13 +2914,44 @@ class CTViewer(CPRMixin, AbstractViewer):
                 m.epi_axis is not None and len(m.epi_contours) >= 3)
             self._lvv_start_btn.setEnabled(False)
         else:
-            self._lv_endo_btn.setEnabled(sm in (None, "endo"))
-            self._lv_epi_btn.setEnabled(sm in (None, "epi"))
-            self._lvv_start_btn.setEnabled(sm in (None, "blood"))
+            # Forward flow (not in SAX): all three stay clickable so the user can
+            # move Epi → Blood → Endo directly WITHOUT first deactivating the
+            # current one (which lost track of what was loaded). Switching stashes
+            # the current sub-mode's data; each button is coloured when its data
+            # is loaded (see _lv_style_selectors). Re-clicking the active one still
+            # deactivates it.
+            self._lv_endo_btn.setEnabled(True)
+            self._lv_epi_btn.setEnabled(True)
+            self._lvv_start_btn.setEnabled(True)
         # Keep the Blood selector's checked look in step even if it was clicked
         # while already active (the checkable button toggles itself on click).
         if self._lvv_start_btn.isChecked() != blood:
             self._lvv_start_btn.setChecked(blood)
+        if self._lv is None or self._lv.get("sax") is None:
+            self._lv_style_selectors()      # loaded/active colours (not in SAX)
+
+    def _lv_style_selectors(self) -> None:
+        """Colour the Endo / Epi / Blood selector buttons by whether their DATA is
+        loaded (not only when active), so the user sees at a glance what has been
+        set as they move Epi → Blood → Endo. Endo/Epi solid colour, Blood green;
+        grey when no data and not active. Skipped in SAX (armed-border colouring
+        there comes from _lv_sync_buttons)."""
+        sm = self._lv_current_submode()
+        m = self._lv["model"] if self._lv is not None else None
+        epi_loaded = (getattr(self, "_lvv_epi_surf", None) is not None
+                      or (m is not None and len(m.epi_contours) >= 3))
+        endo_loaded = (m is not None and len(m.endo_contours) >= 3)
+        blood_loaded = getattr(self, "_lvv_blood_comp", None) is not None
+        off = self._LV_STY["off"]
+        self._lv_endo_btn.setStyleSheet(
+            self._LV_STY["endo"] if (sm == "endo" or endo_loaded) else off)
+        self._lv_epi_btn.setStyleSheet(
+            self._LV_STY["epi"] if (sm == "epi" or epi_loaded) else off)
+        self._lvv_start_btn.setStyleSheet(
+            ("QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
+            if (sm == "blood" or blood_loaded)
+            else ("QPushButton:checked{background:#2e8b57;color:white;}"
+                  + self._BTN_DIS))
 
     def _lvv_sync(self) -> None:
         on = self._lvv is not None
@@ -3677,14 +3708,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         from the blood pool) / Manual (trace) / Cancel. Returns True if Endo was
         entered, False if blocked or cancelled."""
         from PyQt6.QtWidgets import QMessageBox
+        # Epi/Blood count as ready whether they live in the persisted stash OR in
+        # the currently-active session (so entering Endo straight from an active
+        # Blood/Epi doesn't falsely report them missing).
+        epi_ok = (getattr(self, "_lvv_epi_surf", None) is not None
+                  or (self._lv is not None
+                      and len(self._lv["model"].epi_contours) >= 3))
+        blood_ok = (getattr(self, "_lvv_blood_comp", None) is not None
+                    or (self._lvv is not None
+                        and self._lvv.get("seed") is not None))
         missing = []
         if self._lv_valves.get("mitral") is None:
             missing.append(t("MV plane"))
         if self._lv_valves.get("aortic") is None:
             missing.append(t("AoV plane"))
-        if getattr(self, "_lvv_epi_surf", None) is None:
+        if not epi_ok:
             missing.append(t("Epi data"))
-        if getattr(self, "_lvv_blood_comp", None) is None:
+        if not blood_ok:
             missing.append(t("Blood data"))
         if missing:
             QMessageBox.information(
@@ -3706,6 +3746,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if clicked is b_auto:
             return self._lv_auto_endo_from_blood()
         if clicked is b_manual:
+            if self._lvv is not None:                  # leave an active Blood
+                self._lvv_deactivate()
             self._lv_select_pass("endo")
             return True
         return False                                   # Cancel / closed
