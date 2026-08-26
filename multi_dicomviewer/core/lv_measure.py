@@ -718,38 +718,103 @@ class LVModel:
                                else self.epi_apex)
         return surf
 
-    def volume_ml_valves(self, spacing: float, which: str, planes
+    def _mv_parallel_surface(self, which: str, mv_center, mv_normal,
+                             level_step: float = LV_LEVEL_STEP_MM,
+                             n_theta: int = LV_RING_POINTS):
+        """Re-express the traced *which* surface on an axis PERPENDICULAR to the
+        MV plane (axis = MV normal through the apex), so its ring stack is PARALLEL
+        to the mitral annulus and the basal cut IS the MV plane — no tilted-plane-
+        vs-⟂-axis mismatch (the 'base short + protrudes' artefact). Reslices the
+        deepest-extent ⟂-LV-axis rings onto the new axis' meridian planes, then
+        flat-cuts at the MV-plane level. None if not traceable."""
+        base = self._full_surface(which, level_step, n_theta)
+        if base is None:
+            return None
+        apex = getattr(base, "apex_world", None)
+        if apex is None:
+            apex = base.axis.apex + float(base.along[0]) * base.axis.axis
+        apex = np.asarray(apex, float)
+        c = np.asarray(mv_center, float)
+        n = np.asarray(mv_normal, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        if float((c - apex) @ n) < 0.0:                # base on the + side
+            n = -n
+        r0 = base.axis.radial0 - (base.axis.radial0 @ n) * n
+        if np.linalg.norm(r0) < 1e-6:
+            r0 = base.axis.binormal - (base.axis.binormal @ n) * n
+        r0 = r0 / (np.linalg.norm(r0) or 1.0)
+        new_ax = LVAxis.from_frame(apex, n, r0)
+        rings = [base.ring_world(k) for k in range(len(base.along))]
+        base_along = float((c - apex) @ n)             # MV-plane level on new axis
+        if base_along <= level_step:
+            return None
+        contours: dict = {}
+        for i in range(self.n_planes):
+            phi = i * 180.0 / self.n_planes
+            _o, e_s, _e_t, nrm = new_ax.long_axis_basis(phi)
+            pos, neg = [], []
+            for ring in rings:
+                b = (ring - apex) @ nrm                 # signed dist to the plane
+                m = len(ring)
+                for k in range(m):
+                    j = (k + 1) % m
+                    b0, b1 = float(b[k]), float(b[j])
+                    if b0 == b1:
+                        continue
+                    if (b0 <= 0.0 <= b1) or (b1 <= 0.0 <= b0):
+                        t = b0 / (b0 - b1)
+                        P = ring[k] + t * (ring[j] - ring[k])
+                        dp = P - apex
+                        along = float(dp @ n)
+                        s = float(dp @ e_s)
+                        (pos if s >= 0.0 else neg).append((along, abs(s)))
+            for theta, samples in ((phi % 360.0, pos),
+                                   ((phi + 180.0) % 360.0, neg)):
+                if len(samples) < 2:
+                    continue
+                arr = np.array(sorted(samples), float)
+                keep = np.concatenate(([True], np.diff(arr[:, 0]) > 1e-9))
+                contours[theta] = arr[keep]
+        if len(contours) < 3:
+            return None
+        surf = LVSurface.from_meridian_contours(
+            new_ax, contours, level_step, n_theta, base_along=base_along)
+        if surf is not None:
+            surf.apex_world = apex
+        return surf
+
+    def volume_ml_valves(self, spacing: float, which: str, mv=None, aov=None
                          ) -> float | None:
-        """Endo/Epi volume (mL) bounded BASALLY by the valve *planes* (apex side).
-        The surface is built to its DEEPEST traced extent and clipped by the
-        (possibly tilted) planes, so the base follows the MV annulus on every
-        meridian without protruding past the trace. *planes* = iterable of
-        (center, normal). Falls back to the plain volume with no planes. None if
-        not built."""
-        if not planes:
+        """Endo/Epi volume (mL) integrated in slices PARALLEL to the MV plane, from
+        the apex up to the MV plane (the base) — so the base follows the mitral
+        annulus with no ⟂-axis-vs-tilted-plane mismatch. *mv*/*aov* are (center,
+        normal[, r]) valve tuples or None; AoV, if given, additionally clips the
+        outflow side. Falls back to the plain (⟂-LV-axis) volume if MV is missing.
+        None if not built."""
+        if mv is None:
             surf = self.endo if which == "endo" else self.epi
             return None if surf is None else surf.voxel_volume_ml(spacing)
-        surf = self._full_surface(which)
+        surf = self._mv_parallel_surface(which, mv[0], mv[1])
         if surf is None:
             return None
-        apex = getattr(surf, "apex_world", None)
-        if apex is None:
-            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
-        return surf.voxel_volume_ml_valves(spacing, planes, apex)
+        if aov is None:
+            return surf.voxel_volume_ml(spacing)       # flat cut = MV plane
+        return surf.voxel_volume_ml_valves(spacing, [(aov[0], aov[1])],
+                                           surf.apex_world)
 
-    def inside_mask(self, spacing_xyz, shape, which: str, planes):
-        """Boolean voxel mask (comp, bbox) of the Endo/Epi region measured by
-        volume_ml_valves, on the native DICOM grid — for the red overlay. Uses the
-        deepest-extent surface clipped by the valve *planes* = iterable of
-        (center, normal). (None, None) if not built or empty."""
-        surf = self._full_surface(which) if planes else (
-            self.endo if which == "endo" else self.epi)
+    def inside_mask(self, spacing_xyz, shape, which: str, mv=None, aov=None):
+        """Boolean voxel mask (comp, bbox) of the region volume_ml_valves counts —
+        MV-parallel slices to the MV plane, AoV-clipped — on the native DICOM
+        grid, for the red overlay. (None, None) if not built/empty."""
+        if mv is None:
+            surf = self.endo if which == "endo" else self.epi
+            return (None, None) if surf is None else \
+                surf.inside_mask_bbox(spacing_xyz, shape, [], surf.axis.apex)
+        surf = self._mv_parallel_surface(which, mv[0], mv[1])
         if surf is None:
             return None, None
-        apex = getattr(surf, "apex_world", None)
-        if apex is None:
-            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
-        return surf.inside_mask_bbox(spacing_xyz, shape, planes, apex)
+        planes = [(aov[0], aov[1])] if aov is not None else []
+        return surf.inside_mask_bbox(spacing_xyz, shape, planes, surf.apex_world)
 
     def myocardial_volume_ml(self, spacing: float) -> float | None:
         """Myocardial volume = epi − endo (mL), or None if either is missing."""

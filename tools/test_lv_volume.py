@@ -236,4 +236,42 @@ mask_ml = int(comp.sum()) * (0.5 ** 3) / 1000.0
 print("H2) native-grid measured mask (red overlay):")
 _check("mask volume", mask_ml, V_clipM, 0.05)
 
+# ---- I: MV-parallel measurement — cut follows a TILTED MV plane ------------
+# A prolate ellipsoid (tapers to the apex, like a real LV) cut by a MV plane
+# that is perpendicular OR tilted. volume_ml_valves reslices onto the MV normal
+# and integrates in MV-parallel slices; it must match a brute-force voxel count
+# of the SAME region (true solid clipped by the plane) — so the base follows the
+# tilted plane without the ⟂-axis-ring mismatch.
+axI = LVAxis.from_points([15, 0, 80], [-15, 0, 80], [0, 0, 0])
+aI, LI, cI = 20.0, 80.0, 40.0
+mI = LVModel(n_planes=6)
+mI.set_axis_from_frame(axI.apex, axI.axis, axI.radial0, which="endo")
+axmI = mI._axis_for("endo")
+
+
+def _r_ell(z):
+    return aI * math.sqrt(max(0.0, 1.0 - ((z - cI) / cI) ** 2))
+
+
+for _i in range(6):
+    _phi = _i * 180.0 / 6
+    _pts = [axmI.to_world((_phi + 180.0) % 360.0, _r_ell(z), z)
+            for z in np.linspace(80, 0, 60)]
+    _pts += [axmI.to_world(_phi, _r_ell(z), z) for z in np.linspace(0, 80, 60)]
+    mI.set_long_axis_contour(_phi, np.asarray(_pts, float), which="endo")
+mI.set_apex_point("endo", axI.apex)
+_fs = mI._full_surface("endo")
+_apexI = _fs.apex_world
+print("I) MV-parallel cut follows a tilted MV plane:")
+for _tan in (0.0, 0.2, 0.3):
+    _n = np.array([_tan, 0.0, 1.0])
+    _mv = (np.array([0.0, 0.0, 50.0]), _n)
+    _brute = _fs.voxel_volume_ml_valves(0.5, [_mv], _apexI)   # true solid clip
+    _resl = mI.volume_ml_valves(0.5, "endo", mv=_mv, aov=None)
+    _err = abs(_resl - _brute) / _brute
+    print(f"  tilt tan={_tan:.1f}: reslice {_resl:.2f} vs solid {_brute:.2f} "
+          f"({_err*100:.1f}%) {'OK' if _err < 0.02 else 'FAIL'}")
+    assert _err < 0.02, f"MV-parallel off by {_err*100:.1f}% at tan={_tan}"
+print("OK: MV-parallel volume matches the true solid clipped by the plane")
+
 print("\nALL PASS")
