@@ -8595,6 +8595,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         if self._lv is None or self._lv.get("phase") != "contour":
             return
+        # A valid result is already shown (vol_done, cleared on any edit) and the
+        # reconstruction is slow — so a repeat click confirms before recomputing.
+        if self._lv.get("vol_done"):
+            box = QMessageBox(self.window())
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle(t("LV Volume"))
+            box.setText(t("Volume already calculated. Re-calculate?"))
+            recalc = box.addButton(t("Re-Calc"),
+                                   QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(t("Cancel"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(recalc)
+            box.exec()
+            if box.clickedButton() is not recalc:
+                return
         self._lv_capture_current()          # capture any pending trace
         m = self._lv["model"]
         # Per-sub-mode: Calc Vol computes the ACTIVE pass's own enclosed volume
