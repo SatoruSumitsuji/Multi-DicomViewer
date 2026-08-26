@@ -3561,9 +3561,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         a = a / (np.linalg.norm(a) or 1.0)
         b = np.cross(n, a)
         # A: face-on (view along n) → circle. B: plane spanned by (a, n) contains
-        # n → the MV plane cuts it along 'a' → edge-on line; up = n.
+        # n → the MV plane cuts it along 'a' → edge-on line. B's up = -n so the
+        # base (MV) is at the TOP and the apex at the BOTTOM (per user preference);
+        # only the vertical sense flips (u stays, so no left-right mirror).
         self._frame["A"] = self._ortho(a, b)
-        self._frame["B"] = self._ortho(a, n)
+        self._frame["B"] = self._ortho(a, -n)
         self._pc["A"] = c.copy()
         self._pc["B"] = c.copy()
         self._center = c.copy()
