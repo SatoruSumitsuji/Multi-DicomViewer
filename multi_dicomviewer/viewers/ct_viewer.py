@@ -2411,16 +2411,22 @@ class CTViewer(CPRMixin, AbstractViewer):
               "Trace"))
         self._lv_epi_btn.clicked.connect(lambda: self._lv_select_submode("epi"))
         row1.addWidget(self._lv_epi_btn)
-        self._lvv_start_btn = FitButton(t("Blood"))
+        self._lvv_start_btn = FitButton(t("Blood/Endo"))
         self._lvv_start_btn.setCheckable(True)
         self._lvv_start_btn.setHelpToolTip(
-            t("Blood-pool volume sub-mode (needs a traced/loaded Epi border)"))
+            t("Blood + Endo sub-mode: set the blood HU range, measure the blood "
+              "volume, then derive & edit the Endo border from it (needs Epi + "
+              "MV/AoV)"))
         self._lvv_start_btn.clicked.connect(lambda: self._lv_select_submode("blood"))
         row1.addWidget(self._lvv_start_btn)
+        # Endo is now part of the Blood/Endo sub-mode (derived from the blood
+        # pool), so it has no separate selector button — kept only for the
+        # internal contour-editing state.
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.setHelpToolTip(
             t("Endo (lumen) pass — align its long-axis view, Set axis, then Trace"))
         self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
+        self._lv_endo_btn.setVisible(False)          # merged into Blood/Endo
         row1.addWidget(self._lv_endo_btn)
         row1.addSpacing(8)
 
@@ -2544,6 +2550,16 @@ class CTViewer(CPRMixin, AbstractViewer):
               "first if none is in memory"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
         gb.addWidget(self._lvv_epi_btn)
+        # Auto-Endo: derive the Endo border from the measured blood pool and open
+        # it (13 edit handles) for manual correction. Re-pressing re-derives from
+        # the current HU range (warns first — save the current Endo if wanted).
+        self._lvv_auto_endo_btn = FitButton(t("Auto-Endo"))
+        self._lvv_auto_endo_btn.setHelpToolTip(
+            t("Derive the Endo border from the measured blood region (papillary "
+              "filled; 13 handles) and open it for editing. Re-derives from the "
+              "current HU range when pressed again."))
+        self._lvv_auto_endo_btn.clicked.connect(self._lv_blood_auto_endo)
+        gb.addWidget(self._lvv_auto_endo_btn)
         row1.addWidget(self._lv_grp_blood)
         row1.addStretch(1)
 
@@ -2947,9 +2963,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._LV_STY["endo"] if (sm == "endo" or endo_loaded) else off)
         self._lv_epi_btn.setStyleSheet(
             self._LV_STY["epi"] if (sm == "epi" or epi_loaded) else off)
+        # Blood/Endo button: endo is part of this sub-mode now, so it reads active/
+        # loaded for either blood OR endo data.
+        be_on = (sm in ("blood", "endo") or blood_loaded or endo_loaded)
         self._lvv_start_btn.setStyleSheet(
             ("QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
-            if (sm == "blood" or blood_loaded)
+            if be_on
             else ("QPushButton:checked{background:#2e8b57;color:white;}"
                   + self._BTN_DIS))
 
@@ -2976,6 +2995,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thr_btn.setEnabled(on and apex_done and valves_ok)
         self._lvv_calc_btn.setEnabled(on and roi_done)
         self._lvv_save_btn.setEnabled(on and roi_done)
+        # Auto-Endo needs a measured blood mask.
+        if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+            self._lvv_auto_endo_btn.setEnabled(
+                on and self._lvv_blood_comp is not None)
         self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
 
@@ -3701,6 +3724,27 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_prompt(
                 t("Aortic plane captured. Draw a Polygon inside the LV cavity "
                   "(Measure→Polygon), then press the 内腔ROI button."))
+
+    def _lv_blood_auto_endo(self, *args) -> None:
+        """Auto-Endo button (Blood/Endo sub-mode): (re)derive the Endo border from
+        the current blood measure and open it for editing. Warns first that any
+        unsaved Endo edits will be replaced — versions are kept via Save/Load of
+        the self-contained BldEnd file."""
+        from PyQt6.QtWidgets import QMessageBox
+        if getattr(self, "_lvv_blood_comp", None) is None:
+            QMessageBox.information(
+                self.window(), t("Blood/Endo"),
+                t("Measure the blood volume first (set the HU range + ROI, press "
+                  "LV Vol計測), then Auto-Endo."))
+            return
+        if QMessageBox.question(
+                self.window(), t("Auto-Endo"),
+                t("(Re)derive the Endo border from the current blood HU range? "
+                  "Any unsaved Endo edits will be replaced — Save the BldEnd file "
+                  "first if you want to keep them.")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_auto_endo_from_blood()
 
     def _lv_endo_entry(self) -> bool:
         """Endo sub-mode entry gate. Require MV / AoV / Epi / Blood to all be
