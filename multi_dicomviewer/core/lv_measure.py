@@ -712,7 +712,8 @@ class LVModel:
             float(np.asarray(c, float).reshape(-1, 2)[:, 0].max())
             for c in contours.values())
         surf = LVSurface.from_meridian_contours(
-            axis, contours, level_step, n_theta, base_along=base_full)
+            axis, contours, level_step, n_theta, base_along=base_full,
+            clamp_basal=True)          # no cross-meridian bulge past a short wall
         if surf is not None:
             surf.apex_world = (self.endo_apex if which == "endo"
                                else self.epi_apex)

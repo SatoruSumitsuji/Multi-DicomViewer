@@ -285,7 +285,8 @@ class LVSurface:
     def from_meridian_contours(cls, axis: LVAxis, contours: dict,
                                level_step: float = LV_LEVEL_STEP_MM,
                                n_theta: int = LV_RING_POINTS,
-                               base_along: float | None = None) -> "LVSurface":
+                               base_along: float | None = None,
+                               clamp_basal: bool = False) -> "LVSurface":
         """Build the ring stack from per-meridian long-axis contours.
 
         *contours* maps a meridian angle θ (deg) → an (T,2) array of
@@ -296,6 +297,12 @@ class LVSurface:
         *base_along* overrides the basal cut level (this axis' along); used to
         cut Endo and Epi at a COMMON basal level judged on the epi axis (see
         LVModel.build). None → the surface's own most-basal common level.
+
+        *clamp_basal*: above a meridian's OWN traced range, keep its LAST radius
+        (extend straight up) instead of dropping out (NaN). Then a level above a
+        short meridian is NOT widened by angular interpolation from its longer
+        (wider) neighbours — so the surface can't bulge past that wall when the
+        base is cut by a tilted valve plane. Used for valve-clipped volumes.
         """
         if len(contours) < 3:
             raise ValueError("need at least 3 meridians to build a surface")
@@ -334,6 +341,8 @@ class LVSurface:
             lo, hi = float(cc[0, 0]), float(cc[-1, 0])
             m = (along >= lo - 1e-6) & (along <= hi + 1e-6)
             r_km[m, j] = np.interp(along[m], cc[:, 0], cc[:, 1])
+            if clamp_basal:                    # extend straight up (own radius)
+                r_km[along > hi + 1e-6, j] = float(cc[-1, 1])
         # per level, resample radii around θ using ONLY the meridians present at
         # that level, then → 2-D pts. Deep apical levels are built from the few
         # meridians that reach there; the basal levels from all of them.
