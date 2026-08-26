@@ -5843,6 +5843,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
             if self._lv is not None and self._measures[which][hit[0]].get("_lv"):
                 self._lv_push_undo(which, hit[0])   # snapshot before the drag
+                # Record which WALL (side of the LV axis) this point starts on, so
+                # the drag can't push it across the axis to the other meridian
+                # (which the sign-based split would reassign → unfill/protrusion).
+                self._edit["lv_side"] = self._lv_border_side(
+                    self._measures[which][hit[0]], hit[1])
             self._redraw_geom(which)            # show the green dot now
             # Grabbing an LV border vertex → light the linked SAX crossing green
             # at once (not only after the first drag).
@@ -5998,6 +6003,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._snap_lumen and self._lv is None:
                     _, _, nrm = self._axes_for(e["key"])
                     P = self._snap_to_lumen(P, nrm)
+                    m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
+                # LV border: keep the point on its own wall (don't let it cross
+                # the LV axis) — the sign-based meridian split would otherwise
+                # reassign it to the opposite wall, corrupting the reconstruction.
+                if m.get("_lv") is not None and self._lv is not None:
+                    P = self._lv_clamp_border_point(P, m["_lv"],
+                                                    e.get("lv_side"))
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
                 m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
@@ -8384,6 +8396,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apply_target(self._lv.get("pass"))
         self._lv_show_plane()
         self._redraw_meas(pane)
+
+    def _lv_border_side(self, m, vi) -> float:
+        """+1 / −1: which WALL (side of the LV axis) LV-border point *vi* is on,
+        by the sign of its in-plane radial along its meridian. 1.0 if unknown."""
+        tag = m.get("_lv")
+        if tag is None or self._lv is None or not m.get("pts3d"):
+            return 1.0
+        idx, target = tag
+        ax = self._lv["model"]._axis_for(target)
+        if ax is None or not (0 <= vi < len(m["pts3d"])):
+            return 1.0
+        angs = self._lv["model"].plane_angles()
+        e_s = np.asarray(ax.meridian_dir(angs[idx % len(angs)]), float)
+        s = float((np.asarray(m["pts3d"][vi], float) - ax.apex) @ e_s)
+        return 1.0 if s >= 0.0 else -1.0
+
+    def _lv_clamp_border_point(self, P, tag, side, s_min: float = 2.5):
+        """Keep an LV-border point on its own wall: clamp its in-plane radial so
+        it stays on *side* of the LV axis and no closer than *s_min* mm (avoids a
+        radius-0 pinch and the cross-axis meridian reassignment). Adjusts only the
+        radial component along the meridian; the along-axis position is kept."""
+        if self._lv is None or side is None or tag is None:
+            return P
+        idx, target = tag
+        ax = self._lv["model"]._axis_for(target)
+        if ax is None:
+            return P
+        angs = self._lv["model"].plane_angles()
+        e_s = np.asarray(ax.meridian_dir(angs[idx % len(angs)]), float)
+        apex = np.asarray(ax.apex, float)
+        P = np.asarray(P, float)
+        s = float((P - apex) @ e_s)
+        s_cl = side * max(s_min, side * s)      # own side, |s| ≥ s_min, no cross
+        if abs(s_cl - s) > 1e-9:
+            P = P + (s_cl - s) * e_s
+        return P
 
     def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0) -> bool:
         """Move each traced long-axis plane's two BASAL end-points of the *pas*
