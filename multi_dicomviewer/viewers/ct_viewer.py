@@ -1454,6 +1454,19 @@ class _Pane:
         lenv.GetProperty().SetPointSize(3.0)
         self.ren.AddActor(lenv)
         self.lvv_env_actor = lenv
+        # Auto-Endo表示 overlay: the display-only endocardial envelope border
+        # where it crosses this pane (own mapper/actor so it's independent of the
+        # green Epi dots and works during free rotation).
+        self.lvv_endo_mapper = vtkPolyDataMapper()
+        self.lvv_endo_mapper.SetInputData(vtkPolyData())
+        self.lvv_endo_mapper.ScalarVisibilityOn()
+        self.lvv_endo_mapper.SetScalarModeToUseCellData()
+        self.lvv_endo_mapper.SetColorModeToDirectScalars()
+        lendo = vtkActor()
+        lendo.SetMapper(self.lvv_endo_mapper)
+        lendo.GetProperty().SetPointSize(3.0)
+        self.ren.AddActor(lendo)
+        self.lvv_endo_actor = lendo
         # Highlighted SAX crossing (the one that follows an active long-axis
         # edit) — green, TWICE the yellow crossing-dot radius (own actor so it
         # can be a larger point).
@@ -2134,6 +2147,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_blood_comp = None      # last Blood mask (bbox sub-volume, bool)
         self._lvv_blood_bbox = None      # its (z0,z1,y0,y1,x0,x1) in the volume
         self._lvv_blood_apex = None      # apex used for that Blood measure
+        # Auto-Endo表示 (display-only) vs Manual-Endo (edit) — two independent
+        # Endo borders. endo_auto is re-derived from the blood pool whenever the
+        # HU range changes; endo_manual is the hand-edited border and is RETAINED
+        # across HU changes (never auto-discarded).
+        self._lv_endo_auto_model = None  # built LVModel of the auto Endo
+        self._lv_endo_auto_surf = None   # its endo surface (for the reslice dots)
+        self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
+        self._lvv_endo_show = False      # Auto-Endo表示 toggle state
+        self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
@@ -2585,16 +2607,26 @@ class CTViewer(CPRMixin, AbstractViewer):
               "first if none is in memory"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
         gb.addWidget(self._lvv_epi_btn)
-        # Auto-Endo: derive the Endo border from the measured blood pool and open
-        # it (13 edit handles) for manual correction. Re-pressing re-derives from
-        # the current HU range (warns first — save the current Endo if wanted).
-        self._lvv_auto_endo_btn = FitButton(t("Auto-Endo"))
+        # Auto-Endo表示: display-only toggle of the endocardial envelope derived
+        # from the blood pool (papillary filled). Independent of LV-Blood表示 /
+        # Epi表示; recomputes from the current HU range when the range changed.
+        self._lvv_auto_endo_btn = FitButton(t("Auto-Endo表示"))
+        self._lvv_auto_endo_btn.setCheckable(True)
         self._lvv_auto_endo_btn.setHelpToolTip(
-            t("Derive the Endo border from the measured blood region (papillary "
-              "filled; 13 handles) and open it for editing. Re-derives from the "
-              "current HU range when pressed again."))
-        self._lvv_auto_endo_btn.clicked.connect(self._lv_blood_auto_endo)
+            t("Show the auto Endo border (from the blood pool, papillary filled) "
+              "as a display-only overlay — free to rotate/spin. Recomputes for "
+              "the current HU range."))
+        self._lvv_auto_endo_btn.clicked.connect(self._lvv_toggle_auto_endo)
         gb.addWidget(self._lvv_auto_endo_btn)
+        # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from the auto
+        # Endo the first time; the hand-edited border is retained across HU
+        # changes (Clear it to re-seed from a fresh auto).
+        self._lvv_manual_endo_btn = FitButton(t("Manual-Endo"))
+        self._lvv_manual_endo_btn.setHelpToolTip(
+            t("Edit the Endo border by hand (13 handles). Seeded from Auto-Endo "
+              "the first time; kept when the HU range changes."))
+        self._lvv_manual_endo_btn.clicked.connect(self._lvv_manual_endo)
+        gb.addWidget(self._lvv_manual_endo_btn)
         row1.addWidget(self._lv_grp_blood)
         row1.addStretch(1)
 
@@ -2711,7 +2743,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
-            self._lvv_exit_btn]
+            self._lvv_exit_btn, self._lvv_manual_endo_btn]
         for b in self._lvv_ctrl_btns:
             b.setStyleSheet(self._BTN_DIS)
         self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
@@ -2874,14 +2906,34 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                               # noqa: BLE001
             pass
 
+    def _lv_stash_manual_endo(self, model) -> None:
+        """Serialize a hand-edited Endo model into _lv_endo_manual_dict so it is
+        RETAINED across HU-range changes (Auto-Endo recomputes, Manual does not).
+        A CLEARED Endo (<3 meridians) drops the retained manual instead, so the
+        recommended re-seed path (Clear → Manual-Endo) rebuilds from a fresh
+        Auto-Endo."""
+        try:
+            if (model is not None
+                    and getattr(model, "endo_axis", None) is not None
+                    and len(model.endo_contours) >= 3):
+                self._lv_endo_manual_dict = model.to_dict()
+            else:
+                self._lv_endo_manual_dict = None        # cleared → re-seed next
+        except Exception:                               # noqa: BLE001
+            pass
+
     def _lv_reset_contour_empty(self) -> None:
         """Drop the current pass's model + on-screen borders and return to the
         no-pass state (still in LV mode). Used when a pass is DEACTIVATED (its
         data is discarded then) and before starting a fresh independent pass."""
         from multi_dicomviewer.core.lv_measure import LVModel
         lv = self._lv
-        # Before wiping, keep any Epi surface so Blood can still use it.
+        # Before wiping, keep any Epi surface so Blood can still use it, and keep
+        # a hand-edited Endo (Manual-Endo) so it is retained across HU changes.
         self._lv_stash_epi_for_blood(lv["model"])
+        if getattr(self, "_lv_endo_manual_mode", False):
+            self._lv_stash_manual_endo(lv["model"])
+            self._lv_endo_manual_mode = False
         lv["model"] = LVModel(n_planes=lv["model"].n_planes)
         for k in ("A", "B"):
             self._measures[k] = [mm for mm in self._measures[k]
@@ -3024,10 +3076,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_aov_btn.setEnabled(on and mv_done)
         self._lvv_mask_btn.setEnabled(ready)        # LV-Blood表示
         self._lvv_save_btn.setEnabled(on and apex_done)
-        # Auto-Endo needs a measured blood mask.
+        # Auto-Endo表示 needs a measured blood mask; Manual-Endo needs blood OR a
+        # retained hand-edited Endo to continue.
+        blood_ok = self._lvv_blood_comp is not None
         if getattr(self, "_lvv_auto_endo_btn", None) is not None:
-            self._lvv_auto_endo_btn.setEnabled(
-                on and self._lvv_blood_comp is not None)
+            self._lvv_auto_endo_btn.setEnabled(on and blood_ok)
+            self._lvv_auto_endo_btn.setVisible(on)
+            self._lvv_auto_endo_btn.setChecked(
+                bool(getattr(self, "_lvv_endo_show", False)))
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        if getattr(self, "_lvv_manual_endo_btn", None) is not None:
+            self._lvv_manual_endo_btn.setEnabled(
+                on and (blood_ok
+                        or getattr(self, "_lv_endo_manual_dict", None) is not None))
+            self._lvv_manual_endo_btn.setVisible(on)
         self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
 
@@ -3250,6 +3312,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_hl_btn.setChecked(True)
             self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
             self._lvv_update_mask()
+        # The auto Endo is derived from the blood pool, so a HU change makes it
+        # stale: drop it + hide Auto-Endo表示 (re-press to recompute). The
+        # hand-edited Manual Endo is RETAINED (never auto-discarded).
+        self._lv_endo_auto_model = None
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        if getattr(self, "_lvv_endo_show", False):
+            self._lvv_endo_show = False
+            self._lvv_auto_endo_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            self._lvv_show_endo(render=False)
         self._lvv_update_highlight()
 
     def _lvv_toggle_blood(self, *args) -> None:
@@ -3821,27 +3894,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 t("Aortic plane captured. Draw a Polygon inside the LV cavity "
                   "(Measure→Polygon), then press the 内腔ROI button."))
 
-    def _lv_blood_auto_endo(self, *args) -> None:
-        """Auto-Endo button (Blood/Endo sub-mode): (re)derive the Endo border from
-        the current blood measure and open it for editing. Warns first that any
-        unsaved Endo edits will be replaced — versions are kept via Save/Load of
-        the self-contained BldEnd file."""
-        from PyQt6.QtWidgets import QMessageBox
-        if getattr(self, "_lvv_blood_comp", None) is None:
-            QMessageBox.information(
-                self.window(), t("Blood/Endo"),
-                t("Compute the LV blood first (adjust the HU range, press "
-                  "'LV-Blood表示'), then Auto-Endo."))
-            return
-        if QMessageBox.question(
-                self.window(), t("Auto-Endo"),
-                t("(Re)derive the Endo border from the current blood HU range? "
-                  "Any unsaved Endo edits will be replaced — Save the BldEnd file "
-                  "first if you want to keep them.")) \
-                != QMessageBox.StandardButton.Yes:
-            return
-        self._lv_auto_endo_from_blood()
-
     def _lv_endo_entry(self) -> bool:
         """Endo sub-mode entry gate. Require MV / AoV / Epi / Blood to all be
         ready (else name what's missing and block). When ready, offer Auto (build
@@ -3892,12 +3944,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             return True
         return False                                   # Cancel / closed
 
-    def _lv_auto_endo_from_blood(self) -> bool:
-        """Build an editable Endo border from the retained blood pool: the
-        compact-layer envelope (papillary/trabeculae filled), sampled at 7 along-
-        levels per wall — apex, ⅛, ¼, ½, ¾, ⅞, base — so each long-axis plane has
-        13 edit handles (the apex is shared). Opens it in the Endo sub-mode.
-        Returns True on success."""
+    def _lvv_build_endo_model(self):
+        """Build (but do NOT open) an Endo LVModel from the retained blood pool:
+        the compact-layer envelope (papillary/trabeculae filled), sampled at 7
+        along-levels per wall — apex, ⅛, ¼, ½, ¾, ⅞, base — so each long-axis
+        plane has 13 handles (apex shared). Returns the built LVModel or None
+        (showing a message on failure)."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         from multi_dicomviewer.core.lv_measure import LVModel
@@ -3911,7 +3963,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(
                 self.window(), t("LV"),
                 t("自動Endo needs Blood, Epi, apex and the MV plane."))
-            return False
+            return None
         ax = epi.axis
         apex = np.asarray(apex, float)
         axis_dir = np.asarray(ax.axis, float)
@@ -3923,7 +3975,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(
                 self.window(), t("LV"),
                 t("The MV plane is not basal to the apex — re-check apex / MV."))
-            return False
+            return None
         z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
@@ -3961,7 +4013,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("LV"),
                 t("Could not derive Endo from the blood pool: {e}").format(
                     e=result.get("err") or (prof or {}).get("error", "empty")))
-            return False
+            return None
         # 7 along-levels per wall (fractions of apex→base); the apex is shared, so
         # 6 non-apex per wall + 1 apex = 13 handles per plane.
         fracs = [0.125, 0.25, 0.5, 0.75, 0.875, 1.0]
@@ -3992,15 +4044,119 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("LV"),
                 t("Too few meridians recovered from the blood pool ({n}). Re-check "
                   "the blood measure / thresholds.").format(n=built))
-            return False
+            return None
         model.set_apex_point("endo", apex)
+        model.build()
+        return model
+
+    def _lv_auto_endo_from_blood(self) -> bool:
+        """Build the auto Endo from the blood pool and OPEN it for editing (the
+        Manual path from the Endo entry gate). Returns True on success."""
+        from PyQt6.QtWidgets import QMessageBox
+        model = self._lvv_build_endo_model()
+        if model is None:
+            return False
+        self._lv_endo_manual_mode = True     # this pass is a hand-edited Endo
         self._lv_apply_model(model)          # opens Endo for editing (13 handles)
         QMessageBox.information(
             self.window(), t("LV"),
-            t("Auto-Endo created from the blood pool on {n} planes (papillary "
-              "filled; 13 handles/plane). Edit as needed, then Calc Vol.").format(
-                  n=built))
+            t("Auto-Endo created from the blood pool (papillary filled; 13 "
+              "handles/plane). Edit as needed."))
         return True
+
+    def _lvv_endo_stale(self) -> bool:
+        """True if the auto Endo needs rebuilding: none built yet, or the blood
+        signature changed since (HU range edited)."""
+        if self._lv_endo_auto_model is None or self._lv_endo_auto_surf is None:
+            return True
+        sig = self._lvv_signature() if self._lvv is not None else None
+        return sig is None or sig != self._lv_endo_auto_sig
+
+    def _lvv_toggle_auto_endo(self, *args) -> None:
+        """Auto-Endo表示: display-only overlay of the auto Endo border. Builds it
+        (a few seconds) when stale/absent, then shows it; unchecking hides it."""
+        if not self._lvv_auto_endo_btn.isChecked():
+            self._lvv_endo_show = False
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            self._lvv_show_endo()
+            return
+        if getattr(self, "_lvv_blood_comp", None) is None:
+            self._lvv_auto_endo_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self.window(), t("Auto-Endo"),
+                t("Compute the LV blood first (adjust the HU range, press "
+                  "'LV-Blood表示'), then Auto-Endo表示."))
+            return
+        if self._lvv_endo_stale():
+            model = self._lvv_build_endo_model()
+            if model is None:                    # build failed → leave it off
+                self._lvv_auto_endo_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+                return
+            self._lv_endo_auto_model = model
+            self._lv_endo_auto_surf = model.endo
+            self._lv_endo_auto_sig = (self._lvv_signature()
+                                      if self._lvv is not None else None)
+        self._lvv_endo_show = True
+        self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        self._lvv_show_endo()
+
+    def _lvv_show_endo(self, render=True) -> None:
+        """Draw the auto Endo surface where it crosses each pane (orange dots) —
+        the Auto-Endo表示 overlay. Follows plane/zoom/rotation like the Epi dots."""
+        on = (self._lvv is not None and self._lv is None
+              and self._lv_endo_auto_surf is not None
+              and getattr(self, "_lvv_endo_show", False))
+        pts = self._lv_endo_auto_surf._all_ring_points() if on else None
+        for key in ("A", "B"):
+            p = self.pane[key]
+            if pts is None:
+                p.lvv_endo_mapper.SetInputData(vtkPolyData())
+            else:
+                _u, _v, n = self._axes_for(key)
+                n = np.asarray(n, float)
+                o = np.asarray(self._pc[key], float)
+                dist = (pts - o) @ n
+                tol = 0.75 * max(self._dims)
+                near = pts[np.abs(dist) <= tol]
+                if len(near):
+                    out = [self._world3d_to_out(key, P) for P in near]
+                    p.lvv_endo_mapper.SetInputData(
+                        _lv_pts_pd(out, [(255, 140, 40)] * len(out), z=0.73))
+                else:
+                    p.lvv_endo_mapper.SetInputData(vtkPolyData())
+            if render:
+                p.render()
+
+    def _lvv_manual_endo(self, *args) -> None:
+        """Manual-Endo: enter the Endo edit pass. Continues the RETAINED hand-
+        edited Endo if one exists (kept across HU changes); otherwise seeds it
+        from the auto Endo (built now if needed). To re-seed from a fresh auto,
+        Clear the manual Endo first."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
+        from multi_dicomviewer.core.lv_measure import LVModel
+        if getattr(self, "_lv_endo_manual_dict", None) is not None:
+            model = LVModel.from_dict(self._lv_endo_manual_dict)
+            model.build()
+        else:
+            if getattr(self, "_lvv_blood_comp", None) is None:
+                QMessageBox.information(
+                    self.window(), t("Manual-Endo"),
+                    t("Compute the LV blood first (adjust the HU range, press "
+                      "'LV-Blood表示'), then Manual-Endo."))
+                return
+            model = self._lvv_build_endo_model()
+            if model is None:
+                return
+        self._lv_endo_manual_mode = True         # stash edits as manual on exit
+        self._lv_apply_model(model)              # opens Endo for editing
+        QMessageBox.information(
+            self.window(), t("Manual-Endo"),
+            t("Editing the Endo border (13 handles/plane). Changes are kept when "
+              "the HU range changes; Clear to re-seed from Auto-Endo."))
 
     def _lvv_calc(self, then=None) -> None:
         from PyQt6.QtWidgets import QMessageBox
@@ -4345,10 +4501,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_vol = None
         self._lvv_mask_on = False
         self._lvv_epi_show = False
+        # NOTE: the auto Endo model and the RETAINED manual Endo survive leaving
+        # Blood (like _lvv_blood_comp); only the on-screen overlay is hidden.
+        self._lvv_endo_show = False
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lvv") is None]
             self.pane[k].lvv_env_mapper.SetInputData(vtkPolyData())
+            self.pane[k].lvv_endo_mapper.SetInputData(vtkPolyData())
             self.pane[k].colors_hl.SetLookupTable(_lvv_transparent_lut())
             self.pane[k].colors_hl.Modified()
             self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(False))
@@ -7222,6 +7382,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_blood_comp = None              # and its blood mask
         self._lvv_blood_bbox = None
         self._lvv_blood_apex = None
+        self._lv_endo_auto_model = None          # and the Auto/Manual Endo
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        self._lv_endo_manual_dict = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
@@ -7308,6 +7472,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_blood_comp = None              # and its blood mask
         self._lvv_blood_bbox = None
         self._lvv_blood_apex = None
+        self._lv_endo_auto_model = None          # and the Auto/Manual Endo
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        self._lv_endo_manual_dict = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
@@ -9265,6 +9433,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Stash the traced EPI surface so Blood can use it as the outer bound.
         if self._lv is not None:
             self._lv_stash_epi_for_blood(self._lv["model"])
+            if getattr(self, "_lv_endo_manual_mode", False):
+                self._lv_stash_manual_endo(self._lv["model"])
+                self._lv_endo_manual_mode = False
         self._lv_reset_undo()
         # Remove the on-screen LV border traces (kept in the model for volume).
         for k in ("A", "B"):
@@ -10199,6 +10370,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # LV Vol Epi-border dots follow plane/zoom changes (data only).
         if self._lvv is not None and getattr(self, "_lvv_epi_show", False):
             self._lvv_show_epi(render=False)
+        # Auto-Endo表示 overlay follows plane/zoom/rotation too.
+        if self._lvv is not None and getattr(self, "_lvv_endo_show", False):
+            self._lvv_show_endo(render=False)
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
