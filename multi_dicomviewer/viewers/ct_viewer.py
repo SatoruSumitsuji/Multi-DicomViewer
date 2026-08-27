@@ -3076,19 +3076,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_aov_btn.setEnabled(on and mv_done)
         self._lvv_mask_btn.setEnabled(ready)        # LV-Blood表示
         self._lvv_save_btn.setEnabled(on and apex_done)
-        # Auto-Endo表示 needs a measured blood mask; Manual-Endo needs blood OR a
-        # retained hand-edited Endo to continue.
+        # Auto-Endo表示 / Manual-Endo are available once the region CAN be computed
+        # (apex + valves + Epi) — they compute the blood pool internally, so the
+        # user does NOT have to press LV-Blood表示 first. Manual also stays
+        # available if a retained hand-edited Endo exists.
         blood_ok = self._lvv_blood_comp is not None
         if getattr(self, "_lvv_auto_endo_btn", None) is not None:
-            self._lvv_auto_endo_btn.setEnabled(on and blood_ok)
+            self._lvv_auto_endo_btn.setEnabled(ready or blood_ok)
             self._lvv_auto_endo_btn.setVisible(on)
             self._lvv_auto_endo_btn.setChecked(
                 bool(getattr(self, "_lvv_endo_show", False)))
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
         if getattr(self, "_lvv_manual_endo_btn", None) is not None:
             self._lvv_manual_endo_btn.setEnabled(
-                on and (blood_ok
-                        or getattr(self, "_lv_endo_manual_dict", None) is not None))
+                ready or blood_ok
+                or getattr(self, "_lv_endo_manual_dict", None) is not None)
             self._lvv_manual_endo_btn.setVisible(on)
         self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
@@ -4073,21 +4075,47 @@ class CTViewer(CPRMixin, AbstractViewer):
         return sig is None or sig != self._lv_endo_auto_sig
 
     def _lvv_toggle_auto_endo(self, *args) -> None:
-        """Auto-Endo表示: display-only overlay of the auto Endo border. Builds it
-        (a few seconds) when stale/absent, then shows it; unchecking hides it."""
+        """Auto-Endo表示: display-only overlay of the auto Endo border. Computes
+        the blood pool INTERNALLY if needed (no change to the 水色 / 全域HU fill),
+        builds the Endo (a few seconds) when stale, then shows it. Independent of
+        LV-Blood表示. Unchecking hides it."""
+        from PyQt6.QtWidgets import QMessageBox
         if not self._lvv_auto_endo_btn.isChecked():
             self._lvv_endo_show = False
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             self._lvv_show_endo()
             return
+        # Ready to compute? (apex + valves + Epi). If not, tell the user.
+        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+        ready = (self._lvv is not None and self._lvv.get("apex") is not None
+                 and av is not None and mv is not None
+                 and self._lvv_epi_surf is not None)
+        if not (ready or self._lvv_blood_comp is not None):
+            self._lvv_auto_endo_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            QMessageBox.information(
+                self.window(), t("Auto-Endo"),
+                t("Set the apex, MV/AoV planes and an Epi surface first."))
+            return
+        # Ensure a FRESH blood pool for the current HU (compute silently — do not
+        # flip the 水色 / 全域HU fill). Then build + show the Endo overlay.
+        sig = self._lvv_signature() if self._lvv is not None else None
+        blood_fresh = (self._lvv_blood_comp is not None
+                       and self._lvv.get("calc_sig") is not None
+                       and self._lvv.get("calc_sig") == sig)
+        if not blood_fresh:
+            self._lvv_calc(then=self._lvv_finish_auto_endo, display=False)
+            return
+        self._lvv_finish_auto_endo()
+
+    def _lvv_finish_auto_endo(self) -> None:
+        """Build the auto Endo (if stale) from the now-computed blood pool and
+        show the Auto-Endo表示 overlay. Called directly, or as the callback after
+        an internal blood compute."""
         if getattr(self, "_lvv_blood_comp", None) is None:
             self._lvv_auto_endo_btn.setChecked(False)
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self.window(), t("Auto-Endo"),
-                t("Compute the LV blood first (adjust the HU range, press "
-                  "'LV-Blood表示'), then Auto-Endo表示."))
             return
         if self._lvv_endo_stale():
             model = self._lvv_build_endo_model()
@@ -4100,6 +4128,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_endo_auto_sig = (self._lvv_signature()
                                       if self._lvv is not None else None)
         self._lvv_endo_show = True
+        self._lvv_auto_endo_btn.setChecked(True)
         self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
         self._lvv_show_endo()
 
@@ -4158,12 +4187,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Editing the Endo border (13 handles/plane). Changes are kept when "
               "the HU range changes; Clear to re-seed from Auto-Endo."))
 
-    def _lvv_calc(self, then=None) -> None:
+    def _lvv_calc(self, then=None, display=True) -> None:
         from PyQt6.QtWidgets import QMessageBox
         try:
             lvv = self._lvv
             if lvv is None or self._vol is None:
                 return
+            self._lvv_calc_display = display   # finish flips the 水色 fill or not
             # Already computed AND the inputs are unchanged since (signature
             # matches)? Then just re-show the 水色 region (no recompute).
             have = (lvv.get("last_ml") is not None
@@ -4246,26 +4276,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv = self._lvv
             if lvv is None:
                 return
+
+            def _fail(msg, critical=False):
+                # A failed compute must not leave a toggle stuck ON (e.g. the
+                # Auto-Endo表示 button that kicked off a silent compute).
+                self._lvv_calc_then = None
+                if critical:
+                    QMessageBox.critical(self.window(), t("LV Vol (error)"), msg)
+                else:
+                    QMessageBox.information(self.window(), t("LV Vol"), msg)
+                self._lvv_sync()
+
             if res is None:
-                QMessageBox.information(
-                    self.window(), t("LV Vol"),
-                    t("No cavity found — check the HU range."))
+                _fail(t("No cavity found — check the HU range."))
                 return
             if res.get("error") == "exc":
-                QMessageBox.critical(self.window(), t("LV Vol (error)"),
-                                     res.get("msg", "error"))
+                _fail(res.get("msg", "error"), critical=True)
                 return
             if res.get("error") == "seed_out":
-                QMessageBox.information(
-                    self.window(), t("LV Vol"),
-                    t("Could not compute — {m}.\nAdjust the 下限/上限 HU range or "
-                      "re-check the Epi / MV / AoV.").format(m=res["msg"]))
+                _fail(t("Could not compute — {m}.\nAdjust the 下限/上限 HU range "
+                        "or re-check the Epi / MV / AoV.").format(m=res["msg"]))
                 return
             if res.get("error") == "too_large":
-                QMessageBox.warning(
-                    self.window(), t("LV Vol"),
-                    t("Region too large to compute ({v:,} voxels) — re-check "
-                      "the Epi surface.").format(v=res["voxels"]))
+                _fail(t("Region too large to compute ({v:,} voxels) — re-check "
+                        "the Epi surface.").format(v=res["voxels"]))
                 return
             lvv["last_ml"] = res["volume_ml"]
             self._lvv_dirty = True         # a fresh measure is unsaved
@@ -4288,15 +4322,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_mask_alpha = 0.55
                 for k in ("A", "B"):
                     self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
-                # Show 水色, hide the 全域HU tint (they are exclusive).
-                self._lvv_mask_on = True
-                self._lvv_mask_btn.setChecked(True)
-                self._lvv_hl_on = False
-                self._lvv_hl_btn.setChecked(False)
-                self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-                self._refresh()                          # reslice the mask now
-                self._lvv_update_mask()
-                self._lvv_update_highlight()
+                if getattr(self, "_lvv_calc_display", True):
+                    # Show 水色, hide the 全域HU tint (they are exclusive).
+                    self._lvv_mask_on = True
+                    self._lvv_mask_btn.setChecked(True)
+                    self._lvv_hl_on = False
+                    self._lvv_hl_btn.setChecked(False)
+                    self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+                    self._refresh()                      # reslice the mask now
+                    self._lvv_update_mask()
+                    self._lvv_update_highlight()
             self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
             self._lvv_sync()
             self._lv_update_text()     # show "Blood-Volume:" in the result block
