@@ -6135,7 +6135,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 hit = None
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
-            if self._lv is not None and self._measures[which][hit[0]].get("_lv"):
+            is_lv_border = (self._lv is not None
+                            and self._measures[which][hit[0]].get("_lv"))
+            if not is_lv_border:
+                # Non-LV measure handle drag → snapshot for a general undo step,
+                # committed on release only if the point actually moved.
+                self._meas_edit_before = (which, self._meas_pane_snap(which))
+                self._meas_edit_moved = False
+            if is_lv_border:
                 self._lv_push_undo(which, hit[0])   # snapshot before the drag
                 # Record which WALL (side of the LV axis) this point starts on, so
                 # the drag can't push it across the axis to the other meridian
@@ -6154,6 +6161,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if ca_hit is not None:
             self._edit = {"key": which, "mi": ca_hit[0], "vi": ca_hit[1],
                           "ca": True}
+            self._meas_edit_before = (which, self._meas_pane_snap(which))
+            self._meas_edit_moved = False
             self._redraw_geom(which)
             return True
         if not self._meas_type:
@@ -6166,11 +6175,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 P = self._out_to_world3d(which, *w)
             except Exception:
                 P = None
+            _pt_before = self._meas_pane_snap(which)
             self._meas_seq += 1
             self._measures[which].append(
                 {"id": self._meas_seq, "type": "point", "pts": [w],
                  "pts3d": [P] if P is not None else []})
             self._redraw_meas(which)
+            self._meas_record(which, _pt_before)
             return False
         # Line: support press-drag-release (the natural gesture for a straight
         # line) ON TOP of click-click. The first press starts a rubber-band line
@@ -6269,6 +6280,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _measure_drag(self, which, sx, sy):
         e = self._edit
+        if e and self._meas_edit_before is not None:
+            self._meas_edit_moved = True     # a non-LV handle actually moved
         if not e:
             # Rubber-band the 2nd point of a Line being press-dragged.
             d = self._draft
@@ -6349,6 +6362,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apex_snap = None     # LV geometry snap while dragging an apex
         self._draft_redo = []         # points popped from an in-progress trace
         self._lod_drag = False        # interactive low-res reslice while dragging
+        self._meas_edit_before = None  # (pane, snapshot) at a measure-handle press
+        self._meas_edit_moved = False  # did the current measure drag move a point
 
     def _undo_record(self, undo_fn, redo_fn) -> None:
         """Append one undo/redo command, dropping any redo-future first."""
@@ -6367,6 +6382,53 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._undo_record(lambda b=before: self._view_restore(b),
                           lambda a=after: self._view_restore(a))
+
+    # ---- general Measure (Line/Polyline/Ellipse/Polygon/Point) undo --------
+    # Non-LV measures live in self._measures[pane] (plain dicts). Create /
+    # delete / handle-move each snapshot the whole pane list before and after,
+    # so Ctrl+Z / Ctrl+Y restore it exactly (LV borders keep their OWN undo via
+    # _lv_record_* and are excluded here to avoid double steps).
+    def _meas_pane_snap(self, pane):
+        """Deep copy of the NON-LV measures on *pane* (LV borders keep their own
+        undo, so they are excluded and left untouched by a restore)."""
+        import copy
+        return copy.deepcopy([m for m in self._measures.get(pane, [])
+                              if not m.get("_lv")])
+
+    def _meas_pane_restore(self, pane, snap) -> None:
+        import copy
+        cur = self._measures.get(pane, [])
+        lv_keep = [m for m in cur if m.get("_lv")]     # untouched by general undo
+        old_ids = {m.get("id") for m in cur if not m.get("_lv")}
+        self._measures[pane] = copy.deepcopy(snap) + lv_keep
+        new_ids = {m.get("id") for m in self._measures[pane] if not m.get("_lv")}
+        # Keep the Measure-History side list in step: drop entries whose measure
+        # went away, (re)add entries whose measure came back.
+        try:
+            for mid in old_ids - new_ids:
+                if mid is not None:
+                    self.measurement_removed.emit(int(mid))
+            add_back = new_ids - old_ids
+            for m in self._measures[pane]:
+                if not m.get("_lv") and m.get("id") in add_back:
+                    self.measurement_added.emit(Measurement(
+                        kind=self._JP.get(m["type"], m["type"]),
+                        points=[tuple(q) for q in m["pts"]],
+                        text=self._metrics_text(pane, m),
+                        mid=int(m["id"])))
+        except Exception:                               # noqa: BLE001
+            pass
+        self._redraw_meas(pane)
+
+    def _meas_record(self, pane, before) -> None:
+        """Record a measure-list change on *pane* from the *before* snapshot to
+        its current state as one undo/redo step."""
+        if before is None:
+            return
+        after = self._meas_pane_snap(pane)
+        self._undo_record(
+            lambda p=pane, b=before: self._meas_pane_restore(p, b),
+            lambda p=pane, a=after: self._meas_pane_restore(p, a))
 
     def _gesture_begin(self) -> None:
         """A view-changing mouse drag is starting: snapshot the state so its
@@ -6822,6 +6884,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     and mi is not None:
                 self._lv_record_border(self._lv_edit_before, key, mi)
             self._lv_edit_before = None
+            # Commit a general-Measure handle DRAG as one undo step (only if the
+            # point actually moved).
+            if self._meas_edit_before is not None:
+                bpane, bsnap = self._meas_edit_before
+                self._meas_edit_before = None
+                if self._meas_edit_moved:
+                    self._meas_record(bpane, bsnap)
+                self._meas_edit_moved = False
             return
         # Line press-drag-release: a real drag commits the 2-point line; a press
         # with (almost) no movement reverts to a 1-point draft so the classic
@@ -6848,6 +6918,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draft = None
         if d is None or len(d["pts"]) < 2:
             return
+        # Snapshot for a general-Measure undo step (skipped for LV borders, which
+        # keep their own _lv_record_create via _lv_on_border_committed).
+        lv_border = (self._lv is not None and self._lv.get("phase") == "contour")
+        meas_before = None if lv_border else self._meas_pane_snap(d["pane"])
         if d["type"] == "ellipse":
             # First two clicks are the MAJOR-axis endpoints (an oblique drag
             # makes an oblique ellipse); the minor radius starts at half the
@@ -6885,6 +6959,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             rec["pts3d"] = list(d["pts3d"])
         self._measures[d["pane"]].append(rec)
         self._redraw_meas(d["pane"])
+        if meas_before is not None:                  # general-Measure create undo
+            self._meas_record(d["pane"], meas_before)
         # File it under the current study's shared Measure History. The
         # pre-formatted metrics string is the label; points/kind travel
         # along so the entry is self-describing (mm units already baked in).
@@ -7113,25 +7189,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QtPoint(int(sx), int(sy))
             )
         )
+        # Snapshot for a general-Measure undo step (non-LV measures only; LV
+        # borders keep their own edit flow). Recorded after a modifying action.
+        _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
+        _mr_changed = False
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
+            _mr_changed = True
         elif resume_act is not None and chosen is resume_act:
             self._resume_trace(which, mi, vi)
             return                               # _resume_trace redraws itself
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
+            _mr_changed = True
         elif chosen is del_res:
             self._lv_drop_border(m)              # clear its model contour (if LV)
+            if m.get("id") is not None:
+                self.measurement_removed.emit(int(m["id"]))   # drop history entry
             del self._measures[which][mi]
+            _mr_changed = True
         else:
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
+                    _mr_changed = True
                     break
             for act, val in transp_actions:
                 if chosen is act:
                     m["transp"] = val
+                    _mr_changed = True
                     break
+        if _mr_before is not None and _mr_changed:
+            self._meas_record(which, _mr_before)
         self._redraw_meas(which)              # recomputes + redraws compares too
 
     def _outline_right(self, which, mi, sx, sy):
@@ -7181,33 +7270,46 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QtPoint(int(sx), int(sy))
             )
         )
+        _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
+        _mr_changed = False
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
+            _mr_changed = True
         elif cpr_act is not None and chosen is cpr_act:
             self._enter_cpr(which, mi)
             return                               # _enter_cpr redraws itself
         elif snap_now_act is not None and chosen is snap_now_act:
             self._snap_trace(which, mi)
+            _mr_changed = True
         elif snap_auto_act is not None and chosen is snap_auto_act:
             self._snap_lumen = snap_auto_act.isChecked()
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
+            _mr_changed = True
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = {"key": which, "mi": mi}
             m.pop("center_angle", None)
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
+            _mr_changed = True
         elif chosen is del_act:
+            if m.get("id") is not None:
+                self.measurement_removed.emit(int(m["id"]))   # drop history entry
             del self._measures[which][mi]
+            _mr_changed = True
         else:
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
+                    _mr_changed = True
                     break
             for act, val in transp_actions:
                 if chosen is act:
                     m["transp"] = val
+                    _mr_changed = True
                     break
+        if _mr_before is not None and _mr_changed:
+            self._meas_record(which, _mr_before)
         self._redraw_meas(which)
 
     def _center_angle_add(self, w) -> None:
