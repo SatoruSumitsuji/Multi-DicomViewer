@@ -1756,6 +1756,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_close_mm = 5.0      # Auto-Endo papillary/trabecula bridging
         self._lvv_endo_show = False
         self._lv_endo_manual_dict = None
         self._lv_endo_manual_mode = False
@@ -6803,6 +6804,21 @@ class CTViewer(CPRMixin, AbstractViewer):
               "as a display-only overlay — recomputes for the current HU range."))
         self._lvv_auto_endo_btn.clicked.connect(self._lvv_toggle_auto_endo)
         row.addWidget(self._lvv_auto_endo_btn)
+        # Auto-Endo 係数: papillary/trabecula BRIDGING radius (close_mm). Larger =
+        # smoother (trabeculae included); smaller = follows the blood indents.
+        self._lvv_close_lbl = QLabel(t("肉柱"))
+        self._lvv_close_spin = QSpinBox()
+        self._lvv_close_spin.setRange(1, 12)
+        self._lvv_close_spin.setValue(5)
+        self._lvv_close_spin.setSuffix(" mm")
+        self._lvv_close_spin.setKeyboardTracking(False)
+        self._lvv_close_spin.setToolTip(
+            t("Auto-Endo の肉柱/乳頭筋の凹凸を橋渡しする量 (close_mm): 大きいほど"
+              "滑らか＝緻密層寄り、小さいほど血流に忠実"))
+        self._lvv_close_spin.valueChanged.connect(
+            lambda _v: self._lvv_close_changed())
+        row.addWidget(self._lvv_close_lbl)
+        row.addWidget(self._lvv_close_spin)
         # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from Auto-Endo
         # the first time; the hand-edited border is retained across HU changes.
         self._lvv_manual_endo_btn = FitButton(t("Manual-Endo"))
@@ -6883,6 +6899,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                   self._lvv_hi_lbl, self._lvv_hi_spin, self._lvv_hl_btn):
             w.setVisible(on)
+        if getattr(self, "_lvv_close_spin", None) is not None:
+            self._lvv_close_lbl.setVisible(on)
+            self._lvv_close_spin.setVisible(on)
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_mask_btn.setVisible(on)
         self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
@@ -7097,6 +7116,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_redraw()
 
+    def _lvv_close_changed(self) -> None:
+        """Auto-Endo 肉柱 bridging (close_mm) changed → drop the stale auto Endo +
+        hide Auto-Endo表示 so a re-press recomputes. Manual Endo is unaffected."""
+        self._lv_endo_close_mm = float(self._lvv_close_spin.value())
+        self._lv_endo_auto_model = None
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        if getattr(self, "_lvv_endo_show", False):
+            self._lvv_endo_show = False
+            if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+                self._lvv_auto_endo_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
     def _lvv_hu_changed(self) -> None:
         """HU 下限/上限 changed: the computed LV-Blood region no longer matches, so
         drop the 水色 region and fall back to the instant 全域HU tint. Re-press
@@ -7206,6 +7240,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
+        close = float(getattr(self, "_lv_endo_close_mm", 5.0))  # 肉柱 bridging
         result: dict = {}
 
         class _EndoWorker(QThread):
@@ -7214,7 +7249,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     result["prof"] = endo_contours_from_blood(
                         blood, dims, apex, axis_dir, radial0, 2 * n_planes,
                         along_apex=1.0, along_base=along_base - 0.5,
-                        sax_step_mm=1.0, close_mm=5.0, half_mm=70.0, grid_mm=0.8)
+                        sax_step_mm=1.0, close_mm=close, half_mm=70.0, grid_mm=0.8)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 

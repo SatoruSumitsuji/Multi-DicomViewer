@@ -2170,6 +2170,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None  # built LVModel of the auto Endo
         self._lv_endo_auto_surf = None   # its endo surface (for the reslice dots)
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
+        self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
         self._lvv_endo_show = False      # Auto-Endo表示 toggle state
         self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
@@ -2611,13 +2612,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_blood)
         gb.addWidget(self._lvv_mask_btn)
         self._lvv_epi_show = False
-        # Epi読み込み: ALWAYS pick an EpiLv.json (replace the in-memory Epi).
+        # Epi読み込み is retired — the Epi is supplied before/at Blood/Endo entry
+        # (trace, or the entry dialog's Load/Create). Hidden placeholder keeps
+        # _lvv_epi_load_click references harmless.
         self._lvv_epi_load_btn = FitButton(t("Epi読み込み"))
-        self._lvv_epi_load_btn.setHelpToolTip(
-            t("Load an EpiLv.json as the Epi surface bounding the Blood region "
-              "(replaces the current Epi)"))
+        self._lvv_epi_load_btn.setVisible(False)
         self._lvv_epi_load_btn.clicked.connect(self._lvv_epi_load_click)
-        gb.addWidget(self._lvv_epi_load_btn)
         # Epi表示: toggle the green Epi border; if none in memory, load one first.
         self._lvv_epi_btn = FitButton(t("Epi表示"))
         self._lvv_epi_btn.setCheckable(True)
@@ -2637,6 +2637,22 @@ class CTViewer(CPRMixin, AbstractViewer):
               "the current HU range."))
         self._lvv_auto_endo_btn.clicked.connect(self._lvv_toggle_auto_endo)
         gb.addWidget(self._lvv_auto_endo_btn)
+        # Auto-Endo 係数: the papillary/trabecula BRIDGING radius (close_mm) that
+        # shapes the auto Endo — larger = smoother (compacted-wall / trabeculae
+        # INCLUDED in the cavity), smaller = follows the blood pool's indents.
+        # Changing it re-derives the auto Endo on the next Auto-Endo表示 press.
+        self._lvv_close_lbl = QLabel(t("肉柱"))
+        self._lvv_close_spin = QSpinBox()
+        self._lvv_close_spin.setRange(1, 12)
+        self._lvv_close_spin.setValue(5)
+        self._lvv_close_spin.setSuffix(" mm")
+        self._lvv_close_spin.setKeyboardTracking(False)
+        self._lvv_close_spin.setToolTip(
+            t("Auto-Endo の肉柱/乳頭筋の凹凸を橋渡しする量 (close_mm): 大きいほど"
+              "滑らか＝緻密層寄り(肉柱をcavityに含める)、小さいほど血流に忠実"))
+        self._lvv_close_spin.valueChanged.connect(lambda _v: self._lvv_close_changed())
+        gb.addWidget(self._lvv_close_lbl)
+        gb.addWidget(self._lvv_close_spin)
         # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from the auto
         # Endo the first time; the hand-edited border is retained across HU
         # changes (Clear it to re-seed from a fresh auto).
@@ -3138,10 +3154,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Epi buttons: both available throughout Blood mode. Epi読み込み always
         # picks a file; Epi表示 toggles the border (and loads one first if none
         # is in memory), so it stays enabled even before an Epi is loaded.
-        self._lvv_epi_load_btn.setVisible(on)
+        self._lvv_epi_load_btn.setVisible(False)   # retired (Epi supplied earlier)
         self._lvv_epi_btn.setVisible(on)
         self._lvv_epi_btn.setChecked(bool(getattr(self, "_lvv_epi_show", False)))
         self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+        # Auto-Endo 肉柱 (close_mm) spin: available whenever Blood is active.
+        if getattr(self, "_lvv_close_spin", None) is not None:
+            self._lvv_close_lbl.setVisible(on)
+            self._lvv_close_spin.setVisible(on)
         self._lv_update_submode_ui()        # show only the active sub-mode's group
 
     def _lvv_prompt(self, text) -> None:
@@ -3357,6 +3377,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             self._lvv_show_endo(render=False)
         self._lvv_update_highlight()
+
+    def _lvv_close_changed(self) -> None:
+        """Auto-Endo 肉柱 bridging (close_mm) changed → the auto Endo is stale.
+        Drop it + hide Auto-Endo表示 so a re-press recomputes with the new value.
+        Blood and the hand-edited Manual Endo are unaffected."""
+        self._lv_endo_close_mm = float(self._lvv_close_spin.value())
+        self._lv_endo_auto_model = None
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        if getattr(self, "_lvv_endo_show", False):
+            self._lvv_endo_show = False
+            if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+                self._lvv_auto_endo_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            self._lvv_show_endo(render=False)
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lvv_toggle_blood(self, *args) -> None:
         """LV-Blood表示: show the computed, Epi-clipped blood region (水色). When
@@ -4013,6 +4050,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
+        close = float(getattr(self, "_lv_endo_close_mm", 5.0))  # 肉柱 bridging
         result: dict = {}
 
         class _EndoWorker(QThread):
@@ -4021,7 +4059,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     result["prof"] = endo_contours_from_blood(
                         blood, dims, apex, axis_dir, radial0, 2 * n_planes,
                         along_apex=1.0, along_base=along_base - 0.5,
-                        sax_step_mm=1.0, close_mm=5.0, half_mm=70.0, grid_mm=0.8)
+                        sax_step_mm=1.0, close_mm=close, half_mm=70.0, grid_mm=0.8)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 
