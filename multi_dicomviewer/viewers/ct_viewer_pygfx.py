@@ -1702,6 +1702,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_red_img = {"A": None, "B": None}    # measured-region RGBA per pane
         self._lvv_worker = None               # keep the compute thread ref
         self._lvv_calc_then = None            # chained action after a measure
+        self._lvv_blood_comp = None           # last Blood mask (bbox sub-volume)
+        self._lvv_blood_bbox = None           # its (z0,z1,y0,y1,x0,x1)
+        self._lvv_blood_apex = None           # apex used for that Blood measure
         #: On-image DICOM-tag / readout text size (pt), shared across modalities
         #: via the shell. Read by the pane overlays' paint.
         self._overlay_font_pt = TAG_FONT_PT_DEFAULT
@@ -6122,53 +6125,61 @@ class CTViewer(CPRMixin, AbstractViewer):
               "press this to capture its plane"))
         self._lvv_aov_btn.clicked.connect(lambda: self._lvv_capture_valve("aortic"))
         row.addWidget(self._lvv_aov_btn)
+        # 内腔ROI (Polygon HU sampling) is retired — the blood HU range starts at
+        # 200–500 and is fine-tuned with the spin arrows (the seed is auto = the
+        # largest in-range component inside the Epi). Hidden placeholder keeps
+        # old references harmless.
         self._lvv_thr_btn = FitButton(t("内腔ROI"))
+        self._lvv_thr_btn.setVisible(False)
         self._lvv_thr_btn.setHelpToolTip(
             t("Draw a Polygon inside the LV cavity (Measure→Polygon), then press "
               "this: it colours the ROI, seeds it, and sets the HU range from "
               "the pixels inside — adjust 下限/上限 below."))
         self._lvv_thr_btn.clicked.connect(self._lvv_capture_roi)
-        row.addWidget(self._lvv_thr_btn)
-        # Blood HU RANGE (lower / upper) for the cavity — suggested from the ROI
-        # polygon, then adjustable. Applied on CalcVol.
+        # (not added to the row — retired)
+        # Blood HU RANGE (lower / upper). Defaults 200–500; adjust with the arrows.
         self._lvv_lo_lbl = QLabel(t("下限"))
         self._lvv_lo_spin = QSpinBox()
         self._lvv_lo_spin.setRange(-1000, 4000)
         self._lvv_lo_spin.setSingleStep(10)
+        self._lvv_lo_spin.setValue(200)                # blood-pool default lo
         self._lvv_lo_spin.setSuffix(" HU")
         self._lvv_lo_spin.setKeyboardTracking(False)
         self._lvv_hi_lbl = QLabel(t("上限"))
         self._lvv_hi_spin = QSpinBox()
         self._lvv_hi_spin.setRange(-1000, 4000)
         self._lvv_hi_spin.setSingleStep(10)
-        self._lvv_hi_spin.setValue(3000)
+        self._lvv_hi_spin.setValue(500)                # blood-pool default hi
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
-        self._lvv_lo_spin.valueChanged.connect(
-            lambda _v: self._lvv_update_highlight())
-        self._lvv_hi_spin.valueChanged.connect(
-            lambda _v: self._lvv_update_highlight())
+        self._lvv_lo_spin.valueChanged.connect(lambda _v: self._lvv_hu_changed())
+        self._lvv_hi_spin.valueChanged.connect(lambda _v: self._lvv_hu_changed())
         for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                    self._lvv_hi_lbl, self._lvv_hi_spin):
             row.addWidget(_w)
-        # "血流領域表示" toggle: tint ALL in-range (blood) voxels across the whole
-        # image so the operator can optimise 下限/上限 (default on).
+        # 全域HU表示: instant tint of ALL in-range voxels (no compute) — the
+        # DEFAULT view on entering the mode, for tuning 下限/上限. Exclusive with
+        # LV-Blood表示 (the computed, Epi-clipped region).
         self._lvv_hl_on = True
-        self._lvv_hl_btn = FitButton(t("血流領域表示"))
+        self._lvv_hl_btn = FitButton(t("全域HU表示"))
         self._lvv_hl_btn.setCheckable(True)
         self._lvv_hl_btn.setChecked(True)
         self._lvv_hl_btn.setHelpToolTip(
-            t("Tint every voxel whose HU is in the 下限–上限 range on both panes "
-              "(in-range = blood); adjust 下限/上限 to optimise"))
+            t("Instantly tint every voxel whose HU is in the 下限–上限 range on "
+              "both panes (no compute) — adjust 下限/上限 to optimise. Turned off "
+              "automatically while LV-Blood表示 is shown."))
         self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
         row.addWidget(self._lvv_hl_btn)
-        # "計測領域" toggle: show the measured region (red) after LV Vol計測.
-        self._lvv_mask_btn = FitButton(t("計測領域"))
+        # LV-Blood表示: compute the blood WITHIN the Epi surface (largest in-range
+        # connected component, apex-side of MV/AoV) and show it in 水色 + report
+        # the volume. Recomputes when the HU range changed since.
+        self._lvv_mask_btn = FitButton(t("LV-Blood表示"))
         self._lvv_mask_btn.setCheckable(True)
-        self._lvv_mask_btn.setChecked(True)
+        self._lvv_mask_btn.setChecked(False)
         self._lvv_mask_btn.setHelpToolTip(
-            t("Show the measured LV blood region (red) — independent of 血流領域表示"))
-        self._lvv_mask_btn.clicked.connect(self._lvv_toggle_mask)
+            t("Compute + show the LV blood inside the Epi surface (水色) and its "
+              "volume. Exclusive with 全域HU表示; recomputes on HU-range change."))
+        self._lvv_mask_btn.clicked.connect(self._lvv_toggle_blood)
         row.addWidget(self._lvv_mask_btn)
         # "Epi境界" toggle: draw the Epi surface where it crosses each pane
         # (green) — to judge whether coronary voxels contaminate the cavity.
@@ -6181,17 +6192,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lvv_epi_btn)
         # (Per-pane slab thickness is changed with the toolbar "Slab(mm)"
         # control — it stays enabled in LV Vol mode. No dedicated spinboxes.)
+        # Calc Vol is retired — LV-Blood表示 computes + shows the volume. Hidden
+        # placeholders keep old references harmless.
         self._lvv_calc_btn = FitButton(t("LV Vol計測"))
-        self._lvv_calc_btn.setHelpToolTip(
-            t("Measure the blood volume inside the Epi surface, apex-side of "
-              "MV/AoV, within the 下限–上限 HU range"))
+        self._lvv_calc_btn.setVisible(False)
         self._lvv_calc_btn.clicked.connect(lambda: self._lvv_calc())
-        row.addWidget(self._lvv_calc_btn)
         self._lvv_vol_lbl = QLabel("--")
-        fv = self._lvv_vol_lbl.font(); fv.setBold(True)
-        self._lvv_vol_lbl.setFont(fv)
-        self._lvv_vol_lbl.setMinimumWidth(90)
-        row.addWidget(self._lvv_vol_lbl)
+        self._lvv_vol_lbl.setVisible(False)
         self._lvv_save_btn = FitButton(t("Save"))
         self._lvv_save_btn.setHelpToolTip(
             t("Save the LV Vol landmarks, HU range, Epi surface and volume"))
@@ -6224,15 +6231,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_start_btn.setChecked(on)
         g = (lambda k: on and self._lvv.get(k) is not None)
         apex_done, aov_done = g("apex"), g("aortic")
-        mv_done, roi_done = g("mitral"), g("seed")
-        # Wizard: enable only the next step (previous steps stay live for redo).
-        # Order: Apex → MV → AoV → 内腔ROI.
+        mv_done = g("mitral")
+        # Ready to compute LV-Blood: apex + valves + an Epi surface (no ROI now —
+        # the seed is auto = the largest in-range component inside the Epi).
+        ready = on and apex_done and aov_done and (self._lvv_epi_surf is not None)
         self._lvv_apex_btn.setEnabled(on)
         self._lvv_mv_btn.setEnabled(on and apex_done)
         self._lvv_aov_btn.setEnabled(on and mv_done)
-        self._lvv_thr_btn.setEnabled(on and aov_done)
-        self._lvv_calc_btn.setEnabled(on and roi_done)
-        self._lvv_save_btn.setEnabled(on and roi_done)
+        self._lvv_mask_btn.setEnabled(ready)        # LV-Blood表示
+        self._lvv_save_btn.setEnabled(on and apex_done)
         self._lvv_load_btn.setEnabled(self._vol is not None)
         self._lvv_exit_btn.setEnabled(on)
 
@@ -6248,25 +6255,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         _done(self._lvv_apex_btn, apex_done, "#d32f2f")     # apex red
         _done(self._lvv_aov_btn, aov_done, "#b8860b")       # aortic amber
         _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
-        _done(self._lvv_thr_btn, roi_done, "#2e8b57")       # ROI green
+        # HU spins + the 全域HU / LV-Blood toggles are available whenever Blood is
+        # active (the 全域HU tint is the default view; adjust 下限/上限 then press
+        # LV-Blood表示 to compute the Epi-clipped region).
         for w in (self._lvv_lo_lbl, self._lvv_lo_spin,
                   self._lvv_hi_lbl, self._lvv_hi_spin, self._lvv_hl_btn):
-            w.setVisible(roi_done)
-        # 血流領域表示 button colours cyan while active.
-        if roi_done:
-            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-        # Once a volume is measured the LV Vol計測 button acts as the red
-        # measured-region on/off toggle (no recompute): light-red WHILE the red
-        # overlay is showing, plain when hidden. The separate 計測領域 toggle
-        # mirrors the same state.
-        measured = on and self._lvv.get("last_ml") is not None
-        showing = measured and self._lvv_mask_on
-        self._lvv_calc_btn.setStyleSheet(
-            ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
-            if showing else self._BTN_DIS)
-        self._lvv_mask_btn.setVisible(measured)
-        if measured:
-            self._lvv_style_toggle(self._lvv_mask_btn, "#ff5a5a", "black")
+            w.setVisible(on)
+        self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        self._lvv_mask_btn.setVisible(on)
+        self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
         # Epi-border toggle: available in the mode.
         self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
 
@@ -6294,6 +6291,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
+                # 全域HU tint ON by default; LV-Blood off until computed.
+                self._lvv_hl_on = True
+                self._lvv_mask_on = False
+                self._lvv_hl_btn.setChecked(True)
+                self._lvv_mask_btn.setChecked(False)
                 self._lvv_sync()
                 for k in ("A", "B"):
                     self._overlay[k].update()
@@ -6380,7 +6382,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return None
             mv = _trilinear_sample(self._lvv_mask_vol, vx, vy, vz)
             inmask = (mv >= 0.5) & ~oob
-            col = (255, 64, 64, 204)           # Blood red at 20% transparency
+            col = (64, 191, 255, 140)          # LV-Blood = 水色 (light blue)
         if not inmask.any():
             return None
         rgba = np.zeros((ih, iw, 4), np.uint8)
@@ -6395,7 +6397,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         _refresh and from the toggle/spin handlers."""
         cyan = red = None
         if self._lvv is not None:
-            if self._lvv.get("seed") is not None and self._lvv_hl_on:
+            # Exclusive fills: 全域HU tint (cyan) when LV-Blood is NOT shown; the
+            # computed 水色 region (red image slot) when it is.
+            if self._lvv_hl_on and not self._lvv_mask_on:
                 cyan = self._lvv_plane_rgba(key, "cyan")
             if self._lvv_mask_vol is not None and self._lvv_mask_on:
                 red = self._lvv_plane_rgba(key, "red")
@@ -6425,9 +6429,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return tuple(round(float(x), nd)
                          for x in np.asarray(v, float).ravel())
         try:
-            apex, seed = lvv["apex"], lvv["seed"]
+            apex = lvv["apex"]
             aortic, mitral = lvv["aortic"], lvv["mitral"]
-            if apex is None or seed is None or aortic is None or mitral is None:
+            if apex is None or aortic is None or mitral is None:
                 return None
             c_a, n_a = aortic[0], aortic[1]
             c_m, n_m = mitral[0], mitral[1]
@@ -6435,13 +6439,57 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         lo = round(float(self._lvv_lo_spin.value()), 3)
         hi = round(float(self._lvv_hi_spin.value()), 3)
-        return (rt(apex), rt(c_a), rt(n_a, 4), rt(c_m), rt(n_m, 4),
-                rt(seed), lo, hi)
+        return (rt(apex), rt(c_a), rt(n_a, 4), rt(c_m), rt(n_m, 4), lo, hi)
 
     def _lvv_toggle_highlight(self, *args) -> None:
+        # 全域HU表示 and LV-Blood表示 are exclusive.
         self._lvv_hl_on = self._lvv_hl_btn.isChecked()
+        if self._lvv_hl_on and self._lvv_mask_on:
+            self._lvv_mask_on = False
+            self._lvv_mask_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-        self._lvv_update_highlight()
+        self._lvv_redraw()
+
+    def _lvv_hu_changed(self) -> None:
+        """HU 下限/上限 changed: the computed LV-Blood region no longer matches, so
+        drop the 水色 region and fall back to the instant 全域HU tint. Re-press
+        LV-Blood表示 to recompute for the new range."""
+        if self._lvv_mask_on:
+            self._lvv_mask_on = False
+            self._lvv_mask_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_hl_on = True
+            self._lvv_hl_btn.setChecked(True)
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+        self._lvv_redraw()
+
+    def _lvv_toggle_blood(self, *args) -> None:
+        """LV-Blood表示: show the computed, Epi-clipped blood region (水色). When
+        turning ON, compute it for the current HU range if stale/absent; the
+        全域HU tint is hidden while it is shown. Turning OFF restores the tint."""
+        if not self._lvv_mask_btn.isChecked():
+            self._lvv_mask_on = False
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_hl_on = True
+            self._lvv_hl_btn.setChecked(True)
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+            self._lvv_redraw()
+            return
+        have = (self._lvv is not None and self._lvv.get("last_ml") is not None
+                and self._lvv_mask_vol is not None
+                and self._lvv.get("calc_sig") is not None
+                and self._lvv_signature() == self._lvv.get("calc_sig"))
+        if have:
+            self._lvv_mask_on = True
+            self._lvv_hl_on = False
+            self._lvv_hl_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_redraw()
+            return
+        self._lvv_mask_btn.setChecked(False)     # recompute (re-checks on success)
+        self._lvv_calc()
 
     def _lvv_toggle_epi(self, *args) -> None:
         self._lvv_epi_show = self._lvv_epi_btn.isChecked()
@@ -6612,14 +6660,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if then is not None:
                     then()
                     return
-                self._lvv_mask_on = not self._lvv_mask_on
-                self._lvv_mask_btn.setChecked(self._lvv_mask_on)
-                self._lvv_update_mask()
+                self._lvv_mask_on = True
+                self._lvv_hl_on = False
+                self._lvv_mask_btn.setChecked(True)
+                self._lvv_hl_btn.setChecked(False)
+                self._lvv_redraw()
                 self._lvv_sync()
                 return
             miss = [n for n, k in ((t("apex"), "apex"), (t("aortic plane"),
-                    "aortic"), (t("mitral plane"), "mitral"),
-                    (t("ROI"), "seed")) if lvv.get(k) is None]
+                    "aortic"), (t("mitral plane"), "mitral"))
+                    if lvv.get(k) is None]
             if miss:
                 QMessageBox.information(
                     self.window(), t("LV Vol"),
@@ -6631,7 +6681,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
             from multi_dicomviewer.core.lv_bloodpool import bloodpool_volume_epi
             from PyQt6.QtWidgets import QProgressDialog
-            seed = tuple(lvv["seed"])
+            seed = None                          # auto: largest in-range component
             hu_lo = float(self._lvv_lo_spin.value())
             hu_hi = float(self._lvv_hi_spin.value())
             c_a, n_a, _r_a = lvv["aortic"]
@@ -6701,7 +6751,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv["last_ml"] = res["volume_ml"]
             lvv["calc_sig"] = self._lvv_signature()      # inputs at this measure
             self._lvv_vol_lbl.setText(t("{v:.1f} mL").format(v=res["volume_ml"]))
-            # Build the measured-region mask volume (0/1 float32) for the red
+            # Build the LV-Blood region mask volume (0/1 float32) for the 水色
             # overlay — a plain numpy array sampled by _lvv_plane_rgba (no VTK).
             comp = res.get("comp")
             if comp is not None:
@@ -6709,9 +6759,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 full = np.zeros(self._vol.shape, np.float32)
                 full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
                 self._lvv_mask_vol = full
+                self._lvv_blood_comp = np.asarray(comp, bool)
+                self._lvv_blood_bbox = tuple(res["bbox"])
+                if lvv.get("apex") is not None:
+                    self._lvv_blood_apex = np.asarray(lvv["apex"], float)
+                # Show 水色, hide the 全域HU tint (they are exclusive).
                 self._lvv_mask_on = True
                 self._lvv_mask_btn.setChecked(True)
-                self._lvv_update_mask()                  # build + show red now
+                self._lvv_hl_on = False
+                self._lvv_hl_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+                self._lvv_redraw()                       # build + show 水色 now
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
             self._lvv_sync()
             then = getattr(self, "_lvv_calc_then", None)
             self._lvv_calc_then = None
@@ -6727,9 +6786,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         compute-then-save, or cancel (mirrors the contour LV Save)."""
         from PyQt6.QtWidgets import QMessageBox
         lvv = self._lvv
-        if lvv is None or lvv.get("seed") is None:
+        if lvv is None or lvv.get("apex") is None:
             QMessageBox.information(self.window(), t("LV Vol"),
-                                   t("Set the ROI first."))
+                                   t("Set the apex first."))
             return
         if lvv.get("last_ml") is None:
             box = QMessageBox(self.window())
@@ -6755,7 +6814,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         import json
         import os
         lvv = self._lvv
-        if lvv is None or lvv.get("seed") is None:
+        if lvv is None or lvv.get("apex") is None:
             return
         c_a, n_a, r_a = lvv["aortic"]
         c_m, n_m, r_m = lvv["mitral"]
@@ -6764,7 +6823,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             "series": (self._lv_series_meta()
                        if hasattr(self, "_lv_series_meta") else {}),
             "apex": list(map(float, lvv["apex"])),
-            "seed": list(map(float, lvv["seed"])),
             "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
                        "r": float(r_a)},
             "mitral": {"c": list(map(float, c_m)), "n": list(map(float, n_m)),
@@ -6849,7 +6907,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                              "step": "apex", "last_ml": None, "calc_sig": None}
             lvv = self._lvv
             lvv["apex"] = np.asarray(data["apex"], float)
-            lvv["seed"] = np.asarray(data["seed"], float)
+            if data.get("seed") is not None:         # legacy files only
+                lvv["seed"] = np.asarray(data["seed"], float)
             a, m = data["aortic"], data["mitral"]
             lvv["aortic"] = (np.asarray(a["c"], float), np.asarray(a["n"], float),
                              float(a.get("r", 20.0)))
