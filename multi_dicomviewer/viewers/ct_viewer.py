@@ -3227,6 +3227,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
+                # Default the apex to the EPI apex (the LV apex from the Epi
+                # surface), so LV-Blood / Auto-Endo work WITHOUT a manual Apex
+                # step. The Apex button can still override it (fine-tune vs the
+                # Epi apex). Also inherit the common MV/AoV planes.
+                if getattr(self, "_lvv_epi_apex", None) is not None:
+                    self._lvv["apex"] = np.asarray(self._lvv_epi_apex, float)
+                    self._lvv["step"] = "ready"
+                    self._lvv_add_marker("apex", self._lvv["apex"], "#ff4040")
+                if self._lv_valves.get("mitral") is not None:
+                    self._lvv["mitral"] = self._lv_valves["mitral"]
+                if self._lv_valves.get("aortic") is not None:
+                    self._lvv["aortic"] = self._lv_valves["aortic"]
                 self._lvv_dirty = False              # fresh Blood session
                 # 全域HU tint ON by default (blood evaluation is the whole point of
                 # this mode); LV-Blood表示 off until computed.
@@ -3237,10 +3249,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_sync()
                 self._lvv_update_highlight()
                 self._lvv_prompt(
-                    t("Epi border loaded. Move the crosshair onto the LV apex "
-                      "(left double-click recentres), then press Apex. (This "
-                      "apex is for the valve orientation — it can differ from "
-                      "the Epi apex.)"))
+                    t("Epi loaded; the apex defaults to the Epi apex. Adjust the "
+                      "blood HU range (下限/上限) with 全域HU表示, then press "
+                      "'LV-Blood表示' / 'Auto-Endo表示'. (Press 'Apex' to set a "
+                      "different apex if needed.)"))
                 return
             else:
                 self._lvv_clear_markers()
