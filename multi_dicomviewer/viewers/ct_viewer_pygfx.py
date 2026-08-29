@@ -6918,6 +6918,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
                              "step": "apex", "last_ml": None, "calc_sig": None}
+                # Default the apex to the EPI apex so LV-Blood / Auto-Endo work
+                # WITHOUT a manual Apex step (Apex button can override).
+                if getattr(self, "_lvv_epi_apex", None) is not None:
+                    self._lvv["apex"] = np.asarray(self._lvv_epi_apex, float)
+                    self._lvv["step"] = "ready"
                 # Inherit the COMMON MV/AoV planes (unified LV bar) so Blood uses
                 # the same valves as Epi — no separate per-Blood valve capture.
                 if self._lv_valves.get("mitral") is not None:
