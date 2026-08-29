@@ -6653,6 +6653,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
             self._lv_stl_btn, self._lv_exit_btn]
+        # Explicit INITIAL group visibility (no sub-mode active): the idempotent
+        # _vis() in _lv_update_submode_ui can't take effect at build time because
+        # isVisible() is False before the parent is shown, so set it directly
+        # here — only the valve Save/Load row shows until Epi/Blood is picked.
+        for _g in (self._lv_grp_trace, self._lv_grp_blood,
+                   self._lv_grp_r2_trace, self._lv_grp_r2_blood):
+            _g.setVisible(False)
+        self._lv_grp_r2_valves.setVisible(True)
         self._lv_sync_buttons()
         self._lv_update_submode_ui()
         return self._lv_wrap
