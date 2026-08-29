@@ -7997,6 +7997,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh()
         for k in ("A", "B"):
             self.pane[k].render()
+        # With the MV plane set, auto-orient to the MV-perpendicular view (left
+        # pane = MV face-on circle, right pane = MV edge-on line, base on top) so
+        # the operator no longer has to press 'MV plane' twice → choose the view
+        # by hand. They can still fine-tune before 'Set axis'.
+        if self._lv_valves.get("mitral") is not None:
+            self._lv_show_mv_perp_auto()
+
+    def _lv_show_mv_perp_auto(self) -> None:
+        """Show the MV ring and orient both panes to the MV-perpendicular view —
+        the automatic setup on entering an Endo/Epi align (MV plane set)."""
+        self._lv_valve_shown["mitral"] = True
+        for k in ("A", "B"):
+            for mm in self._measures.get(k, []):
+                if mm.get("_lv_valve") == "mitral":
+                    mm["hidden"] = False
+            self._redraw_meas(k)
+        self._lv_update_valve_buttons()
+        self._lv_view_mv_perpendicular()
 
     def _lv_set_axis(self) -> None:
         """'Set axis' button. ALIGN → READY: capture the current view as this
