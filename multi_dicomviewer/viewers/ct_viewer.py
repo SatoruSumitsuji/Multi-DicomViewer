@@ -5159,14 +5159,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             if dis:                                  # greyed + unclickable
                 b.setStyleSheet("background:#e6e6e6;color:#a8a8a8;"
                                 "border:1px solid #d8d8d8;")
-            elif measuring:
-                # Clickable WHILE measuring so the user can pick which tool an
-                # Alt/Option+drag runs; the dimmed-red styling signals it.
-                b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
-                                else "color:#9a9a9a;")
+            elif active:                             # selected tool = red
+                b.setStyleSheet("background:#c0392b;color:white;")
             else:
-                b.setStyleSheet("background:#c0392b;color:white;" if active
-                                else "")
+                # Non-selected but selectable → the plain BLACK-text native look
+                # (same as Rt90/Lt90), so a greyed/disabled tool is clearly
+                # distinguishable from an available one. (During measure it is
+                # run with Alt/Option; the shortcut/click still selects it.)
+                b.setStyleSheet(self._BTN_DIS)
         # CenterLine button: greyed + unclickable while the LV crosshair is
         # SUPPRESSED (apex placed → tracing) and in 2-D. Re-enables automatically
         # when suppression ends (apex/Trace undo, deactivate, Exit).
