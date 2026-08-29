@@ -167,6 +167,12 @@ _TOOL_LABELS = {
 #: Tools that only make sense in 3-D MPR mode — disabled in 2-D (single-slice)
 #: mode, where the pane shows native acquisition slices.
 _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
+#: Tools DISABLED (greyed + unclickable) while an LV pass is axis-locked or in
+#: SAX (Trace/SAX): Rotate/Spin would re-tilt the locked reslice frame and
+#: Paging would shift the long-axis level (hard to tell which pane paged), so
+#: they are blocked. Zoom/Move/Thick/WL stay usable (Alt/Option passthrough).
+#: NOT applied in plain 3-D MPR — there all tools remain available.
+_LV_LOCK_DISABLED = ("ROTATE", "SPIN", "PAGING")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
@@ -851,9 +857,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # yields while a line is being drawn so tracing always wins.
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._owner._lv is not None):
-            _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            # Alt/Option (not Shift) adjusts the view before placing the apex,
+            # matching the measure-mode passthrough (Shift is now the draw
+            # constraint = 正円/縦横直線).
+            _adj = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
             r = self._owner._lv_apex_press(
-                self._which, e.position().x(), e.position().y(), _sh)
+                self._which, e.position().x(), e.position().y(), _adj)
             if r == "place":
                 return
             if r in ("endo", "epi"):
@@ -884,13 +893,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._meas_drag = False
                 self._last = e.position()
                 return
-        # Shift while measuring temporarily runs the SELECTED tool instead of
-        # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
-        # off the slab; Move/Zoom just help you look) — so you can reorient the
-        # plane mid-trace without leaving Measure. Falls through to the same
-        # tool path idle-Measure uses.
-        _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        if self._owner._meas_on and not _shift:
+        # ALT/OPTION while measuring temporarily runs the SELECTED tool instead
+        # of drawing (Zoom/Move/Thick/WL help you look / adjust the slab; Rotate/
+        # Spin/Paging are disabled while an LV pass is locked) — so you can adjust
+        # the view mid-trace without leaving Measure. SHIFT is now the DRAW
+        # CONSTRAINT (正円 / 縦横直線), matching PowerPoint. Falls through to the
+        # same tool path idle-Measure uses.
+        _alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
+        if self._owner._meas_on and not _alt:
             self._cross = False
             self._meas_drag = False
             # Left-click MEASURES while a type is selected or a Center-Angle
@@ -900,12 +910,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # which is why the tools are only greyed once a type is selected.
             capturing = (bool(self._owner._meas_type)
                          or self._owner._center_angle_target is not None)
-            # Ctrl held while placing an Ellipse point → constrain to a TRUE
-            # CIRCLE (正円). Shift is already the tool-passthrough modifier, so
-            # the circle lock rides on Ctrl. Read here (the press has the
-            # modifiers) and consumed by the ellipse commit.
-            self._owner._meas_circle = bool(
-                e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+            # SHIFT held while drawing constrains the shape: an Ellipse → TRUE
+            # CIRCLE (正円), a Line → axis-aligned (縦横直線). Read here (the press
+            # carries the modifiers) and consumed by the drag/commit.
+            _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._owner._meas_circle = _sh
+            self._owner._meas_ortho = _sh
             started = self._owner._measure_left(
                 self._which, e.position().x(), e.position().y()
             )
@@ -967,6 +977,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._last = e.position()
             return
         if self._owner._meas_on and self._meas_drag:
+            # Keep the draw-constraint live so the Shift 縦横/正円 preview tracks
+            # the modifier during the drag, not only at press.
+            _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._owner._meas_ortho = _sh
+            self._owner._meas_circle = _sh
             self._owner._measure_drag(
                 self._which, e.position().x(), e.position().y()
             )
@@ -2157,6 +2172,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_endo_show = False      # Auto-Endo表示 toggle state
         self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
+        self._meas_circle = False       # Shift while drawing → 正円 (Ellipse)
+        self._meas_ortho = False        # Shift while drawing → 縦横直線 (Line)
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
         self._meas_seq = 0              # type-independent running number
@@ -5100,6 +5117,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # keyboard shortcuts are otherwise still live).
         if getattr(self, "_mode", "3D") == "2D" and name in _MPR_ONLY_TOOLS:
             return
+        # Rotate/Spin/Paging can't be selected while an LV pass is locked/in SAX
+        # (the hotkeys R/S/G are otherwise live).
+        if (self._lv_axis_locked() or self._lv_sax_active()) \
+                and name in _LV_LOCK_DISABLED:
+            return
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
@@ -5115,19 +5137,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         measuring = getattr(self, "_meas_on", False) and bool(
             getattr(self, "_meas_type", None))
         is2d = getattr(self, "_mode", "3D") == "2D"
-        locked = self._lv_axis_locked()          # LV axis set → no re-tilt tools
+        # LV Trace/SAX (axis-locked long-axis OR SAX display): Rotate/Spin/Paging
+        # are DISABLED (re-tilt / long-axis shift); Zoom/Move/Thick/WL stay live.
+        lv_lock = self._lv_axis_locked() or self._lv_sax_active()
+
+        def _disabled(n):
+            return ((is2d and n in _MPR_ONLY_TOOLS)
+                    or (lv_lock and n in _LV_LOCK_DISABLED))
+
+        # If the ACTIVE tool just became unavailable, fall back to Move (this
+        # re-enters via _set_tool, which re-runs this refresh with a safe tool).
+        cur = getattr(self, "_tool", None)
+        if _disabled(cur) and cur != "MOVE":
+            self._set_tool("MOVE")
+            return
         for n, b in self._tool_btns.items():
-            active = (n == getattr(self, "_tool", None))
-            # Keep the tools clickable WHILE measuring so the user can pick which
-            # tool a Shift+drag uses (the shortcut keys already switch them); the
-            # dimmed-red styling below still signals "hold Shift to use it here".
-            b.setEnabled(not ((is2d or locked) and n in _MPR_ONLY_TOOLS))
-            if measuring:
+            active = (n == cur)
+            dis = _disabled(n)
+            b.setEnabled(not dis)
+            b.setChecked(active)
+            if dis:                                  # greyed + unclickable
+                b.setStyleSheet("background:#e6e6e6;color:#a8a8a8;"
+                                "border:1px solid #d8d8d8;")
+            elif measuring:
+                # Clickable WHILE measuring so the user can pick which tool an
+                # Alt/Option+drag runs; the dimmed-red styling signals it.
                 b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
                                 else "color:#9a9a9a;")
             else:
                 b.setStyleSheet("background:#c0392b;color:white;" if active
                                 else "")
+        # CenterLine button: greyed + unclickable while the LV crosshair is
+        # SUPPRESSED (apex placed → tracing) and in 2-D. Re-enables automatically
+        # when suppression ends (apex/Trace undo, deactivate, Exit).
+        if getattr(self, "_cl_btn", None) is not None:
+            self._cl_btn.setEnabled(
+                (not is2d) and not self._lv_cross_suppressed())
+            self._style_cl()
         # WB reverse (grayscale invert) and the slab-thickness spin are disabled
         # throughout LV mode (thin slices, fixed grayscale). It is ALSO disabled
         # in 3-D MPR per user request (not needed for 3DCT for now) — REVIVABLE:
@@ -5147,6 +5193,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # --------------------------------------------------- CenterLine
     def _style_cl(self):
+        if not self._cl_btn.isEnabled():          # suppressed/2-D → greyed out
+            self._cl_btn.setStyleSheet(
+                "background:#e6e6e6;color:#a8a8a8;border:1px solid #d8d8d8;")
+            return
         on = self._cl_btn.isChecked()
         self._cl_btn.setStyleSheet(
             "background:#b8860b;color:black;" if on
@@ -6287,7 +6337,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             d = self._draft
             if (d is not None and d.get("_drag_new")
                     and d.get("type") == "line" and d.get("pane") == which):
-                d["pts"][1] = self._disp_to_world(which, sx, sy)
+                w = self._disp_to_world(which, sx, sy)
+                if getattr(self, "_meas_ortho", False):   # Shift → 縦横直線 preview
+                    w = self._ortho_snap(d["pts"][0], w)
+                d["pts"][1] = w
                 self._redraw_geom(which)
             return
         w = self._disp_to_world(e["key"], sx, sy)
@@ -6907,6 +6960,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._redraw_geom(d["pane"])
         self._lv_edit_before = None
 
+    @staticmethod
+    def _ortho_snap(p0, p1):
+        """Snap *p1* to a horizontal or vertical line through *p0* (whichever the
+        drag is closer to) — the 縦横直線 constraint when Shift is held."""
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        if abs(dx) >= abs(dy):
+            return (p1[0], p0[1])       # horizontal
+        return (p0[0], p1[1])           # vertical
+
     def _set_ellipse_handle(self, m, vi, w):
         # Oblique-ellipse handle drag via the shared pure helper (same logic
         # used by the XA/IVUS canvas and the pygfx CT viewer). A circle-locked
@@ -6932,6 +6995,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 minor_ratio=1.0 if d.get("circle") else 0.5)
         elif d["type"] == "line":
             pts = d["pts"][:2]
+            # Shift held → constrain the line to horizontal/vertical (縦横直線).
+            if getattr(self, "_meas_ortho", False) and len(pts) == 2:
+                pts = [pts[0], self._ortho_snap(pts[0], pts[1])]
         else:
             pts = list(d["pts"])
         # A resumed trace keeps its ORIGINAL id (and colour / spline / alpha) so
@@ -10942,7 +11008,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # measure-mode greying in one place).
         self._refresh_tool_availability()
         self._slab_spin.setEnabled(not is2d)
-        self._cl_btn.setEnabled(not is2d)
+        self._cl_btn.setEnabled(
+            (not is2d) and not self._lv_cross_suppressed())
+        self._style_cl()
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
         # Rt90/Lt90/Flip-H/Flip-V all work in BOTH 2-D (native slice) and 3-D MPR
@@ -11468,16 +11536,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # camera (the image AND the overlay rotate together), leaving the frame
         # and the reconstructed data untouched.
         if self._lv_sax_active():
-            if t == "PAGING":
-                self._view_initial = False
-                self._lv_drag_level(dy)
+            # Rotate/Spin/Paging are disabled in SAX (Paging would move the long-
+            # axis level on the long-axis pane; the ○ level line handle scrubs the
+            # level instead). Zoom/Move/Thick/WL still work.
+            if t in ("PAGING", "ROTATE", "SPIN"):
                 return
-            if t == "ROTATE":
-                return
-        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Thick
-        # (which would re-tilt the reslice frame) are blocked. Zoom/Move/WL/Paging
-        # still work (they don't change the axis relationship).
-        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "THICK"):
+        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Paging
+        # (re-tilt the frame / shift the long-axis level) are blocked. Zoom/Move/
+        # WL/Thick still work (they don't change the axis relationship).
+        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "PAGING"):
             return
         if t != "WL":
             self._view_initial = False
