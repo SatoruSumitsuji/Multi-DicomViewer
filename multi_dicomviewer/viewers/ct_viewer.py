@@ -168,11 +168,12 @@ _TOOL_LABELS = {
 #: mode, where the pane shows native acquisition slices.
 _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
 #: Tools DISABLED (greyed + unclickable) while an LV pass is axis-locked or in
-#: SAX (Trace/SAX): Rotate/Spin would re-tilt the locked reslice frame and
-#: Paging would shift the long-axis level (hard to tell which pane paged), so
-#: they are blocked. Zoom/Move/Thick/WL stay usable (Alt/Option passthrough).
-#: NOT applied in plain 3-D MPR — there all tools remain available.
-_LV_LOCK_DISABLED = ("ROTATE", "SPIN", "PAGING")
+#: SAX (Trace/SAX): Rotate would re-tilt the locked reslice frame and Paging
+#: would shift the long-axis level (hard to tell which pane paged), so they are
+#: blocked. Zoom/Move/Thick/WL AND Spin stay usable (Spin only rolls the camera
+#: — image + overlay rotate together, the frame/data are untouched — via the
+#: Alt/Option passthrough). NOT applied in plain 3-D MPR (all tools available).
+_LV_LOCK_DISABLED = ("ROTATE", "PAGING")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
@@ -2180,6 +2181,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draft = None              # {type, pane, pts} in progress
         self._edit = None               # {key, mi, vi} handle drag
         self._meas_hover_handle = None  # {key, mi, vi, ca} handle under cursor
+        self._meas_hover_outline = None  # (key, mi) shape outline under cursor
         self._center_angle_target = None  # {key, mi} during 3-pt pick
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
         self._cmp_on = False                 # Compare-select mode: click 2 shapes
@@ -5820,6 +5822,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         hov_mi = hh["mi"] if hov_here else -1
         hov_vi = hh["vi"] if hov_here else -1
         hov_ca = bool(hh.get("ca")) if hov_here else False
+        # Outline hover: the movable shape whose outline is under the cursor is
+        # drawn green (it will be grabbed to MOVE).
+        ho = getattr(self, "_meas_hover_outline", None)
+        hov_out_mi = ho[1] if (ho and ho[0] == key) else -1
         for mi, m in enumerate(self._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
             # right-click Hide → skip its line, handles, axes and id label.
@@ -5843,6 +5849,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 labels.append((f"#{m['id']}", (wx, wy)))
                 continue
             rgb = _hex_to_rgb(m.get("color"))
+            # Hover-highlight the whole outline green (movable shape under cursor).
+            if mi == hov_out_mi:
+                rgb = (80, 220, 80)
             a4 = transp_to_alpha(m.get("transp", 0))   # Change Transparency
             # Off-plane depth cue for a 3-D trace: a vertex whose 3-D point is
             # > 1 mm off this plane (along its normal) is "off-plane".
@@ -6086,19 +6095,46 @@ class CTViewer(CPRMixin, AbstractViewer):
             ca = self._pick_center_angle(which, sx, sy)
             new = ({"key": which, "mi": ca[0], "vi": ca[1], "ca": True}
                    if ca is not None else None)
-        if new == self._meas_hover_handle:
+        # With no handle/vertex under the cursor, hovering a movable shape's
+        # OUTLINE turns the whole outline green (it will be grabbed to MOVE).
+        out_new = None
+        if new is None:
+            om = self._pick_measure(which, sx, sy, tol=8.0)
+            if om is not None:
+                m = self._measures[which][om]
+                if (not m.get("_lv") and not m.get("_lv_valve")
+                        and not m.get("hidden")
+                        and m.get("type") in ("line", "ellipse", "polygon")):
+                    out_new = (which, om)
+        changed = (new != self._meas_hover_handle
+                   or out_new != getattr(self, "_meas_hover_outline", None))
+        if not changed:
             return
         old = self._meas_hover_handle
+        old_out = getattr(self, "_meas_hover_outline", None)
         self._meas_hover_handle = new
-        for k in ({which} | ({old["key"]} if old else set())):
+        self._meas_hover_outline = out_new
+        keys = {which}
+        if old:
+            keys.add(old["key"])
+        if old_out:
+            keys.add(old_out[0])
+        for k in keys:
             self._redraw_geom(k)
 
     def _clear_hover_handle(self) -> None:
-        if self._meas_hover_handle is None:
+        if (self._meas_hover_handle is None
+                and getattr(self, "_meas_hover_outline", None) is None):
             return
-        k = self._meas_hover_handle["key"]
+        keys = set()
+        if self._meas_hover_handle:
+            keys.add(self._meas_hover_handle["key"])
+        if getattr(self, "_meas_hover_outline", None):
+            keys.add(self._meas_hover_outline[0])
         self._meas_hover_handle = None
-        self._redraw_geom(k)
+        self._meas_hover_outline = None
+        for k in keys:
+            self._redraw_geom(k)
 
     def _lv_has_border(self, which, target) -> bool:
         """True if a captured Endo/Epi (*target*) border already exists for the
@@ -6125,11 +6161,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return mi, ci
         return None
 
-    def _pick_measure(self, which, sx, sy):
+    def _pick_measure(self, which, sx, sy, tol=5.0):
         # Pixel-based catch (constant on-screen width, zoom/DPR independent), so
         # the boundary band can't balloon when zoomed in and shadow the filled
-        # compare region — a click ≥5 px inside the annulus now selects the fill.
-        tol = 5.0                              # screen px, each side of the line
+        # compare region — a click ≥tol px inside the annulus now selects the
+        # fill. tol=5 for right-click routing; ~8 for outline hover / move-grab.
         # STRONGLY honour the armed Endo/Epi selection: when a target is armed,
         # ONLY that border is a candidate — so right-click "Add point" (and any
         # outline pick) lands on the SELECTED border, never the nearer other one
@@ -6215,6 +6251,32 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._meas_edit_moved = False
             self._redraw_geom(which)
             return True
+        # No handle/vertex hit: pressing on a shape's OUTLINE grabs the WHOLE
+        # shape to MOVE it (Line/Ellipse/Polygon), shape preserved. Only for
+        # plain (non-LV, non-valve, visible) measures and NOT while a trace is in
+        # progress — so drawing a fresh shape near an existing one still works
+        # (start it a few px off the outline). LV borders are traced, not moved.
+        if not lv_drawing and self._draft is None:
+            om = self._pick_measure(which, sx, sy, tol=8.0)
+            if om is not None:
+                m = self._measures[which][om]
+                if (not m.get("_lv") and not m.get("_lv_valve")
+                        and not m.get("hidden")
+                        and m.get("type") in ("line", "ellipse", "polygon")):
+                    w0 = self._disp_to_world(which, sx, sy)
+                    ca0 = m.get("center_angle")
+                    self._edit = {
+                        "key": which, "mi": om, "vi": None, "move": True,
+                        "anchor": w0,
+                        "orig": [tuple(q) for q in m["pts"]],
+                        "orig3d": ([list(map(float, P)) for P in m["pts3d"]]
+                                   if m.get("pts3d") else None),
+                        "orig_ca": ([tuple(q) for q in ca0["pts"]]
+                                    if ca0 and ca0.get("pts") else None)}
+                    self._meas_edit_before = (which, self._meas_pane_snap(which))
+                    self._meas_edit_moved = False
+                    self._redraw_geom(which)
+                    return True
         if not self._meas_type:
             return False
         w = self._disp_to_world(which, sx, sy)
@@ -6343,8 +6405,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                 d["pts"][1] = w
                 self._redraw_geom(which)
             return
-        w = self._disp_to_world(e["key"], sx, sy)
         m = self._measures[e["key"]][e["mi"]]
+        if e.get("move"):
+            # Translate the WHOLE shape by the drag delta (shape preserved).
+            w = self._disp_to_world(e["key"], sx, sy)
+            dx = w[0] - e["anchor"][0]
+            dy = w[1] - e["anchor"][1]
+            m["pts"] = [(q[0] + dx, q[1] + dy) for q in e["orig"]]
+            if e.get("orig3d"):
+                P0 = np.asarray(self._out_to_world3d(e["key"], *e["anchor"]),
+                                float)
+                P1 = np.asarray(self._out_to_world3d(e["key"], *w), float)
+                dP = P1 - P0
+                m["pts3d"] = [list(np.asarray(P, float) + dP)
+                              for P in e["orig3d"]]
+            if e.get("orig_ca") and m.get("center_angle"):
+                m["center_angle"]["pts"] = [(q[0] + dx, q[1] + dy)
+                                            for q in e["orig_ca"]]
+                self._resnap_center_angle(m)
+            self._meas_edit_moved = True
+            self._redraw_geom(e["key"])
+            return
+        w = self._disp_to_world(e["key"], sx, sy)
         if e.get("ca"):
             self._set_center_angle_point(m, e["vi"], w)
         elif m["type"] == "ellipse":
@@ -6960,6 +7042,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._redraw_geom(d["pane"])
         self._lv_edit_before = None
 
+    def _make_circle(self, which, mi) -> None:
+        """Turn an existing Ellipse into a TRUE CIRCLE (正円化): the minor axis is
+        set equal to the major (same centre + major direction). Recorded as one
+        undo step; pts3d (if the ellipse is 3-D anchored) is re-derived."""
+        if not (0 <= mi < len(self._measures.get(which, []))):
+            return
+        m = self._measures[which][mi]
+        if m.get("type") != "ellipse" or len(m.get("pts", [])) < 2:
+            return
+        before = None if m.get("_lv") else self._meas_pane_snap(which)
+        m["pts"] = _ellipse_from_major(m["pts"][0], m["pts"][1], minor_ratio=1.0)
+        m["circle"] = True
+        if m.get("pts3d") and len(m["pts3d"]) == 4:
+            m["pts3d"] = [self._out_to_world3d(which, *q) for q in m["pts"]]
+        if before is not None:
+            self._meas_record(which, before)
+        self._redraw_meas(which)
+
     @staticmethod
     def _ortho_snap(p0, p1):
         """Snap *p1* to a horizontal or vertical line through *p0* (whichever the
@@ -7245,6 +7345,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Line/Angle, most easily right-clicked on a handle).
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
+        # 正円化: turn an Ellipse into a true circle.
+        circle_act = (menu.addAction(t("Make Circle"))
+                      if m["type"] == "ellipse" else None)
         hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
@@ -7255,6 +7358,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QtPoint(int(sx), int(sy))
             )
         )
+        if circle_act is not None and chosen is circle_act:
+            self._make_circle(which, mi)         # records its own undo + redraw
+            return
         # Snapshot for a general-Measure undo step (non-LV measures only; LV
         # borders keep their own edit flow). Recorded after a modifying action.
         _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
@@ -7321,6 +7427,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
+        # 正円化: turn an Ellipse into a true circle (outline menu too).
+        circle_act = (menu.addAction(t("Make Circle"))
+                      if m["type"] == "ellipse" else None)
         color_menu = menu.addMenu(t("Change Color"))
         color_actions: list[tuple] = []
         for name, hexcol in COLOR_CHOICES:
@@ -7336,6 +7445,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QtPoint(int(sx), int(sy))
             )
         )
+        if circle_act is not None and chosen is circle_act:
+            self._make_circle(which, mi)         # records its own undo + redraw
+            return
         _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
         _mr_changed = False
         if chosen is add_pt:
@@ -11536,15 +11648,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # camera (the image AND the overlay rotate together), leaving the frame
         # and the reconstructed data untouched.
         if self._lv_sax_active():
-            # Rotate/Spin/Paging are disabled in SAX (Paging would move the long-
-            # axis level on the long-axis pane; the ○ level line handle scrubs the
-            # level instead). Zoom/Move/Thick/WL still work.
-            if t in ("PAGING", "ROTATE", "SPIN"):
+            # Rotate/Paging are disabled in SAX (Paging would move the long-axis
+            # level on the long-axis pane; the ○ level line handle scrubs the
+            # level instead). Zoom/Move/Thick/WL AND Spin (camera roll) still work.
+            if t in ("PAGING", "ROTATE"):
                 return
-        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Paging
+        # Long-axis view after Set axis: the axis is locked, so Rotate/Paging
         # (re-tilt the frame / shift the long-axis level) are blocked. Zoom/Move/
-        # WL/Thick still work (they don't change the axis relationship).
-        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "PAGING"):
+        # WL/Thick/Spin still work (they don't change the axis relationship).
+        if self._lv_axis_locked() and t in ("ROTATE", "PAGING"):
             return
         if t != "WL":
             self._view_initial = False
