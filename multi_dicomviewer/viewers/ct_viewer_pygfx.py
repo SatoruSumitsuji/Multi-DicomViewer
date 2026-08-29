@@ -951,6 +951,10 @@ class _Overlay(QWidget):
         hov_mi = hh["mi"] if hov_here else -1
         hov_vi = hh["vi"] if hov_here else -1
         hov_ca = bool(hh.get("ca")) if hov_here else False
+        # Outline hover: the movable shape under the cursor draws green (it will
+        # be grabbed to MOVE).
+        ho = v._meas_hover_outline
+        hov_out_mi = ho[1] if (ho and ho[0] == key) else -1
 
         for mi, m in enumerate(v._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
@@ -958,6 +962,8 @@ class _Overlay(QWidget):
             if v._results_hidden or m.get("hidden"):
                 continue
             rgb = _hex_to_rgb(m.get("color"))
+            if mi == hov_out_mi:                 # outline hover → green
+                rgb = (80, 220, 80)
             a4 = transp_to_alpha(m.get("transp", 0))
             # Point HU probe → a fixed-size "+" (two ~12 px segments) + #id.
             if m["type"] == "point":
@@ -1659,6 +1665,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._undo_clear()                   # unified Ctrl+Z / Ctrl+Y state
         self._edit = None                    # {key, mi, vi} handle drag
         self._meas_hover_handle = None       # {key, mi, vi, ca} handle under cursor
+        self._meas_hover_outline = None      # (key, mi) shape outline under cursor
+        self._meas_edit_before = None        # (pane, snapshot) at a handle press
+        self._meas_edit_moved = False        # did the current measure drag move
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
@@ -2215,6 +2224,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cross_grab = False
         self._meas_drag = False
         self._alt_tool = False
+        self._meas_edit_before = None
+        self._meas_edit_moved = False
         self._spin_prev = None
         self._lv_line_drag = None
         self._lv_apex_drag = None
@@ -5231,19 +5242,44 @@ class CTViewer(CPRMixin, AbstractViewer):
             ca = self._pick_center_angle(which, sx, sy)
             new = ({"key": which, "mi": ca[0], "vi": ca[1], "ca": True}
                    if ca is not None else None)
-        if new == self._meas_hover_handle:
+        # With no handle/vertex under the cursor, hovering a movable shape's
+        # OUTLINE turns the whole outline green (it will be grabbed to MOVE).
+        out_new = None
+        if new is None:
+            om = self._pick_measure(which, sx, sy, tol=8.0)
+            if om is not None:
+                m = self._measures[which][om]
+                if (not m.get("_lv") and not m.get("hidden")
+                        and m.get("type") in ("line", "ellipse", "polygon")):
+                    out_new = (which, om)
+        if (new == self._meas_hover_handle
+                and out_new == self._meas_hover_outline):
             return
         old = self._meas_hover_handle
+        old_out = self._meas_hover_outline
         self._meas_hover_handle = new
-        for k in ({which} | ({old["key"]} if old else set())):
+        self._meas_hover_outline = out_new
+        keys = {which}
+        if old:
+            keys.add(old["key"])
+        if old_out:
+            keys.add(old_out[0])
+        for k in keys:
             self._overlay[k].update()
 
     def _clear_hover_handle(self) -> None:
-        if self._meas_hover_handle is None:
+        if (self._meas_hover_handle is None
+                and self._meas_hover_outline is None):
             return
-        k = self._meas_hover_handle["key"]
+        keys = set()
+        if self._meas_hover_handle:
+            keys.add(self._meas_hover_handle["key"])
+        if self._meas_hover_outline:
+            keys.add(self._meas_hover_outline[0])
         self._meas_hover_handle = None
-        self._overlay[k].update()
+        self._meas_hover_outline = None
+        for k in keys:
+            self._overlay[k].update()
 
     def _pick_center_angle(self, which, sx, sy):
         """Pick a finalized Center-Angle marker point (the orange dots) so it
@@ -5258,11 +5294,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return mi, ci
         return None
 
-    def _pick_measure(self, which, sx, sy):
+    def _pick_measure(self, which, sx, sy, tol=5.0):
         # Pixel-based catch (constant on-screen width, zoom/DPR independent), so
         # the boundary band can't balloon when zoomed in and shadow the filled
-        # compare region — a click ≥5 px inside the annulus now selects the fill.
-        tol = 5.0                              # screen px, each side of the line
+        # compare region. tol=5 for right-click routing; ~8 for hover / move-grab.
         # STRONGLY honour the armed Endo/Epi selection: when a target is armed,
         # ONLY that border is a candidate — so right-click "Add point" (and any
         # outline pick) lands on the SELECTED border, never the nearer other one.
@@ -5307,8 +5342,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 hit = None
         if hit is not None:
             self._edit = {"key": which, "mi": hit[0], "vi": hit[1]}
-            if self._lv is not None and self._measures[which][hit[0]].get("_lv"):
+            is_lv_border = (self._lv is not None
+                            and self._measures[which][hit[0]].get("_lv"))
+            if is_lv_border:
                 self._lv_push_undo(which, hit[0])   # snapshot before the drag
+            else:
+                self._meas_edit_before = (which, self._meas_pane_snap(which))
+                self._meas_edit_moved = False
             self._redraw_geom(which)
             # Grabbing an LV border vertex → light the linked SAX crossing green
             # at once (not only after the first drag).
@@ -5320,8 +5360,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         if ca_hit is not None:
             self._edit = {"key": which, "mi": ca_hit[0], "vi": ca_hit[1],
                           "ca": True}
+            self._meas_edit_before = (which, self._meas_pane_snap(which))
+            self._meas_edit_moved = False
             self._redraw_geom(which)
             return True
+        # No handle/vertex hit: pressing on a shape's OUTLINE grabs the WHOLE
+        # shape to MOVE it (Line/Ellipse/Polygon, shape preserved). Non-LV only,
+        # and NOT while a trace is in progress (draw a fresh shape a few px off).
+        if not lv_drawing and self._draft is None:
+            om = self._pick_measure(which, sx, sy, tol=8.0)
+            if om is not None:
+                m = self._measures[which][om]
+                if (not m.get("_lv") and not m.get("hidden")
+                        and m.get("type") in ("line", "ellipse", "polygon")):
+                    w0 = self._disp_to_world(which, sx, sy)
+                    ca0 = m.get("center_angle")
+                    self._edit = {
+                        "key": which, "mi": om, "vi": None, "move": True,
+                        "anchor": w0,
+                        "orig": [tuple(q) for q in m["pts"]],
+                        "orig3d": ([list(map(float, P)) for P in m["pts3d"]]
+                                   if m.get("pts3d") else None),
+                        "orig_ca": ([tuple(q) for q in ca0["pts"]]
+                                    if ca0 and ca0.get("pts") else None)}
+                    self._meas_edit_before = (which, self._meas_pane_snap(which))
+                    self._meas_edit_moved = False
+                    self._redraw_geom(which)
+                    return True
         if not self._meas_type:
             return False
         w = self._disp_to_world(which, sx, sy)
@@ -5332,11 +5397,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 P = self._out_to_world3d(which, *w)
             except Exception:
                 P = None
+            _pt_before = self._meas_pane_snap(which)
             self._meas_seq += 1
             self._measures[which].append(
                 {"id": self._meas_seq, "type": "point", "pts": [w],
                  "pts3d": [P] if P is not None else []})
             self._redraw_meas(which)
+            self._meas_record(which, _pt_before)
             return False
         # Line: support press-drag-release (the natural gesture for a straight
         # line) ON TOP of click-click. The first press starts a rubber-band line
@@ -5414,8 +5481,30 @@ class CTViewer(CPRMixin, AbstractViewer):
                 d["pts"][1] = w
                 self._redraw_geom(which)
             return
-        w = self._disp_to_world(e["key"], sx, sy)
         m = self._measures[e["key"]][e["mi"]]
+        if e.get("move"):
+            # Translate the WHOLE shape by the drag delta (shape preserved).
+            w = self._disp_to_world(e["key"], sx, sy)
+            dx = w[0] - e["anchor"][0]
+            dy = w[1] - e["anchor"][1]
+            m["pts"] = [(q[0] + dx, q[1] + dy) for q in e["orig"]]
+            if e.get("orig3d"):
+                P0 = np.asarray(self._out_to_world3d(e["key"], *e["anchor"]),
+                                float)
+                P1 = np.asarray(self._out_to_world3d(e["key"], *w), float)
+                dP = P1 - P0
+                m["pts3d"] = [list(np.asarray(P, float) + dP)
+                              for P in e["orig3d"]]
+            if e.get("orig_ca") and m.get("center_angle"):
+                m["center_angle"]["pts"] = [(q[0] + dx, q[1] + dy)
+                                            for q in e["orig_ca"]]
+                self._resnap_center_angle(m)
+            self._meas_edit_moved = True
+            self._redraw_geom(e["key"])
+            return
+        w = self._disp_to_world(e["key"], sx, sy)
+        if self._meas_edit_before is not None:
+            self._meas_edit_moved = True     # a non-LV handle actually moved
         if e.get("ca"):
             self._set_center_angle_point(m, e["vi"], w)
         elif m["type"] == "ellipse":
@@ -5488,6 +5577,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     and mi is not None:
                 self._lv_record_border(self._lv_edit_before, key, mi)
             self._lv_edit_before = None
+            # Commit a general-Measure handle/move DRAG as one undo step (only if
+            # the shape/point actually moved).
+            if self._meas_edit_before is not None:
+                bpane, bsnap = self._meas_edit_before
+                self._meas_edit_before = None
+                if self._meas_edit_moved:
+                    self._meas_record(bpane, bsnap)
+                self._meas_edit_moved = False
             return
         # Line press-drag-release: a real drag commits the 2-point line; a press
         # with (almost) no movement reverts to a 1-point draft so the classic
@@ -5516,12 +5613,34 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _set_ellipse_handle(self, m, vi, w):
         m["pts"] = _ellipse_drag(m["pts"], vi, w, circle=bool(m.get("circle")))
 
+    def _make_circle(self, which, mi) -> None:
+        """Turn an existing Ellipse into a TRUE CIRCLE (正円化): minor axis = major
+        (same centre + major direction). Recorded as one undo step; pts3d re-
+        derived if 3-D anchored."""
+        if not (0 <= mi < len(self._measures.get(which, []))):
+            return
+        m = self._measures[which][mi]
+        if m.get("type") != "ellipse" or len(m.get("pts", [])) < 2:
+            return
+        before = None if m.get("_lv") else self._meas_pane_snap(which)
+        m["pts"] = _ellipse_from_major(m["pts"][0], m["pts"][1], minor_ratio=1.0)
+        m["circle"] = True
+        if m.get("pts3d") and len(m["pts3d"]) == 4:
+            m["pts3d"] = [self._out_to_world3d(which, *q) for q in m["pts"]]
+        if before is not None:
+            self._meas_record(which, before)
+        self._redraw_meas(which)
+
     def _commit_draft(self):
         d = self._draft
         self._draft = None
         self._meas_hover = None
         if d is None or len(d["pts"]) < 2:
             return
+        # Snapshot for a general-Measure create undo (skipped for LV borders,
+        # which keep their own _lv_record_create).
+        lv_border = (self._lv is not None and self._lv.get("phase") == "contour")
+        meas_before = None if lv_border else self._meas_pane_snap(d["pane"])
         if d["type"] == "ellipse":
             # The two clicked points are the MAJOR-axis endpoints; the minor
             # axis starts at half the major (or EQUAL to it → 正円 when Shift is
@@ -5560,6 +5679,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             m["pts3d"] = [np.asarray(P, float) for P in d["pts3d"]]
         self._measures[d["pane"]].append(m)
         self._redraw_meas(d["pane"])
+        if meas_before is not None:                  # general-Measure create undo
+            self._meas_record(d["pane"], meas_before)
         # Log to the study's measurement history (shell-owned).
         meas = Measurement(kind=d["type"].capitalize(), points=list(pts),
                            spacing_mm=None, mid=rid)
@@ -5728,6 +5849,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         from multi_dicomviewer.viewers.image_canvas import COLOR_CHOICES
         color_actions = add_color_submenu(menu, COLOR_CHOICES)
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
+        circle_act = (menu.addAction(t("Make Circle"))
+                      if m["type"] == "ellipse" else None)
         hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
@@ -5738,24 +5861,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QPoint(int(sx), int(sy))))
         finally:
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
+        if circle_act is not None and chosen is circle_act:
+            self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
+        _mr_changed = False
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
+            _mr_changed = True
         elif resume_act is not None and chosen is resume_act:
             self._resume_trace(which, mi, vi)
             return                               # _resume_trace redraws itself
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
+            _mr_changed = True
         elif chosen is del_res:
+            if m.get("id") is not None:
+                self.measurement_removed.emit(int(m["id"]))
             del self._measures[which][mi]
+            _mr_changed = True
         else:
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
+                    _mr_changed = True
                     break
             for act, val in transp_actions:
                 if chosen is act:
                     m["transp"] = val
+                    _mr_changed = True
                     break
+        if _mr_before is not None and _mr_changed:
+            self._meas_record(which, _mr_before)
         self._recompute_compares(which)     # a colour change refreshes any compare
         self._redraw_meas(which)
 
@@ -5785,6 +5922,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
+        circle_act = (menu.addAction(t("Make Circle"))
+                      if m["type"] == "ellipse" else None)
         color_menu = menu.addMenu(t("Change Color"))
         color_actions = []
         for name, hexcol in COLOR_CHOICES:
@@ -5801,33 +5940,49 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QPoint(int(sx), int(sy))))
         finally:
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
+        if circle_act is not None and chosen is circle_act:
+            self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
+        _mr_changed = False
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
+            _mr_changed = True
         elif cpr_act is not None and chosen is cpr_act:
             self._enter_cpr(which, mi)
             return                               # _enter_cpr redraws itself
         elif snap_now_act is not None and chosen is snap_now_act:
             self._snap_trace(which, mi)
+            _mr_changed = True
         elif snap_auto_act is not None and chosen is snap_auto_act:
             self._snap_lumen = snap_auto_act.isChecked()
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
+            _mr_changed = True
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = {"key": which, "mi": mi}
             m.pop("center_angle", None)
         elif chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
+            _mr_changed = True
         elif chosen is del_act:
+            if m.get("id") is not None:
+                self.measurement_removed.emit(int(m["id"]))
             del self._measures[which][mi]
+            _mr_changed = True
         else:
             for act, hexcol in color_actions:
                 if chosen is act:
                     m["color"] = hexcol
+                    _mr_changed = True
                     break
             for act, val in transp_actions:
                 if chosen is act:
                     m["transp"] = val
+                    _mr_changed = True
                     break
+        if _mr_before is not None and _mr_changed:
+            self._meas_record(which, _mr_before)
         self._recompute_compares(which)     # a colour change refreshes any compare
         self._redraw_meas(which)
 
@@ -7983,6 +8138,46 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._undo_record(lambda b=before: self._view_restore(b),
                           lambda a=after: self._view_restore(a))
+
+    # ---- general Measure (Line/Polyline/Ellipse/Polygon/Point) undo --------
+    # NON-LV measures snapshot the pane list before/after so Ctrl+Z / Ctrl+Y
+    # restore it exactly (LV borders keep their own _lv_record_* undo).
+    def _meas_pane_snap(self, pane):
+        import copy
+        return copy.deepcopy([m for m in self._measures.get(pane, [])
+                              if not m.get("_lv")])
+
+    def _meas_pane_restore(self, pane, snap) -> None:
+        import copy
+        cur = self._measures.get(pane, [])
+        lv_keep = [m for m in cur if m.get("_lv")]
+        old_ids = {m.get("id") for m in cur if not m.get("_lv")}
+        self._measures[pane] = copy.deepcopy(snap) + lv_keep
+        new_ids = {m.get("id") for m in self._measures[pane]
+                   if not m.get("_lv")}
+        try:
+            for mid in old_ids - new_ids:
+                if mid is not None:
+                    self.measurement_removed.emit(int(mid))
+            add_back = new_ids - old_ids
+            for m in self._measures[pane]:
+                if not m.get("_lv") and m.get("id") in add_back:
+                    meas = Measurement(kind=m["type"].capitalize(),
+                                       points=list(m["pts"]), spacing_mm=None,
+                                       mid=int(m["id"]))
+                    meas.text = self._metrics_text(pane, m)
+                    self.measurement_added.emit(meas)
+        except Exception:                               # noqa: BLE001
+            pass
+        self._redraw_meas(pane)
+
+    def _meas_record(self, pane, before) -> None:
+        if before is None:
+            return
+        after = self._meas_pane_snap(pane)
+        self._undo_record(
+            lambda p=pane, b=before: self._meas_pane_restore(p, b),
+            lambda p=pane, a=after: self._meas_pane_restore(p, a))
 
     def _undo_last(self) -> None:
         """Ctrl+Z: while tracing drop the last point; else step one command
