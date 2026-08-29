@@ -1718,6 +1718,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # LV EF (ported from the VTK viewer): whole state in self._lv (None when
         # off). Rendering is done in the _Overlay (QPainter), not VTK actors.
         self._lv = None
+        self._lv_view_free = False   # Epi領域表示 inspect state: lock lifted
         # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base —
         # each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
         self._lv_valves = {"mitral": None, "aortic": None}
@@ -6129,6 +6130,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         APEX is placed (tracing has begun) — from there the plane is driven only
         by the SAX handles / ◀▶ and the crosshair would only corrupt a trace.
         Active through align/ready and up to the first apex click. Matches VTK."""
+        if getattr(self, "_lv_view_free", False):     # Epi領域表示 inspect
+            return False
         return (getattr(self, "_lv", None) is not None
                 and self._lv_active_apex() is not None)
 
@@ -6560,11 +6563,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_grp_trace = QWidget()
         gt = QHBoxLayout(self._lv_grp_trace)
         gt.setContentsMargins(0, 0, 0, 0); gt.setSpacing(4)
+        # 'Set axis' retired — Trace auto-captures the axis. Hidden placeholder.
         self._lv_setaxis_btn = FitButton(t("Set axis"))
-        self._lv_setaxis_btn.setHelpToolTip(
-            t("Use the current long-axis view as this pass's rotation axis"))
+        self._lv_setaxis_btn.setVisible(False)
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
-        gt.addWidget(self._lv_setaxis_btn)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         gt.addWidget(self._lv_trace_btn)
@@ -6599,6 +6601,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
         self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
         r2t.addWidget(self._lv_vol_btn)
+        # Epi領域表示: toggle the red measured region + free the view for 3-D
+        # inspection (Rotate/Spin/Paging/CenterLine unlocked while ON).
+        self._lv_region_btn = FitButton(t("Epi領域表示"))
+        self._lv_region_btn.setCheckable(True)
+        self._lv_region_btn.setHelpToolTip(
+            t("Show/hide the red measured region (after Calc Vol) and free the "
+              "view (Rotate/Spin/Paging/CenterLine) to inspect it in 3-D."))
+        self._lv_region_btn.clicked.connect(self._lv_toggle_region)
+        r2t.addWidget(self._lv_region_btn)
         self._lv_wall_btn = FitButton(t("Wall"))
         self._lv_wall_btn.setCheckable(True)
         self._lv_wall_btn.setStyleSheet(
@@ -8001,9 +8012,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_enter_align(self) -> None:
         """ALIGN sub-phase for the active pass: free long-axis MPR so the user
-        orients the view; 'Set axis' then captures it. Trace/analysis controls
-        are disabled until the axis is set."""
+        orients the view; Trace then captures it. Trace/analysis controls are
+        disabled until the axis is set."""
         lv = self._lv
+        self._lv_region_reset()
         lv["phase"] = "align"
         lv["target"] = None
         self.set_side("Bi")
@@ -8072,6 +8084,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_select_pass(ed)             # resume that pass's trace
             return
         ph = lv.get("phase")
+        if ph == "align":
+            # 'Set axis' retired — Trace captures the current (auto MV-perp) view.
+            self._lv_set_axis()                      # align → ready
+            ph = lv.get("phase")
         if ph == "ready":
             m = lv["model"]
             apex = m.endo_apex if lv["pass"] == "endo" else m.epi_apex
@@ -8385,6 +8401,7 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_toggle_sax(self) -> None:
         from PyQt6.QtWidgets import QMessageBox
+        self._lv_region_reset()
         lv = self._lv
         if lv is None or lv.get("phase") != "contour":
             self._lv_sax_btn.setChecked(False)
@@ -8647,9 +8664,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         fixed, so Rotate/Spin/Thick (which would re-tilt the reslice frame) are
         blocked. Zoom/Move/WL and the cross-section level still work."""
         lv = self._lv
+        if getattr(self, "_lv_view_free", False):     # Epi領域表示 inspect
+            return False
         return (lv is not None
                 and lv.get("phase") in ("ready", "apex", "contour")
                 and lv.get("sax") is None)
+
+    def _lv_toggle_region(self) -> None:
+        """Epi領域表示: show/hide the red measured region AND free the view
+        (Rotate/Spin/Paging/CenterLine) for 3-D inspection while ON."""
+        on = self._lv_region_btn.isChecked()
+        self._lv_view_free = on
+        self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
+        self._lvv_redraw()
+        self._refresh_tool_availability()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        self._lv_region_btn.setStyleSheet(
+            "QPushButton{background:#ff5a5a;color:black;}" if on else "")
+
+    def _lv_region_reset(self) -> None:
+        self._lv_view_free = False
+        if getattr(self, "_lv_region_btn", None) is not None:
+            self._lv_region_btn.setChecked(False)
+            self._lv_region_btn.setStyleSheet("")
 
     def _lv_level_range(self):
         """The along span (in the SAX axis' frame) to SCROLL the level over:
@@ -9680,6 +9718,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit()
 
     def _lv_exit(self, from_toggle=False) -> None:
+        self._lv_region_reset()
         if self._lv is not None and self._lv.get("phase") == "contour":
             self._lv_capture_current()
         # Stash the traced EPI surface so LV Vol mode can use it as the outer
