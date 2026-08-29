@@ -133,6 +133,12 @@ _TOOL_LABELS = {
 }
 #: Tools that only make sense in 3-D MPR mode — disabled in 2-D (single-slice).
 _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
+#: Tools DISABLED (greyed + unclickable) while an LV pass is axis-locked or in
+#: SAX (Trace/SAX): Rotate would re-tilt the locked reslice frame, Paging would
+#: shift the long-axis level (hard to tell which pane paged). Zoom/Move/Thick/WL
+#: AND Spin (camera roll only) stay usable via the Alt/Option passthrough. NOT
+#: applied in plain 3-D MPR. Mirrors the VTK viewer.
+_LV_LOCK_DISABLED = ("ROTATE", "PAGING")
 #: Series with this many slices or fewer default to 2-D display; more → 3-D.
 _MODE_2D_MAX = 200
 #: 2-D frame scrubber handle: a 20 px white disc with a blue inner dot (radial
@@ -512,7 +518,7 @@ class _Overlay(QWidget):
             self._paint_cpr(p, w, h)
             self._paint_info(p, key, w, h)
             return
-        if v._cl_on:
+        if v._cl_on and not v._lv_cross_suppressed():
             self._paint_cross(p, key, w, h)
         self._paint_measures(p, key, w, h)
         if v._lv is not None:
@@ -2863,6 +2869,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # keyboard shortcuts are otherwise still live).
         if getattr(self, "_mode", "3D") == "2D" and name in _MPR_ONLY_TOOLS:
             return
+        # Rotate/Paging can't be selected while an LV pass is locked/in SAX.
+        if (self._lv_axis_locked() or self._lv_sax_active()) \
+                and name in _LV_LOCK_DISABLED:
+            return
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
@@ -2875,27 +2885,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         measure type (Measure off, or on but idle) they are their normal
         colour and usable (selected = red). MPR-only tools also stay disabled
         in 2-D native-slice mode."""
-        measuring = getattr(self, "_meas_on", False) and bool(
-            getattr(self, "_meas_type", None))
         is2d = getattr(self, "_mode", "3D") == "2D"
-        locked = (self._lv_axis_locked()
-                  if hasattr(self, "_lv") else False)   # LV axis set → no re-tilt
+        # LV Trace/SAX (axis-locked long-axis OR SAX): Rotate/Paging disabled;
+        # Zoom/Move/Thick/WL AND Spin stay live (via the Alt/Option passthrough).
+        lv_lock = (self._lv_axis_locked() or self._lv_sax_active()) \
+            if hasattr(self, "_lv") else False
+
+        def _disabled(n):
+            return ((is2d and n in _MPR_ONLY_TOOLS)
+                    or (lv_lock and n in _LV_LOCK_DISABLED))
+
+        # If the ACTIVE tool just became unavailable, fall back to Move (re-enters
+        # _set_tool, which re-runs this refresh with a safe tool).
+        cur = getattr(self, "_tool", None)
+        if _disabled(cur) and cur != "MOVE":
+            self._set_tool("MOVE")
+            return
         for n, b in self._tool_btns.items():
-            active = (n == getattr(self, "_tool", None))
-            # Keep the tools clickable WHILE measuring so the user can pick which
-            # tool a Shift+drag uses (matches the Windows viewer; the shortcut
-            # keys already switch them). The dimmed-red styling below still
-            # signals "hold Shift to use it here".
-            b.setEnabled(not ((is2d or locked) and n in _MPR_ONLY_TOOLS))
-            if measuring:
-                # greyed-out; the selected tool keeps a dimmed red.
-                b.setStyleSheet("background:#7a4b46;color:#d0d0d0;" if active
-                                else "color:#9a9a9a;")
+            active = (n == cur)
+            dis = _disabled(n)
+            b.setEnabled(not dis)
+            b.setChecked(active)
+            if dis:                                  # greyed + unclickable
+                b.setStyleSheet("background:#e6e6e6;color:#a8a8a8;"
+                                "border:1px solid #d8d8d8;")
+            elif active:                             # selected tool = red
+                b.setStyleSheet("background:#c0392b;color:white;")
             else:
-                # Active = red background + WHITE text; only colour is
-                # overridden so the button keeps its base border/radius.
-                b.setStyleSheet("background:#c0392b;color:white;" if active
-                                else "")
+                # Non-selected but selectable → plain BLACK-text look so a
+                # greyed/disabled tool is clearly distinguishable (VTK parity).
+                b.setStyleSheet("")
+        # CenterLine button: greyed + unclickable while the LV crosshair is
+        # SUPPRESSED (apex placed → tracing) and in 2-D; auto-re-enables.
+        if getattr(self, "_cl_btn", None) is not None:
+            self._cl_btn.setEnabled(
+                (not is2d) and not self._lv_cross_suppressed())
+            self._style_cl()
         # WB reverse (grayscale invert) and the slab-thickness spin are disabled
         # throughout LV mode (thin slices, fixed grayscale).
         in_lv = getattr(self, "_lv", None) is not None
@@ -2947,7 +2972,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         is2d = (mode == "2D")
         self._refresh_tool_availability()   # MPR-only tools off in 2-D
         self._slab_spin.setEnabled(not is2d)
-        self._cl_btn.setEnabled(not is2d)
+        self._cl_btn.setEnabled(
+            (not is2d) and not self._lv_cross_suppressed())
+        self._style_cl()
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
         # Rt90/Lt90/Flip act on the native slice in 2-D and on the ACTIVE pane's
@@ -4085,16 +4112,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # camera (the image AND the overlay rotate together), leaving the frame
         # and the reconstructed data untouched.
         if self._lv_sax_active():
-            if t == "PAGING":
-                self._view_initial = False
-                self._lv_drag_level(dy)
+            # Rotate/Paging disabled in SAX (Paging would move the long-axis level
+            # on the long-axis pane; the ○ level line handle scrubs the level).
+            # Zoom/Move/Thick/WL AND Spin (camera roll) still work.
+            if t in ("PAGING", "ROTATE"):
                 return
-            if t == "ROTATE":
-                return
-        # Long-axis view after Set axis: the axis is locked, so Rotate/Spin/Thick
-        # (which would re-tilt the reslice frame) are blocked. Zoom/Move/WL/Paging
-        # still work (they don't change the axis relationship).
-        if self._lv_axis_locked() and t in ("ROTATE", "SPIN", "THICK"):
+        # Long-axis view after Set axis: the axis is locked, so Rotate/Paging
+        # (re-tilt the frame / shift the long-axis level) are blocked. Zoom/Move/
+        # WL/Thick/Spin still work (they don't change the axis relationship).
+        if self._lv_axis_locked() and t in ("ROTATE", "PAGING"):
             return
         if t != "WL":
             self._view_initial = False
@@ -5894,6 +5920,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         vertex drag (which already re-captures live)."""
         if self._lv is not None and m.get("_lv") is not None:
             self._lv_live_recapture(which, m)
+
+    def _lv_cross_suppressed(self) -> bool:
+        """The crosshair is hidden + non-interactive once the active LV pass's
+        APEX is placed (tracing has begun) — from there the plane is driven only
+        by the SAX handles / ◀▶ and the crosshair would only corrupt a trace.
+        Active through align/ready and up to the first apex click. Matches VTK."""
+        return (getattr(self, "_lv", None) is not None
+                and self._lv_active_apex() is not None)
+
+    def _style_cl(self):
+        if not self._cl_btn.isEnabled():          # suppressed / 2-D → greyed out
+            self._cl_btn.setStyleSheet(
+                "background:#e6e6e6;color:#a8a8a8;border:1px solid #d8d8d8;")
+        else:
+            self._cl_btn.setStyleSheet("")        # default checkable look
 
     def _toggle_centerline(self):
         self._cl_on = self._cl_btn.isChecked()
