@@ -7941,8 +7941,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
             setax.setStyleSheet(self._LV_STY["setaxis"]
                                 if ph in ("ready", "apex", "contour") else "")
-            trace.setStyleSheet(self._LV_STY["trace"]
-                                if ph in ("apex", "contour") else "")
+            # Trace red while tracing; neutral once toggled to VIEW (trace_view).
+            _tracing = (ph == "apex"
+                        or (ph == "contour" and not lv.get("trace_view")))
+            trace.setStyleSheet(self._LV_STY["trace"] if _tracing else "")
             # LIFO enable: you can only turn OFF the LAST button turned on.
             setax.setEnabled(ph in ("align", "ready"))
             trace.setEnabled(ph in ("ready", "apex", "contour"))
@@ -8103,11 +8105,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_sync_buttons()
             self._lv_update_text()
             self._lv_redraw_all()
+        elif ph == "contour" and lv.get("sax") is None and (
+                lv["model"].endo_planes or lv["model"].epi_planes):
+            # Border traced → Trace toggles TRACE ⇄ VIEW instead of undoing: VIEW
+            # frees Rotate/Spin/Paging/CenterLine to inspect the result in 3-D.
+            lv["trace_view"] = not lv.get("trace_view", False)
+            if lv["trace_view"] and self._meas_on:
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._lv_sync_buttons()
+            self._lv_apply_view_free()
         elif ph in ("apex", "contour") and lv.get("sax") is None:
             lv["phase"] = "ready"                    # UNDO trace → ready
             lv["apex_target"] = None
             # Clear this pass's placed apex so its marker disappears and it can be
-            # re-placed (re-Trace) — or the axis redone via Set axis.
+            # re-placed (re-Trace).
             lv["model"].set_apex_point(lv["pass"], None)
             self._lv_result_lines = []
             if self._meas_on:
@@ -8670,24 +8682,39 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and lv.get("phase") in ("ready", "apex", "contour")
                 and lv.get("sax") is None)
 
-    def _lv_toggle_region(self) -> None:
-        """Epi領域表示: show/hide the red measured region AND free the view
-        (Rotate/Spin/Paging/CenterLine) for 3-D inspection while ON."""
-        on = self._lv_region_btn.isChecked()
-        self._lv_view_free = on
-        self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
-        self._lvv_redraw()
+    def _lv_apply_view_free(self) -> None:
+        """Recompute the free-view state from the Trace⇄View toggle and the
+        Epi領域表示 button, then lift/restore the tool + CenterLine locks."""
+        lv = self._lv
+        trace_view = bool(lv is not None and lv.get("trace_view"))
+        region_on = bool(getattr(self, "_lv_region_btn", None) is not None
+                         and self._lv_region_btn.isChecked())
+        self._lv_view_free = trace_view or region_on
         self._refresh_tool_availability()
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    def _lv_toggle_region(self) -> None:
+        """Epi領域表示: show/hide the red measured region (computing it if not done
+        yet) and, as one free-view source, allow 3-D inspection."""
+        on = self._lv_region_btn.isChecked()
         self._lv_region_btn.setStyleSheet(
             "QPushButton{background:#ff5a5a;color:black;}" if on else "")
+        if on and self._lvv_mask_vol is None:
+            self._lv_apply_view_free()
+            self._lv_compute_volume()
+            return
+        self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
+        self._lvv_redraw()
+        self._lv_apply_view_free()
 
     def _lv_region_reset(self) -> None:
-        self._lv_view_free = False
+        if self._lv is not None:
+            self._lv["trace_view"] = False
         if getattr(self, "_lv_region_btn", None) is not None:
             self._lv_region_btn.setChecked(False)
             self._lv_region_btn.setStyleSheet("")
+        self._lv_view_free = False
 
     def _lv_level_range(self):
         """The along span (in the SAX axis' frame) to SCROLL the level over:
