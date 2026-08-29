@@ -1718,6 +1718,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # LV EF (ported from the VTK viewer): whole state in self._lv (None when
         # off). Rendering is done in the _Overlay (QPainter), not VTK actors.
         self._lv = None
+        # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base —
+        # each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
+        self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
+        self._lv_dirty = False
         self._lv_result_lines = []
         self._lv_wall = False
         self._lv_line_drag = None             # "level"/"meridian" while grabbing
@@ -6147,6 +6152,360 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_redraw_all(self) -> None:
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    # ===== Unified LV mode: common valves + sub-mode selector (VTK parity) =====
+    def _lv_current_submode(self):
+        """Which sub-mode is active: 'blood', 'endo', 'epi', or None."""
+        if self._lvv is not None:
+            return "blood"
+        if self._lv is not None:
+            return self._lv.get("pass")
+        return None
+
+    def _lv_valves_ready(self) -> bool:
+        return (self._lv_valves.get("mitral") is not None
+                and self._lv_valves.get("aortic") is not None)
+
+    def _lv_capture_valve_common(self, which) -> None:
+        """Set the COMMON MV/AoV plane from the latest fresh Ellipse."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._vol is None:
+            return
+        m, key, best = None, None, -1
+        for k in ("A", "B"):
+            for cand in self._measures.get(k, []):
+                if (cand.get("type") == "ellipse"
+                        and cand.get("_lv_valve") is None
+                        and cand.get("id", -1) > best):
+                    best = cand.get("id", -1); m, key = cand, k
+        vname = "AoV" if which == "aortic" else "MV"
+        if m is None:
+            if self._lv_valves.get(which) is not None:
+                self._lv_toggle_valve_visibility(which)
+                return
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV")); box.setIcon(QMessageBox.Icon.Information)
+            box.setText(t("Set the {v} plane:").format(v=vname))
+            b_load = box.addButton(t("Load"), QMessageBox.ButtonRole.AcceptRole)
+            b_make = box.addButton(t("Create (draw Ellipse)"),
+                                   QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_load:
+                self._lv_load_valve(which)
+            elif clicked is b_make:
+                QMessageBox.information(
+                    self.window(), t("LV"),
+                    t("Draw an Ellipse on the {v} annulus (Measure→Ellipse), "
+                      "then press {v} plane again.").format(v=vname))
+            return
+        self._lv_valve_shown[which] = True
+        cx, cy = self._shape_center(m)
+        center = np.asarray(self._out_to_world3d(key, cx, cy), float)
+        _u, _v, n = self._axes_for(key)
+        _ecx, _ecy, ea, eb = self._ellipse_cab(m)
+        radius = float(max(ea, eb))
+        self._lv_valves[which] = (center, np.asarray(n, float), radius)
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm is not m and mm.get("_lv_valve") != which]
+        self._lv_valve_show_from_geom(which)
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+
+    def _lv_valve_show_from_geom(self, which) -> None:
+        v = self._lv_valves.get(which)
+        if v is None or self._vol is None:
+            return
+        c, n, r = v
+        c = np.asarray(c, float); n = np.asarray(n, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(float(n[0])) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        u = np.cross(n, ref); u = u / (np.linalg.norm(u) or 1.0)
+        w = np.cross(n, u)
+        ths = np.linspace(0.0, 2.0 * np.pi, 33)[:-1]
+        pts3d = [tuple(map(float, c + r * np.cos(t) * u + r * np.sin(t) * w))
+                 for t in ths]
+        color = "#ffd24d" if which == "aortic" else "#4dd0ff"
+        hidden = not self._lv_valve_shown.get(which, True)
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm.get("_lv_valve") != which]
+            self._meas_seq += 1
+            self._measures[k].append({
+                "id": self._meas_seq, "type": "polygon",
+                "pts": [self._world3d_to_out(k, P) for P in pts3d],
+                "pts3d": list(pts3d), "color": color, "_lv_valve": which,
+                "transp": 50, "hidden": hidden})
+            self._redraw_meas(k)
+
+    def _lv_toggle_valve_visibility(self, which) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        shown = not self._lv_valve_shown.get(which, True)
+        if (which == "mitral" and shown
+                and self._lv_valves.get("mitral") is not None):
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("MV plane")); box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("Show the MV plane:"))
+            b_asis = box.addButton(t("As-is"), QMessageBox.ButtonRole.AcceptRole)
+            b_perp = box.addButton(t("MV-perpendicular view"),
+                                   QMessageBox.ButtonRole.ActionRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is None or clicked not in (b_asis, b_perp):
+                return
+            self._lv_valve_shown["mitral"] = True
+            for k in ("A", "B"):
+                for mm in self._measures.get(k, []):
+                    if mm.get("_lv_valve") == "mitral":
+                        mm["hidden"] = False
+                self._redraw_meas(k)
+            self._lv_update_valve_buttons()
+            if clicked is b_perp:
+                self._lv_view_mv_perpendicular()
+            return
+        self._lv_valve_shown[which] = shown
+        for k in ("A", "B"):
+            for mm in self._measures.get(k, []):
+                if mm.get("_lv_valve") == which:
+                    mm["hidden"] = not shown
+            self._redraw_meas(k)
+        self._lv_update_valve_buttons()
+
+    def _lv_view_mv_perpendicular(self) -> None:
+        mv = self._lv_valves.get("mitral")
+        if mv is None or self._vol is None:
+            return
+        c = np.asarray(mv[0], float); n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        ref = (np.array([1.0, 0.0, 0.0]) if abs(float(n[0])) < 0.9
+               else np.array([0.0, 1.0, 0.0]))
+        a = np.cross(n, ref); a = a / (np.linalg.norm(a) or 1.0)
+        b = np.cross(n, a)
+        self._frame["A"] = self._ortho(a, b)
+        self._frame["B"] = self._ortho(a, -n)
+        self._pc["A"] = c.copy(); self._pc["B"] = c.copy()
+        self._center = c.copy()
+        self._cross_ang = {"A": 0.0, "B": 0.0}
+        self.set_side("Bi")
+        self._view_initial = True
+        self._refresh()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _lv_update_valve_buttons(self) -> None:
+        if getattr(self, "_lv_mv_btn", None) is None:
+            return
+        for which, btn, color in (("mitral", self._lv_mv_btn, "#2b6cb0"),
+                                   ("aortic", self._lv_aov_btn, "#b8860b")):
+            if self._lv_valves.get(which) is None:
+                btn.setStyleSheet(self._BTN_DIS)
+            elif self._lv_valve_shown.get(which, True):
+                btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                                  % (color, self._BTN_DIS))
+            else:
+                btn.setStyleSheet(
+                    "QPushButton{background:palette(button);color:%s;"
+                    "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
+
+    def _lv_save_valve(self, which) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json, os
+        v = self._lv_valves.get(which)
+        if v is None:
+            QMessageBox.information(
+                self.window(), t("LV"), t("Set the {w} plane first.").format(
+                    w="MV" if which == "mitral" else "AoV"))
+            return
+        c, n, r = v
+        data = {"type": "valve", "valve": which,
+                "series": (self._lv_series_meta()
+                           if hasattr(self, "_lv_series_meta") else {}),
+                "c": list(map(float, c)), "n": list(map(float, n)), "r": float(r)}
+        suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "valve")
+        default = os.path.join(d, stem + suffix) if d else stem + suffix
+        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+                else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save valve plane"), default, flt)
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += suffix
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        QMessageBox.information(self.window(), t("LV"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _lv_load_valve(self, which) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        if self._vol is None:
+            return
+        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+                else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load valve plane"), d, flt)
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            self._lv_valves[which] = (np.asarray(data["c"], float),
+                                      np.asarray(data["n"], float),
+                                      float(data.get("r", 20.0)))
+            self._lv_valve_shown[which] = True
+            self._lv_valve_show_from_geom(which)
+            self._lv_update_valve_buttons()
+            self._lv_update_submode_ui()
+            QMessageBox.information(
+                self.window(), t("LV"), t("Loaded the {w} plane.").format(
+                    w="MV" if which == "mitral" else "AoV"))
+        except Exception as exc:                        # noqa: BLE001
+            import traceback
+            QMessageBox.critical(self.window(), t("LV (valve load error)"),
+                                 traceback.format_exc() or repr(exc))
+
+    def _lv_stash_epi_for_blood(self, model) -> None:
+        try:
+            if (model is not None and model.epi_axis is not None
+                    and len(model.epi_contours) >= 3):
+                model.build()
+                if model.epi is not None:
+                    self._lvv_epi_surf = model.epi
+                    self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+                    self._lvv_epi_model_dict = model.to_dict()
+        except Exception:                               # noqa: BLE001
+            pass
+
+    def _lv_mode_has_unsaved(self, mode) -> bool:
+        if mode == "blood":
+            return (self._lvv is not None
+                    and self._lvv.get("last_ml") is not None
+                    and getattr(self, "_lvv_dirty", False))
+        return (self._lv is not None
+                and bool(self._lv["model"].endo_planes
+                         or self._lv["model"].epi_planes)
+                and getattr(self, "_lv_dirty", False))
+
+    def _lv_confirm_drop(self, mode) -> bool:
+        from PyQt6.QtWidgets import QMessageBox
+        if not self._lv_mode_has_unsaved(mode):
+            return True
+        return QMessageBox.question(
+            self.window(), t("LV"),
+            t("This sub-mode has unsaved data. Switch without saving?")) \
+            == QMessageBox.StandardButton.Yes
+
+    def _lv_style_selectors(self) -> None:
+        sm = self._lv_current_submode()
+        m = self._lv["model"] if self._lv is not None else None
+        epi_loaded = (getattr(self, "_lvv_epi_surf", None) is not None
+                      or (m is not None and len(m.epi_contours) >= 3))
+        endo_loaded = (m is not None and len(m.endo_contours) >= 3)
+        blood_loaded = getattr(self, "_lvv_blood_comp", None) is not None
+        off = self._LV_STY.get("off", "")
+        self._lv_epi_btn.setStyleSheet(
+            self._LV_STY.get("epi", "") if (sm == "epi" or epi_loaded) else off)
+        be_on = (sm in ("blood", "endo") or blood_loaded or endo_loaded)
+        self._lvv_start_btn.setStyleSheet(
+            ("QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
+            if be_on
+            else ("QPushButton:checked{background:#2e8b57;color:white;}"
+                  + self._BTN_DIS))
+
+    def _lv_update_submode_ui(self) -> None:
+        if not hasattr(self, "_lv_grp_trace"):
+            return
+        sm = self._lv_current_submode()
+        endoepi = sm in ("endo", "epi")
+        blood = sm == "blood"
+
+        def _vis(w, on):
+            if w.isVisible() != on:
+                w.setVisible(on)
+        _vis(self._lv_grp_trace, endoepi)
+        _vis(self._lv_grp_blood, blood)
+        _vis(self._lv_grp_r2_trace, endoepi)
+        _vis(self._lv_grp_r2_blood, blood)
+        if getattr(self, "_lv_grp_r2_valves", None) is not None:
+            _vis(self._lv_grp_r2_valves, sm is None)
+        self._lv_update_valve_buttons()
+        ready = self._lv_valves_ready()
+        if not ready:
+            self._lv_epi_btn.setEnabled(sm == "epi")
+            self._lvv_start_btn.setEnabled(sm == "blood")
+        else:
+            self._lv_epi_btn.setEnabled(True)
+            self._lvv_start_btn.setEnabled(True)
+        if self._lvv_start_btn.isChecked() != blood:
+            self._lvv_start_btn.setChecked(blood)
+        if self._lv is None or self._lv.get("sax") is None:
+            self._lv_style_selectors()
+
+    def _lv_select_submode(self, sm) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        cur = self._lv_current_submode()
+        if sm == cur:
+            if sm == "blood":
+                if not self._lv_confirm_drop("blood"):
+                    return
+                self._lvv_toggle()
+            elif self._lv is not None and self._lv.get("sax") is None:
+                m = self._lv["model"]
+                if bool(m.endo_planes or m.epi_planes):
+                    if not self._lv_confirm_drop("contour"):
+                        return
+                    self._lv_exit()
+                else:
+                    self._lv["pass"] = None
+                    self._lv_apply_target(None)
+                    self._lv_sync_buttons()
+            self._lv_update_submode_ui()
+            return
+        if not self._lv_valves_ready():
+            QMessageBox.information(
+                self.window(), t("LV"),
+                t("Set the MV and AoV planes first. Draw an Ellipse on each "
+                  "annulus and press MV plane / AoV plane (or Load them); then "
+                  "Epi / Blood/Endo become available."))
+            return
+        if sm == "epi":
+            if self._lvv is not None:
+                self._lvv_deactivate()
+            self._lv_select_pass("epi")
+        elif sm == "blood":
+            if self._lv is not None:
+                self._lv_stash_epi_for_blood(self._lv["model"])
+                self._lv_exit()
+            self._lvv_toggle()
+        self._lv_update_submode_ui()
+
+    def _lv_exit_all(self) -> None:
+        if self._lvv is not None:
+            if not self._lv_confirm_drop("blood"):
+                return
+            self._lvv_clear_markers()
+            self._lvv = None
+            self._lvv_sync()
+        if self._lv is not None:
+            self._lv_exit_confirm()
+        self._lv_update_submode_ui()
 
     def _build_lv_bar(self) -> QWidget:
         """LV EF bar (below the image): Endo/Epi ENTER LV mode and select the
