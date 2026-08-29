@@ -1656,7 +1656,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center_angle_target = None     # {key, mi} during 3-pt pick
         self._metrics = {"A": [], "B": []}   # per-measure result strings
         self._meas_drag = False              # canvas is dragging a handle
-        self._shift_tool = False             # Shift-press runs the tool, not measure
+        self._alt_tool = False               # Alt/Option-press runs the tool, not measure
+        self._meas_circle = False            # Shift while drawing → 正円 (Ellipse)
+        self._meas_ortho = False             # Shift while drawing → 縦横直線 (Line)
         self._meas_hover = None              # cursor (output coords) for draft preview
         self._probe_hover = None             # (key, sx, sy, text) for the Point HU probe
         # Compare (%Area + radial gap map between two Polygon/Ellipse outlines)
@@ -1941,8 +1943,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # marker moves the apex instead of adding a trace point; _lv_apex_press
         # yields while a line is being drawn so tracing always wins.
         if self._drag_btn == 1 and self._lv is not None:
-            _sh = "Shift" in (ev.get("modifiers") or ())
-            r = self._lv_apex_press(key, x, y, _sh)
+            # Alt/Option (not Shift) adjusts the view before placing the apex,
+            # matching the measure passthrough (Shift is now the draw constraint).
+            _adj = "Alt" in (ev.get("modifiers") or ())
+            r = self._lv_apex_press(key, x, y, _adj)
             if r == "place":
                 return
             if r in ("endo", "epi"):
@@ -1969,16 +1973,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._meas_drag = False
                 self._last = (x, y)
                 return
-        # Shift while measuring temporarily runs the SELECTED tool instead of
-        # drawing (Rotate/Spin/Paging move the cutting plane to chase a vessel
-        # off the slab; Move/Zoom just help you look) — so you can reorient the
-        # plane mid-trace without leaving Measure. Falls through to the same
-        # tool path idle-Measure uses; _shift_tool keeps _on_move on that path
-        # for the rest of the drag (Shift may be released mid-gesture).
-        _shift = "Shift" in (ev.get("modifiers") or ())
-        self._shift_tool = bool(self._meas_on and _shift and self._drag_btn == 1)
-        if self._meas_on and not _shift:
+        # ALT/OPTION while measuring temporarily runs the SELECTED tool instead
+        # of drawing (Zoom/Move/Thick/WL help you look / adjust the slab) — so
+        # you can adjust the view mid-trace without leaving Measure. SHIFT is now
+        # the DRAW CONSTRAINT (正円 / 縦横直線), matching PowerPoint and the VTK
+        # (Windows) viewer. _alt_tool keeps _on_move on the tool path for the
+        # rest of the drag (Alt may be released mid-gesture).
+        _mods = ev.get("modifiers") or ()
+        _alt = "Alt" in _mods
+        self._alt_tool = bool(self._meas_on and _alt and self._drag_btn == 1)
+        if self._meas_on and not _alt:
             self._cross_grab = False
+            # SHIFT held while drawing constrains the shape: Ellipse → 正円,
+            # Line → 縦横 (axis-aligned). Consumed by the draft/commit.
+            _sh = "Shift" in _mods
+            self._meas_circle = _sh
+            self._meas_ortho = _sh
             # Left-click MEASURES while a type is selected or a Center-Angle
             # pick is in progress, and it also grabs an existing measure's
             # handle to edit it. Otherwise (Measure on but no type chosen) it
@@ -2064,8 +2074,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_line_move(key, x, y)
                 self._last = (x, y)
             return
-        if self._meas_on and not self._shift_tool:
+        if self._meas_on and not self._alt_tool:
             if self._meas_drag:
+                # Keep the Shift 縦横/正円 constraint live during the drag.
+                _sh = "Shift" in (ev.get("modifiers") or ())
+                self._meas_ortho = _sh
+                self._meas_circle = _sh
                 self._measure_drag(key, x, y)
                 return
             if self._draft and self._draft["pane"] == key:
@@ -2162,7 +2176,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # itself (leaves _gesture_moved False), so this won't double-record.
         self._gesture_commit()
         self._meas_drag = False
-        self._shift_tool = False
+        self._alt_tool = False
         self._drag_btn = None
         self._cross_grab = False
         self._spin_prev = None
@@ -2191,7 +2205,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._meas_drag = False
-        self._shift_tool = False
+        self._alt_tool = False
         self._spin_prev = None
         self._lv_line_drag = None
         self._lv_apex_drag = None
@@ -5365,7 +5379,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             d = self._draft
             if (d is not None and d.get("_drag_new")
                     and d.get("type") == "line" and d.get("pane") == which):
-                d["pts"][1] = self._disp_to_world(which, sx, sy)
+                w = self._disp_to_world(which, sx, sy)
+                if getattr(self, "_meas_ortho", False):   # Shift → 縦横直線 preview
+                    w = self._ortho_snap(d["pts"][0], w)
+                d["pts"][1] = w
                 self._redraw_geom(which)
             return
         w = self._disp_to_world(e["key"], sx, sy)
@@ -5457,8 +5474,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._redraw_geom(d["pane"])
         self._lv_edit_before = None
 
+    @staticmethod
+    def _ortho_snap(p0, p1):
+        """Snap *p1* to a horizontal or vertical line through *p0* (whichever the
+        drag is closer to) — the 縦横直線 constraint when Shift is held."""
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        if abs(dx) >= abs(dy):
+            return (p1[0], p0[1])       # horizontal
+        return (p0[0], p1[1])           # vertical
+
     def _set_ellipse_handle(self, m, vi, w):
-        m["pts"] = _ellipse_drag(m["pts"], vi, w)
+        m["pts"] = _ellipse_drag(m["pts"], vi, w, circle=bool(m.get("circle")))
 
     def _commit_draft(self):
         d = self._draft
@@ -5468,10 +5495,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if d["type"] == "ellipse":
             # The two clicked points are the MAJOR-axis endpoints; the minor
-            # axis starts at half the major and is then dragged to taste.
-            pts = _ellipse_from_major(d["pts"][0], d["pts"][1])
+            # axis starts at half the major (or EQUAL to it → 正円 when Shift is
+            # held) and is then dragged to taste.
+            circ = bool(getattr(self, "_meas_circle", False))
+            pts = _ellipse_from_major(d["pts"][0], d["pts"][1],
+                                      minor_ratio=1.0 if circ else 0.5)
         elif d["type"] == "line":
             pts = d["pts"][:2]
+            # Shift held → constrain the line to horizontal/vertical (縦横直線).
+            if getattr(self, "_meas_ortho", False) and len(pts) == 2:
+                pts = [pts[0], self._ortho_snap(pts[0], pts[1])]
         else:
             pts = list(d["pts"])
         # A resumed trace keeps its ORIGINAL id (and colour / spline / alpha) so
@@ -5487,6 +5520,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("color", "smooth", "transp"):
             if d.get(k) is not None:
                 m[k] = d[k]
+        # A Shift-drawn ellipse is a TRUE CIRCLE; remember it so handle edits
+        # keep it circular (see _set_ellipse_handle).
+        if d["type"] == "ellipse" and getattr(self, "_meas_circle", False):
+            m["circle"] = True
         # Carry the per-click 3-D control points (polyline only) so the trace
         # can seed a short-axis centreline and its control markers.
         if d["type"] == "polyline" and d.get("pts3d") \
