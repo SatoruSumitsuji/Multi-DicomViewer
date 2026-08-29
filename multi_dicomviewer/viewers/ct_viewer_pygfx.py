@@ -981,8 +981,11 @@ class _Overlay(QWidget):
             # right-click Hide → skip its line, handles and id label entirely.
             if v._results_hidden or m.get("hidden"):
                 continue
+            # MV/AoV valve rings are LOCKED: draw the outline ONLY (no vertex
+            # handles, no long/short-diameter lines) — to change, redraw + Save.
+            locked = bool(m.get("_lv_valve"))
             rgb = _hex_to_rgb(m.get("color"))
-            if mi == hov_out_mi:                 # outline hover → green
+            if mi == hov_out_mi and not locked:  # outline hover → green
                 rgb = (80, 220, 80)
             a4 = transp_to_alpha(m.get("transp", 0))
             # Point HU probe → a fixed-size "+" (two ~12 px segments) + #id.
@@ -1016,7 +1019,7 @@ class _Overlay(QWidget):
                     p.drawLine(S(verts[i]), S(verts[i + 1]))
             else:
                 draw_outline(v._outline(m), rgb, alpha=a4)
-            if m["type"] in ("ellipse", "polygon"):
+            if m["type"] in ("ellipse", "polygon") and not locked:
                 maj, mnr, _, _ = _major_minor(m)
                 for seg in (maj, mnr):
                     if seg is not None:
@@ -1061,22 +1064,24 @@ class _Overlay(QWidget):
             # as solid yellow dots, off-plane ones as 50% hollow yellow rings so
             # the user sees which pseudo-centres sit in the shown cross-section.
             idle_on, idle_off, hov_pts = [], [], []
-            for vi, q in enumerate(v._handles(m)):
-                if mi == edit_mi and not edit_ca and vi == edit_vi:
-                    continue                          # the dragged one → green
-                if (not hov_ca and mi == hov_mi and vi == hov_vi):
-                    hov_pts.append(q)                 # hovered one → green
-                    continue
-                if of is not None and vi < len(of) and of[vi]:
-                    idle_off.append(q)
-                else:
-                    idle_on.append(q)
+            if not locked:                          # valve ring = no handles
+                for vi, q in enumerate(v._handles(m)):
+                    if mi == edit_mi and not edit_ca and vi == edit_vi:
+                        continue                      # the dragged one → green
+                    if (not hov_ca and mi == hov_mi and vi == hov_vi):
+                        hov_pts.append(q)             # hovered one → green
+                        continue
+                    if of is not None and vi < len(of) and of[vi]:
+                        idle_off.append(q)
+                    else:
+                        idle_on.append(q)
             # In-range dot a touch larger than the off-plane ring so the
             # in-plane pseudo-centre reads as the more prominent of the two.
             dots(idle_on, QColor(255, 217, 0), 4.4)              # yellow handles
             dots_hollow(idle_off, QColor(255, 217, 0, 128), 3.3)  # off-plane 50%
             dots(hov_pts, QColor(59, 219, 90), 6.0)             # hover green
-            if mi == edit_mi and not edit_ca and 0 <= edit_vi < len(m["pts"]):
+            if (not locked and mi == edit_mi and not edit_ca
+                    and 0 <= edit_vi < len(m["pts"])):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
             p.setPen(QColor(255, 217, 0))
@@ -5258,8 +5263,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
-            if m.get("hidden"):
-                continue                           # invisible → can't be grabbed
+            if m.get("hidden") or m.get("_lv_valve"):
+                continue          # invisible / LOCKED valve ring → not grabbable
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_screen(which, q[0], q[1])
                 if math.hypot(qx - sx, qy - sy) < 12.0:
@@ -5350,7 +5355,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv_t = self._lv.get("target") if self._lv is not None else None
         best, bi = tol, None
         for mi, m in enumerate(self._measures[which]):
-            if m.get("hidden"):
+            if m.get("hidden") or m.get("_lv_valve"):   # locked valve ring
                 continue
             if lv_t in ("endo", "epi"):
                 tag = m.get("_lv")
