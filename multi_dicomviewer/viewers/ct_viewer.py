@@ -173,7 +173,7 @@ _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
 #: blocked. Zoom/Move/Thick/WL AND Spin stay usable (Spin only rolls the camera
 #: — image + overlay rotate together, the frame/data are untouched — via the
 #: Alt/Option passthrough). NOT applied in plain 3-D MPR (all tools available).
-_LV_LOCK_DISABLED = ("ROTATE", "SPIN", "PAGING")
+_LV_LOCK_DISABLED = ("ROTATE", "PAGING")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
