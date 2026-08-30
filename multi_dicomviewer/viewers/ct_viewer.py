@@ -173,7 +173,7 @@ _MPR_ONLY_TOOLS = ("ROTATE", "SPIN", "THICK")
 #: blocked. Zoom/Move/Thick/WL AND Spin stay usable (Spin only rolls the camera
 #: — image + overlay rotate together, the frame/data are untouched — via the
 #: Alt/Option passthrough). NOT applied in plain 3-D MPR (all tools available).
-_LV_LOCK_DISABLED = ("ROTATE", "PAGING")
+_LV_LOCK_DISABLED = ("ROTATE", "SPIN", "PAGING")
 #: Series with this many slices or fewer default to 2-D (single-slice) display;
 #: more than this defaults to 3-D MPR reconstruction.
 _MODE_2D_MAX = 200
@@ -2865,8 +2865,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_toggle()                    # leave Blood (drops it)
             elif self._lv is not None and self._lv.get("sax") is None:
                 m = self._lv["model"]
-                if bool(m.endo_planes or m.epi_planes):
-                    if not self._lv_confirm_drop("contour"):
+                has_border = bool(m.endo_planes or m.epi_planes)
+                if has_border and self._lv.get("vol_done"):
+                    # Committed (Calc Vol done) → LEAVE to OBSERVE: retain the
+                    # border + red region as a display overlay, unlock the view
+                    # for free 3-D inspection. Editing is finished — nothing is
+                    # discarded; re-click Epi/Endo to resume editing, Clear to
+                    # drop it, Save to persist it.
+                    self._lv_leave_observe()
+                elif has_border:
+                    # Mid-edit (no committed volume) → discard the in-progress
+                    # trace, as the user expects a mode-button re-click to do.
+                    from PyQt6.QtWidgets import QMessageBox
+                    if QMessageBox.question(
+                            self.window(), t("LV"),
+                            t("Discard this trace and end editing?")) \
+                            != QMessageBox.StandardButton.Yes:
                         return
                     self._lv_reset_contour_empty()    # drop the pass's data
                 else:
@@ -2968,6 +2982,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                               # noqa: BLE001
             pass
 
+    def _lv_leave_observe(self) -> None:
+        """Leave the Endo/Epi sub-mode with its Calc-Vol-committed border + red
+        region RETAINED as a display overlay for free-view observation. The
+        sub-mode selector goes inactive (pass=None) but the phase stays
+        'contour', so the Epi領域表示 toggle, Clear, Save and Load stay live and
+        the view is unlocked (vol_done → Rotate/Spin/Paging/CenterLine) — the
+        border + region track the volume as it is rotated. Re-clicking Endo/Epi
+        resumes editing; Clear drops it; Save persists it to an EndoLv/EpiLv."""
+        self._lv_capture_current()
+        self._lv["pass"] = None            # sub-mode selector inactive
+        self._lv_apply_target(None)        # no border armed for point editing
+        self._lv_apply_view_free()         # vol_done → unlock the view
+        self._lv_sync_buttons()
+        self._redraw_all_lv()
+
     def _lv_reset_contour_empty(self) -> None:
         """Drop the current pass's model + on-screen borders and return to the
         no-pass state (still in LV mode). Used when a pass is DEACTIVATED (its
@@ -3019,6 +3048,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         sm = self._lv_current_submode()               # 'endo'/'epi'/'blood'/None
         endoepi = sm in ("endo", "epi")
         blood = sm == "blood"
+        # OBSERVE state: sub-mode inactive (pass=None) but a Calc-Vol-committed
+        # contour border is RETAINED for free-view inspection (left via
+        # _lv_leave_observe). Its file/region row (Epi領域表示 / Clear / Save /
+        # Load) stays live so the border/region can be toggled, re-edited or
+        # persisted without re-entering the sub-mode.
+        observing = (self._lv is not None and self._lv.get("pass") is None
+                     and self._lv.get("phase") == "contour"
+                     and bool(self._lv["model"].endo_planes
+                              or self._lv["model"].epi_planes))
 
         # Idempotent show/hide: only toggle a group's visibility when it actually
         # changes. Calling setVisible every sync (many per view manipulation)
@@ -3029,13 +3067,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 w.setVisible(on)
         _vis(self._lv_grp_trace, endoepi)
         _vis(self._lv_grp_blood, blood)
-        _vis(self._lv_grp_r2_trace, endoepi)
+        _vis(self._lv_grp_r2_trace, endoepi or observing)
         _vis(self._lv_grp_r2_blood, blood)
-        # Valve-setup file controls (row 2) show when NO sub-mode is active — the
-        # initial "set the common MV / AoV planes" step. The MV/AoV capture
-        # buttons (row 1) stay visible always.
+        # Valve-setup file controls (row 2) show when NO sub-mode is active AND we
+        # are not observing a retained contour — the initial "set the common MV /
+        # AoV planes" step. The MV/AoV capture buttons (row 1) stay visible always.
         if getattr(self, "_lv_grp_r2_valves", None) is not None:
-            _vis(self._lv_grp_r2_valves, sm is None)
+            _vis(self._lv_grp_r2_valves, sm is None and not observing)
         self._lv_update_valve_buttons()
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
@@ -7000,6 +7038,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             lv["vol_myo_ml"] = None
             self._lv_result_lines = []
             self._lv_clear_measured_mask()       # stale red region → clear it
+            if getattr(self, "_lv_region_btn", None) is not None:
+                self._lv_region_btn.setChecked(False)
+                self._lv_region_btn.setStyleSheet(self._BTN_DIS)
+            self._lv_apply_view_free()           # editing again → re-lock the view
             self._lv_sync_buttons()
             self._lv_update_text()
 
@@ -8829,8 +8871,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         fixed, so Rotate/Spin/Thick (which would re-tilt the reslice frame) are
         blocked. Zoom/Move/WL and the cross-section level still work."""
         lv = self._lv
-        # Epi領域表示 (inspect/free-view) lifts the lock so the traced region can
-        # be rotated/spun/paged freely to view it in 3-D.
+        # Once the volume is COMMITTED (Calc Vol → _lv_view_free), editing is
+        # finished: the lock lifts so the traced border + red region can be
+        # rotated/spun/paged freely to inspect them in 3-D (they track the
+        # volume). An edit clears vol_done and the lock returns.
         if getattr(self, "_lv_view_free", False):
             return False
         return (lv is not None
@@ -8842,10 +8886,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         toggle (lv['trace_view']) and the Epi領域表示 button — then lift/restore the
         Rotate/Spin/Paging/CenterLine locks and repaint the crosshair."""
         lv = self._lv
-        trace_view = bool(lv is not None and lv.get("trace_view"))
-        region_on = bool(getattr(self, "_lv_region_btn", None) is not None
-                         and self._lv_region_btn.isChecked())
-        self._lv_view_free = trace_view or region_on
+        # Free view (Rotate/Spin/Paging/CenterLine unlocked) is granted ONLY once
+        # the pass's volume is COMMITTED via Calc Vol — i.e. editing is finished.
+        # Up to Calc Vol the long-axis frame stays LOCKED (long-axis tracing +
+        # SAX editing); after it the traced border + red region can be inspected
+        # freely in 3-D (rotate/spin/page while they track the volume), whether
+        # still in the pass or after leaving it to observe. Any edit clears
+        # vol_done → the frame re-locks. Showing the red region alone no longer
+        # unlocks (that pre-Calc-Vol inconsistency is what the user hit).
+        self._lv_view_free = bool(lv is not None and lv.get("vol_done"))
         self._refresh_tool_availability()
         for k in ("A", "B"):
             self.pane[k].set_overlay_visible(self._cross_overlay_on())
@@ -9408,6 +9457,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Paint the measured region RED on both panes — same overlay channel as
         # the Blood volume (a native-grid 0/1 mask resliced onto each plane).
         self._lv_show_measured_mask(result.get("mask"))
+        # Reflect the freshly-shown red region on the Epi領域表示 toggle so that,
+        # once the user leaves to observe, it reads ON and a click hides it.
+        if getattr(self, "_lv_region_btn", None) is not None:
+            self._lv_region_btn.setChecked(True)
+            self._lv_region_btn.setStyleSheet(
+                "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+        # Editing is now finished for this pass → unlock the view (vol_done) so the
+        # border + region can be inspected freely in 3-D right away.
+        self._lv_apply_view_free()
         self._lv_sync_buttons()
         self._lv_update_text()
 
