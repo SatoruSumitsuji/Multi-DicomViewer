@@ -3847,11 +3847,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         a = a / (np.linalg.norm(a) or 1.0)
         b = np.cross(n, a)
         # A: face-on (view along n) → circle. B: plane spanned by (a, n) contains
-        # n → the MV plane cuts it along 'a' → edge-on line. B's up = -n so the
-        # base (MV) is at the TOP and the apex at the BOTTOM (per user preference);
-        # only the vertical sense flips (u stays, so no left-right mirror).
+        # n → the MV plane cuts it along 'a' → edge-on line. B's up must put the
+        # base (MV) at the TOP and the apex at the BOTTOM. The valve normal n's
+        # SIGN is arbitrary — it comes from whichever way the pane faced when the
+        # MV ellipse was drawn — so a fixed '-n' flipped up/down depending on the
+        # capture. Anchor "up" to patient SUPERIOR instead (the base is superior
+        # to the apex): pick the sign of n that points superior. Only the vertical
+        # sense flips (u stays, so no left-right mirror); fall back to -n if the
+        # patient basis is unknown or n lies in the axial plane.
+        up = -n
+        pb = getattr(self, "_pbasis", None)
+        if pb is not None:
+            try:
+                sup = np.linalg.inv(np.asarray(pb, float)) @ \
+                    np.array([0.0, 0.0, 1.0])       # patient Superior in vol space
+                d = float(np.dot(n, sup))
+                if abs(d) > 1e-6:
+                    up = n if d >= 0.0 else -n      # base (superior) → screen top
+            except np.linalg.LinAlgError:
+                pass
         self._frame["A"] = self._ortho(a, b)
-        self._frame["B"] = self._ortho(a, -n)
+        self._frame["B"] = self._ortho(a, up)
         self._pc["A"] = c.copy()
         self._pc["B"] = c.copy()
         self._center = c.copy()
@@ -4777,7 +4793,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             # then so the current step's usable buttons stand out.
             has_pass = pas in ("endo", "epi")
             setax.setEnabled(has_pass and ph in ("align", "ready"))
-            trace.setEnabled(has_pass and ph in ("ready", "apex", "contour"))
+            # Trace is clickable in ALIGN too: Set axis is retired, so Trace is
+            # what captures the current (auto MV-perp) view as the axis before
+            # placing the apex (_lv_start_trace handles ph=='align'). Without
+            # 'align' here the button greys out and — with Set axis hidden — the
+            # pass gets stuck in align with no way to advance.
+            trace.setEnabled(
+                has_pass and ph in ("align", "ready", "apex", "contour"))
         self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
         for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
