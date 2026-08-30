@@ -5906,7 +5906,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # anchored this way too — their handles/vertices carry pts3d.
                 if (p3 and m["type"] in ("polyline", "point", "ellipse",
                                          "polygon")
-                        and len(p3) == len(m["pts"])):
+                        and (len(p3) == len(m["pts"])
+                             or m.get("_lv") or m.get("_lv_valve"))):
+                    # LV borders / valve rings are 3-D authoritative: always
+                    # re-derive their 2-D from pts3d so they track free rotation
+                    # even if a stray edit left pts/pts3d out of length-sync (the
+                    # parity guard would otherwise freeze them on screen).
                     m["pts"] = [self._world3d_to_out(key, P) for P in p3]
             d = self._draft
             if (d is not None and d.get("pane") == key and d.get("pts3d")
@@ -10890,9 +10895,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # so the pseudo-centre points AND their lines follow the image even
         # after Measure is turned off. Cheap guard: only runs when such a trace
         # exists (a plain measure has no pts3d).
-        if self._mode == "3D" and any(
+        if self._mode == "3D" and (self._lv is not None or any(
                 m.get("pts3d") for kk in ("A", "B")
-                for m in self._measures[kk]):
+                for m in self._measures[kk])):
             for kk in ("A", "B"):
                 if only is not None and kk != only:
                     continue
