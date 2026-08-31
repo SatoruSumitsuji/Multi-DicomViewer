@@ -118,6 +118,60 @@ def _hull_radius_profile(filled: np.ndarray, ctr: int, rays, grid_mm: float):
     return out
 
 
+def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
+                            half_mm=100.0, step_mm=0.8):
+    """Outline polygon(s) of a 3-D region's CROSS-SECTION on an arbitrary plane.
+
+    Samples the boolean region (``comp`` = bbox-local mask, ``bbox`` =
+    (z0,z1,y0,y1,x0,x1) into the full volume) on a square grid centred at
+    *origin* (world mm) with in-plane axes *u*, *v* (unit, world), extent
+    +/-half_mm at pitch *step_mm*, then traces the mask boundary. Returns a list
+    of polygons, each a list of (out_u, out_v) points in the plane's OUTPUT
+    coordinates (origin = (0,0), same frame the viewers reslice in) — ready to
+    draw as the region's border that TRACKS free rotation (it is the section of
+    the reconstructed solid, so it always coincides with the resliced fill).
+
+    [] if the plane misses the region or OpenCV is unavailable.
+    """
+    try:
+        import cv2
+    except Exception:                                   # noqa: BLE001
+        return []
+    comp = np.asarray(comp, bool)
+    if comp.size == 0 or not comp.any():
+        return []
+    z0, z1, y0, y1, x0, x1 = bbox
+    sx, sy, sz = spacing_xyz
+    o = np.asarray(origin, float)
+    u = np.asarray(u, float)
+    v = np.asarray(v, float)
+    n = max(2, int(2.0 * half_mm / step_mm) + 1)
+    ax = np.linspace(-half_mm, half_mm, n)
+    uu, vv = np.meshgrid(ax, ax)                        # uu[i,j]=ax[j], vv[i,j]=ax[i]
+    px = o[0] + uu * u[0] + vv * v[0]
+    py = o[1] + uu * u[1] + vv * v[1]
+    pz = o[2] + uu * u[2] + vv * v[2]
+    ix = np.round(px / sx).astype(np.int64)
+    iy = np.round(py / sy).astype(np.int64)
+    iz = np.round(pz / sz).astype(np.int64)
+    inb = ((ix >= x0) & (ix < x1) & (iy >= y0) & (iy < y1)
+           & (iz >= z0) & (iz < z1))
+    g = np.zeros((n, n), np.uint8)
+    sel = np.where(inb)
+    g[sel] = comp[iz[sel] - z0, iy[sel] - y0, ix[sel] - x0]
+    if not g.any():
+        return []
+    cnts, _h = cv2.findContours(g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    polys = []
+    for c in cnts:
+        pc = c.reshape(-1, 2)                           # (col=j, row=i)
+        if len(pc) < 3:
+            continue
+        polys.append([(-half_mm + float(j) * step_mm,
+                       -half_mm + float(i) * step_mm) for j, i in pc])
+    return polys
+
+
 def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                              n_meridians, along_apex, along_base,
                              sax_step_mm=1.0, close_mm=4.0, half_mm=60.0,
