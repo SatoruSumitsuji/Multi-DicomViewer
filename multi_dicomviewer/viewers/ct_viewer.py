@@ -2173,6 +2173,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
         self._lv_endo_method = "close"   # Auto-Endo bridging: close / polar / hull
+        self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lvv_endo_show = False      # Auto-Endo表示 toggle state
         self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
@@ -3966,6 +3967,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV"),
                                 t("Save failed: {err}", err=str(exc)))
             return
+        self._lv_remember_dir(path)
         QMessageBox.information(self.window(), t("LV"),
                                t("Saved: {p}", p=os.path.basename(path)))
 
@@ -4000,6 +4002,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                       float(data.get("r", 20.0)))
             self._lv_valve_shown[which] = True
             self._lv_valve_show_from_geom(which)   # draw the ring on both panes
+            self._lv_remember_dir(path)
             self._lv_update_valve_buttons()
             self._lv_update_submode_ui()        # both valves set → un-grey
             QMessageBox.information(
@@ -7841,6 +7844,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._bounds = self._image.GetBounds()
         self._header = loaded.header
         self._src_dir = getattr(loaded, "source_dir", "") or ""   # data folder
+        if not self._src_dir:
+            # Fall back to the header's own file path so Save/Load/Export still
+            # default to the data folder when source_dir wasn't recorded.
+            import os as _os
+            _fn = getattr(loaded.header, "filename", None) \
+                if getattr(loaded, "header", None) is not None else None
+            if _fn:
+                _d = _os.path.dirname(str(_fn))
+                if _d:
+                    self._src_dir = _d
         # voxel-axis -> patient-LPS rotation (cols=x, rows=y, slices=z).
         # None -> standard axial supine head-first (x=Left, y=Post, z=Head).
         pb = loaded.patient_basis
@@ -9678,13 +9691,28 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_save_dir(self) -> str:
         """Default folder for SAVE / EXPORT / LOAD dialogs = the PARENT of the
         source-data folder (one level ABOVE where the CT series was read), per
-        user preference. Falls back to the source folder if it has no parent."""
+        user preference. Falls back to the source folder if it has no parent, and
+        to the last folder actually used this session if the source is unknown."""
         import os
         d = self._lv_series_dir()
         if not d:
-            return d
+            # Source folder unknown → keep the last folder the user saved/loaded
+            # to this session so the default doesn't collapse to the CWD.
+            last = getattr(self, "_lv_last_dir", "") or ""
+            return last if last and os.path.isdir(last) else d
         parent = os.path.dirname(d.rstrip("\\/"))
         return parent if parent and os.path.isdir(parent) else d
+
+    def _lv_remember_dir(self, path) -> None:
+        """Record the folder of a just-saved/loaded LV file so later dialogs
+        default there when the source folder can't be determined."""
+        import os
+        try:
+            dd = os.path.dirname(str(path))
+            if dd and os.path.isdir(dd):
+                self._lv_last_dir = dd
+        except Exception:                               # noqa: BLE001
+            pass
 
     @staticmethod
     def _unlink_case_variant(path) -> None:
@@ -9872,6 +9900,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV Volume"),
                                 t("Save failed: {err}", err=str(exc)))
             return
+        self._lv_remember_dir(path)
         self._lv_dirty = False               # borders saved → no unsaved-switch warn
         # Keep the volume readout on screen after saving (append the saved note,
         # don't replace it) so the result stays visible.
@@ -9904,6 +9933,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("Load failed: {err}", err=str(exc)))
             return
+        self._lv_remember_dir(path)
         if model.axis is None:
             QMessageBox.warning(self.window(), t("LV EF"),
                                 t("The file has no LV axis."))
