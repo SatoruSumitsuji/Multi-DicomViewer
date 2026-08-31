@@ -61,18 +61,87 @@ def _envelope_radius(env: np.ndarray, ctr: int, dx: float, dy: float,
     return last * grid_mm
 
 
+def _polar_close(r: np.ndarray, k: int) -> np.ndarray:
+    """Circular 1-D grey CLOSING (dilate then erode) of a radial profile r[θ]
+    with a flat window of half-width *k* samples. Fills INWARD dips (papillary /
+    trabecular notches up to ~2k samples wide) while leaving the broad cavity
+    shape intact — the angular analogue of the 2-D closing, but it only bridges
+    radial dips instead of rounding the whole contour."""
+    m = len(r)
+    if k < 1 or m == 0:
+        return r
+    idx = np.arange(m)
+    dil = r.copy()
+    for s in range(-k, k + 1):                         # dilation = rolling max
+        dil = np.maximum(dil, r[(idx + s) % m])
+    ero = dil.copy()
+    for s in range(-k, k + 1):                         # erosion  = rolling min
+        ero = np.minimum(ero, dil[(idx + s) % m])
+    return ero
+
+
+def _hull_radius_profile(filled: np.ndarray, ctr: int, rays, grid_mm: float):
+    """Convex-hull radius (mm) along each ray from the grid centre. The blood
+    cross-section's convex hull bridges ALL inward notches (papillary muscles /
+    trabeculae) with straight chords — the most aggressive "papillary-included"
+    envelope (matches the smooth curve a human draws), at the cost of a little
+    over-inclusion where the cavity is genuinely concave (base / LVOT)."""
+    ys, xs = np.nonzero(filled)
+    n = len(rays)
+    if len(xs) < 3:
+        return [0.0] * n
+    pu = xs.astype(float) - ctr                        # u = column
+    pv = ys.astype(float) - ctr                        # v = row
+    pts = np.column_stack([pu, pv])
+    try:
+        from scipy.spatial import ConvexHull
+        verts = pts[ConvexHull(pts).vertices]          # ordered boundary loop
+    except Exception:                                   # noqa: BLE001
+        return [0.0] * n
+    nH = len(verts)
+    out = []
+    for _th, dx, dy in rays:
+        # Cast the ray  P = t·(dx,dy), t>0  against each hull edge a→b; the exit
+        # crossing (largest valid t with 0≤s≤1) is the hull boundary radius.
+        best_t = 0.0
+        for i in range(nH):
+            a = verts[i]
+            e = verts[(i + 1) % nH] - a
+            denom = dx * e[1] - dy * e[0]              # d × e
+            if abs(denom) < 1e-9:
+                continue
+            tt = (a[0] * e[1] - a[1] * e[0]) / denom    # (a × e)/(d × e)
+            ss = (a[0] * dy - a[1] * dx) / denom        # (a × d)/(d × e)
+            if tt > best_t and -1e-9 <= ss <= 1.0 + 1e-9:
+                best_t = tt
+        out.append(best_t * grid_mm)
+    return out
+
+
 def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                              n_meridians, along_apex, along_base,
                              sax_step_mm=1.0, close_mm=4.0, half_mm=60.0,
-                             grid_mm=0.6):
+                             grid_mm=0.6, method="close", bridge_deg=40.0):
     """Per-meridian (along, radius) profiles of the ENDOCARDIAL ENVELOPE derived
     from the blood pool — the compact-layer inner surface (papillary/trabeculae
     INCLUDED in the cavity), ready to load as an editable Endo border.
 
     For each short-axis level the blood is filled (enclosed papillary islands)
-    and closed (wall-attached notches) into the smooth envelope; its radial
-    extent is then measured along each of *n_meridians* directions (θ=0 along
-    *radial0*, matching LVModel's meridian convention).
+    then the wall-attached notches (papillary muscles / trabeculae) are bridged
+    into a smooth envelope; its radial extent is measured along each of
+    *n_meridians* directions (θ=0 along *radial0*, LVModel's meridian convention).
+
+    *method* selects how the notches are bridged:
+      * ``"close"`` — 2-D morphological closing with a disk of radius *close_mm*
+        (the original; isotropic, rounds the whole contour — a blunt lever for
+        broad papillaries).
+      * ``"polar"`` — measure the raw outermost-blood radius per ray on the
+        FILLED blood, then bridge inward dips with a 1-D circular closing over θ
+        of angular width ~*bridge_deg* (targeted: fills papillary dips, keeps
+        the rest of the shape).
+      * ``"hull"`` — per-level convex hull of the blood: bridges every inward
+        notch with a straight chord (most aggressive; may slightly over-include
+        where the cavity is genuinely concave).
 
     Returns ``{theta_deg: np.ndarray[(along, radius), …]}`` for the meridian
     angles ``i*360/n_meridians`` (only those with ≥2 samples), or
@@ -91,9 +160,13 @@ def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
     u = u / (np.linalg.norm(u) or 1.0)
     v = np.cross(n, u)
     se = _disk(close_mm / grid_mm)
-    thetas = [360.0 * i / n_meridians for i in range(int(n_meridians))]
+    n_mer = int(n_meridians)
+    thetas = [360.0 * i / n_mer for i in range(n_mer)]
     rays = [(th, math.cos(math.radians(th)), math.sin(math.radians(th)))
             for th in thetas]
+    # Polar-close half-width: samples spanning ~bridge_deg of arc.
+    deg_per = 360.0 / max(1, n_mer)
+    k_win = max(1, int(round((bridge_deg * 0.5) / deg_per)))
     out: dict = {th: [] for th in thetas}
     slab = float(sax_step_mm)
     t = float(along_apex)
@@ -102,14 +175,22 @@ def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
         g, _cell = _sample_on_plane(blood, spacing_xyz, centre, u, v,
                                     half_mm, grid_mm)
         if g.any():
-            env = ndimage.binary_fill_holes(g)
-            env = ndimage.binary_closing(env, structure=se)
-            env = ndimage.binary_fill_holes(env)
-            ctr = env.shape[0] // 2                      # (u,v)=(0,0) pixel
-            for th, dx, dy in rays:
-                r = _envelope_radius(env, ctr, dx, dy, grid_mm)
+            filled = ndimage.binary_fill_holes(g)       # enclosed islands
+            ctr = filled.shape[0] // 2                   # (u,v)=(0,0) pixel
+            if method == "hull":
+                rs = _hull_radius_profile(filled, ctr, rays, grid_mm)
+            elif method == "polar":
+                rs = [_envelope_radius(filled, ctr, dx, dy, grid_mm)
+                      for _th, dx, dy in rays]
+                rs = list(_polar_close(np.asarray(rs, float), k_win))
+            else:                                        # "close" (original)
+                env = ndimage.binary_closing(filled, structure=se)
+                env = ndimage.binary_fill_holes(env)
+                rs = [_envelope_radius(env, ctr, dx, dy, grid_mm)
+                      for _th, dx, dy in rays]
+            for (th, _dx, _dy), r in zip(rays, rs):
                 if r > 0.0:
-                    out[th].append((float(t), r))
+                    out[th].append((float(t), float(r)))
         t += slab
     return {th: np.asarray(vals, float)
             for th, vals in out.items() if len(vals) >= 2}
