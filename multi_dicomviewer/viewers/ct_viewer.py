@@ -3011,6 +3011,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_capture_current()
         self._lv["pass"] = None            # sub-mode selector inactive
         self._lv_apply_target(None)        # no border armed for point editing
+        # Turn Measure OFF (like entering align / the Trace→View toggle) so a
+        # plain left-drag drives the now-unlocked view tools (Rotate / Paging /
+        # CenterLine) instead of being captured by the Polyline trace tool — the
+        # buttons were enabled but a drag still went to Measure.
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
         self._lv_apply_view_free()         # vol_done → unlock the view
         self._lv_sync_buttons()
         self._redraw_all_lv()
