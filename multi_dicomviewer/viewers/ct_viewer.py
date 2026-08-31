@@ -2174,6 +2174,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
         self._lv_endo_method = "close"   # Auto-Endo bridging: close / polar / hull
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
+        self._lv_region_comp = None      # measured-region mask (bbox-local bool)
+        self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
         self._lvv_endo_show = False      # Auto-Endo表示 toggle state
         self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
@@ -5999,10 +6001,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         # drawn green (it will be grabbed to MOVE).
         ho = getattr(self, "_meas_hover_outline", None)
         hov_out_mi = ho[1] if (ho and ho[0] == key) else -1
+        lv_free = getattr(self, "_lv_view_free", False)
         for mi, m in enumerate(self._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
             # right-click Hide → skip its line, handles, axes and id label.
             if self._results_hidden or m.get("hidden"):
+                continue
+            # In OBSERVE / free-view, the traced Endo/Epi border (planar
+            # meridians) is replaced by the region's cross-section outline drawn
+            # in _redraw_lv, so hide the (parallel-projected) trace here — it
+            # would not match the oblique fill. Editing (locked) shows it again.
+            if lv_free and m.get("_lv"):
                 continue
             # Point HU probe → a fixed-size "+" (two short segments, ~12 px) at
             # the point plus its #id; skip the generic outline/handle drawing.
@@ -7118,6 +7127,8 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_clear_measured_mask(self) -> None:
         """Hide + drop the red measured-region overlay (Endo/Epi Calc Vol)."""
+        self._lv_region_comp = None          # drop the cross-section source too
+        self._lv_region_bbox = None
         if getattr(self, "_lvv_mask_vol", None) is None:
             return
         self._lvv_mask_vol = None
@@ -9557,6 +9568,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         comp, bbox = mask
         z0, z1, y0, y1, x0, x1 = bbox
+        # Keep the region mask (bbox-local bool) so the border can be drawn as
+        # its cross-section outline on any freely-rotated plane (tracks the fill).
+        self._lv_region_comp = np.asarray(comp, bool)
+        self._lv_region_bbox = bbox
         full = np.zeros(self._vol.shape, np.float32)
         full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
         sx, sy, sz = self._dims
@@ -10376,6 +10391,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv.get("phase") != "contour" or lv["model"].axis is None:
             return                                       # only markers pre-trace
         ax = lv["model"].axis
+        # OBSERVE / free-view (Calc Vol committed, no SAX): draw the Epi/Endo
+        # border as the CROSS-SECTION outline of the reconstructed region on THIS
+        # plane, so it tracks free rotation and always coincides with the red
+        # fill — instead of the traced meridians' (planar) parallel projection,
+        # which is hidden in free-view (see _redraw_geom). Redrawn every view
+        # change since _redraw_lv runs from _refresh.
+        if (lv.get("sax") is None and getattr(self, "_lv_view_free", False)
+                and getattr(self, "_lv_region_comp", None) is not None):
+            from multi_dicomviewer.core.lv_compact import region_outline_on_plane
+            u_ax, v_ax, _n_ax = self._axes_for(key)
+            half = float(getattr(self, "_half", 100.0))
+            try:
+                polys = region_outline_on_plane(
+                    self._lv_region_comp, self._lv_region_bbox, self._dims,
+                    self._pc[key], u_ax, v_ax, half_mm=half, step_mm=0.8)
+            except Exception:                            # noqa: BLE001
+                polys = []
+            if polys:
+                rings = [[tuple(q) for q in poly] + [tuple(poly[0])]
+                         for poly in polys]
+                mm = lv["model"]
+                which = "endo" if (mm.endo_contours and not mm.epi_contours) \
+                    else "epi"
+                mapper = (p.lv_endo_mapper if which == "endo"
+                          else p.lv_epi_mapper)
+                mapper.SetInputData(_polylines_pd(rings))
+            return
         # SHORT-AXIS mode (both panes visible):
         if lv.get("sax") is not None:
             along0 = float(lv["sax"])
