@@ -8764,6 +8764,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if first:
             la_cam.SetParallelScale(la_ps0)
             self._update_cross(la)
+            # _refresh drew the level line + ○ handle for the FITTED camera; the
+            # scale was then restored, so redraw the long-axis overlays for the
+            # FINAL camera — otherwise the ○ is placed for the wrong scale (often
+            # off-screen), so on entry it neither shows nor hit-tests until a
+            # ◀/▶ (F/A) triggers a reslice. This puts it in the F-key state now.
+            self._redraw_lv(la)
         for k in (la, sa):
             self.pane[k].set_overlay_visible(self._cross_overlay_on())
             self.pane[k].set_slab_visible(False)
