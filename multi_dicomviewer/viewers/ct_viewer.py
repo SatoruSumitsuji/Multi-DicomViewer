@@ -6161,11 +6161,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # right-click Hide → skip its line, handles, axes and id label.
             if self._results_hidden or m.get("hidden"):
                 continue
-            # In OBSERVE / free-view, the traced Endo/Epi border (planar
-            # meridians) is replaced by the region's cross-section outline drawn
-            # in _redraw_lv, so hide the (parallel-projected) trace here — it
-            # would not match the oblique fill. Editing (locked) shows it again.
-            if lv_free and m.get("_lv"):
+            # Epi境界表示 OFF hides the traced Endo/Epi border on the long-axis
+            # pane too (this is the border shown there in SAX), so the toggle
+            # governs the green border everywhere. In OBSERVE it is hidden anyway
+            # (the region's cross-section outline is drawn in _redraw_lv instead).
+            if m.get("_lv") and (lv_free
+                                 or not getattr(self, "_lv_border_show", True)):
                 continue
             # Point HU probe → a fixed-size "+" (two short segments, ~12 px) at
             # the point plus its #id; skip the generic outline/handle drawing.
@@ -9172,7 +9173,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         works the same whether SAX is on or off. Button colour synced from the
         flag by _lv_sync_buttons."""
         self._lv_border_show = self._lv_border_btn.isChecked()
-        self._redraw_all_lv()
+        for k in ("A", "B"):
+            self._redraw_meas(k)     # traced border on the long-axis pane
+        self._redraw_all_lv()        # SAX splines + observe section outline
         self._lv_sync_buttons()
 
     def _lv_region_reset(self) -> None:
