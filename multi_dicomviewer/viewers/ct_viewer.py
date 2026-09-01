@@ -5004,7 +5004,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         m = lv["model"]
         has_border = (len(m.endo_contours) >= 3 or len(m.epi_contours) >= 3)
         data_ok = bool(contour and (has_border or lv.get("vol_done")))
-        self._lv_sax_btn.setEnabled(data_ok)
+        # SAX is available throughout tracing (contour) — it captures the current
+        # border on entry and guides "trace 3 planes first" if too few. Gating it
+        # on has_border stranded the user when the just-traced borders weren't
+        # captured/synced yet, so keep it on the phase (as before).
+        self._lv_sax_btn.setEnabled(contour)
         for b in (self._lv_prev_btn, self._lv_next_btn):
             b.setEnabled(contour)
         for b in (self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
