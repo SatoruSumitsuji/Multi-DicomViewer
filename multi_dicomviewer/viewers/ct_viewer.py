@@ -3394,6 +3394,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._lv_valves.get("aortic") is not None:
                     self._lvv["aortic"] = self._lv_valves["aortic"]
                 self._lvv_dirty = False              # fresh Blood session
+                # Blood/Endo evaluates HU on THIN slices — force BOTH panes' slab
+                # to 0 (the right pane often carried a 5mm MPR slab).
+                self._thick["A"] = 0.0
+                self._thick["B"] = 0.0
+                if hasattr(self, "_sync_slab_spin"):
+                    self._sync_slab_spin()
+                self._refresh()
                 # 全域HU tint ON by default (blood evaluation is the whole point of
                 # this mode); LV-Blood表示 off until computed.
                 self._lvv_hl_on = True
