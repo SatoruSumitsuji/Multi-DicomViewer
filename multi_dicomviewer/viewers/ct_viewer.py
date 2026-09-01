@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "convex3d"  # Auto-Endo: 3-D convex hull (all blood)
+        self._lv_endo_method = "hull"    # Auto-Endo: per-level convex hull (user pref)
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,12 +2671,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("3D凸包", "convex3d")  # default: all blood,
-        self._lvv_method_combo.addItem("放射", "polar")       # convex everywhere
-        self._lvv_method_combo.addItem("凸包(層)", "hull")
+        self._lvv_method_combo.addItem("凸包(層)", "hull")     # convex per level
+        self._lvv_method_combo.addItem("凸包(丸)", "hull_round")  # rounded toward ○
+        self._lvv_method_combo.addItem("放射", "polar")
+        self._lvv_method_combo.addItem("3D凸包", "convex3d")
         self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の作り方: 3D凸包=血流の3次元凸包(全血流を内包・短軸/長軸とも"
-              "凸で凹みなし・丸い)、放射=各方向の最遠血流、凸包(層)=短軸レベル凸包"))
+            t("Auto-Endo の作り方: 凸包(層)=短軸レベル凸包、凸包(丸)=それを円に近づけ"
+              "る(肉柱で丸み)、放射=各方向の最遠血流(肉柱で谷を橋渡し)、3D凸包=3次元凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
@@ -4335,8 +4336,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         dims = self._dims
         # 肉柱(close_mm) → angular span bridged across papillary notches; the 3-D
         # closing is kept small (de-stripe only) so the Endo stays tight.
-        bridge = max(10.0, float(getattr(self, "_lv_endo_close_mm", 5.0)) * 4.0)
+        close_mm = float(getattr(self, "_lv_endo_close_mm", 5.0))
+        bridge = max(10.0, close_mm * 4.0)
         method = getattr(self, "_lv_endo_method", "polar")
+        # 凸包(丸): 肉柱 also sets how far the hull rounds toward a circle
+        # (0..~0.85). 20 mm ≈ 0.83 → quite round; small 肉柱 ≈ the plain hull.
+        roundness = min(0.85, close_mm / 24.0) if method == "hull_round" else 0.0
         result: dict = {}
 
         class _MaskWorker(QThread):
@@ -4352,7 +4357,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                             along_apex=1.0, along_base=along_base,
                             sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
                             grid_mm=0.7, method=method,
-                            bridge_deg=bridge, n_meridians=240)
+                            bridge_deg=bridge, n_meridians=240,
+                            roundness=roundness)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
