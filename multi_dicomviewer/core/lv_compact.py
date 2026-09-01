@@ -170,7 +170,20 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                                     half_mm, grid_mm)
         if g.any():
             filled = ndimage.binary_fill_holes(g)
-            if method == "hull":
+            if method == "circle":
+                # 外接円: the min-enclosing circle of the blood at this level —
+                # centre = blood centroid, radius = the farthest blood pixel — so
+                # EVERY blood voxel of the level is inside. Stacked apex→base this
+                # is the classic bullet Endo; base/apex taper naturally as the
+                # blood narrows.
+                ys_p, xs_p = np.nonzero(filled)
+                cu = float(xs_p.mean())
+                cv = float(ys_p.mean())
+                rr = float(np.sqrt((xs_p - cu) ** 2
+                                   + (ys_p - cv) ** 2).max()) + 1.0
+                gy, gx = np.ogrid[0:filled.shape[0], 0:filled.shape[1]]
+                env = ((gx - cu) ** 2 + (gy - cv) ** 2) <= rr * rr
+            elif method == "hull":
                 rs = _hull_radius_profile(filled, ctr, rays, grid_mm)
                 env = _radius_to_mask(rs, thetas, ang_grid, rad_grid)
             elif method == "polar":
