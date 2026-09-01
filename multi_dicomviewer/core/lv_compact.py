@@ -279,10 +279,32 @@ def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
             continue
         ring = np.column_stack([-half_mm + pc[:, 0].astype(float) * step_mm,
                                 -half_mm + pc[:, 1].astype(float) * step_mm])
-        polys.append(_resample_closed(ring, 64))
+        # Arc-length resample dense, then periodic low-pass to erase the pixel
+        # staircase (the caller Catmull-Roms the result) — a smooth outline.
+        polys.append(_smooth_ring(_resample_closed(ring, 96), passes=16))
     # Keep the biggest ring first (the cavity); tiny specks (noise) sort after.
     polys.sort(key=len, reverse=True)
     return polys
+
+
+def _smooth_ring(pts, passes=12, lam=0.63, mu=-0.67):
+    """TAUBIN (λ|μ) smoothing of a closed ring: erases the pixel-staircase wiggle
+    WITHOUT the inward shrink a plain moving-average causes (the μ step re-
+    inflates), so the smoothed Endo outline stays out at the wall. Returns a list
+    of (x, y)."""
+    p = np.asarray(pts, float)
+    n = len(p)
+    if n < 5:
+        return [tuple(map(float, q)) for q in p]
+    idx = np.arange(n)
+
+    def _lap(q):                                       # neighbour-average − self
+        return 0.5 * (q[(idx - 1) % n] + q[(idx + 1) % n]) - q
+
+    for _ in range(max(1, int(passes))):
+        p = p + lam * _lap(p)
+        p = p + mu * _lap(p)
+    return [(float(x), float(y)) for x, y in p]
 
 
 def _resample_closed(ring: np.ndarray, n: int):

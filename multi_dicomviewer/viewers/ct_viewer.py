@@ -10019,6 +10019,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv.get("vol_done") and vv is not None:
             data["volume"] = {("endo_ml" if pas == "endo" else "epi_ml"):
                               float(vv)}
+            # Persist the measured RED region mask (packed+zlib) so Load can show
+            # it INSTANTLY — no slow ReCalc. Only when a valid result is showing.
+            if (getattr(self, "_lv_region_comp", None) is not None
+                    and self._lv_region_bbox is not None):
+                import base64
+                import zlib
+                comp = np.ascontiguousarray(self._lv_region_comp, bool)
+                data["region"] = {
+                    "bbox": [int(x) for x in self._lv_region_bbox],
+                    "shape": [int(s) for s in comp.shape],
+                    "vol_shape": [int(s) for s in self._vol.shape],
+                    "packed": base64.b64encode(
+                        zlib.compress(np.packbits(comp).tobytes(), 6)
+                    ).decode("ascii")}
         self._unlink_case_variant(path)      # force EndoLv/EpiLv exact casing
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -10077,6 +10091,31 @@ class CTViewer(CPRMixin, AbstractViewer):
                     QMessageBox.StandardButton.Yes:
                 return
         self._lv_apply_model(model, volume=data.get("volume"))
+        self._lv_restore_region(data.get("region"))
+
+    def _lv_restore_region(self, reg) -> None:
+        """Rebuild + show the saved RED measured region from a Load (no ReCalc).
+        Skipped (falls back to ReCalc) if absent, corrupt, or the saved volume
+        shape doesn't match the current series."""
+        if not reg or self._vol is None or self._lv is None:
+            return
+        try:
+            import base64
+            import zlib
+            if list(reg.get("vol_shape", [])) != [int(s) for s in self._vol.shape]:
+                return                                # different series → recompute
+            shape = tuple(int(s) for s in reg["shape"])
+            bbox = tuple(int(x) for x in reg["bbox"])
+            raw = zlib.decompress(base64.b64decode(reg["packed"]))
+            flat = np.unpackbits(np.frombuffer(raw, np.uint8))
+            comp = flat[:int(np.prod(shape))].reshape(shape).astype(bool)
+        except Exception:                             # noqa: BLE001
+            return
+        self._lv_show_measured_mask((comp, bbox))     # sets _lv_region_* + red on
+        if getattr(self, "_lv_region_btn", None) is not None:
+            self._lv_region_btn.setChecked(True)
+            self._lv_region_btn.setStyleSheet(
+                "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
 
     def _lv_apply_model(self, model, volume=None) -> None:
         """Enter LV contour mode with a loaded model (axis + borders from file)
