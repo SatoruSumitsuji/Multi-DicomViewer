@@ -194,14 +194,26 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                   & (iz >= 0) & (iz < nz))
             endo[iz[ok], iy[ok], ix[ok]] = True
         t += float(sax_step_mm)
-    # Close 1-voxel stripes left between rasterised levels, then fill any holes —
-    # never removes blood (closing/fill only add), so endo ⊇ blood holds.
-    endo = ndimage.binary_closing(endo, structure=np.ones((3, 3, 3), bool))
-    endo |= blood                                        # re-guarantee ⊇ blood
-    endo = ndimage.binary_fill_holes(endo)
     zs, ys, xs = np.where(endo)
     if len(zs) == 0:
         return None
+    # 3-D CLOSING scaled by close_mm (肉柱), applied for EVERY method in a cropped
+    # box (blood extent + margin) for speed: it bridges the papillary/trabecular
+    # indentations in 3-D — not just per short-axis level — so an obliquely-cut
+    # Endo no longer dips into the notches but sits smoothly further OUT. Closing
+    # only fills concavities (convex parts stay put) and we re-union blood, so
+    # endo ⊇ blood still holds. Larger 肉柱 → smoother / further out.
+    it = max(1, min(16, int(round(float(close_mm) / max(1e-3, min(spacing_xyz))))))
+    mrg = it + 4
+    bz0, bz1 = max(0, int(zs.min()) - mrg), min(nz, int(zs.max()) + 1 + mrg)
+    by0, by1 = max(0, int(ys.min()) - mrg), min(ny, int(ys.max()) + 1 + mrg)
+    bx0, bx1 = max(0, int(xs.min()) - mrg), min(nx, int(xs.max()) + 1 + mrg)
+    sub = endo[bz0:bz1, by0:by1, bx0:bx1]
+    sub = ndimage.binary_closing(sub, iterations=it)
+    sub |= blood[bz0:bz1, by0:by1, bx0:bx1]             # re-guarantee ⊇ blood
+    sub = ndimage.binary_fill_holes(sub)
+    endo[bz0:bz1, by0:by1, bx0:bx1] = sub
+    zs, ys, xs = np.where(endo)
     bbox = (int(zs.min()), int(zs.max()) + 1, int(ys.min()), int(ys.max()) + 1,
             int(xs.min()), int(xs.max()) + 1)
     z0, z1, y0, y1, x0, x1 = bbox

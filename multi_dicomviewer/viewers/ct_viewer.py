@@ -2652,7 +2652,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Changing it re-derives the auto Endo on the next Auto-Endo表示 press.
         self._lvv_close_lbl = QLabel(t("肉柱"))
         self._lvv_close_spin = QSpinBox()
-        self._lvv_close_spin.setRange(1, 12)
+        self._lvv_close_spin.setRange(1, 20)
         self._lvv_close_spin.setValue(5)
         self._lvv_close_spin.setSuffix(" mm")
         self._lvv_close_spin.setKeyboardTracking(False)
