@@ -1481,6 +1481,9 @@ class _Pane:
         lendo = vtkActor()
         lendo.SetMapper(self.lvv_endo_mapper)
         lendo.GetProperty().SetPointSize(3.0)
+        lendo.GetProperty().SetLineWidth(3.6)          # Auto-Endo line 1.5× (2.4)
+        if hasattr(lendo.GetProperty(), "SetRenderLinesAsTubes"):
+            lendo.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(lendo)
         self.lvv_endo_actor = lendo
         # Highlighted SAX crossing (the one that follows an active long-axis
@@ -4414,7 +4417,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     polys = region_outline_on_plane(
                         self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
                         self._dims, self._pc[key], u_ax, v_ax,
-                        half_mm=half, step_mm=0.8)
+                        half_mm=half, step_mm=0.8, convex=True)
                 except Exception:                        # noqa: BLE001
                     polys = []
                 for poly in polys:
