@@ -2979,7 +2979,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_submode_ui()
 
     def _lv_exit_all(self) -> None:
-        """Exit the whole LV mode (both the contour and the Blood sub-modes)."""
+        """Exit the whole LV mode (contour + Blood sub-modes) AND wipe the common
+        MV/AoV planes + every Epi/Blood/Endo stash — Exit returns a blank slate,
+        so LV must be restarted from the MV/AoV planes."""
         if self._lvv is not None:
             if not self._lv_confirm_drop("blood"):   # warn on unsaved Blood
                 return
@@ -2988,7 +2990,39 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
         if self._lv is not None:
             self._lv_exit_confirm()                  # has its own confirm
+        # Complete the "まっさら" wipe only once fully out of every sub-mode (a
+        # declined confirm leaves _lv set → keep everything).
+        if self._lv is None and self._lvv is None:
+            self._lv_wipe_common()
         self._lv_update_submode_ui()
+
+    def _lv_wipe_common(self) -> None:
+        """Drop the common MV/AoV planes (+ their rings) and every Blood/Epi/Endo
+        stash so the LV setup is blank after Exit."""
+        self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm.get("_lv_valve") is None]
+        self._lvv_epi_surf = None
+        self._lvv_epi_apex = None
+        self._lvv_epi_model_dict = None
+        self._lvv_blood_comp = None
+        self._lvv_blood_bbox = None
+        self._lvv_blood_apex = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
+        self._lv_endo_auto_model = None
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        self._lv_endo_manual_dict = None
+        self._lv_region_comp = None
+        self._lv_region_bbox = None
+        if getattr(self, "_lv_update_valve_buttons", None) is not None:
+            self._lv_update_valve_buttons()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
 
     def _lv_stash_epi_for_blood(self, model) -> None:
         """Build + stash the Epi surface from *model* so Blood can use it as the
@@ -4939,22 +4973,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             # pass gets stuck in align with no way to advance.
             trace.setEnabled(
                 has_pass and ph in ("align", "ready", "apex", "contour"))
-        self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
-        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_vol_btn,
-                  self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-                  self._lv_stl_btn):
-            b.setEnabled(contour)
-        # Epi領域表示 / Epi境界表示 act on a traced/computed border — grey them (and
-        # block clicks) until this pass HAS one, so before Epi data only Load and
-        # Exit are live in row 2. (_BTN_DIS's :disabled rule greys them.)
+        # Every row-2 ACTION (Calc Vol / Epi領域表示 / Epi境界表示 / Save / STL /
+        # Clear) and SAX act on a traced/computed border — grey them (and block
+        # clicks) until this pass HAS one, so before Epi data (fresh, or after
+        # Clear) only Load and Exit are live in row 2. (_BTN_DIS greys them.)
         m = lv["model"]
         has_border = (len(m.endo_contours) >= 3 or len(m.epi_contours) >= 3)
-        disp_ok = contour and (has_border or lv.get("vol_done"))
+        data_ok = contour and (has_border or lv.get("vol_done"))
+        self._lv_sax_btn.setEnabled(data_ok)
+        for b in (self._lv_prev_btn, self._lv_next_btn):
+            b.setEnabled(contour)
+        for b in (self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
+                  self._lv_save_btn, self._lv_stl_btn):
+            b.setEnabled(data_ok)
         if getattr(self, "_lv_region_btn", None) is not None:
-            self._lv_region_btn.setEnabled(disp_ok)
+            self._lv_region_btn.setEnabled(data_ok)
         if getattr(self, "_lv_border_btn", None) is not None:
-            self._lv_border_btn.setEnabled(disp_ok)
+            self._lv_border_btn.setEnabled(data_ok)
         # CalcVol: blue once a volume has been computed for the CURRENT trace,
         # grey again after any edit (result stale). See lv["vol_done"].
         self._lv_vol_btn.setStyleSheet(
@@ -9378,27 +9414,50 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_clear_contours()
 
     def _lv_clear_contours(self) -> None:
-        """Discard all captured borders and start tracing again from plane 0
-        (the long axis / view is kept)."""
+        """Discard EVERYTHING for this pass — borders, the apex, the long axis and
+        the red region — so NO Epi/Endo display remains (apex marker + the ±2.5mm
+        guide band vanish too), and the pass returns to a blank 'align' state
+        (re-trace from scratch, or Load). The common MV/AoV planes are kept."""
         if self._lv is None or self._lv.get("phase") != "contour":
             return
-        pane = self._lv["pane"]
-        m = self._lv["model"]
+        lv = self._lv
+        pane = lv["pane"]
+        m = lv["model"]
         m.endo_contours.clear()
         m.epi_contours.clear()
         m.endo_planes.clear()               # also drop the raw borders (else SAX
         m.epi_planes.clear()                # / rebuild would resurrect them)
         m.endo_orig = None                  # and the promotion stash
+        # Drop the apex + long axis so the apex marker AND the keep-out band go —
+        # "no Epi data" must leave nothing on screen.
+        try:
+            m.set_apex_point("endo", None)
+            m.set_apex_point("epi", None)
+        except Exception:                    # noqa: BLE001
+            pass
+        m.endo_axis = None
+        m.epi_axis = None
+        m.axis = None
         self._lv_reset_undo()
         self._measures[pane] = [mm for mm in self._measures[pane]
                                 if mm.get("type") != "polyline"]
         self._draft = None
         self._lv_result_lines = []
-        self._lv["plane_idx"] = 0
-        if self._lv.get("sax") is not None:     # leaving short-axis (stay Bi)
+        lv["plane_idx"] = 0
+        lv["vol_done"] = False
+        lv["vol_endo_ml"] = None
+        lv["vol_epi_ml"] = None
+        self._lv_clear_measured_mask()       # drop the red region + _lv_region_comp
+        if getattr(self, "_lv_region_btn", None) is not None:
+            self._lv_region_btn.setChecked(False)
+            self._lv_region_btn.setStyleSheet(self._BTN_DIS)
+        if lv.get("sax") is not None:        # leaving short-axis (stay Bi)
             self._lv_leave_sax()
-        self._lv_apply_target(self._lv.get("pass"))
-        self._lv_show_plane()
+        lv["phase"] = "align"                # no axis → back to align (nothing drawn)
+        self._lv_apply_target(None)          # nothing armed → no guide band
+        self._lv_apply_view_free()           # vol_done cleared → re-lock the view
+        self._lv_sync_buttons()
+        self._redraw_all_lv()                # clear the apex / guide / border overlays
         self._redraw_meas(pane)
 
     def _lv_border_side(self, m, vi) -> float:
@@ -10208,8 +10267,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if QMessageBox.question(
                 self.window(), t("LV EF"),
-                t("Exit LV analysis? Unsaved borders/results are kept only if "
-                  "you Saved them.")) != QMessageBox.StandardButton.Yes:
+                t("Exit LV analysis? This clears EVERYTHING — the MV/AoV planes, "
+                  "Epi/Blood/Endo and borders — back to a blank slate (unsaved "
+                  "data is kept only if you Saved it). Restart from MV/AoV.")) \
+                != QMessageBox.StandardButton.Yes:
             return
         self._lv_exit()
 
