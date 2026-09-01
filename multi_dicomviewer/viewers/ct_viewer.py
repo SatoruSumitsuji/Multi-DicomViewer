@@ -9147,7 +9147,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if on else self._BTN_DIS)
         if on and self._lvv_mask_vol is None:
             self._lv_apply_view_free()               # unlock now
-            self._lv_compute_volume()                # compute + show red on finish
+            self._lv_compute_volume(quiet=True)      # build region (no Re-Calc ask)
             return
         self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
         self._refresh()                              # re-reslice the mask now
@@ -9595,7 +9595,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_record_geom(before)            # one Ctrl+Z step
         return moved
 
-    def _lv_compute_volume(self) -> None:
+    def _lv_compute_volume(self, quiet=False) -> None:
         """Build the endo/epi surfaces from the traced borders and report the LV
         cavity volume (voxels inside the endo surface) + myocardial mass.
 
@@ -9604,14 +9604,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         gets IMMEDIATE "computing" feedback (no more "did it even start?"), the
         window stays painted, and the bar animates because the UI event loop is
         free. The compute is pure-numpy on the model (no Qt/VTK), so it is safe
-        off the UI thread; results are read back here after it finishes."""
+        off the UI thread; results are read back here after it finishes.
+
+        *quiet*: skip the "Re-Calc?" confirm (used to silently rebuild the region
+        mask on Load when the file had none)."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         # A valid result is already shown (vol_done, cleared on any edit) and the
         # reconstruction is slow — so a repeat click confirms before recomputing.
-        if self._lv.get("vol_done"):
+        if self._lv.get("vol_done") and not quiet:
             box = QMessageBox(self.window())
             box.setIcon(QMessageBox.Icon.Question)
             box.setWindowTitle(t("LV Volume"))
@@ -10166,28 +10169,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_restore_region(data.get("region"))
 
     def _lv_restore_region(self, reg) -> None:
-        """Rebuild + show the saved RED measured region from a Load (no ReCalc).
-        Skipped (falls back to ReCalc) if absent, corrupt, or the saved volume
-        shape doesn't match the current series."""
-        if not reg or self._vol is None or self._lv is None:
+        """Make the RED region available right after a Load so BOTH toggles work
+        WITHOUT a manual ReCalc: restore the saved mask when present, else (an
+        old file with no mask) rebuild it once, silently. The region starts shown
+        with the button lit."""
+        if self._vol is None or self._lv is None:
             return
-        try:
-            import base64
-            import zlib
-            if list(reg.get("vol_shape", [])) != [int(s) for s in self._vol.shape]:
-                return                                # different series → recompute
-            shape = tuple(int(s) for s in reg["shape"])
-            bbox = tuple(int(x) for x in reg["bbox"])
-            raw = zlib.decompress(base64.b64decode(reg["packed"]))
-            flat = np.unpackbits(np.frombuffer(raw, np.uint8))
-            comp = flat[:int(np.prod(shape))].reshape(shape).astype(bool)
-        except Exception:                             # noqa: BLE001
-            return
-        self._lv_show_measured_mask((comp, bbox))     # sets _lv_region_* + red on
-        if getattr(self, "_lv_region_btn", None) is not None:
-            self._lv_region_btn.setChecked(True)
-            self._lv_region_btn.setStyleSheet(
-                "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+        comp = bbox = None
+        if reg:
+            try:
+                import base64
+                import zlib
+                if list(reg.get("vol_shape", [])) == [int(s)
+                                                      for s in self._vol.shape]:
+                    shape = tuple(int(s) for s in reg["shape"])
+                    bbox = tuple(int(x) for x in reg["bbox"])
+                    raw = zlib.decompress(base64.b64decode(reg["packed"]))
+                    flat = np.unpackbits(np.frombuffer(raw, np.uint8))
+                    comp = flat[:int(np.prod(shape))].reshape(shape).astype(bool)
+            except Exception:                         # noqa: BLE001
+                comp = bbox = None
+        if comp is not None:
+            self._lv_show_measured_mask((comp, bbox))  # sets _lv_region_* + red on
+        elif (self._lv.get("vol_done")
+              and (len(self._lv["model"].endo_contours) >= 3
+                   or len(self._lv["model"].epi_contours) >= 3)):
+            # Old file with no saved mask → build it once now (silent), so the
+            # region/border can be toggled without a per-click ReCalc later.
+            self._lv_compute_volume(quiet=True)
+        if getattr(self, "_lv_region_comp", None) is not None:
+            if getattr(self, "_lv_region_btn", None) is not None:
+                self._lv_region_btn.setChecked(True)
+                self._lv_region_btn.setStyleSheet(
+                    "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
 
     def _lv_apply_model(self, model, volume=None) -> None:
         """Enter LV contour mode with a loaded model (axis + borders from file)
@@ -10671,7 +10685,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                         edit_which = etag[1]
                         edit_mu = (phi % 360.0) if s >= 0 \
                             else ((phi + 180.0) % 360.0)
-                show = self._lv_sax_borders()       # single pass, or both
+                # Epi境界表示 OFF hides the border splines here too (so the toggle
+                # governs the border in SAX, not only the observe outline).
+                show = (self._lv_sax_borders()
+                        if getattr(self, "_lv_border_show", True) else [])
                 for which, mapper in (("endo", p.lv_endo_mapper),
                                       ("epi", p.lv_epi_mapper)):
                     if which not in show:
