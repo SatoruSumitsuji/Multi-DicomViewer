@@ -2588,7 +2588,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hi_spin = QSpinBox()
         self._lvv_hi_spin.setRange(-1000, 4000)
         self._lvv_hi_spin.setSingleStep(10)
-        self._lvv_hi_spin.setValue(500)                # blood-pool default hi
+        self._lvv_hi_spin.setValue(1000)               # blood-pool default hi
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
         self._lvv_lo_spin.valueChanged.connect(lambda _v: self._lvv_hu_changed())
