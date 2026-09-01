@@ -6163,7 +6163,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # drawn green (it will be grabbed to MOVE).
         ho = getattr(self, "_meas_hover_outline", None)
         hov_out_mi = ho[1] if (ho and ho[0] == key) else -1
-        lv_free = getattr(self, "_lv_view_free", False)
+        # OBSERVE = free-view with NO SAX (sax None): there the region's section
+        # outline replaces the traced border. In SAX the traced border IS the
+        # long-axis-pane border, so it must still show even though vol_done makes
+        # _lv_view_free True — only hide it in true observe or when the border
+        # toggle is off.
+        lv_observe = (self._lv is not None and self._lv.get("sax") is None
+                      and getattr(self, "_lv_view_free", False))
         for mi, m in enumerate(self._measures[key]):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
             # right-click Hide → skip its line, handles, axes and id label.
@@ -6173,8 +6179,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # pane too (this is the border shown there in SAX), so the toggle
             # governs the green border everywhere. In OBSERVE it is hidden anyway
             # (the region's cross-section outline is drawn in _redraw_lv instead).
-            if m.get("_lv") and (lv_free
-                                 or not getattr(self, "_lv_border_show", True)):
+            if m.get("_lv") and (lv_observe
+                                  or not getattr(self, "_lv_border_show", True)):
                 continue
             # Point HU probe → a fixed-size "+" (two short segments, ~12 px) at
             # the point plus its #id; skip the generic outline/handle drawing.
