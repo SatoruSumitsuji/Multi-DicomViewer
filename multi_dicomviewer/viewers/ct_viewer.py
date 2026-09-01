@@ -4351,8 +4351,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                             blood, dims, apex, axis_dir, radial0,
                             along_apex=1.0, along_base=along_base,
                             sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
-                            grid_mm=0.8, method=method,
-                            bridge_deg=bridge, n_meridians=180)
+                            grid_mm=0.7, method=method,
+                            bridge_deg=bridge, n_meridians=240)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
@@ -4474,7 +4474,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     polys = region_outline_on_plane(
                         self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
                         self._dims, self._pc[key], u_ax, v_ax,
-                        half_mm=half, step_mm=0.8, convex=False)
+                        half_mm=half, step_mm=0.45, convex=False)
                 except Exception:                        # noqa: BLE001
                     polys = []
                 for poly in polys:
