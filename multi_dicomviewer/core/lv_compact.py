@@ -118,6 +118,104 @@ def _hull_radius_profile(filled: np.ndarray, ctr: int, rays, grid_mm: float):
     return out
 
 
+def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
+                       along_apex, along_base, sax_step_mm=1.0, close_mm=4.0,
+                       half_mm=70.0, grid_mm=0.8, method="close",
+                       bridge_deg=40.0, n_meridians=180):
+    """3-D ENDOCARDIAL ENVELOPE mask = the blood pool with its papillary /
+    trabecular indentations bridged, per short-axis level, rasterised back into
+    the volume grid. Returns ``(comp bool[dz,dy,dx], bbox)`` or None.
+
+    Unlike the per-meridian radial loft (endo_contours_from_blood → LVModel),
+    this is a VOLUME mask built as ``endo = blood | (bridged additions)``, so the
+    Endo cavity is GUARANTEED to contain the blood pool everywhere (no blood
+    poking out on the myocardium side between sparse meridians). *method* bridges
+    the same way as endo_contours_from_blood (close / polar / hull).
+    """
+    try:
+        from scipy import ndimage
+    except Exception:                                   # noqa: BLE001
+        return None
+    blood = np.asarray(blood, bool)
+    if not blood.any():
+        return None
+    endo = blood.copy()
+    nz, ny, nx = blood.shape
+    sx, sy, sz = spacing_xyz
+    apex = np.asarray(apex_xyz, float)
+    n = np.asarray(axis_dir, float)
+    n = n / (np.linalg.norm(n) or 1.0)
+    u = np.asarray(radial0, float)
+    u = u - u.dot(n) * n
+    u = u / (np.linalg.norm(u) or 1.0)
+    v = np.cross(n, u)
+    se = _disk(close_mm / grid_mm)
+    n_mer = max(8, int(n_meridians))
+    thetas = np.array([360.0 * i / n_mer for i in range(n_mer)] + [360.0])
+    rays = [(360.0 * i / n_mer,
+             math.cos(math.radians(360.0 * i / n_mer)),
+             math.sin(math.radians(360.0 * i / n_mer))) for i in range(n_mer)]
+    deg_per = 360.0 / n_mer
+    k_win = max(1, int(round((bridge_deg * 0.5) / deg_per)))
+    ng = max(2, int(2.0 * half_mm / grid_mm) + 1)
+    ctr = ng // 2
+    ax = np.linspace(-half_mm, half_mm, ng)
+    uu, vv = np.meshgrid(ax, ax)
+    ang_grid = np.degrees(np.arctan2(vv, uu)) % 360.0    # (ng,ng)
+    rad_grid = np.hypot(uu, vv)                          # mm from centre
+    t = float(along_apex)
+    while t <= float(along_base) + 1e-6:
+        centre = apex + t * n
+        g, _cell = _sample_on_plane(blood, spacing_xyz, centre, u, v,
+                                    half_mm, grid_mm)
+        if g.any():
+            filled = ndimage.binary_fill_holes(g)
+            if method == "hull":
+                rs = _hull_radius_profile(filled, ctr, rays, grid_mm)
+                env = _radius_to_mask(rs, thetas, ang_grid, rad_grid)
+            elif method == "polar":
+                rs = [_envelope_radius(filled, ctr, dx, dy, grid_mm)
+                      for _th, dx, dy in rays]
+                rs = list(_polar_close(np.asarray(rs, float), k_win))
+                env = _radius_to_mask(rs, thetas, ang_grid, rad_grid)
+            else:                                        # "close"
+                env = ndimage.binary_fill_holes(
+                    ndimage.binary_closing(filled, structure=se))
+            sel = np.where(env)
+            uo = -half_mm + sel[1].astype(float) * grid_mm   # col → u
+            vo = -half_mm + sel[0].astype(float) * grid_mm   # row → v
+            px = centre[0] + uo * u[0] + vo * v[0]
+            py = centre[1] + uo * u[1] + vo * v[1]
+            pz = centre[2] + uo * u[2] + vo * v[2]
+            ix = np.round(px / sx).astype(np.int64)
+            iy = np.round(py / sy).astype(np.int64)
+            iz = np.round(pz / sz).astype(np.int64)
+            ok = ((ix >= 0) & (ix < nx) & (iy >= 0) & (iy < ny)
+                  & (iz >= 0) & (iz < nz))
+            endo[iz[ok], iy[ok], ix[ok]] = True
+        t += float(sax_step_mm)
+    # Close 1-voxel stripes left between rasterised levels, then fill any holes —
+    # never removes blood (closing/fill only add), so endo ⊇ blood holds.
+    endo = ndimage.binary_closing(endo, structure=np.ones((3, 3, 3), bool))
+    endo |= blood                                        # re-guarantee ⊇ blood
+    endo = ndimage.binary_fill_holes(endo)
+    zs, ys, xs = np.where(endo)
+    if len(zs) == 0:
+        return None
+    bbox = (int(zs.min()), int(zs.max()) + 1, int(ys.min()), int(ys.max()) + 1,
+            int(xs.min()), int(xs.max()) + 1)
+    z0, z1, y0, y1, x0, x1 = bbox
+    return endo[z0:z1, y0:y1, x0:x1].copy(), bbox
+
+
+def _radius_to_mask(rs, thetas, ang_grid, rad_grid):
+    """Fill a star polygon r(θ) into the SAX grid: pixel inside iff its radius
+    (mm) <= the profile radius at its angle (circular-interpolated)."""
+    rr = np.asarray(list(rs) + [rs[0]], float)          # wrap for interp
+    r_at = np.interp(ang_grid, thetas, rr)
+    return rad_grid <= r_at
+
+
 def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
                             half_mm=100.0, step_mm=0.8):
     """Outline polygon(s) of a 3-D region's CROSS-SECTION on an arbitrary plane.
