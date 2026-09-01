@@ -238,6 +238,22 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                                    + (ys_p - cv) ** 2).max()) + 1.0
                 gy, gx = np.ogrid[0:filled.shape[0], 0:filled.shape[1]]
                 env = ((gx - cu) ** 2 + (gy - cv) ** 2) <= rr * rr
+            elif method == "hull_smooth":
+                # Per-level convex hull, then a Catmull-Rom spline through its
+                # vertices so the straight chords arc smoothly OUTWARD — a clean
+                # rounded Endo that still contains the blood (spline ⊇ hull).
+                try:
+                    import cv2
+                    ys_p, xs_p = np.nonzero(filled)
+                    hv = cv2.convexHull(
+                        np.column_stack([xs_p, ys_p]).astype(np.int32)
+                    ).reshape(-1, 2).astype(float)
+                    sm = _catmull_closed(hv, subdiv=10)
+                    env = np.zeros(filled.shape, np.uint8)
+                    cv2.fillPoly(env, [np.round(sm).astype(np.int32)], 1)
+                    env = env.astype(bool)
+                except Exception:                        # noqa: BLE001
+                    env = ndimage.binary_fill_holes(filled)
             elif method in ("hull", "hull_round"):
                 rs = _hull_radius_profile(filled, ctr, rays, grid_mm)
                 if method == "hull_round" and roundness > 0.0:
@@ -293,6 +309,28 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
             int(xs.min()), int(xs.max()) + 1)
     z0, z1, y0, y1, x0, x1 = bbox
     return endo[z0:z1, y0:y1, x0:x1].copy(), bbox
+
+
+def _catmull_closed(P, subdiv: int = 10):
+    """Closed uniform Catmull-Rom spline through points *P* (Nx2). Between the
+    control points the curve bulges OUTWARD for a convex polygon (the tangents
+    follow the hull), so hull vertices → a smooth convex curve that arcs out past
+    the straight chords. Returns the densified (M,2) points."""
+    P = np.asarray(P, float)
+    n = len(P)
+    if n < 3:
+        return P
+    ts = np.linspace(0.0, 1.0, int(subdiv), endpoint=False)
+    out = []
+    for i in range(n):
+        p0, p1, p2, p3 = P[(i - 1) % n], P[i], P[(i + 1) % n], P[(i + 2) % n]
+        for t in ts:
+            t2 = t * t
+            t3 = t2 * t
+            out.append(0.5 * (2 * p1 + (-p0 + p2) * t
+                              + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+                              + (-p0 + 3 * p1 - 3 * p2 + p3) * t3))
+    return np.asarray(out, float)
 
 
 def _radius_to_mask(rs, thetas, ang_grid, rad_grid):

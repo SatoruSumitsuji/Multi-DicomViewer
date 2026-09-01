@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "hull"    # Auto-Endo: per-level convex hull (user pref)
+        self._lv_endo_method = "hull_smooth"  # Auto-Endo: hull + outward smooth arcs
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,13 +2671,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
+        self._lvv_method_combo.addItem("凸包滑", "hull_smooth")  # hull + smooth arcs
         self._lvv_method_combo.addItem("凸包(層)", "hull")     # convex per level
         self._lvv_method_combo.addItem("凸包(丸)", "hull_round")  # rounded toward ○
         self._lvv_method_combo.addItem("放射", "polar")
         self._lvv_method_combo.addItem("3D凸包", "convex3d")
         self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の作り方: 凸包(層)=短軸レベル凸包、凸包(丸)=それを円に近づけ"
-              "る(肉柱で丸み)、放射=各方向の最遠血流(肉柱で谷を橋渡し)、3D凸包=3次元凸包"))
+            t("Auto-Endo の作り方: 凸包滑=短軸レベル凸包の頂点間を外に膨らむ滑らかな"
+              "カーブで結ぶ(推奨)、凸包(層)=凸包の多角形そのまま、凸包(丸)=円に近づける"
+              "(肉柱)、放射=各方向の最遠血流(肉柱で谷を橋渡し)、3D凸包=3次元凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
