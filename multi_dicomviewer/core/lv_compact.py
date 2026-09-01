@@ -248,7 +248,9 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                     hv = cv2.convexHull(
                         np.column_stack([xs_p, ys_p]).astype(np.int32)
                     ).reshape(-1, 2).astype(float)
-                    sm = _catmull_closed(hv, subdiv=10)
+                    # Bulge ONLY the long chords (concavities); short hull edges
+                    # stay on the blood so convex walls aren't pushed into myo.
+                    sm = _hull_bulge_long_chords(hv, grid_mm)
                     env = np.zeros(filled.shape, np.uint8)
                     cv2.fillPoly(env, [np.round(sm).astype(np.int32)], 1)
                     env = env.astype(bool)
@@ -309,6 +311,42 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
             int(xs.min()), int(xs.max()) + 1)
     z0, z1, y0, y1, x0, x1 = bbox
     return endo[z0:z1, y0:y1, x0:x1].copy(), bbox
+
+
+def _hull_bulge_long_chords(hull, grid_mm, min_chord_mm=5.0, bulge_frac=0.20):
+    """Smooth the convex hull by arcing ONLY its LONG edges (those that span an
+    inward concavity — the straight chords the user wants rounded OUT) while
+    leaving SHORT edges (where the hull already hugs the blood) exactly on the
+    blood, so convex walls are NOT pushed out into myocardium. Each long edge is
+    replaced by an OUTWARD quadratic-Bezier arc; short edges stay straight.
+    *hull* = ordered (N,2) hull vertices (pixels). Returns dense (M,2) pixels."""
+    hull = np.asarray(hull, float)
+    n = len(hull)
+    if n < 3:
+        return hull
+    cen = hull.mean(axis=0)
+    min_px = float(min_chord_mm) / max(1e-6, float(grid_mm))
+    out = []
+    for i in range(n):
+        v0 = hull[i]
+        v1 = hull[(i + 1) % n]
+        seg = v1 - v0
+        L = float(np.hypot(seg[0], seg[1]))
+        if L <= min_px:
+            out.append(v0)                               # short → keep on the blood
+            continue
+        nrm = np.array([-seg[1], seg[0]], float)         # perpendicular
+        nn = np.hypot(nrm[0], nrm[1]) or 1.0
+        nrm = nrm / nn
+        mid = 0.5 * (v0 + v1)
+        if float(np.dot(mid - cen, nrm)) < 0.0:          # point OUTWARD
+            nrm = -nrm
+        ctrl = mid + nrm * (bulge_frac * L)              # bulge amount ∝ chord
+        m = max(4, min(24, int(L / 2.0)))                # arc subdivisions
+        for t in np.linspace(0.0, 1.0, m, endpoint=False):
+            omt = 1.0 - t                                # quadratic Bezier
+            out.append(omt * omt * v0 + 2 * omt * t * ctrl + t * t * v1)
+    return np.asarray(out, float)
 
 
 def _catmull_closed(P, subdiv: int = 10):
