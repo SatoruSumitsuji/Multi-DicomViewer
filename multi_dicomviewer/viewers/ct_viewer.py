@@ -2168,8 +2168,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Endo borders. endo_auto is re-derived from the blood pool whenever the
         # HU range changes; endo_manual is the hand-edited border and is RETAINED
         # across HU changes (never auto-discarded).
-        self._lv_endo_auto_model = None  # built LVModel of the auto Endo
+        self._lv_endo_auto_model = None  # built LVModel of the auto Endo (Manual seed)
         self._lv_endo_auto_surf = None   # its endo surface (for the reslice dots)
+        self._lv_endo_mask_comp = None   # Auto-Endo envelope MASK (⊇ blood)
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
         self._lv_endo_method = "close"   # Auto-Endo bridging: close / polar / hull
@@ -3465,6 +3468,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None       # drop the envelope mask too
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             self._lvv_auto_endo_btn.setChecked(False)
@@ -3491,6 +3497,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None       # drop the envelope mask too
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -4245,6 +4254,65 @@ class CTViewer(CPRMixin, AbstractViewer):
         model.build()
         return model
 
+    def _lvv_build_endo_mask(self):
+        """Build the 3-D Auto-Endo ENVELOPE MASK from the blood pool: the blood
+        with its papillary/trabecular indentations bridged (per _lv_endo_method),
+        GUARANTEED to contain the blood pool (endo ⊇ blood). Returns (comp, bbox)
+        or None. Runs off-thread behind a busy dialog (like Calc Vol)."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QProgressDialog
+        from multi_dicomviewer.core.lv_compact import endo_envelope_mask
+        epi = getattr(self, "_lvv_epi_surf", None)
+        apex = getattr(self, "_lvv_blood_apex", None)
+        mv = self._lv_valves.get("mitral")
+        if (self._vol is None or self._lvv_blood_comp is None
+                or self._lvv_blood_bbox is None or epi is None
+                or apex is None or mv is None):
+            return None
+        ax = epi.axis
+        apex = np.asarray(apex, float)
+        axis_dir = np.asarray(ax.axis, float)
+        axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
+        radial0 = np.asarray(ax.radial0, float)
+        along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
+        if along_base <= 6.0:
+            return None
+        z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
+        blood = np.zeros(self._vol.shape, bool)
+        blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
+        dims = self._dims
+        close = float(getattr(self, "_lv_endo_close_mm", 5.0))
+        method = getattr(self, "_lv_endo_method", "close")
+        result: dict = {}
+
+        class _MaskWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    result["mask"] = endo_envelope_mask(
+                        blood, dims, apex, axis_dir, radial0,
+                        along_apex=1.0, along_base=along_base - 0.5,
+                        sax_step_mm=1.0, close_mm=close, half_mm=70.0,
+                        grid_mm=0.8, method=method, bridge_deg=60.0)
+                except Exception as exc:                  # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Deriving Endo envelope…"), "", 0, 0,
+                              self.window())
+        dlg.setWindowTitle(t("Endo (Auto)"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        worker = _MaskWorker()
+        worker.finished.connect(dlg.reset)
+        worker.start()
+        dlg.exec()
+        worker.wait()
+        worker.deleteLater()
+        if result.get("err") or not result.get("mask"):
+            return None
+        return result["mask"]
+
     def _lv_auto_endo_from_blood(self) -> bool:
         """Build the auto Endo from the blood pool and OPEN it for editing (the
         Manual path from the Endo entry gate). Returns True on success."""
@@ -4311,45 +4379,53 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_auto_endo_btn.setChecked(False)
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             return
-        if self._lvv_endo_stale():
-            model = self._lvv_build_endo_model()
-            if model is None:                    # build failed → leave it off
+        sig = self._lvv_signature() if self._lvv is not None else None
+        if (self._lv_endo_mask_comp is None
+                or self._lv_endo_mask_sig != sig):
+            mask = self._lvv_build_endo_mask()   # 3-D envelope, endo ⊇ blood
+            if not mask:                         # build failed → leave it off
                 self._lvv_auto_endo_btn.setChecked(False)
                 self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
                 return
-            self._lv_endo_auto_model = model
-            self._lv_endo_auto_surf = model.endo
-            self._lv_endo_auto_sig = (self._lvv_signature()
-                                      if self._lvv is not None else None)
+            self._lv_endo_mask_comp, self._lv_endo_mask_bbox = mask
+            self._lv_endo_mask_sig = sig
         self._lvv_endo_show = True
         self._lvv_auto_endo_btn.setChecked(True)
         self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
         self._lvv_show_endo()
 
     def _lvv_show_endo(self, render=True) -> None:
-        """Draw the auto Endo surface where it crosses each pane (orange dots) —
-        the Auto-Endo表示 overlay. Follows plane/zoom/rotation like the Epi dots."""
+        """Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
+        MASK on each pane (orange, smooth) — the section of the reconstructed
+        endocardial cavity, so it always ENCLOSES the blood pool and tracks
+        plane/zoom/rotation. (Replaces the sparse-loft ring dots, which let blood
+        poke out on the myocardium side between meridians.)"""
+        from multi_dicomviewer.core.lv_compact import region_outline_on_plane
         on = (self._lvv is not None and self._lv is None
-              and self._lv_endo_auto_surf is not None
+              and getattr(self, "_lv_endo_mask_comp", None) is not None
               and getattr(self, "_lvv_endo_show", False))
-        pts = self._lv_endo_auto_surf._all_ring_points() if on else None
+        half = float(getattr(self, "_half", 100.0))
         for key in ("A", "B"):
             p = self.pane[key]
-            if pts is None:
-                p.lvv_endo_mapper.SetInputData(vtkPolyData())
+            rings = []
+            if on:
+                u_ax, v_ax, _n = self._axes_for(key)
+                try:
+                    polys = region_outline_on_plane(
+                        self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
+                        self._dims, self._pc[key], u_ax, v_ax,
+                        half_mm=half, step_mm=0.8)
+                except Exception:                        # noqa: BLE001
+                    polys = []
+                for poly in polys:
+                    sm = _smooth_closed([tuple(q) for q in poly])
+                    if len(sm) >= 3:
+                        rings.append([tuple(q) for q in sm] + [tuple(sm[0])])
+            if rings:
+                p.lvv_endo_mapper.SetInputData(_colored_multi_pd(
+                    rings, [(255, 140, 40)] * len(rings)))
             else:
-                _u, _v, n = self._axes_for(key)
-                n = np.asarray(n, float)
-                o = np.asarray(self._pc[key], float)
-                dist = (pts - o) @ n
-                tol = 0.75 * max(self._dims)
-                near = pts[np.abs(dist) <= tol]
-                if len(near):
-                    out = [self._world3d_to_out(key, P) for P in near]
-                    p.lvv_endo_mapper.SetInputData(
-                        _lv_pts_pd(out, [(255, 140, 40)] * len(out), z=0.73))
-                else:
-                    p.lvv_endo_mapper.SetInputData(vtkPolyData())
+                p.lvv_endo_mapper.SetInputData(vtkPolyData())
             if render:
                 p.render()
 
