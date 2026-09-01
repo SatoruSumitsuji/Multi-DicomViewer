@@ -8876,9 +8876,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             #                        green Epi no longer implies it's editable)
             self._lv_show_sax_both()
         else:
-            # SAX is the last-on button → pressing it turns SAX OFF (back to the
-            # long-axis trace). The endo/epi single-vs-both content is chosen via
-            # the Endo/Epi buttons and Wall, not by re-pressing SAX.
+            # Inside a pass WITH a border the review is ALWAYS the SAX dual-pane
+            # (per the agreed model: SAX-off behaves exactly like SAX-on, so the
+            # level line stays selectable). Keep SAX on; to get the free-rotate
+            # observe, LEAVE the pass (Epi/Endo button). Only when there is no
+            # border yet does SAX-off return to the long-axis trace.
+            m = lv["model"]
+            has_border = (len(m.endo_contours) >= 3 or len(m.epi_contours) >= 3)
+            if has_border:
+                self._lv_sax_btn.setChecked(True)
+                return
             self._lv_leave_sax()
             self._lv_show_plane()                    # back to the long-axis view
 
