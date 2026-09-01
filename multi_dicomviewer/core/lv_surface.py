@@ -547,18 +547,15 @@ class LVSurface:
         voxel_ml = (sx * sy * sz) / 1000.0
 
         def _clip(planes):
-            m = inside
-            first = True
+            m = inside.copy()                            # ALWAYS start inside the surface
             for (c, nrm) in planes:
                 c = np.asarray(c, float)
                 n = np.asarray(nrm, float)
                 n = n / (np.linalg.norm(n) or 1.0)
                 if float(np.dot(apex - c, n)) < 0.0:
                     n = -n
-                keep = ((pts - c) @ n >= 0.0)
-                m = keep if first else (m & keep)
-                first = False
-            return m if not first else inside
+                m &= ((pts - c) @ n >= 0.0)              # keep the apex side
+            return m
 
         both = [(v[0], v[1]) for v in (mv, aov) if v is not None]
         m_both = _clip(both)
