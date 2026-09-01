@@ -2904,15 +2904,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if not self._lv_confirm_drop("blood"):
                     return
                 self._lvv_toggle()                    # leave Blood (drops it)
-            elif self._lv is not None and self._lv.get("sax") is None:
+            elif self._lv is not None:
+                # Re-clicking the active Endo/Epi button EXITS the pass — even
+                # from SAX (leave SAX first so the button always exits, per the
+                # agreed model: inside a pass = SAX-style review, LEAVING it =
+                # free-view observe). Switching to the OTHER border in SAX still
+                # arms it via the sm != cur path below.
+                if self._lv.get("sax") is not None:
+                    if getattr(self, "_lv_sax_btn", None) is not None:
+                        self._lv_sax_btn.setChecked(False)
+                    self._lv_leave_sax()
                 m = self._lv["model"]
                 has_border = bool(m.endo_planes or m.epi_planes)
                 if has_border and self._lv.get("vol_done"):
                     # Committed (Calc Vol done) → LEAVE to OBSERVE: retain the
                     # border + red region as a display overlay, unlock the view
-                    # for free 3-D inspection. Editing is finished — nothing is
-                    # discarded; re-click Epi/Endo to resume editing, Clear to
-                    # drop it, Save to persist it.
+                    # for free 3-D inspection. Re-click Epi/Endo to resume, Clear
+                    # to drop, Save to persist.
                     self._lv_leave_observe()
                 elif has_border:
                     # Mid-edit (no committed volume) → discard the in-progress
@@ -2928,9 +2936,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._lv["pass"] = None           # nothing traced → just clear
                     self._lv_apply_target(None)
                     self._lv_sync_buttons()
-            else:
-                # In SAX, re-click ARMS this border for editing (existing flow).
-                self._lv_select_pass(sm)
             self._lv_update_submode_ui()
             return
         # PREREQUISITE: the common MV/AoV valve planes must be set before any
@@ -9153,15 +9158,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         toggle (lv['trace_view']) and the Epi領域表示 button — then lift/restore the
         Rotate/Spin/Paging/CenterLine locks and repaint the crosshair."""
         lv = self._lv
-        # Free view (Rotate/Spin/Paging/CenterLine unlocked) is granted ONLY once
-        # the pass's volume is COMMITTED via Calc Vol — i.e. editing is finished.
-        # Up to Calc Vol the long-axis frame stays LOCKED (long-axis tracing +
-        # SAX editing); after it the traced border + red region can be inspected
-        # freely in 3-D (rotate/spin/page while they track the volume), whether
-        # still in the pass or after leaving it to observe. Any edit clears
-        # vol_done → the frame re-locks. Showing the red region alone no longer
-        # unlocks (that pre-Calc-Vol inconsistency is what the user hit).
-        self._lv_view_free = bool(lv is not None and lv.get("vol_done"))
+        # Free-view (Rotate/Spin/Paging/CenterLine unlocked, 3-D observe) is
+        # granted ONLY after LEAVING the pass to observe (pass is None) with a
+        # committed volume. INSIDE a pass (pass == endo/epi) the frame stays
+        # LOCKED — a SAX-style review whether the SAX button is on or off — so
+        # only leaving Epi/Endo starts the free rotation, per the agreed model.
+        self._lv_view_free = bool(lv is not None and lv.get("vol_done")
+                                  and lv.get("pass") is None)
         self._refresh_tool_availability()
         for k in ("A", "B"):
             self.pane[k].set_overlay_visible(self._cross_overlay_on())
