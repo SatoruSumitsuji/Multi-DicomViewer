@@ -203,7 +203,7 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
     # Endo no longer dips into the notches but sits smoothly further OUT. Closing
     # only fills concavities (convex parts stay put) and we re-union blood, so
     # endo ⊇ blood still holds. Larger 肉柱 → smoother / further out.
-    it = max(1, min(16, int(round(float(close_mm) / max(1e-3, min(spacing_xyz))))))
+    it = max(1, min(32, int(round(float(close_mm) / max(1e-3, min(spacing_xyz))))))
     mrg = it + 4
     bz0, bz1 = max(0, int(zs.min()) - mrg), min(nz, int(zs.max()) + 1 + mrg)
     by0, by1 = max(0, int(ys.min()) - mrg), min(ny, int(ys.max()) + 1 + mrg)

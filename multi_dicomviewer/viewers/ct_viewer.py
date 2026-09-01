@@ -4987,10 +4987,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in (self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
                   self._lv_save_btn, self._lv_stl_btn):
             b.setEnabled(data_ok)
+        # Region / border buttons reflect the ACTUAL display flags (single source
+        # of truth) so their colour always matches what's on screen, regardless
+        # of how the state changed (SAX on/off, Load, Calc Vol, pass switch). The
+        # :disabled rule greys them when data_ok is False.
         if getattr(self, "_lv_region_btn", None) is not None:
             self._lv_region_btn.setEnabled(data_ok)
+            ron = bool(getattr(self, "_lvv_mask_on", False)
+                       and self._lvv_mask_vol is not None)
+            self._lv_region_btn.setChecked(ron)
+            self._lv_region_btn.setStyleSheet(
+                ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+                if ron else self._BTN_DIS)
         if getattr(self, "_lv_border_btn", None) is not None:
             self._lv_border_btn.setEnabled(data_ok)
+            bon = bool(getattr(self, "_lv_border_show", True))
+            self._lv_border_btn.setChecked(bon)
+            self._lv_border_btn.setStyleSheet(
+                ("QPushButton{background:#40c040;color:black;}" + self._BTN_DIS)
+                if bon else self._BTN_DIS)
         # CalcVol: blue once a volume has been computed for the CURRENT trace,
         # grey again after any edit (result stale). See lv["vol_done"].
         self._lv_vol_btn.setStyleSheet(
@@ -9139,37 +9154,35 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].render()
 
     def _lv_toggle_region(self) -> None:
-        """Epi領域表示: show/hide the red measured region (computing it via Calc Vol
-        if not done yet) and — as one free-view source — allow 3-D inspection."""
-        on = self._lv_region_btn.isChecked()
-        self._lv_region_btn.setStyleSheet(
-            ("QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
-            if on else self._BTN_DIS)
-        if on and self._lvv_mask_vol is None:
-            self._lv_apply_view_free()               # unlock now
+        """Epi領域表示: show/hide the RED measured region. Single flag _lvv_mask_on
+        drives the red overlay in EVERY view (SAX / observe / trace); the mask is
+        built once (silently) if absent. Button colour is synced from the flag by
+        _lv_sync_buttons."""
+        want = self._lv_region_btn.isChecked()
+        if want and self._lvv_mask_vol is None:
             self._lv_compute_volume(quiet=True)      # build region (no Re-Calc ask)
-            return
-        self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
-        self._refresh()                              # re-reslice the mask now
+            return                                   # compute path shows + syncs
+        self._lvv_mask_on = want and (self._lvv_mask_vol is not None)
         self._lvv_update_mask()
-        self._lv_apply_view_free()
+        self._lv_sync_buttons()
 
     def _lv_toggle_border(self) -> None:
-        """Epi境界表示: show/hide the GREEN border outline (the region's cross-
-        section on the current plane) in observe/free-view."""
+        """Epi境界表示: show/hide the GREEN border. Single flag _lv_border_show
+        gates ALL border rendering (SAX splines + observe section outline), so it
+        works the same whether SAX is on or off. Button colour synced from the
+        flag by _lv_sync_buttons."""
         self._lv_border_show = self._lv_border_btn.isChecked()
-        self._lv_border_btn.setStyleSheet(
-            ("QPushButton{background:#40c040;color:black;}" + self._BTN_DIS)
-            if self._lv_border_show else self._BTN_DIS)
         self._redraw_all_lv()
+        self._lv_sync_buttons()
 
     def _lv_region_reset(self) -> None:
-        """Drop the free-view (Trace⇄View + Epi領域表示) on pass change/SAX/exit."""
+        """Reset ONLY the free-view state (Trace⇄View + the vol_done unlock) on a
+        pass change / SAX / exit. It must NOT touch the region/border SHOW flags
+        or their buttons — those are single sources of truth (_lvv_mask_on /
+        _lv_border_show) kept in sync by _lv_sync_buttons, so the toggles behave
+        the same whether SAX is on or off."""
         if self._lv is not None:
             self._lv["trace_view"] = False
-        if getattr(self, "_lv_region_btn", None) is not None:
-            self._lv_region_btn.setChecked(False)
-            self._lv_region_btn.setStyleSheet(self._BTN_DIS)
         self._lv_view_free = False
 
     def _lv_sax_stores(self):
@@ -10197,11 +10210,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Old file with no saved mask → build it once now (silent), so the
             # region/border can be toggled without a per-click ReCalc later.
             self._lv_compute_volume(quiet=True)
-        if getattr(self, "_lv_region_comp", None) is not None:
-            if getattr(self, "_lv_region_btn", None) is not None:
-                self._lv_region_btn.setChecked(True)
-                self._lv_region_btn.setStyleSheet(
-                    "QPushButton{background:#ff5a5a;color:black;}" + self._BTN_DIS)
+        self._lv_sync_buttons()          # reflect the region flag on the button
 
     def _lv_apply_model(self, model, volume=None) -> None:
         """Enter LV contour mode with a loaded model (axis + borders from file)
