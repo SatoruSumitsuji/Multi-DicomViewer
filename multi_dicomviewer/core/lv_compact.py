@@ -176,7 +176,7 @@ def endo_convex3d_mask(blood, spacing_xyz, apex_xyz, axis_dir,
 def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                        along_apex, along_base, sax_step_mm=1.0, close_mm=4.0,
                        half_mm=70.0, grid_mm=0.8, method="close",
-                       bridge_deg=40.0, n_meridians=180):
+                       bridge_deg=40.0, n_meridians=180, roundness=0.0):
     """3-D ENDOCARDIAL ENVELOPE mask = the blood pool with its papillary /
     trabecular indentations bridged, per short-axis level, rasterised back into
     the volume grid. Returns ``(comp bool[dz,dy,dx], bbox)`` or None.
@@ -238,8 +238,15 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                                    + (ys_p - cv) ** 2).max()) + 1.0
                 gy, gx = np.ogrid[0:filled.shape[0], 0:filled.shape[1]]
                 env = ((gx - cu) ** 2 + (gy - cv) ** 2) <= rr * rr
-            elif method == "hull":
+            elif method in ("hull", "hull_round"):
                 rs = _hull_radius_profile(filled, ctr, rays, grid_mm)
+                if method == "hull_round" and roundness > 0.0:
+                    # Blend the convex-hull radius toward the circumscribing
+                    # circle (its max radius) so the polygon rounds toward a
+                    # circle: roundness 0 = hull, 1 = full circle.
+                    arr = np.asarray(rs, float)
+                    rmax = float(arr.max()) if arr.size else 0.0
+                    rs = list(arr + float(roundness) * (rmax - arr))
                 env = _radius_to_mask(rs, thetas, ang_grid, rad_grid)
             elif method == "polar":
                 rs = [_envelope_radius(filled, ctr, dx, dy, grid_mm)
