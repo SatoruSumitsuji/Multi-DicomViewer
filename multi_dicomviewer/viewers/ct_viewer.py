@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "close"   # Auto-Endo bridging: close / polar / hull
+        self._lv_endo_method = "circle"  # Auto-Endo: circle / close / polar / hull
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,12 +2671,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("Close", "close")
+        self._lvv_method_combo.addItem("外接円", "circle")   # default: guarantees
+        self._lvv_method_combo.addItem("Close", "close")     # all blood inside
         self._lvv_method_combo.addItem("Polar", "polar")
         self._lvv_method_combo.addItem("Hull", "hull")
         self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の乳頭筋/肉柱の橋渡し方式: Close=2D closing(肉柱mm), "
-              "Polar=角度方向のdip橋渡し(形状保持), Hull=レベル凸包(最も強力)"))
+            t("Auto-Endo の作り方: 外接円=各短軸レベルで血流の最小外接円(全血流を"
+              "内包)、Close=2D closing(肉柱mm)、Polar=角度dip橋渡し、Hull=レベル凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
@@ -4334,7 +4335,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 try:
                     result["mask"] = endo_envelope_mask(
                         blood, dims, apex, axis_dir, radial0,
-                        along_apex=1.0, along_base=along_base - 0.5,
+                        along_apex=1.0, along_base=along_base,
                         sax_step_mm=1.0, close_mm=close, half_mm=70.0,
                         grid_mm=0.8, method=method, bridge_deg=60.0)
                 except Exception as exc:                  # noqa: BLE001
