@@ -2176,6 +2176,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
+        self._lv_border_show = True      # Epi境界表示: draw the section outline
         self._lvv_endo_show = False      # Auto-Endo表示 toggle state
         self._lv_endo_manual_dict = None  # retained hand-edited Endo (LVModel dict)
         self._meas_on = False
@@ -2707,6 +2708,19 @@ class CTViewer(CPRMixin, AbstractViewer):
               "view (Rotate/Spin/Paging/CenterLine) to inspect it in 3-D."))
         self._lv_region_btn.clicked.connect(self._lv_toggle_region)
         r2t.addWidget(self._lv_region_btn)
+        # Epi境界表示: toggle the GREEN border — in observe/free-view this is the
+        # region's cross-section outline (tracks rotation); on/off independent of
+        # the red region.
+        self._lv_border_btn = FitButton(t("Epi境界表示"))
+        self._lv_border_btn.setCheckable(True)
+        self._lv_border_btn.setChecked(True)
+        self._lv_border_btn.setHelpToolTip(
+            t("Show/hide the green Epi/Endo border outline (the section of the "
+              "reconstructed region on the current plane)."))
+        self._lv_border_btn.clicked.connect(self._lv_toggle_border)
+        self._lv_border_btn.setStyleSheet(
+            "QPushButton{background:#40c040;color:black;}" + self._BTN_DIS)
+        r2t.addWidget(self._lv_border_btn)
         # Wall button: kept (referenced by _lv_sync_buttons) but NOT shown in the
         # bar — wall-thickness moves to the Tools「心機能」tool (planned).
         self._lv_wall_btn = FitButton(t("Wall"))
@@ -9015,6 +9029,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_update_mask()
         self._lv_apply_view_free()
 
+    def _lv_toggle_border(self) -> None:
+        """Epi境界表示: show/hide the GREEN border outline (the region's cross-
+        section on the current plane) in observe/free-view."""
+        self._lv_border_show = self._lv_border_btn.isChecked()
+        self._lv_border_btn.setStyleSheet(
+            ("QPushButton{background:#40c040;color:black;}" + self._BTN_DIS)
+            if self._lv_border_show else self._BTN_DIS)
+        self._redraw_all_lv()
+
     def _lv_region_reset(self) -> None:
         """Drop the free-view (Trace⇄View + Epi領域表示) on pass change/SAX/exit."""
         if self._lv is not None:
@@ -10404,7 +10427,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # which is hidden in free-view (see _redraw_geom). Redrawn every view
         # change since _redraw_lv runs from _refresh.
         if (lv.get("sax") is None and getattr(self, "_lv_view_free", False)
-                and getattr(self, "_lv_region_comp", None) is not None):
+                and getattr(self, "_lv_region_comp", None) is not None
+                and getattr(self, "_lv_border_show", True)):
             from multi_dicomviewer.core.lv_compact import region_outline_on_plane
             u_ax, v_ax, _n_ax = self._axes_for(key)
             half = float(getattr(self, "_half", 100.0))
@@ -10415,8 +10439,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 polys = []
             if polys:
-                rings = [[tuple(q) for q in poly] + [tuple(poly[0])]
-                         for poly in polys]
+                # The mask-traced polygon is pixel-jagged; spline each ring with
+                # the SAME closed Catmull-Rom the SAX borders use for a smooth
+                # line (the core already arc-length-resamples it to a sane count).
+                rings = []
+                for poly in polys:
+                    sm = _smooth_closed([tuple(q) for q in poly])
+                    if len(sm) >= 3:
+                        rings.append([tuple(q) for q in sm] + [tuple(sm[0])])
                 mm = lv["model"]
                 which = "endo" if (mm.endo_contours and not mm.epi_contours) \
                     else "epi"

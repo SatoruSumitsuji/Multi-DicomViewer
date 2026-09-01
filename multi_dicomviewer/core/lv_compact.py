@@ -167,9 +167,31 @@ def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
         pc = c.reshape(-1, 2)                           # (col=j, row=i)
         if len(pc) < 3:
             continue
-        polys.append([(-half_mm + float(j) * step_mm,
-                       -half_mm + float(i) * step_mm) for j, i in pc])
+        ring = np.column_stack([-half_mm + pc[:, 0].astype(float) * step_mm,
+                                -half_mm + pc[:, 1].astype(float) * step_mm])
+        polys.append(_resample_closed(ring, 64))
+    # Keep the biggest ring first (the cavity); tiny specks (noise) sort after.
+    polys.sort(key=len, reverse=True)
     return polys
+
+
+def _resample_closed(ring: np.ndarray, n: int):
+    """Resample a closed polygon to *n* points EVENLY BY ARC LENGTH, so the
+    pixel-jagged contour becomes a smooth, uniformly-sampled ring ready for a
+    Catmull-Rom spline. Returns a list of (x, y)."""
+    p = np.asarray(ring, float)
+    if len(p) < 3:
+        return [tuple(map(float, q)) for q in p]
+    closed = np.vstack([p, p[:1]])                      # wrap to close
+    seg = np.linalg.norm(np.diff(closed, axis=0), axis=1)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    total = float(s[-1])
+    if total <= 1e-6:
+        return [tuple(map(float, q)) for q in p]
+    targets = np.linspace(0.0, total, n, endpoint=False)
+    xs = np.interp(targets, s, closed[:, 0])
+    ys = np.interp(targets, s, closed[:, 1])
+    return [(float(x), float(y)) for x, y in zip(xs, ys)]
 
 
 def endo_contours_from_blood(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
