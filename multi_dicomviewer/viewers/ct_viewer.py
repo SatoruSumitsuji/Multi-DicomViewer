@@ -5003,7 +5003,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Clear) only Load and Exit are live in row 2. (_BTN_DIS greys them.)
         m = lv["model"]
         has_border = (len(m.endo_contours) >= 3 or len(m.epi_contours) >= 3)
-        data_ok = contour and (has_border or lv.get("vol_done"))
+        data_ok = bool(contour and (has_border or lv.get("vol_done")))
         self._lv_sax_btn.setEnabled(data_ok)
         for b in (self._lv_prev_btn, self._lv_next_btn):
             b.setEnabled(contour)
