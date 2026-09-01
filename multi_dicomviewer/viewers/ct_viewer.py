@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "hull"    # Auto/Manual-Endo bridging: close/polar/hull
+        self._lv_endo_method = "polar"   # Auto-Endo: radial-max (outermost blood)
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,12 +2671,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("Hull", "hull")       # default (tightest)
-        self._lvv_method_combo.addItem("Close", "close")
-        self._lvv_method_combo.addItem("Polar", "polar")
+        self._lvv_method_combo.addItem("放射", "polar")      # default: radial-max
+        self._lvv_method_combo.addItem("凸包", "hull")
         self._lvv_method_combo.setToolTip(
-            t("Auto/Manual-Endo の乳頭筋/肉柱の橋渡し方式 (per-meridian loft): "
-              "Hull=レベル凸包(最も内包)、Close=2D closing(肉柱mm)、Polar=角度dip橋渡し"))
+            t("Auto-Endo の作り方: 放射=各方向の最遠血流(outermost)を肉柱の角度幅で"
+              "橋渡し＋平滑(全血流を内包しつつタイト)、凸包=レベル凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
@@ -4304,33 +4303,49 @@ class CTViewer(CPRMixin, AbstractViewer):
         return model
 
     def _lvv_build_endo_mask(self):
-        """Auto-Endo uses the SAME construction as Manual-Endo: build the
-        per-meridian lofted Endo model from the blood pool (papillaries bridged
-        per 肉柱 / 方式), then take its inside_mask — the tight endocardial cavity
-        (identical to Calc Vol's region), NOT a circumscribing envelope. Returns
-        (comp, bbox) or None. Runs off-thread behind a busy dialog."""
+        """Auto-Endo = per short-axis level, the OUTERMOST-blood envelope along
+        many radial directions from the LV axis (radial-max), the papillary /
+        trabecular notches bridged over the 肉柱 angular span, then smoothed on θ
+        and along-axis. Every blood voxel of the level is inside (the ray reaches
+        its own outermost blood) yet it hugs the cavity — not a big circumscribing
+        circle. Returns (comp, bbox) or None; runs off-thread."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
-        model = self._lvv_build_endo_model()      # loft (own progress dialog)
-        if model is None:
-            return None
-        self._lv_endo_auto_model = model           # Manual-Endo can seed from it
-        try:
-            self._lv_endo_auto_surf = model.endo
-        except Exception:                          # noqa: BLE001
-            pass
+        from multi_dicomviewer.core.lv_compact import endo_envelope_mask
+        epi = getattr(self, "_lvv_epi_surf", None)
+        apex = getattr(self, "_lvv_blood_apex", None)
         mv = self._lv_valves.get("mitral")
-        av = self._lv_valves.get("aortic")
+        if (self._vol is None or self._lvv_blood_comp is None
+                or self._lvv_blood_bbox is None or epi is None
+                or apex is None or mv is None):
+            return None
+        ax = epi.axis
+        apex = np.asarray(apex, float)
+        axis_dir = np.asarray(ax.axis, float)
+        axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
+        radial0 = np.asarray(ax.radial0, float)
+        along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
+        if along_base <= 6.0:
+            return None
+        z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
+        blood = np.zeros(self._vol.shape, bool)
+        blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
-        shape = self._vol.shape
+        # 肉柱(close_mm) → angular span bridged across papillary notches; the 3-D
+        # closing is kept small (de-stripe only) so the Endo stays tight.
+        bridge = max(10.0, float(getattr(self, "_lv_endo_close_mm", 5.0)) * 4.0)
+        method = getattr(self, "_lv_endo_method", "polar")
         result: dict = {}
 
         class _MaskWorker(QThread):
             def run(self_) -> None:
                 try:
-                    model.build()
-                    result["mask"] = model.inside_mask(dims, shape, "endo",
-                                                       mv, av)
+                    result["mask"] = endo_envelope_mask(
+                        blood, dims, apex, axis_dir, radial0,
+                        along_apex=1.0, along_base=along_base,
+                        sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
+                        grid_mm=0.8, method=method,
+                        bridge_deg=bridge, n_meridians=180)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
