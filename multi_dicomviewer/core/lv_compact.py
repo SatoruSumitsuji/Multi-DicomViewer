@@ -229,7 +229,7 @@ def _radius_to_mask(rs, thetas, ang_grid, rad_grid):
 
 
 def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
-                            half_mm=100.0, step_mm=0.8):
+                            half_mm=100.0, step_mm=0.8, convex=False):
     """Outline polygon(s) of a 3-D region's CROSS-SECTION on an arbitrary plane.
 
     Samples the boolean region (``comp`` = bbox-local mask, ``bbox`` =
@@ -272,6 +272,19 @@ def region_outline_on_plane(comp, bbox, spacing_xyz, origin, u, v,
     if not g.any():
         return []
     cnts, _h = cv2.findContours(g, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if convex:
+        # A single CONVEX outline that CIRCUMSCRIBES the section (an "外接" curve)
+        # — the smooth envelope the user wants for Auto-Endo: hull all the section
+        # points, then resample + Taubin-smooth so the corners round off. Since
+        # the mask ⊇ blood, the hull ⊇ blood too (no blood pokes outside it).
+        allpts = np.vstack([c.reshape(-1, 2) for c in cnts
+                            if len(c) >= 3]) if cnts else None
+        if allpts is None or len(allpts) < 3:
+            return []
+        hull = cv2.convexHull(allpts.astype(np.int32)).reshape(-1, 2)
+        ring = np.column_stack([-half_mm + hull[:, 0].astype(float) * step_mm,
+                                -half_mm + hull[:, 1].astype(float) * step_mm])
+        return [_smooth_ring(_resample_closed(ring, 96), passes=16)]
     polys = []
     for c in cnts:
         pc = c.reshape(-1, 2)                           # (col=j, row=i)
