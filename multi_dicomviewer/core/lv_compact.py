@@ -118,6 +118,55 @@ def _hull_radius_profile(filled: np.ndarray, ctr: int, rays, grid_mm: float):
     return out
 
 
+def endo_convex3d_mask(blood, spacing_xyz, apex_xyz, axis_dir,
+                       along_apex, along_base):
+    """3-D CONVEX HULL of the blood pool within the valve-to-apex range. Being
+    convex, EVERY planar section (short-axis OR any oblique long-axis) is convex
+    — no inward dips — and it contains ALL blood; a rounded bullet Endo, far
+    tighter than a per-level circumscribing circle. Returns (comp, bbox) or None.
+    """
+    try:
+        from scipy.spatial import ConvexHull
+    except Exception:                                   # noqa: BLE001
+        return None
+    blood = np.asarray(blood, bool)
+    zs, ys, xs = np.where(blood)
+    if len(zs) < 8:
+        return None
+    sx, sy, sz = spacing_xyz
+    apex = np.asarray(apex_xyz, float)
+    n = np.asarray(axis_dir, float)
+    n = n / (np.linalg.norm(n) or 1.0)
+    P = np.column_stack([xs * sx, ys * sy, zs * sz]).astype(float)
+    along = (P - apex) @ n
+    keep = (along >= float(along_apex)) & (along <= float(along_base))
+    if int(keep.sum()) < 8:
+        return None
+    P = P[keep]
+    zsk, ysk, xsk = zs[keep], ys[keep], xs[keep]
+    try:
+        hull = ConvexHull(P)
+    except Exception:                                   # noqa: BLE001
+        return None
+    A = hull.equations[:, :3]
+    b = hull.equations[:, 3]
+    z0, z1 = int(zsk.min()), int(zsk.max()) + 1
+    y0, y1 = int(ysk.min()), int(ysk.max()) + 1
+    x0, x1 = int(xsk.min()), int(xsk.max()) + 1
+    gz, gy, gx = np.mgrid[z0:z1, y0:y1, x0:x1]
+    gp = np.column_stack([gx.ravel() * sx, gy.ravel() * sy,
+                          gz.ravel() * sz]).astype(float)
+    inside = np.empty(len(gp), bool)
+    ch = 40000                                          # chunk the face test
+    for i in range(0, len(gp), ch):
+        seg = gp[i:i + ch]
+        inside[i:i + ch] = np.all((seg @ A.T) + b <= 1e-6, axis=1)
+    comp = inside.reshape(gz.shape)
+    if not comp.any():
+        return None
+    return comp, (z0, z1, y0, y1, x0, x1)
+
+
 def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                        along_apex, along_base, sax_step_mm=1.0, close_mm=4.0,
                        half_mm=70.0, grid_mm=0.8, method="close",

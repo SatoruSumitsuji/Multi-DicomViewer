@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "polar"   # Auto-Endo: radial-max (outermost blood)
+        self._lv_endo_method = "convex3d"  # Auto-Endo: 3-D convex hull (all blood)
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,11 +2671,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("放射", "polar")      # default: radial-max
-        self._lvv_method_combo.addItem("凸包", "hull")
+        self._lvv_method_combo.addItem("3D凸包", "convex3d")  # default: all blood,
+        self._lvv_method_combo.addItem("放射", "polar")       # convex everywhere
+        self._lvv_method_combo.addItem("凸包(層)", "hull")
         self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の作り方: 放射=各方向の最遠血流(outermost)を肉柱の角度幅で"
-              "橋渡し＋平滑(全血流を内包しつつタイト)、凸包=レベル凸包"))
+            t("Auto-Endo の作り方: 3D凸包=血流の3次元凸包(全血流を内包・短軸/長軸とも"
+              "凸で凹みなし・丸い)、放射=各方向の最遠血流、凸包(層)=短軸レベル凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
@@ -4311,7 +4312,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         circle. Returns (comp, bbox) or None; runs off-thread."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
-        from multi_dicomviewer.core.lv_compact import endo_envelope_mask
+        from multi_dicomviewer.core.lv_compact import (
+            endo_convex3d_mask, endo_envelope_mask)
         epi = getattr(self, "_lvv_epi_surf", None)
         apex = getattr(self, "_lvv_blood_apex", None)
         mv = self._lv_valves.get("mitral")
@@ -4340,12 +4342,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         class _MaskWorker(QThread):
             def run(self_) -> None:
                 try:
-                    result["mask"] = endo_envelope_mask(
-                        blood, dims, apex, axis_dir, radial0,
-                        along_apex=1.0, along_base=along_base,
-                        sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
-                        grid_mm=0.8, method=method,
-                        bridge_deg=bridge, n_meridians=180)
+                    if method == "convex3d":
+                        result["mask"] = endo_convex3d_mask(
+                            blood, dims, apex, axis_dir,
+                            along_apex=0.0, along_base=along_base)
+                    else:
+                        result["mask"] = endo_envelope_mask(
+                            blood, dims, apex, axis_dir, radial0,
+                            along_apex=1.0, along_base=along_base,
+                            sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
+                            grid_mm=0.8, method=method,
+                            bridge_deg=bridge, n_meridians=180)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
