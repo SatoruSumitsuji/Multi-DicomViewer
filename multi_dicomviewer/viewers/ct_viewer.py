@@ -2178,7 +2178,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
-        self._lv_endo_method = "circle"  # Auto-Endo: circle / close / polar / hull
+        self._lv_endo_method = "hull"    # Auto/Manual-Endo bridging: close/polar/hull
         self._lv_last_dir = ""           # last folder used for LV Save/Load/Export
         self._lv_region_comp = None      # measured-region mask (bbox-local bool)
         self._lv_region_bbox = None      # its (z0,z1,y0,y1,x0,x1) into the volume
@@ -2671,13 +2671,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QComboBox
         self._lvv_method_lbl = QLabel(t("方式"))
         self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("外接円", "circle")   # default: guarantees
-        self._lvv_method_combo.addItem("Close", "close")     # all blood inside
+        self._lvv_method_combo.addItem("Hull", "hull")       # default (tightest)
+        self._lvv_method_combo.addItem("Close", "close")
         self._lvv_method_combo.addItem("Polar", "polar")
-        self._lvv_method_combo.addItem("Hull", "hull")
         self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の作り方: 外接円=各短軸レベルで血流の最小外接円(全血流を"
-              "内包)、Close=2D closing(肉柱mm)、Polar=角度dip橋渡し、Hull=レベル凸包"))
+            t("Auto/Manual-Endo の乳頭筋/肉柱の橋渡し方式 (per-meridian loft): "
+              "Hull=レベル凸包(最も内包)、Close=2D closing(肉柱mm)、Polar=角度dip橋渡し"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
@@ -4305,48 +4304,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         return model
 
     def _lvv_build_endo_mask(self):
-        """Build the 3-D Auto-Endo ENVELOPE MASK from the blood pool: the blood
-        with its papillary/trabecular indentations bridged (per _lv_endo_method),
-        GUARANTEED to contain the blood pool (endo ⊇ blood). Returns (comp, bbox)
-        or None. Runs off-thread behind a busy dialog (like Calc Vol)."""
+        """Auto-Endo uses the SAME construction as Manual-Endo: build the
+        per-meridian lofted Endo model from the blood pool (papillaries bridged
+        per 肉柱 / 方式), then take its inside_mask — the tight endocardial cavity
+        (identical to Calc Vol's region), NOT a circumscribing envelope. Returns
+        (comp, bbox) or None. Runs off-thread behind a busy dialog."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
-        from multi_dicomviewer.core.lv_compact import endo_envelope_mask
-        epi = getattr(self, "_lvv_epi_surf", None)
-        apex = getattr(self, "_lvv_blood_apex", None)
+        model = self._lvv_build_endo_model()      # loft (own progress dialog)
+        if model is None:
+            return None
+        self._lv_endo_auto_model = model           # Manual-Endo can seed from it
+        try:
+            self._lv_endo_auto_surf = model.endo
+        except Exception:                          # noqa: BLE001
+            pass
         mv = self._lv_valves.get("mitral")
-        if (self._vol is None or self._lvv_blood_comp is None
-                or self._lvv_blood_bbox is None or epi is None
-                or apex is None or mv is None):
-            return None
-        ax = epi.axis
-        apex = np.asarray(apex, float)
-        axis_dir = np.asarray(ax.axis, float)
-        axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
-        radial0 = np.asarray(ax.radial0, float)
-        along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
-        if along_base <= 6.0:
-            return None
-        z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
-        blood = np.zeros(self._vol.shape, bool)
-        blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
+        av = self._lv_valves.get("aortic")
         dims = self._dims
-        close = float(getattr(self, "_lv_endo_close_mm", 5.0))
-        method = getattr(self, "_lv_endo_method", "close")
+        shape = self._vol.shape
         result: dict = {}
 
         class _MaskWorker(QThread):
             def run(self_) -> None:
                 try:
-                    result["mask"] = endo_envelope_mask(
-                        blood, dims, apex, axis_dir, radial0,
-                        along_apex=1.0, along_base=along_base,
-                        sax_step_mm=1.0, close_mm=close, half_mm=70.0,
-                        grid_mm=0.8, method=method, bridge_deg=60.0)
-                except Exception as exc:                  # noqa: BLE001
+                    model.build()
+                    result["mask"] = model.inside_mask(dims, shape, "endo",
+                                                       mv, av)
+                except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
-        dlg = QProgressDialog(t("Deriving Endo envelope…"), "", 0, 0,
+        dlg = QProgressDialog(t("Deriving Endo region…"), "", 0, 0,
                               self.window())
         dlg.setWindowTitle(t("Endo (Auto)"))
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
@@ -4359,7 +4347,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.exec()
         worker.wait()
         worker.deleteLater()
-        if result.get("err") or not result.get("mask"):
+        if result.get("err") or not result.get("mask") or result["mask"][0] is None:
             return None
         return result["mask"]
 
@@ -4464,7 +4452,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     polys = region_outline_on_plane(
                         self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
                         self._dims, self._pc[key], u_ax, v_ax,
-                        half_mm=half, step_mm=0.8, convex=True)
+                        half_mm=half, step_mm=0.8, convex=False)
                 except Exception:                        # noqa: BLE001
                     polys = []
                 for poly in polys:
