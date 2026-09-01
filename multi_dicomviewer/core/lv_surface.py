@@ -516,6 +516,61 @@ class LVSurface:
             return None, None
         return comp, (z0, z1, y0, y1, x0, x1)
 
+    def inside_mask_volumes(self, spacing_xyz, shape, mv, aov, apex_xyz,
+                            pad_mm: float = 2.0):
+        """ONE rasterization of the surface over the native grid → the red-overlay
+        mask AND both volumes, so Calc Vol needs a single `contains` pass instead
+        of three (was: volume_ml_valves ×2 + inside_mask). Returns
+        (comp, bbox, vol_ml, vol_mv_only_ml): comp/vol use BOTH valve planes;
+        vol_mv_only uses just MV (for the AoV-trim diagnostic). Plane clips are
+        cheap dot-products reusing the single inside array.
+        """
+        sx, sy, sz = spacing_xyz
+        nz, ny, nx = shape
+        apex = np.asarray(apex_xyz, float)
+        allp = self._all_ring_points()
+        lo = allp.min(axis=0) - pad_mm
+        hi = allp.max(axis=0) + pad_mm
+        x0 = max(0, int(np.floor(lo[0] / sx)))
+        x1 = min(nx, int(np.ceil(hi[0] / sx)) + 1)
+        y0 = max(0, int(np.floor(lo[1] / sy)))
+        y1 = min(ny, int(np.ceil(hi[1] / sy)) + 1)
+        z0 = max(0, int(np.floor(lo[2] / sz)))
+        z1 = min(nz, int(np.ceil(hi[2] / sz)) + 1)
+        if x1 <= x0 or y1 <= y0 or z1 <= z0:
+            return None, None, None, None
+        zz, yy, xx = np.meshgrid(np.arange(z0, z1), np.arange(y0, y1),
+                                 np.arange(x0, x1), indexing="ij")
+        pts = np.column_stack([xx.ravel() * sx, yy.ravel() * sy,
+                               zz.ravel() * sz])
+        inside = self.contains(pts, extend_base=False)   # the ONE expensive pass
+        voxel_ml = (sx * sy * sz) / 1000.0
+
+        def _clip(planes):
+            m = inside
+            first = True
+            for (c, nrm) in planes:
+                c = np.asarray(c, float)
+                n = np.asarray(nrm, float)
+                n = n / (np.linalg.norm(n) or 1.0)
+                if float(np.dot(apex - c, n)) < 0.0:
+                    n = -n
+                keep = ((pts - c) @ n >= 0.0)
+                m = keep if first else (m & keep)
+                first = False
+            return m if not first else inside
+
+        both = [(v[0], v[1]) for v in (mv, aov) if v is not None]
+        m_both = _clip(both)
+        m_mv = _clip([(mv[0], mv[1])]) if (aov is not None and mv is not None) \
+            else m_both
+        vol = int(np.count_nonzero(m_both)) * voxel_ml
+        vol_mv = int(np.count_nonzero(m_mv)) * voxel_ml
+        comp = m_both.reshape(z1 - z0, y1 - y0, x1 - x0)
+        if not comp.any():
+            return None, (z0, z1, y0, y1, x0, x1), vol, vol_mv
+        return comp, (z0, z1, y0, y1, x0, x1), vol, vol_mv
+
     def contains(self, pts, extend_base: bool = False) -> np.ndarray:
         """Boolean mask (N,) — which world points (N,3) fall inside the closed
         surface (per-axial-level point-in-polygon, concave-safe). Same test as

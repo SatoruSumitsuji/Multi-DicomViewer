@@ -126,42 +126,48 @@ def endo_convex3d_mask(blood, spacing_xyz, apex_xyz, axis_dir,
     tighter than a per-level circumscribing circle. Returns (comp, bbox) or None.
     """
     try:
+        from scipy import ndimage
         from scipy.spatial import ConvexHull
     except Exception:                                   # noqa: BLE001
         return None
     blood = np.asarray(blood, bool)
-    zs, ys, xs = np.where(blood)
-    if len(zs) < 8:
+    bz, by, bx = np.where(blood)
+    if len(bz) < 8:
         return None
     sx, sy, sz = spacing_xyz
     apex = np.asarray(apex_xyz, float)
     n = np.asarray(axis_dir, float)
     n = n / (np.linalg.norm(n) or 1.0)
-    P = np.column_stack([xs * sx, ys * sy, zs * sz]).astype(float)
+    # Work in the blood's tight bbox (the blood is a small region in a big
+    # volume) so erosion / the voxel grid stay small.
+    z0, z1 = int(bz.min()), int(bz.max()) + 1
+    y0, y1 = int(by.min()), int(by.max()) + 1
+    x0, x1 = int(bx.min()), int(bx.max()) + 1
+    bsub = blood[z0:z1, y0:y1, x0:x1]
+    # The hull is set by EXTREME points only, so feed ConvexHull just the SURFACE
+    # voxels (blood minus its erosion) — a few thousand instead of millions.
+    surf = bsub & ~ndimage.binary_erosion(bsub)
+    szs, sys_, sxs = np.where(surf)
+    P = np.column_stack([(sxs + x0) * sx, (sys_ + y0) * sy,
+                         (szs + z0) * sz]).astype(float)
     along = (P - apex) @ n
     keep = (along >= float(along_apex)) & (along <= float(along_base))
     if int(keep.sum()) < 8:
         return None
     P = P[keep]
-    zsk, ysk, xsk = zs[keep], ys[keep], xs[keep]
     try:
+        from scipy.spatial import Delaunay
         hull = ConvexHull(P)
+        tri = Delaunay(P[hull.vertices])   # tiny (hull vertices) → fast queries
     except Exception:                                   # noqa: BLE001
         return None
-    A = hull.equations[:, :3]
-    b = hull.equations[:, 3]
-    z0, z1 = int(zsk.min()), int(zsk.max()) + 1
-    y0, y1 = int(ysk.min()), int(ysk.max()) + 1
-    x0, x1 = int(xsk.min()), int(xsk.max()) + 1
     gz, gy, gx = np.mgrid[z0:z1, y0:y1, x0:x1]
     gp = np.column_stack([gx.ravel() * sx, gy.ravel() * sy,
                           gz.ravel() * sz]).astype(float)
-    inside = np.empty(len(gp), bool)
-    ch = 40000                                          # chunk the face test
-    for i in range(0, len(gp), ch):
-        seg = gp[i:i + ch]
-        inside[i:i + ch] = np.all((seg @ A.T) + b <= 1e-6, axis=1)
-    comp = inside.reshape(gz.shape)
+    # Inside-hull test via a Delaunay triangulation of the hull VERTICES (a few
+    # hundred pts) — find_simplex is C-optimised and ~7× faster than testing
+    # every voxel against every face equation.
+    comp = (tri.find_simplex(gp) >= 0).reshape(gz.shape)
     if not comp.any():
         return None
     return comp, (z0, z1, y0, y1, x0, x1)

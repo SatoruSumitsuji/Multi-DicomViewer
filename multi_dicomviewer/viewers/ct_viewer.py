@@ -9719,15 +9719,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    # Integrate in slices PARALLEL to the MV plane (base = MV
-                    # plane), AoV clipping the outflow. The red mask is the SAME
-                    # region.
-                    result["vol"] = m.volume_ml_valves(spacing, pas, mv, av)
-                    result["mask"] = m.inside_mask(dims, shape, pas, mv, av)
-                    # AoV contribution: MV-only minus (MV+AoV) = mL the AoV trims.
+                    # ONE rasterization (native grid) → the red mask AND both
+                    # volumes (MV+AoV, and MV-only for the AoV-trim diagnostic).
+                    # Was 3 separate `contains` passes (volume ×2 + inside_mask);
+                    # now a single pass + cheap plane clips ≈ 3× faster.
+                    comp, bbox, vol, vol_mv = m.inside_mask_volumes(
+                        dims, shape, pas, mv, av)
+                    result["vol"] = vol
+                    result["mask"] = (comp, bbox)
                     if av is not None and mv is not None:
-                        result["vol_mv_only"] = m.volume_ml_valves(
-                            spacing, pas, mv, None)
+                        result["vol_mv_only"] = vol_mv
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
 

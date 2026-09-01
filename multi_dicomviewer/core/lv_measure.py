@@ -848,6 +848,20 @@ class LVModel:
             apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
         return surf.inside_mask_bbox(spacing_xyz, shape, planes, apex)
 
+    def inside_mask_volumes(self, spacing_xyz, shape, which: str,
+                            mv=None, aov=None):
+        """ONE rasterization → (comp, bbox, vol_ml, vol_mv_only_ml) for Calc Vol
+        (mask + both volumes in a single `contains` pass). See
+        LVSurface.inside_mask_volumes."""
+        surf = self._full_surface(which) if (mv is not None or aov is not None) \
+            else (self.endo if which == "endo" else self.epi)
+        if surf is None:
+            return None, None, None, None
+        apex = getattr(surf, "apex_world", None)
+        if apex is None:
+            apex = surf.axis.apex + float(surf.along[0]) * surf.axis.axis
+        return surf.inside_mask_volumes(spacing_xyz, shape, mv, aov, apex)
+
     def myocardial_volume_ml(self, spacing: float) -> float | None:
         """Myocardial volume = epi − endo (mL), or None if either is missing."""
         if self.endo is None or self.epi is None:
