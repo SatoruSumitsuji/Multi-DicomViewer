@@ -15,7 +15,8 @@ import sys
 import traceback
 
 from PyQt6.QtCore import (
-    QEvent, QMimeData, QObject, QRect, QSize, Qt, QThread, QTimer, pyqtSignal,
+    QEvent, QMimeData, QObject, QPoint, QRect, QSize, Qt, QThread, QTimer,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QAction,
@@ -170,6 +171,41 @@ _GRID_MAX_COLS = max(c for _r, c, _cnt in _LAYOUTS.values())
 
 #: drag payload (source pane index) for swapping pane positions
 PANE_MIME = "application/x-mdv-pane"
+
+
+class _LayoutButton(QPushButton):
+    """Top-bar "Layout ▾" button. The picker opens on HOVER (after a short
+    delay); a plain single click is inert; a DOUBLE click requests auto-fit
+    (the smallest layout that contains every pane holding an image)."""
+    hover_requested = pyqtSignal()
+    auto_fit_requested = pyqtSignal()
+    _HOVER_MS = 200
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self._hover_timer = QTimer(self)
+        self._hover_timer.setSingleShot(True)
+        self._hover_timer.timeout.connect(self.hover_requested)
+
+    def enterEvent(self, e):  # noqa: N802 (Qt override)
+        self._hover_timer.start(self._HOVER_MS)
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):  # noqa: N802
+        self._hover_timer.stop()
+        super().leaveEvent(e)
+
+    def mousePressEvent(self, e):  # noqa: N802
+        # Single click is intentionally inert (the picker is hover-driven);
+        # cancel any pending hover-open so a click/double-click doesn't also pop
+        # the menu after the fact.
+        self._hover_timer.stop()
+        e.accept()
+
+    def mouseDoubleClickEvent(self, e):  # noqa: N802
+        self._hover_timer.stop()
+        self.auto_fit_requested.emit()
+        e.accept()
 
 
 class LayoutGridPicker(QWidget):
@@ -1326,7 +1362,9 @@ class MainWindow(QMainWindow):
             t("Show/hide the left Info window (study tree)")
         )
         self._layout_btn.setText(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
+        self._layout_btn.setToolTip(t(
+            "Hover to open the grid, then click/drag to show any block of panes. "
+            "Double-click to auto-fit the panes that hold images."))
         self._pane_step_btn.setText(t("Pane →"))
         self._pane_step_btn.setHelpToolTip(
             t("Flip the fullscreen (1×1) view to the next loaded pane; wraps "
@@ -2490,8 +2528,10 @@ class MainWindow(QMainWindow):
         # Visual layout picker (Office "insert table" style): a "Layout ▾"
         # button opens a popup grid you hover/drag to choose ROWS×COLS — no more
         # mixing up 1×2 vs 2×1.
-        self._layout_btn = QPushButton(self._layout_btn_text())
-        self._layout_btn.setToolTip(t("Drag over the grid to show any block of panes (not just the top-left)."))
+        self._layout_btn = _LayoutButton(self._layout_btn_text())
+        self._layout_btn.setToolTip(t(
+            "Hover to open the grid, then click/drag to show any block of panes. "
+            "Double-click to auto-fit the panes that hold images."))
         # This menu-button renders square on macOS; give it the same light-grey
         # rounded border as the pane buttons so the top bar matches.
         self._layout_btn.setStyleSheet(
@@ -2504,7 +2544,9 @@ class MainWindow(QMainWindow):
         _wa = QWidgetAction(self._layout_menu)
         _wa.setDefaultWidget(self._layout_picker)
         self._layout_menu.addAction(_wa)
-        self._layout_btn.setMenu(self._layout_menu)
+        # Hover opens the picker; single click is inert; double-click auto-fits.
+        self._layout_btn.hover_requested.connect(self._open_layout_menu_hover)
+        self._layout_btn.auto_fit_requested.connect(self._layout_auto_fit)
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
@@ -2719,9 +2761,30 @@ class MainWindow(QMainWindow):
         self._layout_picker.set_current_rect(*self._current_layout_rect())
 
     def _layout_btn_text(self) -> str:
-        # setMenu() adds the native dropdown arrow, so the text itself stays
-        # plain: "Layout  2×3".
-        return f"{t('Layout')}  {self._layout_key.replace('x', '×')}"
+        # The picker is now hover-driven (no setMenu → no native arrow), so add
+        # a ▾ to the caption to keep the dropdown affordance: "Layout  2×3 ▾".
+        return f"{t('Layout')}  {self._layout_key.replace('x', '×')} ▾"
+
+    def _open_layout_menu_hover(self) -> None:
+        """Hovering the Layout button pops the grid picker just below it."""
+        if self._layout_menu.isVisible():
+            return
+        pos = self._layout_btn.mapToGlobal(
+            QPoint(0, self._layout_btn.height()))
+        self._layout_menu.popup(pos)
+
+    def _layout_auto_fit(self) -> None:
+        """Double-click the Layout button → show the SMALLEST master-grid
+        rectangle that contains every pane currently holding an image (a single
+        image → 1×1). Reuses the picker's commit path so off-origin blocks and
+        the 1×1 case work exactly as a manual drag would."""
+        self._layout_menu.hide()
+        occ = self._pane_occupancy()
+        if not occ:
+            return                       # nothing loaded → leave the layout as-is
+        rows = [r for r, _c in occ]
+        cols = [c for _r, c in occ]
+        self._on_layout_picked(min(rows), min(cols), max(rows), max(cols))
 
     def _on_layout_picked(self, r0: int, c0: int, r1: int, c1: int) -> None:
         """A rectangle was dragged in the visual grid picker → show exactly that
