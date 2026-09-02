@@ -8511,18 +8511,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         return True
 
     def _lv_thick_trace_both(self) -> None:
-        """Slab thickness for the LV panes. The Epi pass is evaluated on THIN
-        slices, so BOTH panes are forced to 0 mm on entry; the Endo pass keeps a
-        5 mm MIP slab on the long-axis TRACE pane (helps see the endo border) and
-        0 mm on the other (cross-section) pane."""
-        pas = self._lv.get("pass") if self._lv is not None else None
-        if pas == "epi":
-            self._thick["A"] = 0.0
-            self._thick["B"] = 0.0
-        else:
-            pane = self._lv["pane"] if self._lv is not None else "B"
-            for k in ("A", "B"):
-                self._thick[k] = 5.0 if k == pane else 0.0
+        """Slab thickness for the LV panes on Endo/Epi entry: BOTH panes 0 mm —
+        the Endo and Epi borders are both traced/judged on THIN cross-sections
+        (no MIP slab), matching the Blood/Endo sub-mode."""
+        self._thick["A"] = 0.0
+        self._thick["B"] = 0.0
         if hasattr(self, "_sync_slab_spin"):
             self._sync_slab_spin()
 
