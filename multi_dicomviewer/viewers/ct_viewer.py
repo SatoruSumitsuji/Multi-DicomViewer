@@ -2344,12 +2344,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         super().showEvent(e)
         if self._image is not None:
             QTimer.singleShot(0, self._refit_on_show)
+            # Self-heal the intermittent "first Render hit a half-mapped native
+            # window → BLACK pane" case (the "must be a top level window" /
+            # wglMakeCurrent-2004 family), which otherwise needed a manual
+            # reload or a drag to another pane. A drag recovers it because each
+            # Render re-binds VTK's GL context to the (now valid) HDC — so we
+            # just repaint a few times over the next ~½s. Repaint-only (no
+            # refit) → never fights a zoom/pan; a no-op when already correct.
+            for _ms in (60, 180, 450):
+                QTimer.singleShot(_ms, self._rerender_on_show)
 
     def _refit_on_show(self) -> None:
         # Guard: the viewer may have been cleared/destroyed before this fires.
         if self._image is None:
             return
         self._refresh(reset_cam=self._view_initial)
+
+    def _rerender_on_show(self) -> None:
+        """A follow-up repaint (camera untouched) that recovers a pane which
+        came up black because its GL surface wasn't valid at the first Render.
+        Each pane's render() is a no-op while it is genuinely off screen."""
+        if self._image is None:
+            return
+        for key in ("A", "B"):
+            try:
+                self.pane[key].render()
+            except Exception:                            # noqa: BLE001
+                pass
 
     def finalize_gl(self) -> None:
         """Release each pane's VTK OpenGL context while our native windows are
