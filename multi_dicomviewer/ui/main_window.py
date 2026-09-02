@@ -4598,9 +4598,10 @@ class MainWindow(QMainWindow):
         caps = {"CT": self._live_cap[Modality.CT],
                 "XA": self._live_cap[Modality.XA]}
         quality = settings.load_display_quality()
+        lv_endo = settings.load_lv_endo_params()
         dlg = SettingsDialog(caps, quality, self._open_ct_color,
                              on_advanced=self._open_advanced_quality,
-                             parent=self)
+                             parent=self, lv_endo=lv_endo)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Display count: persist + apply (over-cap panes sleep now; keep=active
@@ -4619,6 +4620,13 @@ class MainWindow(QMainWindow):
         for v in self._all_loaded_viewers():
             if hasattr(v, "reload_display_quality"):
                 v.reload_display_quality()
+        # LV Auto-Endo advanced params: persist + tell CT viewers to re-read
+        # (drops any cached params + invalidates a built Endo so a re-press
+        # rebuilds with the new shape/resolution).
+        settings.save_lv_endo_params(dlg.lv_endo())
+        for v in self._all_loaded_viewers():
+            if hasattr(v, "_lv_endo_adv_refresh"):
+                v._lv_endo_adv_refresh()
         self.statusBar().showMessage(
             t("Settings saved (CT {ct} / Angio {xa} live)",
               ct=vals["CT"], xa=vals["XA"]))

@@ -176,7 +176,8 @@ def endo_convex3d_mask(blood, spacing_xyz, apex_xyz, axis_dir,
 def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                        along_apex, along_base, sax_step_mm=1.0, close_mm=4.0,
                        half_mm=70.0, grid_mm=0.8, method="close",
-                       bridge_deg=40.0, n_meridians=180, roundness=0.0):
+                       bridge_deg=40.0, n_meridians=180, roundness=0.0,
+                       bulge_frac=0.20, min_chord_mm=5.0):
     """3-D ENDOCARDIAL ENVELOPE mask = the blood pool with its papillary /
     trabecular indentations bridged, per short-axis level, rasterised back into
     the volume grid. Returns ``(comp bool[dz,dy,dx], bbox)`` or None.
@@ -250,7 +251,9 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                     ).reshape(-1, 2).astype(float)
                     # Bulge ONLY the long chords (concavities); short hull edges
                     # stay on the blood so convex walls aren't pushed into myo.
-                    sm = _hull_bulge_long_chords(hv, grid_mm)
+                    sm = _hull_bulge_long_chords(
+                        hv, grid_mm, min_chord_mm=min_chord_mm,
+                        bulge_frac=bulge_frac)
                     env = np.zeros(filled.shape, np.uint8)
                     cv2.fillPoly(env, [np.round(sm).astype(np.int32)], 1)
                     env = env.astype(bool)

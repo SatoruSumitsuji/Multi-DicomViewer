@@ -385,6 +385,62 @@ def save_display_quality(prefs: dict) -> None:
         pass
 
 
+# ------------------------------------- LV Auto-Endo advanced (shape/resolution)
+LV_ENDO_PATH = SETTINGS_DIR / "lv_endo_params.json"
+
+#: Advanced Auto-Endo params exposed in Settings (the per-method "肉柱" knob lives
+#: on the Blood/Endo bar instead). All are rarely touched; defaults are good.
+_LV_ENDO_DEFAULTS = {
+    "min_chord_mm": 5.0,   # 凸包滑: hull edge longer than this = a concavity to bulge
+    "n_meridians": 240,    # 放射: number of radial directions
+    "grid_mm": 0.7,        # mask sampling pitch (smaller = finer/slower)
+    "step_mm": 0.45,       # display outline sampling pitch
+}
+_LV_ENDO_RANGES = {       # (min, max) sanity clamps
+    "min_chord_mm": (1.0, 30.0),
+    "n_meridians": (60, 720),
+    "grid_mm": (0.3, 2.0),
+    "step_mm": (0.3, 1.5),
+}
+
+
+def load_lv_endo_params() -> dict:
+    """Persisted advanced Auto-Endo params, defaults for any missing/bad key."""
+    out = dict(_LV_ENDO_DEFAULTS)
+    try:
+        data = json.loads(LV_ENDO_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k, dv in _LV_ENDO_DEFAULTS.items():
+                v = data.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    lo, hi = _LV_ENDO_RANGES[k]
+                    vv = max(lo, min(hi, v))
+                    out[k] = int(vv) if isinstance(dv, int) else float(vv)
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def save_lv_endo_params(params: dict) -> None:
+    """Best-effort persist of the advanced Auto-Endo params."""
+    try:
+        out = {}
+        for k, dv in _LV_ENDO_DEFAULTS.items():
+            v = params.get(k, dv)
+            lo, hi = _LV_ENDO_RANGES[k]
+            try:
+                vv = max(lo, min(hi, float(v)))
+            except (TypeError, ValueError):
+                vv = dv
+            out[k] = int(vv) if isinstance(dv, int) else float(vv)
+        out["version"] = 1
+        LV_ENDO_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LV_ENDO_PATH.write_text(
+            json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ----------------------------------------------- live pane count (memory cap)
 def _clamp_cap(mod: str, val) -> int:
     lo, hi = LIVE_CAPS_MIN[mod], LIVE_CAPS_MAX[mod]
