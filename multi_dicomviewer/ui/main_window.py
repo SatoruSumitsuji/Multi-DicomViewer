@@ -317,13 +317,24 @@ def _viewer_chrome_widgets(viewer) -> list:
     if lay is None:
         return out
 
+    def add_widget(w):
+        # A height-cap scroll container (ImageFloorMixin) holds real chrome
+        # bars — recurse into it so each bar (and its _mdv_keep_on_max flag)
+        # is handled individually instead of hiding the whole container.
+        if getattr(w, "_mdv_chrome_scroll", False):
+            inner = w.widget() if hasattr(w, "widget") else None
+            if inner is not None and inner.layout() is not None:
+                walk(inner.layout())
+            return
+        if not getattr(w, "_mdv_keep_on_max", False):
+            out.append(w)
+
     def walk(layout):
         for i in range(layout.count()):
             item = layout.itemAt(i)
             w = item.widget()
             if w is not None:
-                if not getattr(w, "_mdv_keep_on_max", False):
-                    out.append(w)
+                add_widget(w)
             elif item.layout() is not None:
                 walk(item.layout())
 
@@ -333,10 +344,7 @@ def _viewer_chrome_widgets(viewer) -> list:
         item = lay.itemAt(i)
         w = item.widget()
         if w is not None:
-            # Widgets flagged _mdv_keep_on_max (e.g. the Play/seek transport)
-            # stay visible in Max Image so playback is still usable.
-            if not getattr(w, "_mdv_keep_on_max", False):
-                out.append(w)
+            add_widget(w)
         elif item.layout() is not None:
             walk(item.layout())
     return out

@@ -647,19 +647,28 @@ class XAViewer(AbstractViewer):
         # ECG strip sits directly under the angio image (hidden until V
         # toggles it on, and only on series that carry an ECG waveform).
         layout.addWidget(self._ecg_strip)
-        layout.addWidget(self._build_plane_bar())
+        # Below-image bars (Plane / transport / readout) go in a height-cappable
+        # scroll container so multi-pane (compact) mode keeps ≥50% for the image
+        # — overflow scrolls (see ImageFloorMixin).
+        self._below_wrap = QWidget()
+        _bc = QVBoxLayout(self._below_wrap)
+        _bc.setContentsMargins(0, 0, 0, 0)
+        _bc.setSpacing(0)
+        _bc.addWidget(self._build_plane_bar())
         # Transport (Play + seek) wrapped in a widget flagged to SURVIVE the
         # shell's "Max Image" (Hide Buttons) so playback stays usable while
         # the rest of the chrome is hidden.
         self._transport_bar = QWidget()
         self._transport_bar.setLayout(self._build_transport())
         self._transport_bar._mdv_keep_on_max = True
-        layout.addWidget(self._transport_bar)
+        _bc.addWidget(self._transport_bar)
         # W/L is rarely used on XA/IVUS and ate a permanent toolbar row, so it
         # now lives in a small popup opened from the image right-click ▸
         # Change W/L (built here so the sliders exist before load_series).
         self._build_wl_dialog()
-        layout.addWidget(self.readout)
+        _bc.addWidget(self.readout)
+        self._below_scroll = self._make_chrome_scroll(self._below_wrap)
+        layout.addWidget(self._below_scroll)
         # Left-align every toolbar button's caption so a too-narrow button shows
         # the START of its label (e.g. "Clear All Result", the tool names) rather
         # than centring it and clipping both ends. Include VERTICAL padding: a
@@ -1301,6 +1310,9 @@ class XAViewer(AbstractViewer):
             if not hasattr(self, "_base_layout_spacing"):
                 self._base_layout_spacing = lay.spacing()
             lay.setSpacing(0 if on else self._base_layout_spacing)
+        # Cap the below-image bars so ≥50% of the pane stays image.
+        self._mdv_compact = on
+        self._apply_image_floor()
 
     def _refresh_seek_style(self) -> None:
         """Apply the seek-bar stylesheet for the current compact + playable
