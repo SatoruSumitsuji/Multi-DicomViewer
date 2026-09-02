@@ -3533,21 +3533,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_update_highlight()
 
     def _lvv_hu_changed(self) -> None:
-        """HU 下限/上限 changed: the computed LV-Blood region (and any Auto-Endo
-        derived from it) no longer matches, so drop the 水色 region and fall back
-        to the instant 全域HU tint. Re-press LV-Blood表示 to recompute for the new
-        range. A manually-edited Endo is retained (never auto-discarded)."""
-        if getattr(self, "_lvv_mask_on", False):
-            self._lvv_mask_on = False
-            self._lvv_mask_btn.setChecked(False)
-            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
-            self._lvv_hl_on = True
-            self._lvv_hl_btn.setChecked(True)
-            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-            self._lvv_update_mask()
-        # The auto Endo is derived from the blood pool, so a HU change makes it
-        # stale: drop it + hide Auto-Endo表示 (re-press to recompute). The
-        # hand-edited Manual Endo is RETAINED (never auto-discarded).
+        """HU 下限/上限 changed. Keep the CURRENT view mode (don't flip 全域HU ⇔
+        LV-Blood): if LV-Blood表示 is on, recompute the 水色 region for the new
+        range and keep showing it (debounced so rapid 下限/上限 steps coalesce
+        into one recompute); 全域HU表示 just refreshes its instant tint. The
+        Auto-Endo derived from the blood pool is stale, so it is dropped (re-press
+        Auto-Endo表示 to recompute); a hand-edited Manual Endo is RETAINED."""
+        # Auto Endo is derived from the blood pool → stale on any HU change.
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
@@ -3559,7 +3551,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_auto_endo_btn.setChecked(False)
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             self._lvv_show_endo(render=False)
-        self._lvv_update_highlight()
+        if getattr(self, "_lvv_mask_on", False):
+            # Stay in LV-Blood表示 — recompute the 水色 region for the new HU
+            # range (debounced). The previous region shows until it lands.
+            self._lvv_schedule_blood_recalc()
+        else:
+            # 全域HU tint (or nothing) → just refresh the instant preview.
+            self._lvv_update_highlight()
+
+    def _lvv_schedule_blood_recalc(self) -> None:
+        """Debounce LV-Blood recomputes so stepping 下限/上限 a few times fires a
+        single (few-second, modal) recompute instead of one per arrow click."""
+        tmr = getattr(self, "_lvv_hu_recalc_timer", None)
+        if tmr is None:
+            tmr = QTimer(self)
+            tmr.setSingleShot(True)
+            tmr.timeout.connect(self._lvv_do_blood_recalc)
+            self._lvv_hu_recalc_timer = tmr
+        tmr.start(400)
+
+    def _lvv_do_blood_recalc(self) -> None:
+        # Only if still in Blood/Endo and LV-Blood表示 is the intended view.
+        if self._lvv is None or not getattr(self, "_lvv_mask_on", False):
+            return
+        self._lvv_calc()          # signature differs → recomputes + re-shows 水色
 
     def _lvv_close_changed(self) -> None:
         """Auto-Endo 肉柱 bridging (close_mm) changed → the auto Endo is stale.
