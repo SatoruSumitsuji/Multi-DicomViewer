@@ -2263,10 +2263,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measure_bar.setVisible(False)
         lay.addWidget(self._measure_bar)
         lay.addLayout(imgrow, 1)
-        lay.addWidget(plane_bar)
-        lay.addWidget(self._build_seek_bar())
-        lay.addWidget(self._build_cpr_bar())
-        lay.addWidget(self._build_lv_bar())
+        # The below-image control bars (Plane / seek / CPR / LV) live in a
+        # height-cappable scroll container so multi-pane (compact) mode can keep
+        # ≥50% of the pane for the image — overflow scrolls (see ImageFloorMixin).
+        self._below_wrap = QWidget()
+        below_col = QVBoxLayout(self._below_wrap)
+        below_col.setContentsMargins(0, 0, 0, 0)
+        below_col.setSpacing(0)
+        below_col.addWidget(plane_bar)
+        below_col.addWidget(self._build_seek_bar())
+        below_col.addWidget(self._build_cpr_bar())
+        below_col.addWidget(self._build_lv_bar())
+        self._below_scroll = self._make_chrome_scroll(self._below_wrap)
+        lay.addWidget(self._below_scroll)
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -5386,6 +5395,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFixedHeight(bar.sizeHint().height() + 14)
+        # Kept so compact (multi-pane) mode can re-shrink the strip's height.
+        self._toolbar_bar = bar
+        self._toolbar_scroll = scroll
         return scroll
 
     def set_overlay_font_pt(self, pt: int) -> None:
@@ -12041,15 +12053,36 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cap.setVisible(False)   # no dangling "Series:" caption
 
     def set_compact(self, on: bool) -> None:
-        """Shrink the bottom slice scrubber (Frame label + slider + N/total)
-        for multi-row layouts so it matches the cine viewers' compact
-        transport. Called by the shell from _apply_layout."""
+        """Compact multi-row layouts: shrink the scrubber AND the whole control
+        chrome (toolbar + Plane/seek/CPR/LV bars), and cap the below-image bars
+        so ≥50% of the pane stays image (overflow scrolls). Called by the shell
+        from _apply_layout."""
         on = bool(on)
         if getattr(self, "_ct_compact", False) == on:
             return
         self._ct_compact = on
+        self._mdv_compact = on          # drives ImageFloorMixin._apply_image_floor
         if hasattr(self, "_seek_slider"):
             self._apply_seek_compact(on)
+        self._apply_chrome_compact(on)
+        self._apply_image_floor()
+
+    def _apply_chrome_compact(self, on: bool) -> None:
+        """Shrink chrome button/label fonts (font-size only — leaves each
+        button's own colour stylesheet intact) and re-shrink the top toolbar's
+        fixed height, so a multi-pane pane spends less height on controls."""
+        qss = ("QPushButton,QToolButton,QLabel,QComboBox,QSpinBox,"
+               "QDoubleSpinBox{font-size:11px;}") if on else ""
+        for w in (getattr(self, "_toolbar_bar", None),
+                  getattr(self, "_below_wrap", None),
+                  getattr(self, "_measure_bar", None)):
+            if w is not None:
+                w.setStyleSheet(qss)
+        tb = getattr(self, "_toolbar_bar", None)
+        sc = getattr(self, "_toolbar_scroll", None)
+        if tb is not None and sc is not None:
+            tb.ensurePolished()
+            sc.setFixedHeight(tb.sizeHint().height() + (6 if on else 14))
 
     def _apply_seek_compact(self, on: bool) -> None:
         base = getattr(self, "_seek_base_pt", 9.0) or 9.0
