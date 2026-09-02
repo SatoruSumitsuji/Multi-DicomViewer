@@ -2684,6 +2684,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             lambda _i: self._lvv_method_changed())
         gb.addWidget(self._lvv_method_lbl)
         gb.addWidget(self._lvv_method_combo)
+        self._lvv_update_close_ui()   # 肉柱 spin label/enable follows the method
         # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from the auto
         # Endo the first time; the hand-edited border is retained across HU
         # changes (Clear it to re-seed from a fresh auto).
@@ -3541,7 +3542,38 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Auto-Endo bridging METHOD changed (Close/Polar/Hull) → auto Endo is
         stale; drop it so a re-press recomputes with the new method."""
         self._lv_endo_method = self._lvv_method_combo.currentData() or "close"
+        self._lvv_update_close_ui()
         self._lvv_invalidate_auto_endo()
+
+    # The single 肉柱 spin is context-sensitive: its label/meaning/enabled state
+    # follow the chosen method. Advanced per-method values live in Settings.
+    _LVV_KNOB_ROLE = {
+        "hull_smooth": ("膨らみ", True,
+                        "凸包の頂点間(凹み)を外へ膨らませる量。大=より丸く、"
+                        "小=凸包の直線に近い。凸辺(心筋側)は動かさない。"),
+        "hull_round":  ("丸み", True,
+                        "短軸レベル凸包を円に近づける度合い。大=より円形。"),
+        "polar":       ("橋渡し", True,
+                        "乳頭筋/肉柱の谷を橋渡しする角度幅。大=谷を大きく跨ぐ。"),
+        "hull":        ("—", False,
+                        "凸包(層)はこのノブの影響を受けません(凸包そのまま)。"),
+        "convex3d":    ("—", False,
+                        "3D凸包はこのノブの影響を受けません。"),
+    }
+
+    def _lvv_update_close_ui(self) -> None:
+        """Relabel / enable the single 肉柱 spin to match the current method so it
+        reads as one context-sensitive knob (膨らみ / 丸み / 橋渡し / none)."""
+        if getattr(self, "_lvv_close_spin", None) is None:
+            return
+        method = getattr(self, "_lv_endo_method", "hull_smooth")
+        role, on, tip = self._LVV_KNOB_ROLE.get(
+            method, self._LVV_KNOB_ROLE["hull_smooth"])
+        if getattr(self, "_lvv_close_lbl", None) is not None:
+            self._lvv_close_lbl.setText(t(role) if role != "—" else "肉柱")
+            self._lvv_close_lbl.setEnabled(on)
+        self._lvv_close_spin.setEnabled(on)
+        self._lvv_close_spin.setToolTip(t(tip))
 
     def _lvv_invalidate_auto_endo(self) -> None:
         """Drop the cached auto Endo + hide Auto-Endo表示 so the next press
@@ -4306,6 +4338,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         model.build()
         return model
 
+    def _lv_endo_adv(self) -> dict:
+        """Advanced Auto-Endo params (Settings → LV Auto-Endo), cached. Re-read on
+        demand after a Settings change via `_lv_endo_adv_refresh`."""
+        adv = getattr(self, "_lv_endo_adv_cache", None)
+        if adv is None:
+            try:
+                from multi_dicomviewer.core import settings as _st
+                adv = _st.load_lv_endo_params()
+            except Exception:                            # noqa: BLE001
+                adv = {"min_chord_mm": 5.0, "n_meridians": 240,
+                       "grid_mm": 0.7, "step_mm": 0.45}
+            self._lv_endo_adv_cache = adv
+        return adv
+
+    def _lv_endo_adv_refresh(self) -> None:
+        """Drop the cached advanced params so the next Auto-Endo re-reads them, and
+        invalidate any built Endo so a re-press rebuilds it with the new values."""
+        self._lv_endo_adv_cache = None
+        try:
+            self._lvv_invalidate_auto_endo()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _lvv_build_endo_mask(self):
         """Auto-Endo = per short-axis level, the OUTERMOST-blood envelope along
         many radial directions from the LV axis (radial-max), the papillary /
@@ -4336,14 +4391,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
-        # 肉柱(close_mm) → angular span bridged across papillary notches; the 3-D
-        # closing is kept small (de-stripe only) so the Endo stays tight.
-        close_mm = float(getattr(self, "_lv_endo_close_mm", 5.0))
-        bridge = max(10.0, close_mm * 4.0)
+        # 肉柱 = the single context-sensitive knob on the Blood/Endo bar; how it is
+        # applied depends on the method (bridge span / roundness / bulge). Advanced
+        # per-method values live in Settings → LV Auto-Endo.
+        adv = self._lv_endo_adv()
+        knob = float(getattr(self, "_lv_endo_close_mm", 5.0))
         method = getattr(self, "_lv_endo_method", "polar")
-        # 凸包(丸): 肉柱 also sets how far the hull rounds toward a circle
-        # (0..~0.85). 20 mm ≈ 0.83 → quite round; small 肉柱 ≈ the plain hull.
-        roundness = min(0.85, close_mm / 24.0) if method == "hull_round" else 0.0
+        # 放射: 肉柱 → angular span bridged across papillary notches.
+        bridge = max(10.0, knob * 4.0)
+        # 凸包(丸): 肉柱 → how far the hull rounds toward a circle (0..~0.85).
+        # 20 mm ≈ 0.83 → quite round; small 肉柱 ≈ the plain hull.
+        roundness = min(0.85, knob / 24.0) if method == "hull_round" else 0.0
+        # 凸包滑: 肉柱 → how much the concave chords bulge outward (膨らみ).
+        # knob=5 (default) → 0.20 = the approved default look; 1→0.05, 20→0.6.
+        bulge_frac = max(0.05, min(0.6, knob / 25.0))
+        grid_mm = float(adv["grid_mm"])
+        n_mer = int(adv["n_meridians"])
+        min_chord = float(adv["min_chord_mm"])
         result: dict = {}
 
         class _MaskWorker(QThread):
@@ -4358,9 +4422,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                             blood, dims, apex, axis_dir, radial0,
                             along_apex=1.0, along_base=along_base,
                             sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
-                            grid_mm=0.7, method=method,
-                            bridge_deg=bridge, n_meridians=240,
-                            roundness=roundness)
+                            grid_mm=grid_mm, method=method,
+                            bridge_deg=bridge, n_meridians=n_mer,
+                            roundness=roundness, bulge_frac=bulge_frac,
+                            min_chord_mm=min_chord)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 
@@ -4482,7 +4547,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     polys = region_outline_on_plane(
                         self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
                         self._dims, self._pc[key], u_ax, v_ax,
-                        half_mm=half, step_mm=0.45, convex=False)
+                        half_mm=half, step_mm=float(self._lv_endo_adv()["step_mm"]),
+                        convex=False)
                 except Exception:                        # noqa: BLE001
                     polys = []
                 for poly in polys:

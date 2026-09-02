@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QDoubleSpinBox,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -34,7 +35,7 @@ class SettingsDialog(QDialog):
     display-quality dict; *on_ct_color* opens the CT colour-map editor."""
 
     def __init__(self, caps: dict, quality: dict, on_ct_color,
-                 on_advanced=None, parent=None):
+                 on_advanced=None, parent=None, lv_endo=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         self._on_ct_color = on_ct_color
@@ -137,6 +138,54 @@ class SettingsDialog(QDialog):
             ctqlay.addWidget(rb)
         root.addWidget(gb_ctq)
 
+        # ---- LV Auto-Endo (advanced) --------------------------------------
+        # The everyday 肉柱 knob lives on the Blood/Endo bar; these are the rarely
+        # touched per-method shape/resolution values. Defaults are good.
+        lv = dict(settings._LV_ENDO_DEFAULTS)
+        if isinstance(lv_endo, dict):
+            lv.update({k: lv_endo[k] for k in lv if k in lv_endo})
+        gb_lv = QGroupBox(t("LV Auto-Endo (advanced)"))
+        lvform = QFormLayout(gb_lv)
+        lvnote = QLabel(
+            t("Advanced Auto-Endo shape/resolution. Normally leave these — the "
+              "everyday 肉柱 knob is on the Blood/Endo bar. Smaller resolution "
+              "values are finer but slower."))
+        lvnote.setWordWrap(True)
+        lvform.addRow(lvnote)
+        self._lv_spins: dict[str, QDoubleSpinBox | QSpinBox] = {}
+        # (key, label, tip, is_int, lo, hi, step, decimals, suffix)
+        lv_fields = (
+            ("min_chord_mm", t("凸包滑: 凹み判定 (弦長)"),
+             t("Hull edges longer than this (mm) are treated as concavities and "
+               "bulged; shorter = convex wall, kept straight."),
+             False, 1.0, 30.0, 0.5, 1, t(" mm")),
+            ("n_meridians", t("放射: 本数"),
+             t("Number of radial directions used by the 放射 method. Higher = "
+               "finer angular detail, a little slower."),
+             True, 60, 720, 20, 0, ""),
+            ("grid_mm", t("マスク解像度"),
+             t("Auto-Endo mask sampling pitch (mm). Smaller = finer surface, "
+               "slower to compute."),
+             False, 0.3, 2.0, 0.1, 1, t(" mm")),
+            ("step_mm", t("輪郭解像度"),
+             t("Displayed Endo outline sampling pitch (mm). Smaller = smoother "
+               "line, a little slower to draw."),
+             False, 0.3, 1.5, 0.05, 2, t(" mm")),
+        )
+        for key, label, tip, is_int, lo, hi, step, dec, suf in lv_fields:
+            sb = QSpinBox() if is_int else QDoubleSpinBox()
+            if not is_int:
+                sb.setDecimals(dec)
+            sb.setRange(lo, hi)
+            sb.setSingleStep(step)
+            sb.setValue(int(lv[key]) if is_int else float(lv[key]))
+            if suf:
+                sb.setSuffix(suf)
+            sb.setToolTip(tip)
+            self._lv_spins[key] = sb
+            lvform.addRow(label, sb)
+        root.addWidget(gb_lv)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -187,4 +236,13 @@ class SettingsDialog(QDialog):
             if rb.isChecked():
                 out["ct_quality_mode"] = val
                 break
+        return out
+
+    def lv_endo(self) -> dict:
+        """Chosen advanced Auto-Endo params (min_chord_mm / n_meridians /
+        grid_mm / step_mm)."""
+        out = {}
+        for k, sb in self._lv_spins.items():
+            v = sb.value()
+            out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
         return out
