@@ -1723,6 +1723,16 @@ class MainWindow(QMainWindow):
             label = self._pane_bar(se)
         except Exception:                                # noqa: BLE001
             label = getattr(se, "label", "")
+        # Folders the series' files live in, so a saved presentation can be
+        # re-opened on another day by re-scanning them (see case_open_folders).
+        src_dirs = []
+        try:
+            for f in (se.files or []):
+                d = os.path.dirname(f)
+                if d and d not in src_dirs:
+                    src_dirs.append(d)
+        except Exception:                                # noqa: BLE001
+            pass
         return {
             "series_uid": uid,
             "modality": (getattr(se, "kind", "") or "").upper(),
@@ -1733,7 +1743,24 @@ class MainWindow(QMainWindow):
             "comment": "",
             "view_state": state,
             "label": label,
+            "src_dirs": src_dirs,
         }
+
+    def case_series_loaded(self, uid: str) -> bool:
+        """True if the series UID currently resolves to a loaded series."""
+        return bool(uid) and uid in self._series_by_uid
+
+    def case_open_folders(self, folders: list) -> int:
+        """Re-scan the given folders so a saved presentation's series get
+        (re)indexed. Async — series bind when the user next clicks 表示.
+        Returns how many folders were actually queued."""
+        dirs = []
+        for f in (folders or []):
+            if f and os.path.isdir(f) and f not in dirs:
+                dirs.append(f)
+        if dirs:
+            self._load_paths(dirs)
+        return len(dirs)
 
     def case_capture_active(self) -> dict | None:
         """A row for the active pane's series (falls back to the first shown
