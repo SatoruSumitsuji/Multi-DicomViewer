@@ -316,13 +316,15 @@ class LayoutGridPicker(QWidget):
                 max(a[0], b[0]), max(a[1], b[1]))
 
     def _hi_rect(self):
-        """The rectangle to highlight right now: the live drag, else the hovered
-        single cell, else the applied layout."""
+        """The rectangle to FILL blue as 'would apply': the live drag, else the
+        hovered single cell. None at rest — so the resting grid shows pane
+        occupancy (which panes hold an image) instead of a blue block covering
+        it; the applied layout is drawn as an outline in paintEvent instead."""
         if self._anchor is not None and self._cur is not None:
             return self._norm(self._anchor, self._cur)
         if self._cur is not None:
             return (self._cur[0], self._cur[1], self._cur[0], self._cur[1])
-        return self._current_rect
+        return None
 
     def mousePressEvent(self, e):
         hit = self._cell_at(e.position().x(), e.position().y())
@@ -355,19 +357,32 @@ class LayoutGridPicker(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.fillRect(self.rect(), QColor("#2b2b2b"))
-        r0, c0, r1, c1 = self._hi_rect()
+        hi = self._hi_rect()
         on = QColor("#4a90d9")          # inside the selection (would apply)
-        off_data = QColor("#8a8a8a")    # outside, pane HAS data
-        off_empty = QColor("#3a3a3a")   # outside, pane is empty
+        off_data = QColor("#8a8a8a")    # pane HAS data (image loaded)
+        off_empty = QColor("#3a3a3a")   # pane is empty
         edge = QColor("#1f1f1f")
         for r in range(self._rows):
             for c in range(self._cols):
-                sel = r0 <= r <= r1 and c0 <= c <= c1
+                sel = (hi is not None and hi[0] <= r <= hi[2]
+                       and hi[1] <= c <= hi[3])
                 brush = on if sel else (
                     off_data if (r, c) in self._occupied else off_empty)
                 p.setPen(QPen(edge, 1))
                 p.setBrush(brush)
                 p.drawRoundedRect(self._cell_rect(r, c), 3, 3)
+        # At rest (no hover/drag) the applied layout is shown as an OUTLINE so it
+        # doesn't cover the occupancy shading underneath; the caption tracks it.
+        if hi is None:
+            r0, c0, r1, c1 = self._current_rect
+            tl, br = self._cell_rect(r0, c0), self._cell_rect(r1, c1)
+            p.setPen(QPen(on, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(
+                QRect(tl.left(), tl.top(),
+                      br.right() - tl.left(), br.bottom() - tl.top()), 3, 3)
+        else:
+            r0, c0, r1, c1 = hi
         # caption "R×C"
         p.setPen(QColor("#e0e0e0"))
         p.drawText(
