@@ -14,6 +14,7 @@ event within 10 s of an XA event is placed just after it — see core logic).
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import Qt
@@ -168,6 +169,10 @@ class CasePresentationWindow(QMainWindow):
         b_del = QPushButton(t("削除"))
         b_del.clicked.connect(self._delete_selected)
         bar2.addWidget(b_del)
+        b_refresh = QPushButton(t("状態更新"))
+        b_refresh.setToolTip(t("各行の読込状態を再確認 (フォルダ読込完了後に押す)"))
+        b_refresh.clicked.connect(lambda: self._rebuild())
+        bar2.addWidget(b_refresh)
         bar2.addStretch(1)
         b_save = QPushButton(t("保存…"))
         b_save.clicked.connect(self._save)
@@ -343,6 +348,7 @@ class CasePresentationWindow(QMainWindow):
                 "time": r.get("time", ""),
                 "comment": r.get("comment", ""),
                 "label": r.get("label", ""),
+                "src_dirs": r.get("src_dirs", []),
                 "view_state": json_safe(r.get("view_state", {})),
             } for r in self._rows],
         }
@@ -380,11 +386,41 @@ class CasePresentationWindow(QMainWindow):
                 "time": r.get("time", ""),
                 "comment": r.get("comment", ""),
                 "label": r.get("label", ""),
+                "src_dirs": r.get("src_dirs", []),
                 "view_state": r.get("view_state", {}),
             })
         self._refresh_ref_combo()
         self._rebuild()
         self._hint.setText(t("読込みました: {p}", p=path))
+        self._offer_open_missing()
+
+    def _offer_open_missing(self) -> None:
+        """After a load, offer to re-scan the folders of any series that aren't
+        currently loaded, so their 表示 buttons work."""
+        missing = [r for r in self._rows
+                   if not self._shell.case_series_loaded(r.get("series_uid", ""))]
+        if not missing:
+            return
+        dirs = []
+        for r in missing:
+            for d in r.get("src_dirs", []):
+                if d and d not in dirs:
+                    dirs.append(d)
+        if not dirs:
+            self._warn(t(
+                "未読込のシリーズが {n} 件ありますが、保存に元フォルダ情報が"
+                "無いため自動で開けません。元のDICOMフォルダを開いてください。",
+                n=len(missing)))
+            return
+        ans = QMessageBox.question(
+            self, t("Case Presentation"),
+            t("未読込のシリーズが {n} 件あります。関連フォルダ {m} 個を開いて"
+              "読み込みますか?", n=len(missing), m=len(dirs)))
+        if ans == QMessageBox.StandardButton.Yes:
+            opened = self._shell.case_open_folders(dirs)
+            self._hint.setText(t(
+                "{m} 個のフォルダを読み込み中… 完了後に「状態更新」を押すと"
+                "[表示]が有効になります。", m=opened))
 
     # ----------------------------------------------------------- helpers
     def _on_ref_changed(self, text: str) -> None:
@@ -442,6 +478,11 @@ class CasePresentationWindow(QMainWindow):
                 cm.setBackground(QColor(255, 235, 235))    # empty = must fill
             tb.setItem(i, C_COMMENT, cm)
             btn = QPushButton(t("表示"))
+            if not self._shell.case_series_loaded(r.get("series_uid", "")):
+                btn.setStyleSheet("color:#999;")
+                btn.setToolTip(t(
+                    "未読込 — 「読込」時に自動で開くか、元フォルダを開いて"
+                    "から「状態更新」を押してください"))
             btn.clicked.connect(lambda _c, row=r: self._show_row(row))
             tb.setCellWidget(i, C_SHOW, btn)
         tb.blockSignals(False)
