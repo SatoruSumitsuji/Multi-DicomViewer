@@ -1472,6 +1472,14 @@ class MainWindow(QMainWindow):
         ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
+        self._casepres_act = QAction(t("Case Presentation…"), self)
+        self._casepres_act.setToolTip(t(
+            "Build a time-ordered list of the open series (XA / IVUS / CT …) "
+            "with your comments; click 表示 on a row to bring that image back "
+            "exactly as captured — for walking through a case"
+        ))
+        self._casepres_act.triggered.connect(self._open_case_presentation)
+        tm.addAction(self._casepres_act)
 
         tm.addSeparator()
         self._dicomcheck_act = QAction(t("DicomCheck…"), self)
@@ -1654,6 +1662,134 @@ class MainWindow(QMainWindow):
         self._as_taskbar_window(self._coreg_win)
         self._coreg_win.showMaximized()
         self._coreg_win.raise_()
+
+    # ============================ Case Presentation ====================
+    def _open_case_presentation(self) -> None:
+        """Tools ▸ Case Presentation — a time-ordered table of the open series
+        with comments; each row's 表示 button re-displays that image exactly as
+        captured. A single window instance is kept so the list survives closing."""
+        from multi_dicomviewer.ui.case_presentation_window import (
+            CasePresentationWindow)
+        w = getattr(self, "_casepres_win", None)
+        if w is None:
+            w = CasePresentationWindow(self)          # owner-less (own taskbar)
+            self._as_taskbar_window(w)
+            self._casepres_win = w
+        w.show()
+        w.raise_()
+        w.activateWindow()
+
+    @staticmethod
+    def _case_extract_dt(hdr) -> tuple:
+        """(date 'YYYYMMDD', time 'HHMMSS[.ffffff]') from a DICOM header, trying
+        Acquisition → Content → Series → Study. '' for anything missing."""
+        def g(*names):
+            for n in names:
+                v = getattr(hdr, n, None)
+                if v:
+                    return str(v)
+            return ""
+        adt = g("AcquisitionDateTime")
+        if len(adt) >= 8:
+            return adt[0:8], (adt[8:] if len(adt) > 8 else "")
+        date = g("AcquisitionDate", "ContentDate", "SeriesDate", "StudyDate")
+        tm = g("AcquisitionTime", "ContentTime", "SeriesTime", "StudyTime")
+        return date, tm
+
+    def _case_capture_one(self, pane) -> dict | None:
+        """Snapshot one pane's shown series into a Case-Presentation row, or
+        None if the pane holds no resolvable series."""
+        uid = pane.shown_series_uid()
+        if not uid:
+            return None
+        se = self._series_by_uid.get(uid)
+        v = pane.current_viewer()
+        if se is None or v is None:
+            return None
+        date, tm = "", ""
+        try:
+            hdr = v.current_header() if hasattr(v, "current_header") else None
+            if hdr is not None:
+                date, tm = self._case_extract_dt(hdr)
+        except Exception:                                # noqa: BLE001
+            pass
+        state = {}
+        try:
+            if hasattr(v, "capture_view_state"):
+                state = v.capture_view_state()
+        except Exception:                                # noqa: BLE001
+            state = {}
+        try:
+            label = self._pane_bar(se)
+        except Exception:                                # noqa: BLE001
+            label = getattr(se, "label", "")
+        return {
+            "series_uid": uid,
+            "modality": (getattr(se, "kind", "") or "").upper(),
+            "number": se.number,
+            "pane_index": pane.index,
+            "date": date,
+            "time": tm,
+            "comment": "",
+            "view_state": state,
+            "label": label,
+        }
+
+    def case_capture_active(self) -> dict | None:
+        """A row for the active pane's series (falls back to the first shown
+        pane that has data). None if nothing is displayed."""
+        row = self._case_capture_one(self._active)
+        if row is None:
+            for p in self._shown_panes():
+                row = self._case_capture_one(p)
+                if row is not None:
+                    break
+        return row
+
+    def case_capture_all(self) -> list:
+        """One row per currently-shown pane that holds a series."""
+        out, seen = [], set()
+        for p in self._shown_panes():
+            r = self._case_capture_one(p)
+            if r is None:
+                continue
+            key = (r["pane_index"], r["series_uid"])
+            if key not in seen:
+                seen.add(key)
+                out.append(r)
+        return out
+
+    def case_redisplay(self, row: dict) -> bool:
+        """Bring a captured row's series back into view and restore its state.
+        False if that series is no longer loaded."""
+        uid = row.get("series_uid")
+        se = self._series_by_uid.get(uid) if uid else None
+        if se is None:
+            return False
+        shown = self._shown_panes()
+        idx = row.get("pane_index", 0)
+        if isinstance(idx, int) and 0 <= idx < len(self._panes) \
+                and self._panes[idx] in shown:
+            pane = self._panes[idx]
+        elif self._active in shown:
+            pane = self._active
+        else:
+            pane = shown[0] if shown else self._active
+        self._set_active_pane(pane)
+        already = pane.is_loaded(se.modality, se.series_uid)
+        self._open_series(se, pane)
+        v = pane.current_viewer()
+        st = row.get("view_state")
+        if st and v is not None and hasattr(v, "restore_view_state"):
+            if already:
+                v.restore_view_state(st)
+            else:
+                # Not yet loaded: _open_series decodes off-thread; defer the
+                # state restore until the pixels are in.
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(
+                    450, lambda vv=v, s=st: vv.restore_view_state(s))
+        return True
 
     def _open_dicom_check(self) -> None:
         """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
@@ -2473,7 +2609,7 @@ class MainWindow(QMainWindow):
     #: Attribute names on self; closed together with the main window below.
     _TOOL_WINDOW_ATTRS = (
         "_coreg_win", "_multisync", "_ortho_win", "_rupture_win",
-        "_dicomcheck_win", "_dicomfolder_win",
+        "_dicomcheck_win", "_dicomfolder_win", "_casepres_win",
     )
 
     def _as_taskbar_window(self, win):
