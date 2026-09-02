@@ -2267,6 +2267,63 @@ class XAViewer(AbstractViewer):
         finally:
             self._suspend_frame_signal = False
 
+    # ---- Case Presentation: full 2-D view-state capture / restore ------
+    def capture_view_state(self) -> dict:
+        """Full 2-D display state for the Case Presentation tool: frame +
+        zoom/pan + window/level. (IVUS extends this with the long-axis angle.)"""
+        st = {
+            "kind": "xa",
+            "frame": int(getattr(self, "_frame", 0)),
+            "window": float(self._window),
+            "level": float(self._level),
+            "zoom": float(getattr(self.canvas, "_zoom", 1.0)),
+            "pan": list(getattr(self.canvas, "_pan", [0.0, 0.0])),
+        }
+        if self._wl_override is not None:
+            st["wl_override"] = [float(self._wl_override[0]),
+                                 float(self._wl_override[1])]
+        return st
+
+    def restore_view_state(self, st: dict) -> None:
+        """Re-apply a state from capture_view_state (best effort — never
+        raises so a re-display always at least shows the series)."""
+        if not isinstance(st, dict):
+            return
+        try:
+            w, lv = st.get("window"), st.get("level")
+            if w is not None and lv is not None:
+                self._window, self._level = float(w), float(lv)
+                self._wl_override = (self._window, self._level)
+                for sl, val in (
+                        (getattr(self, "win_slider", None), self._window),
+                        (getattr(self, "lvl_slider", None), self._level)):
+                    if sl is not None:
+                        sl.blockSignals(True)
+                        sl.setValue(int(val))
+                        sl.blockSignals(False)
+                if hasattr(self, "_update_wl_labels"):
+                    self._update_wl_labels()
+                self._refresh_wl_lut()
+            zoom, pan = st.get("zoom"), st.get("pan")
+            for c in (getattr(self, "canvas", None),
+                      getattr(self, "canvas2", None)):
+                if c is None:
+                    continue
+                if zoom is not None:
+                    c._zoom = float(zoom)
+                if pan is not None and len(pan) == 2:
+                    c._pan = [float(pan[0]), float(pan[1])]
+            fr = st.get("frame")
+            if fr is not None:
+                self.goto_frame(int(fr))
+            self._render()
+            for c in (getattr(self, "canvas", None),
+                      getattr(self, "canvas2", None)):
+                if c is not None:
+                    c.update()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _set_fps(self, fps: float):
         self._fps = fps
         if self._timer.isActive():

@@ -1054,6 +1054,25 @@ class IVUSViewer(XAViewer):
         # Drag ended → crisp full-resolution strip.
         self._rebuild_long_axis(draft=False)
 
+    # ---- Case Presentation: extend the 2-D state with the long-axis angle
+    def capture_view_state(self) -> dict:
+        st = super().capture_view_state()
+        st["kind"] = "ivus"
+        st["la_angle"] = float(getattr(self, "_la_angle", 0.0))
+        return st
+
+    def restore_view_state(self, st: dict) -> None:
+        super().restore_view_state(st)
+        if not isinstance(st, dict) or st.get("la_angle") is None:
+            return
+        try:
+            self._la_angle = float(st["la_angle"]) % (2 * math.pi)
+            if hasattr(self, "_refresh_center_marker"):
+                self._refresh_center_marker()
+            self._rebuild_long_axis(draft=False)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _on_la_angle_set(self, angle: float) -> None:
         """Cut-line drag on the cross-section set an absolute long-axis
         angle. Sync the angle, redraw the cross-section guide on both

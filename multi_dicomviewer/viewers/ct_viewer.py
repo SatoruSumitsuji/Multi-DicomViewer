@@ -7311,6 +7311,45 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._mode == "2D":
             self._sync_seek()
 
+    # ---- Case Presentation: full view-state capture / restore ----------
+    def capture_view_state(self) -> dict:
+        """Full display state for the Case Presentation tool (slice + MPR
+        camera + W/L + CPR). Reuses the undo/redo snapshot."""
+        try:
+            st = dict(self._view_snapshot())
+        except Exception:                                # noqa: BLE001
+            st = {}
+        st["kind"] = "ct"
+        return st
+
+    def _ct_rehydrate(self, st: dict) -> dict:
+        """Coerce array-like keys back to ndarray so a state that round-tripped
+        through JSON (lists) restores like a live one."""
+        s = dict(st)
+        c = s.get("center")
+        if isinstance(c, list):
+            s["center"] = np.asarray(c, float)
+        if isinstance(s.get("pc"), dict):
+            s["pc"] = {k: (np.asarray(v, float) if isinstance(v, list) else v)
+                       for k, v in s["pc"].items()}
+        if isinstance(s.get("frame"), dict):
+            s["frame"] = {k: tuple(np.asarray(a, float) for a in v)
+                          for k, v in s["frame"].items()}
+        ax = s.get("axes2d")
+        if isinstance(ax, list) and len(ax) == 2:
+            s["axes2d"] = (np.asarray(ax[0], float), np.asarray(ax[1], float))
+        if isinstance(s.get("cpr_T"), list):
+            s["cpr_T"] = np.asarray(s["cpr_T"], float)
+        return s
+
+    def restore_view_state(self, st: dict) -> None:
+        if not isinstance(st, dict):
+            return
+        try:
+            self._view_restore(self._ct_rehydrate(st))
+        except Exception:                                # noqa: BLE001
+            pass
+
     # LV kept the same public names; they now feed the unified stack.
     def _lv_reset_undo(self) -> None:
         self._undo_clear()
