@@ -1238,6 +1238,18 @@ class _Pane:
         tri.GetProperty().SetColor(0.0, 0.95, 0.25)   # green: stands out
         self.ren.AddActor(tri)
         self._overlay_actors.append(tri)
+        # ○ = section-line DIRECTION marker on the crosshair (a slightly smaller
+        # sibling of the LV/Epi ○ handle) so every cross-section shows which way
+        # it is oriented, in Blood/Endo and plain observation too — not just LV.
+        self.dir_ring_mapper = vtkPolyDataMapper()
+        self.dir_ring_mapper.SetInputData(vtkPolyData())
+        ring = vtkActor()
+        ring.SetMapper(self.dir_ring_mapper)
+        ring.GetProperty().SetColor(1.0, 0.85, 0.0)   # crosshair yellow
+        ring.GetProperty().SetLineWidth(1.6)
+        ring.GetProperty().SetOpacity(0.9)
+        self.ren.AddActor(ring)
+        self._overlay_actors.append(ring)
         # Curved rotate-arrow shown beside a caught centreline while hovering /
         # dragging in the OUTER (rotate) zone — a hint that the gesture rotates
         # rather than parallel-moves. Empty + hidden until _set_cross_highlight
@@ -11707,6 +11719,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 for a in (d, -d)
             ])
         )
+
+        # ○ direction marker on the section (horizontal) line — a smaller sibling
+        # of the LV/Epi ○ handle, placed near the +uh visible edge, so every
+        # cross-section shows its orientation (Blood/Endo, observation, …). Its
+        # actor is in _overlay_actors, so it hides with the crosshair overlay.
+        rcr = 0.7 * self._lv_ring_radius(key)
+        rrx, rry = self._lv_ring_pos(key, ccx, ccy, float(uh[0]), float(uh[1]))
+        p.dir_ring_mapper.SetInputData(
+            _polylines_pd([self._circle_poly(rrx, rry, rcr)], z=z))
 
         other = "B" if key == "A" else "A"
         t = self._thick[other]
