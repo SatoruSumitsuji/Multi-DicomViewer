@@ -15,8 +15,8 @@ import sys
 import traceback
 
 from PyQt6.QtCore import (
-    QEvent, QMimeData, QObject, QPoint, QRect, QSize, Qt, QThread, QTimer,
-    pyqtSignal,
+    QElapsedTimer, QEvent, QMimeData, QObject, QPoint, QRect, QSize, Qt,
+    QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QAction,
@@ -176,16 +176,41 @@ PANE_MIME = "application/x-mdv-pane"
 class _LayoutButton(QPushButton):
     """Top-bar "Layout ▾" button. The picker opens on HOVER (after a short
     delay); a plain single click is inert; a DOUBLE click requests auto-fit
-    (the smallest layout that contains every pane holding an image)."""
+    (the smallest layout that contains every pane holding an image).
+
+    Double-click is detected MANUALLY (two clicks within the system interval)
+    so it works even when the picker popup is already open: the popup grabs the
+    mouse, so the first click of the pair reaches us via ``eventFilter`` on the
+    menu (which also dismisses it) and the second directly — both feed the same
+    counter. This fixes "double-click only registers after several clicks"."""
     hover_requested = pyqtSignal()
     auto_fit_requested = pyqtSignal()
-    _HOVER_MS = 200
+    _HOVER_MS = 220
 
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
+        self._menu = None
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
         self._hover_timer.timeout.connect(self.hover_requested)
+        self._click_clock = QElapsedTimer()
+        self._armed_click = False
+
+    def attach_menu(self, menu) -> None:
+        """Watch the hover popup so a click on the button while it is open still
+        counts toward a double-click (the popup's grab would swallow it)."""
+        self._menu = menu
+        menu.installEventFilter(self)
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if obj is self._menu and ev.type() in (
+                QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
+            gp = ev.globalPosition().toPoint()
+            if self.rect().contains(self.mapFromGlobal(gp)):
+                self._menu.hide()
+                self._register_click()
+                return True
+        return super().eventFilter(obj, ev)
 
     def enterEvent(self, e):  # noqa: N802 (Qt override)
         self._hover_timer.start(self._HOVER_MS)
@@ -193,19 +218,32 @@ class _LayoutButton(QPushButton):
 
     def leaveEvent(self, e):  # noqa: N802
         self._hover_timer.stop()
+        self._armed_click = False
         super().leaveEvent(e)
 
     def mousePressEvent(self, e):  # noqa: N802
-        # Single click is intentionally inert (the picker is hover-driven);
-        # cancel any pending hover-open so a click/double-click doesn't also pop
-        # the menu after the fact.
+        # Single click is inert (the picker is hover-driven); cancel any pending
+        # hover-open, and feed the manual double-click counter.
         self._hover_timer.stop()
+        self._register_click()
         e.accept()
 
     def mouseDoubleClickEvent(self, e):  # noqa: N802
+        # Fires for a clean double-click while the popup is closed.
         self._hover_timer.stop()
+        self._armed_click = False
         self.auto_fit_requested.emit()
         e.accept()
+
+    def _register_click(self) -> None:
+        if (self._armed_click
+                and self._click_clock.elapsed()
+                <= QApplication.doubleClickInterval()):
+            self._armed_click = False
+            self.auto_fit_requested.emit()
+        else:
+            self._armed_click = True
+            self._click_clock.restart()
 
 
 class LayoutGridPicker(QWidget):
@@ -2547,6 +2585,7 @@ class MainWindow(QMainWindow):
         # Hover opens the picker; single click is inert; double-click auto-fits.
         self._layout_btn.hover_requested.connect(self._open_layout_menu_hover)
         self._layout_btn.auto_fit_requested.connect(self._layout_auto_fit)
+        self._layout_btn.attach_menu(self._layout_menu)
         self._layout_menu.aboutToShow.connect(self._refresh_layout_picker)
         row.addWidget(self._layout_btn)
 
@@ -2766,12 +2805,18 @@ class MainWindow(QMainWindow):
         return f"{t('Layout')}  {self._layout_key.replace('x', '×')} ▾"
 
     def _open_layout_menu_hover(self) -> None:
-        """Hovering the Layout button pops the grid picker just below it."""
+        """Hovering the Layout button pops the grid picker just below it, with
+        the loaded-pane shading already applied (refresh BEFORE showing so the
+        first paint isn't the unshaded grid)."""
         if self._layout_menu.isVisible():
             return
+        self._refresh_layout_picker()
         pos = self._layout_btn.mapToGlobal(
             QPoint(0, self._layout_btn.height()))
         self._layout_menu.popup(pos)
+        # Force an immediate repaint with the fresh occupancy — the menu's
+        # deferred first paint could otherwise show the grid before the shading.
+        self._layout_picker.repaint()
 
     def _layout_auto_fit(self) -> None:
         """Double-click the Layout button → show the SMALLEST master-grid
