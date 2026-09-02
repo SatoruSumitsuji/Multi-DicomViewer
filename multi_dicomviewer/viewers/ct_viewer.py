@@ -9781,13 +9781,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                     out[i] = out[i] + (tgt - si) * e_s
         return [tuple(map(float, p)) for p in out]
 
-    def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0) -> bool:
-        """Move each traced long-axis plane's two BASAL end-points of the *pas*
-        border onto the common MV plane (orthogonal projection = drop a
-        perpendicular to the plane), so the border reaches the mitral-annulus
-        base exactly. Only ends within *guard_mm* of the plane snap (the apex end
-        is a whole LV away, so it's never caught). Edits are undoable and the
-        on-screen trace + model are updated. Returns True if anything moved."""
+    def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0,
+                            eps_mm: float = 0.1) -> bool:
+        """Extend each traced long-axis plane's BASAL end of the *pas* border to
+        the common MV plane by APPENDING a new terminal point = the closest point
+        on the MV plane to the end (its orthogonal projection). The user's own
+        end-point is KEPT in place (it is not moved onto the plane, which used to
+        force a re-place in SAX); the border simply gains a short extension so it
+        reaches the mitral-annulus base exactly (base = MV plane, no prism gap).
+        Only ends within *guard_mm* of the plane are extended (the apex end is a
+        whole LV away, so it's never caught); an end already on the plane
+        (within *eps_mm*) needs nothing. Edits are undoable and the on-screen
+        trace + model are updated. Returns True if anything changed."""
         if self._lv is None:
             return False
         mv = self._lv_valves.get("mitral")
@@ -9804,20 +9809,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         before = self._lv_geom_snap()
         moved = False
         for phi, arr in list(store.items()):
-            P = np.asarray(arr, float).reshape(-1, 3).copy()
+            P = np.asarray(arr, float).reshape(-1, 3)
             if len(P) < 2:
                 continue
-            hit = False
-            for e in (0, len(P) - 1):               # the two basal ends
-                d = float((P[e] - c) @ n)
-                if abs(d) <= guard_mm:
-                    P[e] = P[e] - d * n             # ⟂ projection onto the plane
-                    hit = True
-            if hit:
-                m.set_long_axis_contour(phi, P, which=pas)
-                moved = True
+            d0 = float((P[0] - c) @ n)               # first end offset to plane
+            dL = float((P[-1] - c) @ n)              # last end offset to plane
+            # New terminal = the end's ⟂ projection onto the MV plane, PREPENDED
+            # (first end) / APPENDED (last end) so the original point survives.
+            pre = (P[0] - d0 * n) if eps_mm < abs(d0) <= guard_mm else None
+            app = (P[-1] - dL * n) if eps_mm < abs(dL) <= guard_mm else None
+            if pre is None and app is None:
+                continue
+            pieces = []
+            if pre is not None:
+                pieces.append(pre.reshape(1, 3))
+            pieces.append(P)
+            if app is not None:
+                pieces.append(app.reshape(1, 3))
+            m.set_long_axis_contour(phi, np.vstack(pieces), which=pas)
+            moved = True
         if moved:
-            self._lv_rebuild_measures()             # redraw the moved trace
+            self._lv_rebuild_measures()             # redraw the extended trace
             self._lv_show_plane()
             self._lv_record_geom(before)            # one Ctrl+Z step
         return moved
