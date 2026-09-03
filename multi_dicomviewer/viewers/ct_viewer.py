@@ -5292,6 +5292,42 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lvv_do_save()
 
+    def _lvv_restore_blood(self, bd) -> bool:
+        """Decode an embedded blood mask (BldLv.json 'blood') into memory and
+        build its 水色 display volume so LV-Blood表示 / Auto-Endo / 壁厚 work
+        immediately with no recompute. Returns True on success."""
+        if not isinstance(bd, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(bd.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in bd["shape"])
+            bbox = tuple(int(x) for x in bd["bbox"])
+            raw = zlib.decompress(base64.b64decode(bd["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+        except Exception:                                # noqa: BLE001
+            return False
+        self._lvv_blood_comp = comp
+        self._lvv_blood_bbox = bbox
+        if bd.get("apex") is not None:
+            self._lvv_blood_apex = np.asarray(bd["apex"], float)
+        elif self._lvv is not None and self._lvv.get("apex") is not None:
+            self._lvv_blood_apex = np.asarray(self._lvv["apex"], float)
+        full = np.zeros(self._vol.shape, np.float32)
+        z0, z1, y0, y1, x0, x1 = bbox
+        full[z0:z1, y0:y1, x0:x1][comp] = 1.0
+        sx, sy, sz = self._dims
+        self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
+        self._lvv_mask_rgb = (0.25, 0.75, 1.0)
+        self._lvv_mask_alpha = 0.55
+        for k in ("A", "B"):
+            self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
+        return True
+
     def _lvv_do_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -5331,6 +5367,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         em = getattr(self, "_lvv_epi_model_dict", None)
         if isinstance(em, dict) and em.get("series"):
             data["epi_series"] = em.get("series")
+        # Embed the computed blood mask (packed+zlib+base64) so Load restores the
+        # 水色 region — and enables 壁厚 — INSTANTLY, with no LV-Blood recompute.
+        if (getattr(self, "_lvv_blood_comp", None) is not None
+                and getattr(self, "_lvv_blood_bbox", None) is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            comp = np.ascontiguousarray(self._lvv_blood_comp, bool)
+            blood = {
+                "bbox": [int(x) for x in self._lvv_blood_bbox],
+                "shape": [int(s) for s in comp.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(np.packbits(comp).tobytes(), 6)).decode("ascii"),
+            }
+            if getattr(self, "_lvv_blood_apex", None) is not None:
+                blood["apex"] = list(map(float, self._lvv_blood_apex))
+            data["blood"] = blood
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -5419,12 +5473,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                 spin.setValue(int(round(float(v))))
                 spin.blockSignals(False)
             self._lvv_add_marker("apex", lvv["apex"], "#ff4040")
-            # The 水色 region isn't saved (only landmarks + HU + volume). Start on
-            # the instant 全域HU tint; press LV-Blood表示 to recompute the region.
-            self._lvv_hl_on = True
-            self._lvv_mask_on = False
-            self._lvv_hl_btn.setChecked(True)
-            self._lvv_mask_btn.setChecked(False)
+            # Restore the embedded 水色 blood mask (packed) if present, so LV-Blood
+            # 表示 / Auto-Endo / 壁厚 work immediately with NO recompute.
+            blood_shown = self._lvv_restore_blood(data.get("blood"))
+            if blood_shown:
+                # Blood mask fresh in memory → show 水色, hide the 全域HU tint.
+                lvv["calc_sig"] = self._lvv_signature()
+                self._lvv_hl_on = False
+                self._lvv_mask_on = True
+                self._lvv_hl_btn.setChecked(False)
+                self._lvv_mask_btn.setChecked(True)
+            else:
+                # No embedded mask (old file) → instant 全域HU tint; press
+                # LV-Blood表示 to recompute the region.
+                self._lvv_hl_on = True
+                self._lvv_mask_on = False
+                self._lvv_hl_btn.setChecked(True)
+                self._lvv_mask_btn.setChecked(False)
             self._lvv_sync()
             self._lvv_update_mask()
             self._lvv_update_highlight()
