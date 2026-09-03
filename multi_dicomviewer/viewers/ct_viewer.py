@@ -3589,18 +3589,45 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_calc()          # signature differs → recomputes + re-shows 水色
 
     def _lvv_close_changed(self) -> None:
-        """Auto-Endo 肉柱 bridging (close_mm) changed → the auto Endo is stale.
-        Drop it + hide Auto-Endo表示 so a re-press recomputes with the new value.
-        Blood and the hand-edited Manual Endo are unaffected."""
+        """Auto-Endo 膨らみ/肉柱 knob changed → the auto Endo is stale. If it is
+        being shown, recompute in place keeping the old line until the new one
+        lands (snap, no blank flash); otherwise drop it silently."""
         self._lv_endo_close_mm = float(self._lvv_close_spin.value())
-        self._lvv_invalidate_auto_endo()
+        self._lvv_after_param_change()
 
     def _lvv_method_changed(self) -> None:
-        """Auto-Endo bridging METHOD changed (Close/Polar/Hull) → auto Endo is
-        stale; drop it so a re-press recomputes with the new method."""
+        """Auto-Endo METHOD changed → auto Endo is stale; recompute-in-place if
+        shown (snap), else drop it silently."""
         self._lv_endo_method = self._lvv_method_combo.currentData() or "close"
         self._lvv_update_close_ui()
-        self._lvv_invalidate_auto_endo()
+        self._lvv_after_param_change()
+
+    def _lvv_after_param_change(self) -> None:
+        """A 方式 / 膨らみ change: if Auto-Endo表示 is ON, KEEP the current line
+        shown and recompute in place (debounced) so it SNAPS to the new shape —
+        the old line stays until the new mask lands (the modal build runs with
+        the old line still on screen behind it), making the difference easy to
+        see. If it's off, just drop the now-stale mask silently."""
+        if getattr(self, "_lvv_endo_show", False):
+            # Force a rebuild (the signature doesn't capture 方式/膨らみ) but KEEP
+            # _lv_endo_mask_comp displayed so the old line stays until the swap.
+            self._lv_endo_mask_sig = None
+            tmr = getattr(self, "_lvv_endo_reapply_timer", None)
+            if tmr is None:
+                tmr = QTimer(self)
+                tmr.setSingleShot(True)
+                tmr.timeout.connect(self._lvv_reapply_auto_endo)
+                self._lvv_endo_reapply_timer = tmr
+            tmr.start(250)                       # coalesce rapid 膨らみ steps
+        else:
+            self._lvv_invalidate_auto_endo()
+
+    def _lvv_reapply_auto_endo(self) -> None:
+        """Debounced recompute of the shown Auto-Endo for new 方式/膨らみ — rebuilds
+        (mask_sig was cleared) and swaps the line in place, no blank."""
+        if self._lvv is None or not getattr(self, "_lvv_endo_show", False):
+            return
+        self._lvv_finish_auto_endo()
 
     # The single 肉柱 spin is context-sensitive: its label/meaning/enabled state
     # follow the chosen method. Advanced per-method values live in Settings.
