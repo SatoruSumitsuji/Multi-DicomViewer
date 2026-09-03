@@ -4788,12 +4788,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         cur = getattr(self, "_lvv_thick_mode", None)
         target = None if mode == cur else mode      # re-click active → off
         if target is not None:
-            if self._lv_endo_mask_comp is None or self._lvv_epi_surf is None:
+            if not self._lvv_thick_ready():
                 self._lvv_thick_sync_buttons()
                 QMessageBox.information(
                     self.window(), t("壁厚"),
-                    t("Build the Auto-Endo first (press Auto-Endo表示), then 壁厚."))
+                    t("Set the apex, MV/AoV planes and an Epi surface first."))
                 return
+            # Build the Endo mask on demand (needs the blood pool) so the user
+            # doesn't have to press Auto-Endo表示 first.
+            if self._lv_endo_mask_comp is None:
+                if getattr(self, "_lvv_blood_comp", None) is None:
+                    self._lvv_thick_sync_buttons()
+                    QMessageBox.information(
+                        self.window(), t("壁厚"),
+                        t("Press LV-Blood表示 (or Auto-Endo表示) first to compute "
+                          "the blood pool, then 壁厚."))
+                    return
+                mask = self._lvv_build_endo_mask()      # synchronous (modal)
+                if not mask:
+                    self._lvv_thick_sync_buttons()
+                    QMessageBox.information(
+                        self.window(), t("壁厚"),
+                        t("Could not build the Endo — check the HU range / Epi."))
+                    return
+                self._lv_endo_mask_comp, self._lv_endo_mask_bbox = mask
+                self._lv_endo_mask_sig = (self._lvv_signature()
+                                          if self._lvv is not None else None)
             before = self._lvv_thick_snap()
             built = self._lvv_build_wall_thickness(target)  # old map stays here
             if not built:
@@ -4874,11 +4894,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_sync_buttons()
         self._lv_update_text()
 
+    def _lvv_thick_ready(self) -> bool:
+        """True if 壁厚 can be computed: an Epi surface plus either an already-
+        computed blood pool, OR the inputs to build one (apex + MV/AoV). The Endo
+        mask is built on demand at press time, so the user doesn't have to press
+        Auto-Endo表示 first."""
+        if self._lvv is None or self._lvv_epi_surf is None:
+            return False
+        if getattr(self, "_lv_endo_mask_comp", None) is not None:
+            return True
+        if getattr(self, "_lvv_blood_comp", None) is not None:
+            return True
+        apex_ok = self._lvv.get("apex") is not None
+        valves_ok = (self._lv_valves_ready()
+                     or self._lvv.get("aortic") is not None)
+        return bool(apex_ok and valves_ok)
+
     def _lvv_thick_sync_buttons(self) -> None:
         """Reflect the 壁厚 mode on both buttons (only one can be on)."""
         mode = getattr(self, "_lvv_thick_mode", None)
-        can = (self._lv_endo_mask_comp is not None
-               and self._lvv_epi_surf is not None)
+        can = self._lvv_thick_ready()
         for m, (attr, col, _lbl) in self._THICK_MODES.items():
             btn = getattr(self, attr, None)
             if btn is None:
@@ -4991,6 +5026,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._undo_record(
                 lambda b=before: self._lv_endo_mask_apply(b),
                 lambda a=after: self._lv_endo_mask_apply(a))
+        # The Endo mask now exists → 壁厚 can run; refresh its buttons.
+        self._lvv_thick_sync_buttons()
 
     def _lvv_show_endo(self, render=True) -> None:
         """Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
