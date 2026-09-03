@@ -3993,6 +3993,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_disp_bbox = None
         self._lvv_epi_disp_id = None
 
+    def _lv_outline_step(self, fine=0.45) -> float:
+        """On-plane border-outline sampling pitch: COARSE (fast) while dragging
+        (LOD) so the line tracks the mouse in real time; FINE at rest for a crisp
+        line. The mask cross-section cost scales ~1/step, so this is the main
+        lever for making Epi/Endo/wall overlays follow a drag smoothly."""
+        return 2.0 if getattr(self, "_lod_drag", False) else float(fine)
+
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
         Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
@@ -4003,8 +4010,9 @@ class CTViewer(CPRMixin, AbstractViewer):
               and getattr(self, "_lvv_epi_show", False)
               and getattr(self, "_lvv_epi_disp_comp", None) is not None)
         half = float(getattr(self, "_half", 100.0))
-        step = float(self._lv_endo_adv().get("step_mm", 0.45)) \
+        fine = float(self._lv_endo_adv().get("step_mm", 0.45)) \
             if hasattr(self, "_lv_endo_adv") else 0.45
+        step = self._lv_outline_step(fine)
         for key in ("A", "B"):
             p = self.pane[key]
             rings = []
@@ -5190,7 +5198,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     polys = region_outline_on_plane(
                         self._lv_endo_mask_comp, self._lv_endo_mask_bbox,
                         self._dims, self._pc[key], u_ax, v_ax,
-                        half_mm=half, step_mm=float(self._lv_endo_adv()["step_mm"]),
+                        half_mm=half,
+                        step_mm=self._lv_outline_step(
+                            self._lv_endo_adv()["step_mm"]),
                         convex=False)
                 except Exception:                        # noqa: BLE001
                     polys = []
@@ -11681,7 +11691,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             try:
                 polys = region_outline_on_plane(
                     self._lv_region_comp, self._lv_region_bbox, self._dims,
-                    self._pc[key], u_ax, v_ax, half_mm=half, step_mm=0.8)
+                    self._pc[key], u_ax, v_ax, half_mm=half,
+                    step_mm=self._lv_outline_step(0.8))
             except Exception:                            # noqa: BLE001
                 polys = []
             if polys:
