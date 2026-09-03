@@ -4893,9 +4893,10 @@ class MainWindow(QMainWindow):
                 "XA": self._live_cap[Modality.XA]}
         quality = settings.load_display_quality()
         lv_endo = settings.load_lv_endo_params()
+        lv_wall = settings.load_lv_wall_bands()
         dlg = SettingsDialog(caps, quality, self._open_ct_color,
                              on_advanced=self._open_advanced_quality,
-                             parent=self, lv_endo=lv_endo)
+                             parent=self, lv_endo=lv_endo, lv_wall=lv_wall)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Display count: persist + apply (over-cap panes sleep now; keep=active
@@ -4921,6 +4922,11 @@ class MainWindow(QMainWindow):
         for v in self._all_loaded_viewers():
             if hasattr(v, "_lv_endo_adv_refresh"):
                 v._lv_endo_adv_refresh()
+        # LV wall-thickness colour bands: persist + repaint any live 壁厚 map.
+        settings.save_lv_wall_bands(dlg.lv_wall())
+        for v in self._all_loaded_viewers():
+            if hasattr(v, "_lv_wall_bands_refresh"):
+                v._lv_wall_bands_refresh()
         self.statusBar().showMessage(
             t("Settings saved (CT {ct} / Angio {xa} live)",
               ct=vals["CT"], xa=vals["XA"]))

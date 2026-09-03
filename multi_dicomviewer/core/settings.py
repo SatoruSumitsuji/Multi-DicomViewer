@@ -441,6 +441,64 @@ def save_lv_endo_params(params: dict) -> None:
         pass
 
 
+# ---------------------------------- LV wall-thickness colour bands (壁厚)
+LV_WALL_BANDS_PATH = SETTINGS_DIR / "lv_wall_bands.json"
+
+#: Ascending thresholds (mm) that split the clinical wall-thickness colour map.
+#: N thresholds → N+1 colour bands (thin→thick = red→green, auto-ramped in the
+#: viewer). Any number of thresholds is allowed (more or fewer bands). Defaults
+#: match the Measure-Compare gap bands (5 / 7 / 9 mm → red/orange/yellow/green).
+_LV_WALL_DEFAULT_THRESHOLDS = [5.0, 7.0, 9.0]
+_LV_WALL_RANGE = (0.5, 60.0)
+_LV_WALL_MAX_THRESHOLDS = 11        # ≤ 12 bands — plenty, keeps the LUT sane
+
+
+def _clean_thresholds(vals) -> list:
+    """Sanitise a threshold list: numeric, in range, sorted, de-duplicated
+    (min 0.1 mm apart), capped in count. Empty → the defaults."""
+    out = []
+    for v in (vals or []):
+        try:
+            if isinstance(v, bool):
+                continue
+            fv = max(_LV_WALL_RANGE[0], min(_LV_WALL_RANGE[1], float(v)))
+        except (TypeError, ValueError):
+            continue
+        out.append(fv)
+    out = sorted(out)
+    dedup = []
+    for v in out:
+        if not dedup or v - dedup[-1] >= 0.1:
+            dedup.append(round(v, 2))
+    dedup = dedup[:_LV_WALL_MAX_THRESHOLDS]
+    return dedup or list(_LV_WALL_DEFAULT_THRESHOLDS)
+
+
+def load_lv_wall_bands() -> dict:
+    """Persisted wall-thickness thresholds {'thresholds': [mm, …]} (ascending),
+    defaults if missing/bad. N thresholds = N+1 colour bands."""
+    thr = None
+    try:
+        data = json.loads(LV_WALL_BANDS_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            thr = data.get("thresholds")
+    except (OSError, ValueError):
+        thr = None
+    return {"thresholds": _clean_thresholds(thr)}
+
+
+def save_lv_wall_bands(bands: dict) -> None:
+    """Best-effort persist of the wall-thickness thresholds (any count)."""
+    try:
+        thr = _clean_thresholds((bands or {}).get("thresholds"))
+        LV_WALL_BANDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LV_WALL_BANDS_PATH.write_text(
+            json.dumps({"thresholds": thr, "version": 1},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 # ----------------------------------------------- live pane count (memory cap)
 def _clamp_cap(mod: str, val) -> int:
     lo, hi = LIVE_CAPS_MIN[mod], LIVE_CAPS_MAX[mod]
