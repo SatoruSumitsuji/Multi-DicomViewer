@@ -5328,6 +5328,50 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].reslice_mask.SetInputData(self._lvv_mask_vol)
         return True
 
+    def _lvv_restore_endo(self, ed) -> bool:
+        """Decode an embedded Auto-Endo mask (BldLv.json 'endo') into memory so
+        壁厚 / Auto-Endo表示 work with no recompute; restore its 方式/膨らみ so a
+        later re-derive reproduces this exact Endo."""
+        if not isinstance(ed, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(ed.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in ed["shape"])
+            bbox = tuple(int(x) for x in ed["bbox"])
+            raw = zlib.decompress(base64.b64decode(ed["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+        except Exception:                                # noqa: BLE001
+            return False
+        self._lv_endo_mask_comp = comp
+        self._lv_endo_mask_bbox = bbox
+        self._lv_endo_mask_sig = (self._lvv_signature()
+                                  if self._lvv is not None else None)
+        self._lv_endo_ghost = False
+        meth = ed.get("method")
+        if meth:
+            self._lv_endo_method = meth
+            combo = getattr(self, "_lvv_method_combo", None)
+            if combo is not None:
+                ci = combo.findData(meth)
+                if ci is not None and ci >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(ci)
+                    combo.blockSignals(False)
+            self._lvv_update_close_ui()
+        if ed.get("close") is not None:
+            self._lv_endo_close_mm = float(ed["close"])
+            spin = getattr(self, "_lvv_close_spin", None)
+            if spin is not None:
+                spin.blockSignals(True)
+                spin.setValue(int(round(float(ed["close"]))))
+                spin.blockSignals(False)
+        return True
+
     def _lvv_do_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -5385,6 +5429,32 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(self, "_lvv_blood_apex", None) is not None:
                 blood["apex"] = list(map(float, self._lvv_blood_apex))
             data["blood"] = blood
+        # Embed the Auto-Endo mask + spacing/axis too, so the file is a self-
+        # contained cardiac-function object: volumes / myocardial mass / wall
+        # thickness can be computed from the masks alone (no image re-render).
+        if (getattr(self, "_lv_endo_mask_comp", None) is not None
+                and getattr(self, "_lv_endo_mask_bbox", None) is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            ec = np.ascontiguousarray(self._lv_endo_mask_comp, bool)
+            data["endo"] = {
+                "bbox": [int(x) for x in self._lv_endo_mask_bbox],
+                "shape": [int(s) for s in ec.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(np.packbits(ec).tobytes(), 6)).decode("ascii"),
+                "method": getattr(self, "_lv_endo_method", "hull_smooth"),
+                "close": float(getattr(self, "_lv_endo_close_mm", 5.0)),
+            }
+        data["spacing"] = [float(s) for s in self._dims]     # (sx, sy, sz) mm
+        _epi = getattr(self, "_lvv_epi_surf", None)
+        _ax = getattr(_epi, "axis", None) if _epi is not None else None
+        if _ax is not None:
+            data["axis"] = {
+                "apex": list(map(float, lvv["apex"])),
+                "dir": list(map(float, np.asarray(_ax.axis, float))),
+                "radial0": list(map(float, np.asarray(_ax.radial0, float)))}
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -5476,6 +5546,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Restore the embedded 水色 blood mask (packed) if present, so LV-Blood
             # 表示 / Auto-Endo / 壁厚 work immediately with NO recompute.
             blood_shown = self._lvv_restore_blood(data.get("blood"))
+            # Restore the embedded Auto-Endo mask too (for instant 壁厚 / offline
+            # function analysis); keeps its 方式/膨らみ so a re-derive matches.
+            self._lvv_restore_endo(data.get("endo"))
             if blood_shown:
                 # Blood mask fresh in memory → show 水色, hide the 全域HU tint.
                 lvv["calc_sig"] = self._lvv_signature()
