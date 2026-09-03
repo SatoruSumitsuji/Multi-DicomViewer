@@ -7012,6 +7012,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._lvv["mitral"] = self._lv_valves["mitral"]
                 if self._lv_valves.get("aortic") is not None:
                     self._lvv["aortic"] = self._lv_valves["aortic"]
+                # Blood/Endo evaluates HU on THIN slices — force BOTH panes' slab
+                # to 0 (the right pane often carried a 5mm MPR slab).
+                self._thick["A"] = 0.0
+                self._thick["B"] = 0.0
+                if hasattr(self, "_sync_slab_spin"):
+                    self._sync_slab_spin()
                 # 全域HU tint ON by default; LV-Blood off until computed.
                 self._lvv_hl_on = True
                 self._lvv_mask_on = False
@@ -8060,12 +8066,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         return True
 
     def _lv_thick_trace_both(self) -> None:
-        """Slab thickness for the LV panes: 5 mm on the long-axis TRACE pane (a
-        thin MIP slab helps see the endo/epi border), 0 mm on the other
-        (cross-section) pane."""
-        pane = self._lv["pane"] if self._lv is not None else "B"
-        for k in ("A", "B"):
-            self._thick[k] = 5.0 if k == pane else 0.0
+        """Slab thickness for the LV panes on Endo/Epi entry: BOTH panes 0 mm —
+        the Endo and Epi borders are both traced/judged on THIN cross-sections
+        (no MIP slab), matching the Blood/Endo sub-mode."""
+        self._thick["A"] = 0.0
+        self._thick["B"] = 0.0
+        if hasattr(self, "_sync_slab_spin"):
+            self._sync_slab_spin()
 
     # ---- pass flow: align the view → Set axis → place apex → trace ----------
     def _lv_axis_from_view(self):
