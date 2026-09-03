@@ -692,6 +692,37 @@ def _wall_thickness_lut(t_lo: float, t_hi: float,
     return lut
 
 
+def _dash_polyline(pts, dash_mm: float = 3.0, gap_mm: float = 2.2,
+                   step_mm: float = 0.6):
+    """Break a polyline (list of (x, y) in mm) into DASH sub-polylines by walking
+    its arc length — reliable dashing that doesn't rely on GL line stipple."""
+    out, cur, acc = [], [], 0.0
+    period = dash_mm + gap_mm
+    for i in range(len(pts) - 1):
+        x0, y0 = pts[i]
+        x1, y1 = pts[i + 1]
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if seg < 1e-9:
+            continue
+        n = max(1, int(seg / step_mm))
+        for j in range(n):
+            a, b = j / n, (j + 1) / n
+            on = ((acc + seg * (a + b) * 0.5) % period) < dash_mm
+            pa = (x0 + (x1 - x0) * a, y0 + (y1 - y0) * a)
+            pb = (x0 + (x1 - x0) * b, y0 + (y1 - y0) * b)
+            if on:
+                if not cur:
+                    cur = [pa]
+                cur.append(pb)
+            elif len(cur) >= 2:
+                out.append(cur)
+                cur = []
+        acc += seg
+    if len(cur) >= 2:
+        out.append(cur)
+    return out
+
+
 def _gray_lut(width: float, level: float, invert: bool = False) -> vtkLookupTable:
     lut = vtkLookupTable()
     lut.SetHueRange(0.0, 0.0)
@@ -2239,6 +2270,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None   # Auto-Endo envelope MASK (⊇ blood)
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None    # blood/method/close signature it was built for
+        self._lv_endo_ghost = False      # shown line is a stale (dashed) ghost
+        self._lv_endo_undo_before = None  # old mask stashed for the next apply-undo
         self._lv_endo_auto_sig = None    # blood signature it was built at (stale?)
         self._lv_endo_close_mm = 5.0     # Auto-Endo papillary/trabecula bridging
         self._lv_endo_method = "hull_smooth"  # Auto-Endo: hull + outward smooth arcs
@@ -3627,22 +3660,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         LV-Blood): if LV-Blood表示 is on, recompute the 水色 region for the new
         range and keep showing it (debounced so rapid 下限/上限 steps coalesce
         into one recompute); 全域HU表示 just refreshes its instant tint. The
-        Auto-Endo derived from the blood pool is stale, so it is dropped (re-press
-        Auto-Endo表示 to recompute); a hand-edited Manual Endo is RETAINED."""
+        Auto-Endo line is kept as a stale GHOST (dashed, 50%) until Auto-Endo表示
+        is pressed; a hand-edited Manual Endo is RETAINED."""
         if getattr(self, "_lvv_thick_on", False):
             self._lvv_thick_hide()        # wall thickness depends on the Endo
-        # Auto Endo is derived from the blood pool → stale on any HU change.
+        # Auto Endo MODEL (for Manual seeding) is stale; the mask is kept for the
+        # ghost line and rebuilt only when Auto-Endo表示 is pressed.
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
-        self._lv_endo_mask_comp = None       # drop the envelope mask too
-        self._lv_endo_mask_bbox = None
-        self._lv_endo_mask_sig = None
-        if getattr(self, "_lvv_endo_show", False):
-            self._lvv_endo_show = False
-            self._lvv_auto_endo_btn.setChecked(False)
-            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
-            self._lvv_show_endo(render=False)
+        self._lvv_endo_param_changed()       # ghost the Auto-Endo line (or drop)
         if getattr(self, "_lvv_mask_on", False):
             # Stay in LV-Blood表示 — recompute the 水色 region for the new HU
             # range (debounced). The previous region shows until it lands.
@@ -3683,33 +3710,45 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_after_param_change()
 
     def _lvv_after_param_change(self) -> None:
-        """A 方式 / 膨らみ change: if Auto-Endo表示 is ON, KEEP the current line
-        shown and recompute in place (debounced) so it SNAPS to the new shape —
-        the old line stays until the new mask lands (the modal build runs with
-        the old line still on screen behind it), making the difference easy to
-        see. If it's off, just drop the now-stale mask silently."""
+        """A 方式 / 膨らみ change → ghost the shown Auto-Endo line (see
+        _lvv_endo_param_changed). NO recompute here; it happens only when
+        Auto-Endo表示 is pressed."""
         if getattr(self, "_lvv_thick_on", False):
             self._lvv_thick_hide()        # Endo shape changed → thickness stale
-        if getattr(self, "_lvv_endo_show", False):
-            # Force a rebuild (the signature doesn't capture 方式/膨らみ) but KEEP
-            # _lv_endo_mask_comp displayed so the old line stays until the swap.
-            self._lv_endo_mask_sig = None
-            tmr = getattr(self, "_lvv_endo_reapply_timer", None)
-            if tmr is None:
-                tmr = QTimer(self)
-                tmr.setSingleShot(True)
-                tmr.timeout.connect(self._lvv_reapply_auto_endo)
-                self._lvv_endo_reapply_timer = tmr
-            tmr.start(250)                       # coalesce rapid 膨らみ steps
+        self._lvv_endo_param_changed()
+
+    def _lvv_endo_param_changed(self) -> None:
+        """A param that reshapes the Auto-Endo (HU 下限/上限, 膨らみ, 方式) changed.
+        If the Auto-Endo line is shown, keep the PREVIOUS line as a 50%-transparent
+        DASHED GHOST and mark it stale — do NOT recompute now. Pressing Auto-Endo
+        表示 recomputes and swaps in the new SOLID line (recorded for Undo/Redo).
+        If it's off, drop the stale mask silently."""
+        if (getattr(self, "_lvv_endo_show", False)
+                and getattr(self, "_lv_endo_mask_comp", None) is not None):
+            self._lv_endo_ghost = True
+            self._lv_endo_mask_sig = None     # stale → rebuild on button press
+            self._lvv_show_endo()
         else:
             self._lvv_invalidate_auto_endo()
 
-    def _lvv_reapply_auto_endo(self) -> None:
-        """Debounced recompute of the shown Auto-Endo for new 方式/膨らみ — rebuilds
-        (mask_sig was cleared) and swaps the line in place, no blank."""
-        if self._lvv is None or not getattr(self, "_lvv_endo_show", False):
-            return
-        self._lvv_finish_auto_endo()
+    def _lv_endo_mask_snap(self) -> dict:
+        """Snapshot the Auto-Endo mask (for a one-step Undo of a param change)."""
+        c = getattr(self, "_lv_endo_mask_comp", None)
+        return {"comp": None if c is None else np.array(c, copy=True),
+                "bbox": getattr(self, "_lv_endo_mask_bbox", None),
+                "sig": getattr(self, "_lv_endo_mask_sig", None)}
+
+    def _lv_endo_mask_apply(self, s: dict) -> None:
+        """Restore an Auto-Endo mask snapshot + show it SOLID (Undo/Redo target)."""
+        self._lv_endo_mask_comp = s.get("comp")
+        self._lv_endo_mask_bbox = s.get("bbox")
+        self._lv_endo_mask_sig = s.get("sig")
+        self._lv_endo_ghost = False
+        self._lvv_endo_show = self._lv_endo_mask_comp is not None
+        if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+            self._lvv_auto_endo_btn.setChecked(self._lvv_endo_show)
+            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        self._lvv_show_endo()
 
     # The single 肉柱 spin is context-sensitive: its label/meaning/enabled state
     # follow the chosen method. Advanced per-method values live in Settings.
@@ -3752,6 +3791,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None       # drop the envelope mask too
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
+        self._lv_endo_ghost = False
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -4780,11 +4820,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         builds the Endo (a few seconds) when stale, then shows it. Independent of
         LV-Blood表示. Unchecking hides it."""
         from PyQt6.QtWidgets import QMessageBox
-        if not self._lvv_auto_endo_btn.isChecked():
+        btn = self._lvv_auto_endo_btn
+        ghost = getattr(self, "_lv_endo_ghost", False)
+        # A click while a GHOST (dashed old line after a param change) is pending
+        # means "apply the new params" — recompute the solid line, don't hide.
+        if not btn.isChecked() and ghost:
+            btn.setChecked(True)
+        if not btn.isChecked():
+            self._lv_endo_ghost = False
             self._lvv_endo_show = False
-            self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+            self._lvv_style_toggle(btn, "#ff8c28", "black")
             self._lvv_show_endo()
             return
+        if ghost:
+            # Stash the OLD mask for a one-step Undo, then force a rebuild.
+            self._lv_endo_undo_before = self._lv_endo_mask_snap()
+            self._lv_endo_ghost = False
+            self._lv_endo_mask_sig = None
         # Ready to compute? (apex + valves + Epi). If not, tell the user.
         av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
         mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
@@ -4814,6 +4866,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         show the Auto-Endo表示 overlay. Called directly, or as the callback after
         an internal blood compute."""
         if getattr(self, "_lvv_blood_comp", None) is None:
+            self._lv_endo_undo_before = None      # abandon any pending apply-undo
             self._lvv_auto_endo_btn.setChecked(False)
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             return
@@ -4822,15 +4875,26 @@ class CTViewer(CPRMixin, AbstractViewer):
                 or self._lv_endo_mask_sig != sig):
             mask = self._lvv_build_endo_mask()   # 3-D envelope, endo ⊇ blood
             if not mask:                         # build failed → leave it off
+                self._lv_endo_undo_before = None
                 self._lvv_auto_endo_btn.setChecked(False)
                 self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
                 return
             self._lv_endo_mask_comp, self._lv_endo_mask_bbox = mask
             self._lv_endo_mask_sig = sig
         self._lvv_endo_show = True
+        self._lv_endo_ghost = False
         self._lvv_auto_endo_btn.setChecked(True)
         self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
         self._lvv_show_endo()
+        # If this build APPLIED a param change from a ghost, record the swap
+        # (old line ↔ new line) so Ctrl+Z / Ctrl+Y flip between them.
+        before = getattr(self, "_lv_endo_undo_before", None)
+        if before is not None:
+            self._lv_endo_undo_before = None
+            after = self._lv_endo_mask_snap()
+            self._undo_record(
+                lambda b=before: self._lv_endo_mask_apply(b),
+                lambda a=after: self._lv_endo_mask_apply(a))
 
     def _lvv_show_endo(self, render=True) -> None:
         """Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
@@ -4842,6 +4906,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         on = (self._lvv is not None and self._lv is None
               and getattr(self, "_lv_endo_mask_comp", None) is not None
               and getattr(self, "_lvv_endo_show", False))
+        ghost = getattr(self, "_lv_endo_ghost", False)    # stale = dashed + 50%
         half = float(getattr(self, "_half", 100.0))
         for key in ("A", "B"):
             p = self.pane[key]
@@ -4860,9 +4925,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                     sm = _smooth_closed([tuple(q) for q in poly])
                     if len(sm) >= 3:
                         rings.append([tuple(q) for q in sm] + [tuple(sm[0])])
-            if rings:
+            # A stale (param-changed) line shows as a 50%-transparent DASHED
+            # ghost so the difference to the recomputed solid line is obvious.
+            draw = []
+            if ghost:
+                for r in rings:
+                    draw.extend(_dash_polyline(r))
+            else:
+                draw = rings
+            prop = p.lvv_endo_actor.GetProperty()
+            prop.SetOpacity(0.5 if ghost else 1.0)
+            if hasattr(prop, "SetRenderLinesAsTubes"):
+                prop.SetRenderLinesAsTubes(not ghost)     # crisp dashes when ghost
+            prop.SetLineWidth(2.4 if ghost else 3.6)
+            if draw:
                 p.lvv_endo_mapper.SetInputData(_colored_multi_pd(
-                    rings, [(255, 140, 40)] * len(rings)))
+                    draw, [(255, 140, 40)] * len(draw)))
             else:
                 p.lvv_endo_mapper.SetInputData(vtkPolyData())
             if render:
@@ -5248,6 +5326,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # NOTE: the auto Endo model and the RETAINED manual Endo survive leaving
         # Blood (like _lvv_blood_comp); only the on-screen overlay is hidden.
         self._lvv_endo_show = False
+        self._lv_endo_ghost = False
+        self._lv_endo_undo_before = None
         self._lvv_thick_on = False
         self._lvv_thick_vol = None
         self._lvv_thick_stats = None
