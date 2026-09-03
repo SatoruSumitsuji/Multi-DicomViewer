@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -35,7 +36,7 @@ class SettingsDialog(QDialog):
     display-quality dict; *on_ct_color* opens the CT colour-map editor."""
 
     def __init__(self, caps: dict, quality: dict, on_ct_color,
-                 on_advanced=None, parent=None, lv_endo=None):
+                 on_advanced=None, parent=None, lv_endo=None, lv_wall=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         self._on_ct_color = on_ct_color
@@ -186,6 +187,22 @@ class SettingsDialog(QDialog):
             lvform.addRow(label, sb)
         root.addWidget(gb_lv)
 
+        # ---- LV wall-thickness colour bands (壁厚) -------------------------
+        gb_wall = QGroupBox(t("LV wall thickness colour (壁厚)"))
+        wform = QFormLayout(gb_wall)
+        wnote = QLabel(t(
+            "Colour thresholds in mm for the 壁厚3D / 壁厚短軸 heat maps, thin→"
+            "thick = red→green. Enter any number of ASCENDING values separated "
+            "by commas (N values = N+1 colour bands). Default 5, 7, 9."))
+        wnote.setWordWrap(True)
+        wform.addRow(wnote)
+        thr = (lv_wall or {}).get("thresholds") or [5.0, 7.0, 9.0]
+        self._wall_edit = QLineEdit(", ".join(f"{float(x):g}" for x in thr))
+        self._wall_edit.setToolTip(t("e.g. '4, 6, 8, 10' for 5 bands, or '6' "
+                                     "for a single thin/thick split at 6 mm"))
+        wform.addRow(t("しきい値 (mm)"), self._wall_edit)
+        root.addWidget(gb_wall)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -246,3 +263,17 @@ class SettingsDialog(QDialog):
             v = sb.value()
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
         return out
+
+    def lv_wall(self) -> dict:
+        """Chosen wall-thickness colour thresholds (mm), parsed from the text —
+        any count; sanitising (sort / dedupe / clamp) happens in settings."""
+        thr = []
+        for tok in self._wall_edit.text().replace("、", ",").split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                thr.append(float(tok))
+            except ValueError:
+                continue
+        return {"thresholds": thr}

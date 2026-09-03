@@ -663,22 +663,46 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
     return lut
 
 
-def _jet(f: float):
-    """Blue→cyan→green→yellow→red ramp for a heat map (f in [0, 1])."""
-    f = min(1.0, max(0.0, f))
-    r = min(max(1.5 - abs(4.0 * f - 3.0), 0.0), 1.0)
-    g = min(max(1.5 - abs(4.0 * f - 2.0), 0.0), 1.0)
-    b = min(max(1.5 - abs(4.0 * f - 1.0), 0.0), 1.0)
-    return r, g, b
+#: Colour anchors for the clinical wall-thickness ramp (thin→thick =
+#: red→orange→yellow→green). Any band COUNT samples this ramp, so at 4 bands the
+#: sampled colours are exactly these (= the Measure-Compare gap colours).
+_WALL_RAMP = ((0.70, 0.0, 0.0),          # dark red (thin, critical)
+              (1.0, 0.549, 0.0),         # orange
+              (0.945, 0.769, 0.059),     # yellow
+              (0.18, 0.80, 0.44))        # green (thick, normal)
 
 
-def _wall_thickness_lut(t_lo: float, t_hi: float,
-                        alpha: float = 0.6, n: int = 256) -> vtkLookupTable:
-    """Heat-map LUT for the wall-thickness scalar reslice: value ≤ 0.05 (no
-    myocardium) → transparent; thickness in [t_lo, t_hi] mm → blue→red at
-    *alpha* opacity so the CT underneath still shows."""
-    hi = float(max(t_hi, t_lo + 1e-3))
-    span = max(1e-3, float(t_hi - t_lo))
+def _wall_band_colors(count: int):
+    """*count* RGB colours evenly sampled along _WALL_RAMP (count≥1). count==4 →
+    the exact anchors (the Measure-Compare colours)."""
+    count = max(1, int(count))
+    if count == 1:
+        return [_WALL_RAMP[0]]
+    out = []
+    m = len(_WALL_RAMP) - 1
+    for i in range(count):
+        x = i / (count - 1) * m               # position along the ramp
+        j = min(int(x), m - 1)
+        f = x - j
+        a, b = _WALL_RAMP[j], _WALL_RAMP[j + 1]
+        out.append(tuple(a[k] + (b[k] - a[k]) * f for k in range(3)))
+    return out
+
+
+_WALL_DEFAULT_THR = (5.0, 7.0, 9.0)   # default bands (Measure-Compare 5/7/9 mm)
+
+
+def _wall_thickness_lut(thresholds, alpha: float = 0.6,
+                        n: int = 256) -> vtkLookupTable:
+    """BANDED wall-thickness LUT (clinical, = Measure-Compare colours). N ascending
+    *thresholds* (mm) → N+1 bands, coloured red→green along _WALL_RAMP. Value
+    ≤ 0.05 (no myocardium) → transparent; *alpha* 0 = fully hidden."""
+    thr = [float(x) for x in (thresholds or [])] or [5.0, 7.0, 9.0]
+    thr = sorted(thr)
+    cols = _wall_band_colors(len(thr) + 1)
+    edges = list(thr) + [float("inf")]
+    top = thr[-1]
+    hi = max(top * 1.35, top + 3.0)
     lut = vtkLookupTable()
     lut.SetNumberOfTableValues(n)
     lut.SetTableRange(0.0, hi)
@@ -686,9 +710,12 @@ def _wall_thickness_lut(t_lo: float, t_hi: float,
         v = hi * i / (n - 1)
         if v <= 0.05:
             lut.SetTableValue(i, 0.0, 0.0, 0.0, 0.0)
-        else:
-            r, g, b = _jet((v - t_lo) / span)
-            lut.SetTableValue(i, r, g, b, alpha)
+            continue
+        for bi, bh in enumerate(edges):
+            if v < bh:
+                r, g, b = cols[bi]
+                lut.SetTableValue(i, r, g, b, alpha)
+                break
     lut.Build()
     return lut
 
@@ -1280,7 +1307,7 @@ class _Pane:
         self.reslice_thick.SetBackgroundLevel(0.0)
         self.colors_thick = vtkImageMapToColors()
         self.colors_thick.SetOutputFormatToRGBA()
-        self.colors_thick.SetLookupTable(_wall_thickness_lut(1.0, 20.0, 0.0))
+        self.colors_thick.SetLookupTable(_wall_thickness_lut(_WALL_DEFAULT_THR, 0.0))
         self.colors_thick.SetInputConnection(self.reslice_thick.GetOutputPort())
         self.actor_thick = vtkImageActor()
         self.actor_thick.GetMapper().SetInputConnection(
@@ -1290,7 +1317,7 @@ class _Pane:
         # Wall-thickness colour LEGEND (which colour = how many mm), shown only
         # while a 壁厚 heat map is on. Hidden until the viewer sets its LUT.
         self.thick_bar = vtkScalarBarActor()
-        self.thick_bar.SetLookupTable(_wall_thickness_lut(1.0, 20.0, 1.0))
+        self.thick_bar.SetLookupTable(_wall_thickness_lut(_WALL_DEFAULT_THR, 1.0))
         self.thick_bar.SetNumberOfLabels(6)
         self.thick_bar.SetTitle("mm")
         self.thick_bar.SetLabelFormat("%.0f")
@@ -1581,6 +1608,10 @@ class _Pane:
         lenv = vtkActor()
         lenv.SetMapper(self.lvv_env_mapper)
         lenv.GetProperty().SetPointSize(3.0)
+        # Epi境界 = a SOLID line, same weight as the Auto-Endo (橙) line.
+        lenv.GetProperty().SetLineWidth(3.6)
+        if hasattr(lenv.GetProperty(), "SetRenderLinesAsTubes"):
+            lenv.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(lenv)
         self.lvv_env_actor = lenv
         # Auto-Endo表示 overlay: the display-only endocardial envelope border
@@ -2272,6 +2303,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_valve_shown = {"mitral": True, "aortic": True}
         self._lvv = None                 # LV blood-pool volume (LVEF) session
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
+        self._lvv_epi_disp_comp = None   # Epi border display mask (for the line)
+        self._lvv_epi_disp_bbox = None
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
@@ -2280,8 +2313,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
         self._lvv_thick_mode = None      # None / "3d" (nearest-dist) / "sax" (radial)
         self._lvv_thick_stats = None     # {min, mean, max, myo_ml}
-        self._lvv_thick_thi = 20.0       # colour-scale upper mm (legend range)
         self._lvv_thick_undo_before = None
+        try:                             # clinical colour bands (Settings)
+            from multi_dicomviewer.core import settings as _st
+            self._lv_wall_thresholds = list(
+                _st.load_lv_wall_bands()["thresholds"])
+        except Exception:                # noqa: BLE001
+            self._lv_wall_thresholds = list(_WALL_DEFAULT_THR)
         self._lvv_blood_comp = None      # last Blood mask (bbox sub-volume, bool)
         self._lvv_blood_bbox = None      # its (z0,z1,y0,y1,x0,x1) in the volume
         self._lvv_blood_apex = None      # apex used for that Blood measure
@@ -3532,6 +3570,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_epi_surf = model.epi
             self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
             self._lvv_epi_model_dict = data
+            self._lvv_invalidate_epi_disp()      # new Epi → rebuild the line mask
+            if getattr(self, "_lvv_epi_show", False):
+                self._lvv_build_epi_disp_mask()
+                self._lvv_show_epi()
             return True
         except Exception as exc:                        # noqa: BLE001
             import traceback
@@ -3898,30 +3940,89 @@ class CTViewer(CPRMixin, AbstractViewer):
         hi = round(float(self._lvv_hi_spin.value()), 3)
         return (rt(apex), rt(c_a), rt(n_a, 4), rt(c_m), rt(n_m, 4), lo, hi)
 
+    def _lvv_build_epi_disp_mask(self) -> bool:
+        """Rasterize the Epi interior once (no valve clip → the full border) and
+        cache it, so Epi表示 can draw a SOLID cross-section LINE (like the
+        Auto-Endo) that tracks rotation. Modal (~few sec). Returns True on success."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        if epi is None or self._vol is None:
+            return False
+        if (getattr(self, "_lvv_epi_disp_comp", None) is not None
+                and self._lvv_epi_disp_bbox is not None
+                and getattr(self, "_lvv_epi_disp_id", None) == id(epi)):
+            return True                              # cache matches the Epi
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QProgressDialog
+        apex = (self._lvv or {}).get("apex")
+        apex = np.asarray(apex, float) if apex is not None else np.zeros(3)
+        dims, shape = self._dims, self._vol.shape
+        result: dict = {}
+
+        class _EpiDispWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    result["mask"] = epi.inside_mask_bbox(dims, shape, [], apex)
+                except Exception as exc:            # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Building Epi border…"), "", 0, 0, self.window())
+        dlg.setWindowTitle(t("Epi"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        w = _EpiDispWorker()
+        w.finished.connect(dlg.reset)
+        w.start()
+        dlg.exec()
+        w.wait()
+        w.deleteLater()
+        m = result.get("mask")
+        if not m or m[0] is None:
+            return False
+        self._lvv_epi_disp_comp, self._lvv_epi_disp_bbox = m
+        self._lvv_epi_disp_id = id(epi)
+        return True
+
+    def _lvv_invalidate_epi_disp(self) -> None:
+        """Drop the cached Epi border mask (the Epi changed / was reloaded)."""
+        self._lvv_epi_disp_comp = None
+        self._lvv_epi_disp_bbox = None
+        self._lvv_epi_disp_id = None
+
     def _lvv_show_epi(self, render=True) -> None:
-        """Draw the Epi surface where it crosses each pane (green dots), so the
-        operator can see the Epi border and judge coronary contamination."""
+        """Epi表示: draw the Epi border as a SOLID green line (same weight as the
+        Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
+        tracks rotation/zoom just like the Endo line."""
+        from multi_dicomviewer.core.lv_compact import region_outline_on_plane
         on = (self._lvv is not None and self._lv is None
               and self._lvv_epi_surf is not None
-              and getattr(self, "_lvv_epi_show", False))
-        pts = self._lvv_epi_surf._all_ring_points() if on else None
+              and getattr(self, "_lvv_epi_show", False)
+              and getattr(self, "_lvv_epi_disp_comp", None) is not None)
+        half = float(getattr(self, "_half", 100.0))
+        step = float(self._lv_endo_adv().get("step_mm", 0.45)) \
+            if hasattr(self, "_lv_endo_adv") else 0.45
         for key in ("A", "B"):
             p = self.pane[key]
-            if pts is None:
-                p.lvv_env_mapper.SetInputData(vtkPolyData())
+            rings = []
+            if on:
+                u_ax, v_ax, _n = self._axes_for(key)
+                try:
+                    polys = region_outline_on_plane(
+                        self._lvv_epi_disp_comp, self._lvv_epi_disp_bbox,
+                        self._dims, self._pc[key], u_ax, v_ax,
+                        half_mm=half, step_mm=step, convex=False)
+                except Exception:                        # noqa: BLE001
+                    polys = []
+                for poly in polys:
+                    sm = _smooth_closed([tuple(q) for q in poly])
+                    if len(sm) >= 3:
+                        rings.append([tuple(q) for q in sm] + [tuple(sm[0])])
+            if rings:
+                p.lvv_env_mapper.SetInputData(_colored_multi_pd(
+                    rings, [(80, 220, 80)] * len(rings)))
             else:
-                _u, _v, n = self._axes_for(key)
-                n = np.asarray(n, float)
-                o = np.asarray(self._pc[key], float)
-                dist = (pts - o) @ n
-                tol = 0.75 * max(self._dims)
-                near = pts[np.abs(dist) <= tol]
-                if len(near):
-                    out = [self._world3d_to_out(key, P) for P in near]
-                    p.lvv_env_mapper.SetInputData(
-                        _lv_pts_pd(out, [(80, 220, 80)] * len(out), z=0.72))
-                else:
-                    p.lvv_env_mapper.SetInputData(vtkPolyData())
+                p.lvv_env_mapper.SetInputData(vtkPolyData())
             if render:
                 p.render()
 
@@ -3946,6 +4047,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
         self._lvv_epi_show = self._lvv_epi_btn.isChecked()
         self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+        if self._lvv_epi_show:
+            # Build the Epi border mask once so the line can be drawn solid.
+            if not self._lvv_build_epi_disp_mask():
+                self._lvv_epi_show = False
+                self._lvv_epi_btn.setChecked(False)
+                self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
         self._lvv_show_epi()
 
     def _lvv_style_toggle(self, btn, color, text="white") -> None:
@@ -4858,24 +4965,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_refresh_display()
         self._lvv_thick_sync_buttons()
 
+    def _wall_thresholds(self) -> list:
+        return list(getattr(self, "_lv_wall_thresholds", None)
+                    or _WALL_DEFAULT_THR)
+
     def _lvv_thick_refresh_display(self) -> None:
-        """Push the current 壁厚 state (mode / volume / colour range) to VTK."""
+        """Push the current 壁厚 state (mode / volume / clinical colour bands) to
+        VTK."""
         on = (getattr(self, "_lvv_thick_mode", None) is not None
               and getattr(self, "_lvv_thick_vol", None) is not None)
-        thi = float(getattr(self, "_lvv_thick_thi", 20.0))
+        thr = self._wall_thresholds()
         for k in ("A", "B"):
             p = self.pane[k]
             if on:
                 p.reslice_thick.SetInputData(self._lvv_thick_vol)
-                p.colors_thick.SetLookupTable(_wall_thickness_lut(1.0, thi, 0.6))
-                p.thick_bar.SetLookupTable(_wall_thickness_lut(1.0, thi, 1.0))
+                p.colors_thick.SetLookupTable(_wall_thickness_lut(thr, 0.6))
+                p.thick_bar.SetLookupTable(_wall_thickness_lut(thr, 1.0))
+                p.thick_bar.SetNumberOfLabels(min(12, len(thr) + 2))
                 p.thick_bar.SetVisibility(True)
             else:
                 p.reslice_thick.SetInputData(_placeholder_image())
-                p.colors_thick.SetLookupTable(_wall_thickness_lut(1.0, 20.0, 0.0))
+                p.colors_thick.SetLookupTable(
+                    _wall_thickness_lut(_WALL_DEFAULT_THR, 0.0))
                 p.thick_bar.SetVisibility(False)
             p.colors_thick.Modified()
             p.render()
+
+    def _lv_wall_bands_refresh(self) -> None:
+        """Re-read the wall-thickness colour bands (Settings changed) and repaint
+        any live 壁厚 heat map with them."""
+        try:
+            from multi_dicomviewer.core import settings as _st
+            self._lv_wall_thresholds = list(
+                _st.load_lv_wall_bands()["thresholds"])
+        except Exception:                                # noqa: BLE001
+            return
+        self._lvv_thick_refresh_display()
 
     def _lvv_thick_snap(self) -> dict:
         """Snapshot the 壁厚 display state for one-step Undo/Redo."""
@@ -5617,7 +5742,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].colors_mask.Modified()
             self.pane[k].reslice_thick.SetInputData(_placeholder_image())
             self.pane[k].colors_thick.SetLookupTable(
-                _wall_thickness_lut(1.0, 20.0, 0.0))
+                _wall_thickness_lut(_WALL_DEFAULT_THR, 0.0))
             self.pane[k].colors_thick.Modified()
             self.pane[k].thick_bar.SetVisibility(False)
             self._redraw_meas(k)
@@ -11245,11 +11370,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             if mode is not None and getattr(self, "_lvv_thick_stats", None):
                 s = self._lvv_thick_stats
                 name = self._THICK_MODES.get(mode, ("", "", "壁厚"))[2]
+                bands = "/".join(f"{x:g}" for x in self._wall_thresholds())
                 lines.append(t(
                     "{n}: mean {a:.1f} / min {b:.1f} / max {c:.1f} mm  "
-                    "(colour 0–{h:.0f}mm)",
-                    n=name, a=s["mean"], b=s["min"], c=s["max"],
-                    h=float(getattr(self, "_lvv_thick_thi", 20.0))))
+                    "(bands {bd} mm)",
+                    n=name, a=s["mean"], b=s["min"], c=s["max"], bd=bands))
             return lines
         lv = self._lv
         if lv is None:
