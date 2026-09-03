@@ -11475,12 +11475,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Only the two clinically important volumes — Blood (LV cavity) and
             # Epi (epicardial). Wall-thickness stats + polygon metrics are hidden.
             lines = []
-            if lvv.get("last_ml") is not None:
-                lines.append(
-                    t("Blood-Volume: {v:.1f} mL", v=float(lvv["last_ml"])))
+            blood_ml = (float(lvv["last_ml"])
+                        if lvv.get("last_ml") is not None else None)
+            if blood_ml is not None:
+                lines.append(t("Blood-Volume: {v:.1f} mL", v=blood_ml))
             epi_ml = self._lvv_epi_volume_ml()
             if epi_ml is not None:
                 lines.append(t("Epi-Volume: {v:.1f} mL", v=epi_ml))
+            # When both are shown, the myocardial volume is their difference
+            # (epicardial minus cavity).
+            if blood_ml is not None and epi_ml is not None:
+                lines.append(t("Myocardium-Volume: {v:.1f} mL",
+                               v=max(0.0, epi_ml - blood_ml)))
             return lines
         lv = self._lv
         if lv is None:
