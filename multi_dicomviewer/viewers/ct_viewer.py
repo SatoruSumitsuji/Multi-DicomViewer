@@ -61,7 +61,8 @@ from vtkmodules.vtkCommonMath import vtkMatrix4x4
 from vtkmodules.vtkFiltersSources import vtkLineSource
 from vtkmodules.vtkImagingCore import vtkImageMapToColors, vtkImageReslice
 from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth
-from vtkmodules.vtkRenderingAnnotation import vtkCornerAnnotation
+from vtkmodules.vtkRenderingAnnotation import (
+    vtkCornerAnnotation, vtkScalarBarActor)
 from vtkmodules.vtkRenderingCore import (
     vtkActor,
     vtkActor2D,
@@ -1286,6 +1287,26 @@ class _Pane:
             self.colors_thick.GetOutputPort())
         self.actor_thick.SetInterpolate(False)
         self.actor_thick.SetPosition(0.0, 0.0, 0.12)
+        # Wall-thickness colour LEGEND (which colour = how many mm), shown only
+        # while a 壁厚 heat map is on. Hidden until the viewer sets its LUT.
+        self.thick_bar = vtkScalarBarActor()
+        self.thick_bar.SetLookupTable(_wall_thickness_lut(1.0, 20.0, 1.0))
+        self.thick_bar.SetNumberOfLabels(6)
+        self.thick_bar.SetTitle("mm")
+        self.thick_bar.SetLabelFormat("%.0f")
+        self.thick_bar.SetVisibility(False)
+        self.thick_bar.GetPositionCoordinate() \
+            .SetCoordinateSystemToNormalizedViewport()
+        self.thick_bar.GetPositionCoordinate().SetValue(0.905, 0.18)
+        self.thick_bar.SetWidth(0.085)
+        self.thick_bar.SetHeight(0.62)
+        _btp = self.thick_bar.GetTitleTextProperty()
+        _blp = self.thick_bar.GetLabelTextProperty()
+        for _tp in (_btp, _blp):
+            _tp.SetColor(1.0, 1.0, 1.0)
+            _tp.SetFontSize(12)
+            _tp.SetBold(True)
+            _tp.ShadowOn()
         self.ren = vtkRenderer()
         self.ren.SetBackground(0.0, 0.0, 0.0)
         self.ren.GetActiveCamera().ParallelProjectionOn()
@@ -1293,6 +1314,7 @@ class _Pane:
         self.ren.AddActor(self.actor_hl)              # blood tint over grayscale
         self.ren.AddActor(self.actor_mask)           # measured region (red) on top
         self.ren.AddActor(self.actor_thick)          # wall-thickness heat map
+        self.ren.AddActor2D(self.thick_bar)          # wall-thickness colour legend
 
         self.cross = []
         self._overlay_actors = []
@@ -2256,8 +2278,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
-        self._lvv_thick_on = False       # 壁厚 heat-map visible
+        self._lvv_thick_mode = None      # None / "3d" (nearest-dist) / "sax" (radial)
         self._lvv_thick_stats = None     # {min, mean, max, myo_ml}
+        self._lvv_thick_thi = 20.0       # colour-scale upper mm (legend range)
+        self._lvv_thick_undo_before = None
         self._lvv_blood_comp = None      # last Blood mask (bbox sub-volume, bool)
         self._lvv_blood_bbox = None      # its (z0,z1,y0,y1,x0,x1) in the volume
         self._lvv_blood_apex = None      # apex used for that Blood measure
@@ -2829,15 +2853,27 @@ class CTViewer(CPRMixin, AbstractViewer):
               "the first time; kept when the HU range changes."))
         self._lvv_manual_endo_btn.clicked.connect(self._lvv_manual_endo)
         gb.addWidget(self._lvv_manual_endo_btn)
-        # 壁厚: heat-map the myocardial wall thickness (Endo→Epi nearest distance).
-        self._lvv_thick_btn = FitButton(t("壁厚"))
-        self._lvv_thick_btn.setCheckable(True)
-        self._lvv_thick_btn.setHelpToolTip(
-            t("Heat-map the myocardial wall thickness (Endo→Epi nearest "
-              "distance) on both panes. Build the Auto-Endo first; needs the "
-              "Epi surface and MV/AoV planes. blue = thin, red = thick."))
-        self._lvv_thick_btn.clicked.connect(self._lvv_toggle_wall_thickness)
-        gb.addWidget(self._lvv_thick_btn)
+        # 壁厚: two mutually-exclusive heat maps of the myocardial wall thickness
+        # (blue=thin → red=thick, with a mm colour legend). 3D = Endo→Epi nearest
+        # distance; 短軸 = radial (echo-style) from the LV long axis.
+        self._lvv_thick3d_btn = FitButton(t("壁厚3D"))
+        self._lvv_thick3d_btn.setCheckable(True)
+        self._lvv_thick3d_btn.setHelpToolTip(
+            t("Wall-thickness heat map — Endo→Epi NEAREST distance (3-D). Build "
+              "the Auto-Endo first; needs the Epi surface + MV/AoV. Only one of "
+              "壁厚3D / 壁厚短軸 shows at a time."))
+        self._lvv_thick3d_btn.clicked.connect(
+            lambda: self._lvv_set_thick_mode("3d"))
+        gb.addWidget(self._lvv_thick3d_btn)
+        self._lvv_thicksax_btn = FitButton(t("壁厚短軸"))
+        self._lvv_thicksax_btn.setCheckable(True)
+        self._lvv_thicksax_btn.setHelpToolTip(
+            t("Wall-thickness heat map — RADIAL (short-axis / echo-style) from "
+              "the LV long axis, to compare with echocardiography. Mutually "
+              "exclusive with 壁厚3D."))
+        self._lvv_thicksax_btn.clicked.connect(
+            lambda: self._lvv_set_thick_mode("sax"))
+        gb.addWidget(self._lvv_thicksax_btn)
         row1.addWidget(self._lv_grp_blood)
         row1.addStretch(1)
 
@@ -3410,15 +3446,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 ready or blood_ok
                 or getattr(self, "_lv_endo_manual_dict", None) is not None)
             self._lvv_manual_endo_btn.setVisible(on)
-        if getattr(self, "_lvv_thick_btn", None) is not None:
-            # 壁厚 needs a built Auto-Endo mask + an Epi surface.
-            self._lvv_thick_btn.setEnabled(
-                self._lv_endo_mask_comp is not None
-                and self._lvv_epi_surf is not None)
-            self._lvv_thick_btn.setVisible(on)
-            self._lvv_thick_btn.setChecked(bool(getattr(self, "_lvv_thick_on",
-                                                         False)))
-            self._lvv_style_toggle(self._lvv_thick_btn, "#ffd040", "black")
+        # 壁厚3D / 壁厚短軸 (need a built Auto-Endo mask + an Epi surface).
+        for _attr, _c, _l in self._THICK_MODES.values():
+            _b = getattr(self, _attr, None)
+            if _b is not None:
+                _b.setVisible(on)
+        self._lvv_thick_sync_buttons()
         self._lvv_load_btn.setEnabled(self._image is not None)
         self._lvv_exit_btn.setEnabled(on)
 
@@ -3662,8 +3695,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         into one recompute); 全域HU表示 just refreshes its instant tint. The
         Auto-Endo line is kept as a stale GHOST (dashed, 50%) until Auto-Endo表示
         is pressed; a hand-edited Manual Endo is RETAINED."""
-        if getattr(self, "_lvv_thick_on", False):
-            self._lvv_thick_hide()        # wall thickness depends on the Endo
+        if getattr(self, "_lvv_thick_mode", None) is not None:
+            self._lvv_thick_clear()        # wall thickness depends on the Endo
         # Auto Endo MODEL (for Manual seeding) is stale; the mask is kept for the
         # ghost line and rebuilt only when Auto-Endo表示 is pressed.
         self._lv_endo_auto_model = None
@@ -3713,8 +3746,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         """A 方式 / 膨らみ change → ghost the shown Auto-Endo line (see
         _lvv_endo_param_changed). NO recompute here; it happens only when
         Auto-Endo表示 is pressed."""
-        if getattr(self, "_lvv_thick_on", False):
-            self._lvv_thick_hide()        # Endo shape changed → thickness stale
+        if getattr(self, "_lvv_thick_mode", None) is not None:
+            self._lvv_thick_clear()        # Endo shape changed → thickness stale
         self._lvv_endo_param_changed()
 
     def _lvv_endo_param_changed(self) -> None:
@@ -3783,8 +3816,8 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_invalidate_auto_endo(self) -> None:
         """Drop the cached auto Endo + hide Auto-Endo表示 so the next press
         recomputes. Blood and the hand-edited Manual Endo are unaffected."""
-        if getattr(self, "_lvv_thick_on", False):
-            self._lvv_thick_hide()        # thickness depends on the Endo mask
+        if getattr(self, "_lvv_thick_mode", None) is not None:
+            self._lvv_thick_clear()        # thickness depends on the Endo mask
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
@@ -4655,10 +4688,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         return result["mask"]
 
     # ------------------------------------------ wall thickness (Epi−Endo)
-    def _lvv_build_wall_thickness(self):
+    def _lvv_build_wall_thickness(self, mode: str = "3d"):
         """Build the myocardial wall-thickness field (mm) between the Endo (auto
-        envelope) and the Epi surface, cut by the MV/AoV valves. Returns
-        (full[z,y,x] float32, stats) or None; the EDT runs off-thread (~1-2 s)."""
+        envelope) and the Epi surface, valve-clipped. *mode* '3d' = Endo→Epi
+        nearest distance (EDT); 'sax' = radial (short-axis / echo-style) from the
+        LV long axis. Returns (full[z,y,x] float32, stats) or None; off-thread."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         epi = getattr(self, "_lvv_epi_surf", None)
@@ -4669,6 +4703,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 or apex is None or self._lv_endo_mask_comp is None
                 or self._lv_endo_mask_bbox is None):
             return None
+        if mode == "sax" and getattr(epi, "axis", None) is None:
+            return None
         dims = self._dims                       # (sx, sy, sz)
         shape = self._vol.shape                 # (nz, ny, nx)
         c_a, n_a = np.asarray(av[0], float), np.asarray(av[1], float)
@@ -4676,13 +4712,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         apex = np.asarray(apex, float)
         endo_comp = np.asarray(self._lv_endo_mask_comp, bool)
         endo_bb = tuple(self._lv_endo_mask_bbox)
+        ax = getattr(epi, "axis", None)
+        axis_dir = None if ax is None else np.asarray(ax.axis, float)
+        radial0 = None if ax is None else np.asarray(ax.radial0, float)
         result: dict = {}
 
         class _ThickWorker(QThread):
             def run(self_) -> None:
                 try:
                     from multi_dicomviewer.core.lv_wallthickness import (
-                        wall_thickness_field)
+                        wall_thickness_field, wall_thickness_radial_field)
                     # Epi interior on the native grid, valve-clipped (apex side).
                     epi_comp, epi_bb = epi.inside_mask_bbox(
                         dims, shape, [(c_a, n_a), (c_m, n_m)], apex)
@@ -4700,8 +4739,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                                 x0 - ex0:x1 - ex0] = endo_comp[
                             z0 - nz0:z1 - nz0, y0 - ny0:y1 - ny0,
                             x0 - nx0:x1 - nx0]
-                    thick_sub, stats = wall_thickness_field(
-                        endo_in, epi_comp, (dims[2], dims[1], dims[0]))
+                    sp = (dims[2], dims[1], dims[0])   # (sz, sy, sx)
+                    if mode == "sax":
+                        # apex into the sub-box's local voxel frame (origin =
+                        # world of local (0,0,0)); axis dirs are offset-free.
+                        origin = np.array([ex0 * dims[0], ey0 * dims[1],
+                                           ez0 * dims[2]], float)
+                        thick_sub, stats = wall_thickness_radial_field(
+                            endo_in, epi_comp, sp, apex - origin,
+                            axis_dir, radial0)
+                    else:
+                        thick_sub, stats = wall_thickness_field(
+                            endo_in, epi_comp, sp)
                     full = np.zeros(shape, np.float32)
                     full[ez0:ez1, ey0:ey1, ex0:ex1] = thick_sub
                     result["full"] = full
@@ -4726,70 +4775,117 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         return result["full"], result["stats"]
 
-    def _lvv_toggle_wall_thickness(self, *args) -> None:
-        """壁厚: heat-map the myocardial wall thickness (Endo→Epi nearest-distance)
-        on both panes. Needs the Auto-Endo built (press Auto-Endo表示 first) plus
-        the Epi surface and MV/AoV planes. Exclusive with the blood/tint fill."""
-        from PyQt6.QtWidgets import QMessageBox
-        if not self._lvv_thick_btn.isChecked():
-            self._lvv_thick_hide()
-            return
-        if self._lv_endo_mask_comp is None:
-            self._lvv_thick_btn.setChecked(False)
-            self._lvv_style_toggle(self._lvv_thick_btn, "#ffd040", "black")
-            QMessageBox.information(
-                self.window(), t("壁厚"),
-                t("Build the Auto-Endo first (press Auto-Endo表示), then 壁厚."))
-            return
-        built = self._lvv_build_wall_thickness()
-        if not built:
-            self._lvv_thick_btn.setChecked(False)
-            self._lvv_style_toggle(self._lvv_thick_btn, "#ffd040", "black")
-            QMessageBox.information(
-                self.window(), t("壁厚"),
-                t("Could not compute wall thickness — check Endo / Epi / valves."))
-            return
-        full, stats = built
-        sx, sy, sz = self._dims
-        self._lvv_thick_vol = numpy_to_vtk_image(full, sx, sy, sz)
-        self._lvv_thick_stats = stats
-        self._lvv_thick_on = True
-        t_hi = max(6.0, math.ceil(float(stats["max"])))
-        for k in ("A", "B"):
-            self.pane[k].reslice_thick.SetInputData(self._lvv_thick_vol)
-            self.pane[k].colors_thick.SetLookupTable(
-                _wall_thickness_lut(1.0, t_hi, 0.6))
-            self.pane[k].colors_thick.Modified()
-        # Hide the blood/tint fill so the heat map reads clearly.
-        self._lvv_mask_on = False
-        self._lvv_hl_on = False
-        self._lvv_mask_btn.setChecked(False)
-        self._lvv_hl_btn.setChecked(False)
-        self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
-        self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
-        self._lvv_update_mask()
-        self._lvv_update_highlight()
-        self._lvv_style_toggle(self._lvv_thick_btn, "#ffd040", "black")
-        self._lv_update_text()
-        for k in ("A", "B"):
-            self.pane[k].render()
+    #: 壁厚 mode → (button attr, chip colour, label)
+    _THICK_MODES = {"3d": ("_lvv_thick3d_btn", "#ffd040", "壁厚3D"),
+                    "sax": ("_lvv_thicksax_btn", "#ff40d0", "壁厚短軸")}
 
-    def _lvv_thick_hide(self) -> None:
-        """Turn the 壁厚 heat map off and release its scalar volume."""
-        self._lvv_thick_on = False
+    def _lvv_set_thick_mode(self, mode: str) -> None:
+        """壁厚3D / 壁厚短軸: mutually-exclusive heat map. Clicking the active mode
+        turns it OFF; clicking the other SWITCHES (the old map stays until the new
+        one is computed, so the difference is visible). Recorded for Undo/Redo.
+        Needs the Auto-Endo built + Epi + MV/AoV."""
+        from PyQt6.QtWidgets import QMessageBox
+        cur = getattr(self, "_lvv_thick_mode", None)
+        target = None if mode == cur else mode      # re-click active → off
+        if target is not None:
+            if self._lv_endo_mask_comp is None or self._lvv_epi_surf is None:
+                self._lvv_thick_sync_buttons()
+                QMessageBox.information(
+                    self.window(), t("壁厚"),
+                    t("Build the Auto-Endo first (press Auto-Endo表示), then 壁厚."))
+                return
+            before = self._lvv_thick_snap()
+            built = self._lvv_build_wall_thickness(target)  # old map stays here
+            if not built:
+                self._lvv_thick_sync_buttons()
+                QMessageBox.information(
+                    self.window(), t("壁厚"),
+                    t("Could not compute wall thickness — check Endo/Epi/valves."))
+                return
+            full, stats = built
+            sx, sy, sz = self._dims
+            self._lvv_thick_mode = target
+            self._lvv_thick_vol = numpy_to_vtk_image(full, sx, sy, sz)
+            self._lvv_thick_stats = stats
+            self._lvv_thick_thi = max(6.0, math.ceil(float(stats["max"])))
+            # Hide the blood/tint fill so the heat map reads clearly.
+            self._lvv_mask_on = False
+            self._lvv_hl_on = False
+            self._lvv_mask_btn.setChecked(False)
+            self._lvv_hl_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+            self._lvv_update_mask()
+            self._lvv_update_highlight()
+        else:
+            before = self._lvv_thick_snap()
+            self._lvv_thick_mode = None
+            self._lvv_thick_vol = None
+            self._lvv_thick_stats = None
+        self._lvv_thick_refresh_display()
+        after = self._lvv_thick_snap()
+        self._undo_record(
+            lambda b=before: self._lvv_thick_apply_snap(b),
+            lambda a=after: self._lvv_thick_apply_snap(a))
+        self._lvv_thick_sync_buttons()
+        self._lv_update_text()
+
+    def _lvv_thick_clear(self) -> None:
+        """Drop the 壁厚 heat map (used when the Endo becomes stale)."""
+        self._lvv_thick_mode = None
         self._lvv_thick_vol = None
         self._lvv_thick_stats = None
+        self._lvv_thick_refresh_display()
+        self._lvv_thick_sync_buttons()
+
+    def _lvv_thick_refresh_display(self) -> None:
+        """Push the current 壁厚 state (mode / volume / colour range) to VTK."""
+        on = (getattr(self, "_lvv_thick_mode", None) is not None
+              and getattr(self, "_lvv_thick_vol", None) is not None)
+        thi = float(getattr(self, "_lvv_thick_thi", 20.0))
         for k in ("A", "B"):
-            self.pane[k].reslice_thick.SetInputData(_placeholder_image())
-            self.pane[k].colors_thick.SetLookupTable(
-                _wall_thickness_lut(1.0, 20.0, 0.0))
-            self.pane[k].colors_thick.Modified()
-        if getattr(self, "_lvv_thick_btn", None) is not None:
-            self._lvv_thick_btn.setChecked(False)
-            self._lvv_style_toggle(self._lvv_thick_btn, "#ffd040", "black")
+            p = self.pane[k]
+            if on:
+                p.reslice_thick.SetInputData(self._lvv_thick_vol)
+                p.colors_thick.SetLookupTable(_wall_thickness_lut(1.0, thi, 0.6))
+                p.thick_bar.SetLookupTable(_wall_thickness_lut(1.0, thi, 1.0))
+                p.thick_bar.SetVisibility(True)
+            else:
+                p.reslice_thick.SetInputData(_placeholder_image())
+                p.colors_thick.SetLookupTable(_wall_thickness_lut(1.0, 20.0, 0.0))
+                p.thick_bar.SetVisibility(False)
+            p.colors_thick.Modified()
+            p.render()
+
+    def _lvv_thick_snap(self) -> dict:
+        """Snapshot the 壁厚 display state for one-step Undo/Redo."""
+        return {"mode": getattr(self, "_lvv_thick_mode", None),
+                "vol": getattr(self, "_lvv_thick_vol", None),
+                "stats": getattr(self, "_lvv_thick_stats", None),
+                "thi": getattr(self, "_lvv_thick_thi", 20.0)}
+
+    def _lvv_thick_apply_snap(self, s: dict) -> None:
+        """Restore a 壁厚 snapshot (Undo/Redo target)."""
+        self._lvv_thick_mode = s.get("mode")
+        self._lvv_thick_vol = s.get("vol")
+        self._lvv_thick_stats = s.get("stats")
+        self._lvv_thick_thi = s.get("thi", 20.0)
+        self._lvv_thick_refresh_display()
+        self._lvv_thick_sync_buttons()
         self._lv_update_text()
-        for k in ("A", "B"):
-            self.pane[k].render()
+
+    def _lvv_thick_sync_buttons(self) -> None:
+        """Reflect the 壁厚 mode on both buttons (only one can be on)."""
+        mode = getattr(self, "_lvv_thick_mode", None)
+        can = (self._lv_endo_mask_comp is not None
+               and self._lvv_epi_surf is not None)
+        for m, (attr, col, _lbl) in self._THICK_MODES.items():
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            btn.setChecked(mode == m)
+            btn.setEnabled(can)
+            self._lvv_style_toggle(btn, col, "black")
 
     def _lv_auto_endo_from_blood(self) -> bool:
         """Build the auto Endo from the blood pool and OPEN it for editing (the
@@ -5328,7 +5424,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_endo_show = False
         self._lv_endo_ghost = False
         self._lv_endo_undo_before = None
-        self._lvv_thick_on = False
+        self._lvv_thick_mode = None
         self._lvv_thick_vol = None
         self._lvv_thick_stats = None
         for k in ("A", "B"):
@@ -5345,6 +5441,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].colors_thick.SetLookupTable(
                 _wall_thickness_lut(1.0, 20.0, 0.0))
             self.pane[k].colors_thick.Modified()
+            self.pane[k].thick_bar.SetVisibility(False)
             self._redraw_meas(k)
 
     def _lvv_deactivate(self) -> None:
@@ -10966,12 +11063,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             if lvv.get("last_ml") is not None:
                 lines.append(
                     t("Blood-Volume: {v:.1f} mL", v=float(lvv["last_ml"])))
-            if (getattr(self, "_lvv_thick_on", False)
-                    and getattr(self, "_lvv_thick_stats", None)):
+            mode = getattr(self, "_lvv_thick_mode", None)
+            if mode is not None and getattr(self, "_lvv_thick_stats", None):
                 s = self._lvv_thick_stats
+                name = self._THICK_MODES.get(mode, ("", "", "壁厚"))[2]
                 lines.append(t(
-                    "Wall thickness: mean {a:.1f} / min {b:.1f} / max {c:.1f} mm",
-                    a=s["mean"], b=s["min"], c=s["max"]))
+                    "{n}: mean {a:.1f} / min {b:.1f} / max {c:.1f} mm  "
+                    "(colour 0–{h:.0f}mm)",
+                    n=name, a=s["mean"], b=s["min"], c=s["max"],
+                    h=float(getattr(self, "_lvv_thick_thi", 20.0))))
             return lines
         lv = self._lv
         if lv is None:

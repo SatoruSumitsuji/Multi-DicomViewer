@@ -6,7 +6,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from multi_dicomviewer.core.lv_wallthickness import wall_thickness_field  # noqa: E402
+from multi_dicomviewer.core.lv_wallthickness import (  # noqa: E402
+    wall_thickness_field, wall_thickness_radial_field)
 
 
 def test_spherical_shell():
@@ -44,5 +45,29 @@ def test_spherical_shell():
     print("WALL THICKNESS OK")
 
 
+def test_radial_shell():
+    # Coaxial cylinders along z: endo r=10, epi r=25 → radial thickness 15.
+    N = 70
+    c = N / 2.0
+    zz, yy, xx = np.mgrid[0:N, 0:N, 0:N]
+    r = np.sqrt((yy - c) ** 2 + (xx - c) ** 2)
+    zin = (zz > 10) & (zz < 60)
+    endo = (r <= 10) & zin
+    epi = (r <= 25) & zin
+    apex = np.array([c, c, 5.0])
+    thick, stats = wall_thickness_radial_field(
+        endo, epi, (1.0, 1.0, 1.0), apex,
+        np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]))
+    myo = epi & ~endo
+    vals = thick[myo]
+    print(f"radial: median={np.median(vals):.2f} mean={stats['mean']:.2f} "
+          f"min={stats['min']:.2f} max={stats['max']:.2f} (true 15)")
+    assert abs(np.median(vals) - 15.0) <= 1.5, np.median(vals)
+    assert abs(stats["mean"] - 15.0) <= 1.5, stats["mean"]
+    assert thick[~myo].max() == 0.0
+    print("RADIAL OK")
+
+
 if __name__ == "__main__":
     test_spherical_shell()
+    test_radial_shell()
