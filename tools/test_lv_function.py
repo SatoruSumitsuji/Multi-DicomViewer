@@ -31,14 +31,16 @@ def test_function_from_file():
     vshape = (N, N, N)
     # bbox = tight box of each mask (full volume here for simplicity)
     bb = (0, N, 0, N, 0, N)
-    data = {
+    # EpiLv.json carries the Epi region mask (single source); BldLv.json the
+    # Endo mask + spacing + axis. The analysis reads BOTH.
+    epilv = {"region": _pack(epi, bb, vshape)}
+    bldlv = {
         "spacing": [1.0, 1.0, 1.0],           # (sx, sy, sz)
         "endo": _pack(endo, bb, vshape),
-        "epi": _pack(epi, bb, vshape),
         "axis": {"apex": [c, c, 5.0], "dir": [0.0, 0.0, 1.0],
                  "radial0": [1.0, 0.0, 0.0]},
     }
-    fn = LVFunction.from_json(data)
+    fn = LVFunction.from_files(epilv, bldlv)
     assert fn is not None
     s = fn.summary()
     # true cavity = 4/3 π 20³ ≈ 33510 mL(voxels); myo = 4/3π(30³−20³) ≈ 79587
@@ -59,11 +61,13 @@ def test_function_from_file():
     assert abs(s["wall_3d"]["mean"] - 10.0) <= 1.5
     assert s["wall_sax"] is not None and s["wall_sax"]["mean"] > 0.0
     # missing axis → radial returns None, 3-D still works
-    data2 = dict(data)
-    data2.pop("axis")
-    fn2 = LVFunction.from_json(data2)
+    bldlv2 = dict(bldlv)
+    bldlv2.pop("axis")
+    fn2 = LVFunction.from_files(epilv, bldlv2)
     assert fn2.wall_thickness("sax") is None
     assert fn2.wall_thickness("3d") is not None
+    # missing Epi (EpiLv not provided) → no analysis object
+    assert LVFunction.from_files({}, bldlv) is None
     print("LV FUNCTION OK")
 
 
