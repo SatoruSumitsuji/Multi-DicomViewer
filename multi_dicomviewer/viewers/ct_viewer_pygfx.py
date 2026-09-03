@@ -1285,17 +1285,31 @@ class _Overlay(QWidget):
                 _draw_outlined_text(p, QRectF(6, 4, w * 0.40 - 6, h - 40),
                                     flags, "\n".join(head),
                                     QColor(255, 255, 255), width=1.0)
-        # LV-Blood volume readout (top-right) while LV Vol mode has a result.
+        # LV-Blood / Epi / Myocardium volume readout (top-right) while LV Vol mode
+        # has a result. Myocardium = Epi − Blood, shown only when both are known.
         lvv = getattr(v, "_lvv", None)
-        if lvv is not None and lvv.get("last_ml") is not None:
-            fb = QFont("monospace", 13)
-            fb.setBold(True)
-            p.setFont(fb)
-            _draw_outlined_text(
-                p, QRectF(w * 0.55, 6, w * 0.45 - 6, 24),
-                int(Qt.AlignmentFlag.AlignRight) | int(Qt.AlignmentFlag.AlignTop),
-                t("Blood-Volume: {v:.1f} mL").format(v=float(lvv["last_ml"])),
-                QColor(120, 220, 255), width=1.0)
+        if lvv is not None:
+            vlines = []
+            blood_ml = (float(lvv["last_ml"])
+                        if lvv.get("last_ml") is not None else None)
+            if blood_ml is not None:
+                vlines.append(t("Blood-Volume: {v:.1f} mL").format(v=blood_ml))
+            epi_ml = (v._lvv_epi_volume_ml()
+                      if hasattr(v, "_lvv_epi_volume_ml") else None)
+            if epi_ml is not None:
+                vlines.append(t("Epi-Volume: {v:.1f} mL").format(v=epi_ml))
+            if blood_ml is not None and epi_ml is not None:
+                vlines.append(t("Myocardium-Volume: {v:.1f} mL").format(
+                    v=max(0.0, epi_ml - blood_ml)))
+            if vlines:
+                fb = QFont("monospace", 13)
+                fb.setBold(True)
+                p.setFont(fb)
+                _draw_outlined_text(
+                    p, QRectF(w * 0.50, 6, w * 0.50 - 6, 24 * len(vlines)),
+                    int(Qt.AlignmentFlag.AlignRight)
+                    | int(Qt.AlignmentFlag.AlignTop),
+                    "\n".join(vlines), QColor(120, 220, 255), width=1.0)
         p.setFont(QFont("monospace", 12))       # corner readouts stay compact
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
@@ -1745,6 +1759,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_surf = None             # LVSurface (Epi outer bound)
         self._lvv_epi_apex = None             # Epi apex (world mm)
         self._lvv_epi_model_dict = None       # LVModel dict for Save
+        self._lvv_epi_ml = None               # cached epicardial volume (mL)
         self._lvv_hl_on = True                # 血流領域表示 (in-range tint) on
         self._lvv_epi_show = False            # Epi境界 (green border) on
         self._lvv_mask_on = False             # 計測領域 (red region) on
@@ -6397,9 +6412,34 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if model.epi is not None:
                     self._lvv_epi_surf = model.epi
                     self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
-                    self._lvv_epi_model_dict = model.to_dict()
+                    d = model.to_dict()
+                    # Carry the epicardial volume so Blood/Endo can show
+                    # Epi-Volume (and Myocardium = Epi − Blood) with no recompute.
+                    try:
+                        spacing = max(0.5, float(min(self._dims)))
+                        epi_ml = model.volume_ml(spacing, "epi")
+                        if epi_ml is not None:
+                            d.setdefault("volume", {})["epi_ml"] = float(epi_ml)
+                            self._lvv_epi_ml = float(epi_ml)
+                    except Exception:                   # noqa: BLE001
+                        pass
+                    self._lvv_epi_model_dict = d
         except Exception:                               # noqa: BLE001
             pass
+
+    def _lvv_epi_volume_ml(self):
+        """Epicardial volume (mL) for the Blood/Endo readout, from the stashed Epi
+        model dict — cached, no recompute. None if unknown."""
+        v = getattr(self, "_lvv_epi_ml", None)
+        if v is not None:
+            return v
+        d = getattr(self, "_lvv_epi_model_dict", None)
+        try:
+            v = float(d["volume"]["epi_ml"]) if d else None
+        except (KeyError, TypeError, ValueError):
+            v = None
+        self._lvv_epi_ml = v
+        return v
 
     def _lv_mode_has_unsaved(self, mode) -> bool:
         if mode == "blood":
@@ -7171,6 +7211,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                                        "black")
         self._lvv_redraw()
 
+    def _lvv_blood_vol_from_comp(self) -> bool:
+        """(Re)build the 水色 display volume (numpy 0/1 float32, full grid) from the
+        retained blood component (``_lvv_blood_comp`` + ``_lvv_blood_bbox``)
+        WITHOUT re-running the blood-pool segmentation. Used on LV-Blood re-entry
+        so a retained mask is reused rather than recomputed."""
+        comp = getattr(self, "_lvv_blood_comp", None)
+        bbox = getattr(self, "_lvv_blood_bbox", None)
+        if comp is None or bbox is None or self._vol is None:
+            return False
+        full = np.zeros(self._vol.shape, np.float32)
+        z0, z1, y0, y1, x0, x1 = bbox
+        full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
+        self._lvv_mask_vol = full
+        return True
+
     def _lvv_toggle_blood(self, *args) -> None:
         """LV-Blood表示: show the computed, Epi-clipped blood region (水色). When
         turning ON, compute it for the current HU range if stale/absent; the
@@ -7183,11 +7238,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
             self._lvv_redraw()
             return
+        # The display volume is dropped on leaving LV mode, but the segmented
+        # component (_lvv_blood_comp) is retained — rebuild the volume cheaply
+        # from it rather than re-running the pool segmentation.
         have = (self._lvv is not None and self._lvv.get("last_ml") is not None
-                and self._lvv_mask_vol is not None
                 and self._lvv.get("calc_sig") is not None
-                and self._lvv_signature() == self._lvv.get("calc_sig"))
+                and self._lvv_signature() == self._lvv.get("calc_sig")
+                and (self._lvv_mask_vol is not None
+                     or getattr(self, "_lvv_blood_comp", None) is not None))
         if have:
+            if self._lvv_mask_vol is None:
+                self._lvv_blood_vol_from_comp()
             self._lvv_mask_on = True
             self._lvv_hl_on = False
             self._lvv_hl_btn.setChecked(False)
@@ -7808,6 +7869,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_epi_surf = model.epi
             self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
             self._lvv_epi_model_dict = data["epi_model"]
+            self._lvv_epi_ml = None          # re-derive from the loaded dict
             if self._lvv is None:
                 self._lvv = {"apex": None, "aortic": None, "mitral": None,
                              "hu_lo": None, "hu_hi": None, "seed": None,
@@ -7886,6 +7948,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_surf = None
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None
+        self._lvv_epi_ml = None
         self._lvv_mask_vol = None
         self._lvv_mask_on = False
         self._lvv_epi_show = False
@@ -9765,7 +9828,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                         self._lvv_epi_surf = model.epi
                         self._lvv_epi_apex = np.asarray(
                             model.epi_axis.apex, float)
-                        self._lvv_epi_model_dict = model.to_dict()
+                        d = model.to_dict()
+                        try:
+                            spacing = max(0.5, float(min(self._dims)))
+                            epi_ml = model.volume_ml(spacing, "epi")
+                            if epi_ml is not None:
+                                d.setdefault("volume", {})["epi_ml"] = float(
+                                    epi_ml)
+                                self._lvv_epi_ml = float(epi_ml)
+                        except Exception:               # noqa: BLE001
+                            pass
+                        self._lvv_epi_model_dict = d
         except Exception:                               # noqa: BLE001
             pass
         # Keep a hand-edited Endo (Manual-Endo) so it is retained across HU
