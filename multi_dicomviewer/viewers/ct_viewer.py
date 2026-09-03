@@ -7746,7 +7746,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return
         if lv.get("vol_done") or lv.get("vol_endo_ml") is not None \
-                or lv.get("vol_epi_ml") is not None or self._lv_result_lines:
+                or lv.get("vol_epi_ml") is not None \
+                or getattr(self, "_lv_result_lines", None):
             lv["vol_done"] = False
             lv["vol_endo_ml"] = None
             lv["vol_epi_ml"] = None
@@ -8779,6 +8780,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
         self._lv_dirty = False                       # nothing traced yet
+        self._lv_result_lines = []                   # result-block lines (must
+        #    exist before any _lv_invalidate_volume; the old click-to-place-apex
+        #    path used to seed it, the Apex-button flow doesn't reach that path)
         self._lv_reset_undo()                        # fresh Ctrl+Z stack
         self._lv_btn.setChecked(True)               # internal mode flag
         self.set_side("Bi")
