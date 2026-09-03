@@ -1334,7 +1334,7 @@ class _Pane:
         _blp = self.thick_bar.GetLabelTextProperty()
         for _tp in (_btp, _blp):
             _tp.SetColor(1.0, 1.0, 1.0)
-            _tp.SetFontSize(9)
+            _tp.SetFontSize(18)             # 2× (each dim) the earlier 9 px
             _tp.SetBold(True)
             _tp.ShadowOn()
         self.ren = vtkRenderer()
@@ -2308,6 +2308,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_disp_comp = None   # Epi border display mask (for the line)
         self._lvv_epi_disp_bbox = None
+        self._lvv_epi_ml = None          # Epi (epicardial) volume mL, cached
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
@@ -3187,10 +3188,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._lv_update_submode_ui()
                 return                                # blocked/cancelled → stay
         if sm in ("endo", "epi"):
+            retain_epi = None
             if self._lvv is not None:                 # (defensive) leftover Blood
+                # Leaving Blood into Epi: retain the Epi that was loaded into
+                # Blood (+ its volume) so Epi mode shows it with NO recompute.
+                if sm == "epi":
+                    retain_epi = getattr(self, "_lvv_epi_model_dict", None)
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
+            if retain_epi is not None:
+                try:
+                    from multi_dicomviewer.core.lv_measure import LVModel
+                    model = LVModel.from_dict(retain_epi)
+                    model.build()
+                    if (model.epi_axis is not None
+                            and len(model.epi_contours) >= 3):
+                        self._lv_apply_model(
+                            model, volume=retain_epi.get("volume"))
+                        self._lv_update_submode_ui()
+                        return
+                except Exception:                        # noqa: BLE001
+                    pass
             elif self._lv is not None:
                 m = self._lv["model"]
                 other_planes = (m.endo_planes if sm == "epi"
@@ -3266,7 +3285,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if model.epi is not None:
                     self._lvv_epi_surf = model.epi
                     self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
-                    self._lvv_epi_model_dict = model.to_dict()
+                    d = model.to_dict()
+                    # Carry the computed Epi volume so Blood shows Epi-Volume and
+                    # a later return to Epi mode restores it without a recompute.
+                    if (self._lv is not None
+                            and self._lv.get("vol_epi_ml") is not None):
+                        d.setdefault("volume", {})["epi_ml"] = \
+                            float(self._lv["vol_epi_ml"])
+                    self._lvv_epi_model_dict = d
+                    self._lvv_epi_ml = None      # re-read from the new dict
         except Exception:                               # noqa: BLE001
             pass
 
@@ -3573,6 +3600,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_epi_surf = model.epi
             self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
             self._lvv_epi_model_dict = data
+            self._lvv_epi_ml = None              # new Epi → its own volume
             self._lvv_invalidate_epi_disp()      # new Epi → rebuild the line mask
             if getattr(self, "_lvv_epi_show", False):
                 self._lvv_build_epi_disp_mask()
@@ -3998,7 +4026,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         (LOD) so the line tracks the mouse in real time; FINE at rest for a crisp
         line. The mask cross-section cost scales ~1/step, so this is the main
         lever for making Epi/Endo/wall overlays follow a drag smoothly."""
-        return 2.0 if getattr(self, "_lod_drag", False) else float(fine)
+        return 2.8 if getattr(self, "_lod_drag", False) else float(fine)
+
+    def _lvv_epi_volume_ml(self):
+        """Epi (epicardial) volume in mL for the result block. Cached; taken from
+        the loaded EpiLv file's stored volume (no recompute), else None."""
+        v = getattr(self, "_lvv_epi_ml", None)
+        if v is not None:
+            return float(v)
+        em = getattr(self, "_lvv_epi_model_dict", None)
+        if isinstance(em, dict):
+            vol = em.get("volume") or {}
+            ev = vol.get("epi_ml")
+            if ev is not None:
+                self._lvv_epi_ml = float(ev)
+                return self._lvv_epi_ml
+        return None
 
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
@@ -5012,7 +5055,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     _wall_thickness_lut(_WALL_DEFAULT_THR, 0.0))
                 p.thick_bar.SetVisibility(False)
             p.colors_thick.Modified()
-            p.render()
+        # A full refresh sets reslice_thick's plane axes so the heat map appears
+        # IMMEDIATELY (a plain render leaves the axes unset until the next view
+        # change, which is why it only showed after nudging the centreline).
+        if self._image is not None:
+            self._refresh()
+        else:
+            for k in ("A", "B"):
+                self.pane[k].render()
 
     def _lv_wall_bands_refresh(self) -> None:
         """Re-read the wall-thickness colour bands (Settings changed) and repaint
@@ -7307,10 +7357,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_geom(key)
         self._redraw_compare(key)
         p = self.pane[key]
-        # "Hide/Show All Result" hides the measure result text too. In LV mode,
-        # the border traces show NO length (they're LV contours, not rulers);
-        # the LV volume result + tracing guidance are shown instead.
-        meas_lines = ([] if self._results_hidden
+        # "Hide/Show All Result" hides the measure result text too. In an LV mode
+        # (Blood/Endo or Epi/Endo trace) the ONLY numbers wanted are the LV volume
+        # result — the polygon/ellipse measurement metrics are clutter there, so
+        # they are hidden; outside LV they show as usual.
+        in_lv = (self._lv is not None or self._lvv is not None)
+        meas_lines = ([] if (self._results_hidden or in_lv)
                       else [self._metrics_text(key, m)
                             for m in self._measures[key]
                             if m.get("_lv") is None])
@@ -10755,17 +10807,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # sub-mode: "Endo-LV Volume:" or "Epi-LV Volume:".
         label = (t("Endo-LV Volume: {v:.1f} mL") if pas == "endo"
                  else t("Epi-LV Volume: {v:.1f} mL"))
-        lines = [label.format(v=vol_ml)]
-        # Diagnostic: how much the AoV plane trims from this volume (MV-only −
-        # both). Shows the AoV's exact effect; ~0 mL means AoV isn't clipping.
-        vmv = result.get("vol_mv_only")
-        if vmv is not None:
-            aov_cut = float(vmv) - float(vol_ml)
-            if abs(aov_cut) >= 0.1:
-                lines.append(t("  (AoV plane trims −{d:.1f} mL)").format(d=aov_cut))
-            else:
-                lines.append(t("  (AoV plane: no effect)"))
-        self._lv_result_lines = lines
+        # Only the volume itself — the AoV-trim diagnostic is hidden to keep the
+        # result block clean (just Endo-/Epi-LV Volume).
+        self._lv_result_lines = [label.format(v=vol_ml)]
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the number so Save can persist it and Load can redisplay.
         if pas == "endo":
@@ -11263,9 +11307,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_rebuild_measures()
         self._lv_apply_target(self._lv["pass"])
         self._lv_show_plane()
-        self._lv_result_lines = [
-            t("Loaded borders: endo {ne} / epi {nep} planes",
-              ne=len(model.endo_planes), nep=len(model.epi_planes))]
+        self._lv_result_lines = []       # only the volume is shown (set below)
         # Go straight to the short-axis (left pane) so the loaded borders are
         # shown there immediately and the level/centre lines are draggable.
         if (len(model.endo_contours) >= 3 or len(model.epi_contours) >= 3):
@@ -11274,8 +11316,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Redisplay a SAVED volume result (after SAX entry, which clears the
         # result panel) and light CalcVol blue — so Load shows the computed value.
         if volume and self._lv is not None:
-            lines = [t("Loaded borders: endo {ne} / epi {nep} planes",
-                       ne=len(model.endo_planes), nep=len(model.epi_planes))]
+            lines = []               # only Endo-/Epi-LV Volume, nothing else
             ev = volume.get("endo_ml")
             pv = volume.get("epi_ml")
             if ev is not None:
@@ -11387,19 +11428,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # as Endo/Epi (consistent overlay), labelled "Blood-Volume:".
         lvv = self._lvv
         if lvv is not None:
+            # Only the two clinically important volumes — Blood (LV cavity) and
+            # Epi (epicardial). Wall-thickness stats + polygon metrics are hidden.
             lines = []
             if lvv.get("last_ml") is not None:
                 lines.append(
                     t("Blood-Volume: {v:.1f} mL", v=float(lvv["last_ml"])))
-            mode = getattr(self, "_lvv_thick_mode", None)
-            if mode is not None and getattr(self, "_lvv_thick_stats", None):
-                s = self._lvv_thick_stats
-                name = self._THICK_MODES.get(mode, ("", "", "壁厚"))[2]
-                bands = "/".join(f"{x:g}" for x in self._wall_thresholds())
-                lines.append(t(
-                    "{n}: mean {a:.1f} / min {b:.1f} / max {c:.1f} mm  "
-                    "(bands {bd} mm)",
-                    n=name, a=s["mean"], b=s["min"], c=s["max"], bd=bands))
+            epi_ml = self._lvv_epi_volume_ml()
+            if epi_ml is not None:
+                lines.append(t("Epi-Volume: {v:.1f} mL", v=epi_ml))
             return lines
         lv = self._lv
         if lv is None:
