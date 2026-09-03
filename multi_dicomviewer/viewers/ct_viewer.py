@@ -2616,10 +2616,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_setaxis_btn = FitButton(t("Set axis"))
         self._lv_setaxis_btn.setVisible(False)
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
+        # Apex (left of Trace): move the centreline crossing onto the apex, then
+        # press this to SET the apex there (no clicking on the image). It colours
+        # once set (like MV/AoV); it does NOT toggle off — the apex stays shown.
+        self._lv_apex_btn = FitButton(t("Apex"))
+        self._lv_apex_btn.setHelpToolTip(
+            t("Set this pass's LV apex at the centreline crossing — move the "
+              "crossing onto the apex first, then press Apex, then Trace."))
+        self._lv_apex_btn.clicked.connect(self._lv_confirm_apex_trace)
+        gt.addWidget(self._lv_apex_btn)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.setHelpToolTip(
-            t("Place this pass's apex (first click; Shift-click to adjust the "
-              "view) then trace its border"))
+            t("Trace this pass's border (set the apex with the Apex button "
+              "first)"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         gt.addWidget(self._lv_trace_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
@@ -5314,12 +5323,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv = self._lv
         endo_btn, epi_btn = self._lv_endo_btn, self._lv_epi_btn
         setax, trace = self._lv_setaxis_btn, self._lv_trace_btn
+        apexb = getattr(self, "_lv_apex_btn", None)
         endo_btn.setEnabled(True)
         epi_btn.setEnabled(True)
         self._lv_load_btn.setEnabled(True)
         if lv is None:                                # not in LV mode
             for b in (endo_btn, epi_btn, setax, trace):
                 b.setStyleSheet(self._LV_STY["off"])
+            if apexb is not None:
+                apexb.setStyleSheet(self._LV_STY["off"])
             self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
@@ -5348,6 +5360,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             setax.setEnabled(False)
             trace.setStyleSheet(self._LV_STY["neutral"])
             trace.setEnabled(ed in ("endo", "epi"))
+            if apexb is not None:                    # apex is set pre-SAX only
+                apexb.setStyleSheet(self._LV_STY["neutral"])
+                apexb.setEnabled(False)
         else:
             off = self._LV_STY["off"]
             endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else off)
@@ -5373,6 +5388,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             # pass gets stuck in align with no way to advance.
             trace.setEnabled(
                 has_pass and ph in ("align", "ready", "apex", "contour"))
+            # Apex: coloured (pass colour, matching its marker) once this pass's
+            # apex is set — it never toggles off. Settable in align/ready only.
+            if apexb is not None:
+                mdl = lv["model"]
+                apex_set = ((mdl.endo_apex if pas == "endo"
+                             else mdl.epi_apex if pas == "epi" else None)
+                            is not None)
+                if apex_set:
+                    apexb.setStyleSheet(self._LV_STY["endo"] if pas == "endo"
+                                        else self._LV_STY["epi"])
+                else:
+                    apexb.setStyleSheet(off)
+                apexb.setEnabled(has_pass and ph in ("align", "ready"))
         contour = ph == "contour"
         # Every row-2 ACTION (Calc Vol / Epi領域表示 / Epi境界表示 / Save / STL /
         # Clear) and SAX act on a traced/computed border — grey them (and block
@@ -8867,10 +8895,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif ph == "ready":
             self._lv_enter_align()                   # undo (keeps the image)
 
+    def _lv_confirm_apex_trace(self) -> None:
+        """'Apex' button (trace flow): SET this pass's apex at the centreline
+        crossing (self._center). Captures the long axis from the current view
+        first if still aligning, so the flow is: orient the view + move the
+        crossing onto the apex → Apex → Trace. Re-pressing just re-sets the apex
+        at the crossing (it never toggles off — the apex stays shown)."""
+        lv = self._lv
+        if lv is None or self._center is None:
+            return
+        if lv.get("sax") is not None:                # not used in SAX review
+            return
+        pas = lv.get("pass")
+        if pas not in ("endo", "epi"):
+            self._lvv_prompt(t("Choose Endo or Epi first, then set the apex."))
+            return
+        if lv.get("phase") == "align":
+            self._lv_set_axis()                      # capture axis (align→ready)
+        lv["model"].set_apex_point(pas, np.asarray(self._center, float).copy())
+        lv["apex_target"] = None
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        self._lv_show_plane()
+        for k in ("A", "B"):
+            self.pane[k].render()
+        self._lvv_prompt(t("Apex set — press 'Trace' to trace the border."))
+
     def _lv_start_trace(self) -> None:
-        """'Trace' button. READY → tracing: place this pass's apex (first plain
-        click; Shift-click adjusts the view) then trace — or resume if the apex
-        is already set. APEX/CONTOUR (press again, SAX off) → UNDO back to READY."""
+        """'Trace' button. READY (apex set) → start/resume tracing. In ALIGN it
+        captures the axis first. If the apex isn't set yet, it points the user at
+        the Apex button. APEX/CONTOUR (press again, SAX off) → UNDO to READY."""
         lv = self._lv
         if lv is None:
             return
@@ -8898,19 +8952,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         if ph == "ready":
             m = lv["model"]
             apex = m.endo_apex if lv["pass"] == "endo" else m.epi_apex
-            if apex is not None:                     # apex already set → resume
+            if apex is not None:                     # apex set → start/resume
                 lv["apex_target"] = None
                 self._lv_enter_contour()
                 return
-            lv["phase"] = "apex"
-            lv["apex_target"] = lv["pass"]
-            if self._meas_on:                        # clicks place the apex first
-                self._meas_btn.setChecked(False)
-                self._toggle_measure()
-            self._lv_sync_buttons()
-            self._lv_update_text()
-            for k in ("A", "B"):
-                self.pane[k].render()
+            # No apex yet → the apex is set with the Apex button now, not by
+            # clicking the image. Point the user there.
+            self._lvv_prompt(t(
+                "Set the apex first: move the centreline crossing onto the "
+                "apex, then press 'Apex'."))
         elif ph == "contour" and lv.get("sax") is None and (
                 lv["model"].endo_planes or lv["model"].epi_planes):
             # Border traced → Trace toggles TRACE ⇄ VIEW instead of undoing: VIEW
