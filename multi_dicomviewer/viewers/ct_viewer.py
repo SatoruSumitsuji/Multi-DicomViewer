@@ -1318,20 +1318,23 @@ class _Pane:
         # while a 壁厚 heat map is on. Hidden until the viewer sets its LUT.
         self.thick_bar = vtkScalarBarActor()
         self.thick_bar.SetLookupTable(_wall_thickness_lut(_WALL_DEFAULT_THR, 1.0))
-        self.thick_bar.SetNumberOfLabels(6)
+        self.thick_bar.SetNumberOfLabels(4)
         self.thick_bar.SetTitle("mm")
-        self.thick_bar.SetLabelFormat("%.0f")
+        self.thick_bar.SetLabelFormat("%g")     # 5 not 5.0; thresholds set later
         self.thick_bar.SetVisibility(False)
         self.thick_bar.GetPositionCoordinate() \
             .SetCoordinateSystemToNormalizedViewport()
-        self.thick_bar.GetPositionCoordinate().SetValue(0.905, 0.18)
-        self.thick_bar.SetWidth(0.085)
-        self.thick_bar.SetHeight(0.62)
+        self.thick_bar.GetPositionCoordinate().SetValue(0.915, 0.20)
+        self.thick_bar.SetWidth(0.065)
+        self.thick_bar.SetHeight(0.58)
+        # ~75% smaller text: fix the font size (else VTK auto-scales it big).
+        if hasattr(self.thick_bar, "UnconstrainedFontSizeOn"):
+            self.thick_bar.UnconstrainedFontSizeOn()
         _btp = self.thick_bar.GetTitleTextProperty()
         _blp = self.thick_bar.GetLabelTextProperty()
         for _tp in (_btp, _blp):
             _tp.SetColor(1.0, 1.0, 1.0)
-            _tp.SetFontSize(12)
+            _tp.SetFontSize(9)
             _tp.SetBold(True)
             _tp.ShadowOn()
         self.ren = vtkRenderer()
@@ -4949,13 +4952,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_thick_mode = None
             self._lvv_thick_vol = None
             self._lvv_thick_stats = None
+        # Set the result text BEFORE the render so it shows immediately (it used
+        # to only appear on the next redraw = a centreline nudge).
+        self._lv_update_text()
         self._lvv_thick_refresh_display()
         after = self._lvv_thick_snap()
         self._undo_record(
             lambda b=before: self._lvv_thick_apply_snap(b),
             lambda a=after: self._lvv_thick_apply_snap(a))
         self._lvv_thick_sync_buttons()
-        self._lv_update_text()
 
     def _lvv_thick_clear(self) -> None:
         """Drop the 壁厚 heat map (used when the Endo becomes stale)."""
@@ -4981,7 +4986,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.reslice_thick.SetInputData(self._lvv_thick_vol)
                 p.colors_thick.SetLookupTable(_wall_thickness_lut(thr, 0.6))
                 p.thick_bar.SetLookupTable(_wall_thickness_lut(thr, 1.0))
-                p.thick_bar.SetNumberOfLabels(min(12, len(thr) + 2))
+                # Label ONLY at the colour-change thresholds (the mm boundaries).
+                try:
+                    from vtkmodules.vtkCommonCore import vtkDoubleArray
+                    arr = vtkDoubleArray()
+                    arr.SetNumberOfValues(len(thr))
+                    for _i, _tv in enumerate(thr):
+                        arr.SetValue(_i, float(_tv))
+                    p.thick_bar.SetUseCustomLabels(True)
+                    p.thick_bar.SetCustomLabels(arr)
+                except Exception:                        # noqa: BLE001
+                    p.thick_bar.SetNumberOfLabels(min(12, len(thr) + 2))
                 p.thick_bar.SetVisibility(True)
             else:
                 p.reslice_thick.SetInputData(_placeholder_image())
@@ -5015,9 +5030,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_vol = s.get("vol")
         self._lvv_thick_stats = s.get("stats")
         self._lvv_thick_thi = s.get("thi", 20.0)
+        self._lv_update_text()               # set text before the render
         self._lvv_thick_refresh_display()
         self._lvv_thick_sync_buttons()
-        self._lv_update_text()
 
     def _lvv_thick_ready(self) -> bool:
         """True if 壁厚 can be computed: an Epi surface plus either an already-
