@@ -3924,12 +3924,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         # ON → ensure computed for the current HU, then show. If the retained
         # blood already matches the current inputs, just re-show (no recompute).
+        # The display volume (_lvv_mask_vol) is dropped when leaving LV mode, but
+        # the actual segmented component (_lvv_blood_comp) is retained — rebuild
+        # the volume cheaply from it rather than re-running the pool segmentation.
         have = (self._lvv is not None
                 and self._lvv.get("last_ml") is not None
-                and self._lvv_mask_vol is not None
                 and self._lvv.get("calc_sig") is not None
-                and self._lvv_signature() == self._lvv.get("calc_sig"))
+                and self._lvv_signature() == self._lvv.get("calc_sig")
+                and (self._lvv_mask_vol is not None
+                     or getattr(self, "_lvv_blood_comp", None) is not None))
         if have:
+            if self._lvv_mask_vol is None:
+                self._lvv_blood_vol_from_comp()
             self._lvv_mask_on = True
             self._lvv_hl_on = False
             self._lvv_hl_btn.setChecked(False)
@@ -4853,7 +4859,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Build the myocardial wall-thickness field (mm) between the Endo (auto
         envelope) and the Epi surface, valve-clipped. *mode* '3d' = Endo→Epi
         nearest distance (EDT); 'sax' = radial (short-axis / echo-style) from the
-        LV long axis. Returns (full[z,y,x] float32, stats) or None; off-thread."""
+        LV long axis. Returns (thick_sub[z,y,x] float32, epi_bbox, stats) or
+        None; off-thread. The caller expands the small sub-volume into the full
+        grid (and caches the sub-volume so re-entry needs no recompute)."""
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         epi = getattr(self, "_lvv_epi_surf", None)
@@ -4912,9 +4920,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     else:
                         thick_sub, stats = wall_thickness_field(
                             endo_in, epi_comp, sp)
-                    full = np.zeros(shape, np.float32)
-                    full[ez0:ez1, ey0:ey1, ex0:ex1] = thick_sub
-                    result["full"] = full
+                    result["sub"] = np.ascontiguousarray(
+                        thick_sub, np.float32)
+                    result["bbox"] = epi_bb
                     result["stats"] = stats
                 except Exception as exc:            # noqa: BLE001
                     result["err"] = str(exc)
@@ -4932,9 +4940,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.exec()
         worker.wait()
         worker.deleteLater()
-        if result.get("err") or result.get("full") is None:
+        if result.get("err") or result.get("sub") is None:
             return None
-        return result["full"], result["stats"]
+        return result["sub"], result["bbox"], result["stats"]
+
+    def _lvv_thick_vol_from_sub(self, sub, bbox):
+        """Expand a cached wall-thickness sub-volume into a full-grid VTK image
+        (cheap; no EDT/radial recompute)."""
+        full = np.zeros(self._vol.shape, np.float32)
+        z0, z1, y0, y1, x0, x1 = bbox
+        full[z0:z1, y0:y1, x0:x1] = np.asarray(sub, np.float32)
+        sx, sy, sz = self._dims
+        return numpy_to_vtk_image(full, sx, sy, sz)
 
     #: 壁厚 mode → (button attr, chip colour, label)
     _THICK_MODES = {"3d": ("_lvv_thick3d_btn", "#ffd040", "壁厚3D"),
@@ -4976,17 +4993,31 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_endo_mask_sig = (self._lvv_signature()
                                           if self._lvv is not None else None)
             before = self._lvv_thick_snap()
-            built = self._lvv_build_wall_thickness(target)  # old map stays here
-            if not built:
-                self._lvv_thick_sync_buttons()
-                QMessageBox.information(
-                    self.window(), t("壁厚"),
-                    t("Could not compute wall thickness — check Endo/Epi/valves."))
-                return
-            full, stats = built
-            sx, sy, sz = self._dims
+            # Reuse a retained wall-thickness field if the inputs (Endo mask +
+            # Epi surface) are unchanged — only re-run the (slow) EDT/radial when
+            # the geometry actually changed.
+            cache = getattr(self, "_lvv_thick_cache", {})
+            epi = getattr(self, "_lvv_epi_surf", None)
+            endo = self._lv_endo_mask_comp     # replaced (new obj) on any rebuild
+            hit = cache.get(target)
+            if (hit is not None and hit.get("epi") is epi
+                    and hit.get("endo") is endo):
+                sub, bbox, stats = hit["sub"], hit["bbox"], hit["stats"]
+            else:
+                built = self._lvv_build_wall_thickness(target)  # old map stays
+                if not built:
+                    self._lvv_thick_sync_buttons()
+                    QMessageBox.information(
+                        self.window(), t("壁厚"),
+                        t("Could not compute wall thickness — check "
+                          "Endo/Epi/valves."))
+                    return
+                sub, bbox, stats = built
+                cache[target] = {"sub": sub, "bbox": bbox, "stats": stats,
+                                 "epi": epi, "endo": endo}
+                self._lvv_thick_cache = cache
             self._lvv_thick_mode = target
-            self._lvv_thick_vol = numpy_to_vtk_image(full, sx, sy, sz)
+            self._lvv_thick_vol = self._lvv_thick_vol_from_sub(sub, bbox)
             self._lvv_thick_stats = stats
             self._lvv_thick_thi = max(6.0, math.ceil(float(stats["max"])))
             # Hide the blood/tint fill so the heat map reads clearly.
@@ -5014,10 +5045,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_sync_buttons()
 
     def _lvv_thick_clear(self) -> None:
-        """Drop the 壁厚 heat map (used when the Endo becomes stale)."""
+        """Drop the 壁厚 heat map (used when the Endo becomes stale). The cached
+        fields are dropped too — the geometry they were built from has changed."""
         self._lvv_thick_mode = None
         self._lvv_thick_vol = None
         self._lvv_thick_stats = None
+        self._lvv_thick_cache = {}
         self._lvv_thick_refresh_display()
         self._lvv_thick_sync_buttons()
 
@@ -5517,9 +5550,20 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_blood_apex = np.asarray(bd["apex"], float)
         elif self._lvv is not None and self._lvv.get("apex") is not None:
             self._lvv_blood_apex = np.asarray(self._lvv["apex"], float)
+        return self._lvv_blood_vol_from_comp()
+
+    def _lvv_blood_vol_from_comp(self) -> bool:
+        """(Re)build the 水色 display volume from the retained blood component
+        (``_lvv_blood_comp`` + ``_lvv_blood_bbox``) WITHOUT re-running the blood-
+        pool segmentation. Used both when loading BldLv.json and when re-entering
+        LV-Blood so a retained mask is reused rather than recomputed."""
+        comp = getattr(self, "_lvv_blood_comp", None)
+        bbox = getattr(self, "_lvv_blood_bbox", None)
+        if comp is None or bbox is None or self._vol is None:
+            return False
         full = np.zeros(self._vol.shape, np.float32)
         z0, z1, y0, y1, x0, x1 = bbox
-        full[z0:z1, y0:y1, x0:x1][comp] = 1.0
+        full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
         sx, sy, sz = self._dims
         self._lvv_mask_vol = numpy_to_vtk_image(full, sx, sy, sz)
         self._lvv_mask_rgb = (0.25, 0.75, 1.0)
