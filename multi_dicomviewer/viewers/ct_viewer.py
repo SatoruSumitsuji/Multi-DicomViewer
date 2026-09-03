@@ -5372,6 +5372,49 @@ class CTViewer(CPRMixin, AbstractViewer):
                 spin.blockSignals(False)
         return True
 
+    def _lvv_compute_epi_mask(self):
+        """Valve-clipped Epi INTERIOR mask (comp, bbox) on the native grid, or
+        None. Modal (~few sec). Cached so a repeat save/壁厚 reuses it."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QProgressDialog
+        epi = getattr(self, "_lvv_epi_surf", None)
+        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+        apex = (self._lvv or {}).get("apex")
+        if (epi is None or av is None or mv is None or apex is None
+                or self._vol is None):
+            return None
+        dims, shape = self._dims, self._vol.shape
+        c_a, n_a = np.asarray(av[0], float), np.asarray(av[1], float)
+        c_m, n_m = np.asarray(mv[0], float), np.asarray(mv[1], float)
+        apex = np.asarray(apex, float)
+        result: dict = {}
+
+        class _EpiWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    result["mask"] = epi.inside_mask_bbox(
+                        dims, shape, [(c_a, n_a), (c_m, n_m)], apex)
+                except Exception as exc:            # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Building Epi mask…"), "", 0, 0, self.window())
+        dlg.setWindowTitle(t("LV Vol"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        w = _EpiWorker()
+        w.finished.connect(dlg.reset)
+        w.start()
+        dlg.exec()
+        w.wait()
+        w.deleteLater()
+        m = result.get("mask")
+        if not m or m[0] is None:
+            return None
+        return m
+
     def _lvv_do_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -5447,6 +5490,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "method": getattr(self, "_lv_endo_method", "hull_smooth"),
                 "close": float(getattr(self, "_lv_endo_close_mm", 5.0)),
             }
+            # Epi INTERIOR mask too → the file computes mass / wall thickness
+            # (Epi−Endo) offline, no images. Built now (a few sec) if an Endo
+            # exists (i.e. this is a real analysis result worth persisting).
+            epi_m = self._lvv_compute_epi_mask()
+            if epi_m is not None:
+                ecomp, ebb = epi_m
+                ecomp = np.ascontiguousarray(ecomp, bool)
+                data["epi"] = {
+                    "bbox": [int(x) for x in ebb],
+                    "shape": [int(s) for s in ecomp.shape],
+                    "vol_shape": [int(s) for s in self._vol.shape],
+                    "packed": base64.b64encode(
+                        zlib.compress(np.packbits(ecomp).tobytes(), 6)
+                    ).decode("ascii")}
         data["spacing"] = [float(s) for s in self._dims]     # (sx, sy, sz) mm
         _epi = getattr(self, "_lvv_epi_surf", None)
         _ax = getattr(_epi, "axis", None) if _epi is not None else None
