@@ -4092,6 +4092,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return self._lvv_epi_ml
         return None
 
+    def _lvv_endo_volume_ml(self):
+        """Endo (endocardial-envelope) volume in mL = the Auto-Endo mask voxel
+        count × the voxel volume. This is the border that bridges the papillary
+        muscles / trabeculae, so Endo ⊇ Blood (Endo − Blood = pap/trab tissue)
+        and Epi ⊇ Endo (Epi − Endo = compact wall). None until the Auto-Endo mask
+        is built (Auto-Endo表示 / 壁厚)."""
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        if comp is None or self._dims is None:
+            return None
+        sx, sy, sz = self._dims
+        vox_ml = (float(sx) * float(sy) * float(sz)) / 1000.0
+        return float(np.count_nonzero(np.asarray(comp, bool))) * vox_ml
+
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
         Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
@@ -11602,21 +11615,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         # as Endo/Epi (consistent overlay), labelled "Blood-Volume:".
         lvv = self._lvv
         if lvv is not None:
-            # Only the two clinically important volumes — Blood (LV cavity) and
-            # Epi (epicardial). Wall-thickness stats + polygon metrics are hidden.
+            # LV volume breakdown (nested: Epi ⊇ Endo ⊇ Blood):
+            #   Epi Volume        = epicardial (myocardial outer bound)
+            #   Endo Volume       = endocardial envelope (Auto-Endo, papillary/
+            #                       trabeculae bridged over)
+            #   Blood Volume      = true contrast-filled cavity
+            #   LV Compact Volume = Epi − Endo  (compact myocardial wall)
+            #   LV PapTned Volume = Endo − Blood (papillary muscle + trabeculae)
+            # Wall-thickness stats + polygon metrics stay hidden.
             lines = []
+            epi_ml = self._lvv_epi_volume_ml()
+            endo_ml = self._lvv_endo_volume_ml()
             blood_ml = (float(lvv["last_ml"])
                         if lvv.get("last_ml") is not None else None)
-            if blood_ml is not None:
-                lines.append(t("Blood-Volume: {v:.1f} mL", v=blood_ml))
-            epi_ml = self._lvv_epi_volume_ml()
             if epi_ml is not None:
-                lines.append(t("Epi-Volume: {v:.1f} mL", v=epi_ml))
-            # When both are shown, the myocardial volume is their difference
-            # (epicardial minus cavity).
-            if blood_ml is not None and epi_ml is not None:
-                lines.append(t("Myocardium-Volume: {v:.1f} mL",
-                               v=max(0.0, epi_ml - blood_ml)))
+                lines.append(t("Epi Volume: {v:.1f} mL", v=epi_ml))
+            if endo_ml is not None:
+                lines.append(t("Endo Volume: {v:.1f} mL", v=endo_ml))
+            if blood_ml is not None:
+                lines.append(t("Blood Volume: {v:.1f} mL", v=blood_ml))
+            if epi_ml is not None and endo_ml is not None:
+                lines.append(t("LV Compact Volume: {v:.1f} mL",
+                               v=max(0.0, epi_ml - endo_ml)))
+            if endo_ml is not None and blood_ml is not None:
+                lines.append(t("LV PapTned Volume: {v:.1f} mL",
+                               v=max(0.0, endo_ml - blood_ml)))
             return lines
         lv = self._lv
         if lv is None:
