@@ -10155,21 +10155,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["fitted_sax"] = True
         self._view_initial = first
         self._lv_update_sax_label()
-        # Keep the LONG-AXIS pane's zoom on SAX entry — the fit would otherwise
-        # rescale (shrink/grow) it like Set axis did (reported). The SHORT-AXIS
-        # pane still fits (it's a fresh view). Restore the long-axis parallel
-        # scale after the fit and re-size its ▲ markers for that scale.
-        la_cam = self.pane[la].ren.GetActiveCamera()
-        la_ps0 = float(la_cam.GetParallelScale())
-        self._refresh(reset_cam=first)
+        # Do NOT auto-fit the LONG-AXIS (right) pane on SAX entry — keep the
+        # user's zoom AND pan exactly as they were. The previous code fitted BOTH
+        # panes then only restored the long-axis SCALE, so the fit's recenter +
+        # rescale still moved/shrank the right image ("右画面が勝手に小さくなる").
+        # Reslice without a camera reset, then fit ONLY the fresh short-axis pane.
+        self._refresh(reset_cam=False)
         if first:
-            la_cam.SetParallelScale(la_ps0)
+            self._fit_pane(sa)                       # fresh cross-section view
             self._update_cross(la)
-            # _refresh drew the level line + ○ handle for the FITTED camera; the
-            # scale was then restored, so redraw the long-axis overlays for the
-            # FINAL camera — otherwise the ○ is placed for the wrong scale (often
-            # off-screen), so on entry it neither shows nor hit-tests until a
-            # ◀/▶ (F/A) triggers a reslice. This puts it in the F-key state now.
+            # Redraw the long-axis overlays (level line + ○ handle) for the
+            # current camera so the ○ shows + hit-tests immediately on entry
+            # (otherwise it only appeared after a ◀/▶ reslice).
             self._redraw_lv(la)
         for k in (la, sa):
             self.pane[k].set_overlay_visible(self._cross_overlay_on())
