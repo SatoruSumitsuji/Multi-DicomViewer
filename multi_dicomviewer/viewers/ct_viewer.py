@@ -1201,6 +1201,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # whichever monitor the cursor happens to be on. Keeps every DPR-
         # dependent quantity (render window size, our mouse <-> world maths)
         # in lockstep on mixed-DPR multi-monitor setups.
+        #
+        # QVTKRenderWindowInteractor sets _Iren / _RenderWindow in __init__ and
+        # drops them on finalize. A resize fired during construction OR teardown
+        # — e.g. dropping a folder that rebuilds the panes — would otherwise hit
+        # VTK's __getattr__ recursion on the missing attr (RecursionError, a hard
+        # crash). Test __dict__ directly (getattr() would trip the same
+        # recursion) and bail out until the interactor is fully wired.
+        d = self.__dict__
+        if d.get("_Iren") is None or d.get("_RenderWindow") is None:
+            return                    # missing (dropped) or not yet wired
         dpr = self.devicePixelRatioF()
         w = int(round(dpr * self.width()))
         h = int(round(dpr * self.height()))
