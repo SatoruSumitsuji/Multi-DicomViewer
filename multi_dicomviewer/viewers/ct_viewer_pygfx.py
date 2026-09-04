@@ -6619,6 +6619,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         if sm == "epi":
             if self._lvv is not None:
                 self._lvv_deactivate()
+            # Returning to Epi with no current Epi trace to resume — whether we
+            # came straight from Blood/Endo or it was closed first (entering it
+            # runs _lv_exit(), dropping the contour _lv) — restore the Epi that
+            # was carried into Blood (_lvv_epi_model_dict) so the border shows
+            # immediately, with no re-load / recompute.
+            has_cur_epi = (self._lv is not None
+                           and len(self._lv["model"].epi_contours) >= 3)
+            retain_epi = (None if has_cur_epi
+                          else getattr(self, "_lvv_epi_model_dict", None))
+            if retain_epi is not None:
+                try:
+                    from multi_dicomviewer.core.lv_measure import LVModel
+                    model = LVModel.from_dict(retain_epi)
+                    model.build()
+                    if (model.epi_axis is not None
+                            and len(model.epi_contours) >= 3):
+                        self._lv_apply_model(
+                            model, volume=retain_epi.get("volume"))
+                        self._lv_update_submode_ui()
+                        return
+                except Exception:                    # noqa: BLE001
+                    pass
             self._lv_select_pass("epi")
         elif sm == "blood":
             if self._lv is not None:
