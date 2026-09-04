@@ -1167,6 +1167,19 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # move·rotate) as one Ctrl+Z step. A click/double-click recentre records
         # itself (it leaves _gesture_moved False), so this won't double-record.
         self._owner._gesture_commit()
+        # LV Vol (Blood/Endo): dragging the RIGHT long-axis section left the LEFT
+        # pane's reslice updated in data but not repainted until it got its own
+        # mouse event (the companion pane's widget didn't present) — so the left
+        # only refreshed after a click on it. On mouse-up, force a full both-pane
+        # refresh and an explicit repaint of BOTH canvases so the companion
+        # follows without needing to be clicked.
+        if getattr(self._owner, "_lvv", None) is not None \
+                and self._owner._image is not None:
+            self._owner._refresh()
+            for _k in ("A", "B"):
+                pane = self._owner.pane[_k]
+                pane.render()
+                pane.canvas.update()
         # End the centreline gesture and drop its highlight (a fresh hover will
         # re-preview if the cursor is still on a line).
         self._owner._cross_dragging = None
