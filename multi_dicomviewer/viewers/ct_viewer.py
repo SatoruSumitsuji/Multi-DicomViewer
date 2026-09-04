@@ -3220,6 +3220,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_clear_markers()
                 self._lvv = None
                 self._lvv_sync()
+            # Returning to Epi with no current Epi trace to resume — whether we
+            # came STRAIGHT from Blood or Blood was CLOSED first (entering Blood
+            # ran _lv_exit(), so the contour _lv is gone) — restore the Epi that
+            # was carried into Blood (_lvv_epi_model_dict) so the border shows
+            # immediately, with no re-load / recompute. Editing it then feeds
+            # back into a fresh Blood/Endo pass.
+            if sm == "epi" and retain_epi is None:
+                has_cur_epi = (self._lv is not None
+                               and len(self._lv["model"].epi_contours) >= 3)
+                if not has_cur_epi:
+                    retain_epi = getattr(self, "_lvv_epi_model_dict", None)
             if retain_epi is not None:
                 try:
                     from multi_dicomviewer.core.lv_measure import LVModel
