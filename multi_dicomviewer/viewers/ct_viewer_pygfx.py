@@ -1355,22 +1355,29 @@ class _Overlay(QWidget):
                 _draw_outlined_text(p, QRectF(6, 4, w * 0.40 - 6, h - 40),
                                     flags, "\n".join(head),
                                     QColor(255, 255, 255), width=1.0)
-        # LV-Blood / Epi / Myocardium volume readout (top-right) while LV Vol mode
-        # has a result. Myocardium = Epi − Blood, shown only when both are known.
+        # LV volume breakdown readout (top-right, nested Epi ⊇ Endo ⊇ Blood):
+        # Epi / Endo / Blood + LV Compact (Epi−Endo) + LV PapTned (Endo−Blood).
         lvv = getattr(v, "_lvv", None)
         if lvv is not None:
             vlines = []
-            blood_ml = (float(lvv["last_ml"])
-                        if lvv.get("last_ml") is not None else None)
-            if blood_ml is not None:
-                vlines.append(t("Blood-Volume: {v:.1f} mL").format(v=blood_ml))
             epi_ml = (v._lvv_epi_volume_ml()
                       if hasattr(v, "_lvv_epi_volume_ml") else None)
+            endo_ml = (v._lvv_endo_volume_ml()
+                       if hasattr(v, "_lvv_endo_volume_ml") else None)
+            blood_ml = (float(lvv["last_ml"])
+                        if lvv.get("last_ml") is not None else None)
             if epi_ml is not None:
-                vlines.append(t("Epi-Volume: {v:.1f} mL").format(v=epi_ml))
-            if blood_ml is not None and epi_ml is not None:
-                vlines.append(t("Myocardium-Volume: {v:.1f} mL").format(
-                    v=max(0.0, epi_ml - blood_ml)))
+                vlines.append(t("Epi Volume: {v:.1f} mL").format(v=epi_ml))
+            if endo_ml is not None:
+                vlines.append(t("Endo Volume: {v:.1f} mL").format(v=endo_ml))
+            if blood_ml is not None:
+                vlines.append(t("Blood Volume: {v:.1f} mL").format(v=blood_ml))
+            if epi_ml is not None and endo_ml is not None:
+                vlines.append(t("LV Compact Volume: {v:.1f} mL").format(
+                    v=max(0.0, epi_ml - endo_ml)))
+            if endo_ml is not None and blood_ml is not None:
+                vlines.append(t("LV PapTned Volume: {v:.1f} mL").format(
+                    v=max(0.0, endo_ml - blood_ml)))
             if vlines:
                 fb = QFont("monospace", 13)
                 fb.setBold(True)
@@ -6522,6 +6529,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         except (KeyError, TypeError, ValueError):
             v = None
         self._lvv_epi_ml = v
+        return v
+
+    def _lvv_endo_volume_ml(self):
+        """Endo (endocardial-envelope) volume in mL = the auto Endo surface
+        rasterised (valve-clipped) and voxel-counted. Endo ⊇ Blood (Endo − Blood
+        = pap/trab tissue) and Epi ⊇ Endo (Epi − Endo = compact wall). Cached by
+        surface identity so the (per-paint) readout doesn't re-rasterise. None
+        until the Auto-Endo surface is built (Auto-Endo表示 / 壁厚)."""
+        surf = getattr(self, "_lv_endo_auto_surf", None)
+        if surf is None or self._vol is None:
+            return None
+        cache = getattr(self, "_lvv_endo_ml_cache", None)
+        if cache is not None and cache[0] is surf:
+            return cache[1]
+        lvv = self._lvv or {}
+        av, mv, apex = lvv.get("aortic"), lvv.get("mitral"), lvv.get("apex")
+        v = None
+        if av is not None and mv is not None and apex is not None:
+            try:
+                planes = [(np.asarray(av[0], float), np.asarray(av[1], float)),
+                          (np.asarray(mv[0], float), np.asarray(mv[1], float))]
+                comp, _bb = surf.inside_mask_bbox(
+                    self._dims, self._vol.shape, planes, np.asarray(apex, float))
+                if comp is not None:
+                    sx, sy, sz = self._dims
+                    v = (float(np.count_nonzero(comp))
+                         * (float(sx) * float(sy) * float(sz)) / 1000.0)
+            except Exception:                        # noqa: BLE001
+                v = None
+        self._lvv_endo_ml_cache = (surf, v)
         return v
 
     def _lv_mode_has_unsaved(self, mode) -> bool:
