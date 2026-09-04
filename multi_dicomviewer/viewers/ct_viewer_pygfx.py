@@ -8180,6 +8180,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if not path.endswith(".json"):
             path += ".lvvol.json"
+        self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -8205,6 +8206,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            self._lv_warn_if_axis_stale(data)
             # (B) Warn on a series mismatch — the apex/seed/valve/Epi are all in
             # THIS series' volume mm, so a file saved for another series won't
             # line up. Let the user override (same as the contour LV load).
@@ -8554,9 +8556,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         ph = lv.get("phase")
         if ph == "align":
-            # 'Set axis' retired — Trace captures the current (auto MV-perp) view.
-            self._lv_set_axis()                      # align → ready
-            ph = lv.get("phase")
+            # The LV long axis is now DETERMINISTIC (apex → MV centre), set by the
+            # Apex button — not captured from the view. Point the user there.
+            self._lvv_prompt(t(
+                "Set the apex first: move the centreline crossing onto the "
+                "apex, then press 'Apex' (the LV long axis = apex→MV centre)."))
+            return
         if ph == "ready":
             m = lv["model"]
             apex = m.endo_apex if lv["pass"] == "endo" else m.epi_apex
@@ -8628,12 +8633,69 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_enter_contour()
 
     # ---- apex points ----
+    #: LV files written with the apex→MV-centre long-axis definition carry this
+    #: marker; files without it predate the change (data-reliability warning).
+    _LV_AXIS_DEF = "apex-mvcenter"
+
+    def _lv_stamp_axis_def(self, data: dict) -> None:
+        """Stamp a saved LV file with the current long-axis definition + a
+        timestamp, so a later load can tell new (apex→MV-centre) files from old
+        ("垂線") ones."""
+        try:
+            from datetime import datetime
+            data["axis_def"] = self._LV_AXIS_DEF
+            data["saved_at"] = datetime.now().strftime("%Y%m%d;%H%M")
+        except Exception:                                # noqa: BLE001
+            data["axis_def"] = self._LV_AXIS_DEF
+
+    def _lv_warn_if_axis_stale(self, data: dict) -> None:
+        """Warn if a loaded LV file predates the apex→MV-centre long axis (marker
+        absent). Non-blocking information dialog."""
+        from PyQt6.QtWidgets import QMessageBox
+        if isinstance(data, dict) and data.get("axis_def") == self._LV_AXIS_DEF:
+            return
+        QMessageBox.information(
+            self.window(), t("LV"),
+            t("長軸データが古いためデータ信頼性に問題があります。"))
+
+    def _lv_long_axis_from_apex(self, apex):
+        """Deterministic LV long axis = apex → MV 3-D centre (the MV-plane circle
+        centre). This is the clinically standard long axis (apex-to-mitral-
+        centroid), replacing the old apex→MV-plane-normal ("垂線") axis. Returns
+        (axis_dir, radial0) or None if the MV plane isn't set yet.
+
+        radial0 (θ=0 reference) is ANY unit vector ⊥ axis — the Epi/volume/wall-
+        thickness analyses are rotationally symmetric so its direction doesn't
+        change their results; anchored to the AoV centre for a reproducible θ=0."""
+        apex = np.asarray(apex, float)
+        mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+        if mv is None:
+            return None
+        c_m = np.asarray(mv[0], float)
+        axis_dir = c_m - apex
+        nrm = float(np.linalg.norm(axis_dir))
+        if nrm < 1e-6:
+            return None
+        axis_dir = axis_dir / nrm
+        ref = None
+        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        if av is not None:
+            ref = np.asarray(av[0], float) - apex
+        if ref is None or np.linalg.norm(
+                np.asarray(ref, float)
+                - np.dot(ref, axis_dir) * axis_dir) < 1e-6:
+            ref = np.array([1.0, 0.0, 0.0])
+            if abs(float(np.dot(ref, axis_dir))) > 0.9:
+                ref = np.array([0.0, 1.0, 0.0])
+        radial0 = ref - np.dot(ref, axis_dir) * axis_dir
+        radial0 = radial0 / (float(np.linalg.norm(radial0)) or 1.0)
+        return axis_dir, radial0
+
     def _lv_confirm_apex_trace(self) -> None:
         """'Apex' button (trace flow): SET this pass's apex at the centreline
-        crossing (the trace pane's plane centre). Captures the long axis from the
-        current view first if still aligning, then re-pins the axis THROUGH the
-        crossing so meridians converge at the tip. Re-pressing just re-sets the
-        apex at the crossing (never toggles off)."""
+        crossing (the trace pane's plane centre); the LV long axis is then
+        DETERMINISTIC = apex → MV centre (no view alignment). Needs the MV plane
+        set first. Re-pressing just re-sets the apex + axis at the crossing."""
         lv = self._lv
         if lv is None:
             return
@@ -8643,27 +8705,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         if pas not in ("endo", "epi"):
             self._lvv_prompt(t("Choose Endo or Epi first, then set the apex."))
             return
-        if lv.get("phase") == "align":
-            self._lv_set_axis()                      # capture axis (align→ready)
-        m = lv["model"]
-        ax = m._axis_for(pas)
-        if ax is None:
-            return
         P = np.asarray(self._pc[lv["pane"]], float).copy()   # crossing = plane ctr
-        new_ax = type(ax).from_frame(P, ax.axis, ax.radial0)
+        axinfo = self._lv_long_axis_from_apex(P)
+        if axinfo is None:
+            self._lvv_prompt(t(
+                "Set the MV plane first — the LV long axis runs from the apex to "
+                "the MV centre."))
+            return
+        from multi_dicomviewer.core.lv_axis import LVAxis
+        axis_dir, radial0 = axinfo
+        ax = LVAxis.from_frame(P, axis_dir, radial0)
+        # Assign directly (non-clearing, like an apex re-pin) so any already-
+        # captured meridians survive an apex nudge.
         if pas == "endo":
-            m.endo_axis = new_ax
+            lv["model"].endo_axis = ax
         else:
-            m.epi_axis = new_ax
-        m.axis = new_ax
-        m.set_apex_point(pas, P)
+            lv["model"].epi_axis = ax
+        lv["model"].axis = ax
+        lv["model"].set_apex_point(pas, P)
         self._center = P.copy()
         lv["apex_target"] = None
+        if lv.get("phase") == "align":
+            lv["phase"] = "ready"                    # axis is set → ready to trace
+            lv["plane_idx"] = 0
         self._lv_sync_buttons()
         self._lv_update_text()
         self._lv_show_plane()
         self._lv_redraw_all()
-        self._lvv_prompt(t("Apex set — press 'Trace' to trace the border."))
+        self._lvv_prompt(t(
+            "Apex set + LV long axis = apex→MV centre. Press 'Trace' to trace "
+            "the border."))
 
     def _lv_apex_on_axis(self, tgt, sx, sy):
         """3-D point for an apex click/drag at screen (sx,sy), CONSTRAINED to the
@@ -10115,6 +10186,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             data["volume"] = {"endo_ml": float(self._lv["vol_endo_ml"]),
                               "myo_ml": (None if self._lv.get("vol_myo_ml") is None
                                          else float(self._lv["vol_myo_ml"]))}
+        self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -10150,6 +10222,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
+            self._lv_warn_if_axis_stale(data)
             model = LVModel.from_dict(data)
         except Exception as exc:                          # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV EF"),
