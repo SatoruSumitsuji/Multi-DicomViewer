@@ -3773,12 +3773,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_update_highlight()
 
     def _lvv_hu_changed(self) -> None:
-        """HU 下限/上限 changed. Keep the CURRENT view mode (don't flip 全域HU ⇔
-        LV-Blood): if LV-Blood表示 is on, recompute the 水色 region for the new
-        range and keep showing it (debounced so rapid 下限/上限 steps coalesce
-        into one recompute); 全域HU表示 just refreshes its instant tint. The
-        Auto-Endo line is kept as a stale GHOST (dashed, 50%) until Auto-Endo表示
-        is pressed; a hand-edited Manual Endo is RETAINED."""
+        """HU 下限/上限 changed: the computed LV-Blood region no longer matches the
+        range, so DROP the 水色 region and fall back to the instant 全域HU tint —
+        WITHOUT recomputing. The blood pool is recomputed only when a display
+        button is pressed (Auto-Endo表示 / LV-Blood表示), never on a 下限/上限
+        arrow step. The Auto-Endo line is kept as a stale GHOST (dashed, 50%)
+        until Auto-Endo表示 is pressed; a hand-edited Manual Endo is RETAINED."""
+        # Cancel any pending (debounced) recompute from an earlier build.
+        tmr = getattr(self, "_lvv_hu_recalc_timer", None)
+        if tmr is not None:
+            tmr.stop()
         if getattr(self, "_lvv_thick_mode", None) is not None:
             self._lvv_thick_clear()        # wall thickness depends on the Endo
         # Auto Endo MODEL (for Manual seeding) is stale; the mask is kept for the
@@ -3788,12 +3792,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_sig = None
         self._lvv_endo_param_changed()       # ghost the Auto-Endo line (or drop)
         if getattr(self, "_lvv_mask_on", False):
-            # Stay in LV-Blood表示 — recompute the 水色 region for the new HU
-            # range (debounced). The previous region shows until it lands.
-            self._lvv_schedule_blood_recalc()
-        else:
-            # 全域HU tint (or nothing) → just refresh the instant preview.
-            self._lvv_update_highlight()
+            # Do NOT recompute — drop the stale 水色 region and show the instant
+            # 全域HU tint. Press Auto-Endo表示 / LV-Blood表示 to recompute.
+            self._lvv_mask_on = False
+            self._lvv_mask_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_hl_on = True
+            self._lvv_hl_btn.setChecked(True)
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+            self._lvv_update_mask()
+        self._lvv_update_highlight()
 
     def _lvv_schedule_blood_recalc(self) -> None:
         """Debounce LV-Blood recomputes so stepping 下限/上限 a few times fires a
