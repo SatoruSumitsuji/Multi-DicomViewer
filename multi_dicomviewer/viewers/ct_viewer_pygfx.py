@@ -1378,6 +1378,10 @@ class _Overlay(QWidget):
             if endo_ml is not None and blood_ml is not None:
                 vlines.append(t("LV PapTned Volume: {v:.1f} mL").format(
                     v=max(0.0, endo_ml - blood_ml)))
+            diam = (v._lvv_lv_diameter_mm()
+                    if hasattr(v, "_lvv_lv_diameter_mm") else None)
+            if diam is not None:
+                vlines.append(t("LV Diameter: {v:.1f} mm").format(v=diam))
             if vlines:
                 fb = QFont("monospace", 13)
                 fb.setBold(True)
@@ -6531,35 +6535,70 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_ml = v
         return v
 
-    def _lvv_endo_volume_ml(self):
-        """Endo (endocardial-envelope) volume in mL = the auto Endo surface
-        rasterised (valve-clipped) and voxel-counted. Endo ⊇ Blood (Endo − Blood
-        = pap/trab tissue) and Epi ⊇ Endo (Epi − Endo = compact wall). Cached by
-        surface identity so the (per-paint) readout doesn't re-rasterise. None
-        until the Auto-Endo surface is built (Auto-Endo表示 / 壁厚)."""
+    def _lvv_endo_mask_cached(self):
+        """Rasterise the auto Endo surface (valve-clipped) to (comp, bbox) once
+        and cache it by surface identity — shared by the Endo volume + LV Diameter
+        readouts so the per-paint result block doesn't re-rasterise. (None, None)
+        until the Auto-Endo surface is built."""
         surf = getattr(self, "_lv_endo_auto_surf", None)
         if surf is None or self._vol is None:
-            return None
-        cache = getattr(self, "_lvv_endo_ml_cache", None)
+            return None, None
+        cache = getattr(self, "_lvv_endo_mask_cache", None)
         if cache is not None and cache[0] is surf:
-            return cache[1]
+            return cache[1], cache[2]
         lvv = self._lvv or {}
         av, mv, apex = lvv.get("aortic"), lvv.get("mitral"), lvv.get("apex")
-        v = None
+        comp = bb = None
         if av is not None and mv is not None and apex is not None:
             try:
                 planes = [(np.asarray(av[0], float), np.asarray(av[1], float)),
                           (np.asarray(mv[0], float), np.asarray(mv[1], float))]
-                comp, _bb = surf.inside_mask_bbox(
+                comp, bb = surf.inside_mask_bbox(
                     self._dims, self._vol.shape, planes, np.asarray(apex, float))
-                if comp is not None:
-                    sx, sy, sz = self._dims
-                    v = (float(np.count_nonzero(comp))
-                         * (float(sx) * float(sy) * float(sz)) / 1000.0)
             except Exception:                        # noqa: BLE001
-                v = None
-        self._lvv_endo_ml_cache = (surf, v)
-        return v
+                comp = bb = None
+        self._lvv_endo_mask_cache = (surf, comp, bb)
+        return comp, bb
+
+    def _lvv_endo_volume_ml(self):
+        """Endo (endocardial-envelope) volume in mL = the auto Endo mask voxel
+        count × voxel volume. Endo ⊇ Blood (Endo − Blood = pap/trab tissue) and
+        Epi ⊇ Endo (Epi − Endo = compact wall). None until the Auto-Endo surface
+        is built (Auto-Endo表示 / 壁厚)."""
+        comp, _bb = self._lvv_endo_mask_cached()
+        if comp is None:
+            return None
+        sx, sy, sz = self._dims
+        return (float(np.count_nonzero(comp))
+                * (float(sx) * float(sy) * float(sz)) / 1000.0)
+
+    def _lvv_lv_diameter_mm(self):
+        """LV Diameter = the maximum endocardial diameter on the planes ⟂ the LV
+        long axis = 2 × the largest perpendicular distance of an Endo voxel from
+        the axis (the envelope is built radially about the axis). None until the
+        Auto-Endo surface is built."""
+        comp, bb = self._lvv_endo_mask_cached()
+        surf = getattr(self, "_lv_endo_auto_surf", None)
+        ax = getattr(surf, "axis", None) if surf is not None else None
+        if comp is None or bb is None or ax is None:
+            return None
+        try:
+            apex = np.asarray(ax.apex, float)
+            axis_dir = np.asarray(ax.axis, float)
+            axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
+            zz, yy, xx = np.nonzero(np.asarray(comp, bool))
+            if not zz.size:
+                return None
+            z0, _z1, y0, _y1, x0, _x1 = bb
+            sx, sy, sz = self._dims
+            P = np.column_stack([(xx + x0) * sx, (yy + y0) * sy,
+                                 (zz + z0) * sz]).astype(float) - apex
+            along = P @ axis_dir
+            perp = P - np.outer(along, axis_dir)
+            r = np.sqrt(np.einsum("ij,ij->i", perp, perp))
+            return float(2.0 * r.max())
+        except Exception:                            # noqa: BLE001
+            return None
 
     def _lv_mode_has_unsaved(self, mode) -> bool:
         if mode == "blood":
@@ -8548,6 +8587,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_region_reset()
         lv["phase"] = "align"
         lv["target"] = None
+        lv["keep_view"] = False                      # fresh alignment → normal fit
         self.set_side("Bi")
         self._lv_thick_trace_both()                  # slab 5mm both panes
         # Hide the other pass's border while aligning this one.
@@ -8784,6 +8824,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["model"].set_apex_point(pas, P)
         self._center = P.copy()
         lv["apex_target"] = None
+        # Keep the EXACT Apex-set view (zoom AND pan) through Trace + tracing so
+        # the crossing doesn't jump to screen centre.
+        lv["keep_view"] = True
         if lv.get("phase") == "align":
             lv["phase"] = "ready"                    # axis is set → ready to trace
             lv["plane_idx"] = 0
@@ -9023,11 +9066,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         pane = lv["pane"]
         u, v, n = self._ortho(ax.meridian_dir(phi), ax.axis)
         self._frame[pane] = (u, v, n)
-        self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        # keep_view (set at Apex): preserve the user's exact zoom/pan through
+        # Trace + tracing — do NOT recentre onto the ventricle mid or auto-fit.
+        keep = lv.get("keep_view", False)
+        if not keep:
+            self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
         self._roll[pane] = 0.0          # long axis EXACTLY vertical: clear any
         #                                SPIN roll done before Set axis
-        first = not lv.get("fitted", False)
+        first = (not lv.get("fitted", False)) and not keep
         lv["fitted"] = True
         self._view_initial = first
         # Show only THIS plane's border for the ACTIVE pass. Endo and Epi are on
