@@ -4105,6 +4105,41 @@ class CTViewer(CPRMixin, AbstractViewer):
         vox_ml = (float(sx) * float(sy) * float(sz)) / 1000.0
         return float(np.count_nonzero(np.asarray(comp, bool))) * vox_ml
 
+    def _lvv_lv_diameter_mm(self):
+        """LV Diameter = the maximum endocardial diameter measured on the planes
+        PERPENDICULAR to the LV long axis = 2 × the largest perpendicular distance
+        of any Endo voxel from the long axis (the endo envelope is built radially
+        about the axis, so the axis is central → 2·max-radius ≈ the max short-axis
+        diameter). None until the Auto-Endo mask is built. Cached by mask id."""
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        bbox = getattr(self, "_lv_endo_mask_bbox", None)
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        if comp is None or bbox is None or ax is None or self._dims is None:
+            return None
+        cache = getattr(self, "_lvv_lv_diam_cache", None)
+        if cache is not None and cache[0] is comp:
+            return cache[1]
+        v = None
+        try:
+            apex = np.asarray(ax.apex, float)
+            axis_dir = np.asarray(ax.axis, float)
+            axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
+            zz, yy, xx = np.nonzero(np.asarray(comp, bool))
+            if zz.size:
+                z0, _z1, y0, _y1, x0, _x1 = bbox
+                sx, sy, sz = self._dims
+                P = np.column_stack([(xx + x0) * sx, (yy + y0) * sy,
+                                     (zz + z0) * sz]).astype(float) - apex
+                along = P @ axis_dir
+                perp = P - np.outer(along, axis_dir)
+                r = np.sqrt(np.einsum("ij,ij->i", perp, perp))
+                v = float(2.0 * r.max())
+        except Exception:                                # noqa: BLE001
+            v = None
+        self._lvv_lv_diam_cache = (comp, v)
+        return v
+
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
         Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
@@ -9537,6 +9572,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_region_reset()                      # drop any inspect free-view
         lv["phase"] = "align"
         lv["target"] = None
+        lv["keep_view"] = False                      # fresh alignment → normal fit
         self.set_side("Bi")
         self._lv_thick_trace_both()                  # slab 5mm both panes
         # Hide the other pass's border while aligning this one (e.g. the Endo
@@ -9656,6 +9692,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center = apex.copy()
         self._lv_up_ref = None                       # default apex→base-up view
         lv["apex_target"] = None
+        # Keep the EXACT Apex-set view (zoom AND pan) through Trace + tracing —
+        # do not auto-fit or recentre the long-axis pane onto the ventricle mid
+        # (that jumped the crossing to screen centre, "その後の操作がしづらい").
+        lv["keep_view"] = True
         if lv.get("phase") == "align":
             lv["phase"] = "ready"                    # axis is set → ready to trace
             lv["plane_idx"] = 0
@@ -9975,7 +10015,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         pane = lv["pane"]
         u, v, n = self._ortho(ax.meridian_dir(phi), ax.axis)  # v = apex→base up
         self._frame[pane] = (u, v, n)
-        self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        # keep_view (set at Apex): preserve the user's exact zoom/pan through
+        # Trace + tracing — do NOT recentre the pane onto the ventricle mid.
+        keep = lv.get("keep_view", False)
+        if not keep:
+            self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
         # Just after Set axis (ready): sync the cross-section pane's reslice
         # centre to the crosshair (_center), like a recenter does
@@ -9987,8 +10031,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             other = "A" if pane == "B" else "B"
             self._pc[other] = np.asarray(self._center, float).copy()
         # Fit the view only the FIRST time; keep the user's zoom/pan when they
-        # step planes (angle change) afterwards.
-        first = not lv.get("fitted", False)
+        # step planes (angle change) afterwards. With keep_view (Apex-set view),
+        # never fit — the user's exact zoom + pan carry through.
+        first = (not lv.get("fitted", False)) and not keep
         lv["fitted"] = True
         self._view_initial = first
         # Show only THIS plane's border for the ACTIVE pass. Endo and Epi are on
@@ -11640,6 +11685,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             if endo_ml is not None and blood_ml is not None:
                 lines.append(t("LV PapTned Volume: {v:.1f} mL",
                                v=max(0.0, endo_ml - blood_ml)))
+            # Max endocardial diameter on the planes ⟂ the LV long axis.
+            diam = self._lvv_lv_diameter_mm()
+            if diam is not None:
+                lines.append(t("LV Diameter: {v:.1f} mm", v=diam))
             return lines
         lv = self._lv
         if lv is None:
