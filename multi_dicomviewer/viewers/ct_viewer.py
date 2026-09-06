@@ -3703,7 +3703,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._thick["B"] = 0.0
                 if hasattr(self, "_sync_slab_spin"):
                     self._sync_slab_spin()
-                self._refresh()
+                # Lay the panes on the LV long axis: right = long-axis view, left
+                # = orthogonal short-axis cut (from the Epi axis).
+                self._lvv_setup_axis_views()
                 # 全域HU tint ON by default (blood evaluation is the whole point of
                 # this mode); LV-Blood表示 off until computed.
                 self._lvv_hl_on = True
@@ -4091,6 +4093,46 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_epi_ml = float(ev)
                 return self._lvv_epi_ml
         return None
+
+    def _lvv_setup_axis_views(self) -> None:
+        """On entering Blood/Endo, lay the panes out on the LV long axis: the
+        RIGHT pane (B) shows the long-axis view (axis vertical) and the LEFT pane
+        (A) the orthogonal SHORT-axis cut (plane ⟂ the long axis), both centred at
+        the mid-ventricle. Derived from the Epi axis (apex→MV centre). Best-effort
+        — a plain refresh if the axis isn't available yet."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        if ax is None or self._image is None:
+            if self._image is not None:
+                self._refresh()
+            return
+        apex = np.asarray(ax.apex, float)
+        axis_dir = np.asarray(ax.axis, float)
+        axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
+        length = float(getattr(ax, "length_mm", 0.0)) or 80.0
+        along_mid = 0.5 * length
+        mid = apex + along_mid * axis_dir
+        # RIGHT (B): long-axis view — output y = axis (apex→base) → vertical.
+        _o, e_s, e_t, nrm = ax.long_axis_basis(0.0)
+        self._frame["B"] = (np.asarray(e_s, float), np.asarray(e_t, float),
+                            np.asarray(nrm, float))
+        self._pc["B"] = mid.copy()
+        self._cross_ang["B"] = 0.0
+        # LEFT (A): short-axis (cardiology view: LV right, RV left, diaphragm
+        # down — the same convention the SAX pane uses).
+        _o2, ex, ey, nn = ax.short_axis_basis(along_mid)
+        self._frame["A"] = (-np.asarray(ex, float), np.asarray(ey, float),
+                            -np.asarray(nn, float))
+        self._pc["A"] = np.asarray(_o2, float).copy()
+        self._cross_ang["A"] = 0.0
+        self._center = mid.copy()
+        self._view_initial = True
+        # reset_cam=True fits each pane AND sets ViewUp=(0,1,0), so the long axis
+        # (output y on B) comes up vertical; the short axis (A) uses the AoV-
+        # anchored radial0 basis for a consistent (un-rolled) orientation.
+        self._refresh(reset_cam=True)
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lvv_endo_volume_ml(self):
         """Endo (endocardial-envelope) volume in mL = the Auto-Endo mask voxel
