@@ -1885,6 +1885,51 @@ class MainWindow(QMainWindow):
                 out.append(r)
         return out
 
+    def case_capture_all_series(self) -> list:
+        """One row per series of the CURRENTLY-SELECTED study (the active pane's
+        series' study, else the first shown pane's). 種別 / Ser / 時間 are filled
+        automatically from each series; view_state is left empty so 表示 shows the
+        series' auto default frame. Covers series NOT open in any pane too."""
+        uid = self._active.shown_series_uid() if self._active is not None else ""
+        se0 = self._series_by_uid.get(uid) if uid else None
+        if se0 is None:
+            for p in self._shown_panes():
+                se0 = self._series_by_uid.get(p.shown_series_uid())
+                if se0 is not None:
+                    break
+        if se0 is None:
+            return []
+        study_uid = getattr(se0, "study_uid", "")
+        out = []
+        for se in self._series_by_uid.values():
+            if getattr(se, "study_uid", "") != study_uid:
+                continue
+            at = getattr(se, "acq_time", "") or ""
+            date, tm = (at[:8], at[8:]) if len(at) >= 8 else ("", "")
+            src_dirs = []
+            try:
+                for f in (se.files or []):
+                    d = os.path.dirname(f)
+                    if d and d not in src_dirs:
+                        src_dirs.append(d)
+            except Exception:                            # noqa: BLE001
+                pass
+            out.append({
+                "series_uid": se.series_uid,
+                "modality": (getattr(se, "kind", "") or "").upper(),
+                "number": se.number,
+                "pane_index": 0,
+                "date": date,
+                "time": tm,
+                "comment": "",
+                "view_state": {},        # empty → the series' auto default frame
+                "label": se.label,
+                "src_dirs": src_dirs,
+            })
+        out.sort(key=lambda r: (r["number"] if r["number"] is not None
+                                else 1 << 30, r["time"]))
+        return out
+
     def case_redisplay(self, row: dict) -> bool:
         """Bring a captured row's series back into view and restore its state.
         False if that series is no longer loaded."""

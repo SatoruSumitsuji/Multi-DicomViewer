@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -115,6 +116,7 @@ class CasePresentationWindow(QMainWindow):
         self._offsets: dict[str, float] = {}       # modality → seconds
         self._reference = "XA"
         self._last_path: str | None = None         # for 上書き保存 (overwrite)
+        self._dirty = False                         # unsaved changes → close warns
         self.setWindowTitle(t("Case Presentation"))
         self.resize(900, 520)
 
@@ -132,6 +134,12 @@ class CasePresentationWindow(QMainWindow):
         b_add_all.setToolTip(t("表示中の全ペインをそれぞれ1行として取り込む"))
         b_add_all.clicked.connect(self._add_all)
         bar1.addWidget(b_add_all)
+        b_add_study = QPushButton(t("全シリーズを追加"))
+        b_add_study.setToolTip(t(
+            "選択中の検査の全シリーズを種別/Ser/時間つきで取り込む "
+            "(表示は各シリーズの自動フレーム)"))
+        b_add_study.clicked.connect(self._add_all_series)
+        bar1.addWidget(b_add_study)
         bar1.addSpacing(16)
         bar1.addWidget(QLabel(t("基準:")))
         self._ref_combo = QComboBox()
@@ -167,13 +175,13 @@ class CasePresentationWindow(QMainWindow):
         b_down.setToolTip(t("選択行を下へ"))
         b_down.clicked.connect(lambda: self._move(+1))
         bar2.addWidget(b_down)
-        b_del = QPushButton(t("削除"))
-        b_del.clicked.connect(self._delete_selected)
-        bar2.addWidget(b_del)
         b_refresh = QPushButton(t("状態更新"))
         b_refresh.setToolTip(t("各行の読込状態を再確認 (フォルダ読込完了後に押す)"))
         b_refresh.clicked.connect(lambda: self._rebuild())
         bar2.addWidget(b_refresh)
+        b_del = QPushButton(t("削除"))
+        b_del.clicked.connect(self._delete_selected)
+        bar2.addWidget(b_del)
         bar2.addStretch(1)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
@@ -209,6 +217,10 @@ class CasePresentationWindow(QMainWindow):
                      (C_UNI, 92), (C_SHOW, 64)):
             self._table.setColumnWidth(c, w)
         self._table.cellChanged.connect(self._on_cell_changed)
+        # Row right-click menu: 状態更新 / 削除.
+        self._table.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._row_menu)
         outer.addWidget(self._table, 1)
 
         self._hint = QLabel("")
@@ -235,6 +247,25 @@ class CasePresentationWindow(QMainWindow):
         self._rows.extend(rows)
         self._after_rows_changed(select_last=True)
 
+    def _add_all_series(self) -> None:
+        """全シリーズを追加: one row per series of the selected study (種別/Ser/
+        時間 auto). Skips series already present so re-pressing doesn't duplicate."""
+        rows = self._shell.case_capture_all_series()
+        if not rows:
+            self._warn(t("シリーズが見つかりません (検査を表示してから押してください)。"))
+            return
+        have = {r.get("series_uid") for r in self._rows if r.get("series_uid")}
+        added = 0
+        for r in rows:
+            if r.get("series_uid") and r["series_uid"] in have:
+                continue
+            self._rows.append(r)
+            added += 1
+        if added == 0:
+            self._warn(t("追加できる新しいシリーズがありません。"))
+            return
+        self._after_rows_changed(select_last=True)
+
     # ------------------------------------------------------------- offsets
     def _present_modalities(self) -> list:
         seen = []
@@ -255,6 +286,7 @@ class CasePresentationWindow(QMainWindow):
         dlg = _OffsetDialog(mods, self._offsets, self._reference, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._offsets.update(dlg.values())
+            self._dirty = True
             self._rebuild()
 
     def _anchor_align(self) -> None:
@@ -284,6 +316,7 @@ class CasePresentationWindow(QMainWindow):
         self._hint.setText(t(
             "{mod} のオフセットを {sec:+.1f} 秒に設定しました。",
             mod=oth["modality"], sec=off))
+        self._dirty = True
         self._rebuild()
 
     # -------------------------------------------------------------- sort
@@ -298,6 +331,7 @@ class CasePresentationWindow(QMainWindow):
                  for r in self._rows]
         order = modified_sort_order(items, tol=_SNAP_TOL_S)
         self._rows = [self._rows[i] for i in order]
+        self._dirty = True
         self._rebuild()
 
     # ------------------------------------------------------------ reorder
@@ -310,6 +344,7 @@ class CasePresentationWindow(QMainWindow):
         if not (0 <= j < len(self._rows)):
             return
         self._rows[i], self._rows[j] = self._rows[j], self._rows[i]
+        self._dirty = True
         self._rebuild(select=j)
 
     def _delete_selected(self) -> None:
@@ -318,6 +353,22 @@ class CasePresentationWindow(QMainWindow):
             return
         self._rows = [r for i, r in enumerate(self._rows) if i not in sel]
         self._after_rows_changed()
+
+    def _row_menu(self, pos) -> None:
+        """Row right-click menu: 状態更新 / 削除."""
+        idx = self._table.indexAt(pos)
+        if idx.isValid():
+            r = idx.row()
+            if r not in set(self._selected_row_indices()):
+                self._table.selectRow(r)      # right-click selects the row
+        menu = QMenu(self)
+        a_ref = menu.addAction(t("状態更新"))
+        a_del = menu.addAction(t("削除"))
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen is a_ref:
+            self._rebuild()
+        elif chosen is a_del:
+            self._delete_selected()
 
     def _clear_all(self) -> None:
         if not self._rows:
@@ -370,6 +421,7 @@ class CasePresentationWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self._last_path = path
+            self._dirty = False
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
@@ -407,6 +459,35 @@ class CasePresentationWindow(QMainWindow):
         else:
             self._save()
 
+    # ------------------------------------------------------------ close
+    def closeEvent(self, e) -> None:
+        """Warn on unsaved changes before closing: 保存 / 終了 / キャンセル."""
+        if not self._dirty or not self._rows:
+            e.accept()
+            return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(t("Case Presentation"))
+        box.setText(t("このデータは未保存ですが、そのまま終了していいですか?"))
+        b_save = box.addButton(t("保存"), QMessageBox.ButtonRole.AcceptRole)
+        b_exit = box.addButton(t("終了"),
+                               QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(t("キャンセル"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_save)
+        box.exec()
+        c = box.clickedButton()
+        if c is b_save:
+            self._save_overwrite()
+            # If the Save-As dialog was cancelled, _dirty stays True → keep open.
+            if self._dirty:
+                e.ignore()
+            else:
+                e.accept()
+        elif c is b_exit:
+            e.accept()
+        else:
+            e.ignore()
+
     def _load(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, t("Case Presentation を読込"), "", t("JSON (*.json)"))
@@ -438,6 +519,7 @@ class CasePresentationWindow(QMainWindow):
                 "view_state": r.get("view_state", {}),
             })
         self._last_path = path          # 上書き保存 targets the loaded file
+        self._dirty = False             # freshly loaded = matches the file
         self._refresh_ref_combo()
         self._rebuild()
         self._hint.setText(t("読込みました: {p}", p=path))
@@ -475,6 +557,7 @@ class CasePresentationWindow(QMainWindow):
     def _on_ref_changed(self, text: str) -> None:
         if text and text != self._reference:
             self._reference = text
+            self._dirty = True
             self._rebuild()
 
     def _refresh_ref_combo(self) -> None:
@@ -489,6 +572,7 @@ class CasePresentationWindow(QMainWindow):
         self._ref_combo.blockSignals(False)
 
     def _after_rows_changed(self, select_last: bool = False) -> None:
+        self._dirty = True
         self._refresh_ref_combo()
         self._rebuild(select=(len(self._rows) - 1) if select_last else None)
 
@@ -550,6 +634,7 @@ class CasePresentationWindow(QMainWindow):
         if 0 <= row < len(self._rows):
             item = self._table.item(row, col)
             self._rows[row]["comment"] = item.text() if item else ""
+            self._dirty = True
             # update the empty-highlight + counters without full rebuild churn
             if item is not None:
                 item.setBackground(QColor(255, 255, 255)
