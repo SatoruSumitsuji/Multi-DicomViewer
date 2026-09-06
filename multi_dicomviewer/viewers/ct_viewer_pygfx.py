@@ -963,8 +963,11 @@ class _Overlay(QWidget):
                 for P in near:
                     p.drawEllipse(Sd(P), 2.0, 2.0)
 
-        # LV Diameter: show WHERE it was measured — the SHORT-axis pane draws the
-        # chord itself; the LONG-axis pane draws the section line at that level.
+        # LV Diameter (LVD): show WHERE it was measured. A short-axis-ish pane
+        # shows the chord ONLY where its plane contains it — both endpoints
+        # in-plane → the full chord LINE; the plane cuts obliquely across it → a
+        # POINT at the crossing; the plane doesn't meet it → nothing. A long-axis
+        # pane shows the section line at that level.
         surf = getattr(v, "_lv_endo_auto_surf", None)
         if surf is not None and getattr(surf, "axis", None) is not None:
             v._lvv_lv_diameter_mm()                   # populate _lvv_diam_pts
@@ -973,11 +976,23 @@ class _Overlay(QWidget):
                 axis = np.asarray(surf.axis.axis, float)
                 axis = axis / (float(np.linalg.norm(axis)) or 1.0)
                 u_ax, _v_ax, n_ax = v._axes_for(key)
-                perp = abs(float(np.dot(np.asarray(n_ax, float), axis)))
+                n_ax = np.asarray(n_ax, float)
+                perp = abs(float(np.dot(n_ax, axis)))
+                tol = max(1.5, 1.2 * float(max(v._dims)))
                 p.setPen(QPen(QColor(255, 235, 0), 2.4))
                 p.setBrush(Qt.BrushStyle.NoBrush)
-                if perp >= 0.6:                       # short-axis → the chord
-                    p.drawLine(Sd(pts[0]), Sd(pts[1]))
+                if perp >= 0.5:                       # short-axis-ish → chord
+                    o = np.asarray(v._pc[key], float)
+                    d0 = float(np.dot(pts[0] - o, n_ax))
+                    d1 = float(np.dot(pts[1] - o, n_ax))
+                    if abs(d0) <= tol and abs(d1) <= tol:
+                        p.drawLine(Sd(pts[0]), Sd(pts[1]))
+                    elif d0 * d1 < 0.0:               # oblique → crossing POINT
+                        tt = d0 / (d0 - d1)
+                        pi = pts[0] + tt * (pts[1] - pts[0])
+                        p.setBrush(QColor(255, 235, 0))
+                        p.drawEllipse(Sd(pi), 3.0, 3.0)
+                    # else: plane doesn't meet the chord → draw nothing
                 else:                                 # long-axis → section line
                     c = 0.5 * (pts[0] + pts[1])
                     d = np.asarray(u_ax, float)
@@ -1401,12 +1416,13 @@ class _Overlay(QWidget):
                 vlines.append(t("LV Compact Volume: {v:.1f} mL").format(
                     v=max(0.0, epi_ml - endo_ml)))
             if endo_ml is not None and blood_ml is not None:
-                vlines.append(t("LV PapTned Volume: {v:.1f} mL").format(
+                # PMT = papillary muscle + trabeculae (Endo − Blood).
+                vlines.append(t("PMT Volume: {v:.1f} mL").format(
                     v=max(0.0, endo_ml - blood_ml)))
             diam = (v._lvv_lv_diameter_mm()
                     if hasattr(v, "_lvv_lv_diameter_mm") else None)
             if diam is not None:
-                vlines.append(t("LV Diameter: {v:.1f} mm").format(v=diam))
+                vlines.append(t("LVD: {v:.1f} mm").format(v=diam))
             if vlines:
                 fb = QFont("monospace", 13)
                 fb.setBold(True)
