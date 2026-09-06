@@ -41,6 +41,35 @@ def _disk(radius_px: float) -> np.ndarray:
     return (x * x + y * y) <= r * r
 
 
+def clip_mask_by_planes(comp, bbox, spacing_xyz, apex_xyz, planes):
+    """Keep only the voxels of *comp* on the APEX side of each (centre, normal)
+    valve plane — the SAME clip LVSurface.inside_mask_bbox applies to the Epi/Endo
+    surfaces. Used to trim the Auto-Endo envelope's flat basal cut back to the
+    (tilted) MV / AoV planes so its base coincides with the valve-clipped Epi.
+    *spacing_xyz* = (sx,sy,sz) mm; *bbox* = (z0,z1,y0,y1,x0,x1). Returns a new
+    boolean comp of the same shape."""
+    comp = np.asarray(comp, bool)
+    planes = [(np.asarray(c, float), np.asarray(n, float))
+              for (c, n) in (planes or []) if c is not None and n is not None]
+    if not planes or not comp.any():
+        return comp
+    z0, z1, y0, y1, x0, x1 = bbox
+    sx, sy, sz = spacing_xyz
+    apex = np.asarray(apex_xyz, float)
+    zz, yy, xx = np.mgrid[z0:z1, y0:y1, x0:x1]
+    wx = xx * sx
+    wy = yy * sy
+    wz = zz * sz
+    out = comp.copy()
+    for c, nrm in planes:
+        nn = nrm / (float(np.linalg.norm(nrm)) or 1.0)
+        if float((apex - c) @ nn) < 0.0:            # point the normal apex-ward
+            nn = -nn
+        d = (wx - c[0]) * nn[0] + (wy - c[1]) * nn[1] + (wz - c[2]) * nn[2]
+        out &= (d >= 0.0)
+    return out
+
+
 def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
                       level_mm: float = 1.5, n_dir: int = 90,
                       min_pts: int = 6, frac_lo: float = 0.15,
