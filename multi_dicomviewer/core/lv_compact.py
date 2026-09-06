@@ -43,7 +43,8 @@ def _disk(radius_px: float) -> np.ndarray:
 
 def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
                       level_mm: float = 1.5, n_dir: int = 90,
-                      min_pts: int = 6):
+                      min_pts: int = 6, frac_lo: float = 0.15,
+                      frac_hi: float = 0.85):
     """Maximum in-plane diameter of a mask on the planes PERPENDICULAR to the LV
     long axis — the clinical LVDd-style "max short-axis diameter".
 
@@ -52,6 +53,10 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     onto the perpendicular plane; per along-axis level the TRUE max chord = the
     max over *n_dir* directions of (max−min projection) — this equals the largest
     pairwise distance in that slice. Returns the max over levels (mm), or None.
+
+    Only levels in the [*frac_lo*, *frac_hi*] fraction of the apex→base along-axis
+    span are considered, so the apical tip and the flared basal annulus / LVOT
+    (which are not the clinical LVDd site) don't overread the result.
 
     NB this is the real diameter (widest cavity slice), NOT 2·max-radius — the
     latter overreads on an off-centre / flared basal slice."""
@@ -77,6 +82,15 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     along = P @ a
     u = P @ e1
     w = P @ e2
+    # Restrict to the mid portion of the apex→base span (drop apical tip + basal
+    # annulus). frac_lo/hi<0 or >1 (or lo>=hi) disables the restriction.
+    a0, a1 = float(along.min()), float(along.max())
+    if a1 > a0 and 0.0 <= frac_lo < frac_hi <= 1.0:
+        lo = a0 + frac_lo * (a1 - a0)
+        hi = a0 + frac_hi * (a1 - a0)
+        band = (along >= lo) & (along <= hi)
+        if int(band.sum()) >= max(2, int(min_pts)):
+            along, u, w = along[band], u[band], w[band]
     lvl = np.round(along / float(level_mm)).astype(int)
     th = np.linspace(0.0, np.pi, int(n_dir), endpoint=False)
     cs, sn = np.cos(th), np.sin(th)
