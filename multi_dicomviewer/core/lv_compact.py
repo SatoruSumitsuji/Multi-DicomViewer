@@ -87,9 +87,11 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     max over *n_dir* directions of (max−min projection) — this equals the largest
     pairwise distance in that slice. Returns the max over levels (mm), or None.
 
-    Only levels in the [*frac_lo*, *frac_hi*] fraction of the apex→base along-axis
-    span are considered, so the apical tip and the flared basal annulus / LVOT
-    (which are not the clinical LVDd site) don't overread the result.
+    LVDd site: the per-level diameter profile is scanned from the BASE toward the
+    apex; the wide sub-aortic / LVOT slices near the base are skipped by taking
+    the max only APICAL of the first profile valley (the basal narrowing that
+    marks entry into the true LV body). [*frac_lo*, *frac_hi*] is only the
+    fallback band used when the profile has no such valley (monotonic).
 
     NB this is the real diameter (widest cavity slice), NOT 2·max-radius — the
     latter overreads on an off-centre / flared basal slice."""
@@ -115,20 +117,12 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     along = P @ a
     u = P @ e1
     w = P @ e2
-    # Restrict to the mid portion of the apex→base span (drop apical tip + basal
-    # annulus). frac_lo/hi<0 or >1 (or lo>=hi) disables the restriction.
-    a0, a1 = float(along.min()), float(along.max())
-    if a1 > a0 and 0.0 <= frac_lo < frac_hi <= 1.0:
-        lo = a0 + frac_lo * (a1 - a0)
-        hi = a0 + frac_hi * (a1 - a0)
-        band = (along >= lo) & (along <= hi)
-        if int(band.sum()) >= max(2, int(min_pts)):
-            along, u, w = along[band], u[band], w[band]
+    # Build the per-level short-axis diameter PROFILE over the whole apex→base
+    # span (true max chord per level + its endpoints).
     lvl = np.round(along / float(level_mm)).astype(int)
     th = np.linspace(0.0, np.pi, int(n_dir), endpoint=False)
     cs, sn = np.cos(th), np.sin(th)
-    best = 0.0
-    best_ep = None                                   # (P1_xyz, P2_xyz) world-mm
+    prof = []                                        # (along_c, dia, P1, P2)
     for L in np.unique(lvl):
         m = lvl == L
         if int(m.sum()) < int(min_pts):
@@ -137,14 +131,41 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
         proj = np.outer(um, cs) + np.outer(wm, sn)   # (n, n_dir)
         wd = proj.max(0) - proj.min(0)               # (n_dir,)
         ki = int(np.argmax(wd))
-        if float(wd[ki]) > best:
-            best = float(wd[ki])
-            col = proj[:, ki]
-            i_hi, i_lo = int(np.argmax(col)), int(np.argmin(col))
-            # world = apex + along·a + u·e1 + w·e2
-            best_ep = (
-                apex + am[i_hi] * a + um[i_hi] * e1 + wm[i_hi] * e2,
-                apex + am[i_lo] * a + um[i_lo] * e1 + wm[i_lo] * e2)
+        col = proj[:, ki]
+        i_hi, i_lo = int(np.argmax(col)), int(np.argmin(col))
+        prof.append((
+            float(am.mean()), float(wd[ki]),
+            apex + am[i_hi] * a + um[i_hi] * e1 + wm[i_hi] * e2,
+            apex + am[i_lo] * a + um[i_lo] * e1 + wm[i_lo] * e2))
+    if not prof:
+        return None
+    prof.sort(key=lambda r: r[0])                    # apex (low along) → base
+    dia = np.array([r[1] for r in prof], float)
+    n = len(dia)
+    # LVDd site: scan from the BASE toward the apex; the sub-aortic / LVOT slices
+    # are wide, then the cavity NARROWS (a valley) entering the true LV body,
+    # then widens again to the LV max. Take the max APICAL of that first valley,
+    # so the wide sub-aortic base is excluded. Light 3-tap smoothing avoids noise
+    # valleys. If there's no such valley (monotonic), fall back to the mid
+    # [frac_lo, frac_hi] band.
+    sm = dia if n < 3 else np.convolve(dia, np.ones(3) / 3.0, mode="same")
+    valley = None
+    for i in range(n - 2, 0, -1):                    # base → apex
+        if sm[i] <= sm[i + 1] and sm[i] < sm[i - 1]:
+            valley = i
+            break
+    if valley is not None:
+        lo_i, hi_i = 0, valley + 1                   # apical side of the valley
+    else:
+        lo_i = int(np.floor(frac_lo * (n - 1)))
+        hi_i = int(np.ceil(frac_hi * (n - 1))) + 1
+    lo_i = max(0, lo_i)
+    hi_i = min(n, hi_i)
+    if hi_i <= lo_i:
+        lo_i, hi_i = 0, n
+    bi = lo_i + int(np.argmax(dia[lo_i:hi_i]))
+    best = float(dia[bi])
+    best_ep = (prof[bi][2], prof[bi][3])
     if best <= 0:
         return None
     if return_detail:
