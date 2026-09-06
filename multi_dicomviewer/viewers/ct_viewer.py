@@ -2224,6 +2224,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: extending its trace) — carries the measure id so the shell drops that
     #: stale history entry; re-committing then re-adds it fresh.
     measurement_removed = pyqtSignal(int)
+    #: emitted when a committed measure's points are EDITED — carries a fresh
+    #: Measurement with the SAME mid so the shell updates that figure's history
+    #: entry in place (same figure number, new value).
+    measurement_updated = pyqtSignal(object)
     #: emitted when the user clicks "Measure History"
     history_requested = pyqtSignal()
     #: HU colour map edited here — shell persists it and mirrors it onto every
@@ -7219,6 +7223,68 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _major_minor(self, m):
         return _major_minor_pure(m)
 
+    def _measure_to_history(self, key, m):
+        """Build a Measurement history record for a committed/edited/pasted
+        general measure (LV borders/regions are not history figures → None)."""
+        if m is None or m.get("_lv") is not None or m.get("_lvv") is not None:
+            return None
+        if m.get("id") is None:
+            return None
+        return Measurement(
+            kind=self._JP.get(m.get("type"), m.get("type", "")),
+            points=[tuple(q) for q in m.get("pts", [])],
+            text=self._metrics_text(key, m),
+            mid=int(m["id"]))
+
+    def _emit_measure_update(self, key, m) -> None:
+        """A committed measure's points were edited → refresh its Measure History
+        entry in place (same figure number, new value)."""
+        rec = self._measure_to_history(key, m)
+        if rec is not None:
+            self.measurement_updated.emit(rec)
+
+    def _copy_measure(self, key, mi) -> None:
+        """Right-click 'Copy': stash a deep copy of this measure on the clipboard
+        for Ctrl+V paste (as a new figure)."""
+        import copy as _copy
+        if 0 <= mi < len(self._measures.get(key, [])):
+            self._meas_clipboard = _copy.deepcopy(self._measures[key][mi])
+
+    def _paste_measure(self) -> None:
+        """Ctrl+V: paste the copied measure as a NEW figure (new id) on the active
+        pane, offset slightly so it doesn't sit exactly on the original. Its
+        result shows as the on-image overlay (and always in Measure History; in
+        the Blood/Endo limited-result view the on-image metrics stay hidden, so
+        the history is where the number appears)."""
+        import copy as _copy
+        clip = getattr(self, "_meas_clipboard", None)
+        if not clip or self._image is None:
+            return
+        key = getattr(self, "_active_pane", "A") or "A"
+        m = _copy.deepcopy(clip)
+        self._meas_seq = getattr(self, "_meas_seq", 0) + 1
+        m["id"] = self._meas_seq
+        for k in ("_lv", "_lvv", "center_angle"):     # a paste is a free measure
+            m.pop(k, None)
+        m["hidden"] = False
+        off_mm = max(4.0, 0.06 * float(getattr(self, "_half", 100.0)))
+        u, v, _n = self._frame[key]
+        if m.get("pts3d"):
+            off3d = off_mm * np.asarray(u, float) + off_mm * np.asarray(v, float)
+            m["pts3d"] = [tuple(np.asarray(P, float) + off3d)
+                          for P in m["pts3d"]]
+            m["pts"] = [self._world3d_to_out(key, P) for P in m["pts3d"]]
+        else:
+            m["pts"] = [(float(x) + off_mm, float(y) + off_mm)
+                        for (x, y) in m["pts"]]
+        before = self._meas_pane_snap(key)
+        self._measures[key].append(m)
+        self._meas_record(key, before)
+        self._redraw_meas(key)
+        rec = self._measure_to_history(key, m)
+        if rec is not None:
+            self.measurement_added.emit(rec)
+
     def _metrics_text(self, key, m):
         t = m["type"]
         pts = m["pts"]
@@ -8595,6 +8661,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._meas_edit_before = None
                 if self._meas_edit_moved:
                     self._meas_record(bpane, bsnap)
+                    # Points changed → refresh this figure's Measure History
+                    # entry in place (same figure number, new value).
+                    if mi is not None and 0 <= mi < len(self._measures[key]):
+                        self._emit_measure_update(key, self._measures[key][mi])
                 self._meas_edit_moved = False
             return
         # Line press-drag-release: a real drag commits the 2-point line; a press
@@ -8918,6 +8988,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         circle_act = (menu.addAction(t("Make Circle"))
                       if m["type"] == "ellipse" else None)
         hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
         else:
@@ -8929,6 +9000,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         )
         if circle_act is not None and chosen is circle_act:
             self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        if chosen is copy_act:
+            self._copy_measure(which, mi)        # stash for Ctrl+V paste
             return
         # Snapshot for a general-Measure undo step (non-LV measures only; LV
         # borders keep their own edit flow). Recorded after a modifying action.
@@ -9008,6 +9082,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         del_act = menu.addAction(t("Delete"))
         chosen = menu.exec(
             self.pane[which].canvas.mapToGlobal(
@@ -9016,6 +9091,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         )
         if circle_act is not None and chosen is circle_act:
             self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        if chosen is copy_act:
+            self._copy_measure(which, mi)        # stash for Ctrl+V paste
             return
         _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
         _mr_changed = False
@@ -14347,6 +14425,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Arrow keys are handled by QShortcuts (see __init__) so a focused
         # spin-box / combo / slider can't swallow them; only letter tool keys
         # and C (ColorMap) are handled here.
+        if (e.key() == Qt.Key.Key_V
+                and (e.modifiers() & Qt.KeyboardModifier.ControlModifier)):
+            self._paste_measure()                 # paste a copied measure (new #)
+            return
         if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
