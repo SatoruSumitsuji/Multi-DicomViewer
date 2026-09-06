@@ -3346,6 +3346,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                             float(self._lv["vol_epi_ml"])
                     self._lvv_epi_model_dict = d
                     self._lvv_epi_ml = None      # re-read from the new dict
+                    # Reuse the Epi TRACE mode's valve-clipped region (which
+                    # reaches the MV plane) as the Blood/Endo Epi-border source,
+                    # so Epi境界 there MATCHES the Epi mode and needs NO rebuild
+                    # (was a separate, slower, non-valve-clipped mask that stopped
+                    # short of the MV plane).
+                    if (getattr(self, "_lv_region_comp", None) is not None
+                            and self._lv_region_bbox is not None):
+                        self._lvv_epi_disp_comp = self._lv_region_comp
+                        self._lvv_epi_disp_bbox = self._lv_region_bbox
+                        self._lvv_epi_disp_id = id(model.epi)
         except Exception:                               # noqa: BLE001
             pass
 
@@ -4041,9 +4051,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         return (rt(apex), rt(c_a), rt(n_a, 4), rt(c_m), rt(n_m, 4), lo, hi)
 
     def _lvv_build_epi_disp_mask(self) -> bool:
-        """Rasterize the Epi interior once (no valve clip → the full border) and
-        cache it, so Epi表示 can draw a SOLID cross-section LINE (like the
-        Auto-Endo) that tracks rotation. Modal (~few sec). Returns True on success."""
+        """Rasterize the Epi interior once (VALVE-CLIPPED to the MV/AoV planes so
+        the base reaches the MV plane, matching the Epi trace mode's region) and
+        cache it, so Epi境界 can draw a SOLID cross-section LINE that tracks
+        rotation. Modal (~few sec). Returns True on success. NOTE: normally the
+        Epi trace region is stashed into _lvv_epi_disp_comp on entry, so this
+        (slower) build is only the fallback when no traced region is available."""
         epi = getattr(self, "_lvv_epi_surf", None)
         if epi is None or self._vol is None:
             return False
@@ -4056,12 +4069,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         apex = (self._lvv or {}).get("apex")
         apex = np.asarray(apex, float) if apex is not None else np.zeros(3)
         dims, shape = self._dims, self._vol.shape
+        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+        planes = []
+        if av is not None:
+            planes.append((np.asarray(av[0], float), np.asarray(av[1], float)))
+        if mv is not None:
+            planes.append((np.asarray(mv[0], float), np.asarray(mv[1], float)))
         result: dict = {}
 
         class _EpiDispWorker(QThread):
             def run(self_) -> None:
                 try:
-                    result["mask"] = epi.inside_mask_bbox(dims, shape, [], apex)
+                    result["mask"] = epi.inside_mask_bbox(
+                        dims, shape, planes, apex)
                 except Exception as exc:            # noqa: BLE001
                     result["err"] = str(exc)
 
@@ -10676,6 +10697,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         _lv_sync_buttons."""
         want = self._lv_region_btn.isChecked()
         if want and self._lvv_mask_vol is None:
+            # The display volume was dropped (SAX / navigation) but the measured
+            # region (_lv_region_comp) is RETAINED once Calc Vol ran — rebuild the
+            # red overlay from it CHEAPLY (no Re-Calc). Only compute if the region
+            # itself is truly absent (never calc'd / cleared).
+            if getattr(self, "_lv_region_comp", None) is not None \
+                    and self._lv_region_bbox is not None:
+                self._lv_show_measured_mask(
+                    (self._lv_region_comp, self._lv_region_bbox))
+                self._lv_sync_buttons()
+                return
             self._lv_compute_volume(quiet=True)      # build region (no Re-Calc ask)
             return                                   # compute path shows + syncs
         self._lvv_mask_on = want and (self._lvv_mask_vol is not None)
