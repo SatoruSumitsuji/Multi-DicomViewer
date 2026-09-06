@@ -4106,11 +4106,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         return float(np.count_nonzero(np.asarray(comp, bool))) * vox_ml
 
     def _lvv_lv_diameter_mm(self):
-        """LV Diameter = the maximum endocardial diameter measured on the planes
-        PERPENDICULAR to the LV long axis = 2 × the largest perpendicular distance
-        of any Endo voxel from the long axis (the endo envelope is built radially
-        about the axis, so the axis is central → 2·max-radius ≈ the max short-axis
-        diameter). None until the Auto-Endo mask is built. Cached by mask id."""
+        """LV Diameter = the maximum endocardial diameter on the planes ⟂ the LV
+        long axis (clinical LVDd-style widest short-axis chord). Per along-axis
+        level the TRUE max chord is taken (max over directions of the projection
+        extent), then the max over levels — NOT 2·max-radius (which overreads on
+        a flared basal / LVOT slice). None until the Auto-Endo mask is built.
+        Cached by mask id."""
         comp = getattr(self, "_lv_endo_mask_comp", None)
         bbox = getattr(self, "_lv_endo_mask_bbox", None)
         epi = getattr(self, "_lvv_epi_surf", None)
@@ -4120,21 +4121,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         cache = getattr(self, "_lvv_lv_diam_cache", None)
         if cache is not None and cache[0] is comp:
             return cache[1]
-        v = None
         try:
-            apex = np.asarray(ax.apex, float)
-            axis_dir = np.asarray(ax.axis, float)
-            axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
-            zz, yy, xx = np.nonzero(np.asarray(comp, bool))
-            if zz.size:
-                z0, _z1, y0, _y1, x0, _x1 = bbox
-                sx, sy, sz = self._dims
-                P = np.column_stack([(xx + x0) * sx, (yy + y0) * sy,
-                                     (zz + z0) * sz]).astype(float) - apex
-                along = P @ axis_dir
-                perp = P - np.outer(along, axis_dir)
-                r = np.sqrt(np.einsum("ij,ij->i", perp, perp))
-                v = float(2.0 * r.max())
+            from multi_dicomviewer.core.lv_compact import max_perp_diameter
+            v = max_perp_diameter(comp, bbox, ax.apex, ax.axis, ax.radial0,
+                                  self._dims)
         except Exception:                                # noqa: BLE001
             v = None
         self._lvv_lv_diam_cache = (comp, v)

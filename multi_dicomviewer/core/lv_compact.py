@@ -41,6 +41,57 @@ def _disk(radius_px: float) -> np.ndarray:
     return (x * x + y * y) <= r * r
 
 
+def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
+                      level_mm: float = 1.5, n_dir: int = 90,
+                      min_pts: int = 6):
+    """Maximum in-plane diameter of a mask on the planes PERPENDICULAR to the LV
+    long axis — the clinical LVDd-style "max short-axis diameter".
+
+    *comp* is a boolean sub-volume [dz,dy,dx] over *bbox* (z0,z1,y0,y1,x0,x1),
+    *spacing_xyz* = (sx,sy,sz) mm. Voxels are projected onto the axis (level) and
+    onto the perpendicular plane; per along-axis level the TRUE max chord = the
+    max over *n_dir* directions of (max−min projection) — this equals the largest
+    pairwise distance in that slice. Returns the max over levels (mm), or None.
+
+    NB this is the real diameter (widest cavity slice), NOT 2·max-radius — the
+    latter overreads on an off-centre / flared basal slice."""
+    comp = np.asarray(comp, bool)
+    zz, yy, xx = np.nonzero(comp)
+    if zz.size < 2:
+        return None
+    z0, _z1, y0, _y1, x0, _x1 = bbox
+    sx, sy, sz = spacing_xyz
+    apex = np.asarray(apex_xyz, float)
+    a = np.asarray(axis_dir, float)
+    a = a / (float(np.linalg.norm(a)) or 1.0)
+    e1 = np.asarray(radial0, float)
+    e1 = e1 - float(e1 @ a) * a                  # orthogonalise to the axis
+    n1 = float(np.linalg.norm(e1))
+    if n1 < 1e-9:                                # radial0 ∥ axis → any perp basis
+        e1 = np.array([1.0, 0.0, 0.0]) - a[0] * a
+        n1 = float(np.linalg.norm(e1)) or 1.0
+    e1 = e1 / n1
+    e2 = np.cross(a, e1)
+    P = np.column_stack([(xx + x0) * sx, (yy + y0) * sy,
+                         (zz + z0) * sz]).astype(float) - apex
+    along = P @ a
+    u = P @ e1
+    w = P @ e2
+    lvl = np.round(along / float(level_mm)).astype(int)
+    th = np.linspace(0.0, np.pi, int(n_dir), endpoint=False)
+    cs, sn = np.cos(th), np.sin(th)
+    best = 0.0
+    for L in np.unique(lvl):
+        m = lvl == L
+        if int(m.sum()) < int(min_pts):
+            continue
+        proj = np.outer(u[m], cs) + np.outer(w[m], sn)   # (n, n_dir)
+        wd = float((proj.max(0) - proj.min(0)).max())
+        if wd > best:
+            best = wd
+    return float(best) if best > 0 else None
+
+
 def _envelope_radius(env: np.ndarray, ctr: int, dx: float, dy: float,
                      grid_mm: float) -> float:
     """Radius (mm) of the *env* boolean SAX grid along the ray (dx, dy) from the
