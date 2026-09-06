@@ -5512,6 +5512,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 lambda a=after: self._lv_endo_mask_apply(a))
         # The Endo mask now exists → 壁厚 can run; refresh its buttons.
         self._lvv_thick_sync_buttons()
+        # The Endo mask now exists → Endo / PMT / LV Compact / LVD are all
+        # computable. Refresh the result block NOW so every value shows on
+        # Auto-Endo表示 completion, without waiting for a centreline nudge.
+        self._lv_update_text()
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lvv_show_endo(self, render=True) -> None:
         """Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
