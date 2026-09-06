@@ -4616,6 +4616,8 @@ class MainWindow(QMainWindow):
             viewer.measurement_added.connect(self._record_measurement)
         if hasattr(viewer, "measurement_removed"):
             viewer.measurement_removed.connect(self._remove_measurement)
+        if hasattr(viewer, "measurement_updated"):
+            viewer.measurement_updated.connect(self._update_measurement)
         if hasattr(viewer, "history_requested"):
             viewer.history_requested.connect(self._show_history)
         # CT HU colour map is global: when it's edited in one CT pane, mirror it
@@ -5127,6 +5129,23 @@ class MainWindow(QMainWindow):
         self._measure_history.setdefault(uid, []).append(m)
         if self._hist_dialog is not None and self._hist_dialog.isVisible():
             self._refresh_history_dialog()
+
+    def _update_measurement(self, m) -> None:
+        """A measure's points were edited → replace its Measure History entry in
+        place (same figure number, new value). Scans newest-first for a matching
+        mid across studies; appends if none (e.g. a measure created before this
+        study had a history entry)."""
+        uid = self._cur_study_uid or "—"
+        for key in (uid, *[k for k in self._measure_history if k != uid]):
+            hist = self._measure_history.get(key, [])
+            for i in range(len(hist) - 1, -1, -1):
+                if getattr(hist[i], "mid", None) == getattr(m, "mid", None):
+                    hist[i] = m
+                    if (self._hist_dialog is not None
+                            and self._hist_dialog.isVisible()):
+                        self._refresh_history_dialog()
+                    return
+        self._record_measurement(m)              # not found → file it fresh
 
     def _remove_measurement(self, mid: int) -> None:
         """Drop the most-recent history entry for source-measure *mid* — used
