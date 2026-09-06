@@ -781,11 +781,11 @@ class ViewerPane(QFrame):
         self._refresh_border()
 
     def set_full_bleed(self, on: bool) -> None:
-        """1×1 mode: hide the title bar and drop the border/margins so the
-        viewer fills the entire central frame."""
+        """1×1 mode: drop the border/margins so the viewer fills the central
+        frame. The title bar (pane info + ✕ close) STAYS visible in 1×1 too, per
+        user request, matching the multi-pane layouts."""
         self._full_bleed = on
-        # Title bar hidden only in 1×1 full-bleed ("Max Image" keeps it).
-        self._title_bar.setVisible(not on)
+        self._title_bar.setVisible(True)
         m = 0 if on else 1
         self._box.setContentsMargins(m, m, m, m)
         self._refresh_border()
