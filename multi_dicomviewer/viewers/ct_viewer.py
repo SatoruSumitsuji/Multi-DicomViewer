@@ -4235,10 +4235,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.render()
 
     def _lvv_show_diameter(self, render=True) -> None:
-        """Show WHERE LV Diameter was measured: the SHORT-axis pane (plane ⟂ the
-        long axis) draws the measured chord; the LONG-axis pane draws the section
-        line (the short-axis plane at that level) — a yellow line perpendicular to
-        the axis. Tracks the panes on every refresh."""
+        """Show WHERE LV Diameter (LVD) was measured. A short-axis-ish pane
+        (plane ⟂ the long axis) shows the measured chord ONLY where that plane
+        actually contains it: both endpoints in-plane → the full chord LINE; the
+        plane cuts obliquely ACROSS the chord → a small cross at the crossing
+        POINT; the plane doesn't meet the chord → nothing (so a wrong-level short
+        axis shows neither line nor point). A long-axis pane shows the section
+        line (the short-axis plane at that level, ⟂ the axis)."""
         self._lvv_lv_diameter_mm()                # ensure endpoints are current
         pts = getattr(self, "_lvv_diam_pts", None)
         epi = getattr(self, "_lvv_epi_surf", None)
@@ -4246,6 +4249,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         on = (self._lvv is not None and self._lv is None
               and pts is not None and ax is not None)
         half = float(getattr(self, "_half", 100.0))
+        tol = max(1.5, 1.2 * float(max(self._dims)))    # "in this plane" band
         axis = None
         if on:
             axis = np.asarray(ax.axis, float)
@@ -4254,15 +4258,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             p = self.pane[key]
             segs = []
             if on:
-                u_ax, _v_ax, n_ax = self._axes_for(key)
-                perp = abs(float(np.dot(np.asarray(n_ax, float), axis)))
-                if perp >= 0.6:
-                    # short-axis pane → the measured chord itself
-                    segs.append([self._world3d_to_out(key, pts[0]),
-                                 self._world3d_to_out(key, pts[1])])
+                u_ax, v_ax, n_ax = self._axes_for(key)
+                n_ax = np.asarray(n_ax, float)
+                perp = abs(float(np.dot(n_ax, axis)))
+                if perp >= 0.5:
+                    # short-axis-ish pane → the chord where it MEETS this plane.
+                    pc = np.asarray(self._pc[key], float)
+                    d0 = float(np.dot(pts[0] - pc, n_ax))
+                    d1 = float(np.dot(pts[1] - pc, n_ax))
+                    if abs(d0) <= tol and abs(d1) <= tol:
+                        segs.append([self._world3d_to_out(key, pts[0]),
+                                     self._world3d_to_out(key, pts[1])])
+                    elif d0 * d1 < 0.0:              # oblique → crossing POINT
+                        tt = d0 / (d0 - d1)
+                        pi = pts[0] + tt * (pts[1] - pts[0])
+                        r = 2.0
+                        uu = np.asarray(u_ax, float)
+                        vv = np.asarray(v_ax, float)
+                        segs.append([self._world3d_to_out(key, pi - r * uu),
+                                     self._world3d_to_out(key, pi + r * uu)])
+                        segs.append([self._world3d_to_out(key, pi - r * vv),
+                                     self._world3d_to_out(key, pi + r * vv)])
+                    # else: plane doesn't meet the chord → draw nothing
                 else:
-                    # long-axis pane → the section line at that level (⟂ axis,
-                    # in this plane), centred on the chord midpoint.
+                    # long-axis pane → the section line at that level (⟂ axis).
                     c = 0.5 * (pts[0] + pts[1])
                     d = np.asarray(u_ax, float)
                     d = d - float(np.dot(d, axis)) * axis
@@ -11880,12 +11899,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 lines.append(t("LV Compact Volume: {v:.1f} mL",
                                v=max(0.0, epi_ml - endo_ml)))
             if endo_ml is not None and blood_ml is not None:
-                lines.append(t("LV PapTned Volume: {v:.1f} mL",
+                # PMT = papillary muscle + trabeculae (Endo − Blood).
+                lines.append(t("PMT Volume: {v:.1f} mL",
                                v=max(0.0, endo_ml - blood_ml)))
             # Max endocardial diameter on the planes ⟂ the LV long axis.
             diam = self._lvv_lv_diameter_mm()
             if diam is not None:
-                lines.append(t("LV Diameter: {v:.1f} mm", v=diam))
+                lines.append(t("LVD: {v:.1f} mm", v=diam))
             return lines
         lv = self._lv
         if lv is None:
