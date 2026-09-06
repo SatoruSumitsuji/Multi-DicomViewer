@@ -517,13 +517,17 @@ class LVSurface:
         return comp, (z0, z1, y0, y1, x0, x1)
 
     def inside_mask_volumes(self, spacing_xyz, shape, mv, aov, apex_xyz,
-                            pad_mm: float = 2.0):
-        """ONE rasterization of the surface over the native grid → the red-overlay
-        mask AND both volumes, so Calc Vol needs a single `contains` pass instead
-        of three (was: volume_ml_valves ×2 + inside_mask). Returns
-        (comp, bbox, vol_ml, vol_mv_only_ml): comp/vol use BOTH valve planes;
-        vol_mv_only uses just MV (for the AoV-trim diagnostic). Plane clips are
-        cheap dot-products reusing the single inside array.
+                            pad_mm: float = 2.0, target_pts: int = 400_000):
+        """ONE rasterization of the surface → the red-overlay mask AND both
+        volumes, so Calc Vol needs a single `contains` pass instead of three.
+        Returns (comp, bbox, vol_ml, vol_mv_only_ml): comp/vol use BOTH valve
+        planes; vol_mv_only uses just MV (for the AoV-trim diagnostic).
+
+        For SPEED the surface is sampled on a COARSER grid (step chosen so the
+        sampled point count ≈ *target_pts*, i.e. ~1–2 mm instead of 0.5 mm) and
+        the resulting mask is nearest-neighbour UPSAMPLED back to the native bbox
+        — so the (comp, bbox) contract is unchanged for callers, the point-in-
+        polygon work drops ~step³, and the volume is within ~1 % (voxelisation).
         """
         sx, sy, sz = spacing_xyz
         nz, ny, nx = shape
@@ -539,15 +543,21 @@ class LVSurface:
         z1 = min(nz, int(np.ceil(hi[2] / sz)) + 1)
         if x1 <= x0 or y1 <= y0 or z1 <= z0:
             return None, None, None, None
-        zz, yy, xx = np.meshgrid(np.arange(z0, z1), np.arange(y0, y1),
-                                 np.arange(x0, x1), indexing="ij")
+        tz, ty, tx = z1 - z0, y1 - y0, x1 - x0
+        n_native = tz * ty * tx
+        step = max(1, int(round((n_native / max(1, target_pts)) ** (1.0 / 3.0))))
+        zc = np.arange(z0, z1, step)
+        yc = np.arange(y0, y1, step)
+        xc = np.arange(x0, x1, step)
+        zz, yy, xx = np.meshgrid(zc, yc, xc, indexing="ij")
         pts = np.column_stack([xx.ravel() * sx, yy.ravel() * sy,
                                zz.ravel() * sz])
         inside = self.contains(pts, extend_base=False)   # the ONE expensive pass
         voxel_ml = (sx * sy * sz) / 1000.0
+        cz, cy, cx = len(zc), len(yc), len(xc)
 
         def _clip(planes):
-            m = inside.copy()                            # ALWAYS start inside the surface
+            m = inside.copy()                            # ALWAYS start inside
             for (c, nrm) in planes:
                 c = np.asarray(c, float)
                 n = np.asarray(nrm, float)
@@ -557,13 +567,20 @@ class LVSurface:
                 m &= ((pts - c) @ n >= 0.0)              # keep the apex side
             return m
 
+        def _up(flat):
+            """Coarse (cz,cy,cx) flat mask → native (tz,ty,tx) via NN upsample."""
+            a = flat.reshape(cz, cy, cx)
+            if step > 1:
+                a = np.repeat(np.repeat(np.repeat(a, step, 0), step, 1),
+                              step, 2)[:tz, :ty, :tx]
+            return a
+
         both = [(v[0], v[1]) for v in (mv, aov) if v is not None]
-        m_both = _clip(both)
-        m_mv = _clip([(mv[0], mv[1])]) if (aov is not None and mv is not None) \
-            else m_both
-        vol = int(np.count_nonzero(m_both)) * voxel_ml
-        vol_mv = int(np.count_nonzero(m_mv)) * voxel_ml
-        comp = m_both.reshape(z1 - z0, y1 - y0, x1 - x0)
+        comp = _up(_clip(both))
+        comp_mv = _up(_clip([(mv[0], mv[1])])) \
+            if (aov is not None and mv is not None) else comp
+        vol = int(np.count_nonzero(comp)) * voxel_ml
+        vol_mv = int(np.count_nonzero(comp_mv)) * voxel_ml
         if not comp.any():
             return None, (z0, z1, y0, y1, x0, x1), vol, vol_mv
         return comp, (z0, z1, y0, y1, x0, x1), vol, vol_mv
@@ -593,8 +610,23 @@ class LVSurface:
         sa = np.column_stack([px, py])
         for k in range(self.n_levels):
             sel = in_range & (lvl == k)
-            if np.any(sel):
-                inside[sel] = _points_in_polygon(sa[sel], self.rings[k])
+            idx = np.flatnonzero(sel)
+            if idx.size == 0:
+                continue
+            poly = self.rings[k]
+            # Cheap axis-aligned bbox reject FIRST: only voxels inside the ring's
+            # 2-D bounding box can be inside the ring, so skip the 120-vertex
+            # crossing test for all the others (most of the level's voxel slab is
+            # outside the ring). Pure speedup — outside-bbox points stay False.
+            sak = sa[idx]
+            inbb = ((sak[:, 0] >= poly[:, 0].min())
+                    & (sak[:, 0] <= poly[:, 0].max())
+                    & (sak[:, 1] >= poly[:, 1].min())
+                    & (sak[:, 1] <= poly[:, 1].max()))
+            if not np.any(inbb):
+                continue
+            idx = idx[inbb]
+            inside[idx] = _points_in_polygon(sa[idx], poly)
         return inside
 
     # ---------------------------------------------------------------- meshing
