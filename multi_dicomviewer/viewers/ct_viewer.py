@@ -9472,6 +9472,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
         self._lv_endo_manual_dict = None
+        # A DIFFERENT series must NOT inherit the previous one's LV overlays: drop
+        # the valve planes/rings, the measured region + Auto-Endo + Epi-border
+        # display masks, and every measure (valve rings / LV borders / general
+        # annotations are all in the OLD series' coordinates). Was the reported
+        # "contours/regions show on a fresh CT with nothing loaded" bug.
+        self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
+        self._lv_region_comp = None
+        self._lv_region_bbox = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
+        self._lvv_epi_disp_comp = None
+        self._lvv_epi_disp_bbox = None
+        self._lvv_epi_disp_id = None
+        self._lvv_mask_vol = None
+        self._lvv_mask_on = False
+        self._lvv_thick_mode = None
+        self._lvv_thick_vol = None
+        self._lvv_thick_cache = {}
+        self._lvv_diam_pts = None
+        self._lvv_lv_diam_cache = None
+        self._lv_result_lines = []
+        for _k in ("A", "B"):
+            self._measures[_k] = []
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)

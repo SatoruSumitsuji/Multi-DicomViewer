@@ -3715,6 +3715,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # A new series → drop any LV Vol state (landmarks/Epi/mask are in the
         # previous series' voxel coordinates).
         self._lvv_reset_state()
+        # A DIFFERENT series must NOT inherit the previous one's valve rings, LV
+        # borders or general annotations (all in the old series' coordinates) —
+        # else contours/rings linger on a fresh CT with nothing loaded.
+        self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_shown = {"mitral": True, "aortic": True}
+        self._lv_result_lines = []
+        for _k in ("A", "B"):
+            self._measures[_k] = []
 
         vol = np.ascontiguousarray(loaded.volume, dtype=np.float32)  # (z,y,x)
         self._vol = vol
