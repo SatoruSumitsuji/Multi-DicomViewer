@@ -6574,29 +6574,19 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_lv_diameter_mm(self):
         """LV Diameter = the maximum endocardial diameter on the planes ⟂ the LV
-        long axis = 2 × the largest perpendicular distance of an Endo voxel from
-        the axis (the envelope is built radially about the axis). None until the
-        Auto-Endo surface is built."""
+        long axis (clinical LVDd-style widest short-axis chord: per along-axis
+        level the true max chord, then the max over levels). NOT 2·max-radius,
+        which overreads on a flared basal / LVOT slice. None until the Auto-Endo
+        surface is built."""
         comp, bb = self._lvv_endo_mask_cached()
         surf = getattr(self, "_lv_endo_auto_surf", None)
         ax = getattr(surf, "axis", None) if surf is not None else None
         if comp is None or bb is None or ax is None:
             return None
         try:
-            apex = np.asarray(ax.apex, float)
-            axis_dir = np.asarray(ax.axis, float)
-            axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
-            zz, yy, xx = np.nonzero(np.asarray(comp, bool))
-            if not zz.size:
-                return None
-            z0, _z1, y0, _y1, x0, _x1 = bb
-            sx, sy, sz = self._dims
-            P = np.column_stack([(xx + x0) * sx, (yy + y0) * sy,
-                                 (zz + z0) * sz]).astype(float) - apex
-            along = P @ axis_dir
-            perp = P - np.outer(along, axis_dir)
-            r = np.sqrt(np.einsum("ij,ij->i", perp, perp))
-            return float(2.0 * r.max())
+            from multi_dicomviewer.core.lv_compact import max_perp_diameter
+            return max_perp_diameter(comp, bb, ax.apex, ax.axis, ax.radial0,
+                                     self._dims)
         except Exception:                            # noqa: BLE001
             return None
 
