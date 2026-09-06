@@ -114,6 +114,7 @@ class CasePresentationWindow(QMainWindow):
         self._rows: list[dict] = []
         self._offsets: dict[str, float] = {}       # modality → seconds
         self._reference = "XA"
+        self._last_path: str | None = None         # for 上書き保存 (overwrite)
         self.setWindowTitle(t("Case Presentation"))
         self.resize(900, 520)
 
@@ -174,7 +175,11 @@ class CasePresentationWindow(QMainWindow):
         b_refresh.clicked.connect(lambda: self._rebuild())
         bar2.addWidget(b_refresh)
         bar2.addStretch(1)
-        b_save = QPushButton(t("保存…"))
+        b_overwrite = QPushButton(t("上書き保存"))
+        b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
+        b_overwrite.clicked.connect(self._save_overwrite)
+        bar2.addWidget(b_overwrite)
+        b_save = QPushButton(t("名前を付けて保存…"))
         b_save.clicked.connect(self._save)
         bar2.addWidget(b_save)
         b_load = QPushButton(t("読込…"))
@@ -194,9 +199,15 @@ class CasePresentationWindow(QMainWindow):
         self._table.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
         hh = self._table.horizontalHeader()
+        # Every data column is USER-RESIZABLE (drag the header borders) instead of
+        # locked to its contents; the comment column stretches to fill the rest.
+        # Sensible initial widths are set below and persist across rebuilds.
         for c in (C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW):
-            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_COMMENT, QHeaderView.ResizeMode.Stretch)
+        for c, w in ((C_NO, 44), (C_MOD, 70), (C_SER, 56), (C_TIME, 92),
+                     (C_UNI, 92), (C_SHOW, 64)):
+            self._table.setColumnWidth(c, w)
         self._table.cellChanged.connect(self._on_cell_changed)
         outer.addWidget(self._table, 1)
 
@@ -326,15 +337,18 @@ class CasePresentationWindow(QMainWindow):
                 "(閉じられた可能性があります)。元のフォルダを開き直してください。"))
 
     # ------------------------------------------------------------ file
-    def _save(self) -> None:
-        if not self._rows:
-            self._warn(t("保存する行がありません。"))
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, t("Case Presentation を保存"),
-            "CasePresentation.json", t("JSON (*.json)"))
-        if not path:
-            return
+    def _default_save_dir(self) -> str:
+        """Default save folder = the folder the image data lives in (the first
+        existing source folder recorded on any row)."""
+        import os
+        for r in self._rows:
+            for d in (r.get("src_dirs") or []):
+                if d and os.path.isdir(d):
+                    return d
+        return ""
+
+    def _write_to(self, path: str) -> None:
+        """Serialise the current presentation to *path* (JSON)."""
         data = {
             "version": 1,
             "reference": self._reference,
@@ -355,9 +369,43 @@ class CasePresentationWindow(QMainWindow):
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            self._last_path = path
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
+
+    def _save(self) -> None:
+        """名前を付けて保存 — defaults to the image-data folder."""
+        import os
+        if not self._rows:
+            self._warn(t("保存する行がありません。"))
+            return
+        # Default: overwrite the same file if one is known, else a new file in
+        # the image-data folder.
+        if self._last_path:
+            default = self._last_path
+        else:
+            d = self._default_save_dir()
+            default = os.path.join(d, "CasePresentation.json") if d \
+                else "CasePresentation.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Case Presentation を保存"), default, t("JSON (*.json)"))
+        if not path:
+            return
+        self._write_to(path)
+
+    def _save_overwrite(self) -> None:
+        """上書き保存 — write straight to the last saved/loaded file (no dialog);
+        falls back to 名前を付けて保存 when there is no such file yet."""
+        if not self._rows:
+            self._warn(t("保存する行がありません。"))
+            return
+        import os
+        if self._last_path and os.path.isdir(os.path.dirname(self._last_path)
+                                             or "."):
+            self._write_to(self._last_path)
+        else:
+            self._save()
 
     def _load(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -389,6 +437,7 @@ class CasePresentationWindow(QMainWindow):
                 "src_dirs": r.get("src_dirs", []),
                 "view_state": r.get("view_state", {}),
             })
+        self._last_path = path          # 上書き保存 targets the loaded file
         self._refresh_ref_combo()
         self._rebuild()
         self._hint.setText(t("読込みました: {p}", p=path))
