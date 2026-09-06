@@ -6535,6 +6535,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_ml = v
         return v
 
+    def _lvv_setup_axis_views(self) -> None:
+        """On entering Blood/Endo, lay the panes out on the LV long axis: the
+        RIGHT pane (B) shows the long-axis view (axis vertical) and the LEFT pane
+        (A) the orthogonal SHORT-axis cut (⟂ the long axis, cardiology view),
+        centred at the mid-ventricle. From the Epi axis (apex→MV centre)."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        if ax is None or self._vol is None:
+            return
+        apex = np.asarray(ax.apex, float)
+        axis_dir = np.asarray(ax.axis, float)
+        axis_dir = axis_dir / (float(np.linalg.norm(axis_dir)) or 1.0)
+        length = float(getattr(ax, "length_mm", 0.0)) or 80.0
+        along_mid = 0.5 * length
+        mid = apex + along_mid * axis_dir
+        # RIGHT (B): long-axis — output y = axis (apex→base) → vertical.
+        _o, e_s, e_t, nrm = ax.long_axis_basis(0.0)
+        self._frame["B"] = (np.asarray(e_s, float), np.asarray(e_t, float),
+                            np.asarray(nrm, float))
+        self._pc["B"] = mid.copy()
+        self._cross_ang["B"] = 0.0
+        self._roll["B"] = 0.0
+        # LEFT (A): short-axis (cardiology: LV right, RV left, diaphragm down —
+        # same convention as the SAX pane).
+        _o2, ex, ey, nn = ax.short_axis_basis(along_mid)
+        self._frame["A"] = (-np.asarray(ex, float), np.asarray(ey, float),
+                            -np.asarray(nn, float))
+        self._pc["A"] = np.asarray(_o2, float).copy()
+        self._cross_ang["A"] = 0.0
+        self._roll["A"] = 0.0
+        self._center = mid.copy()
+        self._view_initial = True
+        self._refresh(reset_cam=True)
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
     def _lvv_endo_mask_cached(self):
         """Rasterise the auto Endo surface (valve-clipped) to (comp, bbox) once
         and cache it by surface identity — shared by the Endo volume + LV Diameter
@@ -7222,6 +7258,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._thick["B"] = 0.0
                 if hasattr(self, "_sync_slab_spin"):
                     self._sync_slab_spin()
+                # Lay the panes on the LV long axis: right = long-axis view, left
+                # = orthogonal short-axis cut (from the Epi axis).
+                self._lvv_setup_axis_views()
                 # 全域HU tint ON by default; LV-Blood off until computed.
                 self._lvv_hl_on = True
                 self._lvv_mask_on = False
