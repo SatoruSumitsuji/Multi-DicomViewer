@@ -963,6 +963,31 @@ class _Overlay(QWidget):
                 for P in near:
                     p.drawEllipse(Sd(P), 2.0, 2.0)
 
+        # LV Diameter: show WHERE it was measured — the SHORT-axis pane draws the
+        # chord itself; the LONG-axis pane draws the section line at that level.
+        surf = getattr(v, "_lv_endo_auto_surf", None)
+        if surf is not None and getattr(surf, "axis", None) is not None:
+            v._lvv_lv_diameter_mm()                   # populate _lvv_diam_pts
+            pts = getattr(v, "_lvv_diam_pts", None)
+            if pts is not None:
+                axis = np.asarray(surf.axis.axis, float)
+                axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+                u_ax, _v_ax, n_ax = v._axes_for(key)
+                perp = abs(float(np.dot(np.asarray(n_ax, float), axis)))
+                p.setPen(QPen(QColor(255, 235, 0), 2.4))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                if perp >= 0.6:                       # short-axis → the chord
+                    p.drawLine(Sd(pts[0]), Sd(pts[1]))
+                else:                                 # long-axis → section line
+                    c = 0.5 * (pts[0] + pts[1])
+                    d = np.asarray(u_ax, float)
+                    d = d - float(np.dot(d, axis)) * axis
+                    dn = float(np.linalg.norm(d))
+                    if dn > 1e-6:
+                        d = d / dn
+                        wmm = 0.9 * float(v._ps.get(key, 60.0))
+                        p.drawLine(Sd(c - wmm * d), Sd(c + wmm * d))
+
         # Apex (red) and seed (cyan) landmark dots.
         apex = lvv.get("apex")
         if apex is not None:
@@ -6618,12 +6643,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         surf = getattr(self, "_lv_endo_auto_surf", None)
         ax = getattr(surf, "axis", None) if surf is not None else None
         if comp is None or bb is None or ax is None:
+            self._lvv_diam_pts = None
             return None
         try:
             from multi_dicomviewer.core.lv_compact import max_perp_diameter
-            return max_perp_diameter(comp, bb, ax.apex, ax.axis, ax.radial0,
-                                     self._dims)
+            det = max_perp_diameter(comp, bb, ax.apex, ax.axis, ax.radial0,
+                                    self._dims, return_detail=True)
+            if det is None:
+                self._lvv_diam_pts = None
+                return None
+            self._lvv_diam_pts = (np.asarray(det[1], float),
+                                  np.asarray(det[2], float))
+            return float(det[0])
         except Exception:                            # noqa: BLE001
+            self._lvv_diam_pts = None
             return None
 
     def _lv_mode_has_unsaved(self, mode) -> bool:
