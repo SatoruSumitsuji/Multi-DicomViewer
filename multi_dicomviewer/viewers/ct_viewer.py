@@ -11919,7 +11919,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             #                       trabeculae bridged over)
             #   Blood Volume      = true contrast-filled cavity
             #   LV Compact Volume = Epi − Endo  (compact myocardial wall)
-            #   LV PapTned Volume = Endo − Blood (papillary muscle + trabeculae)
+            # Order: Epi / Endo / Blood / Myocardium(Epi−Blood) /
+            #        Compact(Epi−Endo) / PMT(Endo−Blood) / LVD.
             # Wall-thickness stats + polygon metrics stay hidden.
             lines = []
             epi_ml = self._lvv_epi_volume_ml()
@@ -11927,17 +11928,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             blood_ml = (float(lvv["last_ml"])
                         if lvv.get("last_ml") is not None else None)
             if epi_ml is not None:
-                lines.append(t("Epi Volume: {v:.1f} mL", v=epi_ml))
+                lines.append(t("Epi Vol: {v:.1f} mL", v=epi_ml))
             if endo_ml is not None:
-                lines.append(t("Endo Volume: {v:.1f} mL", v=endo_ml))
+                lines.append(t("Endo Vol: {v:.1f} mL", v=endo_ml))
             if blood_ml is not None:
-                lines.append(t("Blood Volume: {v:.1f} mL", v=blood_ml))
+                lines.append(t("Blood Vol: {v:.1f} mL", v=blood_ml))
+            if epi_ml is not None and blood_ml is not None:
+                # Myocardium = total myocardial volume (Epi − Blood).
+                lines.append(t("Myocardium Vol: {v:.1f} mL",
+                               v=max(0.0, epi_ml - blood_ml)))
             if epi_ml is not None and endo_ml is not None:
-                lines.append(t("LV Compact Volume: {v:.1f} mL",
+                # Compact = compact myocardial wall (Epi − Endo).
+                lines.append(t("Compact Vol: {v:.1f} mL",
                                v=max(0.0, epi_ml - endo_ml)))
             if endo_ml is not None and blood_ml is not None:
                 # PMT = papillary muscle + trabeculae (Endo − Blood).
-                lines.append(t("PMT Volume: {v:.1f} mL",
+                lines.append(t("PMT Vol: {v:.1f} mL",
                                v=max(0.0, endo_ml - blood_ml)))
             # Max endocardial diameter on the planes ⟂ the LV long axis.
             diam = self._lvv_lv_diameter_mm()

@@ -1406,18 +1406,25 @@ class _Overlay(QWidget):
                        if hasattr(v, "_lvv_endo_volume_ml") else None)
             blood_ml = (float(lvv["last_ml"])
                         if lvv.get("last_ml") is not None else None)
+            # Order: Epi / Endo / Blood / Myocardium(Epi−Blood) /
+            #        Compact(Epi−Endo) / PMT(Endo−Blood) / LVD.
             if epi_ml is not None:
-                vlines.append(t("Epi Volume: {v:.1f} mL").format(v=epi_ml))
+                vlines.append(t("Epi Vol: {v:.1f} mL").format(v=epi_ml))
             if endo_ml is not None:
-                vlines.append(t("Endo Volume: {v:.1f} mL").format(v=endo_ml))
+                vlines.append(t("Endo Vol: {v:.1f} mL").format(v=endo_ml))
             if blood_ml is not None:
-                vlines.append(t("Blood Volume: {v:.1f} mL").format(v=blood_ml))
+                vlines.append(t("Blood Vol: {v:.1f} mL").format(v=blood_ml))
+            if epi_ml is not None and blood_ml is not None:
+                # Myocardium = total myocardial volume (Epi − Blood).
+                vlines.append(t("Myocardium Vol: {v:.1f} mL").format(
+                    v=max(0.0, epi_ml - blood_ml)))
             if epi_ml is not None and endo_ml is not None:
-                vlines.append(t("LV Compact Volume: {v:.1f} mL").format(
+                # Compact = compact myocardial wall (Epi − Endo).
+                vlines.append(t("Compact Vol: {v:.1f} mL").format(
                     v=max(0.0, epi_ml - endo_ml)))
             if endo_ml is not None and blood_ml is not None:
                 # PMT = papillary muscle + trabeculae (Endo − Blood).
-                vlines.append(t("PMT Volume: {v:.1f} mL").format(
+                vlines.append(t("PMT Vol: {v:.1f} mL").format(
                     v=max(0.0, endo_ml - blood_ml)))
             diam = (v._lvv_lv_diameter_mm()
                     if hasattr(v, "_lvv_lv_diameter_mm") else None)
