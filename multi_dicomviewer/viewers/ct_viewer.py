@@ -4933,7 +4933,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         worker.deleteLater()
         if result.get("err") or not result.get("mask") or result["mask"][0] is None:
             return None
-        return result["mask"]
+        comp, mbbox = result["mask"]
+        # Trim the envelope's flat basal cut back to the (tilted) MV + AoV planes
+        # — apex side — so the Endo region's base coincides with the valve-clipped
+        # Epi base (the MV plane), instead of a flat perpendicular cut at the MV
+        # centre level. Matches the Epi's inside_mask_bbox valve clip.
+        try:
+            from multi_dicomviewer.core.lv_compact import clip_mask_by_planes
+            av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+            planes = []
+            if mv is not None:
+                planes.append((np.asarray(mv[0], float),
+                               np.asarray(mv[1], float)))
+            if av is not None:
+                planes.append((np.asarray(av[0], float),
+                               np.asarray(av[1], float)))
+            if planes:
+                comp = clip_mask_by_planes(comp, mbbox, dims, apex, planes)
+        except Exception:                                # noqa: BLE001
+            pass
+        return comp, mbbox
 
     # ------------------------------------------ wall thickness (Epi−Endo)
     def _lvv_build_wall_thickness(self, mode: str = "3d"):
