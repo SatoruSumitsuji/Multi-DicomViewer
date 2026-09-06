@@ -73,9 +73,13 @@ def clip_mask_by_planes(comp, bbox, spacing_xyz, apex_xyz, planes):
 def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
                       level_mm: float = 1.5, n_dir: int = 90,
                       min_pts: int = 6, frac_lo: float = 0.15,
-                      frac_hi: float = 0.85):
+                      frac_hi: float = 0.85, return_detail: bool = False):
     """Maximum in-plane diameter of a mask on the planes PERPENDICULAR to the LV
     long axis — the clinical LVDd-style "max short-axis diameter".
+
+    With *return_detail* True, returns ``(mm, p1_xyz, p2_xyz)`` where p1/p2 are
+    the world-mm endpoints of the winning chord (for drawing where it was
+    measured), or None. Otherwise returns the diameter (mm) or None.
 
     *comp* is a boolean sub-volume [dz,dy,dx] over *bbox* (z0,z1,y0,y1,x0,x1),
     *spacing_xyz* = (sx,sy,sz) mm. Voxels are projected onto the axis (level) and
@@ -124,15 +128,28 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     th = np.linspace(0.0, np.pi, int(n_dir), endpoint=False)
     cs, sn = np.cos(th), np.sin(th)
     best = 0.0
+    best_ep = None                                   # (P1_xyz, P2_xyz) world-mm
     for L in np.unique(lvl):
         m = lvl == L
         if int(m.sum()) < int(min_pts):
             continue
-        proj = np.outer(u[m], cs) + np.outer(w[m], sn)   # (n, n_dir)
-        wd = float((proj.max(0) - proj.min(0)).max())
-        if wd > best:
-            best = wd
-    return float(best) if best > 0 else None
+        um, wm, am = u[m], w[m], along[m]
+        proj = np.outer(um, cs) + np.outer(wm, sn)   # (n, n_dir)
+        wd = proj.max(0) - proj.min(0)               # (n_dir,)
+        ki = int(np.argmax(wd))
+        if float(wd[ki]) > best:
+            best = float(wd[ki])
+            col = proj[:, ki]
+            i_hi, i_lo = int(np.argmax(col)), int(np.argmin(col))
+            # world = apex + along·a + u·e1 + w·e2
+            best_ep = (
+                apex + am[i_hi] * a + um[i_hi] * e1 + wm[i_hi] * e2,
+                apex + am[i_lo] * a + um[i_lo] * e1 + wm[i_lo] * e2)
+    if best <= 0:
+        return None
+    if return_detail:
+        return float(best), best_ep[0], best_ep[1]
+    return float(best)
 
 
 def _envelope_radius(env: np.ndarray, ctr: int, dx: float, dy: float,

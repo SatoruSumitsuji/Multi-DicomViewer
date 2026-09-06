@@ -1656,6 +1656,20 @@ class _Pane:
             lendo.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(lendo)
         self.lvv_endo_actor = lendo
+        # LV Diameter overlay: on the short-axis pane the measured chord, on the
+        # long-axis pane the section line at that level (yellow).
+        self.lvv_diam_mapper = vtkPolyDataMapper()
+        self.lvv_diam_mapper.SetInputData(vtkPolyData())
+        self.lvv_diam_mapper.ScalarVisibilityOn()
+        self.lvv_diam_mapper.SetScalarModeToUseCellData()
+        self.lvv_diam_mapper.SetColorModeToDirectScalars()
+        ldiam = vtkActor()
+        ldiam.SetMapper(self.lvv_diam_mapper)
+        ldiam.GetProperty().SetLineWidth(2.6)
+        if hasattr(ldiam.GetProperty(), "SetRenderLinesAsTubes"):
+            ldiam.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(ldiam)
+        self.lvv_diam_actor = ldiam
         # Highlighted SAX crossing (the one that follows an active long-axis
         # edit) — green, TWICE the yellow crossing-dot radius (own actor so it
         # can be a larger point).
@@ -4166,14 +4180,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         cache = getattr(self, "_lvv_lv_diam_cache", None)
         if cache is not None and cache[0] is comp:
+            self._lvv_diam_pts = cache[2]
             return cache[1]
+        v = None
+        pts = None
         try:
             from multi_dicomviewer.core.lv_compact import max_perp_diameter
-            v = max_perp_diameter(comp, bbox, ax.apex, ax.axis, ax.radial0,
-                                  self._dims)
+            det = max_perp_diameter(comp, bbox, ax.apex, ax.axis, ax.radial0,
+                                    self._dims, return_detail=True)
+            if det is not None:
+                v = float(det[0])
+                pts = (np.asarray(det[1], float), np.asarray(det[2], float))
         except Exception:                                # noqa: BLE001
-            v = None
-        self._lvv_lv_diam_cache = (comp, v)
+            v, pts = None, None
+        self._lvv_lv_diam_cache = (comp, v, pts)
+        self._lvv_diam_pts = pts
         return v
 
     def _lvv_show_epi(self, render=True) -> None:
@@ -4210,6 +4231,52 @@ class CTViewer(CPRMixin, AbstractViewer):
                     rings, [(80, 220, 80)] * len(rings)))
             else:
                 p.lvv_env_mapper.SetInputData(vtkPolyData())
+            if render:
+                p.render()
+
+    def _lvv_show_diameter(self, render=True) -> None:
+        """Show WHERE LV Diameter was measured: the SHORT-axis pane (plane ⟂ the
+        long axis) draws the measured chord; the LONG-axis pane draws the section
+        line (the short-axis plane at that level) — a yellow line perpendicular to
+        the axis. Tracks the panes on every refresh."""
+        self._lvv_lv_diameter_mm()                # ensure endpoints are current
+        pts = getattr(self, "_lvv_diam_pts", None)
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        on = (self._lvv is not None and self._lv is None
+              and pts is not None and ax is not None)
+        half = float(getattr(self, "_half", 100.0))
+        axis = None
+        if on:
+            axis = np.asarray(ax.axis, float)
+            axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+        for key in ("A", "B"):
+            p = self.pane[key]
+            segs = []
+            if on:
+                u_ax, _v_ax, n_ax = self._axes_for(key)
+                perp = abs(float(np.dot(np.asarray(n_ax, float), axis)))
+                if perp >= 0.6:
+                    # short-axis pane → the measured chord itself
+                    segs.append([self._world3d_to_out(key, pts[0]),
+                                 self._world3d_to_out(key, pts[1])])
+                else:
+                    # long-axis pane → the section line at that level (⟂ axis,
+                    # in this plane), centred on the chord midpoint.
+                    c = 0.5 * (pts[0] + pts[1])
+                    d = np.asarray(u_ax, float)
+                    d = d - float(np.dot(d, axis)) * axis
+                    dn = float(np.linalg.norm(d))
+                    if dn > 1e-6:
+                        d = d / dn
+                        w = 0.55 * half
+                        segs.append([self._world3d_to_out(key, c - w * d),
+                                     self._world3d_to_out(key, c + w * d)])
+            if segs:
+                p.lvv_diam_mapper.SetInputData(
+                    _colored_multi_pd(segs, [(255, 235, 0)] * len(segs)))
+            else:
+                p.lvv_diam_mapper.SetInputData(vtkPolyData())
             if render:
                 p.render()
 
@@ -6002,6 +6069,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if m.get("_lvv") is None]
             self.pane[k].lvv_env_mapper.SetInputData(vtkPolyData())
             self.pane[k].lvv_endo_mapper.SetInputData(vtkPolyData())
+            self.pane[k].lvv_diam_mapper.SetInputData(vtkPolyData())
             self.pane[k].colors_hl.SetLookupTable(_lvv_transparent_lut())
             self.pane[k].colors_hl.Modified()
             self.pane[k].colors_mask.SetLookupTable(_lvv_mask_lut(False))
@@ -12754,6 +12822,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Auto-Endo表示 overlay follows plane/zoom/rotation too.
         if self._lvv is not None and getattr(self, "_lvv_endo_show", False):
             self._lvv_show_endo(render=False)
+        # LV Diameter chord / section line follows plane/zoom/rotation (shown
+        # whenever the Endo mask + diameter exist).
+        if self._lvv is not None and self._lv is None \
+                and getattr(self, "_lv_endo_mask_comp", None) is not None:
+            self._lvv_show_diameter(render=False)
 
     def _fit_pane(self, key):
         """Fit the actual volume content (projected onto the pane plane)
