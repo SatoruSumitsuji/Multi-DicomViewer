@@ -9528,11 +9528,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
 
     def lv_active(self) -> bool:
-        """True while an LV analysis session is in progress. The shell must NOT
-        auto-demote such a pane to a memory-saving 'still': the LV state (mode,
-        long axis, traced borders, computed volume) isn't captured by the still
-        snapshot, so demoting garbles the image and loses the whole session."""
-        return getattr(self, "_lv", None) is not None
+        """True while this pane holds ANY LV analysis DATA — an open contour
+        (_lv) or Blood/Endo (_lvv) session, OR just-loaded valve planes / Epi /
+        Blood / Auto-Endo / region masks. The shell must NOT auto-demote such a
+        pane to a memory-saving 'still': demoting frees the volume and a later
+        promote reloads (dropping this state) — the whole point of keeping it
+        live is that re-displaying it needs NO reload or recompute."""
+        if getattr(self, "_lv", None) is not None:
+            return True
+        if getattr(self, "_lvv", None) is not None:
+            return True
+        v = getattr(self, "_lv_valves", None) or {}
+        if v.get("mitral") is not None or v.get("aortic") is not None:
+            return True
+        for attr in ("_lvv_epi_surf", "_lvv_blood_comp", "_lv_endo_mask_comp",
+                     "_lv_region_comp", "_lvv_epi_disp_comp"):
+            if getattr(self, attr, None) is not None:
+                return True
+        return False
 
     def snapshot(self):
         """A QPixmap of just the image frames — no toolbars — for the shell's
