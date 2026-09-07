@@ -1,28 +1,32 @@
-"""SnapDock — a QDockWidget whose FLOATING window gains the normal-window
+"""SnapDock — a QDockWidget whose FLOATING window gains normal-window sizing
 gestures a Qt tool window otherwise lacks:
 
-* title-bar double-click → full-screen ⇄ previous size, and
-* dragging an edge to the screen top/bottom → vertical maximize (fill height).
+* full-screen ⇄ previous-size toggle (``toggle_maximize`` — call it from a
+  button and/or a title double-click), and
+* drag an edge to the screen top/bottom → vertical maximize (fill height).
 
-Docking is unaffected: drag onto the main window and drop in the blue region
-to re-dock (QDockWidget's native behaviour). A floating QDockWidget is a Qt
-tool window, so it has no native maximize / Aero-Snap and ``showMaximized()``
-is a no-op — hence the manual geometry handling here.
+Both are ONE reversible state (``_expanded``): whatever the pre-expand geometry
+was is remembered, so maximize AND edge-snap can always be undone by toggling
+back. Docking is unaffected: drag onto the main window and drop in the blue
+region to re-dock. A floating QDockWidget is a Qt tool window with no native
+maximize / Aero-Snap and ``showMaximized()`` is a no-op, hence the manual
+geometry here. The title double-click is best-effort (the floating title bar is
+platform-drawn and not always deliverable as a Qt event) — prefer a real button.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QTimer
+from PyQt6.QtCore import QEvent, QRect, QTimer
 from PyQt6.QtWidgets import QApplication, QDockWidget, QWidget
 
 
 class SnapDock(QDockWidget):
-    _SNAP_PX = 12                    # edge-proximity threshold
+    _SNAP_PX = 12                    # edge-proximity threshold (px)
     _SETTLE_MS = 140                 # drag-settle delay before an edge check
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        self._maxed = False
-        self._pre_max_geom = None
+        self._expanded = False       # currently maximized OR edge-snapped
+        self._pre_geom = None        # geometry to restore to
         self._snapping = False       # guards our own setGeometry from re-firing
         self._snap_timer = QTimer(self)
         self._snap_timer.setSingleShot(True)
@@ -31,39 +35,76 @@ class SnapDock(QDockWidget):
         if app is not None:
             app.installEventFilter(self)
 
-    # -- geometry helpers ------------------------------------------------
+    # -- geometry primitives ---------------------------------------------
     def _avail_geom(self):
         scr = self.screen()
         return scr.availableGeometry() if scr is not None else None
 
-    def _toggle_maximize(self) -> None:
-        """Title double-click while floating: full-screen ⇄ previous size."""
-        if not self.isFloating():
-            return
+    def _frame_margins(self):
+        """(left, top, right, bottom) px the window FRAME (title bar / borders)
+        adds around the client geometry — so an expand can keep the WHOLE window
+        (title bar included) on-screen instead of pushing the bar off the top."""
+        fg = self.frameGeometry()
+        g = self.geometry()
+        return (g.left() - fg.left(), g.top() - fg.top(),
+                fg.right() - g.right(), fg.bottom() - g.bottom())
+
+    def _apply(self, rect: QRect) -> None:
+        self._snapping = True                # our own move must not re-trigger
+        self.setGeometry(rect)
+        self._snapping = False
+
+    def _restore(self) -> None:
+        if self._pre_geom is not None:
+            self._apply(self._pre_geom)
+        self._expanded = False
+
+    def _expand_full(self) -> None:
         av = self._avail_geom()
         if av is None:
             return
-        self._snapping = True                # don't let setGeometry clear _maxed
-        if self._maxed:
-            if self._pre_max_geom is not None:
-                self.setGeometry(self._pre_max_geom)
-            self._maxed = False
-        else:
-            self._pre_max_geom = self.geometry()
-            self.setGeometry(av)
-            self._maxed = True
-        self._snapping = False
+        if not self._expanded:
+            self._pre_geom = self.geometry()
+        left, top, right, bottom = self._frame_margins()
+        self._apply(QRect(av.x() + left, av.top() + top,
+                          av.width() - left - right,
+                          av.height() - top - bottom))
+        self._expanded = True
 
+    def _expand_vertical(self) -> None:
+        av = self._avail_geom()
+        if av is None:
+            return
+        if not self._expanded:
+            self._pre_geom = self.geometry()
+        g = self.geometry()
+        _, top, _, bottom = self._frame_margins()
+        # Fill the height but keep the title bar (top frame) on-screen.
+        self._apply(QRect(g.x(), av.top() + top,
+                          g.width(), av.height() - top - bottom))
+        self._expanded = True
+
+    # -- public toggle (button / double-click) ---------------------------
+    def toggle_maximize(self) -> None:
+        """Full-screen ⇄ previous size; also the way to undo an edge-snap."""
+        if not self.isFloating():
+            return
+        if self._expanded:
+            self._restore()
+        else:
+            self._expand_full()
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    # -- edge snap on drag-settle ----------------------------------------
     def moveEvent(self, e):  # noqa: N802 (Qt override)
         super().moveEvent(e)
-        # A manual drag cancels full-screen (like a normal window) and schedules
-        # an edge-snap check once the movement settles.
         if self.isFloating() and not self._snapping:
-            self._maxed = False
             self._snap_timer.start(self._SETTLE_MS)
 
     def _check_edge_snap(self) -> None:
-        if not self.isFloating() or self._maxed:
+        if not self.isFloating() or self._expanded:
             return
         av = self._avail_geom()
         if av is None:
@@ -71,14 +112,10 @@ class SnapDock(QDockWidget):
         g = self.frameGeometry()
         if (abs(g.top() - av.top()) <= self._SNAP_PX
                 or abs(g.bottom() - av.bottom()) <= self._SNAP_PX):
-            self._snapping = True
-            self.setGeometry(self.geometry().x(), av.top(),
-                             self.width(), av.height())
-            self._snapping = False
+            self._expand_vertical()
 
-    # -- title-bar double-click interception -----------------------------
+    # -- title-bar double-click (best-effort) ----------------------------
     def _on_titlebar(self, obj) -> bool:
-        """True if *obj* is on this dock's title bar (not its content widget)."""
         if not isinstance(obj, QWidget):
             return False
         content = self.widget()
@@ -87,11 +124,9 @@ class SnapDock(QDockWidget):
         return (obj is self or self.isAncestorOf(obj)) and not in_content
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-        # Swallow the title double-click (Qt's default toggles float↔dock, which
-        # keeps losing the panel) and maximize instead when floating.
         if (event.type() == QEvent.Type.MouseButtonDblClick
                 and self._on_titlebar(obj)):
             if self.isFloating():
-                self._toggle_maximize()
+                self.toggle_maximize()
             return True
         return super().eventFilter(obj, event)
