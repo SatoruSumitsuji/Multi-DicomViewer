@@ -154,6 +154,8 @@ class _OffsetDialog(QDialog):
         self.setWindowTitle(t("時刻オフセット (手入力)"))
         root = QVBoxLayout(self)
         root.addWidget(QLabel(t(
+            "各検査の検査時間に下記のオフセット時間を計算した時間が"
+            "統合時間に表示されます。\n"
             "基準「{ref}」に対する各モダリティの時刻ズレ (時間・分・秒)。\n"
             "＋ = そのモダリティの時計が基準より遅れている。", ref=reference)))
         form = QFormLayout()

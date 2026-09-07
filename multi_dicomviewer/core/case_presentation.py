@@ -41,17 +41,26 @@ def parse_dcm_dt(date_str: str, time_str: str) -> Optional[float]:
         return None
     hh = mm = ss = us = 0
     if time_str:
-        try:
-            if len(time_str) >= 2:
-                hh = int(time_str[0:2])
-            if len(time_str) >= 4:
-                mm = int(time_str[2:4])
-            if len(time_str) >= 6:
-                sec = float(time_str[4:])          # may carry ".ffffff"
-                ss = int(sec)
-                us = int(round((sec - ss) * 1e6))
-        except ValueError:
-            hh = mm = ss = us = 0
+        # Parse HH, MM, SS INDEPENDENTLY so a malformed tail never zeroes the
+        # whole time. DICOM TM/DT may carry fractional seconds AND a timezone
+        # suffix (e.g. '142305.000000+0900'); take only the leading digits of
+        # each field and the numeric fraction of the seconds.
+        def _int2(s):
+            return int(s) if len(s) == 2 and s.isdigit() else 0
+        if len(time_str) >= 2:
+            hh = _int2(time_str[0:2])
+        if len(time_str) >= 4:
+            mm = _int2(time_str[2:4])
+        if len(time_str) >= 6:
+            ss = _int2(time_str[4:6])
+            frac = ""
+            if len(time_str) > 6 and time_str[6:7] == ".":
+                j = 7
+                while j < len(time_str) and time_str[j].isdigit():
+                    j += 1
+                frac = time_str[7:j]
+            if frac:
+                us = int(round(float("0." + frac) * 1e6))
     try:
         dt = datetime(y, mo, d, min(hh, 23), min(mm, 59),
                       min(ss, 59), min(us, 999999))
