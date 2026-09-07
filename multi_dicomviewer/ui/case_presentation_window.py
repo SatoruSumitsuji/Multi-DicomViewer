@@ -22,6 +22,7 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -35,6 +36,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -67,6 +69,28 @@ def _fmt_raw_time(tm: str) -> str:
     return f"{hh}:{mm}:{ss}"
 
 
+def _fmt_offset(sec) -> str:
+    """Signed seconds → '＋1時間2分3秒' style, for the applied-offset hint."""
+    try:
+        total = float(sec)
+    except (TypeError, ValueError):
+        return "0秒"
+    sign = "−" if total < 0 else "＋"
+    s = abs(total)
+    d = int(s // 86400); s -= d * 86400
+    h = int(s // 3600);  s -= h * 3600
+    m = int(s // 60);    s -= m * 60
+    out = ""
+    if d:
+        out += f"{d}日"
+    if h:
+        out += f"{h}時間"
+    if m:
+        out += f"{m}分"
+    out += f"{int(round(s))}秒"
+    return sign + out
+
+
 def _fmt_secs(sec) -> str:
     """Seconds-since-epoch (from parse_dcm_dt) → 'HH:MM:SS'."""
     if sec is None:
@@ -86,10 +110,17 @@ class _DHMSEntry(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
-        self._sign = QComboBox()
-        self._sign.addItems(["＋", "−"])
-        self._sign.setFixedWidth(48)
-        lay.addWidget(self._sign)
+        # Sign as two always-visible one-click radio buttons (a dropdown was
+        # easy to miss / hard to change): ＋ = clock behind ref, − = ahead.
+        self._plus = QRadioButton("＋")
+        self._minus = QRadioButton("−")
+        self._plus.setChecked(True)
+        grp = QButtonGroup(self)
+        grp.setExclusive(True)
+        grp.addButton(self._plus)
+        grp.addButton(self._minus)
+        lay.addWidget(self._plus)
+        lay.addWidget(self._minus)
         self._d = QSpinBox(); self._d.setRange(0, 3650)
         self._h = QSpinBox(); self._h.setRange(0, 23)
         self._m = QSpinBox(); self._m.setRange(0, 59)
@@ -103,7 +134,7 @@ class _DHMSEntry(QWidget):
         self.set_seconds(seconds)
 
     def set_seconds(self, total: float) -> None:
-        self._sign.setCurrentIndex(1 if total < 0 else 0)
+        (self._minus if total < 0 else self._plus).setChecked(True)
         s = abs(float(total))
         d = int(s // 86400); s -= d * 86400
         h = int(s // 3600);  s -= h * 3600
@@ -114,7 +145,7 @@ class _DHMSEntry(QWidget):
     def seconds(self) -> float:
         mag = (self._d.value() * 86400 + self._h.value() * 3600
                + self._m.value() * 60 + self._s.value())
-        return -mag if self._sign.currentIndex() == 1 else mag
+        return -mag if self._minus.isChecked() else mag
 
 
 class _OffsetDialog(QDialog):
@@ -441,6 +472,9 @@ class CasePresentationWindow(QMainWindow):
             self._offsets.update(dlg.values())
             self._dirty = True
             self._rebuild()
+            parts = [f"{m}: {_fmt_offset(self._offsets.get(m, 0.0))}"
+                     for m in mods]
+            self._hint.setText(t("オフセットを適用しました — ") + " / ".join(parts))
 
     def _anchor_align(self) -> None:
         sel = self._selected_row_indices()
