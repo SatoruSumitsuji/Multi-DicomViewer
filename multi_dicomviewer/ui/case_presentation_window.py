@@ -438,6 +438,11 @@ class CasePresentationWindow(QMainWindow):
 
     # -------------------------------------------------------------- sort
     def _unified_for(self, row) -> float | None:
+        # CT is EXCLUDED from the unified-time calc (no meaningful acquisition
+        # instant vs the XA/IVUS procedure timeline): its 統合時間 stays blank and
+        # it sorts to the end (keeping order), per request.
+        if (row.get("modality", "") or "").upper() == "CT":
+            return None
         dt = parse_dcm_dt(row.get("date", ""), row.get("time", ""))
         return unified_time(dt, row.get("modality", ""), self._reference,
                             self._offsets)
