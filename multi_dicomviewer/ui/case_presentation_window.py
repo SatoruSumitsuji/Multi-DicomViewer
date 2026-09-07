@@ -53,6 +53,7 @@ from multi_dicomviewer.core.case_presentation import (
     json_safe, modified_sort_order, offset_from_anchor, parse_dcm_dt,
     unified_time)
 from multi_dicomviewer.i18n import t
+from multi_dicomviewer.ui.snap_dock import SnapDock
 
 # Column layout — 表示 / 更新 / 削除 sit between 統合時間 and コメント (easier to
 # reach than the far right edge or the top toolbar), so the comment column is
@@ -249,10 +250,11 @@ class _DnDTable(QTableWidget):
         self.rowMoved.emit(src, dst)
 
 
-class CasePresentationWindow(QDockWidget):
+class CasePresentationWindow(SnapDock):
     """Dockable Case-Presentation panel. Starts as a floating window; drag it
     onto the Studies dock to tab it there, drag it back out to float again
-    (Studies reappears). One instance is kept by the shell."""
+    (Studies reappears). Floating gestures (double-click maximize / edge snap)
+    come from SnapDock. One instance is kept by the shell."""
 
     def __init__(self, shell, parent=None):
         super().__init__(t("Case Presentation"), parent)
@@ -420,75 +422,9 @@ class CasePresentationWindow(QDockWidget):
         sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
         sc_redo2.activated.connect(self._redo_action)
 
-        # F / A step Case-Presentation ROWS — but ONLY while THIS window is the
-        # active window. When the main viewer window is active, F/A fall through
-        # to the viewer's own frame/series stepping. An app-wide filter (active
-        # only while this window is open) is used because after a row is
-        # displayed keyboard focus can sit on a viewer child widget while this
-        # window is still the active top-level — see eventFilter().
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-
-        # Floating-window maximize / edge-snap (a floating QDockWidget is a Qt
-        # tool window, so it gets no native maximize or Aero-Snap — we do it by
-        # hand). _maxed = full-screen toggle (title double-click); the snap
-        # timer fires after a drag settles to vertical-maximize at a screen edge.
-        self._maxed = False
-        self._pre_max_geom = None
-        self._snapping = False
-        self._snap_timer = QTimer(self)
-        self._snap_timer.setSingleShot(True)
-        self._snap_timer.timeout.connect(self._check_edge_snap)
-
-    def _avail_geom(self):
-        scr = self.screen()
-        return scr.availableGeometry() if scr is not None else None
-
-    def _toggle_maximize(self) -> None:
-        """Title-bar double-click while floating: full-screen ⇄ previous size.
-        Uses manual geometry (showMaximized is ignored on a tool window)."""
-        if not self.isFloating():
-            return
-        av = self._avail_geom()
-        if av is None:
-            return
-        # Guard so the setGeometry-driven moveEvent doesn't clear _maxed.
-        self._snapping = True
-        if self._maxed:
-            if self._pre_max_geom is not None:
-                self.setGeometry(self._pre_max_geom)
-            self._maxed = False
-        else:
-            self._pre_max_geom = self.geometry()
-            self.setGeometry(av)
-            self._maxed = True
-        self._snapping = False
-
-    def moveEvent(self, e):  # noqa: N802 (Qt override)
-        super().moveEvent(e)
-        # A manual move cancels the full-screen state (like a normal window) and
-        # schedules an edge-snap check once the drag settles.
-        if self.isFloating() and not self._snapping:
-            self._maxed = False
-            self._snap_timer.start(140)
-
-    def _check_edge_snap(self) -> None:
-        """After a drag settles: if the top edge sits at the screen top OR the
-        bottom edge at the screen bottom, vertically maximize (fill the height,
-        keep x/width) — the 上下最大化 gesture."""
-        if not self.isFloating() or self._maxed:
-            return
-        av = self._avail_geom()
-        if av is None:
-            return
-        g = self.frameGeometry()
-        thr = 12
-        if abs(g.top() - av.top()) <= thr or abs(g.bottom() - av.bottom()) <= thr:
-            self._snapping = True
-            self.setGeometry(self.geometry().x(), av.top(),
-                             self.width(), av.height())
-            self._snapping = False
+        # (SnapDock installs the app-wide event filter and adds floating
+        # maximize / edge-snap; this class's eventFilter override below adds
+        # F/A row navigation on top of it.)
 
     def _wrap_bar(self, lay) -> QScrollArea:
         """Put a toolbar row in a horizontally-scrollable strip so the panel can
@@ -525,22 +461,9 @@ class CasePresentationWindow(QDockWidget):
                 self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
-        # Title-bar double-click: Qt's default toggles float↔dock, which keeps
-        # losing the panel (it docks behind the Studies tab). Intercept the
-        # double-click anywhere on the title bar (the dock itself or a title
-        # child, but NOT the content table) — when floating, toggle full-screen;
-        # when docked, do nothing — so a double-click never loses the panel.
-        if event.type() == QEvent.Type.MouseButtonDblClick and isinstance(
-                obj, QWidget):
-            content = self.widget()
-            in_content = content is not None and (
-                obj is content or content.isAncestorOf(obj))
-            on_titlebar = (obj is self or self.isAncestorOf(obj)) \
-                and not in_content
-            if on_titlebar:
-                if self.isFloating():
-                    self._toggle_maximize()
-                return True                  # swallow → no float/dock toggle
+        # SnapDock handles the title-bar double-click (maximize / edge-snap).
+        if super().eventFilter(obj, event):
+            return True
         # F/A step rows only when keyboard focus is INSIDE this panel (its
         # table). Focus-based (not active-window) so it works identically
         # whether the panel is floating or docked in the main window: focus on
@@ -557,7 +480,7 @@ class CasePresentationWindow(QDockWidget):
                 if inside and not isinstance(fw, (QLineEdit, QAbstractSpinBox)):
                     self._nav_row(1 if event.key() == Qt.Key.Key_F else -1)
                     return True
-        return super().eventFilter(obj, event)
+        return False
 
     # ------------------------------------------------------------- undo/redo
     def _state_snapshot(self) -> dict:
