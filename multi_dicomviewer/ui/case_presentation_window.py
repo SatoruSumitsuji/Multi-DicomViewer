@@ -334,6 +334,14 @@ class CasePresentationWindow(SnapDock):
         b_off.clicked.connect(self._edit_offsets)
         bar1.addWidget(b_off)
         bar1.addStretch(1)
+        # Reliable window control (floating): maximize ⇄ restore, and the way to
+        # UNDO an edge-snap even if the title bar is hard to reach.
+        b_max = QPushButton("⤢")
+        b_max.setToolTip(t("最大化 / 元のサイズに戻す (フロート時)。"
+                           "上下スナップの解除にも使えます"))
+        b_max.setFixedWidth(34)
+        b_max.clicked.connect(self.toggle_maximize)
+        bar1.addWidget(b_max)
         outer.addWidget(self._wrap_bar(bar1))
 
         # -- toolbar row 2: reorder / update-delete / file (left-packed) ---
