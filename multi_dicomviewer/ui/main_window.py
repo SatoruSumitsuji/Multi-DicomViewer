@@ -1886,6 +1886,13 @@ class MainWindow(QMainWindow):
                     return True
             except Exception:                            # noqa: BLE001
                 pass
+        # Base-vs-split '#' tolerance (a series can be indexed under UID#n while
+        # the row stored the base UID, or vice versa).
+        base = uid.split("#", 1)[0]
+        if base:
+            for k in self._series_by_uid:
+                if k == uid or k.split("#", 1)[0] == base:
+                    return True
         return False
 
     def case_open_folders(self, folders: list) -> int:
