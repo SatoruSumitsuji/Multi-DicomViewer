@@ -3184,6 +3184,36 @@ class MainWindow(QMainWindow):
             while others and _live_total() > budget and _demote_oldest():
                 pass
 
+    def _warn_ct_over_cap_with_lv(self, incoming_pane: ViewerPane,
+                                  modality) -> None:
+        """When a new 3DCT would push the live-CT count past the cap AND the
+        other live CT panes hold LV analysis data (so they can't be demoted to
+        free memory), warn that the new CT may fail (e.g. black) and that
+        Exiting an earlier CT's analysis frees things up. Shown once per such
+        over-cap situation to avoid nagging."""
+        if modality != Modality.CT:
+            return
+        cap = self._live_cap.get(Modality.CT) or 1
+        protected = [p for p in self._panes
+                     if p is not incoming_pane
+                     and self._pane_live_modality(p) == Modality.CT
+                     and p not in self._loads
+                     and self._pane_lv_busy(p)]
+        # The incoming CT makes len(protected)+1 live CTs; over the cap means the
+        # protected (LV-data) panes blocked freeing → memory may be tight.
+        if len(protected) + 1 <= cap:
+            self._ct_over_cap_warned = False
+            return
+        if getattr(self, "_ct_over_cap_warned", False):
+            return
+        self._ct_over_cap_warned = True
+        QMessageBox.information(
+            self, t("3DCT"),
+            t("表示中の3DCTが解析データ（弁 / Epi / Blood-Endo）を保持しているため、"
+              "新しい3DCTの表示で問題（黒表示など）が発生する場合があります。\n\n"
+              "問題が発生した場合は、先に表示していた3DCTの解析を Exit で終了して"
+              "からお試しください。"))
+
     def _promote_pane(self, pane: ViewerPane) -> None:
         """A frozen still pane was interacted with → reload its series (its
         view rebuilds; the LRU cap then frees whatever is now oldest). The
@@ -4577,6 +4607,7 @@ class MainWindow(QMainWindow):
         incoming_bytes = int(getattr(getattr(loaded, "volume", None),
                                      "nbytes", 0) or 0)
         self._free_live_for_incoming(pane, loaded.modality, incoming_bytes)
+        self._warn_ct_over_cap_with_lv(pane, loaded.modality)
         try:
             pane.show_series(loaded, series.label, self._pane_bar(series))
         except Exception as exc:                          # noqa: BLE001
