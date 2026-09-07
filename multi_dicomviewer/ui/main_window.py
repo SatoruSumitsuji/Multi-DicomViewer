@@ -1190,7 +1190,11 @@ class MainWindow(QMainWindow):
         self.browser.delete_requested.connect(self._delete_node)
         self.browser.delete_all_requested.connect(self._delete_all_nodes)
         self.browser.export_requested.connect(self._on_export_requested)
-        dock = QDockWidget(t("Studies"), self)
+        from multi_dicomviewer.ui.snap_dock import SnapDock
+        # SnapDock: when floated, the Studies panel gains title-double-click
+        # maximize + drag-to-edge vertical maximize (a plain QDockWidget float
+        # is a tool window without those).
+        dock = SnapDock(t("Studies"), self)
         dock.setWidget(self.browser)
         dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetMovable
