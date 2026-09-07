@@ -399,6 +399,15 @@ class CasePresentationWindow(QMainWindow):
         if app is not None:
             app.installEventFilter(self)
 
+    def changeEvent(self, e):  # noqa: N802 (Qt override)
+        super().changeEvent(e)
+        # When focus returns here after the doctor adjusted the image in the
+        # main viewer, silently update the selected row's key image to that
+        # live view (the "各操作をしたとき" background 更新).
+        if (e.type() == QEvent.Type.ActivationChange and self.isActiveWindow()
+                and not getattr(self, "_suppress_capture", False)):
+            self._capture_view_into_selected()
+
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
         if (event.type() == QEvent.Type.KeyPress and self.isActiveWindow()
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier
@@ -656,12 +665,43 @@ class CasePresentationWindow(QMainWindow):
             pass
         self._return_focus()
 
+    def _current_row_dict(self):
+        i = self._table.currentRow()
+        if 0 <= i < len(self._rows):
+            return self._rows[i]
+        return None
+
+    def _capture_view_into(self, row) -> None:
+        """Silently refresh a row's stored key image to the CURRENT live view of
+        its series (if that series is on screen). This is the background "更新"
+        the doctor wants: the image they're looking at while writing findings
+        becomes the one 表示 restores later."""
+        if not row:
+            return
+        try:
+            vs = self._shell.case_current_view_state(row.get("series_uid", ""))
+        except Exception:                                # noqa: BLE001
+            vs = None
+        if vs:
+            row["view_state"] = vs
+            self._dirty = True
+
+    def _capture_view_into_selected(self) -> None:
+        self._capture_view_into(self._current_row_dict())
+
     def _return_focus(self) -> None:
         """Bring focus back to this window after a display (which activates the
         main viewer window). Keeping THIS window active is what makes F/A keep
         stepping rows — see eventFilter(). Deferred so it wins any activation
         the display path performs on the next event-loop turn."""
+        # Suppress the activation-driven capture through the display: the view
+        # is (re)stored to the row's OWN saved state — for a not-yet-loaded
+        # series that restore is deferred ~450 ms — so capturing now would grab
+        # a pre-restore view and clobber the row's key image.
+        self._suppress_capture = True
         QTimer.singleShot(0, self._do_return_focus)
+        QTimer.singleShot(
+            800, lambda: setattr(self, "_suppress_capture", False))
 
     def _do_return_focus(self) -> None:
         self.activateWindow()
@@ -1015,6 +1055,9 @@ class CasePresentationWindow(QMainWindow):
             self._record_undo()
             self._rows[row]["comment"] = item.text() if item else ""
             self._dirty = True
+            # Writing findings for this row → its live image IS the key image;
+            # capture it in the background so 表示 restores it later.
+            self._capture_view_into(self._rows[row])
             # update the empty-highlight + counters without full rebuild churn
             if item is not None:
                 item.setBackground(QColor(255, 255, 255)
