@@ -389,17 +389,18 @@ class CasePresentationWindow(QMainWindow):
         sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
         sc_redo2.activated.connect(self._redo_action)
 
-        # F / A drive Case-Presentation ROW navigation for the whole workflow,
-        # even after a row is displayed and keyboard focus is on the viewer
-        # window (otherwise the viewer would eat F/A as its own frame/series
-        # step). An application-wide filter, active only while this window is
-        # open, routes F/A here — see eventFilter().
+        # F / A step Case-Presentation ROWS — but ONLY while THIS window is the
+        # active window. When the main viewer window is active, F/A fall through
+        # to the viewer's own frame/series stepping. An app-wide filter (active
+        # only while this window is open) is used because after a row is
+        # displayed keyboard focus can sit on a viewer child widget while this
+        # window is still the active top-level — see eventFilter().
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
-        if (event.type() == QEvent.Type.KeyPress and self.isVisible()
+        if (event.type() == QEvent.Type.KeyPress and self.isActiveWindow()
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier
                 and event.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
             app = QApplication.instance()
