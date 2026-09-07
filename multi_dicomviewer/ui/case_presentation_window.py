@@ -279,24 +279,21 @@ class CasePresentationWindow(QDockWidget):
         central.setMinimumWidth(180)
         outer = QVBoxLayout(central)
         outer.setContentsMargins(4, 4, 4, 4)
+        outer.setSpacing(3)                    # tight rows (no wasted band)
 
-        # -- toolbar row 1: capture / reference / sort --------------------
+        # -- toolbar row 1: capture / reference / sort + (right) offset ----
         bar1 = QHBoxLayout()
         b_add = QPushButton(t("この表示を追加"))
         b_add.setToolTip(t("アクティブなペインの表示を1行として取り込む"))
         b_add.clicked.connect(self._add_active)
         bar1.addWidget(b_add)
-        b_add_all = QPushButton(t("全ペインを追加"))
-        b_add_all.setToolTip(t("表示中の全ペインをそれぞれ1行として取り込む"))
-        b_add_all.clicked.connect(self._add_all)
-        bar1.addWidget(b_add_all)
         b_add_study = QPushButton(t("全シリーズを追加"))
         b_add_study.setToolTip(t(
             "選択中の検査の全シリーズを種別/Ser/時間つきで取り込む "
             "(表示は各シリーズの自動フレーム)"))
         b_add_study.clicked.connect(self._add_all_series)
         bar1.addWidget(b_add_study)
-        bar1.addSpacing(16)
+        bar1.addSpacing(12)
         bar1.addWidget(QLabel(t("基準:")))
         self._ref_combo = QComboBox()
         self._ref_combo.setToolTip(t("統合時間の基準モダリティ (通常 XA)"))
@@ -310,7 +307,7 @@ class CasePresentationWindow(QDockWidget):
         bar1.addWidget(b_sort)
         # Column visibility — hide 統合時間 / 更新 / 削除 to save width. 表示 and
         # the rest stay always-on.
-        b_cols = QPushButton(t("列…"))
+        b_cols = QPushButton(t("列の表示 ▾"))
         b_cols.setToolTip(t("統合時間・更新・削除の列を表示/非表示"))
         col_menu = QMenu(b_cols)
         self._col_actions = {}
@@ -324,20 +321,20 @@ class CasePresentationWindow(QDockWidget):
         b_cols.setMenu(col_menu)
         bar1.addWidget(b_cols)
         bar1.addStretch(1)
-        outer.addWidget(self._wrap_bar(bar1))
-
-        # -- toolbar row 2: offset / reorder / file -----------------------
-        bar2 = QHBoxLayout()
+        # Time-offset tools live at the RIGHT of row 1.
         b_anchor = QPushButton(t("アンカーで揃える"))
         b_anchor.setToolTip(t(
             "同一時点とみなす基準行と他モダリティ行を1行ずつ選択 → その"
             "モダリティの時刻オフセットを自動計算"))
         b_anchor.clicked.connect(self._anchor_align)
-        bar2.addWidget(b_anchor)
+        bar1.addWidget(b_anchor)
         b_off = QPushButton(t("オフセット手入力…"))
         b_off.clicked.connect(self._edit_offsets)
-        bar2.addWidget(b_off)
-        bar2.addSpacing(16)
+        bar1.addWidget(b_off)
+        outer.addWidget(self._wrap_bar(bar1))
+
+        # -- toolbar row 2: reorder / update-delete / file (left-packed) ---
+        bar2 = QHBoxLayout()
         # Row reorder: 最初 / 10上 / 一つ上 / 一つ下 / 10下 / 最後 (drag & drop
         # also works). Symbols read top→bottom: bar+triangle = jump to the edge,
         # double triangle = 10, single triangle = 1.
@@ -361,7 +358,7 @@ class CasePresentationWindow(QDockWidget):
         b_del = QPushButton(t("削除"))
         b_del.clicked.connect(self._delete_selected)
         bar2.addWidget(b_del)
-        bar2.addStretch(1)
+        bar2.addSpacing(12)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
         b_overwrite.clicked.connect(self._save_overwrite)
@@ -375,6 +372,7 @@ class CasePresentationWindow(QDockWidget):
         b_clear = QPushButton(t("全消去"))
         b_clear.clicked.connect(self._clear_all)
         bar2.addWidget(b_clear)
+        bar2.addStretch(1)
         outer.addWidget(self._wrap_bar(bar2))
 
         # -- table (drag & drop reorders rows) ----------------------------
@@ -435,6 +433,7 @@ class CasePresentationWindow(QDockWidget):
     def _wrap_bar(self, lay) -> QScrollArea:
         """Put a toolbar row in a horizontally-scrollable strip so the panel can
         be dragged narrow without the buttons forcing a wide minimum."""
+        lay.setContentsMargins(0, 0, 0, 0)
         w = QWidget()
         w.setLayout(lay)
         sc = QScrollArea()
@@ -443,7 +442,10 @@ class CasePresentationWindow(QDockWidget):
         sc.setFrameShape(QFrame.Shape.NoFrame)
         sc.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        sc.setFixedHeight(max(30, w.sizeHint().height()) + 14)
+        # Reserve exactly the h-scrollbar height (needed only when dragged
+        # narrow) — no bigger, so there's no empty band at normal width.
+        sbh = sc.horizontalScrollBar().sizeHint().height()
+        sc.setFixedHeight(max(26, w.sizeHint().height()) + max(2, sbh))
         return sc
 
     def _set_col_visible(self, col: int, on: bool) -> None:
@@ -463,6 +465,20 @@ class CasePresentationWindow(QDockWidget):
                 self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
+        # Title-bar double-click: Qt's default toggles float↔dock, which keeps
+        # losing the panel (it docks behind the Studies tab). Intercept it —
+        # when floating, toggle maximize (a real 全画面); when docked, do
+        # nothing — so a double-click never makes the panel disappear.
+        if (event.type() == QEvent.Type.MouseButtonDblClick
+                and isinstance(obj, QWidget) and self.isAncestorOf(obj)
+                and (self.widget() is None
+                     or not self.widget().isAncestorOf(obj))):
+            if self.isFloating():
+                if self.isMaximized():
+                    self.showNormal()
+                else:
+                    self.showMaximized()
+            return True                      # swallow → no float/dock toggle
         # F/A step rows only when keyboard focus is INSIDE this panel (its
         # table). Focus-based (not active-window) so it works identically
         # whether the panel is floating or docked in the main window: focus on
