@@ -94,7 +94,7 @@ class _DHMSEntry(QWidget):
         self._h = QSpinBox(); self._h.setRange(0, 23)
         self._m = QSpinBox(); self._m.setRange(0, 59)
         self._s = QDoubleSpinBox()
-        self._s.setRange(0.0, 59.9); self._s.setDecimals(1); self._s.setSingleStep(1.0)
+        self._s.setRange(0.0, 59.0); self._s.setDecimals(0); self._s.setSingleStep(1.0)
         for sb, suf in ((self._d, t("日")), (self._h, t("時間")),
                         (self._m, t("分")), (self._s, t("秒"))):
             sb.setSuffix(" " + suf)
@@ -109,7 +109,7 @@ class _DHMSEntry(QWidget):
         h = int(s // 3600);  s -= h * 3600
         m = int(s // 60);    s -= m * 60
         self._d.setValue(d); self._h.setValue(h)
-        self._m.setValue(m); self._s.setValue(round(s, 1))
+        self._m.setValue(m); self._s.setValue(round(s))
 
     def seconds(self) -> float:
         mag = (self._d.value() * 86400 + self._h.value() * 3600
