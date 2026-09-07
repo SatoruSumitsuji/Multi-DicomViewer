@@ -307,7 +307,7 @@ class CasePresentationWindow(QDockWidget):
         bar1.addWidget(b_sort)
         # Column visibility — hide 統合時間 / 更新 / 削除 to save width. 表示 and
         # the rest stay always-on.
-        b_cols = QPushButton(t("列の表示 ▾"))
+        b_cols = QPushButton(t("列表示"))
         b_cols.setToolTip(t("統合時間・更新・削除の列を表示/非表示"))
         col_menu = QMenu(b_cols)
         self._col_actions = {}
