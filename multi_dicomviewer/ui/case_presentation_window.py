@@ -741,7 +741,13 @@ class CasePresentationWindow(QDockWidget):
         self._rebuild(select=sel[0] if sel else None)
 
     def _nav_row(self, step: int) -> None:
-        """F/A row navigation: move the selection by ``step`` and display it."""
+        """F/A row navigation: move the selection by ``step``, then display it.
+
+        The row SELECTION happens now (cheap); the actual display is DEFERRED to
+        the next event-loop turn. Displaying a series can spin up a CT/VTK GL
+        context and rebuild panes — doing that synchronously inside the key-event
+        dispatch (this runs from an app-wide event filter / keyPressEvent) can
+        hard-crash Qt/VTK. singleShot(0) runs it after the event unwinds."""
         n = len(self._rows)
         if n == 0:
             return
@@ -752,10 +758,14 @@ class CasePresentationWindow(QDockWidget):
             cur = max(0, min(n - 1, cur + step))
         self._table.selectRow(cur)
         self._table.setCurrentCell(cur, C_COMMENT)
-        # Display it, but stay silent on unloaded rows so rapid F/A stepping
-        # isn't interrupted by a modal warning.
+        row = self._rows[cur]
+        QTimer.singleShot(0, lambda r=row: self._display_row_deferred(r))
+
+    def _display_row_deferred(self, row) -> None:
+        # Stay silent on unloaded rows so rapid F/A stepping isn't interrupted
+        # by a modal warning.
         try:
-            self._shell.case_redisplay(self._rows[cur])
+            self._shell.case_redisplay(row)
         except Exception:                            # noqa: BLE001
             pass
         self._return_focus()
