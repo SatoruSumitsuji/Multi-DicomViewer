@@ -103,7 +103,7 @@ def _fmt_secs(sec) -> str:
 
 
 class _DHMSEntry(QWidget):
-    """Signed duration entry as ＋/− 日 時間 分 秒. Value is signed seconds."""
+    """Signed duration entry as ＋/− 時間 分 秒. Value is signed seconds."""
 
     def __init__(self, seconds: float = 0.0, parent=None):
         super().__init__(parent)
@@ -121,12 +121,11 @@ class _DHMSEntry(QWidget):
         grp.addButton(self._minus)
         lay.addWidget(self._plus)
         lay.addWidget(self._minus)
-        self._d = QSpinBox(); self._d.setRange(0, 3650)
-        self._h = QSpinBox(); self._h.setRange(0, 23)
+        self._h = QSpinBox(); self._h.setRange(0, 9999)
         self._m = QSpinBox(); self._m.setRange(0, 59)
         self._s = QDoubleSpinBox()
         self._s.setRange(0.0, 59.0); self._s.setDecimals(0); self._s.setSingleStep(1.0)
-        for sb, suf in ((self._d, t("日")), (self._h, t("時間")),
+        for sb, suf in ((self._h, t("時間")),
                         (self._m, t("分")), (self._s, t("秒"))):
             sb.setSuffix(" " + suf)
             lay.addWidget(sb)
@@ -136,20 +135,18 @@ class _DHMSEntry(QWidget):
     def set_seconds(self, total: float) -> None:
         (self._minus if total < 0 else self._plus).setChecked(True)
         s = abs(float(total))
-        d = int(s // 86400); s -= d * 86400
         h = int(s // 3600);  s -= h * 3600
         m = int(s // 60);    s -= m * 60
-        self._d.setValue(d); self._h.setValue(h)
-        self._m.setValue(m); self._s.setValue(round(s))
+        self._h.setValue(h); self._m.setValue(m); self._s.setValue(round(s))
 
     def seconds(self) -> float:
-        mag = (self._d.value() * 86400 + self._h.value() * 3600
+        mag = (self._h.value() * 3600
                + self._m.value() * 60 + self._s.value())
         return -mag if self._minus.isChecked() else mag
 
 
 class _OffsetDialog(QDialog):
-    """Manual per-modality offset entry (日 / 時間 / 分 / 秒; + = that
+    """Manual per-modality offset entry (時間 / 分 / 秒; + = that
     modality's clock is behind the reference)."""
 
     def __init__(self, modalities, offsets, reference, parent=None):
@@ -157,7 +154,7 @@ class _OffsetDialog(QDialog):
         self.setWindowTitle(t("時刻オフセット (手入力)"))
         root = QVBoxLayout(self)
         root.addWidget(QLabel(t(
-            "基準「{ref}」に対する各モダリティの時刻ズレ (日・時間・分・秒)。\n"
+            "基準「{ref}」に対する各モダリティの時刻ズレ (時間・分・秒)。\n"
             "＋ = そのモダリティの時計が基準より遅れている。", ref=reference)))
         form = QFormLayout()
         self._entries = {}
@@ -183,6 +180,7 @@ class _DnDTable(QTableWidget):
     and rebuild."""
 
     rowMoved = pyqtSignal(int, int)
+    navRow = pyqtSignal(int)          # F/A → +1 / -1 (when NOT editing a cell)
 
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
@@ -193,6 +191,18 @@ class _DnDTable(QTableWidget):
         self.setDropIndicatorShown(True)
         self.setDragDropOverwriteMode(False)      # insert BETWEEN rows, not over
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def keyPressEvent(self, e) -> None:            # noqa: N802 (Qt override)
+        # F = next row, A = previous row — but only when a cell is NOT being
+        # edited (so typing 'f'/'a' into a コメント still works) and no modifier
+        # is held.
+        if (self.state() != QAbstractItemView.State.EditingState
+                and e.modifiers() == Qt.KeyboardModifier.NoModifier
+                and e.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
+            self.navRow.emit(1 if e.key() == Qt.Key.Key_F else -1)
+            e.accept()
+            return
+        super().keyPressEvent(e)
 
     def mousePressEvent(self, e) -> None:          # noqa: N802 (Qt override)
         # Select the pressed row FIRST so a press-and-drag starts a drag right
@@ -332,6 +342,7 @@ class CasePresentationWindow(QMainWindow):
         # -- table (drag & drop reorders rows) ----------------------------
         self._table = _DnDTable(0, len(_HEADERS))
         self._table.rowMoved.connect(self._on_row_dragged)
+        self._table.navRow.connect(self._nav_row)
         self._table.setHorizontalHeaderLabels([t(h) for h in _HEADERS])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(
@@ -595,6 +606,25 @@ class CasePresentationWindow(QMainWindow):
         except ValueError:
             i = None
         self._rebuild(select=i)
+
+    def _nav_row(self, step: int) -> None:
+        """F/A row navigation: move the selection by ``step`` and display it."""
+        n = len(self._rows)
+        if n == 0:
+            return
+        cur = self._table.currentRow()
+        if cur < 0:
+            cur = 0 if step > 0 else n - 1
+        else:
+            cur = max(0, min(n - 1, cur + step))
+        self._table.selectRow(cur)
+        self._table.setCurrentCell(cur, C_COMMENT)
+        # Display it, but stay silent on unloaded rows so rapid F/A stepping
+        # isn't interrupted by a modal warning.
+        try:
+            self._shell.case_redisplay(self._rows[cur])
+        except Exception:                            # noqa: BLE001
+            pass
 
     def _row_menu(self, pos) -> None:
         """Row right-click menu: 表示 / move (最初・10上・一つ上・一つ下・10下・
