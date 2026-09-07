@@ -13,6 +13,7 @@ event within 10 s of an XA event is placed just after it — see core logic).
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 from datetime import datetime, timedelta
@@ -122,7 +123,18 @@ class _DnDTable(QTableWidget):
         self.viewport().setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.setDropIndicatorShown(True)
+        self.setDragDropOverwriteMode(False)      # insert BETWEEN rows, not over
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def mousePressEvent(self, e) -> None:          # noqa: N802 (Qt override)
+        # Select the pressed row FIRST so a press-and-drag starts a drag right
+        # away (otherwise the first press only sets the selection and the drag
+        # won't begin until a second press-drag).
+        if e.button() == Qt.MouseButton.LeftButton:
+            idx = self.indexAt(e.position().toPoint())
+            if idx.isValid():
+                self.selectRow(idx.row())
+        super().mousePressEvent(e)
 
     def dropEvent(self, e) -> None:            # noqa: N802 (Qt override)
         if e.source() is not self:
@@ -159,6 +171,8 @@ class CasePresentationWindow(QMainWindow):
         self._last_path: str | None = None         # for 上書き保存 (overwrite)
         self._last_dir: str = ""                    # remembered file-dialog folder
         self._dirty = False                         # unsaved changes → close warns
+        self._undo: list = []                       # Ctrl+Z snapshots (pre-change)
+        self._redo: list = []                       # Ctrl+Y snapshots
         self.setWindowTitle(t("Case Presentation"))
         self.resize(900, 520)
 
@@ -280,12 +294,61 @@ class CasePresentationWindow(QMainWindow):
         self._refresh_ref_combo()
         self._rebuild()
 
+        # Keyboard: Ctrl+S = 上書き保存, Ctrl+Z / Ctrl+Y = Undo / Redo.
+        from PyQt6.QtGui import QKeySequence, QShortcut
+        sc_save = QShortcut(QKeySequence.StandardKey.Save, self)
+        sc_save.activated.connect(self._save_overwrite)
+        sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
+        sc_undo.activated.connect(self._undo_action)
+        sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
+        sc_redo.activated.connect(self._redo_action)
+        sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
+        sc_redo2.activated.connect(self._redo_action)
+
+    # ------------------------------------------------------------- undo/redo
+    def _state_snapshot(self) -> dict:
+        """Deep copy of the editable state (rows / offsets / reference)."""
+        return {
+            "rows": copy.deepcopy(self._rows),
+            "offsets": copy.deepcopy(self._offsets),
+            "reference": self._reference,
+        }
+
+    def _restore_state(self, snap: dict) -> None:
+        self._rows = copy.deepcopy(snap.get("rows", []))
+        self._offsets = copy.deepcopy(snap.get("offsets", {}))
+        self._reference = snap.get("reference", "XA")
+        self._dirty = True
+        self._refresh_ref_combo()
+        self._rebuild()
+
+    def _record_undo(self) -> None:
+        """Snapshot the CURRENT state onto the undo stack (call BEFORE a change);
+        a new change forks the redo history."""
+        self._undo.append(self._state_snapshot())
+        if len(self._undo) > 100:
+            self._undo.pop(0)
+        self._redo.clear()
+
+    def _undo_action(self) -> None:
+        if not self._undo:
+            return
+        self._redo.append(self._state_snapshot())
+        self._restore_state(self._undo.pop())
+
+    def _redo_action(self) -> None:
+        if not self._redo:
+            return
+        self._undo.append(self._state_snapshot())
+        self._restore_state(self._redo.pop())
+
     # ---------------------------------------------------------------- add
     def _add_active(self) -> None:
         row = self._shell.case_capture_active()
         if row is None:
             self._warn(t("表示中のシリーズがありません。"))
             return
+        self._record_undo()
         self._rows.append(row)
         self._after_rows_changed(select_last=True)
 
@@ -294,6 +357,7 @@ class CasePresentationWindow(QMainWindow):
         if not rows:
             self._warn(t("表示中のシリーズがありません。"))
             return
+        self._record_undo()
         self._rows.extend(rows)
         self._after_rows_changed(select_last=True)
 
@@ -304,6 +368,7 @@ class CasePresentationWindow(QMainWindow):
         if not rows:
             self._warn(t("シリーズが見つかりません (検査を表示してから押してください)。"))
             return
+        self._record_undo()
         have = {r.get("series_uid") for r in self._rows if r.get("series_uid")}
         added = 0
         for r in rows:
@@ -335,6 +400,7 @@ class CasePresentationWindow(QMainWindow):
             return
         dlg = _OffsetDialog(mods, self._offsets, self._reference, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._record_undo()
             self._offsets.update(dlg.values())
             self._dirty = True
             self._rebuild()
@@ -362,6 +428,7 @@ class CasePresentationWindow(QMainWindow):
             self._warn(t("選択した行に有効な時刻がありません。"))
             return
         off = offset_from_anchor(ref_dt, oth_dt)
+        self._record_undo()
         self._offsets[oth["modality"]] = off
         self._hint.setText(t(
             "{mod} のオフセットを {sec:+.1f} 秒に設定しました。",
@@ -380,6 +447,7 @@ class CasePresentationWindow(QMainWindow):
                   "is_ref": r.get("modality") == self._reference}
                  for r in self._rows]
         order = modified_sort_order(items, tol=_SNAP_TOL_S)
+        self._record_undo()
         self._rows = [self._rows[i] for i in order]
         self._dirty = True
         self._rebuild()
@@ -393,6 +461,7 @@ class CasePresentationWindow(QMainWindow):
         j_final = max(0, min(n - 1, j_final))
         if i == j_final:
             return
+        self._record_undo()
         r = self._rows.pop(i)
         self._rows.insert(j_final, r)          # after pop, insert clamps to end
         self._dirty = True
@@ -420,6 +489,7 @@ class CasePresentationWindow(QMainWindow):
         sel = set(self._selected_row_indices())
         if not sel:
             return
+        self._record_undo()
         self._rows = [r for i, r in enumerate(self._rows) if i not in sel]
         self._after_rows_changed()
 
@@ -473,6 +543,7 @@ class CasePresentationWindow(QMainWindow):
         if QMessageBox.question(
                 self, t("全消去"),
                 t("全ての行を消去しますか?")) == QMessageBox.StandardButton.Yes:
+            self._record_undo()
             self._rows = []
             self._after_rows_changed()
 
@@ -669,6 +740,7 @@ class CasePresentationWindow(QMainWindow):
     # ----------------------------------------------------------- helpers
     def _on_ref_changed(self, text: str) -> None:
         if text and text != self._reference:
+            self._record_undo()
             self._reference = text
             self._dirty = True
             self._rebuild()
@@ -746,6 +818,7 @@ class CasePresentationWindow(QMainWindow):
             return
         if 0 <= row < len(self._rows):
             item = self._table.item(row, col)
+            self._record_undo()
             self._rows[row]["comment"] = item.text() if item else ""
             self._dirty = True
             # update the empty-highlight + counters without full rebuild churn
