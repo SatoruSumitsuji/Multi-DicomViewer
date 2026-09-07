@@ -447,11 +447,20 @@ class CasePresentationWindow(QMainWindow):
         return unified_time(dt, row.get("modality", ""), self._reference,
                             self._offsets)
 
+    @staticmethod
+    def _is_ct(row) -> bool:
+        return (row.get("modality", "") or "").upper() == "CT"
+
     def _sort_rows(self) -> None:
         items = [{"dt": self._unified_for(r),
                   "is_ref": r.get("modality") == self._reference}
                  for r in self._rows]
         order = modified_sort_order(items, tol=_SNAP_TOL_S)
+        # CT is outside the timeline → put CT rows at the TOP by default (keeping
+        # their relative order); the time-sorted rest follow.
+        ct = [i for i in order if self._is_ct(self._rows[i])]
+        rest = [i for i in order if not self._is_ct(self._rows[i])]
+        order = ct + rest
         self._record_undo()
         self._rows = [self._rows[i] for i in order]
         self._dirty = True
