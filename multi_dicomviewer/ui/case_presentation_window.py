@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -35,11 +36,12 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QMenu,
     QMessageBox,
+    QFrame,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -247,11 +249,20 @@ class _DnDTable(QTableWidget):
         self.rowMoved.emit(src, dst)
 
 
-class CasePresentationWindow(QMainWindow):
-    """Non-modal tool window; one instance kept by the shell."""
+class CasePresentationWindow(QDockWidget):
+    """Dockable Case-Presentation panel. Starts as a floating window; drag it
+    onto the Studies dock to tab it there, drag it back out to float again
+    (Studies reappears). One instance is kept by the shell."""
 
     def __init__(self, shell, parent=None):
-        super().__init__(parent)
+        super().__init__(t("Case Presentation"), parent)
+        self.setObjectName("CasePresentationDock")
+        self.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
         self._shell = shell
         self._rows: list[dict] = []
         self._offsets: dict[str, float] = {}       # modality → seconds
@@ -261,12 +272,13 @@ class CasePresentationWindow(QMainWindow):
         self._dirty = False                         # unsaved changes → close warns
         self._undo: list = []                       # Ctrl+Z snapshots (pre-change)
         self._redo: list = []                       # Ctrl+Y snapshots
-        self.setWindowTitle(t("Case Presentation"))
-        self.resize(900, 520)
 
         central = QWidget()
-        self.setCentralWidget(central)
+        self.setWidget(central)
+        # Allow a narrow panel (the table + toolbars can scroll/shrink).
+        central.setMinimumWidth(180)
         outer = QVBoxLayout(central)
+        outer.setContentsMargins(4, 4, 4, 4)
 
         # -- toolbar row 1: capture / reference / sort --------------------
         bar1 = QHBoxLayout()
@@ -296,8 +308,23 @@ class CasePresentationWindow(QMainWindow):
             "その基準の直後に配置)"))
         b_sort.clicked.connect(self._sort_rows)
         bar1.addWidget(b_sort)
+        # Column visibility — hide 統合時間 / 更新 / 削除 to save width. 表示 and
+        # the rest stay always-on.
+        b_cols = QPushButton(t("列…"))
+        b_cols.setToolTip(t("統合時間・更新・削除の列を表示/非表示"))
+        col_menu = QMenu(b_cols)
+        self._col_actions = {}
+        for col, label in ((C_UNI, t("統合時間")), (C_UPD, t("更新")),
+                           (C_DEL, t("削除"))):
+            a = col_menu.addAction(label)
+            a.setCheckable(True)
+            a.setChecked(True)
+            a.toggled.connect(lambda on, c=col: self._set_col_visible(c, on))
+            self._col_actions[col] = a
+        b_cols.setMenu(col_menu)
+        bar1.addWidget(b_cols)
         bar1.addStretch(1)
-        outer.addLayout(bar1)
+        outer.addWidget(self._wrap_bar(bar1))
 
         # -- toolbar row 2: offset / reorder / file -----------------------
         bar2 = QHBoxLayout()
@@ -348,7 +375,7 @@ class CasePresentationWindow(QMainWindow):
         b_clear = QPushButton(t("全消去"))
         b_clear.clicked.connect(self._clear_all)
         bar2.addWidget(b_clear)
-        outer.addLayout(bar2)
+        outer.addWidget(self._wrap_bar(bar2))
 
         # -- table (drag & drop reorders rows) ----------------------------
         self._table = _DnDTable(0, len(_HEADERS))
@@ -405,6 +432,23 @@ class CasePresentationWindow(QMainWindow):
         if app is not None:
             app.installEventFilter(self)
 
+    def _wrap_bar(self, lay) -> QScrollArea:
+        """Put a toolbar row in a horizontally-scrollable strip so the panel can
+        be dragged narrow without the buttons forcing a wide minimum."""
+        w = QWidget()
+        w.setLayout(lay)
+        sc = QScrollArea()
+        sc.setWidget(w)
+        sc.setWidgetResizable(True)
+        sc.setFrameShape(QFrame.Shape.NoFrame)
+        sc.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        sc.setFixedHeight(max(30, w.sizeHint().height()) + 14)
+        return sc
+
+    def _set_col_visible(self, col: int, on: bool) -> None:
+        self._table.setColumnHidden(col, not on)
+
     def changeEvent(self, e):  # noqa: N802 (Qt override)
         super().changeEvent(e)
         # When focus returns here after the doctor adjusted the image in the
@@ -419,7 +463,11 @@ class CasePresentationWindow(QMainWindow):
                 self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
-        if (event.type() == QEvent.Type.KeyPress and self.isActiveWindow()
+        # F/A step rows only when keyboard focus is INSIDE this panel (its
+        # table). Focus-based (not active-window) so it works identically
+        # whether the panel is floating or docked in the main window: focus on
+        # the image → the viewer's own F/A; focus on the list → row nav.
+        if (event.type() == QEvent.Type.KeyPress
                 and event.modifiers() == Qt.KeyboardModifier.NoModifier
                 and event.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
             app = QApplication.instance()
@@ -427,7 +475,8 @@ class CasePresentationWindow(QMainWindow):
             # a text/number field (so 'f'/'a' can still be typed / edited).
             if app is not None and app.activeModalWidget() is None:
                 fw = app.focusWidget()
-                if not isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+                inside = fw is not None and (fw is self or self.isAncestorOf(fw))
+                if inside and not isinstance(fw, (QLineEdit, QAbstractSpinBox)):
                     self._nav_row(1 if event.key() == Qt.Key.Key_F else -1)
                     return True
         return super().eventFilter(obj, event)
@@ -901,15 +950,14 @@ class CasePresentationWindow(QMainWindow):
             self._save()
 
     # ------------------------------------------------------------ close
-    def _remove_app_filter(self) -> None:
-        app = QApplication.instance()
-        if app is not None:
-            app.removeEventFilter(self)
-
     def closeEvent(self, e) -> None:
-        """Warn on unsaved changes before closing: 保存 / 終了 / キャンセル."""
+        """Warn on unsaved changes before closing: 保存 / 終了 / キャンセル.
+
+        This is a dock: closing HIDES it (the instance and its data persist, so
+        reopening restores everything). The app-wide F/A filter is left
+        installed for the panel's lifetime (it no-ops while hidden because focus
+        can't be inside a hidden widget) so F/A still work after a reopen."""
         if not self._dirty or not self._rows:
-            self._remove_app_filter()
             e.accept()
             return
         box = QMessageBox(self)
@@ -929,10 +977,8 @@ class CasePresentationWindow(QMainWindow):
             if self._dirty:
                 e.ignore()
             else:
-                self._remove_app_filter()
                 e.accept()
         elif c is b_exit:
-            self._remove_app_filter()
             e.accept()
         else:
             e.ignore()

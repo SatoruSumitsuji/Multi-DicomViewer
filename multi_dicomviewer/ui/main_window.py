@@ -1771,9 +1771,17 @@ class MainWindow(QMainWindow):
             CasePresentationWindow)
         w = getattr(self, "_casepres_win", None)
         if w is None:
-            w = CasePresentationWindow(self)          # owner-less (own taskbar)
-            self._as_taskbar_window(w)
+            # Dockable panel: registered in the LEFT area and tabbed with the
+            # Studies dock, but starts FLOATING (a separate window). Drag it onto
+            # the Studies area to show the list there; drag it back out to float
+            # again (Studies reappears).
+            w = CasePresentationWindow(self)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
+            if getattr(self, "_studies_dock", None) is not None:
+                self.tabifyDockWidget(self._studies_dock, w)
             self._casepres_win = w
+            w.setFloating(True)
+            w.resize(760, 520)
         w.show()
         w.raise_()
         w.activateWindow()
