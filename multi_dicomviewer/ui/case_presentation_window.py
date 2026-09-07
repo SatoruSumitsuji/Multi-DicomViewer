@@ -322,8 +322,8 @@ class CasePresentationWindow(SnapDock):
             self._col_actions[col] = a
         b_cols.setMenu(col_menu)
         bar1.addWidget(b_cols)
-        bar1.addStretch(1)
-        # Time-offset tools live at the RIGHT of row 1.
+        # Time-offset tools sit just right of 列表示 (left-packed, not floated
+        # to the far right where they were hard to find).
         b_anchor = QPushButton(t("アンカーで揃える"))
         b_anchor.setToolTip(t(
             "同一時点とみなす基準行と他モダリティ行を1行ずつ選択 → その"
@@ -333,6 +333,7 @@ class CasePresentationWindow(SnapDock):
         b_off = QPushButton(t("オフセット手入力…"))
         b_off.clicked.connect(self._edit_offsets)
         bar1.addWidget(b_off)
+        bar1.addStretch(1)
         outer.addWidget(self._wrap_bar(bar1))
 
         # -- toolbar row 2: reorder / update-delete / file (left-packed) ---
