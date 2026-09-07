@@ -17,7 +17,7 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -45,9 +45,10 @@ from multi_dicomviewer.core.case_presentation import (
     unified_time)
 from multi_dicomviewer.i18n import t
 
-# Column layout
-C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_COMMENT, C_SHOW = range(7)
-_HEADERS = ["No", "種別", "Ser", "時間", "統合時間", "コメント", ""]
+# Column layout — 表示 sits between 統合時間 and コメント (easier to reach than
+# the far right edge), so the comment column is last (and stretches).
+C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW, C_COMMENT = range(7)
+_HEADERS = ["No", "種別", "Ser", "時間", "統合時間", "表示", "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
 
 
@@ -106,6 +107,46 @@ class _OffsetDialog(QDialog):
         return {m: sb.value() for m, sb in self._spins.items()}
 
 
+class _DnDTable(QTableWidget):
+    """QTableWidget with single-row internal drag & drop. Rather than let Qt
+    shuffle the QTableWidgetItems (which would desync from the owner's row
+    model), it emits rowMoved(src, final_dst) for the owner to reorder its list
+    and rebuild."""
+
+    rowMoved = pyqtSignal(int, int)
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDropIndicatorShown(True)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+
+    def dropEvent(self, e) -> None:            # noqa: N802 (Qt override)
+        if e.source() is not self:
+            super().dropEvent(e)
+            return
+        src = self.currentRow()
+        pos = e.position().toPoint()
+        idx = self.indexAt(pos)
+        if idx.isValid():
+            dst = idx.row()
+            rect = self.visualRect(idx)
+            if pos.y() > rect.center().y():    # dropped on the lower half → below
+                dst += 1
+        else:
+            dst = self.rowCount()
+        e.setDropAction(Qt.DropAction.IgnoreAction)   # model handles the move
+        e.accept()
+        if src < 0:
+            return
+        if dst > src:                          # "insert before dst" → final index
+            dst -= 1
+        self.rowMoved.emit(src, dst)
+
+
 class CasePresentationWindow(QMainWindow):
     """Non-modal tool window; one instance kept by the shell."""
 
@@ -116,6 +157,7 @@ class CasePresentationWindow(QMainWindow):
         self._offsets: dict[str, float] = {}       # modality → seconds
         self._reference = "XA"
         self._last_path: str | None = None         # for 上書き保存 (overwrite)
+        self._last_dir: str = ""                    # remembered file-dialog folder
         self._dirty = False                         # unsaved changes → close warns
         self.setWindowTitle(t("Case Presentation"))
         self.resize(900, 520)
@@ -167,14 +209,21 @@ class CasePresentationWindow(QMainWindow):
         b_off.clicked.connect(self._edit_offsets)
         bar2.addWidget(b_off)
         bar2.addSpacing(16)
-        b_up = QPushButton("▲")
-        b_up.setToolTip(t("選択行を上へ"))
-        b_up.clicked.connect(lambda: self._move(-1))
-        bar2.addWidget(b_up)
-        b_down = QPushButton("▼")
-        b_down.setToolTip(t("選択行を下へ"))
-        b_down.clicked.connect(lambda: self._move(+1))
-        bar2.addWidget(b_down)
+        # Row reorder: 最初 / 10上 / 一つ上 / 一つ下 / 10下 / 最後 (drag & drop
+        # also works). Symbols read top→bottom: bar+triangle = jump to the edge,
+        # double triangle = 10, single triangle = 1.
+        for sym, tip, fn in (
+                ("⤒", t("選択行を最初へ"), lambda: self._move_edge(True)),
+                ("⏫", t("選択行を10上へ"), lambda: self._move(-10)),
+                ("▲", t("選択行を一つ上へ"), lambda: self._move(-1)),
+                ("▼", t("選択行を一つ下へ"), lambda: self._move(+1)),
+                ("⏬", t("選択行を10下へ"), lambda: self._move(+10)),
+                ("⤓", t("選択行を最後へ"), lambda: self._move_edge(False))):
+            b = QPushButton(sym)
+            b.setToolTip(tip)
+            b.setFixedWidth(34)
+            b.clicked.connect(fn)
+            bar2.addWidget(b)
         b_refresh = QPushButton(t("状態更新"))
         b_refresh.setToolTip(t("各行の読込状態を再確認 (フォルダ読込完了後に押す)"))
         b_refresh.clicked.connect(lambda: self._rebuild())
@@ -198,8 +247,9 @@ class CasePresentationWindow(QMainWindow):
         bar2.addWidget(b_clear)
         outer.addLayout(bar2)
 
-        # -- table --------------------------------------------------------
-        self._table = QTableWidget(0, len(_HEADERS))
+        # -- table (drag & drop reorders rows) ----------------------------
+        self._table = _DnDTable(0, len(_HEADERS))
+        self._table.rowMoved.connect(self._on_row_dragged)
         self._table.setHorizontalHeaderLabels([t(h) for h in _HEADERS])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(
@@ -335,17 +385,36 @@ class CasePresentationWindow(QMainWindow):
         self._rebuild()
 
     # ------------------------------------------------------------ reorder
+    def _relocate(self, i: int, j_final: int) -> None:
+        """MOVE (not swap) row *i* to final position *j_final* (clamped)."""
+        n = len(self._rows)
+        if not (0 <= i < n):
+            return
+        j_final = max(0, min(n - 1, j_final))
+        if i == j_final:
+            return
+        r = self._rows.pop(i)
+        self._rows.insert(j_final, r)          # after pop, insert clamps to end
+        self._dirty = True
+        self._rebuild(select=j_final)
+
     def _move(self, delta: int) -> None:
+        """Move the selected row by *delta* (±1 / ±10; relocate, not swap)."""
         sel = self._selected_row_indices()
         if len(sel) != 1:
             return
-        i = sel[0]
-        j = i + delta
-        if not (0 <= j < len(self._rows)):
+        self._relocate(sel[0], sel[0] + delta)
+
+    def _move_edge(self, first: bool) -> None:
+        """Move the selected row to the very first / last position."""
+        sel = self._selected_row_indices()
+        if len(sel) != 1:
             return
-        self._rows[i], self._rows[j] = self._rows[j], self._rows[i]
-        self._dirty = True
-        self._rebuild(select=j)
+        self._relocate(sel[0], 0 if first else len(self._rows) - 1)
+
+    def _on_row_dragged(self, src: int, dst: int) -> None:
+        """Drag & drop reorder from the table (src row dropped at dst)."""
+        self._relocate(src, dst)
 
     def _delete_selected(self) -> None:
         sel = set(self._selected_row_indices())
@@ -355,17 +424,45 @@ class CasePresentationWindow(QMainWindow):
         self._after_rows_changed()
 
     def _row_menu(self, pos) -> None:
-        """Row right-click menu: 状態更新 / 削除."""
+        """Row right-click menu: 表示 / move (最初・10上・一つ上・一つ下・10下・
+        最後) / 状態更新 / 削除."""
         idx = self._table.indexAt(pos)
-        if idx.isValid():
-            r = idx.row()
-            if r not in set(self._selected_row_indices()):
-                self._table.selectRow(r)      # right-click selects the row
+        row = idx.row() if idx.isValid() else -1
+        if row >= 0 and row not in set(self._selected_row_indices()):
+            self._table.selectRow(row)        # right-click selects the row
         menu = QMenu(self)
+        a_show = menu.addAction(t("表示"))
+        a_show.setEnabled(row >= 0)
+        menu.addSeparator()
+        mv = menu.addMenu(t("移動"))
+        a_first = mv.addAction(t("最初へ"))
+        a_up10 = mv.addAction(t("10上へ"))
+        a_up1 = mv.addAction(t("一つ上へ"))
+        a_dn1 = mv.addAction(t("一つ下へ"))
+        a_dn10 = mv.addAction(t("10下へ"))
+        a_last = mv.addAction(t("最後へ"))
+        menu.addSeparator()
         a_ref = menu.addAction(t("状態更新"))
         a_del = menu.addAction(t("削除"))
         chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
-        if chosen is a_ref:
+        if chosen is None:
+            return
+        if chosen is a_show:
+            if 0 <= row < len(self._rows):
+                self._show_row(self._rows[row])
+        elif chosen is a_first:
+            self._move_edge(True)
+        elif chosen is a_up10:
+            self._move(-10)
+        elif chosen is a_up1:
+            self._move(-1)
+        elif chosen is a_dn1:
+            self._move(+1)
+        elif chosen is a_dn10:
+            self._move(+10)
+        elif chosen is a_last:
+            self._move_edge(False)
+        elif chosen is a_ref:
             self._rebuild()
         elif chosen is a_del:
             self._delete_selected()
@@ -388,15 +485,29 @@ class CasePresentationWindow(QMainWindow):
                 "(閉じられた可能性があります)。元のフォルダを開き直してください。"))
 
     # ------------------------------------------------------------ file
-    def _default_save_dir(self) -> str:
-        """Default save folder = the folder the image data lives in (the first
-        existing source folder recorded on any row)."""
-        import os
-        for r in self._rows:
-            for d in (r.get("src_dirs") or []):
-                if d and os.path.isdir(d):
-                    return d
-        return ""
+    def _default_dir(self) -> str:
+        """File-dialog start folder: the PARENT of the currently displayed image
+        folder; if nothing is displayed/selected, the last folder a dialog used.
+        Falls back to a row's image folder's parent, then "" (cwd)."""
+        img = ""
+        try:
+            if hasattr(self._shell, "case_image_dir"):
+                img = self._shell.case_image_dir() or ""
+        except Exception:                            # noqa: BLE001
+            img = ""
+        if not img:                                  # nothing shown → a row's folder
+            for r in self._rows:
+                for d in (r.get("src_dirs") or []):
+                    if d and os.path.isdir(d):
+                        img = d
+                        break
+                if img:
+                    break
+        if img:
+            parent = os.path.dirname(os.path.normpath(img))
+            if parent and os.path.isdir(parent):
+                return parent
+        return self._last_dir or ""
 
     def _write_to(self, path: str) -> None:
         """Serialise the current presentation to *path* (JSON)."""
@@ -421,23 +532,23 @@ class CasePresentationWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             self._last_path = path
+            self._last_dir = os.path.dirname(path) or self._last_dir
             self._dirty = False
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
 
     def _save(self) -> None:
-        """名前を付けて保存 — defaults to the image-data folder."""
-        import os
+        """名前を付けて保存 — opens in the parent of the displayed image folder
+        (else the last-used folder)."""
         if not self._rows:
             self._warn(t("保存する行がありません。"))
             return
-        # Default: overwrite the same file if one is known, else a new file in
-        # the image-data folder.
+        # Reuse the same file if one is known, else a new file in the default dir.
         if self._last_path:
             default = self._last_path
         else:
-            d = self._default_save_dir()
+            d = self._default_dir()
             default = os.path.join(d, "CasePresentation.json") if d \
                 else "CasePresentation.json"
         path, _ = QFileDialog.getSaveFileName(
@@ -490,9 +601,11 @@ class CasePresentationWindow(QMainWindow):
 
     def _load(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, t("Case Presentation を読込"), "", t("JSON (*.json)"))
+            self, t("Case Presentation を読込"), self._default_dir(),
+            t("JSON (*.json)"))
         if not path:
             return
+        self._last_dir = os.path.dirname(path) or self._last_dir
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)

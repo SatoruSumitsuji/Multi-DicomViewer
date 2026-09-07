@@ -1861,6 +1861,21 @@ class MainWindow(QMainWindow):
             self._load_paths(dirs)
         return len(dirs)
 
+    def case_image_dir(self) -> str:
+        """The folder the currently active/shown pane's image data lives in
+        (viewer._src_dir), or "" if nothing is displayed. Case Presentation's
+        file dialogs open ITS PARENT."""
+        panes = []
+        if self._active is not None:
+            panes.append(self._active)
+        panes.extend(p for p in self._shown_panes() if p is not self._active)
+        for p in panes:
+            v = p.current_viewer() if p is not None else None
+            d = getattr(v, "_src_dir", "") if v is not None else ""
+            if d and os.path.isdir(d):
+                return d
+        return ""
+
     def case_capture_active(self) -> dict | None:
         """A row for the active pane's series (falls back to the first shown
         pane that has data). None if nothing is displayed."""
