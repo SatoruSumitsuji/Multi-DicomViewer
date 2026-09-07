@@ -18,10 +18,12 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
+    QApplication,
     QButtonGroup,
     QComboBox,
     QDialog,
@@ -32,6 +34,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -385,6 +388,29 @@ class CasePresentationWindow(QMainWindow):
         sc_redo.activated.connect(self._redo_action)
         sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
         sc_redo2.activated.connect(self._redo_action)
+
+        # F / A drive Case-Presentation ROW navigation for the whole workflow,
+        # even after a row is displayed and keyboard focus is on the viewer
+        # window (otherwise the viewer would eat F/A as its own frame/series
+        # step). An application-wide filter, active only while this window is
+        # open, routes F/A here — see eventFilter().
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
+        if (event.type() == QEvent.Type.KeyPress and self.isVisible()
+                and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                and event.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
+            app = QApplication.instance()
+            # Don't steal keys from a modal dialog (e.g. offset entry) or from
+            # a text/number field (so 'f'/'a' can still be typed / edited).
+            if app is not None and app.activeModalWidget() is None:
+                fw = app.focusWidget()
+                if not isinstance(fw, (QLineEdit, QAbstractSpinBox)):
+                    self._nav_row(1 if event.key() == Qt.Key.Key_F else -1)
+                    return True
+        return super().eventFilter(obj, event)
 
     # ------------------------------------------------------------- undo/redo
     def _state_snapshot(self) -> dict:
@@ -777,9 +803,15 @@ class CasePresentationWindow(QMainWindow):
             self._save()
 
     # ------------------------------------------------------------ close
+    def _remove_app_filter(self) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
+
     def closeEvent(self, e) -> None:
         """Warn on unsaved changes before closing: 保存 / 終了 / キャンセル."""
         if not self._dirty or not self._rows:
+            self._remove_app_filter()
             e.accept()
             return
         box = QMessageBox(self)
@@ -799,8 +831,10 @@ class CasePresentationWindow(QMainWindow):
             if self._dirty:
                 e.ignore()
             else:
+                self._remove_app_filter()
                 e.accept()
         elif c is b_exit:
+            self._remove_app_filter()
             e.accept()
         else:
             e.ignore()
