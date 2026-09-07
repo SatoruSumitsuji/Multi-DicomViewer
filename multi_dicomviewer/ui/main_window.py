@@ -1862,18 +1862,32 @@ class MainWindow(QMainWindow):
         return len(dirs)
 
     def case_image_dir(self) -> str:
-        """The folder the currently active/shown pane's image data lives in
-        (viewer._src_dir), or "" if nothing is displayed. Case Presentation's
-        file dialogs open ITS PARENT."""
+        """The folder the currently active/shown pane's image data lives in, or ""
+        if nothing is displayed. Case Presentation's file dialogs open ITS PARENT.
+        Tries the viewer's recorded _src_dir first, then the shown series' first
+        file's folder (robust to viewers that don't record _src_dir)."""
         panes = []
         if self._active is not None:
             panes.append(self._active)
         panes.extend(p for p in self._shown_panes() if p is not self._active)
         for p in panes:
-            v = p.current_viewer() if p is not None else None
+            if p is None:
+                continue
+            v = p.current_viewer() if hasattr(p, "current_viewer") else None
             d = getattr(v, "_src_dir", "") if v is not None else ""
             if d and os.path.isdir(d):
                 return d
+            # Fallback: the shown series' own files → their folder.
+            try:
+                uid = (p.shown_series_uid()
+                       if hasattr(p, "shown_series_uid") else "")
+                se = self._series_by_uid.get(uid) if uid else None
+                for f in (getattr(se, "files", None) or []):
+                    dd = os.path.dirname(os.path.abspath(f))
+                    if dd and os.path.isdir(dd):
+                        return dd
+            except Exception:                        # noqa: BLE001
+                pass
         return ""
 
     def case_capture_active(self) -> dict | None:
