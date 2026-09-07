@@ -124,8 +124,17 @@ class SnapDock(QDockWidget):
         return (obj is self or self.isAncestorOf(obj)) and not in_content
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-        if (event.type() == QEvent.Type.MouseButtonDblClick
-                and self._on_titlebar(obj)):
+        et = event.type()
+        # A NATIVE title-bar double-click (the default when a dock first floats
+        # on Windows) arrives as a NON-CLIENT event on the top-level window, not
+        # as a normal MouseButtonDblClick — miss it and Qt's default float↔dock
+        # toggle fires (the panel "closes" into the Studies dock). Catch both.
+        if et == QEvent.Type.NonClientAreaMouseButtonDblClick and (
+                obj is self or obj is self.window()):
+            if self.isFloating():
+                self.toggle_maximize()
+            return True
+        if et == QEvent.Type.MouseButtonDblClick and self._on_titlebar(obj):
             if self.isFloating():
                 self.toggle_maximize()
             return True
