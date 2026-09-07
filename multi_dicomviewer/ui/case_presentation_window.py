@@ -46,10 +46,12 @@ from multi_dicomviewer.core.case_presentation import (
     unified_time)
 from multi_dicomviewer.i18n import t
 
-# Column layout — 表示 sits between 統合時間 and コメント (easier to reach than
-# the far right edge), so the comment column is last (and stretches).
-C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW, C_COMMENT = range(7)
-_HEADERS = ["No", "種別", "Ser", "時間", "統合時間", "表示", "コメント"]
+# Column layout — 表示 / 更新 / 削除 sit between 統合時間 and コメント (easier to
+# reach than the far right edge or the top toolbar), so the comment column is
+# last (and stretches).
+C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL, C_COMMENT = range(9)
+_HEADERS = ["No", "種別", "Ser", "時間", "統合時間", "表示", "更新", "削除",
+            "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
 
 
@@ -274,11 +276,11 @@ class CasePresentationWindow(QMainWindow):
         # Every data column is USER-RESIZABLE (drag the header borders) instead of
         # locked to its contents; the comment column stretches to fill the rest.
         # Sensible initial widths are set below and persist across rebuilds.
-        for c in (C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW):
+        for c in (C_NO, C_MOD, C_SER, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_COMMENT, QHeaderView.ResizeMode.Stretch)
         for c, w in ((C_NO, 44), (C_MOD, 70), (C_SER, 56), (C_TIME, 92),
-                     (C_UNI, 92), (C_SHOW, 64)):
+                     (C_UNI, 92), (C_SHOW, 64), (C_UPD, 56), (C_DEL, 56)):
             self._table.setColumnWidth(c, w)
         self._table.cellChanged.connect(self._on_cell_changed)
         # Row right-click menu: 状態更新 / 削除.
@@ -506,6 +508,24 @@ class CasePresentationWindow(QMainWindow):
         self._record_undo()
         self._rows = [r for i, r in enumerate(self._rows) if i not in sel]
         self._after_rows_changed()
+
+    def _delete_row(self, row) -> None:
+        """Delete the one row backing a per-row 削除 button."""
+        try:
+            i = self._rows.index(row)
+        except ValueError:
+            return
+        self._record_undo()
+        del self._rows[i]
+        self._after_rows_changed()
+
+    def _refresh_row(self, row) -> None:
+        """Per-row 更新: re-check load state, keeping this row selected."""
+        try:
+            i = self._rows.index(row)
+        except ValueError:
+            i = None
+        self._rebuild(select=i)
 
     def _row_menu(self, pos) -> None:
         """Row right-click menu: 表示 / move (最初・10上・一つ上・一つ下・10下・
@@ -817,6 +837,16 @@ class CasePresentationWindow(QMainWindow):
                     "から「状態更新」を押してください"))
             btn.clicked.connect(lambda _c, row=r: self._show_row(row))
             tb.setCellWidget(i, C_SHOW, btn)
+            # Per-row 更新 (re-check load state) / 削除 (remove this row) — saves
+            # reaching the top toolbar or the right-click menu.
+            b_upd = QPushButton(t("更新"))
+            b_upd.setToolTip(t("この行の読込状態を再確認"))
+            b_upd.clicked.connect(lambda _c, row=r: self._refresh_row(row))
+            tb.setCellWidget(i, C_UPD, b_upd)
+            b_del = QPushButton(t("削除"))
+            b_del.setToolTip(t("この行を削除"))
+            b_del.clicked.connect(lambda _c, row=r: self._delete_row(row))
+            tb.setCellWidget(i, C_DEL, b_del)
         tb.blockSignals(False)
         self._building = False
         if select is not None and 0 <= select < len(self._rows):
