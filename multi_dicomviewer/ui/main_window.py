@@ -1782,6 +1782,19 @@ class MainWindow(QMainWindow):
             self._casepres_win = w
             w.setFloating(True)
             w.resize(760, 520)
+        # Robust restore: a title-bar double-click toggles float/dock and can
+        # leave the panel closed, hidden behind the Studies tab, shrunk, or
+        # off-screen. Always bring it back visible with a sane geometry.
+        if not w.isVisible():
+            w.show()
+        if w.isFloating():
+            too_small = w.width() < 240 or w.height() < 160
+            scr = self.screen().availableGeometry() if self.screen() else None
+            off = scr is not None and not scr.intersects(w.frameGeometry())
+            if too_small or off:
+                w.resize(760, 520)
+                c = self.geometry().center()
+                w.move(max(0, c.x() - 380), max(0, c.y() - 260))
         w.show()
         w.raise_()
         w.activateWindow()
