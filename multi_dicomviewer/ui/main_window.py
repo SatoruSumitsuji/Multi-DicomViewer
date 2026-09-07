@@ -1959,6 +1959,24 @@ class MainWindow(QMainWindow):
                                 else 1 << 30, r["time"]))
         return out
 
+    def case_current_view_state(self, series_uid: str):
+        """The LIVE view state (frame/zoom/W-L/camera) of a series that is
+        currently shown in some pane, or None if it isn't on screen. Case
+        Presentation uses this to keep a row's key image in sync with what the
+        doctor is looking at while writing findings."""
+        if not series_uid:
+            return None
+        for p in self._shown_panes():
+            try:
+                if p.shown_series_uid() != series_uid:
+                    continue
+                v = p.current_viewer()
+                if v is not None and hasattr(v, "capture_view_state"):
+                    return v.capture_view_state()
+            except Exception:                            # noqa: BLE001
+                pass
+        return None
+
     def case_redisplay(self, row: dict) -> bool:
         """Bring a captured row's series back into view and restore its state.
         False if that series is no longer loaded."""
