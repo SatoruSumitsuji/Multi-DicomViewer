@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -77,28 +78,62 @@ def _fmt_secs(sec) -> str:
         return ""
 
 
+class _DHMSEntry(QWidget):
+    """Signed duration entry as ＋/− 日 時間 分 秒. Value is signed seconds."""
+
+    def __init__(self, seconds: float = 0.0, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self._sign = QComboBox()
+        self._sign.addItems(["＋", "−"])
+        self._sign.setFixedWidth(48)
+        lay.addWidget(self._sign)
+        self._d = QSpinBox(); self._d.setRange(0, 3650)
+        self._h = QSpinBox(); self._h.setRange(0, 23)
+        self._m = QSpinBox(); self._m.setRange(0, 59)
+        self._s = QDoubleSpinBox()
+        self._s.setRange(0.0, 59.9); self._s.setDecimals(1); self._s.setSingleStep(1.0)
+        for sb, suf in ((self._d, t("日")), (self._h, t("時間")),
+                        (self._m, t("分")), (self._s, t("秒"))):
+            sb.setSuffix(" " + suf)
+            lay.addWidget(sb)
+        lay.addStretch(1)
+        self.set_seconds(seconds)
+
+    def set_seconds(self, total: float) -> None:
+        self._sign.setCurrentIndex(1 if total < 0 else 0)
+        s = abs(float(total))
+        d = int(s // 86400); s -= d * 86400
+        h = int(s // 3600);  s -= h * 3600
+        m = int(s // 60);    s -= m * 60
+        self._d.setValue(d); self._h.setValue(h)
+        self._m.setValue(m); self._s.setValue(round(s, 1))
+
+    def seconds(self) -> float:
+        mag = (self._d.value() * 86400 + self._h.value() * 3600
+               + self._m.value() * 60 + self._s.value())
+        return -mag if self._sign.currentIndex() == 1 else mag
+
+
 class _OffsetDialog(QDialog):
-    """Manual per-modality offset entry (seconds; + = that modality's clock is
-    behind the reference)."""
+    """Manual per-modality offset entry (日 / 時間 / 分 / 秒; + = that
+    modality's clock is behind the reference)."""
 
     def __init__(self, modalities, offsets, reference, parent=None):
         super().__init__(parent)
         self.setWindowTitle(t("時刻オフセット (手入力)"))
         root = QVBoxLayout(self)
         root.addWidget(QLabel(t(
-            "基準「{ref}」に対する各モダリティの時刻ズレ (秒)。\n"
+            "基準「{ref}」に対する各モダリティの時刻ズレ (日・時間・分・秒)。\n"
             "＋ = そのモダリティの時計が基準より遅れている。", ref=reference)))
         form = QFormLayout()
-        self._spins = {}
+        self._entries = {}
         for mod in modalities:
-            sb = QDoubleSpinBox()
-            sb.setRange(-86400.0, 86400.0)
-            sb.setDecimals(1)
-            sb.setSingleStep(1.0)
-            sb.setSuffix(t(" 秒"))
-            sb.setValue(float(offsets.get(mod, 0.0)))
-            self._spins[mod] = sb
-            form.addRow(mod, sb)
+            e = _DHMSEntry(float(offsets.get(mod, 0.0)))
+            self._entries[mod] = e
+            form.addRow(mod, e)
         root.addLayout(form)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
                               | QDialogButtonBox.StandardButton.Cancel)
@@ -107,7 +142,7 @@ class _OffsetDialog(QDialog):
         root.addWidget(bb)
 
     def values(self) -> dict:
-        return {m: sb.value() for m, sb in self._spins.items()}
+        return {m: e.seconds() for m, e in self._entries.items()}
 
 
 class _DnDTable(QTableWidget):
