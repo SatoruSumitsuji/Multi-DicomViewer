@@ -409,9 +409,13 @@ class CasePresentationWindow(QMainWindow):
         # When focus returns here after the doctor adjusted the image in the
         # main viewer, silently update the selected row's key image to that
         # live view (the "各操作をしたとき" background 更新).
-        if (e.type() == QEvent.Type.ActivationChange and self.isActiveWindow()
-                and not getattr(self, "_suppress_capture", False)):
-            self._capture_view_into_selected()
+        if e.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            if not getattr(self, "_suppress_capture", False):
+                self._capture_view_into_selected()
+            # If activating left no focused child (e.g. clicked the title bar),
+            # focus the table so F/A row-navigation works right away.
+            if self.focusWidget() is None:
+                self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
         if (event.type() == QEvent.Type.KeyPress and self.isActiveWindow()
@@ -711,6 +715,11 @@ class CasePresentationWindow(QMainWindow):
     def _do_return_focus(self) -> None:
         self.activateWindow()
         self.raise_()
+        # Give the TABLE keyboard focus: activating a window alone may leave no
+        # focused child, so F/A key presses wouldn't be dispatched anywhere and
+        # row navigation would appear dead. With the table focused, F/A flow to
+        # its keyPressEvent (and the app filter) reliably.
+        self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _row_menu(self, pos) -> None:
         """Row right-click menu: 表示 / move (最初・10上・一つ上・一つ下・10下・
@@ -768,6 +777,14 @@ class CasePresentationWindow(QMainWindow):
 
     # ---------------------------------------------------------- display
     def _show_row(self, row) -> None:
+        # Make the clicked row current so F/A continue from it (clicking the 表示
+        # cell-button doesn't go through the table's row selection).
+        try:
+            i = self._rows.index(row)
+            self._table.selectRow(i)
+            self._table.setCurrentCell(i, C_COMMENT)
+        except ValueError:
+            pass
         ok = self._shell.case_redisplay(row)
         if not ok:
             self._warn(t(
