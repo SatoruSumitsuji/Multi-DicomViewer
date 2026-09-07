@@ -1314,6 +1314,18 @@ class XAViewer(AbstractViewer):
         self._mdv_compact = on
         self._apply_image_floor()
 
+    def showEvent(self, e):  # noqa: N802 (Qt override)
+        """Recompute the image-floor once we're actually on screen.
+
+        The shell calls load_series (and set_compact) while this viewer is
+        still a hidden page of the pane's QStackedWidget, so _apply_image_floor
+        runs against height≈0 and caps the below-image chrome to its 24 px
+        floor — leaving the seek-bar row and everything under it clipped until
+        the next resize. Re-apply it (deferred so Qt has settled the real
+        geometry) so the chrome fits from the first frame."""
+        super().showEvent(e)
+        QTimer.singleShot(0, self._apply_image_floor)
+
     def _refresh_seek_style(self) -> None:
         """Apply the seek-bar stylesheet for the current compact + playable
         state: blue inner dot when a multi-frame cine can play, grey when the
