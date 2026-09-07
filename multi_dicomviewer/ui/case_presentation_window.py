@@ -327,8 +327,9 @@ class CasePresentationWindow(QMainWindow):
             b.clicked.connect(fn)
             bar2.addWidget(b)
         b_refresh = QPushButton(t("状態更新"))
-        b_refresh.setToolTip(t("各行の読込状態を再確認 (フォルダ読込完了後に押す)"))
-        b_refresh.clicked.connect(lambda: self._rebuild())
+        b_refresh.setToolTip(t("選択行のキー画像を現在の表示で更新し、"
+                               "各行の読込状態を再確認"))
+        b_refresh.clicked.connect(self._refresh_state)
         bar2.addWidget(b_refresh)
         b_del = QPushButton(t("削除"))
         b_del.clicked.connect(self._delete_selected)
@@ -647,12 +648,32 @@ class CasePresentationWindow(QMainWindow):
         self._after_rows_changed()
 
     def _refresh_row(self, row) -> None:
-        """Per-row 更新: re-check load state, keeping this row selected."""
+        """Per-row 更新: capture the row's CURRENT on-screen view as its key
+        image (frame/zoom/W-L/…), then re-check load state (keeping this row
+        selected). This is what makes 'adjust to the best frame → 更新 → 保存'
+        actually persist that frame."""
+        before = row.get("view_state")
+        self._capture_view_into(row)
         try:
             i = self._rows.index(row)
         except ValueError:
             i = None
         self._rebuild(select=i)
+        if row.get("view_state") is not before:
+            self._hint.setText(t("この行のキー画像を現在の表示で更新しました。"))
+        else:
+            self._hint.setText(t(
+                "現在このシリーズが表示されていないため、キー画像は"
+                "更新されませんでした (先に「表示」してください)。"))
+
+    def _refresh_state(self) -> None:
+        """Toolbar 状態更新: capture the selected rows' current on-screen views
+        as their key images, then re-check load state."""
+        sel = self._selected_row_indices()
+        for i in sel:
+            if 0 <= i < len(self._rows):
+                self._capture_view_into(self._rows[i])
+        self._rebuild(select=sel[0] if sel else None)
 
     def _nav_row(self, step: int) -> None:
         """F/A row navigation: move the selection by ``step`` and display it."""
