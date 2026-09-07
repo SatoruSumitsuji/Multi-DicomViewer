@@ -18,7 +18,7 @@ import json
 import os
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -654,6 +654,18 @@ class CasePresentationWindow(QMainWindow):
             self._shell.case_redisplay(self._rows[cur])
         except Exception:                            # noqa: BLE001
             pass
+        self._return_focus()
+
+    def _return_focus(self) -> None:
+        """Bring focus back to this window after a display (which activates the
+        main viewer window). Keeping THIS window active is what makes F/A keep
+        stepping rows — see eventFilter(). Deferred so it wins any activation
+        the display path performs on the next event-loop turn."""
+        QTimer.singleShot(0, self._do_return_focus)
+
+    def _do_return_focus(self) -> None:
+        self.activateWindow()
+        self.raise_()
 
     def _row_menu(self, pos) -> None:
         """Row right-click menu: 表示 / move (最初・10上・一つ上・一つ下・10下・
@@ -716,6 +728,8 @@ class CasePresentationWindow(QMainWindow):
             self._warn(t(
                 "このシリーズは現在読み込まれていません "
                 "(閉じられた可能性があります)。元のフォルダを開き直してください。"))
+        else:
+            self._return_focus()
 
     # ------------------------------------------------------------ file
     def _default_dir(self) -> str:
