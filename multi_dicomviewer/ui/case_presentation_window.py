@@ -386,6 +386,21 @@ class CasePresentationWindow(SnapDock):
         bar2.addStretch(1)
         outer.addWidget(self._wrap_bar(bar2))
 
+        # -- toolbar row 3: reliable prev/next row (+ display) -------------
+        # A click-based equivalent of F/A that always works regardless of
+        # keyboard focus / which window is active.
+        bar3 = QHBoxLayout()
+        b_prev = QPushButton(t("◀ 前"))
+        b_prev.setToolTip(t("前の行へ移動して、その画像を表示"))
+        b_prev.clicked.connect(lambda: self._nav_row(-1))
+        bar3.addWidget(b_prev)
+        b_next = QPushButton(t("次 ▶"))
+        b_next.setToolTip(t("次の行へ移動して、その画像を表示"))
+        b_next.clicked.connect(lambda: self._nav_row(+1))
+        bar3.addWidget(b_next)
+        bar3.addStretch(1)
+        outer.addWidget(self._wrap_bar(bar3))
+
         # -- table (drag & drop reorders rows) ----------------------------
         self._table = _DnDTable(0, len(_HEADERS))
         self._table.rowMoved.connect(self._on_row_dragged)
