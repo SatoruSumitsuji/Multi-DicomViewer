@@ -212,8 +212,13 @@ class _DnDTable(QTableWidget):
     def mousePressEvent(self, e) -> None:          # noqa: N802 (Qt override)
         # Select the pressed row FIRST so a press-and-drag starts a drag right
         # away (otherwise the first press only sets the selection and the drag
-        # won't begin until a second press-drag).
-        if e.button() == Qt.MouseButton.LeftButton:
+        # won't begin until a second press-drag). But ONLY on a plain click —
+        # with Ctrl (toggle discontiguous rows) or Shift (extend a range) held,
+        # defer to the default ExtendedSelection so multi-row picks survive.
+        mods = e.modifiers()
+        multi = bool(mods & (Qt.KeyboardModifier.ControlModifier
+                             | Qt.KeyboardModifier.ShiftModifier))
+        if e.button() == Qt.MouseButton.LeftButton and not multi:
             idx = self.indexAt(e.position().toPoint())
             if idx.isValid():
                 self.selectRow(idx.row())
