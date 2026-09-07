@@ -1871,8 +1871,22 @@ class MainWindow(QMainWindow):
         }
 
     def case_series_loaded(self, uid: str) -> bool:
-        """True if the series UID currently resolves to a loaded series."""
-        return bool(uid) and uid in self._series_by_uid
+        """True if the series UID currently resolves to a loaded series — either
+        indexed in _series_by_uid, or actually shown in a pane right now (some
+        series, e.g. multi-file IVUS, can be indexed under a split '#'-suffixed
+        UID while the pane reports the base UID, which would otherwise grey a
+        perfectly displayable 表示 button)."""
+        if not uid:
+            return False
+        if uid in self._series_by_uid:
+            return True
+        for p in self._shown_panes():
+            try:
+                if p.shown_series_uid() == uid:
+                    return True
+            except Exception:                            # noqa: BLE001
+                pass
+        return False
 
     def case_open_folders(self, folders: list) -> int:
         """Re-scan the given folders so a saved presentation's series get
@@ -2008,6 +2022,22 @@ class MainWindow(QMainWindow):
         uid = row.get("series_uid")
         se = self._series_by_uid.get(uid) if uid else None
         if se is None:
+            # UID not indexed (e.g. base-vs-split '#' mismatch) but a pane may
+            # already be showing it — restore that pane's state in place.
+            if uid:
+                for p in self._shown_panes():
+                    try:
+                        if p.shown_series_uid() != uid:
+                            continue
+                        self._set_active_pane(p)
+                        v = p.current_viewer()
+                        st = row.get("view_state")
+                        if (st and v is not None
+                                and hasattr(v, "restore_view_state")):
+                            v.restore_view_state(st)
+                        return True
+                    except Exception:                    # noqa: BLE001
+                        pass
             return False
         shown = self._shown_panes()
         idx = row.get("pane_index", 0)
