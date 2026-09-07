@@ -430,6 +430,66 @@ class CasePresentationWindow(QDockWidget):
         if app is not None:
             app.installEventFilter(self)
 
+        # Floating-window maximize / edge-snap (a floating QDockWidget is a Qt
+        # tool window, so it gets no native maximize or Aero-Snap — we do it by
+        # hand). _maxed = full-screen toggle (title double-click); the snap
+        # timer fires after a drag settles to vertical-maximize at a screen edge.
+        self._maxed = False
+        self._pre_max_geom = None
+        self._snapping = False
+        self._snap_timer = QTimer(self)
+        self._snap_timer.setSingleShot(True)
+        self._snap_timer.timeout.connect(self._check_edge_snap)
+
+    def _avail_geom(self):
+        scr = self.screen()
+        return scr.availableGeometry() if scr is not None else None
+
+    def _toggle_maximize(self) -> None:
+        """Title-bar double-click while floating: full-screen ⇄ previous size.
+        Uses manual geometry (showMaximized is ignored on a tool window)."""
+        if not self.isFloating():
+            return
+        av = self._avail_geom()
+        if av is None:
+            return
+        # Guard so the setGeometry-driven moveEvent doesn't clear _maxed.
+        self._snapping = True
+        if self._maxed:
+            if self._pre_max_geom is not None:
+                self.setGeometry(self._pre_max_geom)
+            self._maxed = False
+        else:
+            self._pre_max_geom = self.geometry()
+            self.setGeometry(av)
+            self._maxed = True
+        self._snapping = False
+
+    def moveEvent(self, e):  # noqa: N802 (Qt override)
+        super().moveEvent(e)
+        # A manual move cancels the full-screen state (like a normal window) and
+        # schedules an edge-snap check once the drag settles.
+        if self.isFloating() and not self._snapping:
+            self._maxed = False
+            self._snap_timer.start(140)
+
+    def _check_edge_snap(self) -> None:
+        """After a drag settles: if the top edge sits at the screen top OR the
+        bottom edge at the screen bottom, vertically maximize (fill the height,
+        keep x/width) — the 上下最大化 gesture."""
+        if not self.isFloating() or self._maxed:
+            return
+        av = self._avail_geom()
+        if av is None:
+            return
+        g = self.frameGeometry()
+        thr = 12
+        if abs(g.top() - av.top()) <= thr or abs(g.bottom() - av.bottom()) <= thr:
+            self._snapping = True
+            self.setGeometry(self.geometry().x(), av.top(),
+                             self.width(), av.height())
+            self._snapping = False
+
     def _wrap_bar(self, lay) -> QScrollArea:
         """Put a toolbar row in a horizontally-scrollable strip so the panel can
         be dragged narrow without the buttons forcing a wide minimum."""
@@ -466,19 +526,21 @@ class CasePresentationWindow(QDockWidget):
 
     def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
         # Title-bar double-click: Qt's default toggles float↔dock, which keeps
-        # losing the panel (it docks behind the Studies tab). Intercept it —
-        # when floating, toggle maximize (a real 全画面); when docked, do
-        # nothing — so a double-click never makes the panel disappear.
-        if (event.type() == QEvent.Type.MouseButtonDblClick
-                and isinstance(obj, QWidget) and self.isAncestorOf(obj)
-                and (self.widget() is None
-                     or not self.widget().isAncestorOf(obj))):
-            if self.isFloating():
-                if self.isMaximized():
-                    self.showNormal()
-                else:
-                    self.showMaximized()
-            return True                      # swallow → no float/dock toggle
+        # losing the panel (it docks behind the Studies tab). Intercept the
+        # double-click anywhere on the title bar (the dock itself or a title
+        # child, but NOT the content table) — when floating, toggle full-screen;
+        # when docked, do nothing — so a double-click never loses the panel.
+        if event.type() == QEvent.Type.MouseButtonDblClick and isinstance(
+                obj, QWidget):
+            content = self.widget()
+            in_content = content is not None and (
+                obj is content or content.isAncestorOf(obj))
+            on_titlebar = (obj is self or self.isAncestorOf(obj)) \
+                and not in_content
+            if on_titlebar:
+                if self.isFloating():
+                    self._toggle_maximize()
+                return True                  # swallow → no float/dock toggle
         # F/A step rows only when keyboard focus is INSIDE this panel (its
         # table). Focus-based (not active-window) so it works identically
         # whether the panel is floating or docked in the main window: focus on
