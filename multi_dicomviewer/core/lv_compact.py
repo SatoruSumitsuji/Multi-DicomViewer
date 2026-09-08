@@ -173,6 +173,157 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     return float(best)
 
 
+def mv_leaflet_tip_diameter(endo_comp, endo_bbox, blood_comp, blood_bbox,
+                            apex_xyz, axis_dir, radial0, spacing_xyz,
+                            mv_center, mv_normal, mv_radius,
+                            level_mm: float = 1.5, n_dir: int = 90,
+                            min_pts: int = 6, basal_frac: float = 0.5,
+                            apical_drop: float = 0.08, alpha: float = 0.5,
+                            tip_offset_mm: float = 0.0,
+                            return_detail: bool = False):
+    """LVD measured at the MITRAL-VALVE-LEAFLET-TIP level (ASE/EACVI 2015).
+
+    Method A+C: the leaflet tips are the most-APICAL extent of the intracavitary
+    valve tissue that is CONNECTED to the mitral annulus. Within the basal band
+    of the LV, per short-axis level we measure the amount of CENTRAL non-blood
+    tissue (Endo ∧ ¬Blood, restricted to the annulus-connected component so
+    papillary muscles / trabeculae are excluded, and to a central disk of radius
+    ``alpha``·R_endo). Going apex→base this central-tissue profile is a low
+    plateau through the LV body then rises where the leaflets appear; the tip is
+    the most-apical level that departs the plateau. LVD = the true max Endo chord
+    at that level (optionally ``tip_offset_mm`` basal, to shift 弁尖先端→腱索).
+
+    Returns None when the leaflet signal is unclear (caller should fall back to
+    ``max_perp_diameter``); otherwise the diameter (mm), or (mm, p1, p2) with
+    ``return_detail``."""
+    endo_comp = np.asarray(endo_comp, bool)
+    blood_comp = np.asarray(blood_comp, bool)
+    if not endo_comp.any():
+        return None
+    sx, sy, sz = spacing_xyz
+    apex = np.asarray(apex_xyz, float)
+    a = np.asarray(axis_dir, float)
+    a = a / (float(np.linalg.norm(a)) or 1.0)
+    e1 = np.asarray(radial0, float)
+    e1 = e1 - float(e1 @ a) * a
+    if float(np.linalg.norm(e1)) < 1e-9:
+        e1 = np.array([1.0, 0.0, 0.0]) - a[0] * a
+    e1 = e1 / (float(np.linalg.norm(e1)) or 1.0)
+    e2 = np.cross(a, e1)
+    nrm = np.asarray(mv_normal, float)
+    nrm = nrm / (float(np.linalg.norm(nrm)) or 1.0)
+    mc = np.asarray(mv_center, float)
+
+    # --- intracavitary tissue = Endo ∧ ¬Blood, on the union bbox -----------
+    ez0, ez1, ey0, ey1, ex0, ex1 = endo_bbox
+    bz0, bz1, by0, by1, bx0, bx1 = blood_bbox
+    uz0, uy0, ux0 = min(ez0, bz0), min(ey0, by0), min(ex0, bx0)
+    uz1, uy1, ux1 = max(ez1, bz1), max(ey1, by1), max(ex1, bx1)
+    shape = (uz1 - uz0, uy1 - uy0, ux1 - ux0)
+    endo_u = np.zeros(shape, bool)
+    endo_u[ez0 - uz0:ez1 - uz0, ey0 - uy0:ey1 - uy0, ex0 - ux0:ex1 - ux0] = endo_comp
+    blood_u = np.zeros(shape, bool)
+    blood_u[bz0 - uz0:bz1 - uz0, by0 - uy0:by1 - uy0,
+            bx0 - ux0:bx1 - ux0] = blood_comp
+    tissue = endo_u & ~blood_u
+    if not tissue.any():
+        return None
+
+    # --- (A) keep only the annulus-CONNECTED tissue component(s) -----------
+    tz, ty, tx = np.nonzero(tissue)
+    W = np.column_stack([(tx + ux0) * sx, (ty + uy0) * sy,
+                         (tz + uz0) * sz]).astype(float)
+    dperp = (W - mc) @ nrm                          # signed dist to MV plane
+    drad = np.linalg.norm(W - mc, axis=1)           # dist to annulus centre
+    seed = (np.abs(dperp) <= 4.0) & (drad <= 1.3 * float(mv_radius))
+    try:
+        from scipy.ndimage import label
+        lab, nlab = label(tissue)
+        if nlab >= 1 and seed.any():
+            keep = set(int(v) for v in np.unique(lab[tz[seed], ty[seed], tx[seed]])
+                       if v != 0)
+            if keep:
+                sel = np.isin(lab[tz, ty, tx], list(keep))
+                tz, ty, tx, W = tz[sel], ty[sel], tx[sel], W[sel]
+    except Exception:                                # noqa: BLE001
+        pass                                         # no scipy → use all tissue
+    if tz.size < min_pts:
+        return None
+
+    # --- per-level Endo profile (chord + endpoints + radius) ---------------
+    zz, yy, xx = np.nonzero(endo_comp)
+    Pe = np.column_stack([(xx + ex0) * sx, (yy + ey0) * sy,
+                          (zz + ez0) * sz]).astype(float) - apex
+    e_along = Pe @ a
+    e_u, e_w = Pe @ e1, Pe @ e2
+    e_lvl = np.round(e_along / float(level_mm)).astype(int)
+    th = np.linspace(0.0, np.pi, int(n_dir), endpoint=False)
+    cs, sn = np.cos(th), np.sin(th)
+    prof = {}                                        # level → (dia, P1, P2, R)
+    for L in np.unique(e_lvl):
+        m = e_lvl == L
+        if int(m.sum()) < int(min_pts):
+            continue
+        um, wm, am = e_u[m], e_w[m], e_along[m]
+        proj = np.outer(um, cs) + np.outer(wm, sn)
+        wd = proj.max(0) - proj.min(0)
+        ki = int(np.argmax(wd))
+        col = proj[:, ki]
+        i_hi, i_lo = int(np.argmax(col)), int(np.argmin(col))
+        R = float(np.sqrt(um * um + wm * wm).max())
+        prof[int(L)] = (
+            float(wd[ki]),
+            apex + am[i_hi] * a + um[i_hi] * e1 + wm[i_hi] * e2,
+            apex + am[i_lo] * a + um[i_lo] * e1 + wm[i_lo] * e2,
+            R)
+    if not prof:
+        return None
+
+    # --- (C) central annulus-connected tissue amount per level -------------
+    Pt = W - apex
+    t_along = Pt @ a
+    t_r = np.sqrt((Pt @ e1) ** 2 + (Pt @ e2) ** 2)
+    t_lvl = np.round(t_along / float(level_mm)).astype(int)
+    along_mv = float((mc - apex) @ a)                # annulus along-axis level
+    if along_mv <= 6.0:
+        return None
+    lo = basal_frac * along_mv
+    hi = (1.0 - apical_drop) * along_mv
+    levels = sorted(L for L in prof if lo <= L * level_mm <= hi)
+    if len(levels) < 4:
+        return None
+    M = []
+    for L in levels:
+        R = prof[L][3]
+        sel = (t_lvl == L) & (t_r <= alpha * R)
+        M.append(float(np.count_nonzero(sel)))
+    M = np.asarray(M, float)
+    # levels are apex→base (increasing along). Plateau = apical 40%; peak =
+    # basal 40%. The tip = the most-apical level clearing the mid threshold.
+    k = max(1, int(round(0.4 * len(levels))))
+    baseline = float(np.median(M[:k]))
+    peak = float(M[-k:].max())
+    if peak <= baseline + 1.0 or peak <= 1.2 * (baseline + 1e-6):
+        return None                                  # no clear leaflet rise
+    thr = baseline + 0.5 * (peak - baseline)
+    tip_idx = None
+    for i in range(len(levels)):                     # apex → base
+        if M[i] >= thr:
+            tip_idx = i
+            break
+    if tip_idx is None:
+        return None
+    tip_along = levels[tip_idx] * level_mm + float(tip_offset_mm)
+    # nearest profile level to the (possibly offset) tip
+    best_L = min(prof, key=lambda L: abs(L * level_mm - tip_along))
+    dia, p1, p2, _R = prof[best_L]
+    if dia <= 0:
+        return None
+    if return_detail:
+        return float(dia), p1, p2
+    return float(dia)
+
+
 def _envelope_radius(env: np.ndarray, ctr: int, dx: float, dy: float,
                      grid_mm: float) -> float:
     """Radius (mm) of the *env* boolean SAX grid along the ray (dx, dy) from the

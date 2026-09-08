@@ -4246,10 +4246,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             return cache[1]
         v = None
         pts = None
+        det = None
+        # Preferred: LVD at the MITRAL-VALVE-LEAFLET-TIP level (ASE/EACVI). Needs
+        # the blood pool + MV annulus; falls back to the generic max-perp
+        # diameter (valley-excluded) when the leaflet signal is unclear.
         try:
-            from multi_dicomviewer.core.lv_compact import max_perp_diameter
-            det = max_perp_diameter(comp, bbox, ax.apex, ax.axis, ax.radial0,
-                                    self._dims, return_detail=True)
+            from multi_dicomviewer.core.lv_compact import (
+                max_perp_diameter, mv_leaflet_tip_diameter)
+            blood = getattr(self, "_lvv_blood_comp", None)
+            bbbox = getattr(self, "_lvv_blood_bbox", None)
+            mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+            if blood is not None and bbbox is not None and mv is not None:
+                try:
+                    det = mv_leaflet_tip_diameter(
+                        comp, bbox, blood, bbbox, ax.apex, ax.axis, ax.radial0,
+                        self._dims, np.asarray(mv[0], float),
+                        np.asarray(mv[1], float), float(mv[2]),
+                        return_detail=True)
+                except Exception:                        # noqa: BLE001
+                    det = None
+            if det is None:
+                det = max_perp_diameter(comp, bbox, ax.apex, ax.axis,
+                                        ax.radial0, self._dims,
+                                        return_detail=True)
             if det is not None:
                 v = float(det[0])
                 pts = (np.asarray(det[1], float), np.asarray(det[2], float))
