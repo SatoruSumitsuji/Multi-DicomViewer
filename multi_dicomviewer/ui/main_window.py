@@ -2028,6 +2028,15 @@ class MainWindow(QMainWindow):
         False if that series is no longer loaded."""
         uid = row.get("series_uid")
         se = self._series_by_uid.get(uid) if uid else None
+        if se is None and uid:
+            # Base-vs-split '#' tolerance: resolve to an indexed series that
+            # shares this UID's base (matches case_series_loaded's leniency, so
+            # a non-greyed 表示 button always has something to display).
+            base = uid.split("#", 1)[0]
+            for k, s in self._series_by_uid.items():
+                if k.split("#", 1)[0] == base:
+                    se = s
+                    break
         if se is None:
             # UID not indexed (e.g. base-vs-split '#' mismatch) but a pane may
             # already be showing it — restore that pane's state in place.
