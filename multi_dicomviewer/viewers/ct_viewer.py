@@ -4255,26 +4255,62 @@ class CTViewer(CPRMixin, AbstractViewer):
             if render:
                 p.render()
 
+    @staticmethod
+    def _clip_line_to_rings(c, d, rings):
+        """Interior chord of the infinite 2-D line (c + t·d) across closed
+        polygon ``rings`` — the segment straddling c (max t≤0 → min t≥0). None
+        if the line doesn't cross the outline on both sides of c."""
+        cx, cy = float(c[0]), float(c[1])
+        dx, dy = float(d[0]), float(d[1])
+        ts = []
+        for ring in rings:
+            for i in range(len(ring) - 1):
+                ax_, ay_ = ring[i]
+                bx_, by_ = ring[i + 1]
+                ex, ey = bx_ - ax_, by_ - ay_
+                denom = dx * ey - dy * ex
+                if abs(denom) < 1e-9:
+                    continue
+                acx, acy = ax_ - cx, ay_ - cy
+                t = (acx * ey - acy * ex) / denom
+                s = (acx * dy - acy * dx) / denom
+                if -1e-6 <= s <= 1.0 + 1e-6:
+                    ts.append(t)
+        if not ts:
+            return None
+        negs = [t for t in ts if t <= 1e-9]
+        poss = [t for t in ts if t >= -1e-9]
+        if not negs or not poss:
+            return None
+        tneg, tpos = max(negs), min(poss)
+        if tpos - tneg < 1e-6:
+            return None
+        return ((cx + tneg * dx, cy + tneg * dy),
+                (cx + tpos * dx, cy + tpos * dy))
+
     def _lvv_show_diameter(self, render=True) -> None:
-        """Show WHERE LV Diameter (LVD) was measured. A short-axis-ish pane
-        (plane ⟂ the long axis) shows the measured chord ONLY where that plane
-        actually contains it: both endpoints in-plane → the full chord LINE; the
-        plane cuts obliquely ACROSS the chord → a small cross at the crossing
-        POINT; the plane doesn't meet the chord → nothing (so a wrong-level short
-        axis shows neither line nor point). A long-axis pane shows the section
-        line (the short-axis plane at that level, ⟂ the axis)."""
+        """Show WHERE LV Diameter (LVD) was measured, drawn to sit EXACTLY on the
+        orange Endo border. On a short-axis-ish pane (⟂ the long axis) the chord
+        is shown only near the LVD level; on a long-axis pane the section line at
+        that level. In BOTH cases the line is CLIPPED to the Endo cross-section
+        outline on that pane (the same smoothed ring the orange line uses), so it
+        fits within Endo instead of overshooting."""
+        from multi_dicomviewer.core.lv_compact import region_outline_on_plane
         self._lvv_lv_diameter_mm()                # ensure endpoints are current
         pts = getattr(self, "_lvv_diam_pts", None)
         epi = getattr(self, "_lvv_epi_surf", None)
         ax = getattr(epi, "axis", None) if epi is not None else None
-        on = (self._lvv is not None and self._lv is None
-              and pts is not None and ax is not None)
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        bbox = getattr(self, "_lv_endo_mask_bbox", None)
+        on = (self._lvv is not None and self._lv is None and pts is not None
+              and ax is not None and comp is not None and bbox is not None)
         half = float(getattr(self, "_half", 100.0))
         tol = max(1.5, 1.2 * float(max(self._dims)))    # "in this plane" band
-        axis = None
+        axis = step_out = None
         if on:
             axis = np.asarray(ax.axis, float)
             axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+            step_out = self._lv_outline_step(self._lv_endo_adv()["step_mm"])
         for key in ("A", "B"):
             p = self.pane[key]
             segs = []
@@ -4282,36 +4318,39 @@ class CTViewer(CPRMixin, AbstractViewer):
                 u_ax, v_ax, n_ax = self._axes_for(key)
                 n_ax = np.asarray(n_ax, float)
                 perp = abs(float(np.dot(n_ax, axis)))
+                c3d = 0.5 * (pts[0] + pts[1])
+                d3d = None
                 if perp >= 0.5:
-                    # short-axis-ish pane → the chord where it MEETS this plane.
+                    # short-axis-ish: only when the chord is (near) in this plane.
                     pc = np.asarray(self._pc[key], float)
                     d0 = float(np.dot(pts[0] - pc, n_ax))
                     d1 = float(np.dot(pts[1] - pc, n_ax))
                     if abs(d0) <= tol and abs(d1) <= tol:
-                        segs.append([self._world3d_to_out(key, pts[0]),
-                                     self._world3d_to_out(key, pts[1])])
-                    elif d0 * d1 < 0.0:              # oblique → crossing POINT
-                        tt = d0 / (d0 - d1)
-                        pi = pts[0] + tt * (pts[1] - pts[0])
-                        r = 2.0
-                        uu = np.asarray(u_ax, float)
-                        vv = np.asarray(v_ax, float)
-                        segs.append([self._world3d_to_out(key, pi - r * uu),
-                                     self._world3d_to_out(key, pi + r * uu)])
-                        segs.append([self._world3d_to_out(key, pi - r * vv),
-                                     self._world3d_to_out(key, pi + r * vv)])
-                    # else: plane doesn't meet the chord → draw nothing
+                        d3d = np.asarray(pts[1] - pts[0], float)
                 else:
-                    # long-axis pane → the section line at that level (⟂ axis).
-                    c = 0.5 * (pts[0] + pts[1])
-                    d = np.asarray(u_ax, float)
-                    d = d - float(np.dot(d, axis)) * axis
-                    dn = float(np.linalg.norm(d))
-                    if dn > 1e-6:
-                        d = d / dn
-                        w = 0.55 * half
-                        segs.append([self._world3d_to_out(key, c - w * d),
-                                     self._world3d_to_out(key, c + w * d)])
+                    # long-axis: the section-line direction (⟂ axis, in-plane).
+                    d3d = np.asarray(u_ax, float)
+                    d3d = d3d - float(np.dot(d3d, axis)) * axis
+                if d3d is not None and float(np.linalg.norm(d3d)) > 1e-6:
+                    try:
+                        polys = region_outline_on_plane(
+                            comp, bbox, self._dims, self._pc[key], u_ax, v_ax,
+                            half_mm=half, step_mm=step_out, convex=False)
+                    except Exception:                    # noqa: BLE001
+                        polys = []
+                    rings = []
+                    for poly in polys:
+                        sm = _smooth_closed([tuple(q) for q in poly])
+                        if len(sm) >= 3:
+                            rings.append([tuple(q) for q in sm] + [tuple(sm[0])])
+                    c2d = np.asarray(self._world3d_to_out(key, c3d), float)
+                    e2d = np.asarray(self._world3d_to_out(key, c3d + d3d), float)
+                    dd = e2d - c2d
+                    dn = float(np.linalg.norm(dd))
+                    if rings and dn > 1e-6:
+                        seg = self._clip_line_to_rings(c2d, dd / dn, rings)
+                        if seg is not None:
+                            segs.append([seg[0], seg[1]])
             if segs:
                 p.lvv_diam_mapper.SetInputData(
                     _colored_multi_pd(segs, [(255, 235, 0)] * len(segs)))
@@ -4898,7 +4937,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
         radial0 = np.asarray(ax.radial0, float)
         n_planes = 6
+        # Reach the MOST-BASAL of MV/AoV (see _lvv_build_endo_mask) so the
+        # editable model's base matches the auto display below the AoV.
+        av0 = self._lv_valves.get("aortic")
         along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
+        if av0 is not None:
+            along_base = max(along_base,
+                             float((np.asarray(av0[0], float) - apex) @ axis_dir))
         if along_base <= 6.0:
             QMessageBox.information(
                 self.window(), t("LV"),
@@ -5026,7 +5071,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         axis_dir = np.asarray(ax.axis, float)
         axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
         radial0 = np.asarray(ax.radial0, float)
+        # Generate the envelope up to the MOST-BASAL of the MV/AoV planes (their
+        # along-axis levels can differ). Capping at MV alone left the sub-aortic
+        # region ungenerated, so clipping to the AoV plane couldn't recover it →
+        # the Endo fell short below the AoV (the 大動脈弁下 misalignment). The
+        # two-plane clip below then trims the excess back to each tilted plane.
+        av0 = self._lv_valves.get("aortic")
         along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
+        if av0 is not None:
+            along_base = max(along_base,
+                             float((np.asarray(av0[0], float) - apex) @ axis_dir))
         if along_base <= 6.0:
             return None
         z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
