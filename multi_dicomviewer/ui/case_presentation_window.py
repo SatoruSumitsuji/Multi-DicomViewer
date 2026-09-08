@@ -386,18 +386,27 @@ class CasePresentationWindow(SnapDock):
         bar2.addStretch(1)
         outer.addWidget(self._wrap_bar(bar2))
 
-        # -- toolbar row 3: reliable prev/next row (+ display) -------------
-        # A click-based equivalent of F/A that always works regardless of
-        # keyboard focus / which window is active.
+        # -- toolbar row 3: reliable row navigation (select + display) -----
+        # Click-based navigation that always works regardless of keyboard focus
+        # / active window (Shift+F/A = 次/前, Ctrl+F/A = 最後/最初 mirror these).
         bar3 = QHBoxLayout()
-        b_prev = QPushButton(t("◀ 前"))
-        b_prev.setToolTip(t("前の行へ移動して、その画像を表示"))
-        b_prev.clicked.connect(lambda: self._nav_row(-1))
-        bar3.addWidget(b_prev)
-        b_next = QPushButton(t("次 ▶"))
-        b_next.setToolTip(t("次の行へ移動して、その画像を表示"))
-        b_next.clicked.connect(lambda: self._nav_row(+1))
-        bar3.addWidget(b_next)
+        for label, tip, fn in (
+                (t("⤒ 最初"), t("一番最初の行へ移動して表示  (Ctrl+A)"),
+                 self._nav_first),
+                (t("⏫ 10前"), t("10行前へ移動して表示"),
+                 lambda: self._nav_row(-10)),
+                (t("◀ 前"), t("前の行へ移動して表示  (Shift+A)"),
+                 lambda: self._nav_row(-1)),
+                (t("次 ▶"), t("次の行へ移動して表示  (Shift+F)"),
+                 lambda: self._nav_row(+1)),
+                (t("10後 ⏬"), t("10行後へ移動して表示"),
+                 lambda: self._nav_row(+10)),
+                (t("最後 ⤓"), t("一番最後の行へ移動して表示  (Ctrl+F)"),
+                 self._nav_last)):
+            b = QPushButton(label)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            bar3.addWidget(b)
         bar3.addStretch(1)
         outer.addWidget(self._wrap_bar(bar3))
 
@@ -446,9 +455,21 @@ class CasePresentationWindow(SnapDock):
         sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
         sc_redo2.activated.connect(self._redo_action)
 
-        # (SnapDock installs the app-wide event filter and adds floating
-        # maximize / edge-snap; this class's eventFilter override below adds
-        # F/A row navigation on top of it.)
+        # Row navigation shortcuts. Plain F/A stay with the main viewer; the
+        # panel uses MODIFIED keys so there's no confusion regardless of which
+        # window is focused: Shift+F / Shift+A = next / prev row, Ctrl+F /
+        # Ctrl+A = last / first row. Application-wide but gated to when the panel
+        # is visible and a text field isn't being edited (see _nav_shortcut).
+        for seq, fn in (("Shift+F", lambda: self._nav_shortcut(+1)),
+                        ("Shift+A", lambda: self._nav_shortcut(-1)),
+                        ("Ctrl+F", lambda: self._nav_shortcut("last")),
+                        ("Ctrl+A", lambda: self._nav_shortcut("first"))):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(fn)
+
+        # (SnapDock installs the app-wide event filter for the title double-click
+        # / floating maximize / edge-snap.)
 
     def _wrap_bar(self, lay) -> QScrollArea:
         """Put a toolbar row in a horizontally-scrollable strip so the panel can
@@ -480,31 +501,14 @@ class CasePresentationWindow(SnapDock):
             if not getattr(self, "_suppress_capture", False):
                 self._capture_view_into_selected()
             # If activating left no focused child (e.g. clicked the title bar),
-            # focus the table so F/A row-navigation works right away.
+            # focus the table so keyboard use lands somewhere sensible.
             if self.focusWidget() is None:
                 self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def eventFilter(self, obj, event):             # noqa: N802 (Qt override)
-        # SnapDock handles the title-bar double-click (maximize / edge-snap).
-        if super().eventFilter(obj, event):
-            return True
-        # F/A step rows only when keyboard focus is INSIDE this panel (its
-        # table). Focus-based (not active-window) so it works identically
-        # whether the panel is floating or docked in the main window: focus on
-        # the image → the viewer's own F/A; focus on the list → row nav.
-        if (event.type() == QEvent.Type.KeyPress
-                and event.modifiers() == Qt.KeyboardModifier.NoModifier
-                and event.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
-            app = QApplication.instance()
-            # Don't steal keys from a modal dialog (e.g. offset entry) or from
-            # a text/number field (so 'f'/'a' can still be typed / edited).
-            if app is not None and app.activeModalWidget() is None:
-                fw = app.focusWidget()
-                inside = fw is not None and (fw is self or self.isAncestorOf(fw))
-                if inside and not isinstance(fw, (QLineEdit, QAbstractSpinBox)):
-                    self._nav_row(1 if event.key() == Qt.Key.Key_F else -1)
-                    return True
-        return False
+    # (Plain F/A are intentionally NOT intercepted — they belong to the main
+    # viewer. Row navigation uses the 前/次 buttons and Shift+F/A · Ctrl+F/A
+    # shortcuts set up in __init__. Title-bar double-click is handled by the
+    # inherited SnapDock.eventFilter.)
 
     # ------------------------------------------------------------- undo/redo
     def _state_snapshot(self) -> dict:
@@ -749,26 +753,57 @@ class CasePresentationWindow(SnapDock):
                 self._capture_view_into(self._rows[i])
         self._rebuild(select=sel[0] if sel else None)
 
-    def _nav_row(self, step: int) -> None:
-        """F/A row navigation: move the selection by ``step``, then display it.
+    def _nav_goto(self, index: int) -> None:
+        """Select row *index* (clamped) and display it.
 
         The row SELECTION happens now (cheap); the actual display is DEFERRED to
         the next event-loop turn. Displaying a series can spin up a CT/VTK GL
-        context and rebuild panes — doing that synchronously inside the key-event
-        dispatch (this runs from an app-wide event filter / keyPressEvent) can
-        hard-crash Qt/VTK. singleShot(0) runs it after the event unwinds."""
+        context and rebuild panes — doing that synchronously inside a key-event
+        dispatch can hard-crash Qt/VTK. singleShot(0) runs it after the event
+        unwinds."""
         n = len(self._rows)
         if n == 0:
             return
+        index = max(0, min(n - 1, index))
+        self._table.selectRow(index)
+        self._table.setCurrentCell(index, C_COMMENT)
+        row = self._rows[index]
+        QTimer.singleShot(0, lambda r=row: self._display_row_deferred(r))
+
+    def _nav_row(self, step: int) -> None:
+        """Move the selection by ``step`` (±1 / ±10) and display it."""
+        if not self._rows:
+            return
         cur = self._table.currentRow()
         if cur < 0:
-            cur = 0 if step > 0 else n - 1
+            cur = 0 if step > 0 else len(self._rows) - 1
         else:
-            cur = max(0, min(n - 1, cur + step))
-        self._table.selectRow(cur)
-        self._table.setCurrentCell(cur, C_COMMENT)
-        row = self._rows[cur]
-        QTimer.singleShot(0, lambda r=row: self._display_row_deferred(r))
+            cur += step
+        self._nav_goto(cur)
+
+    def _nav_first(self) -> None:
+        self._nav_goto(0)
+
+    def _nav_last(self) -> None:
+        self._nav_goto(len(self._rows) - 1)
+
+    def _nav_shortcut(self, target) -> None:
+        """Shift/Ctrl row-nav shortcut, gated so it only fires when the panel is
+        visible and a text field / modal isn't taking input."""
+        if not self.isVisible():
+            return
+        app = QApplication.instance()
+        if app is not None:
+            if app.activeModalWidget() is not None:
+                return
+            if isinstance(app.focusWidget(), (QLineEdit, QAbstractSpinBox)):
+                return
+        if target == "first":
+            self._nav_first()
+        elif target == "last":
+            self._nav_last()
+        else:
+            self._nav_row(int(target))
 
     def _display_row_deferred(self, row) -> None:
         # Stay silent on unloaded rows so rapid F/A stepping isn't interrupted
