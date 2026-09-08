@@ -1962,24 +1962,33 @@ class MainWindow(QMainWindow):
         return out
 
     def case_capture_all_series(self) -> list:
-        """One row per series of the CURRENTLY-SELECTED study (the active pane's
+        """One row per series of the ACTIVE image's STUDY (the active pane's
         series' study, else the first shown pane's). 種別 / Ser / 時間 are filled
-        automatically from each series; view_state is left empty so 表示 shows the
-        series' auto default frame. Covers series NOT open in any pane too."""
+        automatically; view_state is empty so 表示 shows the auto default frame.
+        Series in OTHER studies / other panes are NOT included."""
         uid = self._active.shown_series_uid() if self._active is not None else ""
-        se0 = self._series_by_uid.get(uid) if uid else None
-        if se0 is None:
+        if not uid:
             for p in self._shown_panes():
-                se0 = self._series_by_uid.get(p.shown_series_uid())
-                if se0 is not None:
+                uid = p.shown_series_uid()
+                if uid:
                     break
-        if se0 is None:
+        if not uid:
             return []
-        study_uid = getattr(se0, "study_uid", "")
+        # Series has no study back-reference → find the containing Study via the
+        # patient/study/series tree, then enumerate only THAT study's series so
+        # other studies / other panes' images are NOT swept in.
+        target_study = None
+        for pat in self._patients.values():
+            for st in pat.studies.values():
+                if uid in st.series:
+                    target_study = st
+                    break
+            if target_study is not None:
+                break
+        if target_study is None:
+            return []
         out = []
-        for se in self._series_by_uid.values():
-            if getattr(se, "study_uid", "") != study_uid:
-                continue
+        for se in target_study.series.values():
             at = getattr(se, "acq_time", "") or ""
             date, tm = (at[:8], at[8:]) if len(at) >= 8 else ("", "")
             src_dirs = []
