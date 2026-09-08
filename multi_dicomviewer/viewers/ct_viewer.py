@@ -13395,7 +13395,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # cross-section shows its orientation (Blood/Endo, observation, …). Its
         # actor is in _overlay_actors, so it hides with the crosshair overlay.
         rcr = 0.7 * self._lv_ring_radius(key)
-        rrx, rry = self._lv_ring_pos(key, ccx, ccy, float(uh[0]), float(uh[1]))
+        # Pane A's short-axis basis is NEGATED (u = −radial0), so the ○ must be
+        # mirrored the same way the ▲ are (apex_sgn), otherwise it lands on the
+        # reversed side vs the rest of the overlay / vs pane B.
+        ring_sgn = -1.0 if key == "A" else 1.0
+        rrx, rry = self._lv_ring_pos(key, ccx, ccy,
+                                     ring_sgn * float(uh[0]),
+                                     ring_sgn * float(uh[1]))
         p.dir_ring_mapper.SetInputData(
             _polylines_pd([self._circle_poly(rrx, rry, rcr)], z=z))
 
