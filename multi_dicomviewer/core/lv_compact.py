@@ -73,7 +73,8 @@ def clip_mask_by_planes(comp, bbox, spacing_xyz, apex_xyz, planes):
 def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
                       level_mm: float = 1.5, n_dir: int = 90,
                       min_pts: int = 6, frac_lo: float = 0.15,
-                      frac_hi: float = 0.85, return_detail: bool = False):
+                      frac_hi: float = 0.85, return_detail: bool = False,
+                      at_along_mm=None):
     """Maximum in-plane diameter of a mask on the planes PERPENDICULAR to the LV
     long axis — the clinical LVDd-style "max short-axis diameter".
 
@@ -142,6 +143,17 @@ def max_perp_diameter(comp, bbox, apex_xyz, axis_dir, radial0, spacing_xyz,
     prof.sort(key=lambda r: r[0])                    # apex (low along) → base
     dia = np.array([r[1] for r in prof], float)
     n = len(dia)
+    # A specific along-axis level was requested (e.g. a MANUALLY-set MV-leaflet
+    # -tip level): return that level's chord directly, no valley heuristics.
+    if at_along_mm is not None:
+        alongs = np.array([r[0] for r in prof], float)
+        bi = int(np.argmin(np.abs(alongs - float(at_along_mm))))
+        best = float(dia[bi])
+        if best <= 0:
+            return None
+        if return_detail:
+            return float(best), prof[bi][2], prof[bi][3]
+        return float(best)
     # LVDd site: scan from the BASE toward the apex; the sub-aortic / LVOT slices
     # are wide, then the cavity NARROWS (a valley) entering the true LV body,
     # then widens again to the LV max. Take the max APICAL of that first valley,
