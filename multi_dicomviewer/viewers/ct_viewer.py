@@ -451,6 +451,25 @@ def _rgba(c):
     return (int(c[0]), int(c[1]), int(c[2]), int(c[3]) if len(c) > 3 else 255)
 
 
+def _mask_intersect_bbox(a_comp, a_bbox, b_comp, b_bbox):
+    """AND two bbox sub-volume masks, result in *a_bbox*'s frame. Voxels of *a*
+    outside *b*'s bbox become False (b is treated as False there)."""
+    a = np.asarray(a_comp, bool)
+    b = np.asarray(b_comp, bool)
+    az0, az1, ay0, ay1, ax0, ax1 = a_bbox
+    bz0, bz1, by0, by1, bx0, bx1 = b_bbox
+    b_in_a = np.zeros_like(a)
+    oz0, oz1 = max(az0, bz0), min(az1, bz1)
+    oy0, oy1 = max(ay0, by0), min(ay1, by1)
+    ox0, ox1 = max(ax0, bx0), min(ax1, bx1)
+    if oz0 < oz1 and oy0 < oy1 and ox0 < ox1:
+        b_in_a[oz0 - az0:oz1 - az0, oy0 - ay0:oy1 - ay0,
+               ox0 - ax0:ox1 - ax0] = b[oz0 - bz0:oz1 - bz0,
+                                        oy0 - by0:oy1 - by0,
+                                        ox0 - bx0:ox1 - bx0]
+    return a & b_in_a
+
+
 def _colored_multi_pd(polylines, colors) -> vtkPolyData:
     """Same as _multi_pd but each polyline cell carries its own RGBA colour
     (uint8; 3-tuples are treated as opaque). Caller's mapper must enable
@@ -5306,6 +5325,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 comp = clip_mask_by_planes(comp, mbbox, dims, apex, planes)
         except Exception:                                # noqa: BLE001
             pass
+        # Cavity ⊆ myocardium: clip the Endo to the (valve-clipped) Epi region so
+        # it shares the Epi's base and can't poke past it into the LVOT/aorta
+        # below the AoV (the 大動脈弁下 mismatch). Uses the Epi display mask if it
+        # is already available (no extra modal build).
+        try:
+            ec = getattr(self, "_lvv_epi_disp_comp", None)
+            eb = getattr(self, "_lvv_epi_disp_bbox", None)
+            if ec is not None and eb is not None:
+                comp = _mask_intersect_bbox(comp, mbbox, ec, eb)
+        except Exception:                                # noqa: BLE001
+            pass
         return comp, mbbox
 
     # ------------------------------------------ wall thickness (Epi−Endo)
@@ -5701,6 +5731,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_ghost = False
         self._lvv_auto_endo_btn.setChecked(True)
         self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        # The Endo mask now exists → the LVD表示 button can be used.
+        if getattr(self, "_lvv_lvd_btn", None) is not None:
+            self._lvv_lvd_btn.setEnabled(self._lv_endo_mask_comp is not None)
+            self._lvv_style_lvd_btn()
         self._lvv_show_endo()
         # If this build APPLIED a param change from a ghost, record the swap
         # (old line ↔ new line) so Ctrl+Z / Ctrl+Y flip between them.
