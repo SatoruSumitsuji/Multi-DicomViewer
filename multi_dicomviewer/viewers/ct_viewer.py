@@ -9840,9 +9840,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lvd_shown = False
         self._lvv_lvd_pending = False
         self._lvv_apex_shown = True
+        self._lvv_hl_on = False
         self._lv_result_lines = []
         for _k in ("A", "B"):
             self._measures[_k] = []
+            self._redraw_meas(_k)                # drop valve rings / apex marker
+        # The reset above only dropped the DATA — the overlay ACTORS still held
+        # the previous series' geometry (blood/region tint + Epi/Endo/LVD line
+        # mappers), so it lingered on the new series. Clear them too.
+        for _clear in (lambda: self._lvv_show_epi(render=False),
+                       lambda: self._lvv_show_endo(render=False),
+                       lambda: self._lvv_show_diameter(render=False),
+                       self._lvv_update_mask,
+                       getattr(self, "_lvv_update_highlight", lambda: None),
+                       getattr(self, "_lvv_thick_refresh_display",
+                               lambda: None)):
+            try:
+                _clear()
+            except Exception:                    # noqa: BLE001
+                pass
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
         self._cpr_wrap.setVisible(False)
