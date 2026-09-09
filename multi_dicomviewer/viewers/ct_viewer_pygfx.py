@@ -7920,7 +7920,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         from multi_dicomviewer.core.lv_compact import (
-            clip_mask_by_planes, endo_convex3d_mask, endo_envelope_mask)
+            clip_mask_by_planes, endo_envelope_mask)
         epi = getattr(self, "_lvv_epi_surf", None)
         apex = getattr(self, "_lvv_blood_apex", None)
         lvv = self._lvv or {}
