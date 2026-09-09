@@ -2271,6 +2271,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: shown CT series. Args: (fmt, series_uid, plane_path); CT always passes
     #: plane_path="" (one volume — A/B panes are reformats of the same data).
     plane_export_requested = pyqtSignal(str, str, str)
+    #: image right-click ▸ Export DICOM (Screen) → shell captures the whole
+    #: displayed pane area and writes it as one Secondary-Capture DICOM.
+    screen_export_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -9337,8 +9340,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         key = pick_export_format(
             self, canvas.mapToGlobal(QtPoint(int(sx), int(sy))),
             include_dicom=True, include_mp4=False, include_anon=True,
+            include_screen=True,
         )
         if not key:
+            return
+        if key == "screen-dicom":
+            self.screen_export_requested.emit()
             return
         if key in ("dicom", "csv", "anon-dicom"):
             # One volume — A/B panes are reformats of the same series, so

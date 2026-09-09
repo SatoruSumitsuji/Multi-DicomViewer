@@ -71,6 +71,7 @@ def pick_export_format(
     include_anon: bool = False,
     include_wl: bool = False,
     wl_enabled: bool = True,
+    include_screen: bool = False,
 ) -> Optional[str]:
     """Show the right-click export menu at *global_point*; return the chosen
     format key, or None if dismissed.
@@ -94,6 +95,10 @@ def pick_export_format(
     if include_mp4:
         items.append(("Export MP4", "mp4"))
     items.append(("Export CSV (DICOM tags)", "csv"))
+    if include_screen:
+        # Whole displayed screen (all panes + overlays) → one Secondary Capture
+        # DICOM image. Distinct from "Export DICOM (lossless)" (the source copy).
+        items.append(("Export DICOM (Screen)", "screen-dicom"))
     menu = QMenu(parent)
     acts = [(menu.addAction(label), key) for label, key in items]
     if include_wl:
