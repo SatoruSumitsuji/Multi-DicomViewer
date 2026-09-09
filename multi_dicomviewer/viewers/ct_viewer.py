@@ -5284,6 +5284,34 @@ class CTViewer(CPRMixin, AbstractViewer):
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
+        # Epi mask (full-volume) for the SUB-AORTIC lumen fix: where the Epi
+        # border touches the blood, the compact myocardium bulges into the
+        # cavity, so use the PURE lumen contour there instead of bridging.
+        # Reuse the (valve-clipped) Epi display mask when available; else raster.
+        epi_full = None
+        try:
+            ec = getattr(self, "_lvv_epi_disp_comp", None)
+            eb = getattr(self, "_lvv_epi_disp_bbox", None)
+            if ec is not None and eb is not None:
+                epi_full = np.zeros(self._vol.shape, bool)
+                ez0, ez1, ey0, ey1, ex0, ex1 = eb
+                epi_full[ez0:ez1, ey0:ey1, ex0:ex1] = ec
+            elif epi is not None:
+                planes = []
+                if mv is not None:
+                    planes.append((np.asarray(mv[0], float),
+                                   np.asarray(mv[1], float)))
+                if av0 is not None:
+                    planes.append((np.asarray(av0[0], float),
+                                   np.asarray(av0[1], float)))
+                m = epi.inside_mask_bbox(dims, self._vol.shape, planes, apex)
+                if m and m[0] is not None:
+                    comp2, bbox2 = m
+                    epi_full = np.zeros(self._vol.shape, bool)
+                    pz0, pz1, py0, py1, px0, px1 = bbox2
+                    epi_full[pz0:pz1, py0:py1, px0:px1] = comp2
+        except Exception:                                # noqa: BLE001
+            epi_full = None
         # 肉柱 = the single context-sensitive knob on the Blood/Endo bar; how it is
         # applied depends on the method (bridge span / roundness / bulge). Advanced
         # per-method values live in Settings → LV Auto-Endo.
@@ -5318,7 +5346,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                             grid_mm=grid_mm, method=method,
                             bridge_deg=bridge, n_meridians=n_mer,
                             roundness=roundness, bulge_frac=bulge_frac,
-                            min_chord_mm=min_chord)
+                            min_chord_mm=min_chord, epi_mask=epi_full)
                 except Exception as exc:           # noqa: BLE001
                     result["err"] = str(exc)
 

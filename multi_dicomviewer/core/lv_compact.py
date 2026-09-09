@@ -468,11 +468,79 @@ def endo_convex3d_mask(blood, spacing_xyz, apex_xyz, axis_dir,
     return comp, (z0, z1, y0, y1, x0, x1)
 
 
+def _largest_circular_run(flags):
+    """(start, length) of the LONGEST circular run of True in boolean *flags*;
+    (None, 0) if none. Used to pick the main Epi↔lumen contact arc."""
+    flags = np.asarray(flags, bool)
+    n = len(flags)
+    if n == 0 or not flags.any():
+        return None, 0
+    if flags.all():
+        return 0, n
+    doubled = np.concatenate([flags, flags])
+    best_start, best_len = None, 0
+    cur_start, cur_len = 0, 0
+    for i in range(2 * n):
+        if doubled[i]:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = min(cur_len, n)
+                best_start = cur_start % n
+        else:
+            cur_len = 0
+    return best_start, best_len
+
+
+def _apply_subaortic_lumen(env, filled, epi_mask, spacing_xyz, centre, u, v,
+                           half_mm, grid_mm, ctr, rays, thetas, ang_grid,
+                           rad_grid, contact_mm, semicircle_deg):
+    """Sub-aortic fix on ONE short-axis level: where the Epi border touches the
+    lumen (blood), the compact myocardium bulges INTO the cavity nearby, so the
+    bridging over-reads. Replace the Endo with the PURE LUMEN (blood) contour in
+    a *semicircle_deg* sector centred on the middle of the largest Epi↔lumen
+    contact arc; smooth the two junctions. Returns the (possibly rebuilt) env."""
+    try:
+        from scipy import ndimage
+    except Exception:                                   # noqa: BLE001
+        return env
+    ge, _cell = _sample_on_plane(epi_mask, spacing_xyz, centre, u, v,
+                                 half_mm, grid_mm)
+    if not ge.any():
+        return env
+    ge = ndimage.binary_fill_holes(ge)
+    n_mer = len(rays)
+    r_env = np.array([_envelope_radius(env, ctr, dx, dy, grid_mm)
+                      for _t, dx, dy in rays])
+    r_blood = np.array([_envelope_radius(filled, ctr, dx, dy, grid_mm)
+                        for _t, dx, dy in rays])
+    r_epi = np.array([_envelope_radius(ge, ctr, dx, dy, grid_mm)
+                      for _t, dx, dy in rays])
+    # Epi touches lumen where the radial myocardium (Epi−blood) is ~0.
+    contact = (r_blood > 1.0) & (r_epi > 0.0) & ((r_epi - r_blood) <= contact_mm)
+    start, length = _largest_circular_run(contact)
+    if start is None or length < 2:
+        return env                                      # no clear contact arc
+    deg_per = 360.0 / n_mer
+    center_idx = (start + (length - 1) / 2.0) % n_mer
+    half_idx = (float(semicircle_deg) * 0.5) / deg_per
+    idx = np.arange(n_mer)
+    d = np.abs(((idx - center_idx + n_mer / 2.0) % n_mer) - n_mer / 2.0)
+    # w=1 → pure lumen (inside the sector), w=0 → keep the bridged env; a soft
+    # ramp across the sector edge is the junction smoothing.
+    ramp = max(1.0, half_idx * 0.15)
+    w = np.clip((half_idx - d) / ramp + 0.5, 0.0, 1.0)
+    r_final = w * r_blood + (1.0 - w) * r_env
+    return _radius_to_mask(list(r_final), thetas, ang_grid, rad_grid)
+
+
 def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                        along_apex, along_base, sax_step_mm=1.0, close_mm=4.0,
                        half_mm=70.0, grid_mm=0.8, method="close",
                        bridge_deg=40.0, n_meridians=180, roundness=0.0,
-                       bulge_frac=0.20, min_chord_mm=5.0):
+                       bulge_frac=0.20, min_chord_mm=5.0, epi_mask=None,
+                       contact_mm=1.5, semicircle_deg=150.0):
     """3-D ENDOCARDIAL ENVELOPE mask = the blood pool with its papillary /
     trabecular indentations bridged, per short-axis level, rasterised back into
     the volume grid. Returns ``(comp bool[dz,dy,dx], bbox)`` or None.
@@ -572,6 +640,14 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
             else:                                        # "close"
                 env = ndimage.binary_fill_holes(
                     ndimage.binary_closing(filled, structure=se))
+            # Sub-aortic: where the Epi touches the lumen, use the pure lumen
+            # contour in a semicircle on that side (the compact bulge sits there)
+            # instead of the bridged envelope.
+            if epi_mask is not None:
+                env = _apply_subaortic_lumen(
+                    env, filled, epi_mask, spacing_xyz, centre, u, v, half_mm,
+                    grid_mm, ctr, rays, thetas, ang_grid, rad_grid,
+                    contact_mm, semicircle_deg)
             sel = np.where(env)
             uo = -half_mm + sel[1].astype(float) * grid_mm   # col → u
             vo = -half_mm + sel[0].astype(float) * grid_mm   # row → v
