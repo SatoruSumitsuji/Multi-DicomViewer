@@ -2930,8 +2930,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lvd_btn = FitButton(t("LVD表示"))
         self._lvv_lvd_btn.setHelpToolTip(
             t("Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. "
-              "First press: set the level on the long-axis centreline, then "
-              "press again. Right-click to re-set the level."))
+              "Press → choose 計測 (measure at the current section) or 断面設定後"
+              "計測 (set the section first, then press again). Once set, the "
+              "button toggles the line; right-click to re-set the level."))
         self._lvv_lvd_btn.clicked.connect(self._lvv_toggle_lvd)
         self._lvv_lvd_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
@@ -3876,21 +3877,29 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
 
     def _lvv_toggle_lvd(self) -> None:
-        """LVD表示 button. Unset → prompt to place the MV-leaflet-tip level on
-        the long-axis centreline (next press captures it). Set → toggle the LVD
-        line. The LVD is then measured at that fixed level."""
+        """LVD表示 button. Unset → ask 'measure at THIS section?': 計測 captures
+        the current centreline level and measures now; 断面設定後計測 dismisses so
+        the user can place the section, then click again. Set → toggle the line.
+        (Right-click re-sets the level.)"""
         if self._lvv is None or self._lv is not None:
             return
         if self._lvv_lvd_level is None:
-            if not self._lvv_lvd_pending:
-                self._lvv_lvd_pending = True
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LVD"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("この断面でLVD計測をしていいですか？"))
+            b_now = box.addButton(t("計測"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(t("断面設定後計測"),
+                          QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(b_now)
+            box.exec()
+            if box.clickedButton() is not b_now:
                 self._lvv_prompt(t(
-                    "最初にLVD面を設定してください：長軸像でセンターラインを"
-                    "僧帽弁尖のレベルに合わせ、もう一度「LVD表示」を押してください。"))
-                self._lvv_style_lvd_btn()
+                    "長軸像でセンターラインを僧帽弁尖のレベルに合わせ、もう一度"
+                    "「LVD表示」を押してください。"))
                 return
-            # Second press → capture the current centreline level as the LVD
-            # (MV-leaflet-tip) plane.
+            # 計測: capture the current centreline level as the LVD plane.
             epi = getattr(self, "_lvv_epi_surf", None)
             ax = getattr(epi, "axis", None) if epi is not None else None
             if self._center is None or ax is None:
@@ -3900,7 +3909,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             axis = axis / (float(np.linalg.norm(axis)) or 1.0)
             self._lvv_lvd_level = float((np.asarray(self._center, float)
                                          - apex) @ axis)
-            self._lvv_lvd_pending = False
             self._lvv_lvd_shown = True
             self._lvv_lv_diam_cache = None       # force recompute at new level
         else:
