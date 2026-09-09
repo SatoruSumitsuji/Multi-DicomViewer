@@ -1937,6 +1937,175 @@ class MainWindow(QMainWindow):
                 pass
         return ""
 
+    # ---------------------------------------------- Export DICOM (Screen)
+    def _pane_snapshot(self, pane):
+        """A QPixmap of one pane's on-screen content — v.snapshot() for GL
+        viewers (VTK/wgpu don't render into QWidget.grab()), else a widget grab
+        (still panes / plain-Qt canvases paint into Qt, so grab() works)."""
+        try:
+            if pane.is_still():
+                return pane.grab()
+        except Exception:                            # noqa: BLE001
+            pass
+        v = pane.current_viewer() if hasattr(pane, "current_viewer") else None
+        if v is not None and hasattr(v, "snapshot"):
+            try:
+                pm = v.snapshot()
+                if pm is not None and not pm.isNull():
+                    return pm
+            except Exception:                        # noqa: BLE001
+                pass
+        if v is not None and hasattr(v, "grab"):
+            try:
+                return v.grab()
+            except Exception:                        # noqa: BLE001
+                pass
+        return pane.grab()
+
+    def _active_source_header(self):
+        """DICOM header of the active (else first shown) pane's series, for
+        copying Patient/Study identity into the Secondary-Capture object."""
+        p = self._active
+        if p is None or not (p in self._shown_panes()):
+            shown = self._shown_panes()
+            p = shown[0] if shown else None
+        if p is None:
+            return None
+        v = p.current_viewer() if hasattr(p, "current_viewer") else None
+        try:
+            if v is not None and hasattr(v, "current_header"):
+                h = v.current_header()
+                if h is not None:
+                    return h
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            se = self._series_by_uid.get(p.shown_series_uid())
+            return getattr(se, "header", None)
+        except Exception:                            # noqa: BLE001
+            return None
+
+    def export_screen_dicom(self) -> None:
+        """Right-click ▸ Export DICOM (Screen): capture the WHOLE displayed pane
+        area (all shown panes + overlays, composited to match the layout) and
+        write it as one RGB Secondary-Capture DICOM image, keeping the source's
+        Patient/Study identity. Default save folder = the parent of the image
+        folder."""
+        import numpy as np
+        from PyQt6.QtCore import QPoint, QRect
+        from PyQt6.QtGui import QColor, QImage, QPainter
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        panes = self._shown_panes()
+        if not panes:
+            return
+        container = None
+        if getattr(self, "_grid", None) is not None:
+            container = self._grid.parentWidget()
+        if container is None:
+            container = panes[0].parentWidget()
+        items = []
+        for p in panes:
+            pm = self._pane_snapshot(p)
+            if pm is None or pm.isNull():
+                continue
+            tl = p.mapTo(container, QPoint(0, 0))
+            items.append((tl, p.size(), pm))
+        if not items:
+            QMessageBox.information(self, t("Export DICOM (Screen)"),
+                                    t("表示中の画像がありません。"))
+            return
+        minx = min(tl.x() for tl, _s, _pm in items)
+        miny = min(tl.y() for tl, _s, _pm in items)
+        maxx = max(tl.x() + s.width() for tl, s, _pm in items)
+        maxy = max(tl.y() + s.height() for tl, s, _pm in items)
+        w, h = max(1, maxx - minx), max(1, maxy - miny)
+        canvas = QImage(w, h, QImage.Format.Format_RGB888)
+        canvas.fill(QColor(0, 0, 0))
+        painter = QPainter(canvas)
+        for tl, s, pm in items:
+            painter.drawPixmap(QRect(tl.x() - minx, tl.y() - miny,
+                                     s.width(), s.height()), pm)
+        painter.end()
+        img = canvas.convertToFormat(QImage.Format.Format_RGB888)
+        iw, ih, bpl = img.width(), img.height(), img.bytesPerLine()
+        ptr = img.constBits()
+        ptr.setsize(ih * bpl)
+        arr = np.frombuffer(ptr, np.uint8).reshape(ih, bpl)[:, :iw * 3] \
+            .reshape(ih, iw, 3).copy()
+        ddir = ""
+        try:
+            idir = self.case_image_dir()
+            if idir:
+                ddir = os.path.dirname(os.path.normpath(idir))
+        except Exception:                            # noqa: BLE001
+            pass
+        default = os.path.join(ddir, "screen.dcm") if ddir else "screen.dcm"
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("Export DICOM (Screen)"), default, "DICOM (*.dcm)")
+        if not path:
+            return
+        if not path.lower().endswith(".dcm"):
+            path += ".dcm"
+        try:
+            self._write_sc_dicom(arr, self._active_source_header(), path)
+        except Exception as exc:                     # noqa: BLE001
+            QMessageBox.warning(self, t("Export DICOM (Screen)"),
+                                t("保存に失敗しました: {e}", e=str(exc)))
+            return
+        self.statusBar().showMessage(
+            t("Saved screen DICOM: {p}", p=os.path.basename(path)))
+
+    @staticmethod
+    def _write_sc_dicom(rgb, hdr, path) -> None:
+        """Write an RGB numpy image as a Secondary-Capture DICOM, copying the
+        source header's Patient/Study identity (new Series/SOP UIDs)."""
+        import datetime
+        import numpy as np
+        from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+        from pydicom.uid import (ExplicitVRLittleEndian, generate_uid,
+                                 SecondaryCaptureImageStorage)
+        rgb = np.ascontiguousarray(rgb, np.uint8)
+        ih, iw = rgb.shape[:2]
+        ds = Dataset()
+        for tag in ("PatientName", "PatientID", "PatientBirthDate",
+                    "PatientSex", "StudyInstanceUID", "StudyID", "StudyDate",
+                    "StudyTime", "AccessionNumber", "StudyDescription",
+                    "ReferringPhysicianName"):
+            val = getattr(hdr, tag, None) if hdr is not None else None
+            if val not in (None, ""):
+                setattr(ds, tag, val)
+        if not getattr(ds, "StudyInstanceUID", ""):
+            ds.StudyInstanceUID = generate_uid()
+        now = datetime.datetime.now()
+        ds.SeriesInstanceUID = generate_uid()
+        ds.SOPInstanceUID = generate_uid()
+        ds.SOPClassUID = SecondaryCaptureImageStorage
+        ds.Modality = "OT"
+        ds.ConversionType = "WSD"                     # workstation
+        ds.SeriesNumber = "9001"
+        ds.InstanceNumber = "1"
+        ds.SeriesDescription = "Multi-DicomViewer Screen"
+        ds.BurnedInAnnotation = "YES"
+        ds.ContentDate = now.strftime("%Y%m%d")
+        ds.ContentTime = now.strftime("%H%M%S")
+        ds.Rows, ds.Columns = int(ih), int(iw)
+        ds.SamplesPerPixel = 3
+        ds.PhotometricInterpretation = "RGB"
+        ds.PlanarConfiguration = 0
+        ds.BitsAllocated = 8
+        ds.BitsStored = 8
+        ds.HighBit = 7
+        ds.PixelRepresentation = 0
+        ds.PixelData = rgb.tobytes()
+        fm = FileMetaDataset()
+        fm.MediaStorageSOPClassUID = SecondaryCaptureImageStorage
+        fm.MediaStorageSOPInstanceUID = ds.SOPInstanceUID
+        fm.TransferSyntaxUID = ExplicitVRLittleEndian
+        fds = FileDataset(path, ds, file_meta=fm, preamble=b"\x00" * 128)
+        fds.is_little_endian = True
+        fds.is_implicit_VR = False
+        fds.save_as(path)
+
     def case_capture_active(self) -> dict | None:
         """A row for the active pane's series (falls back to the first shown
         pane that has data). None if nothing is displayed."""
@@ -4840,6 +5009,10 @@ class MainWindow(QMainWindow):
         # clicked plane.
         if hasattr(viewer, "plane_export_requested"):
             viewer.plane_export_requested.connect(self._on_plane_export)
+        # Right-click ▸ Export DICOM (Screen) → whole displayed pane area as one
+        # Secondary-Capture DICOM.
+        if hasattr(viewer, "screen_export_requested"):
+            viewer.screen_export_requested.connect(self.export_screen_dicom)
         # IVUS "Export" of angle keyframes → reuse the export filename-tag
         # picker, then write the small JSON file.
         if hasattr(viewer, "angle_export_requested"):
