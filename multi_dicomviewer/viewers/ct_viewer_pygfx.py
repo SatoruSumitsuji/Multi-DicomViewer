@@ -1003,9 +1003,10 @@ class _Overlay(QWidget):
                         wmm = 0.9 * float(v._ps.get(key, 60.0))
                         p.drawLine(Sd(c - wmm * d), Sd(c + wmm * d))
 
-        # Apex (red) and seed (cyan) landmark dots.
+        # Apex (red) and seed (cyan) landmark dots. The apex dot hides when its
+        # button toggles it off (set → shown/hidden, like MV/AoV).
         apex = lvv.get("apex")
-        if apex is not None:
+        if apex is not None and getattr(v, "_lvv_apex_shown", True):
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
             p.setBrush(QColor(255, 64, 64))
             p.drawEllipse(Sd(np.asarray(apex, float)), 6.0, 6.0)
@@ -7342,7 +7343,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 btn.setStyleSheet(self._BTN_DIS)
 
-        _done(self._lvv_apex_btn, apex_done, "#d32f2f")     # apex red
+        self._lvv_style_apex_btn()                          # apex red (show/hide)
         _done(self._lvv_aov_btn, aov_done, "#b8860b")       # aortic amber
         _done(self._lvv_mv_btn, mv_done, "#2b6cb0")         # mitral blue
         # HU spins + the 全域HU / LV-Blood toggles are available whenever Blood is
@@ -7451,19 +7452,49 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  traceback.format_exc() or repr(exc))
 
     def _lvv_confirm_apex(self) -> None:
-        """Apex button → confirm the apex at the current crosshair centre."""
+        """Apex button. First press sets the apex at the crosshair centre; once
+        set, the button TOGGLES the apex marker's visibility (like MV/AoV)."""
         lvv = self._lvv
-        if lvv is None or self._center is None:
+        if lvv is None:
+            return
+        if lvv.get("apex") is not None:
+            self._lvv_apex_shown = not getattr(self, "_lvv_apex_shown", True)
+            self._lvv_style_apex_btn()
+            for k in ("A", "B"):
+                self._overlay[k].update()
+            return
+        if self._center is None:
             return
         P = np.asarray(self._center, float).copy()
         lvv["apex"] = P
         lvv["step"] = "mv"
+        self._lvv_apex_shown = True
         self._lvv_sync()
+        self._lvv_style_apex_btn()
         for k in ("A", "B"):
             self._overlay[k].update()
         self._lvv_prompt(
             t("Identify the mitral valve: draw an Ellipse on the MV annulus "
               "(Measure→Ellipse), then press 'MV plane'."))
+
+    def _lvv_style_apex_btn(self) -> None:
+        """Apex button: plain when unset; solid red when set AND shown; a red
+        outline when set but hidden (mirrors the VTK viewer)."""
+        btn = getattr(self, "_lvv_apex_btn", None)
+        if btn is None:
+            return
+        color = "#d32f2f"
+        set_ = (getattr(self, "_lvv", None) is not None
+                and (self._lvv or {}).get("apex") is not None)
+        if not set_:
+            btn.setStyleSheet(self._BTN_DIS)
+        elif getattr(self, "_lvv_apex_shown", True):
+            btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                              % (color, self._BTN_DIS))
+        else:
+            btn.setStyleSheet(
+                "QPushButton{background:palette(button);color:%s;"
+                "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
 
     def _lvv_hu_at(self, P) -> float:
         """Nearest-voxel HU at world point *P* (mm) in self._vol (indexed
