@@ -13502,8 +13502,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # highlighted in rotate mode, so it follows a rotate drag / SPIN instead
         # of drifting off the line.
         hi = self._cross_hi.get(key)
-        if hi is not None and hi[1] == "rotate":
-            p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(key, hi[0]))
+        if hi is not None:
+            if hi[1] == "rotate":
+                p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(key, hi[0]))
+            else:
+                # move / center: keep the straight arrows glued to the moving
+                # crosshair centre so they FOLLOW a translate drag too.
+                p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(key, hi[0]))
 
     def _update_info(self, key, title_only):
         p = self.pane[key]
@@ -14729,9 +14734,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
         ccx, ccy = self._cc(which)
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
-        r = 0.42 * ps                                   # tighter circle = more bent
+        r = 0.60 * ps                                   # original position/size
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(11.0)                       # bigger subtended angle
+        span = math.radians(11.0)                       # bigger subtended = more bent
         steps = 10                                      # smoother = clearer arc
         hs = 0.019 * ps                                 # bigger heads (emphasis)
 
@@ -14757,7 +14762,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         c_, s_ = math.cos(th), math.sin(th)
         ccx, ccy = self._cc(which)
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
-        r = 0.42 * ps
+        r = 0.60 * ps
         span = math.radians(11.0)
         half = 0.5 * r * span                           # HALF the arc's length
         D = 0.255 * ps                                  # ▲ distance (matches _tris)
