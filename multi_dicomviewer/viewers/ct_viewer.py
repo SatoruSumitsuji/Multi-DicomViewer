@@ -1428,13 +1428,13 @@ class _Pane:
         # rather than parallel-moves. Empty + hidden until _set_cross_highlight
         # fills it. NOT added to _overlay_actors (it must stay hidden in the
         # "Max Image" presentation mode where overlays are toggled off).
-        # White HALO under the rotate/move arrows (added first → drawn behind) so
+        # BLACK HALO under the rotate/move arrows (added first → drawn behind) so
         # they stay legible on any background.
         self.rot_arrow_halo_mapper = vtkPolyDataMapper()
         self.rot_arrow_halo_mapper.SetInputData(vtkPolyData())
         self.rot_arrow_halo = vtkActor()
         self.rot_arrow_halo.SetMapper(self.rot_arrow_halo_mapper)
-        self.rot_arrow_halo.GetProperty().SetColor(1.0, 1.0, 1.0)   # white
+        self.rot_arrow_halo.GetProperty().SetColor(0.0, 0.0, 0.0)   # black
         self.rot_arrow_halo.GetProperty().SetLineWidth(4.2)         # wider bg
         self.rot_arrow_halo.SetVisibility(False)
         self.ren.AddActor(self.rot_arrow_halo)
