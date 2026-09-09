@@ -969,7 +969,8 @@ class _Overlay(QWidget):
         # POINT at the crossing; the plane doesn't meet it → nothing. A long-axis
         # pane shows the section line at that level.
         surf = getattr(v, "_lv_endo_auto_surf", None)
-        if surf is not None and getattr(surf, "axis", None) is not None:
+        if (surf is not None and getattr(surf, "axis", None) is not None
+                and getattr(v, "_lvv_lvd_shown", False)):
             v._lvv_lv_diameter_mm()                   # populate _lvv_diam_pts
             pts = getattr(v, "_lvv_diam_pts", None)
             if pts is not None:
@@ -6774,13 +6775,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         comp, bb = self._lvv_endo_mask_cached()
         surf = getattr(self, "_lv_endo_auto_surf", None)
         ax = getattr(surf, "axis", None) if surf is not None else None
-        if comp is None or bb is None or ax is None:
+        level = getattr(self, "_lvv_lvd_level", None)
+        # LVD is MANUAL: the MV-leaflet-tip level is set via the LVD表示 button;
+        # None until set → no LVD.
+        if comp is None or bb is None or ax is None or level is None:
             self._lvv_diam_pts = None
             return None
         try:
             from multi_dicomviewer.core.lv_compact import max_perp_diameter
             det = max_perp_diameter(comp, bb, ax.apex, ax.axis, ax.radial0,
-                                    self._dims, return_detail=True)
+                                    self._dims, at_along_mm=float(level),
+                                    return_detail=True)
             if det is None:
                 self._lvv_diam_pts = None
                 return None
@@ -7240,6 +7245,20 @@ class CTViewer(CPRMixin, AbstractViewer):
               "as a display-only overlay — recomputes for the current HU range."))
         self._lvv_auto_endo_btn.clicked.connect(self._lvv_toggle_auto_endo)
         row.addWidget(self._lvv_auto_endo_btn)
+        # LVD表示: LV diameter at a MANUAL mitral-leaflet-tip level (press → choose
+        # 計測 / 断面設定後計測; once set the button toggles the line, right-click
+        # re-sets).
+        self._lvv_lvd_btn = FitButton(t("LVD表示"))
+        self._lvv_lvd_btn.setHelpToolTip(
+            t("Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. "
+              "Press → 計測 (measure at the current section) or 断面設定後計測 "
+              "(set the section first, then press again). Right-click to re-set."))
+        self._lvv_lvd_btn.clicked.connect(self._lvv_toggle_lvd)
+        self._lvv_lvd_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lvv_lvd_btn.customContextMenuRequested.connect(
+            lambda _p: self._lvv_lvd_reset())
+        row.addWidget(self._lvv_lvd_btn)
         # Auto-Endo 係数: papillary/trabecula BRIDGING radius (close_mm). Larger =
         # smoother (trabeculae included); smaller = follows the blood indents.
         self._lvv_close_lbl = QLabel(t("肉柱"))
@@ -7371,6 +7390,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 on and (ready or blood_ok
                         or self._lv_endo_manual_dict is not None))
             self._lvv_manual_endo_btn.setVisible(on)
+        # LVD表示 (manual MV-leaflet-tip level): available once an Endo surface
+        # exists (needs the long axis + lumen from _lv_endo_auto_surf).
+        if getattr(self, "_lvv_lvd_btn", None) is not None:
+            self._lvv_lvd_btn.setVisible(on)
+            self._lvv_lvd_btn.setEnabled(
+                on and getattr(self, "_lv_endo_auto_surf", None) is not None)
+            self._lvv_style_lvd_btn()
         # Epi-border toggle: available in the mode.
         self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
         # 壁厚 buttons: visible in the mode, enabled once computable.
@@ -7490,6 +7516,69 @@ class CTViewer(CPRMixin, AbstractViewer):
             btn.setStyleSheet(self._BTN_DIS)
         elif getattr(self, "_lvv_apex_shown", True):
             btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                              % (color, self._BTN_DIS))
+        else:
+            btn.setStyleSheet(
+                "QPushButton{background:palette(button);color:%s;"
+                "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
+
+    def _lvv_toggle_lvd(self) -> None:
+        """LVD表示 button (manual MV-leaflet-tip level). Unset → ask 計測 /
+        断面設定後計測; set → toggle the line. Right-click re-sets."""
+        if self._lvv is None or self._lv is not None:
+            return
+        if getattr(self, "_lvv_lvd_level", None) is None:
+            from PyQt6.QtWidgets import QMessageBox
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LVD"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(t("この断面でLVD計測をしていいですか？"))
+            b_now = box.addButton(t("計測"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(t("断面設定後計測"),
+                          QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(b_now)
+            box.exec()
+            if box.clickedButton() is not b_now:
+                self._lvv_prompt(t(
+                    "長軸像でセンターラインを僧帽弁尖のレベルに合わせ、もう一度"
+                    "「LVD表示」を押してください。"))
+                return
+            surf = getattr(self, "_lv_endo_auto_surf", None)
+            ax = getattr(surf, "axis", None) if surf is not None else None
+            if self._center is None or ax is None:
+                return
+            apex = np.asarray(ax.apex, float)
+            axis = np.asarray(ax.axis, float)
+            axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+            self._lvv_lvd_level = float((np.asarray(self._center, float)
+                                         - apex) @ axis)
+            self._lvv_lvd_shown = True
+        else:
+            self._lvv_lvd_shown = not getattr(self, "_lvv_lvd_shown", False)
+        self._lvv_style_lvd_btn()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _lvv_lvd_reset(self) -> None:
+        if self._lvv is None:
+            return
+        self._lvv_lvd_level = None
+        self._lvv_lvd_shown = False
+        self._lvv_diam_pts = None
+        self._lvv_style_lvd_btn()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        self._lvv_prompt(t("LVD面をリセットしました。「LVD表示」で再設定できます。"))
+
+    def _lvv_style_lvd_btn(self) -> None:
+        btn = getattr(self, "_lvv_lvd_btn", None)
+        if btn is None:
+            return
+        color = "#c9a800"
+        if getattr(self, "_lvv_lvd_level", None) is None:
+            btn.setStyleSheet(self._BTN_DIS)
+        elif getattr(self, "_lvv_lvd_shown", False):
+            btn.setStyleSheet("QPushButton{background:%s;color:black;}%s"
                               % (color, self._BTN_DIS))
         else:
             btn.setStyleSheet(
@@ -8489,6 +8578,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                           else float(lvv["last_ml"])),
             "epi_model": self._lvv_epi_model_dict,
         }
+        # LVD: the MANUAL MV-leaflet-tip along-axis level (+ line-shown state),
+        # so the LVD line/value come back exactly as analysed.
+        if getattr(self, "_lvv_lvd_level", None) is not None:
+            data["lvd_level"] = float(self._lvv_lvd_level)
+            data["lvd_shown"] = bool(getattr(self, "_lvv_lvd_shown", False))
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -8577,6 +8671,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             lvv["hu_hi"] = float(data["hu_hi"])
             lvv["last_ml"] = data.get("volume_ml")
             lvv["step"] = "ready"
+            # LVD manual level (+ line-shown), if the file carries one.
+            if data.get("lvd_level") is not None:
+                self._lvv_lvd_level = float(data["lvd_level"])
+                self._lvv_lvd_shown = bool(data.get("lvd_shown", True))
+            else:
+                self._lvv_lvd_level = None
+                self._lvv_lvd_shown = False
+            self._lvv_diam_pts = None
             for spin, vv in ((self._lvv_lo_spin, data["hu_lo"]),
                              (self._lvv_hi_spin, data["hu_hi"])):
                 spin.blockSignals(True)
@@ -8661,6 +8763,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_thick_vol = None
         self._lvv_thick_stats = None
         self._lvv_thick_cache = {}
+        self._lvv_lvd_level = None
+        self._lvv_lvd_shown = False
+        self._lvv_diam_pts = None
+        self._lvv_apex_shown = True
         for k in ("A", "B"):
             self._lvv_cyan_img[k] = None
             self._lvv_red_img[k] = None
