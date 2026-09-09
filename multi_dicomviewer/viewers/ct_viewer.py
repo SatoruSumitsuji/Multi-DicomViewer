@@ -6110,6 +6110,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                 spin.blockSignals(False)
         return True
 
+    def _lvv_restore_thick(self, td) -> bool:
+        """Decode an embedded 3D wall-thickness field (BldLv.json 'thick') so the
+        heat map restores with no recompute."""
+        if not isinstance(td, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(td.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in td["shape"])
+            bbox = tuple(int(x) for x in td["bbox"])
+            raw = zlib.decompress(base64.b64decode(td["packed"]))
+            sub = np.frombuffer(raw, np.float32)[
+                :int(np.prod(shape))].reshape(shape).copy()
+        except Exception:                                # noqa: BLE001
+            return False
+        mode = td.get("mode") or "3d"
+        stats = {k: float(v) for k, v in (td.get("stats") or {}).items()}
+        cache = getattr(self, "_lvv_thick_cache", {}) or {}
+        cache[mode] = {"sub": sub, "bbox": bbox, "stats": stats,
+                       "epi": getattr(self, "_lvv_epi_surf", None),
+                       "endo": getattr(self, "_lv_endo_mask_comp", None)}
+        self._lvv_thick_cache = cache
+        self._lvv_thick_mode = mode
+        self._lvv_thick_vol = self._lvv_thick_vol_from_sub(sub, bbox)
+        self._lvv_thick_stats = stats
+        if stats.get("max") is not None:
+            self._lvv_thick_thi = max(6.0, math.ceil(float(stats["max"])))
+        return True
+
     def _lvv_do_save(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -6196,6 +6228,32 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "apex": list(map(float, lvv["apex"])),
                 "dir": list(map(float, np.asarray(_ax.axis, float))),
                 "radial0": list(map(float, np.asarray(_ax.radial0, float)))}
+        # LVD: the MANUAL MV-leaflet-tip along-axis level (+ line-shown state), so
+        # the LVD line/value come back exactly as analysed.
+        if getattr(self, "_lvv_lvd_level", None) is not None:
+            data["lvd_level"] = float(self._lvv_lvd_level)
+            data["lvd_shown"] = bool(getattr(self, "_lvv_lvd_shown", False))
+        # 3D wall-thickness result: embed the computed thickness field (mm, float
+        # sub-volume, packed) + its mode/stats so the heat map restores with NO
+        # recompute — the post-analysis state.
+        tmode = getattr(self, "_lvv_thick_mode", None)
+        thit = ((getattr(self, "_lvv_thick_cache", {}) or {}).get(tmode)
+                if tmode else None)
+        if (tmode and thit is not None and thit.get("sub") is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            sub = np.ascontiguousarray(thit["sub"], np.float32)
+            data["thick"] = {
+                "mode": tmode,
+                "bbox": [int(x) for x in thit["bbox"]],
+                "shape": [int(s) for s in sub.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(sub.tobytes(), 6)).decode("ascii"),
+                "stats": {k: float(v)
+                          for k, v in (thit.get("stats") or {}).items()},
+            }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -6292,6 +6350,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Restore the embedded Auto-Endo mask too (for instant 壁厚 / offline
             # function analysis); keeps its 方式/膨らみ so a re-derive matches.
             self._lvv_restore_endo(data.get("endo"))
+            # Restore the MANUAL LVD level and the 3D wall-thickness field so the
+            # analysis comes back exactly as saved (no re-set / recompute).
+            if data.get("lvd_level") is not None:
+                self._lvv_lvd_level = float(data["lvd_level"])
+                self._lvv_lvd_shown = bool(data.get("lvd_shown", True))
+                self._lvv_lv_diam_cache = None
+            self._lvv_restore_thick(data.get("thick"))
             if blood_shown:
                 # Blood mask fresh in memory → show 水色, hide the 全域HU tint.
                 lvv["calc_sig"] = self._lvv_signature()
@@ -6309,6 +6374,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
             self._lvv_update_mask()
             self._lvv_update_highlight()
+            # Bring back the restored LVD line + 壁厚 heat map on screen.
+            if getattr(self, "_lvv_lvd_level", None) is not None:
+                self._lvv_style_lvd_btn()
+                self._lvv_show_diameter()
+            if getattr(self, "_lvv_thick_mode", None) is not None:
+                self._lvv_thick_refresh_display()
+                self._lvv_thick_sync_buttons()
             self._lv_update_text()     # show "Blood-Volume:" in the result block
             # The Epi is NOT in this file. If none is in memory, tell the user to
             # load one (Epi読み込み) before Calc Vol; otherwise the current Epi is
