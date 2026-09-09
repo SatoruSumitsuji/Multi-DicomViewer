@@ -14604,26 +14604,47 @@ class CTViewer(CPRMixin, AbstractViewer):
             pr.SetOpacity(0.5)
         p.rot_arrow.SetVisibility(False)
         if line == "C":
-            # Intersection (recentre) zone: light up BOTH crosslines, no arrow.
+            # Intersection (recentre) zone = 2-AXIS MOVE: light up BOTH crosslines
+            # and show straight double-arrows on BOTH axes.
             for _src, act in p.cross:
                 pr = act.GetProperty()
                 pr.SetColor(*self._CROSS_HI)
                 pr.SetLineWidth(1.6)
                 pr.SetOpacity(1.0)
+            p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(which, "C"))
+            p.rot_arrow.SetVisibility(True)
         elif line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
             pr.SetColor(*self._CROSS_HI)
             pr.SetLineWidth(1.6)
             pr.SetOpacity(1.0)
+            # rotate = curved arcs; move = straight double-arrows on the axis.
             if mode == "rotate":
                 p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(which, line))
-                p.rot_arrow.SetVisibility(True)
+            else:
+                p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(which, line))
+            p.rot_arrow.SetVisibility(True)
         p.render()
 
+    @staticmethod
+    def _arrow_barbs(tip, nxt, hs):
+        """Two barbs at *tip*, fanned back from the outward direction tip←nxt."""
+        tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
+        tl = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / tl, ty / tl
+        out = []
+        for deg in (28.0, -28.0):
+            ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+            bx = (-tx) * ca - (-ty) * sa
+            by = (-tx) * sa + (-ty) * ca
+            out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
+        return out
+
     def _rot_arrow_pd(self, which, line) -> vtkPolyData:
-        """Two small double-headed curved arrows tangent to a circle about the
-        crosshair centre — one on EACH side of the caught line's outer ends —
-        the 'this rotates (either way)' hint. Compact (~¼ the first pass)."""
+        """Two double-headed CURVED arrows tangent to a circle about the crosshair
+        centre — one on EACH side of the caught line's outer ends — the 'this
+        ROTATES (either way)' hint. Longer + emphasised so rotate reads clearly
+        apart from move (straight arrows)."""
         th = math.radians(self._cross_ang[which])
         c_, s_ = math.cos(th), math.sin(th)
         base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
@@ -14631,22 +14652,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
         r = 0.60 * ps                                   # arc radius (outer zone)
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(3.75)                       # ⅛ of the first pass
-        steps = 6
-        hs = 0.0125 * ps                                # ⅛ head size
-
-        def _head(tip, nxt):
-            """Two barbs at *tip*, fanned back from the outward tangent tip←nxt."""
-            tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
-            tl = math.hypot(tx, ty) or 1.0
-            tx, ty = tx / tl, ty / tl
-            out = []
-            for deg in (28.0, -28.0):
-                ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
-                bx = (-tx) * ca - (-ty) * sa
-                by = (-tx) * sa + (-ty) * ca
-                out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
-            return out
+        span = math.radians(7.5)                        # 2× longer arc
+        steps = 10                                      # smoother = clearer arc
+        hs = 0.019 * ps                                 # bigger heads (emphasis)
 
         polylines = []
         for side in (0.0, math.pi):                     # both ends of the line
@@ -14656,8 +14664,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                 ang = ca0 - span + (2.0 * span) * i / steps
                 arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
             polylines.append(arc)
-            polylines += _head(arc[-1], arc[-2])        # head at one end …
-            polylines += _head(arc[0], arc[1])          # … and the other
+            polylines += self._arrow_barbs(arc[-1], arc[-2], hs)
+            polylines += self._arrow_barbs(arc[0], arc[1], hs)
+        return _polylines_pd(polylines)
+
+    def _move_arrow_pd(self, which, line) -> vtkPolyData:
+        """Straight double-headed arrow(s) ALONG the caught axis — the 'this
+        MOVES/translates' hint, drawn apart from the rotate arcs. Centred at the
+        midpoint between the green ▲ and the centre (±D/2), the same length as
+        the rotate arc. ``line`` 'H'/'V' = one axis; 'C' = both (2-axis move)."""
+        th = math.radians(self._cross_ang[which])
+        c_, s_ = math.cos(th), math.sin(th)
+        ccx, ccy = self._cc(which)
+        ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
+        r = 0.60 * ps
+        span = math.radians(7.5)
+        hl = r * span                                   # half-length = ½ arc length
+        D = 0.255 * ps                                  # ▲ distance (matches _tris)
+        hs = 0.019 * ps
+        dirs = []
+        if line in ("H", "C"):
+            dirs.append((c_, s_))
+        if line in ("V", "C"):
+            dirs.append((-s_, c_))
+        polylines = []
+        for dx, dy in dirs:
+            for sgn in (1.0, -1.0):                     # both sides (both ▲)
+                mid = sgn * (D / 2.0)
+                a = (ccx + (mid - hl) * dx, ccy + (mid - hl) * dy)
+                b = (ccx + (mid + hl) * dx, ccy + (mid + hl) * dy)
+                polylines.append([a, b])
+                polylines += self._arrow_barbs(b, a, hs)
+                polylines += self._arrow_barbs(a, b, hs)
         return _polylines_pd(polylines)
 
     def _cross_move(self, which, sx, sy):
