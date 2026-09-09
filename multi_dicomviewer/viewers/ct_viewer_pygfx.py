@@ -982,38 +982,50 @@ class _Overlay(QWidget):
                 for P in near:
                     p.drawEllipse(Sd(P), 2.0, 2.0)
 
-        # Auto-Endo表示 overlay: the auto endocardial envelope where it crosses
-        # this pane (orange dots), independent of the Epi/blood overlays.
+        # Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
+        # MASK on this pane (orange, smooth) — the section of the reconstructed
+        # endocardial cavity, so it always ENCLOSES the blood pool and tracks
+        # plane/zoom/rotation. Same mask-outline path as the Windows viewer.
         if (getattr(v, "_lvv_endo_show", False)
-                and getattr(v, "_lv_endo_auto_surf", None) is not None):
+                and getattr(v, "_lv_endo_mask_comp", None) is not None):
+            from multi_dicomviewer.core.lv_compact import region_outline_on_plane
+            u_ax, v_ax, _n = v._axes_for(key)
             try:
-                pts = np.asarray(v._lv_endo_auto_surf._all_ring_points(), float)
+                polys = region_outline_on_plane(
+                    v._lv_endo_mask_comp, v._lv_endo_mask_bbox, v._dims,
+                    v._pc[key], u_ax, v_ax,
+                    half_mm=float(getattr(v, "_half", 100.0)),
+                    step_mm=v._lv_outline_step(v._lv_endo_adv()["step_mm"]),
+                    convex=False)
             except Exception:                            # noqa: BLE001
-                pts = None
-            if pts is not None and len(pts):
-                _u, _vv, n = v._axes_for(key)
-                n = np.asarray(n, float)
-                o = np.asarray(v._pc[key], float)
-                dist = (pts - o) @ n
-                tol = 0.75 * max(v._dims)
-                near = pts[np.abs(dist) <= tol]
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(255, 140, 40))
-                for P in near:
-                    p.drawEllipse(Sd(P), 2.0, 2.0)
+                polys = None
+            if polys:
+                # region_outline returns points in the plane's OUTPUT (u,v)
+                # frame (origin = section centre) → straight to screen.
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(255, 140, 40), 2.0))
+                for poly in polys:
+                    if poly is None or len(poly) < 2:
+                        continue
+                    qpts = [QPointF(*v._world_to_screen(key, float(ou),
+                                                        float(ov)))
+                            for (ou, ov) in poly]
+                    p.drawPolyline(QPolygonF(qpts))
 
         # LV Diameter (LVD): show WHERE it was measured. A short-axis-ish pane
         # shows the chord ONLY where its plane contains it — both endpoints
         # in-plane → the full chord LINE; the plane cuts obliquely across it → a
         # POINT at the crossing; the plane doesn't meet it → nothing. A long-axis
         # pane shows the section line at that level.
-        surf = getattr(v, "_lv_endo_auto_surf", None)
-        if (surf is not None and getattr(surf, "axis", None) is not None
+        epi = getattr(v, "_lvv_epi_surf", None)
+        eax = getattr(epi, "axis", None) if epi is not None else None
+        if (getattr(v, "_lv_endo_mask_comp", None) is not None
+                and eax is not None
                 and getattr(v, "_lvv_lvd_shown", False)):
             v._lvv_lv_diameter_mm()                   # populate _lvv_diam_pts
             pts = getattr(v, "_lvv_diam_pts", None)
             if pts is not None:
-                axis = np.asarray(surf.axis.axis, float)
+                axis = np.asarray(eax.axis, float)
                 axis = axis / (float(np.linalg.norm(axis)) or 1.0)
                 u_ax, _v_ax, n_ax = v._axes_for(key)
                 n_ax = np.asarray(n_ax, float)
@@ -1967,7 +1979,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        # Auto-Endo VOXEL MASK (the shared-with-Windows envelope path): the auto
+        # Endo is a 3-D mask (radial-max + 肉柱 bridge + sub-aortic semicircle-
+        # lumen), NOT a surface loft — identical to the VTK viewer's result. The
+        # cross-section outline, Endo volume, LVD and 壁厚 all read this mask.
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         self._lv_endo_close_mm = 5.0      # Auto-Endo papillary/trabecula bridging
+        self._lv_endo_adv_cache = None    # cached Settings → LV Auto-Endo params
         self._lvv_endo_show = False
         self._lv_endo_manual_dict = None
         self._lv_endo_manual_mode = False
@@ -3832,7 +3852,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         v = getattr(self, "_lv_valves", None) or {}
         if v.get("mitral") is not None or v.get("aortic") is not None:
             return True
-        for attr in ("_lvv_epi_surf", "_lvv_blood_comp", "_lv_endo_auto_surf",
+        for attr in ("_lvv_epi_surf", "_lvv_blood_comp", "_lv_endo_mask_comp",
                      "_lv_endo_manual_dict"):
             if getattr(self, attr, None) is not None:
                 return True
@@ -6769,28 +6789,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[k].update()
 
     def _lvv_endo_mask_cached(self):
-        """Rasterise the auto Endo surface (valve-clipped) to (comp, bbox) once
-        and cache it by surface identity — shared by the Endo volume + LV Diameter
-        readouts so the per-paint result block doesn't re-rasterise. (None, None)
-        until the Auto-Endo surface is built."""
-        surf = getattr(self, "_lv_endo_auto_surf", None)
-        if surf is None or self._vol is None:
+        """The auto Endo VOXEL MASK (comp, bbox) — the shared-with-Windows
+        envelope, already valve-clipped and sub-aortic-corrected. Source of truth
+        for the Endo volume, LV Diameter and 壁厚 readouts. (None, None) until the
+        Auto-Endo mask is built."""
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        bb = getattr(self, "_lv_endo_mask_bbox", None)
+        if comp is None or bb is None or self._vol is None:
             return None, None
-        cache = getattr(self, "_lvv_endo_mask_cache", None)
-        if cache is not None and cache[0] is surf:
-            return cache[1], cache[2]
-        lvv = self._lvv or {}
-        av, mv, apex = lvv.get("aortic"), lvv.get("mitral"), lvv.get("apex")
-        comp = bb = None
-        if av is not None and mv is not None and apex is not None:
-            try:
-                planes = [(np.asarray(av[0], float), np.asarray(av[1], float)),
-                          (np.asarray(mv[0], float), np.asarray(mv[1], float))]
-                comp, bb = surf.inside_mask_bbox(
-                    self._dims, self._vol.shape, planes, np.asarray(apex, float))
-            except Exception:                        # noqa: BLE001
-                comp = bb = None
-        self._lvv_endo_mask_cache = (surf, comp, bb)
         return comp, bb
 
     def _lvv_endo_volume_ml(self):
@@ -6812,8 +6818,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         which overreads on a flared basal / LVOT slice. None until the Auto-Endo
         surface is built."""
         comp, bb = self._lvv_endo_mask_cached()
-        surf = getattr(self, "_lv_endo_auto_surf", None)
-        ax = getattr(surf, "axis", None) if surf is not None else None
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
         level = getattr(self, "_lvv_lvd_level", None)
         # LVD is MANUAL: the MV-leaflet-tip level is set via the LVD表示 button;
         # None until set → no LVD.
@@ -7429,12 +7435,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 on and (ready or blood_ok
                         or self._lv_endo_manual_dict is not None))
             self._lvv_manual_endo_btn.setVisible(on)
-        # LVD表示 (manual MV-leaflet-tip level): available once an Endo surface
-        # exists (needs the long axis + lumen from _lv_endo_auto_surf).
+        # LVD表示 (manual MV-leaflet-tip level): available once the Endo envelope
+        # mask exists (needs the long axis + lumen from the mask).
         if getattr(self, "_lvv_lvd_btn", None) is not None:
             self._lvv_lvd_btn.setVisible(on)
             self._lvv_lvd_btn.setEnabled(
-                on and getattr(self, "_lv_endo_auto_surf", None) is not None)
+                on and getattr(self, "_lv_endo_mask_comp", None) is not None)
             self._lvv_style_lvd_btn()
         # Epi-border toggle: available in the mode.
         self._lvv_epi_btn.setVisible(on and self._lvv_epi_surf is not None)
@@ -7582,8 +7588,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "長軸像でセンターラインを僧帽弁尖のレベルに合わせ、もう一度"
                     "「LVD表示」を押してください。"))
                 return
-            surf = getattr(self, "_lv_endo_auto_surf", None)
-            ax = getattr(surf, "axis", None) if surf is not None else None
+            epi = getattr(self, "_lvv_epi_surf", None)
+            ax = getattr(epi, "axis", None) if epi is not None else None
             if self._center is None or ax is None:
                 return
             apex = np.asarray(ax.apex, float)
@@ -7766,6 +7772,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -7793,6 +7802,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -7876,6 +7888,152 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_update_mask()
 
     # -------- Auto-Endo表示 (display) / Manual-Endo (edit) --------
+    def _lv_endo_adv(self) -> dict:
+        """Advanced Auto-Endo params (Settings → LV Auto-Endo), cached — the SAME
+        source the Windows viewer reads, so both platforms build the identical
+        envelope mask. Re-read on demand after a Settings change."""
+        adv = getattr(self, "_lv_endo_adv_cache", None)
+        if adv is None:
+            try:
+                from multi_dicomviewer.core import settings as _st
+                adv = _st.load_lv_endo_params()
+            except Exception:                            # noqa: BLE001
+                adv = {"min_chord_mm": 5.0, "n_meridians": 240,
+                       "grid_mm": 0.7, "step_mm": 0.45}
+            self._lv_endo_adv_cache = adv
+        return adv
+
+    def _lv_outline_step(self, fine=0.45) -> float:
+        """Outline sampling step (mm) for region_outline_on_plane — finer when
+        zoomed in. Mirrors the VTK viewer."""
+        half = float(getattr(self, "_half", 100.0))
+        return float(max(fine, min(1.2, half / 90.0)))
+
+    def _lvv_build_endo_mask(self):
+        """Auto-Endo = per short-axis level, the OUTERMOST-blood envelope along
+        many radial directions from the LV axis (radial-max), the papillary /
+        trabecular notches bridged over the 肉柱 angular span, smoothed on θ and
+        along-axis, with the SUB-AORTIC semicircle-lumen fix where the Epi border
+        touches the cavity. This is the SAME core path as the Windows viewer, so
+        the Endo mask (and everything derived from it) is identical on both
+        platforms. Returns (comp, bbox) or None; runs off-thread."""
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QProgressDialog
+        from multi_dicomviewer.core.lv_compact import (
+            clip_mask_by_planes, endo_convex3d_mask, endo_envelope_mask)
+        epi = getattr(self, "_lvv_epi_surf", None)
+        apex = getattr(self, "_lvv_blood_apex", None)
+        lvv = self._lvv or {}
+        mv = self._lv_valves.get("mitral") or lvv.get("mitral")
+        av0 = self._lv_valves.get("aortic") or lvv.get("aortic")
+        if (self._vol is None or self._lvv_blood_comp is None
+                or self._lvv_blood_bbox is None or epi is None
+                or apex is None or mv is None):
+            return None
+        ax = epi.axis
+        apex = np.asarray(apex, float)
+        axis_dir = np.asarray(ax.axis, float)
+        axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
+        radial0 = np.asarray(ax.radial0, float)
+        # Generate the envelope up to the MOST-BASAL of the MV/AoV planes so the
+        # sub-aortic region is covered; the two-plane clip below trims it back.
+        along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
+        if av0 is not None:
+            along_base = max(along_base,
+                             float((np.asarray(av0[0], float) - apex) @ axis_dir))
+        if along_base <= 6.0:
+            return None
+        z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
+        blood = np.zeros(self._vol.shape, bool)
+        blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
+        dims = self._dims
+        # Epi mask (full-volume) for the SUB-AORTIC lumen fix + final clip: where
+        # the Epi border touches the blood, the compact myocardium bulges into the
+        # cavity, so use the PURE lumen contour there instead of bridging.
+        epi_full = None
+        try:
+            planes = []
+            if mv is not None:
+                planes.append((np.asarray(mv[0], float),
+                               np.asarray(mv[1], float)))
+            if av0 is not None:
+                planes.append((np.asarray(av0[0], float),
+                               np.asarray(av0[1], float)))
+            m = epi.inside_mask_bbox(dims, self._vol.shape, planes, apex)
+            if m and m[0] is not None:
+                comp2, bbox2 = m
+                epi_full = np.zeros(self._vol.shape, bool)
+                pz0, pz1, py0, py1, px0, px1 = bbox2
+                epi_full[pz0:pz1, py0:py1, px0:px1] = comp2
+        except Exception:                                # noqa: BLE001
+            epi_full = None
+        adv = self._lv_endo_adv()
+        knob = float(getattr(self, "_lv_endo_close_mm", 5.0))
+        method = "hull_smooth"          # Windows default (凸包滑らか + 膨らみ)
+        bridge = max(10.0, knob * 4.0)  # 肉柱 → bridged angular span
+        roundness = 0.0
+        bulge_frac = max(0.05, min(0.6, knob / 25.0))
+        grid_mm = float(adv["grid_mm"])
+        n_mer = int(adv["n_meridians"])
+        min_chord = float(adv["min_chord_mm"])
+        result: dict = {}
+
+        class _MaskWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    result["mask"] = endo_envelope_mask(
+                        blood, dims, apex, axis_dir, radial0,
+                        along_apex=1.0, along_base=along_base,
+                        sax_step_mm=1.0, close_mm=2.0, half_mm=70.0,
+                        grid_mm=grid_mm, method=method,
+                        bridge_deg=bridge, n_meridians=n_mer,
+                        roundness=roundness, bulge_frac=bulge_frac,
+                        min_chord_mm=min_chord, epi_mask=epi_full)
+                except Exception as exc:                 # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Deriving Endo region…"), "", 0, 0,
+                              self.window())
+        dlg.setWindowTitle(t("Endo (Auto)"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        worker = _MaskWorker()
+        worker.finished.connect(dlg.reset)
+        worker.start()
+        dlg.exec()
+        worker.wait()
+        worker.deleteLater()
+        if (result.get("err") or not result.get("mask")
+                or result["mask"][0] is None):
+            return None
+        comp, mbbox = result["mask"]
+        # Trim the flat basal cut back to the (tilted) MV + AoV planes so the Endo
+        # base coincides with the valve-clipped Epi base.
+        try:
+            planes = []
+            if mv is not None:
+                planes.append((np.asarray(mv[0], float),
+                               np.asarray(mv[1], float)))
+            if av0 is not None:
+                planes.append((np.asarray(av0[0], float),
+                               np.asarray(av0[1], float)))
+            if planes:
+                comp = clip_mask_by_planes(comp, mbbox, dims, apex, planes)
+        except Exception:                                # noqa: BLE001
+            pass
+        # Cavity ⊆ myocardium: clip the Endo to the (valve-clipped) Epi region so
+        # it can't poke past the Epi into the LVOT/aorta below the AoV.
+        try:
+            if epi_full is not None:
+                mz0, mz1, my0, my1, mx0, mx1 = mbbox
+                comp = np.asarray(comp, bool) & epi_full[mz0:mz1, my0:my1,
+                                                         mx0:mx1]
+        except Exception:                                # noqa: BLE001
+            pass
+        return comp, mbbox
+
     def _lvv_build_endo_model(self):
         """Build (but do NOT open) an Endo LVModel from the retained blood pool
         (compact-layer envelope, papillary filled; 13 handles/plane). Returns the
@@ -7977,10 +8135,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         return model
 
     def _lvv_endo_stale(self) -> bool:
-        if self._lv_endo_auto_model is None or self._lv_endo_auto_surf is None:
+        if self._lv_endo_mask_comp is None:
             return True
         sig = self._lvv_signature() if self._lvv is not None else None
-        return sig is None or sig != self._lv_endo_auto_sig
+        return sig is None or sig != self._lv_endo_mask_sig
 
     def _lvv_toggle_auto_endo(self, *args) -> None:
         """Auto-Endo表示: display-only overlay of the auto Endo border. Computes
@@ -8020,18 +8178,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
             return
         if self._lvv_endo_stale():
-            model = self._lvv_build_endo_model()
-            if model is None:
+            mask = self._lvv_build_endo_mask()       # 3-D envelope, endo ⊇ blood
+            if not mask:
                 self._lvv_auto_endo_btn.setChecked(False)
                 self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
                 return
-            self._lv_endo_auto_model = model
-            self._lv_endo_auto_surf = model.endo
-            self._lv_endo_auto_sig = (self._lvv_signature()
+            self._lv_endo_mask_comp, self._lv_endo_mask_bbox = mask
+            self._lv_endo_mask_sig = (self._lvv_signature()
                                       if self._lvv is not None else None)
         self._lvv_endo_show = True
         self._lvv_auto_endo_btn.setChecked(True)
         self._lvv_style_toggle(self._lvv_auto_endo_btn, "#ff8c28", "black")
+        # The Endo mask now exists → the LVD表示 / 壁厚 buttons can be used.
+        if getattr(self, "_lvv_lvd_btn", None) is not None:
+            self._lvv_lvd_btn.setEnabled(self._lv_endo_mask_comp is not None)
+            self._lvv_style_lvd_btn()
+        self._lvv_thick_sync_buttons()
         self._lvv_redraw()
 
     # -------- 壁厚 (wall thickness) heat maps ---------------------------------
@@ -8048,7 +8210,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         Endo surface, a computed blood pool, OR the inputs to build one."""
         if self._lvv is None or self._lvv_epi_surf is None:
             return False
-        if getattr(self, "_lv_endo_auto_surf", None) is not None:
+        if getattr(self, "_lv_endo_mask_comp", None) is not None:
             return True
         if getattr(self, "_lvv_blood_comp", None) is not None:
             return True
@@ -8111,12 +8273,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         epi = getattr(self, "_lvv_epi_surf", None)
-        endo = getattr(self, "_lv_endo_auto_surf", None)
         av = (self._lvv or {}).get("aortic")
         mv = (self._lvv or {}).get("mitral")
         apex = (self._lvv or {}).get("apex")
-        if (self._vol is None or epi is None or endo is None or av is None
-                or mv is None or apex is None):
+        if (self._vol is None or epi is None or av is None or mv is None
+                or apex is None or self._lv_endo_mask_comp is None
+                or self._lv_endo_mask_bbox is None):
             return None
         if mode == "sax" and getattr(epi, "axis", None) is None:
             return None
@@ -8125,6 +8287,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         c_a, n_a = np.asarray(av[0], float), np.asarray(av[1], float)
         c_m, n_m = np.asarray(mv[0], float), np.asarray(mv[1], float)
         apex = np.asarray(apex, float)
+        endo_comp = np.asarray(self._lv_endo_mask_comp, bool)
+        endo_bb = tuple(self._lv_endo_mask_bbox)
         ax = getattr(epi, "axis", None)
         axis_dir = None if ax is None else np.asarray(ax.axis, float)
         radial0 = None if ax is None else np.asarray(ax.radial0, float)
@@ -8138,9 +8302,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     planes = [(c_a, n_a), (c_m, n_m)]
                     epi_comp, epi_bb = epi.inside_mask_bbox(
                         dims, shape, planes, apex)
-                    endo_comp, endo_bb = endo.inside_mask_bbox(
-                        dims, shape, planes, apex)
-                    if epi_comp is None or endo_comp is None:
+                    if epi_comp is None:
                         return
                     ez0, ez1, ey0, ey1, ex0, ex1 = epi_bb
                     endo_in = np.zeros(epi_comp.shape, bool)
@@ -8200,9 +8362,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self.window(), t("壁厚"),
                     t("Set the apex, MV/AoV planes and an Epi surface first."))
                 return
-            # Build the Endo surface on demand (needs the blood pool).
-            if (getattr(self, "_lv_endo_auto_surf", None) is None
-                    or self._lvv_endo_stale()):
+            # Build the Endo mask on demand (needs the blood pool) so the user
+            # doesn't have to press Auto-Endo表示 first.
+            if self._lv_endo_mask_comp is None or self._lvv_endo_stale():
                 if getattr(self, "_lvv_blood_comp", None) is None:
                     self._lvv_thick_sync_buttons()
                     QMessageBox.information(
@@ -8210,18 +8372,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                         t("Press LV-Blood表示 (or Auto-Endo表示) first to compute "
                           "the blood pool, then 壁厚."))
                     return
-                model = self._lvv_build_endo_model()
-                if model is None:
+                mask = self._lvv_build_endo_mask()
+                if not mask:
                     self._lvv_thick_sync_buttons()
                     return
-                self._lv_endo_auto_model = model
-                self._lv_endo_auto_surf = model.endo
-                self._lv_endo_auto_sig = (self._lvv_signature()
+                self._lv_endo_mask_comp, self._lv_endo_mask_bbox = mask
+                self._lv_endo_mask_sig = (self._lvv_signature()
                                           if self._lvv is not None else None)
-            # Reuse a retained field if the Epi + Endo surfaces are unchanged.
+            # Reuse a retained field if the Epi surface + Endo mask are unchanged.
             cache = getattr(self, "_lvv_thick_cache", {})
             epi = getattr(self, "_lvv_epi_surf", None)
-            endo = getattr(self, "_lv_endo_auto_surf", None)
+            endo = getattr(self, "_lv_endo_mask_comp", None)
             hit = cache.get(target)
             if (hit is not None and hit.get("epi") is epi
                     and hit.get("endo") is endo):
@@ -8796,6 +8957,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
         self._lvv_endo_show = False
         self._lv_endo_manual_dict = None
         self._lvv_thick_mode = None
