@@ -643,8 +643,9 @@ class _Overlay(QWidget):
         p.setPen(hi_pen if (both or hl_line == "V") else base_pen)
         p.drawLine(S(ccx - half * uv[0], ccy - half * uv[1]),
                    S(ccx + half * uv[0], ccy + half * uv[1]))
-        if hi is not None and hi[1] == "rotate":
-            self._paint_rot_arrow(p, S, ccx, ccy, v._ps[key], uh, uv, hi[0])
+        if hi is not None and hi[1] in ("rotate", "move", "center"):
+            self._paint_gesture_arrow(p, S, ccx, ccy, v._ps[key],
+                                      uh, uv, hi[0], hi[1])
 
         # ▲ markers: the OTHER pane's projection direction, a constant
         # fraction of the viewport from the centre (size tied to ps).
@@ -683,37 +684,75 @@ class _Overlay(QWidget):
                 oy1 = ccy + half * uh[1] + off * uv[1]
                 p.drawLine(S(ox0, oy0), S(ox1, oy1))
 
-    def _paint_rot_arrow(self, p, S, ccx, ccy, ps, uh, uv, line):
-        """Two small double-headed curved arrows on BOTH sides of the caught
-        line's outer ends — the 'rotates either way' hint. Drawn in output
-        coords so it follows the crossline (redrawn each paint at the current
-        angle). Compact + dimmed yellow to match the highlight."""
-        base = uh if line == "H" else uv
-        base_ang = math.atan2(base[1], base[0])
-        r = 0.60 * ps
-        span = math.radians(3.75)
-        steps = 6
-        hs = 0.0125 * ps
+    @staticmethod
+    def _arrow_barbs(tip, nxt, hs):
+        """Two barbs at *tip*, fanned back from the outward direction tip←nxt.
+        Returned as a list of 2-point polylines (output coords)."""
+        tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
+        tl = math.hypot(tx, ty) or 1.0
+        tx, ty = tx / tl, ty / tl
+        out = []
+        for deg in (28.0, -28.0):
+            ca, sa = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+            bx = (-tx) * ca - (-ty) * sa
+            by = (-tx) * sa + (-ty) * ca
+            out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
+        return out
+
+    def _paint_gesture_arrow(self, p, S, ccx, ccy, ps, uh, uv, line, mode):
+        """Centreline gesture hint, drawn in OUTPUT coords so it FOLLOWS the
+        (possibly rotating/translating) crosshair on every repaint — parity with
+        the VTK viewer. rotate → two double-headed CURVED arrows (arcs) beside
+        the caught line's outer ends ('rotates either way'); move / center →
+        straight double-headed arrows 90° to the axis (= the translate
+        direction), positioned between the green ▲ and the centre, at 2/3 length.
+        A black halo is drawn behind the yellow for contrast on bright images."""
+        polylines = []
+        if mode == "rotate":
+            base = uh if line == "H" else uv
+            base_ang = math.atan2(base[1], base[0])
+            r = 0.60 * ps
+            span = math.radians(11.0 * 2.0 / 3.0)       # 2/3 length
+            steps = 10                                  # smoother = clearer arc
+            hs = 0.019 * ps                             # bigger heads (emphasis)
+            for side in (0.0, math.pi):                 # both ends of the line
+                ca0 = base_ang + side
+                arc = []
+                for i in range(steps + 1):
+                    ang = ca0 - span + (2.0 * span) * i / steps
+                    arc.append((ccx + r * math.cos(ang),
+                                ccy + r * math.sin(ang)))
+                polylines.append(arc)
+                polylines += self._arrow_barbs(arc[-1], arc[-2], hs)
+                polylines += self._arrow_barbs(arc[0], arc[1], hs)
+        else:                                           # move / center
+            r = 0.60 * ps
+            span = math.radians(11.0)
+            half = (2.0 / 3.0) * 0.5 * r * span         # 2/3 length, halved
+            D = 0.255 * ps                              # ▲ distance (matches _tris)
+            hs = 0.019 * ps
+            dirs = []
+            if line in ("H", "C"):
+                dirs.append(uh)
+            if line in ("V", "C"):
+                dirs.append(uv)
+            for pdx, pdy in dirs:                       # axis to position along
+                adx, ady = -pdy, pdx                    # arrow dir = 90° rotation
+                for sgn in (1.0, -1.0):                 # both sides (both ▲)
+                    cx = ccx + sgn * (D / 2.0) * pdx
+                    cy = ccy + sgn * (D / 2.0) * pdy
+                    a = (cx - half * adx, cy - half * ady)
+                    b = (cx + half * adx, cy + half * ady)
+                    polylines.append([a, b])
+                    polylines += self._arrow_barbs(b, a, hs)
+                    polylines += self._arrow_barbs(a, b, hs)
+        # Black halo behind, then the yellow arrows on top.
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.setPen(QPen(QColor(204, 204, 0, 255), 1.4))
-        for side in (0.0, math.pi):                     # both ends of the line
-            ca0 = base_ang + side
-            arc = []
-            for i in range(steps + 1):
-                ang = ca0 - span + (2.0 * span) * i / steps
-                arc.append((ccx + r * math.cos(ang), ccy + r * math.sin(ang)))
-            p.drawPolyline(QPolygonF([S(ox, oy) for (ox, oy) in arc]))
-            for tip, nxt in ((arc[-1], arc[-2]), (arc[0], arc[1])):
-                tx, ty = tip[0] - nxt[0], tip[1] - nxt[1]
-                tl = math.hypot(tx, ty) or 1.0
-                tx, ty = tx / tl, ty / tl
-                for deg in (28.0, -28.0):
-                    cA = math.cos(math.radians(deg))
-                    sA = math.sin(math.radians(deg))
-                    bx = (-tx) * cA - (-ty) * sA
-                    by = (-tx) * sA + (-ty) * cA
-                    p.drawLine(S(tip[0], tip[1]),
-                               S(tip[0] + bx * hs, tip[1] + by * hs))
+        for pen in (QPen(QColor(0, 0, 0, 255), 3.6),
+                    QPen(QColor(204, 204, 0, 255), 1.6)):
+            p.setPen(pen)
+            for poly in polylines:
+                p.drawPolyline(QPolygonF([S(ox, oy) for (ox, oy) in poly]))
 
     # -- measurements (outlines, calipers, handles, labels, results) -------
     # -- LV EF overlay (endo/epi splines, crossing dots, level/centre line,
