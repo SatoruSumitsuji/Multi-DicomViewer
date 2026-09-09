@@ -493,14 +493,34 @@ def _largest_circular_run(flags):
     return best_start, best_len
 
 
+def _circular_close_bool(flags, k):
+    """Circular morphological CLOSING (dilate then erode by half-window *k*) of a
+    boolean ring — bridges gaps up to ~2k wide (e.g. plaque remnants inside an
+    Epi↔lumen contact arc) while keeping the arc's outer extent."""
+    flags = np.asarray(flags, bool)
+    m = len(flags)
+    if k < 1 or m == 0:
+        return flags
+    idx = np.arange(m)
+    dil = flags.copy()
+    for s in range(-k, k + 1):
+        dil = dil | flags[(idx + s) % m]
+    ero = dil.copy()
+    for s in range(-k, k + 1):
+        ero = ero & dil[(idx + s) % m]
+    return ero
+
+
 def _apply_subaortic_lumen(env, filled, epi_mask, spacing_xyz, centre, u, v,
                            half_mm, grid_mm, ctr, rays, thetas, ang_grid,
                            rad_grid, contact_mm, semicircle_deg):
-    """Sub-aortic fix on ONE short-axis level: where the Epi border touches the
-    lumen (blood), the compact myocardium bulges INTO the cavity nearby, so the
-    bridging over-reads. Replace the Endo with the PURE LUMEN (blood) contour in
-    a *semicircle_deg* sector centred on the middle of the largest Epi↔lumen
-    contact arc; smooth the two junctions. Returns the (possibly rebuilt) env."""
+    """Sub-aortic fix on ONE short-axis level: where the Epi border TOUCHES the
+    lumen (radial myocardium ≈ 0 mm), the compact myocardium bulges into the
+    cavity nearby, so the bridging over-reads. Detect the 0-mm-contact arc
+    (bridging plaque-remnant gaps inside it); if that arc is WIDER than
+    *semicircle_deg*, replace the Endo with the PURE LUMEN (blood) contour all
+    the way round; otherwise only in a *semicircle_deg* sector centred on the arc
+    (soft-ramp junctions). Returns the (possibly rebuilt) env."""
     try:
         from scipy import ndimage
     except Exception:                                   # noqa: BLE001
@@ -511,26 +531,37 @@ def _apply_subaortic_lumen(env, filled, epi_mask, spacing_xyz, centre, u, v,
         return env
     ge = ndimage.binary_fill_holes(ge)
     n_mer = len(rays)
+    deg_per = 360.0 / n_mer
     r_env = np.array([_envelope_radius(env, ctr, dx, dy, grid_mm)
                       for _t, dx, dy in rays])
     r_blood = np.array([_envelope_radius(filled, ctr, dx, dy, grid_mm)
                         for _t, dx, dy in rays])
     r_epi = np.array([_envelope_radius(ge, ctr, dx, dy, grid_mm)
                       for _t, dx, dy in rays])
-    # Epi touches lumen where the radial myocardium (Epi−blood) is ~0.
-    contact = (r_blood > 1.0) & (r_epi > 0.0) & ((r_epi - r_blood) <= contact_mm)
+    # 0-mm contact: Epi−blood within one grid cell (discretisation ≈ 0 mm).
+    tol = max(float(contact_mm), float(grid_mm))
+    contact = (r_blood > 1.0) & (r_epi > 0.0) & ((r_epi - r_blood) <= tol)
+    if not contact.any():
+        return env
+    # Bridge plaque-remnant gaps (non-0 spots) inside the contact region so a
+    # single interruption doesn't split the arc — take the 0-mm part's max span.
+    k_gap = max(1, int(round(10.0 / deg_per)))          # bridge gaps up to ~20°
+    contact = _circular_close_bool(contact, k_gap)
     start, length = _largest_circular_run(contact)
     if start is None or length < 2:
-        return env                                      # no clear contact arc
-    deg_per = 360.0 / n_mer
-    center_idx = (start + (length - 1) / 2.0) % n_mer
-    half_idx = (float(semicircle_deg) * 0.5) / deg_per
+        return env
     idx = np.arange(n_mer)
-    d = np.abs(((idx - center_idx + n_mer / 2.0) % n_mer) - n_mer / 2.0)
-    # w=1 → pure lumen (inside the sector), w=0 → keep the bridged env; a soft
-    # ramp across the sector edge is the junction smoothing.
-    ramp = max(1.0, half_idx * 0.15)
-    w = np.clip((half_idx - d) / ramp + 0.5, 0.0, 1.0)
+    if length * deg_per > float(semicircle_deg):
+        # Contact arc wider than the sector → the whole section is lumen.
+        w = np.ones(n_mer, float)
+    else:
+        center_idx = (start + (length - 1) / 2.0) % n_mer
+        half_idx = (float(semicircle_deg) * 0.5) / deg_per
+        d = np.abs(((idx - center_idx + n_mer / 2.0) % n_mer) - n_mer / 2.0)
+        # w=1 → pure lumen inside the sector, w=0 → keep the bridged env; a soft
+        # ramp across the sector edge is the junction smoothing.
+        ramp = max(1.0, half_idx * 0.15)
+        w = np.clip((half_idx - d) / ramp + 0.5, 0.0, 1.0)
     r_final = w * r_blood + (1.0 - w) * r_env
     return _radius_to_mask(list(r_final), thetas, ang_grid, rad_grid)
 
@@ -540,7 +571,7 @@ def endo_envelope_mask(blood, spacing_xyz, apex_xyz, axis_dir, radial0,
                        half_mm=70.0, grid_mm=0.8, method="close",
                        bridge_deg=40.0, n_meridians=180, roundness=0.0,
                        bulge_frac=0.20, min_chord_mm=5.0, epi_mask=None,
-                       contact_mm=1.5, semicircle_deg=150.0):
+                       contact_mm=0.0, semicircle_deg=150.0):
     """3-D ENDOCARDIAL ENVELOPE mask = the blood pool with its papillary /
     trabecular indentations bridged, per short-axis level, rasterised back into
     the volume grid. Returns ``(comp bool[dz,dy,dx], bbox)`` or None.
