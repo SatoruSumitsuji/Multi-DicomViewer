@@ -14729,9 +14729,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
         ccx, ccy = self._cc(which)
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
-        r = 0.60 * ps                                   # arc radius (outer zone)
+        r = 0.42 * ps                                   # tighter circle = more bent
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(7.5)                        # 2× longer arc
+        span = math.radians(11.0)                       # bigger subtended angle
         steps = 10                                      # smoother = clearer arc
         hs = 0.019 * ps                                 # bigger heads (emphasis)
 
@@ -14748,17 +14748,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         return _polylines_pd(polylines)
 
     def _move_arrow_pd(self, which, line) -> vtkPolyData:
-        """Straight double-headed arrow(s) ALONG the caught axis — the 'this
-        MOVES/translates' hint, drawn apart from the rotate arcs. Centred at the
-        midpoint between the green ▲ and the centre (±D/2), the same length as
-        the rotate arc. ``line`` 'H'/'V' = one axis; 'C' = both (2-axis move)."""
+        """Straight double-headed arrow(s) — the 'this MOVES/translates' hint.
+        Positioned at the midpoint between the green ▲ and the centre (±D/2)
+        ALONG the caught axis, but ORIENTED 90° to it (= the translation
+        direction), at HALF the rotate-arc length. ``line`` 'H'/'V' = one axis;
+        'C' = both (2-axis move)."""
         th = math.radians(self._cross_ang[which])
         c_, s_ = math.cos(th), math.sin(th)
         ccx, ccy = self._cc(which)
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
-        r = 0.60 * ps
-        span = math.radians(7.5)
-        hl = r * span                                   # half-length = ½ arc length
+        r = 0.42 * ps
+        span = math.radians(11.0)
+        half = 0.5 * r * span                           # HALF the arc's length
         D = 0.255 * ps                                  # ▲ distance (matches _tris)
         hs = 0.019 * ps
         dirs = []
@@ -14767,11 +14768,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         if line in ("V", "C"):
             dirs.append((-s_, c_))
         polylines = []
-        for dx, dy in dirs:
+        for pdx, pdy in dirs:                           # axis to position along
+            adx, ady = -pdy, pdx                        # arrow dir = 90° rotation
             for sgn in (1.0, -1.0):                     # both sides (both ▲)
-                mid = sgn * (D / 2.0)
-                a = (ccx + (mid - hl) * dx, ccy + (mid - hl) * dy)
-                b = (ccx + (mid + hl) * dx, ccy + (mid + hl) * dy)
+                cx = ccx + sgn * (D / 2.0) * pdx
+                cy = ccy + sgn * (D / 2.0) * pdy
+                a = (cx - half * adx, cy - half * ady)
+                b = (cx + half * adx, cy + half * ady)
                 polylines.append([a, b])
                 polylines += self._arrow_barbs(b, a, hs)
                 polylines += self._arrow_barbs(a, b, hs)
