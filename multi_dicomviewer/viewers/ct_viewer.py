@@ -1428,12 +1428,22 @@ class _Pane:
         # rather than parallel-moves. Empty + hidden until _set_cross_highlight
         # fills it. NOT added to _overlay_actors (it must stay hidden in the
         # "Max Image" presentation mode where overlays are toggled off).
+        # White HALO under the rotate/move arrows (added first → drawn behind) so
+        # they stay legible on any background.
+        self.rot_arrow_halo_mapper = vtkPolyDataMapper()
+        self.rot_arrow_halo_mapper.SetInputData(vtkPolyData())
+        self.rot_arrow_halo = vtkActor()
+        self.rot_arrow_halo.SetMapper(self.rot_arrow_halo_mapper)
+        self.rot_arrow_halo.GetProperty().SetColor(1.0, 1.0, 1.0)   # white
+        self.rot_arrow_halo.GetProperty().SetLineWidth(4.2)         # wider bg
+        self.rot_arrow_halo.SetVisibility(False)
+        self.ren.AddActor(self.rot_arrow_halo)
         self.rot_arrow_mapper = vtkPolyDataMapper()
         self.rot_arrow_mapper.SetInputData(vtkPolyData())
         self.rot_arrow = vtkActor()
         self.rot_arrow.SetMapper(self.rot_arrow_mapper)
         self.rot_arrow.GetProperty().SetColor(0.8, 0.8, 0.0)    # yellow (dimmed)
-        self.rot_arrow.GetProperty().SetLineWidth(1.4)
+        self.rot_arrow.GetProperty().SetLineWidth(1.6)
         self.rot_arrow.SetVisibility(False)
         self.ren.AddActor(self.rot_arrow)
         # Two dashed lines = the other pane's slab-MIP width.
@@ -1959,7 +1969,17 @@ class _Pane:
         # default), but if presentation mode turns overlays OFF mid-hover, drop
         # it too so no stray arrow lingers.
         if not on:
-            self.rot_arrow.SetVisibility(False)
+            self.show_rot_arrow(False)
+
+    def set_rot_arrow(self, pd) -> None:
+        """Feed the rotate/move arrow geometry to both the yellow arrow and its
+        white halo (drawn behind)."""
+        self.rot_arrow_mapper.SetInputData(pd)
+        self.rot_arrow_halo_mapper.SetInputData(pd)
+
+    def show_rot_arrow(self, on: bool) -> None:
+        self.rot_arrow.SetVisibility(bool(on))
+        self.rot_arrow_halo.SetVisibility(bool(on))
 
     def render(self):
         # Skip the GL Render while this pane's canvas is not actually on screen
@@ -13512,11 +13532,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         hi = self._cross_hi.get(key)
         if hi is not None:
             if hi[1] == "rotate":
-                p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(key, hi[0]))
+                p.set_rot_arrow(self._rot_arrow_pd(key, hi[0]))
             else:
                 # move / center: keep the straight arrows glued to the moving
                 # crosshair centre so they FOLLOW a translate drag too.
-                p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(key, hi[0]))
+                p.set_rot_arrow(self._move_arrow_pd(key, hi[0]))
 
     def _update_info(self, key, title_only):
         p = self.pane[key]
@@ -14694,7 +14714,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             pr.SetColor(*self._CROSS_BASE)
             pr.SetLineWidth(1.0)
             pr.SetOpacity(0.5)
-        p.rot_arrow.SetVisibility(False)
+        p.show_rot_arrow(False)
         if line == "C":
             # Intersection (recentre) zone = 2-AXIS MOVE: light up BOTH crosslines
             # and show straight double-arrows on BOTH axes.
@@ -14703,8 +14723,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pr.SetColor(*self._CROSS_HI)
                 pr.SetLineWidth(1.6)
                 pr.SetOpacity(1.0)
-            p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(which, "C"))
-            p.rot_arrow.SetVisibility(True)
+            p.set_rot_arrow(self._move_arrow_pd(which, "C"))
+            p.show_rot_arrow(True)
         elif line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
             pr.SetColor(*self._CROSS_HI)
@@ -14712,10 +14732,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             pr.SetOpacity(1.0)
             # rotate = curved arcs; move = straight double-arrows on the axis.
             if mode == "rotate":
-                p.rot_arrow_mapper.SetInputData(self._rot_arrow_pd(which, line))
+                p.set_rot_arrow(self._rot_arrow_pd(which, line))
             else:
-                p.rot_arrow_mapper.SetInputData(self._move_arrow_pd(which, line))
-            p.rot_arrow.SetVisibility(True)
+                p.set_rot_arrow(self._move_arrow_pd(which, line))
+            p.show_rot_arrow(True)
         p.render()
 
     @staticmethod
@@ -14744,7 +14764,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
         r = 0.60 * ps                                   # original position/size
         base_ang = math.atan2(base[1], base[0])
-        span = math.radians(11.0)                       # bigger subtended = more bent
+        span = math.radians(11.0 * 2.0 / 3.0)           # 2/3 length
         steps = 10                                      # smoother = clearer arc
         hs = 0.019 * ps                                 # bigger heads (emphasis)
 
@@ -14772,7 +14792,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
         r = 0.60 * ps
         span = math.radians(11.0)
-        half = 0.5 * r * span                           # HALF the arc's length
+        half = (2.0 / 3.0) * 0.5 * r * span             # 2/3 length, halved
         D = 0.255 * ps                                  # ▲ distance (matches _tris)
         hs = 0.019 * ps
         dirs = []
