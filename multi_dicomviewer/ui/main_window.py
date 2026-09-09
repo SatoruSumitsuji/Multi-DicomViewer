@@ -2003,13 +2003,25 @@ class MainWindow(QMainWindow):
             container = self._grid.parentWidget()
         if container is None:
             container = panes[0].parentWidget()
+        # Temporarily hide the on-image DICOM-tag overlay (patient info) so it is
+        # NOT burned into the screenshot — the analysis results/borders stay. The
+        # identity still travels in the DICOM tags of the SC file. Restore after.
+        from PyQt6.QtWidgets import QApplication
+        was_hidden = getattr(self, "_overlay_hidden", False)
         items = []
-        for p in panes:
-            pm = self._pane_snapshot(p)
-            if pm is None or pm.isNull():
-                continue
-            tl = p.mapTo(container, QPoint(0, 0))
-            items.append((tl, p.size(), pm))
+        try:
+            if not was_hidden and hasattr(self, "_apply_overlay_hidden"):
+                self._apply_overlay_hidden(True)
+                QApplication.processEvents()
+            for p in panes:
+                pm = self._pane_snapshot(p)
+                if pm is None or pm.isNull():
+                    continue
+                tl = p.mapTo(container, QPoint(0, 0))
+                items.append((tl, p.size(), pm))
+        finally:
+            if not was_hidden and hasattr(self, "_apply_overlay_hidden"):
+                self._apply_overlay_hidden(False)
         if not items:
             QMessageBox.information(self, t("Export DICOM (Screen)"),
                                     t("表示中の画像がありません。"))
@@ -2067,6 +2079,11 @@ class MainWindow(QMainWindow):
         rgb = np.ascontiguousarray(rgb, np.uint8)
         ih, iw = rgb.shape[:2]
         ds = Dataset()
+        # Copy SpecificCharacterSet FIRST so Japanese PatientName/StudyDescription
+        # encode with the source's charset (else pydicom falls back to ASCII →
+        # mojibake). Default to UTF-8 when the source didn't specify one.
+        scs = getattr(hdr, "SpecificCharacterSet", None) if hdr is not None else None
+        ds.SpecificCharacterSet = scs if scs not in (None, "") else "ISO_IR 192"
         for tag in ("PatientName", "PatientID", "PatientBirthDate",
                     "PatientSex", "StudyInstanceUID", "StudyID", "StudyDate",
                     "StudyTime", "AccessionNumber", "StudyDescription",
