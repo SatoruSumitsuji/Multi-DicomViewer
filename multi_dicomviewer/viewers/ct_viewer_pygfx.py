@@ -6629,6 +6629,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_valve_buttons()
 
     def _lv_view_mv_perpendicular(self) -> None:
+        """Reorient both panes to view the MV plane perpendicular: pane A looks
+        down the MV normal (ring = circle face-on); pane B contains the normal so
+        the ring is edge-on a HORIZONTAL LINE. B's up is anchored to patient
+        SUPERIOR (base at top), and roll/pan are reset + reset_cam so 'a' really
+        lands horizontal on screen (parity with the VTK viewer)."""
         mv = self._lv_valves.get("mitral")
         if mv is None or self._vol is None:
             return
@@ -6638,14 +6643,29 @@ class CTViewer(CPRMixin, AbstractViewer):
                else np.array([0.0, 1.0, 0.0]))
         a = np.cross(n, ref); a = a / (np.linalg.norm(a) or 1.0)
         b = np.cross(n, a)
+        # B's up = patient SUPERIOR (the normal's sign is capture-arbitrary), so
+        # the MV line is edge-on horizontal with the base at the top.
+        up = -n
+        pb = getattr(self, "_pbasis", None)
+        if pb is not None:
+            try:
+                sup = np.linalg.inv(np.asarray(pb, float)) @ \
+                    np.array([0.0, 0.0, 1.0])       # patient Superior in vol space
+                d = float(np.dot(n, sup))
+                if abs(d) > 1e-6:
+                    up = n if d >= 0.0 else -n
+            except np.linalg.LinAlgError:
+                pass
         self._frame["A"] = self._ortho(a, b)
-        self._frame["B"] = self._ortho(a, -n)
+        self._frame["B"] = self._ortho(a, up)
         self._pc["A"] = c.copy(); self._pc["B"] = c.copy()
         self._center = c.copy()
         self._cross_ang = {"A": 0.0, "B": 0.0}
+        self._roll = {"A": 0.0, "B": 0.0}
+        self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
         self.set_side("Bi")
         self._view_initial = True
-        self._refresh()
+        self._refresh(reset_cam=True)
         for k in ("A", "B"):
             self._overlay[k].update()
 
@@ -9873,6 +9893,53 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return True
         return False
 
+    def _lv_snap_base_to_mv(self, pas, guard_mm: float = 20.0,
+                            eps_mm: float = 0.1) -> bool:
+        """Extend each traced long-axis plane's BASAL end of the *pas* border to
+        the common MV plane by APPENDING a terminal point = the end's ⟂
+        projection onto the MV plane, so the base reaches the mitral annulus
+        exactly (no prism gap). The user's own end point is kept; only ends
+        within *guard_mm* of the plane are extended (the apex end is a whole LV
+        away, never caught). Parity with the VTK viewer."""
+        if self._lv is None:
+            return False
+        mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return False
+        m = self._lv["model"]
+        ax = m._axis_for(pas)
+        store = m.endo_planes if pas == "endo" else m.epi_planes
+        if ax is None or not store:
+            return False
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        before = self._lv_geom_snap()
+        moved = False
+        for phi, arr in list(store.items()):
+            P = np.asarray(arr, float).reshape(-1, 3)
+            if len(P) < 2:
+                continue
+            d0 = float((P[0] - c) @ n)               # first end offset to plane
+            dL = float((P[-1] - c) @ n)              # last end offset to plane
+            pre = (P[0] - d0 * n) if eps_mm < abs(d0) <= guard_mm else None
+            app = (P[-1] - dL * n) if eps_mm < abs(dL) <= guard_mm else None
+            if pre is None and app is None:
+                continue
+            pieces = []
+            if pre is not None:
+                pieces.append(pre.reshape(1, 3))
+            pieces.append(P)
+            if app is not None:
+                pieces.append(app.reshape(1, 3))
+            m.set_long_axis_contour(phi, np.vstack(pieces), which=pas)
+            moved = True
+        if moved:
+            self._lv_rebuild_measures()             # redraw the extended trace
+            self._lv_show_plane()
+            self._lv_record_geom(before)            # one Ctrl+Z step
+        return moved
+
     def _lv_step_plane(self, delta) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":
             return
@@ -9883,6 +9950,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_record_scalar(before)         # Ctrl+Z / Ctrl+Y
             return
         self._lv_capture_current()
+        # Snap the just-traced plane's basal ends onto the MV plane before moving
+        # on, so the base stays on the mitral annulus as you trace plane by plane.
+        pas = self._lv.get("pass")
+        if pas in ("endo", "epi"):
+            self._lv_snap_base_to_mv(pas)
         pane = self._lv["pane"]
         self._measures[pane] = [
             m for m in self._measures[pane]
@@ -10619,6 +10691,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         self._lv_capture_current()
+        # Snap each traced plane's basal ends onto the common MV plane so the
+        # base reaches the mitral annulus EXACTLY (no prism gap) — parity with
+        # the VTK viewer; also makes the base-cut line reach the base.
+        for _pas in ("endo", "epi"):
+            self._lv_snap_base_to_mv(_pas)
         m = self._lv["model"]
         top = self.window()
         spacing = max(0.5, float(min(self._dims)))
