@@ -10776,8 +10776,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
-        # Remember the numbers so Save can persist them and Load can redisplay.
-        self._lv["vol_endo_ml"] = float(vol_ml) if pas == "endo" else None
+        # Remember the numbers so Save can persist them and Load can redisplay —
+        # under the ACTIVE pass's key (Endo → vol_endo_ml, Epi → vol_epi_ml).
+        self._lv["vol_endo_ml" if pas == "endo" else "vol_epi_ml"] = float(vol_ml)
         self._lv["vol_myo_ml"] = None if myo_ml is None else float(myo_ml)
         self._lv_sync_buttons()
         self._lv_update_text()
@@ -10955,13 +10956,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_capture_current()
         m = self._lv["model"]
-        if not (m.endo_planes or m.epi_planes):
-            QMessageBox.information(self.window(), t("LV EF"),
-                                    t("No borders to save yet."))
+        # Save the ACTIVE sub-mode's border only (Endo → EndoLv.json, Epi →
+        # EpiLv.json) — parity with the VTK viewer. Pick the pass; require it to
+        # have a border.
+        pas = self._lv.get("pass")
+        if pas not in ("endo", "epi"):
+            pas = "endo" if m.endo_planes else "epi"
+        planes = m.endo_planes if pas == "endo" else m.epi_planes
+        if not planes:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("No {p} border to save yet.").format(p=pas.capitalize()))
             return
         # No valid volume yet → ask whether to save without it or compute first.
+        vol_key = "vol_endo_ml" if pas == "endo" else "vol_epi_ml"
         has_vol = bool(self._lv.get("vol_done")
-                       and self._lv.get("vol_endo_ml") is not None)
+                       and self._lv.get(vol_key) is not None)
         if not has_vol:
             box = QMessageBox(self.window())
             box.setWindowTitle(t("LV EF"))
@@ -10978,22 +10988,39 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_compute_volume()      # runs CalcVol (blocks on its dialog)
             elif clicked is not b_no:
                 return                         # Cancel / closed → abort the save
+        suffix = ".EndoLv.json" if pas == "endo" else ".EpiLv.json"
         d = self._lv_save_dir()
-        default = os.path.join(d, self._lv_default_name()) if d \
-            else self._lv_default_name()
+        fname = self._lv_default_stem() + suffix
+        default = os.path.join(d, fname) if d else fname
+        flt = (("Endo LV (*.EndoLv.json)" if pas == "endo"
+                else "Epi LV (*.EpiLv.json)") + ";;JSON (*.json)")
         path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save LV borders"), default,
-            "LV (*.lv.json);;JSON (*.json)")
+            self.window(), t("Save LV borders"), default, flt)
         if not path:
             return
+        if not path.endswith(".json"):
+            path += suffix
+        # EndoLv.json = endo only, EpiLv.json = epi only: filter the combined
+        # model dict down to just this sub-mode's border.
         data = m.to_dict()
+        if pas == "endo":
+            data["epi_axis"] = None
+            data["epi_apex"] = None
+            data["epi_planes"] = {}
+        else:
+            data["endo_axis"] = None
+            data["endo_apex"] = None
+            data["endo_planes"] = {}
+            data.pop("endo_orig", None)
         data["series"] = self._lv_series_meta()
-        # Persist the computed volume (only while a VALID result is showing —
-        # vol_done is cleared on any edit) so Load can redisplay it.
-        if self._lv.get("vol_done") and self._lv.get("vol_endo_ml") is not None:
-            data["volume"] = {"endo_ml": float(self._lv["vol_endo_ml"]),
-                              "myo_ml": (None if self._lv.get("vol_myo_ml") is None
-                                         else float(self._lv["vol_myo_ml"]))}
+        # Persist THIS sub-mode's computed volume (only while a VALID result is
+        # showing — vol_done is cleared on any edit) so Load can redisplay it.
+        vv = self._lv.get(vol_key)
+        if self._lv.get("vol_done") and vv is not None:
+            data["volume"] = {
+                ("endo_ml" if pas == "endo" else "epi_ml"): float(vv),
+                "myo_ml": (None if self._lv.get("vol_myo_ml") is None
+                           else float(self._lv["vol_myo_ml"]))}
         self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -11024,7 +11051,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV borders"), self._lv_save_dir(),
-            "LV (*.lv.json *.lvef.json);;JSON (*.json)")
+            "LV (*.EndoLv.json *.EpiLv.json *.lv.json *.lvef.json);;"
+            "JSON (*.json)")
         if not path:
             return
         try:
@@ -11077,14 +11105,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         if volume and self._lv is not None:
             lines = [t("Loaded borders: endo {ne} / epi {nep} planes",
                        ne=len(model.endo_planes), nep=len(model.epi_planes))]
-            ev, mv = volume.get("endo_ml"), volume.get("myo_ml")
+            ev = volume.get("endo_ml")
+            pv = volume.get("epi_ml")            # Epi-only file (EpiLv.json)
+            mv = volume.get("myo_ml")
             if ev is not None:
                 lines.append(t("LV cavity volume: {v:.1f} mL", v=float(ev)))
                 self._lv["vol_endo_ml"] = float(ev)
+            if pv is not None:
+                lines.append(t("Epicardial volume: {v:.1f} mL", v=float(pv)))
+                self._lv["vol_epi_ml"] = float(pv)
             if mv is not None:
                 lines.append(t("Myocardial volume: {v:.1f} mL", v=float(mv)))
                 self._lv["vol_myo_ml"] = float(mv)
-            if ev is not None:
+            if ev is not None or pv is not None:
                 self._lv["vol_done"] = True
                 self._lv_result_lines = lines
                 self._lv_sync_buttons()
