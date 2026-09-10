@@ -2294,6 +2294,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: image right-click ▸ Export DICOM (Screen) → shell captures the whole
     #: displayed pane area and writes it as one Secondary-Capture DICOM.
     screen_export_requested = pyqtSignal()
+    #: LV-CoSync (Diastole/Systole live link): the LV short-axis LEVEL changed —
+    #: mm ALONG the LV long axis from the apex. The shell mirrors it to the peer
+    #: CT (raw mm by default, or apex→base fraction under 左室長補正). Emitted only
+    #: while this viewer is CoSync-linked and paged.
+    lv_cosync_level_changed = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2397,6 +2402,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lvd_shown = False
         self._lvv_lvd_pending = False
         self._lvv = None                 # LV blood-pool volume (LVEF) session
+        #: LV-CoSync (Diastole/Systole live link) active on this CT viewer — when
+        #: True, paging is redirected to an ALONG-LV-axis level step and the new
+        #: level is broadcast (lv_cosync_level_changed) so the peer CT mirrors it.
+        self._lv_cosync_on = False
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_disp_comp = None   # Epi border display mask (for the line)
         self._lvv_epi_disp_bbox = None
@@ -4459,6 +4468,156 @@ class CTViewer(CPRMixin, AbstractViewer):
             v = None
         self._lvv_lvl_cache = (comp, v)
         return v
+
+    # ---------------- LV-CoSync (Diastole/Systole live link) -----------------
+    def _lv_cosync_axis(self):
+        """(apex, axis_unit, along_min_mm, along_max_mm) of the LV long axis for
+        the CoSync level linkage, or None. The along range is the Epi border's
+        axial extent when the border mask is available (so paging spans exactly
+        apex→base), else a nominal apex..length window."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        if ax is None:
+            return None
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        nrm = float(np.linalg.norm(axis))
+        if nrm < 1e-9:
+            return None
+        axis = axis / nrm
+        amin, amax = 0.0, (float(getattr(ax, "length_mm", 0.0)) or 90.0)
+        comp = getattr(self, "_lvv_epi_disp_comp", None)
+        bbox = getattr(self, "_lvv_epi_disp_bbox", None)
+        if comp is not None and bbox is not None and self._dims is not None:
+            try:
+                comp_b = np.asarray(comp, bool)
+                if comp_b.any():
+                    sx, sy, sz = self._dims
+                    z0, z1, y0, y1, x0, x1 = bbox
+                    ts = np.arange(-50.0, 200.0, 0.5)
+                    P = apex[None, :] + ts[:, None] * axis[None, :]
+                    ix = np.round(P[:, 0] / sx).astype(np.int64)
+                    iy = np.round(P[:, 1] / sy).astype(np.int64)
+                    iz = np.round(P[:, 2] / sz).astype(np.int64)
+                    inb = ((ix >= x0) & (ix < x1) & (iy >= y0) & (iy < y1)
+                           & (iz >= z0) & (iz < z1))
+                    inside = np.zeros(len(ts), bool)
+                    sel = np.where(inb)[0]
+                    inside[sel] = comp_b[iz[sel] - z0, iy[sel] - y0, ix[sel] - x0]
+                    idx = np.where(inside)[0]
+                    if idx.size:
+                        amin, amax = float(ts[idx.min()]), float(ts[idx.max()])
+            except Exception:                            # noqa: BLE001
+                pass
+        return apex, axis, amin, amax
+
+    def lv_cosync_available(self) -> bool:
+        """True if this CT viewer can join an LV-CoSync link: in LV Vol mode with
+        a valid long axis."""
+        return (self._lvv is not None and self._lv is None
+                and self._lv_cosync_axis() is not None)
+
+    def set_lv_cosync_on(self, on: bool) -> None:
+        """Enter/leave LV-CoSync: while on, paging steps ALONG the long axis and
+        broadcasts the level. On entry the reslice centre is snapped onto the
+        axis so both peers start on-axis."""
+        self._lv_cosync_on = bool(on)
+        if self._lv_cosync_on:
+            lvl = self.lv_cosync_level_mm()
+            if lvl is not None:
+                self.lv_cosync_set_level_mm(lvl, silent=True)
+
+    def lv_cosync_length_mm(self):
+        """Apex→base length (mm) used to convert between mm and fraction under
+        左室長補正; None if no axis."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        _apex, _axis, amin, amax = info
+        return max(1e-3, amax - amin)
+
+    def lv_cosync_level_mm(self):
+        """Current LV short-axis level = the reslice centre projected onto the
+        long axis, mm from the apex. None if no axis."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        apex, axis, _amin, _amax = info
+        return float((np.asarray(self._center, float) - apex) @ axis)
+
+    def lv_cosync_set_level_mm(self, mm, silent: bool = False) -> None:
+        """Put the LV short-axis cut at *mm* along the long axis (clamped to the
+        Epi extent), keeping the reslice centre ON the axis. Emits
+        lv_cosync_level_changed unless *silent* (silent = driven by the peer)."""
+        info = self._lv_cosync_axis()
+        if info is None or self._image is None:
+            return
+        apex, axis, amin, amax = info
+        mm = float(np.clip(float(mm), amin, amax))
+        cur = float((np.asarray(self._center, float) - apex) @ axis)
+        mv = (mm - cur) * axis
+        self._center = np.asarray(self._center, float) + mv
+        # The short-axis pane (A, set by _lvv_setup_axis_views) follows the level.
+        try:
+            self._pc["A"] = np.asarray(self._pc["A"], float) + mv
+        except Exception:                                # noqa: BLE001
+            pass
+        self._clamp_center()
+        self._view_initial = False
+        self._refresh()
+        if not silent:
+            self.lv_cosync_level_changed.emit(float(mm))
+
+    def lv_cosync_level_fraction(self):
+        """Current level as an apex→base FRACTION (0 = apical Epi crossing, 1 =
+        basal). Used by 左室長補正 so the two phases align by relative depth
+        despite different LV lengths. None if no axis."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        apex, axis, amin, amax = info
+        span = max(1e-3, amax - amin)
+        cur = float((np.asarray(self._center, float) - apex) @ axis)
+        return (cur - amin) / span
+
+    def lv_cosync_set_level_fraction(self, frac, silent: bool = False) -> None:
+        """Put the level at an apex→base fraction (0..1) of THIS LV's own
+        length (左室長補正 linkage)."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return
+        _apex, _axis, amin, amax = info
+        self.lv_cosync_set_level_mm(amin + float(frac) * (amax - amin),
+                                    silent=silent)
+
+    def lv_cosync_step(self, step: int) -> None:
+        """One paging notch along the long axis (used when CoSync-linked)."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return
+        _apex, _axis, amin, amax = info
+        span = max(1.0, amax - amin)
+        dmm = float(step) * max(0.5, span / 48.0)        # ~48 steps apex→base
+        cur = self.lv_cosync_level_mm()
+        if cur is None:
+            return
+        self.lv_cosync_set_level_mm(cur + dmm, silent=False)
+
+    def lv_cosync_get_scale(self):
+        """Short-axis pane zoom (VTK ParallelScale), for the same-scale lock."""
+        try:
+            return float(self.pane["A"].ren.GetActiveCamera()
+                         .GetParallelScale())
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def lv_cosync_set_scale(self, ps) -> None:
+        try:
+            for k in ("A", "B"):
+                self.pane[k].ren.GetActiveCamera().SetParallelScale(float(ps))
+                self.pane[k].render()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
@@ -14523,6 +14682,12 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _wheel(self, which, delta):
         if self._image is None:
+            return
+        # LV-CoSync: paging steps ALONG the LV long axis and is broadcast to the
+        # peer CT (Diastole/Systole). Takes priority so both views page together.
+        if (getattr(self, "_lv_cosync_on", False)
+                and self._lvv is not None and self._lv is None):
+            self.lv_cosync_step(1 if delta > 0 else -1)
             return
         # LV short-axis: the wheel pages the cross-section LEVEL along the axis.
         if self._lv_sax_active():
