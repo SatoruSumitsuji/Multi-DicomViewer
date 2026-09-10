@@ -1315,6 +1315,8 @@ class MainWindow(QMainWindow):
         _bar_scroll.setMinimumWidth(0)       # don't pin the central min width
         _bar_scroll.setFixedHeight(_bar.sizeHint().height())
         col.addWidget(_bar_scroll)
+        # LV-CoSync control bar (hidden until a Diastole/Systole CT link is on).
+        col.addWidget(self._build_lv_cosync_bar())
         col.addWidget(self._grid_host, 1)
         self.setCentralWidget(central)
         # Studies dock: minimum width = roughly one minimum-size
@@ -1702,7 +1704,90 @@ class MainWindow(QMainWindow):
         self._multisync.showMaximized()
         self._multisync.raise_()
 
+    def _build_lv_cosync_bar(self):
+        """The thin control strip shown ONLY while an LV-CoSync (Diastole/Systole)
+        CT link is active: a 左室長補正 toggle (mm ↔ apex→base fraction) and a
+        CoSync解除 button. Hidden otherwise."""
+        self._lv_cosync_link = None
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(8, 2, 8, 2)
+        lay.setSpacing(8)
+        lay.addWidget(QLabel(t("LV-CoSync (Diastole↔Systole)")))
+        self._lv_cosync_corr_btn = QPushButton(t("左室長補正"))
+        self._lv_cosync_corr_btn.setCheckable(True)
+        self._lv_cosync_corr_btn.setToolTip(t(
+            "OFF: 同じmm(心尖からの絶対距離)で連動＝左室長の差が見える。"
+            "ON: apex→base 分率で連動＝全長を揃える。"))
+        self._lv_cosync_corr_btn.toggled.connect(self._lv_cosync_set_correct)
+        lay.addWidget(self._lv_cosync_corr_btn)
+        self._lv_cosync_exit_btn = QPushButton(t("CoSync解除"))
+        self._lv_cosync_exit_btn.clicked.connect(self._lv_cosync_stop)
+        lay.addWidget(self._lv_cosync_exit_btn)
+        lay.addStretch(1)
+        self._lv_cosync_bar = bar
+        bar.setVisible(False)
+        return bar
+
+    def _lv_cosync_set_correct(self, on: bool) -> None:
+        if self._lv_cosync_link is not None:
+            self._lv_cosync_link.set_length_correct(bool(on))
+
+    def _lv_cosync_stop(self) -> None:
+        """Tear down the active LV-CoSync link and hide the control bar."""
+        if self._lv_cosync_link is not None:
+            self._lv_cosync_link.teardown()
+            self._lv_cosync_link = None
+        if getattr(self, "_lv_cosync_bar", None) is not None:
+            self._lv_cosync_bar.setVisible(False)
+        self.statusBar().showMessage(t("LV-CoSync を解除しました。"), 4000)
+
+    def _lv_cosync_ct_viewers(self) -> list:
+        """The shown CT viewers eligible for an LV-CoSync link (in LV Vol mode
+        with a valid long axis), in reading order — at most the first two."""
+        out = []
+        for pane in self._shown_panes():
+            v = pane.current_viewer() if hasattr(pane, "current_viewer") else None
+            if (v is not None and getattr(v, "handles_modality", "") == "CT"
+                    and hasattr(v, "lv_cosync_available")
+                    and v.lv_cosync_available()):
+                out.append(v)
+        return out
+
+    def _start_lv_cosync(self, viewers) -> None:
+        """Start the CT-主体 branch of CoSync: a live Diastole/Systole link on the
+        two shown LV-analysed CT panes."""
+        from multi_dicomviewer.ui.lv_cosync import LvCosyncLink
+        if self._lv_cosync_link is not None:
+            self._lv_cosync_stop()
+        self._lv_cosync_link = LvCosyncLink(viewers[0], viewers[1], self)
+        if getattr(self, "_lv_cosync_corr_btn", None) is not None:
+            self._lv_cosync_corr_btn.blockSignals(True)
+            self._lv_cosync_corr_btn.setChecked(False)   # mm by default
+            self._lv_cosync_corr_btn.blockSignals(False)
+        if getattr(self, "_lv_cosync_bar", None) is not None:
+            self._lv_cosync_bar.setVisible(True)
+        self.statusBar().showMessage(
+            t("LV-CoSync 開始: 2つのCTを同一縮尺・G同時ページング(mm)で連動。"
+              "左室長補正で分率連動に切替。"), 6000)
+
     def _open_coreg(self) -> None:
+        """Tools ▸ CoSync — single entry, then branch on what's shown: IVUS/XA
+        (or a coronary-CPR CT) → the IVUS-主体 snapshot window (CoregWindow);
+        else two LV-analysed CT panes → the CT-主体 live Diastole/Systole link."""
+        # CT-主体 branch: no IVUS/XA pull-back, but two LV-analysed CT panes.
+        has_pullback = any(
+            (se := self._series_by_uid.get(p.shown_series_uid())) is not None
+            and se.modality in (Modality.IVUS, Modality.XA)
+            for p in self._shown_panes())
+        if not has_pullback:
+            cts = self._lv_cosync_ct_viewers()
+            if len(cts) >= 2:
+                self._start_lv_cosync(cts[:2])
+                return
+        self._open_coreg_ivus()
+
+    def _open_coreg_ivus(self) -> None:
         """Launch the CoSync window, seeded with the IVUS and XA
         series currently shown in the panes (IVUS pull-backs + the
         representative angio view[s]). Needs ≥1 IVUS and ≥1 XA."""
@@ -1756,9 +1841,10 @@ class MainWindow(QMainWindow):
         if not has_ivus:
             QMessageBox.information(
                 self, t("CoSync"),
-                t("Show at least one IVUS pull-back in the panes first. "
-                  "(XA angio is optional — with no XA this behaves like a "
-                  "multi-IVUS sync viewer.)"),
+                t("Show at least one IVUS pull-back in the panes first "
+                  "(XA angio is optional). For a Diastole↔Systole CT compare, "
+                  "show TWO CT panes both in LV Vol analysis (with the long axis "
+                  "set) and press CoSync again."),
             )
             return
         self._coreg_win = CoregWindow(specs)
