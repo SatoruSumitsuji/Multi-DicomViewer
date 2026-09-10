@@ -4414,6 +4414,52 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_diam_pts = pts
         return v
 
+    def _lvv_lv_length_mm(self):
+        """LVL (Left Ventricular Length) = the distance between the TWO points
+        where the LV long axis crosses the Epi BORDER (apical crossing → basal
+        crossing). The apex LANDMARK is deliberately NOT used: LVL is the pure
+        axis∩Epi extent, so any gap between the picked apex and the reconstructed
+        Epi apical cap does not affect it. Reads the valve-clipped Epi border mask
+        (the same mask the orange Epi line is drawn from); None until it exists.
+        Cached by mask identity (cheap; recomputed only when the Epi changes)."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        comp = getattr(self, "_lvv_epi_disp_comp", None)
+        bbox = getattr(self, "_lvv_epi_disp_bbox", None)
+        if ax is None or comp is None or bbox is None or self._dims is None:
+            return None
+        cache = getattr(self, "_lvv_lvl_cache", None)
+        if cache is not None and cache[0] is comp:
+            return cache[1]
+        v = None
+        try:
+            comp_b = np.asarray(comp, bool)
+            if comp_b.any():
+                sx, sy, sz = self._dims
+                z0, z1, y0, y1, x0, x1 = bbox
+                apex = np.asarray(ax.apex, float)
+                axis = np.asarray(ax.axis, float)
+                axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+                # Sample the axis line finely over a range that generously spans
+                # any LV; the Epi mask membership bounds the two crossings.
+                ts = np.arange(-50.0, 200.0, 0.5)
+                P = apex[None, :] + ts[:, None] * axis[None, :]
+                ix = np.round(P[:, 0] / sx).astype(np.int64)
+                iy = np.round(P[:, 1] / sy).astype(np.int64)
+                iz = np.round(P[:, 2] / sz).astype(np.int64)
+                inb = ((ix >= x0) & (ix < x1) & (iy >= y0) & (iy < y1)
+                       & (iz >= z0) & (iz < z1))
+                inside = np.zeros(len(ts), bool)
+                sel = np.where(inb)[0]
+                inside[sel] = comp_b[iz[sel] - z0, iy[sel] - y0, ix[sel] - x0]
+                idx = np.where(inside)[0]
+                if idx.size:
+                    v = float(ts[idx.max()] - ts[idx.min()])
+        except Exception:                                # noqa: BLE001
+            v = None
+        self._lvv_lvl_cache = (comp, v)
+        return v
+
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
         Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
@@ -12377,6 +12423,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             diam = self._lvv_lv_diameter_mm()
             if diam is not None:
                 lines.append(t("LVD: {v:.1f} mm", v=diam))
+            # LVL = axis∩Epi length (apical↔basal Epi crossings; no apex point).
+            lvl = self._lvv_lv_length_mm()
+            if lvl is not None:
+                lines.append(t("LVL: {v:.1f} mm", v=lvl))
             return lines
         lv = self._lv
         if lv is None:
