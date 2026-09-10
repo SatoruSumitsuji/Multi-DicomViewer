@@ -2388,7 +2388,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._measure_drag(key, x, y)
                 return
             if self._draft and self._draft["pane"] == key:
-                # Update the dashed draft preview that follows the cursor.
+                # Update the dashed draft preview that follows the cursor. Keep
+                # the Shift 縦横/正円 constraint LIVE during this hover (2nd-point
+                # positioning happens with no button held, so it goes through
+                # here, not the drag branch) — else the Ellipse preview stays an
+                # ellipse while Shift is held.
+                _sh = "Shift" in (ev.get("modifiers") or ())
+                self._meas_ortho = _sh
+                self._meas_circle = _sh
                 self._clear_hover_handle()
                 self._meas_hover = self._disp_to_world(key, x, y)
                 self._lv_apex_hover(key, x, y)     # glow apex if cursor in range
