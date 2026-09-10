@@ -17,6 +17,11 @@ PyQt6>=6.7
 pydicom>=3.0
 numpy>=2.0
 
+# LV analysis (Auto-Endo envelope mask, wall thickness, blood pool) uses SciPy
+# (ndimage / spatial). On Windows VTK pulled it in transitively; the Mac build
+# has no VTK, so it MUST be declared here or Auto-Endo/壁厚 silently fail.
+scipy>=1.11
+
 # Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
 pylibjpeg>=2.0
 pylibjpeg-libjpeg>=2.1
