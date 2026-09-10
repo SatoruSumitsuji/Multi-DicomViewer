@@ -9721,8 +9721,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 np.asarray(self._pc[sa]).copy(),
                 self._cross_ang[sa], self._thick[sa])
             lv["fitted_sax"] = False
-            lv["sax_edit"] = None                    # no border armed for editing
-            self._lv_apply_target(None)             # no capture in short-axis
+            # Arm the CURRENTLY-SELECTED pass for editing right away, so the user
+            # can correct its border in SAX without re-clicking Endo/Epi first
+            # (parity with the VTK viewer — Mac used to leave it un-armed, so the
+            # Epi/Endo border points did not respond in SAX). Only if that pass
+            # actually has a border.
+            armed = lv.get("pass") if lv.get("pass") in ("endo", "epi") else None
+            if armed == "endo" and not endo_ok:
+                armed = None
+            elif armed == "epi" and not epi_ok:
+                armed = None
+            lv["sax_edit"] = armed
+            self._lv_apply_target(armed)            # arm that border for editing
             self.set_side("Bi")
             self._lv_sync_buttons()                  # SAX entry → all 4 grey
             self._lv_show_sax_both()
