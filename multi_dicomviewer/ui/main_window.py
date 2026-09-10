@@ -1985,6 +1985,47 @@ class MainWindow(QMainWindow):
         except Exception:                            # noqa: BLE001
             return None
 
+    def _screen_export_stem(self) -> str:
+        """Filename stem for the screen DICOM = '<name>;<date>;Se<NNN>' taken
+        from the SELECTED pane's series header. If nothing is selected (should
+        not happen), fall back to the TOP-LEFT shown pane (_shown_panes is in
+        reading order, so [0] is top-left). Sanitised; 'screen' if no header."""
+        import re
+        p = self._active
+        shown = self._shown_panes()
+        if p is None or p not in shown:
+            p = shown[0] if shown else None
+        hdr = None
+        if p is not None:
+            v = p.current_viewer() if hasattr(p, "current_viewer") else None
+            try:
+                if v is not None and hasattr(v, "current_header"):
+                    hdr = v.current_header()
+            except Exception:                            # noqa: BLE001
+                hdr = None
+            if hdr is None:
+                try:
+                    se = self._series_by_uid.get(p.shown_series_uid())
+                    hdr = getattr(se, "header", None)
+                except Exception:                        # noqa: BLE001
+                    hdr = None
+        if hdr is None:
+            return "screen"
+        pn = str(getattr(hdr, "PatientName", "") or "")
+        name = pn.split("^")[0].strip() or pn.strip()
+        date = str(getattr(hdr, "StudyDate", "")
+                   or getattr(hdr, "AcquisitionDate", "") or "")
+        sn = str(getattr(hdr, "SeriesNumber", "") or "")
+        seno = ""
+        if sn:
+            try:
+                seno = "Se%03d" % int(sn)
+            except (TypeError, ValueError):
+                seno = "Se" + sn
+        stem = ";".join(part for part in (name, date, seno) if part)
+        stem = re.sub(r'[\\/:*?"<>|]', "_", stem).strip()
+        return stem or "screen"
+
     def export_screen_dicom(self) -> None:
         """Right-click ▸ Export DICOM (Screen): capture the WHOLE displayed pane
         area (all shown panes + overlays, composited to match the layout) and
@@ -2051,7 +2092,8 @@ class MainWindow(QMainWindow):
                 ddir = os.path.dirname(os.path.normpath(idir))
         except Exception:                            # noqa: BLE001
             pass
-        default = os.path.join(ddir, "screen.dcm") if ddir else "screen.dcm"
+        fname = self._screen_export_stem() + ".Lv.dcm"
+        default = os.path.join(ddir, fname) if ddir else fname
         path, _ = QFileDialog.getSaveFileName(
             self, t("Export DICOM (Screen)"), default, "DICOM (*.dcm)")
         if not path:
