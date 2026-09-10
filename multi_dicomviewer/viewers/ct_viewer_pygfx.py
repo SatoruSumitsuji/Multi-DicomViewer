@@ -548,7 +548,7 @@ class _Overlay(QWidget):
         # LV Vol voxel tints: cyan (in-range blood, 血流領域表示) then red
         # (measured region, 計測領域) drawn OVER the grayscale but UNDER the
         # crosshair / measures / markers. Cached RGBA images (see _refresh).
-        if v._lvv is not None:
+        if v._lvv is not None or (v._lv is not None and v._lvv_mask_on):
             cyan = v._lvv_cyan_img.get(key)
             if cyan is not None:
                 p.drawImage(self.rect(), cyan)
@@ -4327,8 +4327,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._mip_img[key] = None
             # LV Vol voxel tints follow the plane on any view change (recentre /
             # move / rotate / spin / page), so rebuild them whenever the pane is
-            # refreshed while in LV Vol mode.
-            if self._lvv is not None:
+            # refreshed while in LV Vol mode — OR while the contour-LV measured
+            # region (Epi領域表示) is on.
+            if self._lvv is not None or (self._lv is not None
+                                         and self._lvv_mask_on):
                 self._lvv_refresh_overlays(key)
             p.render()
             self._overlay[key].update()
@@ -7785,7 +7787,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return None
             mv = _trilinear_sample(self._lvv_mask_vol, vx, vy, vz)
             inmask = (mv >= 0.5) & ~oob
-            col = (64, 191, 255, 140)          # LV-Blood = 水色 (light blue)
+            # Contour LV (Epi/Endo trace) measured region → RED (matches the
+            # Windows viewer); LV-Blood region → 水色 (light blue).
+            col = ((255, 64, 64, 140) if (self._lv is not None
+                                          and self._lvv is None)
+                   else (64, 191, 255, 140))
         if not inmask.any():
             return None
         rgba = np.zeros((ih, iw, 4), np.uint8)
@@ -7809,6 +7815,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             if (getattr(self, "_lvv_thick_mode", None) is not None
                     and getattr(self, "_lvv_thick_vol", None) is not None):
                 thick = self._lvv_plane_rgba(key, "wall")
+        elif (self._lv is not None and self._lvv_mask_vol is not None
+              and self._lvv_mask_on):
+            # Contour LV (Epi/Endo trace): the measured Epi/Endo region uses the
+            # same red channel (Epi領域表示).
+            red = self._lvv_plane_rgba(key, "red")
         self._lvv_cyan_img[key] = cyan
         self._lvv_red_img[key] = red
         self._lvv_thick_img[key] = thick
@@ -10803,6 +10814,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         top = self.window()
         spacing = max(0.5, float(min(self._dims)))
+        # Bound the volume BASALLY by the common MV/AoV valve planes (same region
+        # the Blood volume uses) and get the measured-region MASK in ONE pass, so
+        # Epi領域表示 can show the red region after Calc Vol.
+        mv = self._lv_valves.get("mitral")
+        av = self._lv_valves.get("aortic")
+        dims = self._dims
+        shape = self._vol.shape
 
         result: dict = {}
 
@@ -10810,7 +10828,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    result["vol"] = m.volume_ml(spacing, pas)
+                    comp, bbox, vol, _vmv = m.inside_mask_volumes(
+                        dims, shape, pas, mv, av)
+                    result["vol"] = vol
+                    result["mask"] = (comp, bbox)
                     # EF/myocardium needs BOTH borders; None when only one traced.
                     result["myo"] = m.myocardial_volume_ml(spacing)
                 except Exception as exc:                  # noqa: BLE001
@@ -10853,8 +10874,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         # under the ACTIVE pass's key (Endo → vol_endo_ml, Epi → vol_epi_ml).
         self._lv["vol_endo_ml" if pas == "endo" else "vol_epi_ml"] = float(vol_ml)
         self._lv["vol_myo_ml"] = None if myo_ml is None else float(myo_ml)
+        # Build the measured-region red overlay volume (full grid 0/1) from the
+        # mask so Epi領域表示 can show it — reuses the blood/red display channel
+        # (_lvv_mask_vol via _lvv_plane_rgba 'red'). Show it now if the button is
+        # already toggled on.
+        self._lv_show_measured_mask(result.get("mask"))
         self._lv_sync_buttons()
         self._lv_update_text()
+
+    def _lv_show_measured_mask(self, mask) -> None:
+        """Turn (comp, bbox) from Calc Vol into the full-grid red overlay volume
+        (_lvv_mask_vol) that _lvv_plane_rgba('red') reslices, so Epi領域表示 shows
+        the measured Endo/Epi region. Reflects the region button's state."""
+        if not mask or mask[0] is None or self._vol is None:
+            return
+        comp, bbox = mask
+        z0, z1, y0, y1, x0, x1 = bbox
+        full = np.zeros(self._vol.shape, np.float32)
+        full[z0:z1, y0:y1, x0:x1][np.asarray(comp, bool)] = 1.0
+        self._lvv_mask_vol = full
+        self._lvv_mask_alpha = 0.5                # Epi/Endo region = 50% red
+        # If the user already has Epi領域表示 on, reveal it right away.
+        if (getattr(self, "_lv_region_btn", None) is not None
+                and self._lv_region_btn.isChecked()):
+            self._lvv_mask_on = True
+        self._lvv_redraw()
 
     def _lv_toggle_wall(self) -> None:
         """Toggle the short-axis wall-thickness colour map. Turning it ON shows
