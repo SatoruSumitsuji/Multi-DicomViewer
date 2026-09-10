@@ -1212,7 +1212,8 @@ class _Overlay(QWidget):
                     draw_dashed((centre, q), (255, 140, 0))
                 # Orange marker picks; the one being dragged turns green (like a
                 # polygon vertex).
-                ca_edit = edit_ca and mi == edit_mi and 0 <= edit_vi < len(ca["pts"])
+                ca_edit = (edit_ca and mi == edit_mi and edit_vi is not None
+                           and 0 <= edit_vi < len(ca["pts"]))
                 ca_hov = (hov_ca and mi == hov_mi
                           and 0 <= hov_vi < len(ca["pts"]) and not ca_edit)
                 ca_idle = [q for ci, q in enumerate(ca["pts"])
@@ -1244,7 +1245,7 @@ class _Overlay(QWidget):
             dots_hollow(idle_off, QColor(255, 217, 0, 128), 3.3)  # off-plane 50%
             dots(hov_pts, QColor(59, 219, 90), 6.0)             # hover green
             if (not locked and mi == edit_mi and not edit_ca
-                    and 0 <= edit_vi < len(m["pts"])):
+                    and edit_vi is not None and 0 <= edit_vi < len(m["pts"])):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
             # numeric id label at the anchor
             p.setPen(QColor(255, 217, 0))
@@ -1298,8 +1299,13 @@ class _Overlay(QWidget):
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 if d["type"] == "ellipse" and hover is not None:
+                    # Honour the Shift 正円 constraint in the PREVIEW too (the
+                    # commit already does), so the 2nd-point rubber-band shows a
+                    # circle, not an ellipse, while Shift is held.
+                    _mr = 1.0 if getattr(v, "_meas_circle", False) else 0.5
                     p.drawPolyline(poly(_ellipse_outline(
-                        _ellipse_from_major(d["pts"][0], hover))))
+                        _ellipse_from_major(d["pts"][0], hover,
+                                            minor_ratio=_mr))))
                 else:
                     preview = list(d["pts"])
                     if hover is not None and d["type"] != "ellipse":
@@ -5545,7 +5551,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         for m in self._measures[key]:
             p3 = m.get("pts3d")
-            if p3 and m["type"] == "polyline" and len(p3) == len(m["pts"]):
+            # polyline = vessel traces; polygon = LV valve rings (MV/AoV) — both
+            # store ABSOLUTE 3-D points and must re-project each view change, or
+            # the ring sits at stale 2-D coords (the MV/AoV "big offset" bug).
+            if (p3 and m["type"] in ("polyline", "polygon")
+                    and len(p3) == len(m["pts"])):
                 m["pts"] = [self._world3d_to_out(key, P) for P in p3]
         d = self._draft
         if (d is not None and d.get("pane") == key and d.get("pts3d")
@@ -6470,11 +6480,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not self._cl_btn.isEnabled():          # suppressed / 2-D → greyed out
             self._cl_btn.setStyleSheet(
                 "background:#e6e6e6;color:#a8a8a8;border:1px solid #d8d8d8;")
-        else:
-            self._cl_btn.setStyleSheet("")        # default checkable look
+            return
+        # Explicit ON/OFF backgrounds — a checkable button shows no tint under
+        # the macOS native style, so set the colour ourselves (parity with VTK).
+        on = self._cl_btn.isChecked()
+        self._cl_btn.setStyleSheet(
+            "background:#b8860b;color:black;" if on
+            else "background:white;color:black;")
 
     def _toggle_centerline(self):
         self._cl_on = self._cl_btn.isChecked()
+        self._style_cl()
         for k in ("A", "B"):
             self._overlay[k].update()
 
