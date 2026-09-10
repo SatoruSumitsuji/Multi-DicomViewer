@@ -10708,12 +10708,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lv is None or self._lv.get("phase") != "contour":
             return
         self._lv_capture_current()
-        # Snap each traced plane's basal ends onto the common MV plane so the
-        # base reaches the mitral annulus EXACTLY (no prism gap) — parity with
-        # the VTK viewer; also makes the base-cut line reach the base.
-        for _pas in ("endo", "epi"):
-            self._lv_snap_base_to_mv(_pas)
         m = self._lv["model"]
+        # Per-sub-mode: Calc Vol computes the ACTIVE pass's OWN enclosed volume
+        # (Endo → LV cavity, Epi → epicardial). Myocardium / EF (Epi − Endo) is a
+        # separate cross-file tool, so this no longer needs BOTH borders — an
+        # Epi-only trace must NOT be rejected with an "Endo" message (parity with
+        # the VTK viewer).
+        pas = self._lv.get("pass")
+        if pas not in ("endo", "epi"):
+            pas = "endo" if m.endo_planes else "epi"
+        # Snap the active pass's basal ends onto the common MV plane so the base
+        # reaches the mitral annulus EXACTLY (no prism gap); also makes the
+        # base-cut line reach the base.
+        self._lv_snap_base_to_mv(pas)
+        planes = m.endo_planes if pas == "endo" else m.epi_planes
+        if len(planes) < 3:
+            QMessageBox.information(
+                self.window(), t("LV EF"),
+                t("Trace the {p} border on at least 3 planes first.").format(
+                    p=pas.capitalize()))
+            return
         top = self.window()
         spacing = max(0.5, float(min(self._dims)))
 
@@ -10723,7 +10737,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             def run(self_) -> None:
                 try:
                     m.build()
-                    result["endo"] = m.volume_ml(spacing, "endo")
+                    result["vol"] = m.volume_ml(spacing, pas)
+                    # EF/myocardium needs BOTH borders; None when only one traced.
                     result["myo"] = m.myocardial_volume_ml(spacing)
                 except Exception as exc:                  # noqa: BLE001
                     result["err"] = str(exc)
@@ -10746,20 +10761,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                 top, t("LV EF"),
                 t("Could not build the LV surface: {err}", err=result["err"]))
             return
-        endo_ml = result.get("endo")
-        if endo_ml is None:
+        vol_ml = result.get("vol")
+        if vol_ml is None:
             QMessageBox.information(
                 top, t("LV EF"),
-                t("Trace the endo border on at least 3 planes first."))
+                t("Trace the {p} border on at least 3 planes first.").format(
+                    p=pas.capitalize()))
             return
-        lines = [t("LV cavity volume: {v:.1f} mL", v=endo_ml)]
+        # Label by pass: Endo → LV cavity, Epi → epicardial.
+        lines = [t("LV cavity volume: {v:.1f} mL", v=vol_ml) if pas == "endo"
+                 else t("Epicardial volume: {v:.1f} mL", v=vol_ml)]
         myo_ml = result.get("myo")
         if myo_ml is not None:
             lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
         self._lv_result_lines = lines
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the numbers so Save can persist them and Load can redisplay.
-        self._lv["vol_endo_ml"] = float(endo_ml)
+        self._lv["vol_endo_ml"] = float(vol_ml) if pas == "endo" else None
         self._lv["vol_myo_ml"] = None if myo_ml is None else float(myo_ml)
         self._lv_sync_buttons()
         self._lv_update_text()
