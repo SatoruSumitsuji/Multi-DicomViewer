@@ -9991,6 +9991,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         c = np.asarray(mv[0], float)
         n = np.asarray(mv[1], float)
         n = n / (np.linalg.norm(n) or 1.0)
+        # Decide which end is BASAL by its ALONG-AXIS position (not its distance
+        # to the plane): the apex sits at along≈0, the base at along≈along_mv, so
+        # an end well past the apex is basal and must reach the annulus EVEN IF it
+        # stopped far short of it. The old fixed 20 mm distance guard failed for a
+        # basal end more than 20 mm from the plane; the apex end (along≈0) is
+        # still never caught.
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+        along_mv = float((c - apex) @ axis)          # base level along the axis
+        thr = 0.4 * along_mv if along_mv > 1.0 else -1.0
         before = self._lv_geom_snap()
         moved = False
         for phi, arr in list(store.items()):
@@ -9999,8 +10010,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 continue
             d0 = float((P[0] - c) @ n)               # first end offset to plane
             dL = float((P[-1] - c) @ n)              # last end offset to plane
-            pre = (P[0] - d0 * n) if eps_mm < abs(d0) <= guard_mm else None
-            app = (P[-1] - dL * n) if eps_mm < abs(dL) <= guard_mm else None
+            a0 = float((P[0] - apex) @ axis)         # first end along-axis pos
+            aL = float((P[-1] - apex) @ axis)        # last end along-axis pos
+            pre = (P[0] - d0 * n) if (a0 > thr and abs(d0) > eps_mm) else None
+            app = (P[-1] - dL * n) if (aL > thr and abs(dL) > eps_mm) else None
             if pre is None and app is None:
                 continue
             pieces = []
