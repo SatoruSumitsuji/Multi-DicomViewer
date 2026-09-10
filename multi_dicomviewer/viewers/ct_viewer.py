@@ -12860,14 +12860,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
-        # Axis keep-out band (±2.5 mm) on the long-axis TRACE pane while a border
-        # is being placed/edited: guides the user to keep points to one side of
-        # the apex line (a stray point is auto-corrected at capture anyway).
-        if (key == lv.get("pane") and lv.get("phase") == "contour"
-                and lv.get("target") in ("endo", "epi")
-                and lv.get("sax") is None):
-            X = float(getattr(self, "_half", 100.0))
-            p.lv_guide_mapper.SetInputData(_filled_quad_pd(-2.5, 2.5, -X, X))
+        # (The old ±2.5 mm axis 'keep-out' band on the long-axis trace pane is no
+        # longer drawn: the LV long axis is now DEFINED as apex → MV-plane centre,
+        # so it always passes through the MV centre and the band that limited Epi
+        # points when the axis missed the MV centre is obsolete. lv_guide_mapper
+        # stays empty — cleared above.)
         # Apex markers stay visible in EVERY LV phase once an axis exists (so the
         # endo apex remains on screen while the epi pass is being set up).
         if lv["model"].axis is not None:

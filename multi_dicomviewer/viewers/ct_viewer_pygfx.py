@@ -964,23 +964,50 @@ class _Overlay(QWidget):
             sx, sy = v._world_to_screen(key, ox, oy)
             return QPointF(sx, sy)
 
-        # Epi border (green dots) where the surface crosses this pane.
+        # Epi border where the surface crosses this pane. Prefer the SOLID
+        # cross-section outline of the (valve-clipped) Epi MASK — matching the
+        # Windows viewer; fall back to ring dots only until the mask is built.
         if getattr(v, "_lvv_epi_show", False) and v._lvv_epi_surf is not None:
-            try:
-                pts = np.asarray(v._lvv_epi_surf._all_ring_points(), float)
-            except Exception:                            # noqa: BLE001
-                pts = None
-            if pts is not None and len(pts):
-                _u, _vv, n = v._axes_for(key)
-                n = np.asarray(n, float)
-                o = np.asarray(v._pc[key], float)
-                dist = (pts - o) @ n
-                tol = 0.75 * max(v._dims)
-                near = pts[np.abs(dist) <= tol]
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(80, 220, 80))
-                for P in near:
-                    p.drawEllipse(Sd(P), 2.0, 2.0)
+            comp = getattr(v, "_lvv_epi_mask_comp", None)
+            bbox = getattr(v, "_lvv_epi_mask_bbox", None)
+            polys = None
+            if comp is not None and bbox is not None:
+                from multi_dicomviewer.core.lv_compact import (
+                    region_outline_on_plane)
+                u_ax, v_ax, _n = v._axes_for(key)
+                try:
+                    polys = region_outline_on_plane(
+                        comp, bbox, v._dims, v._pc[key], u_ax, v_ax,
+                        half_mm=float(getattr(v, "_half", 100.0)),
+                        step_mm=v._lv_outline_step(v._lv_endo_adv()["step_mm"]),
+                        convex=False)
+                except Exception:                        # noqa: BLE001
+                    polys = None
+            if polys:
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.setPen(QPen(QColor(80, 220, 80), 2.0))
+                for poly in polys:
+                    if poly is None or len(poly) < 2:
+                        continue
+                    p.drawPolyline(QPolygonF([
+                        QPointF(*v._world_to_screen(key, float(ou), float(ov)))
+                        for (ou, ov) in poly]))
+            else:
+                try:
+                    pts = np.asarray(v._lvv_epi_surf._all_ring_points(), float)
+                except Exception:                        # noqa: BLE001
+                    pts = None
+                if pts is not None and len(pts):
+                    _u, _vv, n = v._axes_for(key)
+                    n = np.asarray(n, float)
+                    o = np.asarray(v._pc[key], float)
+                    dist = (pts - o) @ n
+                    tol = 0.75 * max(v._dims)
+                    near = pts[np.abs(dist) <= tol]
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(80, 220, 80))
+                    for P in near:
+                        p.drawEllipse(Sd(P), 2.0, 2.0)
 
         # Auto-Endo表示 overlay: the CROSS-SECTION outline of the endo envelope
         # MASK on this pane (orange, smooth) — the section of the reconstructed
@@ -7335,7 +7362,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_hi_spin = QSpinBox()
         self._lvv_hi_spin.setRange(-1000, 4000)
         self._lvv_hi_spin.setSingleStep(10)
-        self._lvv_hi_spin.setValue(500)                # blood-pool default hi
+        self._lvv_hi_spin.setValue(1000)               # blood-pool default hi
         self._lvv_hi_spin.setSuffix(" HU")
         self._lvv_hi_spin.setKeyboardTracking(False)
         self._lvv_lo_spin.valueChanged.connect(lambda _v: self._lvv_hu_changed())
@@ -7597,6 +7624,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_mask_on = False
                 self._lvv_hl_btn.setChecked(True)
                 self._lvv_mask_btn.setChecked(False)
+                # Measure Result defaults to HIDDEN in Blood/Endo (only the
+                # measure-figure results; the LV volume readout is a separate
+                # block and still shows).
+                self._results_hidden = True
+                if hasattr(self, "_update_hideall_btn"):
+                    self._update_hideall_btn()
                 self._lvv_sync()
                 for k in ("A", "B"):
                     self._overlay[k].update()
@@ -7879,8 +7912,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
-        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
-        self._lvv_epi_mask_bbox = None
+        # NOTE: the Epi mask (_lvv_epi_mask_comp) is NOT cleared here — the Epi
+        # surface does not change with 肉柱, so the solid Epi border + LVL stay.
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -7911,8 +7944,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
-        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
-        self._lvv_epi_mask_bbox = None
+        # NOTE: the Epi mask (_lvv_epi_mask_comp) is NOT cleared here — the Epi
+        # surface does not change with the HU range, so the solid Epi border +
+        # LVL persist across HU tweaks.
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -7972,9 +8006,63 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_btn.setChecked(False)     # recompute (re-checks on success)
         self._lvv_calc()
 
+    def _lvv_ensure_epi_mask(self) -> bool:
+        """Build (once) the valve-clipped Epi border mask so Epi境界 draws a SOLID
+        cross-section line (like the Windows viewer) instead of sparse ring dots.
+        Reuses the cache built during Auto-Endo; builds it here (modal, ~1s) if
+        absent. Returns True when available."""
+        if (getattr(self, "_lvv_epi_mask_comp", None) is not None
+                and getattr(self, "_lvv_epi_mask_bbox", None) is not None):
+            return True
+        epi = getattr(self, "_lvv_epi_surf", None)
+        if epi is None or self._vol is None:
+            return False
+        from PyQt6.QtCore import Qt, QThread
+        from PyQt6.QtWidgets import QProgressDialog
+        lvv = self._lvv or {}
+        apex = lvv.get("apex")
+        apex = np.asarray(apex, float) if apex is not None else np.zeros(3)
+        mv = self._lv_valves.get("mitral") or lvv.get("mitral")
+        av = self._lv_valves.get("aortic") or lvv.get("aortic")
+        planes = []
+        if av is not None:
+            planes.append((np.asarray(av[0], float), np.asarray(av[1], float)))
+        if mv is not None:
+            planes.append((np.asarray(mv[0], float), np.asarray(mv[1], float)))
+        dims, shape = self._dims, self._vol.shape
+        result: dict = {}
+
+        class _EpiWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    result["m"] = epi.inside_mask_bbox(dims, shape, planes, apex)
+                except Exception as exc:                 # noqa: BLE001
+                    result["err"] = str(exc)
+
+        dlg = QProgressDialog(t("Building Epi border…"), "", 0, 0, self.window())
+        dlg.setWindowTitle(t("Epi"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        w = _EpiWorker()
+        w.finished.connect(dlg.reset)
+        w.start()
+        dlg.exec()
+        w.wait()
+        w.deleteLater()
+        m = result.get("m")
+        if m and m[0] is not None:
+            self._lvv_epi_mask_comp = np.asarray(m[0], bool)
+            self._lvv_epi_mask_bbox = tuple(m[1])
+            return True
+        return False
+
     def _lvv_toggle_epi(self, *args) -> None:
         self._lvv_epi_show = self._lvv_epi_btn.isChecked()
         self._lvv_style_toggle(self._lvv_epi_btn, "#50dc50", "black")
+        if self._lvv_epi_show:
+            self._lvv_ensure_epi_mask()      # build the mask → SOLID border line
         for k in ("A", "B"):
             self._overlay[k].update()
 
