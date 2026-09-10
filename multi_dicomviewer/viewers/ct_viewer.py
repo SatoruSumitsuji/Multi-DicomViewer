@@ -10550,9 +10550,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         apex = np.asarray(self._center, float).copy()
         axinfo = self._lv_long_axis_from_apex(apex)
         if axinfo is None:
-            self._lvv_prompt(t(
-                "Set the MV plane first — the LV long axis runs from the apex to "
-                "the MV centre."))
+            # Two causes: (a) no MV plane yet, or (b) the crosshair sits ON the
+            # MV centre (apex == MV → no axis). Distinguish so a loaded MV plane
+            # doesn't misreport "Set the MV plane first".
+            mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+            if mv is None:
+                self._lvv_prompt(t(
+                    "Set the MV plane first — the LV long axis runs from the "
+                    "apex to the MV centre."))
+            else:
+                self._lvv_prompt(t(
+                    "Move the crosshair onto the LV APEX first, then press Apex — "
+                    "it is currently at the MV-plane centre, so no long axis can "
+                    "be formed."))
             return
         from multi_dicomviewer.core.lv_axis import LVAxis
         axis_dir, radial0 = axinfo
