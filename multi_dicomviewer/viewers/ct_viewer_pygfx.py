@@ -8114,9 +8114,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         the Endo mask (and everything derived from it) is identical on both
         platforms. Returns (comp, bbox) or None; runs off-thread."""
         from PyQt6.QtCore import Qt, QThread
-        from PyQt6.QtWidgets import QProgressDialog
+        from PyQt6.QtWidgets import QMessageBox, QProgressDialog
         from multi_dicomviewer.core.lv_compact import (
             clip_mask_by_planes, endo_envelope_mask)
+        # Auto-Endo / 壁厚 need SciPy (envelope mask, EDT). On a Mac install that
+        # is missing it, endo_envelope_mask silently returns None — so check up
+        # front and tell the user exactly what to do instead of failing quietly.
+        try:
+            import scipy  # noqa: F401
+        except Exception:                                # noqa: BLE001
+            QMessageBox.critical(
+                self.window(), t("Auto-Endo"),
+                t("SciPy is not installed, so Auto-Endo / 壁厚 cannot run. In the "
+                  "app's environment run:\n\n    pip3 install scipy\n\n"
+                  "then reopen and retry."))
+            return None
         epi = getattr(self, "_lvv_epi_surf", None)
         apex = getattr(self, "_lvv_blood_apex", None)
         lvv = self._lvv or {}
@@ -8125,6 +8137,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (self._vol is None or self._lvv_blood_comp is None
                 or self._lvv_blood_bbox is None or epi is None
                 or apex is None or mv is None):
+            miss = []
+            if self._lvv_blood_comp is None:
+                miss.append(t("blood pool (press LV-Blood表示)"))
+            if epi is None:
+                miss.append(t("Epi surface"))
+            if apex is None:
+                miss.append(t("apex"))
+            if mv is None:
+                miss.append(t("MV plane"))
+            QMessageBox.information(
+                self.window(), t("Auto-Endo"),
+                t("Cannot build Endo — missing: {m}").format(
+                    m=", ".join(miss) or "?"))
             return None
         ax = epi.axis
         apex = np.asarray(apex, float)
@@ -8205,8 +8230,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.exec()
         worker.wait()
         worker.deleteLater()
-        if (result.get("err") or not result.get("mask")
-                or result["mask"][0] is None):
+        if result.get("err"):
+            QMessageBox.critical(
+                self.window(), t("Auto-Endo"),
+                t("Endo build failed: {e}").format(e=result["err"]))
+            return None
+        if not result.get("mask") or result["mask"][0] is None:
+            QMessageBox.information(
+                self.window(), t("Auto-Endo"),
+                t("Endo build produced no region — check the HU range, the ROI, "
+                  "and the Epi / MV / AoV planes."))
             return None
         comp, mbbox = result["mask"]
         # Trim the flat basal cut back to the (tilted) MV + AoV planes so the Endo

@@ -6,6 +6,12 @@ vtk>=9.4
 pydicom>=3.0
 numpy>=2.0
 
+# LV analysis (Auto-Endo envelope, wall thickness, blood pool) uses SciPy
+# (ndimage / spatial). It was previously only present transitively; pin it so
+# both platforms have it (Mac has no VTK to pull it in — Auto-Endo silently
+# failed there without it).
+scipy>=1.11
+
 # Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
 pylibjpeg>=2.0
 pylibjpeg-libjpeg>=2.1
