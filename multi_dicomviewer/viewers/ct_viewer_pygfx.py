@@ -1489,6 +1489,11 @@ class _Overlay(QWidget):
                     if hasattr(v, "_lvv_lv_diameter_mm") else None)
             if diam is not None:
                 vlines.append(t("LVD: {v:.1f} mm").format(v=diam))
+            # LVL = axis∩Epi length (apical↔basal Epi crossings; no apex point).
+            lvl = (v._lvv_lv_length_mm()
+                   if hasattr(v, "_lvv_lv_length_mm") else None)
+            if lvl is not None:
+                vlines.append(t("LVL: {v:.1f} mm").format(v=lvl))
             if vlines:
                 fb = QFont("monospace", 13)
                 fb.setBold(True)
@@ -1992,6 +1997,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
+        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
+        self._lvv_epi_mask_bbox = None
         self._lv_endo_close_mm = 5.0      # Auto-Endo papillary/trabecula bridging
         self._lv_endo_adv_cache = None    # cached Settings → LV Auto-Endo params
         self._lvv_endo_show = False
@@ -6884,6 +6891,49 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_diam_pts = None
             return None
 
+    def _lvv_lv_length_mm(self):
+        """LVL (Left Ventricular Length) = distance between the TWO points where
+        the LV long axis crosses the Epi border (apical ↔ basal). The apex
+        LANDMARK is NOT used — it is the pure axis∩Epi extent, so any gap between
+        the picked apex and the reconstructed Epi cap does not affect it. Reads
+        the valve-clipped Epi mask cached during the Auto-Endo build; None until
+        it exists. Parity with the Windows viewer. Cached by mask identity."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        comp = getattr(self, "_lvv_epi_mask_comp", None)
+        bbox = getattr(self, "_lvv_epi_mask_bbox", None)
+        if ax is None or comp is None or bbox is None or self._dims is None:
+            return None
+        cache = getattr(self, "_lvv_lvl_cache", None)
+        if cache is not None and cache[0] is comp:
+            return cache[1]
+        v = None
+        try:
+            comp_b = np.asarray(comp, bool)
+            if comp_b.any():
+                sx, sy, sz = self._dims
+                z0, z1, y0, y1, x0, x1 = bbox
+                apex = np.asarray(ax.apex, float)
+                axis = np.asarray(ax.axis, float)
+                axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+                ts = np.arange(-50.0, 200.0, 0.5)
+                P = apex[None, :] + ts[:, None] * axis[None, :]
+                ix = np.round(P[:, 0] / sx).astype(np.int64)
+                iy = np.round(P[:, 1] / sy).astype(np.int64)
+                iz = np.round(P[:, 2] / sz).astype(np.int64)
+                inb = ((ix >= x0) & (ix < x1) & (iy >= y0) & (iy < y1)
+                       & (iz >= z0) & (iz < z1))
+                inside = np.zeros(len(ts), bool)
+                sel = np.where(inb)[0]
+                inside[sel] = comp_b[iz[sel] - z0, iy[sel] - y0, ix[sel] - x0]
+                idx = np.where(inside)[0]
+                if idx.size:
+                    v = float(ts[idx.max()] - ts[idx.min()])
+        except Exception:                            # noqa: BLE001
+            v = None
+        self._lvv_lvl_cache = (comp, v)
+        return v
+
     def _lv_mode_has_unsaved(self, mode) -> bool:
         if mode == "blood":
             return (self._lvv is not None
@@ -7818,6 +7868,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
+        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
+        self._lvv_epi_mask_bbox = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -7848,6 +7900,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
+        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
+        self._lvv_epi_mask_bbox = None
         if getattr(self, "_lvv_endo_show", False):
             self._lvv_endo_show = False
             if getattr(self, "_lvv_auto_endo_btn", None) is not None:
@@ -8008,6 +8062,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 epi_full = np.zeros(self._vol.shape, bool)
                 pz0, pz1, py0, py1, px0, px1 = bbox2
                 epi_full[pz0:pz1, py0:py1, px0:px1] = comp2
+                # Cache the (valve-clipped) Epi mask so LVL can measure the LV
+                # long-axis ∩ Epi extent without another modal build.
+                self._lvv_epi_mask_comp = np.asarray(comp2, bool)
+                self._lvv_epi_mask_bbox = tuple(bbox2)
         except Exception:                                # noqa: BLE001
             epi_full = None
         adv = self._lv_endo_adv()
@@ -9003,6 +9061,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_mask_comp = None
         self._lv_endo_mask_bbox = None
         self._lv_endo_mask_sig = None
+        self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
+        self._lvv_epi_mask_bbox = None
         self._lvv_endo_show = False
         self._lv_endo_manual_dict = None
         self._lvv_thick_mode = None
@@ -10768,13 +10828,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 t("Trace the {p} border on at least 3 planes first.").format(
                     p=pas.capitalize()))
             return
-        # Label by pass: Endo → LV cavity, Epi → epicardial.
-        lines = [t("LV cavity volume: {v:.1f} mL", v=vol_ml) if pas == "endo"
-                 else t("Epicardial volume: {v:.1f} mL", v=vol_ml)]
+        # Label by pass, matching the Windows viewer's result block exactly:
+        # "Endo-LV Volume:" / "Epi-LV Volume:" — the single volume line only
+        # (Myocardium / EF is a separate cross-file tool, not shown here).
         myo_ml = result.get("myo")
-        if myo_ml is not None:
-            lines.append(t("Myocardial volume: {v:.1f} mL", v=myo_ml))
-        self._lv_result_lines = lines
+        self._lv_result_lines = [
+            t("Endo-LV Volume: {v:.1f} mL", v=vol_ml) if pas == "endo"
+            else t("Epi-LV Volume: {v:.1f} mL", v=vol_ml)]
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the numbers so Save can persist them and Load can redisplay —
         # under the ACTIVE pass's key (Endo → vol_endo_ml, Epi → vol_epi_ml).
@@ -11109,13 +11169,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             pv = volume.get("epi_ml")            # Epi-only file (EpiLv.json)
             mv = volume.get("myo_ml")
             if ev is not None:
-                lines.append(t("LV cavity volume: {v:.1f} mL", v=float(ev)))
+                lines.append(t("Endo-LV Volume: {v:.1f} mL", v=float(ev)))
                 self._lv["vol_endo_ml"] = float(ev)
             if pv is not None:
-                lines.append(t("Epicardial volume: {v:.1f} mL", v=float(pv)))
+                lines.append(t("Epi-LV Volume: {v:.1f} mL", v=float(pv)))
                 self._lv["vol_epi_ml"] = float(pv)
             if mv is not None:
-                lines.append(t("Myocardial volume: {v:.1f} mL", v=float(mv)))
                 self._lv["vol_myo_ml"] = float(mv)
             if ev is not None or pv is not None:
                 self._lv["vol_done"] = True
