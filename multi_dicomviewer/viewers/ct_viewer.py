@@ -3006,7 +3006,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the long-axis centreline, next press captures that level. Once set the
         # button toggles the line (filled = shown, outline = hidden);
         # right-click re-sets the level.
-        self._lvv_lvd_btn = FitButton(t("LVD表示"))
+        self._lvv_lvd_btn = FitButton(t("LVD"))
         self._lvv_lvd_btn.setHelpToolTip(
             t("Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. "
               "Press → choose 計測 (measure at the current section) or 断面設定後"
@@ -3191,13 +3191,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_exit_btn.setHelpToolTip(
             t("Leave Blood/Endo back to the LV selector (MV/AoV are kept)"))
         self._lvv_exit_btn.clicked.connect(self._lv_submode_exit)
-        # LVD表示 was not in the Phase-3 row list — appended here so the manual
-        # LV-diameter feature stays reachable (move/hide on request).
+        # LVD was not in the Phase-3 row list — placed after the borders. Endo-
+        # Border(Manual) is set APART (a gap to its left) so it is not misclicked
+        # next to LVD (it enters the hand-edit mode).
         for b in (self._lvv_save_btn, self._lvv_load_btn, self._lvv_exit_btn,
                   self._lvv_hl_btn, self._lvv_mask_btn, self._lvv_epi_btn,
-                  self._lvv_auto_endo_btn, self._lvv_manual_endo_btn,
-                  self._lvv_lvd_btn):
+                  self._lvv_auto_endo_btn, self._lvv_lvd_btn):
             r2b.addWidget(b)
+        r2b.addSpacing(24)                       # keep Manual apart from LVD
+        r2b.addWidget(self._lvv_manual_endo_btn)
         row2.addWidget(self._lv_grp_r2_blood)
 
         # Valve-setup row-2 group: shown when NO sub-mode is active (the initial
