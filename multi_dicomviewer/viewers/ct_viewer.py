@@ -2415,6 +2415,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: shows that valve's Draw/Confirm/Save/Load/Clear/Exit row and greys the
         #: other sub-modes (guided MV/AoV setup — see _lv_enter_valve).
         self._lv_valve_edit = None
+        #: COMMON LV apex (world point) — the third shared prerequisite alongside
+        #: MV/AoV, set once via the Apex selector BEFORE tracing. The LV long axis
+        #: is apex → MV centre, so Epi / Blood-Endo seed their axis from this.
+        self._lv_apex = None
+        self._lv_apex_edit = False        # Apex edit sub-step active (Set/…/Exit)
+        self._lv_apex_shown = True        # common apex marker visibility
         #: Epi guided gate: True once Draw was pressed (or a border is loaded/
         #: resumed), unlocking the row-2 trace tools. Reset on fresh Epi entry /
         #: Clear / Exit. See _lv_epi_armed_now.
@@ -2795,7 +2801,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
         # and the Blood region's basal bound. Saved to their own MVLv.json /
         # AoVLv.json (single source, one per 3DCT phase). ----
-        self._lv_mv_btn = FitButton(t("MV plane"))
+        self._lv_mv_btn = FitButton(t("MV"))
         self._lv_mv_btn.setHelpToolTip(
             t("Set the COMMON MV plane (shared by Epi / Blood-Endo): opens the "
               "MV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
@@ -2807,7 +2813,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_mv_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_rclick_valve("mitral"))
         row1.addWidget(self._lv_mv_btn)
-        self._lv_aov_btn = FitButton(t("AoV plane"))
+        self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
             t("Set the COMMON AoV plane (shared by Epi / Blood-Endo): opens the "
               "AoV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
@@ -2819,6 +2825,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_aov_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_rclick_valve("aortic"))
         row1.addWidget(self._lv_aov_btn)
+        # ---- Common APEX: the third shared prerequisite, set ONCE before tracing
+        # (the LV long axis = apex → MV centre). Opens the Apex step
+        # (Set / RePosition / Hide / Exit). Right-click hides / shows the marker. ----
+        self._lv_apex_sel_btn = FitButton(t("Apex"))
+        self._lv_apex_sel_btn.setHelpToolTip(
+            t("Set the COMMON LV apex (shared by Epi / Blood-Endo): opens the "
+              "Apex step — move the centreline crossing onto the apex, then Set. "
+              "Right-click to hide / show the apex marker. Needs MV + AoV first."))
+        self._lv_apex_sel_btn.clicked.connect(self._lv_enter_apex)
+        self._lv_apex_sel_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_apex_sel_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_apex())
+        row1.addWidget(self._lv_apex_sel_btn)
         row1.addSpacing(8)
 
         # ---- Sub-mode selector, in operation order: Epi → Blood → Endo ----
@@ -2856,15 +2876,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_setaxis_btn = FitButton(t("Set axis"))
         self._lv_setaxis_btn.setVisible(False)
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
-        # Apex (left of Trace): move the centreline crossing onto the apex, then
-        # press this to SET the apex there (no clicking on the image). It colours
-        # once set (like MV/AoV); it does NOT toggle off — the apex stays shown.
+        # Per-pass Apex is RETIRED — the apex is now a COMMON prerequisite set
+        # once via the Apex selector (applied to the pass axis on Draw). Hidden
+        # placeholder keeps _lv_confirm_apex_trace references harmless.
         self._lv_apex_btn = FitButton(t("Apex"))
-        self._lv_apex_btn.setHelpToolTip(
-            t("Set this pass's LV apex at the centreline crossing — move the "
-              "crossing onto the apex first, then press Apex, then Trace."))
+        self._lv_apex_btn.setVisible(False)
         self._lv_apex_btn.clicked.connect(self._lv_confirm_apex_trace)
-        gt.addWidget(self._lv_apex_btn)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.setHelpToolTip(
             t("Trace this pass's border (set the apex with the Apex button "
@@ -2900,11 +2917,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_grp_blood = QWidget()
         gb = QHBoxLayout(self._lv_grp_blood)
         gb.setContentsMargins(0, 0, 0, 0); gb.setSpacing(4)
+        # Blood per-mode Apex is RETIRED — the COMMON apex (Apex selector) is
+        # seeded into Blood on entry. Hidden placeholder keeps references safe.
         self._lvv_apex_btn = FitButton(t("Apex"))
-        self._lvv_apex_btn.setHelpToolTip(
-            t("Confirm the LV apex at the crosshair (move it there first)"))
+        self._lvv_apex_btn.setVisible(False)
         self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
-        gb.addWidget(self._lvv_apex_btn)
         # Blood-specific MV/AoV capture is retired — the COMMON MV/AoV planes
         # (set once via the MV/AoV edit step) are used. Hidden placeholders keep
         # _lvv_capture_valve references harmless.
@@ -3262,6 +3279,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_grp_r2_valve_edit.setVisible(False)
         row2.addWidget(self._lv_grp_r2_valve_edit)
+
+        # APEX edit step (row 3): Set / RePosition / Hide / Exit — set the COMMON
+        # apex at the centreline crossing, before Epi/Blood. (No Load/Save: the
+        # apex is derived live from the crossing; it is stored with the borders.)
+        self._lv_grp_r2_apex = QWidget()
+        r2ax = QHBoxLayout(self._lv_grp_r2_apex)
+        r2ax.setContentsMargins(0, 0, 0, 0); r2ax.setSpacing(4)
+        self._lv_ax_set_btn = FitButton(t("Set"))
+        self._lv_ax_set_btn.setHelpToolTip(
+            t("Set the LV apex at the current centreline crossing."))
+        self._lv_ax_set_btn.clicked.connect(self._lv_apex_set)
+        self._lv_ax_repos_btn = FitButton(t("RePosition"))
+        self._lv_ax_repos_btn.setHelpToolTip(
+            t("Drop the set apex so you can move the crossing and Set again."))
+        self._lv_ax_repos_btn.clicked.connect(self._lv_apex_reposition)
+        self._lv_ax_hide_btn = FitButton(t("Hide"))
+        self._lv_ax_hide_btn.setHelpToolTip(
+            t("Hide / show the apex marker on the image (the apex is kept)."))
+        self._lv_ax_hide_btn.clicked.connect(self._lv_toggle_apex_common_visibility)
+        self._lv_ax_exit_btn = FitButton(t("Exit"))
+        self._lv_ax_exit_btn.setHelpToolTip(t("Return to the LV selector."))
+        self._lv_ax_exit_btn.clicked.connect(self._lv_exit_apex)
+        for b in (self._lv_ax_set_btn, self._lv_ax_repos_btn,
+                  self._lv_ax_hide_btn, self._lv_ax_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
+            r2ax.addWidget(b)
+        self._lv_grp_r2_apex.setVisible(False)
+        row2.addWidget(self._lv_grp_r2_apex)
         row2.addStretch(1)
 
         # Plain-button disabled-grey + the button lists the sync methods use.
@@ -3303,10 +3348,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         return None
 
     def _lv_valves_ready(self) -> bool:
-        """Both common valve planes (MV + AoV) are set — the prerequisite for any
-        LV sub-mode (they anchor the base for Epi/Endo/Blood)."""
+        """Both common valve planes (MV + AoV) are set — the prerequisite for
+        setting the common apex (the axis is apex → MV centre)."""
         return (self._lv_valves.get("mitral") is not None
                 and self._lv_valves.get("aortic") is not None)
+
+    def _lv_setup_ready(self) -> bool:
+        """The three common prerequisites (MV + AoV + apex) are all set — the
+        gate for the Epi / Blood-Endo sub-modes."""
+        return self._lv_valves_ready() and self._lv_apex is not None
 
     def _lv_mode_has_unsaved(self, mode) -> bool:
         """True if *mode* holds traced/measured data not saved since the last
@@ -3385,16 +3435,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._lv_sync_buttons()
             self._lv_update_submode_ui()
             return
-        # PREREQUISITE: the common MV/AoV valve planes must be set before any
-        # sub-mode (they anchor the LV base). Guide the user to set them instead
-        # of entering. (The selector buttons are also greyed until then.)
-        if not self._lv_valves_ready():
+        # PREREQUISITE: the three common setups (MV + AoV + apex) must be set
+        # before any sub-mode — they anchor the LV base and long axis. Guide the
+        # user instead of entering. (The selector buttons are also greyed until
+        # then.)
+        if not self._lv_setup_ready():
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.information(
                 self.window(), t("LV"),
-                t("Set the MV and AoV planes first. Draw an Ellipse on each "
-                  "annulus and press MV plane / AoV plane (or Load them); then "
-                  "Endo / Epi / Blood become available."))
+                t("Set MV, AoV and Apex first (the three buttons to the left); "
+                  "then Epi / Blood-Endo become available."))
             return
         # Switch to a DIFFERENT sub-mode. The current one is already inactive
         # (deactivated by its own 2nd click, warned there), so no warning here —
@@ -3458,7 +3508,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._lv is not None:
                 self._lv_stash_epi_for_blood(self._lv["model"])
             self._lvv_toggle()                        # start Blood (needs Epi)
+            self._lv_seed_blood_apex()                # seed the COMMON apex
         self._lv_update_submode_ui()
+
+    def _lv_seed_blood_apex(self) -> None:
+        """Seed the COMMON apex into a freshly-entered Blood session (its apex is
+        no longer set by a per-mode Apex button). No-op if Blood isn't active, the
+        common apex is unset, or Blood already has an apex."""
+        lvv = self._lvv
+        if lvv is None or self._lv_apex is None or lvv.get("apex") is not None:
+            return
+        P = np.asarray(self._lv_apex, float).copy()
+        lvv["apex"] = P
+        self._lvv_apex_shown = True
+        self._lvv_add_marker("apex", P, "#ff4040")
+        if self._lv_valves_ready():
+            lvv["step"] = "ready"
+        self._lvv_style_apex_btn()
+        self._lvv_sync()
 
     def _lv_epi_armed_now(self) -> bool:
         """The Epi row-2 trace tools are 'armed' (unlocked) once Draw was pressed,
@@ -3470,29 +3537,73 @@ class CTViewer(CPRMixin, AbstractViewer):
         if lv is None:
             return False
         m = lv["model"]
-        return (len(m.epi_contours) >= 3 or bool(m.epi_planes)
-                or m.epi_apex is not None)
+        # NOTE: the apex is now a COMMON prerequisite, applied to the pass axis on
+        # Draw — so it does NOT arm the trace tools by itself (Draw does). Only an
+        # actual traced/loaded border arms them.
+        return (len(m.epi_contours) >= 3 or bool(m.epi_planes))
 
     def _lv_epi_draw(self) -> None:
-        """Epi 'Draw': confirm the trace flow, then unlock the row-2 tools (Apex /
-        Trace / plane step / SAX) so the border can be placed. No Confirm button —
-        the trace is committed via Calc Vol / Save."""
+        """Epi 'Draw': apply the COMMON apex to this pass's long axis (apex → MV
+        centre), confirm the trace flow, then unlock the row-2 tools (Trace /
+        plane step / SAX). No Confirm button — the trace is committed via Calc
+        Vol / Save; the apex was set upfront (Apex step)."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv_current_submode() != "epi":
+            return
+        if self._lv_apex is None:
+            self._lvv_prompt(t("Set the common Apex first (the Apex button)."))
             return
         box = QMessageBox(self.window())
         box.setWindowTitle(t("Epi"))
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(t(
-            "Set the apex at the centreline crossing, then trace the Epi border "
-            "on the 6 planes, and finally refine it on the short axis (SAX)."))
+            "Trace the Epi border on the 6 planes, then refine it on the short "
+            "axis (SAX). The apex + long axis are already set."))
         b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
         box.exec()
         if box.clickedButton() is not b_draw:
             return
+        self._lv_apply_common_apex_to_pass("epi")   # set axis from the common apex
         self._lv_epi_armed = True
-        self._lv_update_submode_ui()          # unlock Apex / Trace / plane / SAX
+        self._lv_update_submode_ui()          # unlock Trace / plane / SAX
+
+    def _lv_apply_common_apex_to_pass(self, pas) -> None:
+        """Seed *pas*'s long axis + apex from the COMMON apex (self._lv_apex): the
+        deterministic LV long axis = apex → MV centre. Non-clearing (like an apex
+        re-pin) so any already-captured meridians survive. No-op if the common
+        apex or the axis geometry isn't available."""
+        lv = self._lv
+        if lv is None or self._lv_apex is None:
+            return
+        apex = np.asarray(self._lv_apex, float).copy()
+        axinfo = self._lv_long_axis_from_apex(apex)
+        if axinfo is None:
+            return
+        from multi_dicomviewer.core.lv_axis import LVAxis
+        axis_dir, radial0 = axinfo
+        ax = LVAxis.from_frame(apex, axis_dir, radial0)
+        m = lv["model"]
+        if pas == "endo":
+            m.endo_axis = ax
+        else:
+            m.epi_axis = ax
+        m.axis = ax
+        m.set_apex_point(pas, apex)
+        # Match the old per-pass Apex-set behaviour: centre on the apex, keep the
+        # exact view (no auto-fit jump) through tracing, default up-ref.
+        self._center = apex.copy()
+        self._lv_up_ref = None
+        lv["apex_target"] = None
+        lv["keep_view"] = True
+        if lv.get("phase") == "align":
+            lv["phase"] = "ready"
+            lv["plane_idx"] = 0
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        self._lv_show_plane()
+        for k in ("A", "B"):
+            self.pane[k].render()
 
     def _lv_submode_exit(self) -> None:
         """Row-3 Exit: leave the current contour sub-mode back to the LV selector
@@ -3559,9 +3670,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         stash so the LV setup is blank after Exit."""
         self._lv_valves = {"mitral": None, "aortic": None}
         self._lv_valve_shown = {"mitral": True, "aortic": True}
+        # Also drop the COMMON apex + its marker.
+        self._lv_apex = None
+        self._lv_apex_edit = False
+        self._lv_apex_shown = True
         for k in ("A", "B"):
             self._measures[k] = [mm for mm in self._measures.get(k, [])
-                                 if mm.get("_lv_valve") is None]
+                                 if mm.get("_lv_valve") is None
+                                 and mm.get("_lv_apex") is None]
         self._lvv_epi_surf = None
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None
@@ -3732,16 +3848,30 @@ class CTViewer(CPRMixin, AbstractViewer):
                 w.setVisible(on)
                 _changed.append(w)
         ve = getattr(self, "_lv_valve_edit", None)     # 'mitral'/'aortic'/None
-        _vis(self._lv_grp_trace, endoepi and not ve)
-        _vis(self._lv_grp_blood, blood and not ve)
+        ax = bool(getattr(self, "_lv_apex_edit", False))   # Apex edit step active
+        _vis(self._lv_grp_trace, endoepi and not ve and not ax)
+        _vis(self._lv_grp_blood, blood and not ve and not ax)
         # Row 3 shows ONLY while a contour sub-mode is active. Leaving it (Exit /
         # re-click) returns to the clean 2-row selector — the old "observe"
         # toolbar (row 3 kept with pass=None) is retired by the guided flow; the
         # committed border still shows as a free-view overlay, and re-clicking
         # Epi/Endo brings the controls back. (`observing` kept for other reads.)
-        _vis(self._lv_grp_r2_trace, endoepi and not ve)
-        _vis(self._lv_grp_r2_blood, blood and not ve)
+        _vis(self._lv_grp_r2_trace, endoepi and not ve and not ax)
+        _vis(self._lv_grp_r2_blood, blood and not ve and not ax)
         _vis(self._lv_grp_r2_valves, False)            # replaced by the MV/AoV step
+        # APEX edit step row: shown while setting the common apex. Set is always
+        # live; RePosition/Hide need an apex set; Hide's label follows visibility.
+        if getattr(self, "_lv_grp_r2_apex", None) is not None:
+            _vis(self._lv_grp_r2_apex, ax)
+            if ax:
+                has_apex = self._lv_apex is not None
+                self._lv_ax_set_btn.setEnabled(True)
+                self._lv_ax_exit_btn.setEnabled(True)
+                self._lv_ax_repos_btn.setEnabled(has_apex)
+                self._lv_ax_hide_btn.setEnabled(has_apex)
+                self._lv_ax_hide_btn.setText(
+                    t("Hide") if getattr(self, "_lv_apex_shown", True)
+                    else t("Show"))
         # MV/AoV EDIT step row: shown while editing a valve; its Save/Clear enable
         # by whether that valve is set.
         if getattr(self, "_lv_grp_r2_valve_edit", None) is not None:
@@ -3769,16 +3899,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         # done from the initial selector). Highlight the valve being edited.
         if getattr(self, "_lv_mv_btn", None) is not None:
             self._lv_mv_btn.setEnabled(
-                (ve in (None, "mitral")) and sm is None)
+                (ve in (None, "mitral")) and sm is None and not ax)
             self._lv_aov_btn.setEnabled(
-                (ve in (None, "aortic")) and sm is None)
+                (ve in (None, "aortic")) and sm is None and not ax)
+        # Apex selector: needs MV+AoV (the axis is apex → MV centre); available at
+        # the selector only. Greyed while editing a valve or in a sub-mode; stays
+        # live during its own step (it is the highlighted active one).
+        if getattr(self, "_lv_apex_sel_btn", None) is not None:
+            self._lv_apex_sel_btn.setEnabled(
+                self._lv_valves_ready() and sm is None and ve is None)
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
         # others back). All three live when nothing is selected. Runs AFTER
         # _lv_sync_buttons / _lvv_sync (which enable them), so this wins.
         # EXCEPTION — in SAX you may switch which traced border you edit, so keep
         # Endo/Epi clickable there (whichever has a border); Blood stays greyed.
-        ready = self._lv_valves_ready()
+        # The Epi / Blood-Endo gate needs ALL of MV + AoV + apex (_lv_setup_ready).
+        ready = self._lv_setup_ready()
         if not ready:
             # Valve planes not set yet → Endo/Epi/Blood are unavailable (only the
             # active one, if any, stays clickable to deactivate).
@@ -3806,9 +3943,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_epi_btn.setEnabled(sm == "epi")
                 self._lvv_start_btn.setEnabled(sm in ("blood", "endo"))
                 self._lv_endo_btn.setEnabled(sm == "endo")
-        # While EDITING a valve, the sub-mode selectors are unavailable (Exit the
-        # valve step first) — the MV/AoV step owns the bar.
-        if ve is not None:
+        # While EDITING a valve OR the apex, the sub-mode selectors are
+        # unavailable (Exit that step first) — the edit step owns the bar.
+        if ve is not None or ax:
             self._lv_endo_btn.setEnabled(False)
             self._lv_epi_btn.setEnabled(False)
             self._lvv_start_btn.setEnabled(False)
@@ -3819,7 +3956,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_epi_draw_btn.setVisible(sm == "epi")
             self._lv_epi_draw_btn.setEnabled(sm == "epi")
         if sm == "epi" and not self._lv_epi_armed_now():
-            for b in (self._lv_apex_btn, self._lv_trace_btn, self._lv_prev_btn,
+            for b in (self._lv_trace_btn, self._lv_prev_btn,
                       self._lv_next_btn, self._lv_sax_btn):
                 b.setEnabled(False)
         # Keep the Blood selector's checked look in step even if it was clicked
@@ -5183,6 +5320,91 @@ class CTViewer(CPRMixin, AbstractViewer):
                  "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
             self._redraw_meas(which)
 
+    # ---- Common APEX edit step (Set / RePosition / Hide / Exit) --------------
+    def _lv_apex_marker_draw(self) -> None:
+        """(Re)draw the COMMON apex marker on both panes from self._lv_apex. A
+        3-D-anchored point (re-projected each redraw), tagged '_lv_apex' so it is
+        independent of the per-mode blood markers ('_lvv')."""
+        P = getattr(self, "_lv_apex", None)
+        hidden = not getattr(self, "_lv_apex_shown", True)
+        for which in ("A", "B"):
+            self._measures[which] = [m for m in self._measures.get(which, [])
+                                     if m.get("_lv_apex") is None]
+            if P is not None:
+                wx, wy = self._world3d_to_out(which, np.asarray(P, float))
+                self._meas_seq += 1
+                self._measures[which].append(
+                    {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
+                     "pts3d": [tuple(map(float, P))], "color": "#ff4040",
+                     "_lv_apex": True, "hidden": hidden})
+            self._redraw_meas(which)
+
+    def _lv_enter_apex(self) -> None:
+        """Apex selector → enter the Apex edit step. Guides the user to place the
+        crossing on the LV apex and press Set; shows the Set/RePosition/Hide/Exit
+        row. Needs MV + AoV first (the axis is apex → MV centre)."""
+        if self._image is None:
+            return
+        if not self._lv_valves_ready():
+            self._lvv_prompt(t(
+                "Set the MV and AoV planes first — the LV long axis runs from "
+                "the apex to the MV centre."))
+            return
+        self._lv_apex_edit = True
+        self._lvv_prompt(t(
+            "Set the centreline crossing as the apex? Move the crossing onto the "
+            "LV apex, then press Set (RePosition to move it again)."))
+        self._lv_update_submode_ui()
+
+    def _lv_apex_set(self) -> None:
+        """Set the COMMON apex at the current centreline crossing (self._center),
+        after checking the LV long axis (apex → MV centre) is well defined."""
+        if self._center is None:
+            return
+        apex = np.asarray(self._center, float).copy()
+        if self._lv_long_axis_from_apex(apex) is None:
+            self._lvv_prompt(t(
+                "The crossing coincides with the MV centre — move it onto the LV "
+                "apex, then press Set."))
+            return
+        self._lv_apex = apex
+        self._lv_apex_shown = True
+        self._lv_apex_marker_draw()
+        self._lvv_prompt(t("Apex set. Exit to the selector, then choose Epi or "
+                           "Blood/Endo."))
+        self._lv_update_submode_ui()
+
+    def _lv_apex_reposition(self) -> None:
+        """Drop the set apex so the crossing can be moved and Set again."""
+        self._lv_apex = None
+        self._lv_apex_marker_draw()
+        self._lvv_prompt(t("Move the crossing onto the LV apex, then press Set."))
+        self._lv_update_submode_ui()
+
+    def _lv_toggle_apex_common_visibility(self) -> None:
+        """Hide / show the common apex marker (the apex point is kept)."""
+        if self._lv_apex is None:
+            self._lvv_prompt(t("Set the apex first."))
+            return
+        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_marker_draw()
+        self._lv_update_submode_ui()
+
+    def _lv_rclick_apex(self) -> None:
+        """Right-click the Apex selector: quick hide / show of the apex marker in
+        ANY mode. No-op (with a prompt) until the apex is set."""
+        if self._image is None or self._lv_apex is None:
+            self._lvv_prompt(t("Set the apex first."))
+            return
+        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_marker_draw()
+        self._lv_update_valve_buttons()
+
+    def _lv_exit_apex(self) -> None:
+        """Leave the Apex step → back to the LV selector (the apex is kept)."""
+        self._lv_apex_edit = False
+        self._lv_update_submode_ui()
+
     # ---- MV/AoV guided edit step (Draw → Confirm → Save/Load/Clear/Exit) ----
     def _lv_enter_valve(self, which) -> None:
         """Enter the MV/AoV edit step (from the LV selector): show that valve's
@@ -5524,6 +5746,20 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_ve_show_btn.setEnabled(has)
             self._lv_ve_show_btn.setText(
                 t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
+        # Apex selector: same convention (red) — plain unset, solid when set AND
+        # shown, red outline when set but hidden.
+        abtn = getattr(self, "_lv_apex_sel_btn", None)
+        if abtn is not None:
+            acol = "#d32f2f"
+            if self._lv_apex is None:
+                abtn.setStyleSheet(self._BTN_DIS)
+            elif getattr(self, "_lv_apex_shown", True):
+                abtn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                                   % (acol, self._BTN_DIS))
+            else:
+                abtn.setStyleSheet(
+                    "QPushButton{background:palette(button);color:%s;"
+                    "border:2px solid %s;}%s" % (acol, acol, self._BTN_DIS))
 
     def _lv_save_valve(self, which) -> None:
         """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
