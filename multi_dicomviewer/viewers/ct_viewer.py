@@ -2389,6 +2389,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base.
         # Each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
         self._lv_valves = {"mitral": None, "aortic": None}
+        #: Valve-edit sub-mode ("mitral"/"aortic"/None). When set, the LV bar
+        #: shows that valve's Draw/Confirm/Save/Load/Clear/Exit row and greys the
+        #: other sub-modes (guided MV/AoV setup — see _lv_enter_valve).
+        self._lv_valve_edit = None
         # Whether each valve's ellipse is currently SHOWN (its button toggles it
         # once the plane is set, so it can be hidden while tracing Endo/Epi).
         self._lv_valve_shown = {"mitral": True, "aortic": True}
@@ -2767,17 +2771,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         # AoVLv.json (single source, one per 3DCT phase). ----
         self._lv_mv_btn = FitButton(t("MV plane"))
         self._lv_mv_btn.setHelpToolTip(
-            t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
-              "press this to set the COMMON MV plane (shared by Endo/Epi/Blood)"))
-        self._lv_mv_btn.clicked.connect(
-            lambda: self._lv_capture_valve_common("mitral"))
+            t("Set the COMMON MV plane (shared by Epi / Blood-Endo): opens the "
+              "MV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
+              "Load a saved MV plane."))
+        self._lv_mv_btn.clicked.connect(lambda: self._lv_enter_valve("mitral"))
         row1.addWidget(self._lv_mv_btn)
         self._lv_aov_btn = FitButton(t("AoV plane"))
         self._lv_aov_btn.setHelpToolTip(
-            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
-              "press this to set the COMMON AoV plane (shared by Endo/Epi/Blood)"))
-        self._lv_aov_btn.clicked.connect(
-            lambda: self._lv_capture_valve_common("aortic"))
+            t("Set the COMMON AoV plane (shared by Epi / Blood-Endo): opens the "
+              "AoV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
+              "Load a saved AoV plane."))
+        self._lv_aov_btn.clicked.connect(lambda: self._lv_enter_valve("aortic"))
         row1.addWidget(self._lv_aov_btn)
         row1.addSpacing(8)
 
@@ -3157,7 +3161,50 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in (self._lv_mv_save_btn, self._lv_mv_load_btn,
                   self._lv_aov_save_btn, self._lv_aov_load_btn):
             b.setStyleSheet(self._BTN_DIS)
+        self._lv_grp_r2_valves.setVisible(False)     # replaced by the MV/AoV step
         row2.addWidget(self._lv_grp_r2_valves)
+
+        # MV/AoV EDIT step (row 2): Draw → Confirm → Save / Load / Clear / Exit,
+        # acting on the valve currently being edited (self._lv_valve_edit).
+        self._lv_grp_r2_valve_edit = QWidget()
+        r2ve = QHBoxLayout(self._lv_grp_r2_valve_edit)
+        r2ve.setContentsMargins(0, 0, 0, 0); r2ve.setSpacing(4)
+        self._lv_ve_draw_btn = FitButton(t("Draw"))
+        self._lv_ve_draw_btn.setHelpToolTip(
+            t("Draw the valve annulus as an Ellipse (Shift = true circle), then "
+              "press Confirm."))
+        self._lv_ve_draw_btn.clicked.connect(self._lv_valve_draw)
+        r2ve.addWidget(self._lv_ve_draw_btn)
+        self._lv_ve_confirm_btn = FitButton(t("Confirm"))
+        self._lv_ve_confirm_btn.setHelpToolTip(
+            t("Set the valve plane from the drawn Ellipse."))
+        self._lv_ve_confirm_btn.clicked.connect(self._lv_valve_confirm)
+        r2ve.addWidget(self._lv_ve_confirm_btn)
+        self._lv_ve_save_btn = FitButton(t("Save"))
+        self._lv_ve_save_btn.setHelpToolTip(t("Save this valve plane to a file."))
+        self._lv_ve_save_btn.clicked.connect(
+            lambda: self._lv_save_valve(self._lv_valve_edit or "mitral"))
+        r2ve.addWidget(self._lv_ve_save_btn)
+        self._lv_ve_load_btn = FitButton(t("Load"))
+        self._lv_ve_load_btn.setHelpToolTip(t("Load a saved valve plane."))
+        self._lv_ve_load_btn.clicked.connect(
+            lambda: self._lv_load_valve(self._lv_valve_edit or "mitral"))
+        r2ve.addWidget(self._lv_ve_load_btn)
+        self._lv_ve_clear_btn = FitButton(t("Clear"))
+        self._lv_ve_clear_btn.setHelpToolTip(
+            t("Remove this valve plane from the image (saved files are kept)."))
+        self._lv_ve_clear_btn.clicked.connect(self._lv_valve_clear)
+        r2ve.addWidget(self._lv_ve_clear_btn)
+        self._lv_ve_exit_btn = FitButton(t("Exit"))
+        self._lv_ve_exit_btn.setHelpToolTip(t("Return to the LV selector."))
+        self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
+        r2ve.addWidget(self._lv_ve_exit_btn)
+        for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+                  self._lv_ve_save_btn, self._lv_ve_load_btn,
+                  self._lv_ve_clear_btn, self._lv_ve_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
+        self._lv_grp_r2_valve_edit.setVisible(False)
+        row2.addWidget(self._lv_grp_r2_valve_edit)
         row2.addStretch(1)
 
         # Plain-button disabled-grey + the button lists the sync methods use.
@@ -3548,16 +3595,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         def _vis(w, on):
             if w.isVisible() != on:
                 w.setVisible(on)
-        _vis(self._lv_grp_trace, endoepi)
-        _vis(self._lv_grp_blood, blood)
-        _vis(self._lv_grp_r2_trace, endoepi or observing)
-        _vis(self._lv_grp_r2_blood, blood)
-        # Valve-setup file controls (row 2) show when NO sub-mode is active AND we
-        # are not observing a retained contour — the initial "set the common MV /
-        # AoV planes" step. The MV/AoV capture buttons (row 1) stay visible always.
-        if getattr(self, "_lv_grp_r2_valves", None) is not None:
-            _vis(self._lv_grp_r2_valves, sm is None and not observing)
+        ve = getattr(self, "_lv_valve_edit", None)     # 'mitral'/'aortic'/None
+        _vis(self._lv_grp_trace, endoepi and not ve)
+        _vis(self._lv_grp_blood, blood and not ve)
+        _vis(self._lv_grp_r2_trace, (endoepi or observing) and not ve)
+        _vis(self._lv_grp_r2_blood, blood and not ve)
+        _vis(self._lv_grp_r2_valves, False)            # replaced by the MV/AoV step
+        # MV/AoV EDIT step row: shown while editing a valve; its Save/Clear enable
+        # by whether that valve is set.
+        if getattr(self, "_lv_grp_r2_valve_edit", None) is not None:
+            _vis(self._lv_grp_r2_valve_edit, ve is not None)
+            if ve is not None:
+                has = self._lv_valves.get(ve) is not None
+                for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+                          self._lv_ve_load_btn, self._lv_ve_exit_btn):
+                    b.setEnabled(True)
+                self._lv_ve_save_btn.setEnabled(has)
+                self._lv_ve_clear_btn.setEnabled(has)
         self._lv_update_valve_buttons()
+        # MV / AoV row-1 buttons: grey the OTHER valve while editing one, and grey
+        # BOTH while an Epi/Blood sub-mode is active (they are a prerequisite step
+        # done from the initial selector). Highlight the valve being edited.
+        if getattr(self, "_lv_mv_btn", None) is not None:
+            self._lv_mv_btn.setEnabled(
+                (ve in (None, "mitral")) and sm is None)
+            self._lv_aov_btn.setEnabled(
+                (ve in (None, "aortic")) and sm is None)
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
         # others back). All three live when nothing is selected. Runs AFTER
@@ -3588,6 +3651,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_endo_btn.setEnabled(True)
             self._lv_epi_btn.setEnabled(True)
             self._lvv_start_btn.setEnabled(True)
+        # While EDITING a valve, the sub-mode selectors are unavailable (Exit the
+        # valve step first) — the MV/AoV step owns the bar.
+        if ve is not None:
+            self._lv_endo_btn.setEnabled(False)
+            self._lv_epi_btn.setEnabled(False)
+            self._lvv_start_btn.setEnabled(False)
         # Keep the Blood selector's checked look in step even if it was clicked
         # while already active (the checkable button toggles itself on click).
         if self._lvv_start_btn.isChecked() != blood:
@@ -4918,6 +4987,82 @@ class CTViewer(CPRMixin, AbstractViewer):
                 {"id": self._meas_seq, "type": "point", "pts": [(wx, wy)],
                  "pts3d": [tuple(map(float, P3))], "color": color, "_lvv": tag})
             self._redraw_meas(which)
+
+    # ---- MV/AoV guided edit step (Draw → Confirm → Save/Load/Clear/Exit) ----
+    def _lv_enter_valve(self, which) -> None:
+        """Enter the MV/AoV edit step (from the LV selector): show that valve's
+        Draw/Confirm/Save/Load/Clear/Exit row; the other valve + Epi/Blood grey
+        out until Exit. Epi/Blood grey the valve buttons, so this is reached only
+        from the initial selector."""
+        if self._image is None:
+            return
+        self._lv_valve_edit = which
+        self._lv_update_submode_ui()
+
+    def _lv_exit_valve(self) -> None:
+        """Leave the MV/AoV edit step → back to the LV selector. The captured
+        plane stays in memory (Confirm set it); only the on-screen draw ellipse
+        is dropped."""
+        from PyQt6.QtWidgets import QMessageBox
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("Return to the LV selector? Any unsaved plane is kept in memory "
+                  "but not written to a file.")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_valve_edit = None
+        # Drop a leftover free-hand ellipse (not yet Confirmed).
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures.get(k, [])
+                                 if not (m.get("type") == "ellipse"
+                                         and m.get("_lv_valve") is None
+                                         and m.get("_lvv") is None
+                                         and m.get("_lv") is None)]
+            self._redraw_meas(k)
+        self._lv_update_submode_ui()
+
+    def _lv_valve_draw(self) -> None:
+        """Draw step: arm Measure → Ellipse (Shift = true circle) and guide the
+        user; Confirm then sets the plane from that ellipse."""
+        which = self._lv_valve_edit or "mitral"
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type("ellipse")
+        vname = "MV" if which == "mitral" else "AoV"
+        self._lvv_prompt(t(
+            "Draw the {v} annulus with Measure → Ellipse (hold Shift for a true "
+            "circle), then press Confirm.").format(v=vname))
+
+    def _lv_valve_confirm(self) -> None:
+        """Confirm step: set the valve plane from the drawn Ellipse."""
+        which = self._lv_valve_edit or "mitral"
+        self._lv_capture_valve_common(which)   # captures the latest ellipse
+        self._lv_update_submode_ui()
+
+    def _lv_valve_clear(self) -> None:
+        """Clear step: remove this valve plane from the image (saved files kept)."""
+        from PyQt6.QtWidgets import QMessageBox
+        which = self._lv_valve_edit or "mitral"
+        if self._lv_valves.get(which) is None:
+            self._lvv_prompt(t("No {v} plane on the image to clear.").format(
+                v="MV" if which == "mitral" else "AoV"))
+            return
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("Remove the {v} plane from the image? Saved files are kept.")
+                .format(v="MV" if which == "mitral" else "AoV")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_valves[which] = None
+        self._lv_valve_shown[which] = True
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures.get(k, [])
+                                 if m.get("_lv_valve") != which]
+            self._redraw_meas(k)
+        self._lv_on_valve_changed(which)       # invalidate dependent caches
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
 
     def _lv_capture_valve_common(self, which) -> None:
         """Set the COMMON MV/AoV plane from the latest Ellipse (centre + the
