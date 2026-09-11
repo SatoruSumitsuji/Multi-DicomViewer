@@ -940,6 +940,37 @@ class _Overlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(yellow, 2.4))
             p.drawLine(S((-X, base)), S((X, base)))
+        # Guide lines: ⟂ the LV long axis (apex → MV centre) at 1/8, 1/4, 1/2,
+        # 3/4, 7/8 of that distance (quarters, plus the apical & basal quarters
+        # halved) — faint white dotted references while tracing the border.
+        self._paint_lv_axis_guides(p, key, S)
+
+    def _paint_lv_axis_guides(self, p, key, S) -> None:
+        v = self._v
+        lv = v._lv
+        if lv is None or lv["model"].axis is None:
+            return
+        mv = v._lv_valves.get("mitral")
+        if mv is None:
+            return
+        ax = lv["model"].axis
+        oa = np.asarray(v._world3d_to_out(key, np.asarray(ax.apex, float)), float)
+        om = np.asarray(v._world3d_to_out(key, np.asarray(mv[0], float)), float)
+        d = om - oa
+        L = float(np.hypot(d[0], d[1]))
+        if L < 1e-3:
+            return
+        perp = np.array([-d[1] / L, d[0] / L])
+        half = 0.42 * float(v._half)
+        pen = QPen(QColor(255, 255, 255, 150), 1.0)
+        pen.setStyle(Qt.PenStyle.DotLine)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        for frac in (0.125, 0.25, 0.5, 0.75, 0.875):
+            c = oa + frac * d
+            a2 = c - half * perp
+            b2 = c + half * perp
+            p.drawLine(S((a2[0], a2[1])), S((b2[0], b2[1])))
 
     def _paint_lv_wall(self, p, key, endo_sm, epi_sm):
         v = self._v
