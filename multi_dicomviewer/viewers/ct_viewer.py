@@ -2393,6 +2393,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: shows that valve's Draw/Confirm/Save/Load/Clear/Exit row and greys the
         #: other sub-modes (guided MV/AoV setup — see _lv_enter_valve).
         self._lv_valve_edit = None
+        #: Epi guided gate: True once Draw was pressed (or a border is loaded/
+        #: resumed), unlocking the row-2 trace tools. Reset on fresh Epi entry /
+        #: Clear / Exit. See _lv_epi_armed_now.
+        self._lv_epi_armed = False
         # Whether each valve's ellipse is currently SHOWN (its button toggles it
         # once the plane is set, so it can be hidden while tracing Endo/Epi).
         self._lv_valve_shown = {"mitral": True, "aortic": True}
@@ -3052,30 +3056,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         row1.addStretch(1)
 
         # ================= Row 2: shared file / measure controls =========
-        # Endo/Epi set: Calc Vol / Save / Load / STL / Clear / Exit.
+        # Epi/Endo row 3 (guided order): Draw, Save, Load, Clear, Exit, Epi-Area,
+        # Epi-Border, Calc Vol, STL. Draw begins the trace (unlocking the row-2
+        # tools); the rest act on the traced border. No Confirm — Epi is
+        # committed via Calc Vol / Save.
         self._lv_grp_r2_trace = QWidget()
         r2t = QHBoxLayout(self._lv_grp_r2_trace)
         r2t.setContentsMargins(0, 0, 0, 0); r2t.setSpacing(4)
+        # Draw: confirm the Epi trace flow, then unlock Apex / Trace / plane step /
+        # SAX (row 2). Epi-only (hidden for Endo, which lives in Blood/Endo).
+        self._lv_epi_draw_btn = FitButton(t("Draw"))
+        self._lv_epi_draw_btn.setHelpToolTip(
+            t("Begin the Epi trace: set the apex at the centreline crossing, "
+              "trace the border on 6 planes, then refine on SAX. Unlocks the "
+              "Apex / Trace / plane / SAX buttons."))
+        self._lv_epi_draw_btn.clicked.connect(self._lv_epi_draw)
         self._lv_vol_btn = FitButton(t("Calc Vol"))
         self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])   # grey until calc
         self._lv_vol_btn.setHelpToolTip(
             t("Compute the volume enclosed by this sub-mode's traced border"))
         self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
-        r2t.addWidget(self._lv_vol_btn)
-        # Epi領域表示: toggle the RED measured region (shown after Calc Vol) on/off,
+        # Epi-Area: toggle the RED measured region (shown after Calc Vol) on/off,
         # and — while ON — lift the Rotate/Spin/Paging/CenterLine restrictions so
         # the region can be inspected FREELY in 3-D (a done-tracing view state).
-        self._lv_region_btn = FitButton(t("Epi領域表示"))
+        self._lv_region_btn = FitButton(t("Epi-Area"))
         self._lv_region_btn.setCheckable(True)
         self._lv_region_btn.setHelpToolTip(
             t("Show/hide the red measured region (after Calc Vol) and free the "
               "view (Rotate/Spin/Paging/CenterLine) to inspect it in 3-D."))
         self._lv_region_btn.clicked.connect(self._lv_toggle_region)
-        r2t.addWidget(self._lv_region_btn)
-        # Epi境界表示: toggle the GREEN border — in observe/free-view this is the
+        # Epi-Border: toggle the GREEN border — in observe/free-view this is the
         # region's cross-section outline (tracks rotation); on/off independent of
         # the red region.
-        self._lv_border_btn = FitButton(t("Epi境界表示"))
+        self._lv_border_btn = FitButton(t("Epi-Border"))
         self._lv_border_btn.setCheckable(True)
         self._lv_border_btn.setChecked(True)
         self._lv_border_btn.setHelpToolTip(
@@ -3084,7 +3097,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_border_btn.clicked.connect(self._lv_toggle_border)
         self._lv_border_btn.setStyleSheet(
             "QPushButton{background:#40c040;color:black;}" + self._BTN_DIS)
-        r2t.addWidget(self._lv_border_btn)
         # Wall button: kept (referenced by _lv_sync_buttons) but NOT shown in the
         # bar — wall-thickness moves to the Tools「心機能」tool (planned).
         self._lv_wall_btn = FitButton(t("Wall"))
@@ -3101,25 +3113,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_save_btn.setHelpToolTip(
             t("Save this sub-mode's border to a file"))
         self._lv_save_btn.clicked.connect(self._lv_save)
-        r2t.addWidget(self._lv_save_btn)
         self._lv_load_btn = FitButton(t("Load"))
         self._lv_load_btn.setHelpToolTip(
             t("Load a previously-saved border and apply it"))
         self._lv_load_btn.clicked.connect(self._lv_load)
-        r2t.addWidget(self._lv_load_btn)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.setHelpToolTip(
             t("Export the reconstructed surface as STL (mm scale)"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
-        r2t.addWidget(self._lv_stl_btn)
         self._lv_redo_btn = FitButton(t("Clear"))
         self._lv_redo_btn.setHelpToolTip(
-            t("Discard all traced borders and start again from plane 1"))
+            t("Discard the drawn / in-progress Epi border (saved files are kept)"))
         self._lv_redo_btn.clicked.connect(self._lv_clear_confirm)
-        r2t.addWidget(self._lv_redo_btn)
         self._lv_exit_btn = FitButton(t("Exit"))
-        self._lv_exit_btn.clicked.connect(self._lv_exit_all)
-        r2t.addWidget(self._lv_exit_btn)
+        self._lv_exit_btn.setHelpToolTip(
+            t("Leave this sub-mode back to the LV selector (MV/AoV are kept)"))
+        self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
+        for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
+                  self._lv_redo_btn, self._lv_exit_btn, self._lv_region_btn,
+                  self._lv_border_btn, self._lv_vol_btn, self._lv_stl_btn):
+            r2t.addWidget(b)
         row2.addWidget(self._lv_grp_r2_trace)
 
         # Blood set: Calc Vol / (mL) / Save / Load / Exit. (STL/Clear come with
@@ -3229,15 +3242,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         row2.addStretch(1)
 
         # Plain-button disabled-grey + the button lists the sync methods use.
-        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_redo_btn,
-                  self._lv_save_btn, self._lv_stl_btn, self._lv_load_btn,
-                  self._lv_exit_btn):
+        for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
+                  self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
+                  self._lv_load_btn, self._lv_exit_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_stl_btn, self._lv_exit_btn]
+            self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn]
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
@@ -3422,6 +3435,82 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._lv is not None:
                 self._lv_stash_epi_for_blood(self._lv["model"])
             self._lvv_toggle()                        # start Blood (needs Epi)
+        self._lv_update_submode_ui()
+
+    def _lv_epi_armed_now(self) -> bool:
+        """The Epi row-2 trace tools are 'armed' (unlocked) once Draw was pressed,
+        OR a border/apex is already present (a loaded or resumed Epi) — so re-entry
+        of an existing trace shows the tools without needing Draw again."""
+        if getattr(self, "_lv_epi_armed", False):
+            return True
+        lv = self._lv
+        if lv is None:
+            return False
+        m = lv["model"]
+        return (len(m.epi_contours) >= 3 or bool(m.epi_planes)
+                or m.epi_apex is not None)
+
+    def _lv_epi_draw(self) -> None:
+        """Epi 'Draw': confirm the trace flow, then unlock the row-2 tools (Apex /
+        Trace / plane step / SAX) so the border can be placed. No Confirm button —
+        the trace is committed via Calc Vol / Save."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv_current_submode() != "epi":
+            return
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Epi"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(t(
+            "Set the apex at the centreline crossing, then trace the Epi border "
+            "on the 6 planes, and finally refine it on the short axis (SAX)."))
+        b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_draw:
+            return
+        self._lv_epi_armed = True
+        self._lv_update_submode_ui()          # unlock Apex / Trace / plane / SAX
+
+    def _lv_submode_exit(self) -> None:
+        """Row-3 Exit: leave the current contour sub-mode back to the LV selector
+        (the 2-row view), KEEPING the common MV/AoV planes. Unsaved in-progress
+        data is discarded (confirmed); a Calc-Vol-committed border is kept in
+        memory (its selector button stays coloured, re-click to resume)."""
+        from PyQt6.QtWidgets import QMessageBox
+        sm = self._lv_current_submode()
+        if sm is None:
+            return
+        name = {"epi": "Epi", "endo": "Endo",
+                "blood": "Blood/Endo"}.get(sm, sm)
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("LV"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("Leave {m} mode? Unsaved data is not saved.").format(m=name))
+        b_exit = box.addButton(t("Exit"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_exit:
+            return
+        self._lv_epi_armed = False
+        if sm == "blood":
+            self._lvv_clear_markers()
+            self._lvv = None
+            self._lvv_sync()
+        elif self._lv is not None:
+            if self._lv.get("sax") is not None:
+                if getattr(self, "_lv_sax_btn", None) is not None:
+                    self._lv_sax_btn.setChecked(False)
+                self._lv_leave_sax()
+            m = self._lv["model"]
+            has_border = bool(m.endo_planes or m.epi_planes)
+            if has_border and self._lv.get("vol_done"):
+                self._lv_leave_observe()      # keep committed overlay, unlock view
+            elif has_border:
+                self._lv_reset_contour_empty()   # drop the in-progress trace
+            else:
+                self._lv["pass"] = None
+                self._lv_apply_target(None)
+                self._lv_sync_buttons()
         self._lv_update_submode_ui()
 
     def _lv_exit_all(self) -> None:
@@ -3622,7 +3711,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         ve = getattr(self, "_lv_valve_edit", None)     # 'mitral'/'aortic'/None
         _vis(self._lv_grp_trace, endoepi and not ve)
         _vis(self._lv_grp_blood, blood and not ve)
-        _vis(self._lv_grp_r2_trace, (endoepi or observing) and not ve)
+        # Row 3 shows ONLY while a contour sub-mode is active. Leaving it (Exit /
+        # re-click) returns to the clean 2-row selector — the old "observe"
+        # toolbar (row 3 kept with pass=None) is retired by the guided flow; the
+        # committed border still shows as a free-view overlay, and re-clicking
+        # Epi/Endo brings the controls back. (`observing` kept for other reads.)
+        _vis(self._lv_grp_r2_trace, endoepi and not ve)
         _vis(self._lv_grp_r2_blood, blood and not ve)
         _vis(self._lv_grp_r2_valves, False)            # replaced by the MV/AoV step
         # MV/AoV EDIT step row: shown while editing a valve; its Save/Clear enable
@@ -3676,21 +3770,35 @@ class CTViewer(CPRMixin, AbstractViewer):
                 m.epi_axis is not None and len(m.epi_contours) >= 3)
             self._lvv_start_btn.setEnabled(False)
         else:
-            # Forward flow (not in SAX): all three stay clickable so the user can
-            # move Epi → Blood → Endo directly WITHOUT first deactivating the
-            # current one (which lost track of what was loaded). Switching stashes
-            # the current sub-mode's data; each button is coloured when its data
-            # is loaded (see _lv_style_selectors). Re-clicking the active one still
-            # deactivates it.
-            self._lv_endo_btn.setEnabled(True)
-            self._lv_epi_btn.setEnabled(True)
-            self._lvv_start_btn.setEnabled(True)
+            # State machine (not in SAX): at the selector (no sub-mode) all three
+            # are live; once a sub-mode is entered, the other two GREY OUT so the
+            # flow is one mode at a time — only the active one stays clickable, to
+            # deselect back to the 2-row selector. Endo lives inside the
+            # Blood/Endo mode, so it tracks the Blood selector.
+            if sm is None:
+                self._lv_endo_btn.setEnabled(True)
+                self._lv_epi_btn.setEnabled(True)
+                self._lvv_start_btn.setEnabled(True)
+            else:
+                self._lv_epi_btn.setEnabled(sm == "epi")
+                self._lvv_start_btn.setEnabled(sm in ("blood", "endo"))
+                self._lv_endo_btn.setEnabled(sm == "endo")
         # While EDITING a valve, the sub-mode selectors are unavailable (Exit the
         # valve step first) — the MV/AoV step owns the bar.
         if ve is not None:
             self._lv_endo_btn.setEnabled(False)
             self._lv_epi_btn.setEnabled(False)
             self._lvv_start_btn.setEnabled(False)
+        # Epi guided gate: the row-2 trace tools (Apex / Trace / plane step / SAX)
+        # stay greyed until Draw is pressed (or a border was loaded/resumed);
+        # Draw unlocks them. The Draw button itself is Epi-only.
+        if getattr(self, "_lv_epi_draw_btn", None) is not None:
+            self._lv_epi_draw_btn.setVisible(sm == "epi")
+            self._lv_epi_draw_btn.setEnabled(sm == "epi")
+        if sm == "epi" and not self._lv_epi_armed_now():
+            for b in (self._lv_apex_btn, self._lv_trace_btn, self._lv_prev_btn,
+                      self._lv_next_btn, self._lv_sax_btn):
+                b.setEnabled(False)
         # Keep the Blood selector's checked look in step even if it was clicked
         # while already active (the checkable button toggles itself on click).
         if self._lvv_start_btn.isChecked() != blood:
@@ -10951,6 +11059,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         lv = self._lv
         m = lv["model"]
+        # Fresh Epi entry starts LOCKED (Draw unlocks the trace tools). A resumed
+        # or loaded Epi re-arms itself via _lv_epi_armed_now's has-border check.
+        if which == "epi":
+            self._lv_epi_armed = False
         if lv.get("sax") is not None:               # in SAX → ARM this border
             # After promotion both borders live on the Epi axis and both are
             # shown on the long-axis plane; the Endo/Epi button picks WHICH
@@ -11893,16 +12005,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_update_text()
 
     def _lv_clear_confirm(self) -> None:
-        """'Clear borders' button → confirm before discarding the traced borders."""
+        """'Clear' button → confirm before discarding the drawn / in-progress
+        border. Saved files are kept; the guided gate re-locks so Draw is needed
+        to start again."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv.get("phase") != "contour":
             return
-        if QMessageBox.question(
-                self.window(), t("LV EF"),
-                t("Clear all traced borders? This cannot be undone.")) \
-                != QMessageBox.StandardButton.Yes:
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("LV"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("Discard the drawn / in-progress border? Unsaved data is "
+                      "not saved (saved files are kept)."))
+        b_clear = box.addButton(t("Clear"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_clear:
             return
+        self._lv_epi_armed = False
         self._lv_clear_contours()
+        self._lv_update_submode_ui()          # re-lock the row-2 tools
 
     def _lv_clear_contours(self) -> None:
         """Discard EVERYTHING for this pass — borders, the apex, the long axis and
