@@ -7641,6 +7641,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # Lay the panes on the LV long axis: right = long-axis view, left
                 # = orthogonal short-axis cut (from the Epi axis).
                 self._lvv_setup_axis_views()
+                # Build the valve-clipped Epi mask up front (Epi Vol is already
+                # available here) so LVL shows WITHOUT waiting for Auto-Endo, and
+                # the Epi境界 line is solid.
+                self._lvv_ensure_epi_mask()
                 # 全域HU tint ON by default; LV-Blood off until computed.
                 self._lvv_hl_on = True
                 self._lvv_mask_on = False
@@ -8448,6 +8452,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_lvv_lvd_btn", None) is not None:
             self._lvv_lvd_btn.setEnabled(self._lv_endo_mask_comp is not None)
             self._lvv_style_lvd_btn()
+        # Ensure the valve-clipped Epi mask is cached so LVL (axis∩Epi length)
+        # shows — a no-op when the Auto-Endo build already cached it.
+        self._lvv_ensure_epi_mask()
         self._lvv_thick_sync_buttons()
         self._lvv_redraw()
 
