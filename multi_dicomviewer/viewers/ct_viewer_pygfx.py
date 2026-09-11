@@ -7877,11 +7877,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Blood + Endo sub-mode: set the blood HU range, compute the blood "
               "volume, then derive & edit the Endo border (needs Epi + MV/AoV)"))
         self._lvv_start_btn.clicked.connect(lambda: self._lv_select_submode("blood"))
+        # Blood per-mode Apex is RETIRED — the COMMON apex (Apex selector) is
+        # seeded on entry. Hidden placeholder keeps references safe.
         self._lvv_apex_btn = FitButton(t("Apex"))
-        self._lvv_apex_btn.setHelpToolTip(
-            t("Confirm the LV apex at the crosshair (move it there first)"))
+        self._lvv_apex_btn.setVisible(False)
         self._lvv_apex_btn.clicked.connect(self._lvv_confirm_apex)
-        row.addWidget(self._lvv_apex_btn)
         # MV/AoV are the COMMON planes (selector row) in the unified bar; the
         # blood-local capture buttons are kept (attrs) but not shown.
         self._lvv_mv_btn = FitButton(t("MV plane"))
@@ -7926,48 +7926,44 @@ class CTViewer(CPRMixin, AbstractViewer):
         # DEFAULT view on entering the mode, for tuning 下限/上限. Exclusive with
         # LV-Blood表示 (the computed, Epi-clipped region).
         self._lvv_hl_on = True
-        self._lvv_hl_btn = FitButton(t("全域HU表示"))
+        self._lvv_hl_btn = FitButton(t("All-Blood"))
         self._lvv_hl_btn.setCheckable(True)
         self._lvv_hl_btn.setChecked(True)
         self._lvv_hl_btn.setHelpToolTip(
             t("Instantly tint every voxel whose HU is in the 下限–上限 range on "
               "both panes (no compute) — adjust 下限/上限 to optimise. Turned off "
-              "automatically while LV-Blood表示 is shown."))
+              "automatically while LV-Blood is shown."))
         self._lvv_hl_btn.clicked.connect(self._lvv_toggle_highlight)
-        row.addWidget(self._lvv_hl_btn)
         # LV-Blood表示: compute the blood WITHIN the Epi surface (largest in-range
         # connected component, apex-side of MV/AoV) and show it in 水色 + report
         # the volume. Recomputes when the HU range changed since.
-        self._lvv_mask_btn = FitButton(t("LV-Blood表示"))
+        self._lvv_mask_btn = FitButton(t("LV-Blood"))
         self._lvv_mask_btn.setCheckable(True)
         self._lvv_mask_btn.setChecked(False)
         self._lvv_mask_btn.setHelpToolTip(
             t("Compute + show the LV blood inside the Epi surface (水色) and its "
-              "volume. Exclusive with 全域HU表示; recomputes on HU-range change."))
+              "volume. Exclusive with All-Blood; recomputes on HU-range change."))
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_blood)
-        row.addWidget(self._lvv_mask_btn)
         # "Epi境界" toggle: draw the Epi surface where it crosses each pane
         # (green) — to judge whether coronary voxels contaminate the cavity.
         self._lvv_epi_show = False
-        self._lvv_epi_btn = FitButton(t("Epi境界"))
+        self._lvv_epi_btn = FitButton(t("Epi-Border"))
         self._lvv_epi_btn.setCheckable(True)
         self._lvv_epi_btn.setHelpToolTip(
             t("Show the Epi border on both panes (green)"))
         self._lvv_epi_btn.clicked.connect(self._lvv_toggle_epi)
-        row.addWidget(self._lvv_epi_btn)
         # Auto-Endo表示: display-only overlay of the endocardial envelope derived
         # from the blood pool (orange). Recomputes for the current HU range.
-        self._lvv_auto_endo_btn = FitButton(t("Auto-Endo表示"))
+        self._lvv_auto_endo_btn = FitButton(t("Endo-Border(Auto)"))
         self._lvv_auto_endo_btn.setCheckable(True)
         self._lvv_auto_endo_btn.setHelpToolTip(
             t("Show the auto Endo border (from the blood pool, papillary filled) "
               "as a display-only overlay — recomputes for the current HU range."))
         self._lvv_auto_endo_btn.clicked.connect(self._lvv_toggle_auto_endo)
-        row.addWidget(self._lvv_auto_endo_btn)
         # LVD表示: LV diameter at a MANUAL mitral-leaflet-tip level (press → choose
         # 計測 / 断面設定後計測; once set the button toggles the line, right-click
         # re-sets).
-        self._lvv_lvd_btn = FitButton(t("LVD表示"))
+        self._lvv_lvd_btn = FitButton(t("LVD"))
         self._lvv_lvd_btn.setHelpToolTip(
             t("Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. "
               "Press → 計測 (measure at the current section) or 断面設定後計測 "
@@ -7977,7 +7973,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lvv_lvd_btn.customContextMenuRequested.connect(
             lambda _p: self._lvv_lvd_reset())
-        row.addWidget(self._lvv_lvd_btn)
         # Auto-Endo 係数: papillary/trabecula BRIDGING radius (close_mm). Larger =
         # smoother (trabeculae included); smaller = follows the blood indents.
         self._lvv_close_lbl = QLabel(t("肉柱"))
@@ -7991,8 +7986,6 @@ class CTViewer(CPRMixin, AbstractViewer):
               "滑らか＝緻密層寄り、小さいほど血流に忠実"))
         self._lvv_close_spin.valueChanged.connect(
             lambda _v: self._lvv_close_changed())
-        row.addWidget(self._lvv_close_lbl)
-        row.addWidget(self._lvv_close_spin)
         # Auto-Endo 方式 (method) — parity with the Windows viewer. The single knob
         # above is relabelled per method (膨らみ / 丸み / 橋渡し / 肉柱) by
         # _lvv_update_close_ui.
@@ -8009,17 +8002,20 @@ class CTViewer(CPRMixin, AbstractViewer):
               "3D凸包=3次元凸包"))
         self._lvv_method_combo.currentIndexChanged.connect(
             lambda _i: self._lvv_method_changed())
+        # Row-2 order (spec): 方式 (method) then 膨らみ (the context-sensitive knob).
         row.addWidget(self._lvv_method_lbl)
         row.addWidget(self._lvv_method_combo)
+        row.addWidget(self._lvv_close_lbl)
+        row.addWidget(self._lvv_close_spin)
         self._lvv_update_close_ui()          # label the knob for the default method
-        # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from Auto-Endo
-        # the first time; the hand-edited border is retained across HU changes.
-        self._lvv_manual_endo_btn = FitButton(t("Manual-Endo"))
+        # Endo-Border(Manual): enter the Endo edit mode. Seeds from Auto-Endo the
+        # first time; the hand-edited border is retained across HU changes. Moved
+        # to row 3.
+        self._lvv_manual_endo_btn = FitButton(t("Endo-Border(Manual)"))
         self._lvv_manual_endo_btn.setHelpToolTip(
             t("Edit the Endo border by hand. Seeded from Auto-Endo the first "
               "time; kept when the HU range changes."))
         self._lvv_manual_endo_btn.clicked.connect(self._lvv_manual_endo)
-        row.addWidget(self._lvv_manual_endo_btn)
         # 壁厚 (wall thickness) heat maps — mutually exclusive.
         self._lvv_thick3d_btn = FitButton(t("壁厚3D"))
         self._lvv_thick3d_btn.setCheckable(True)
@@ -8046,7 +8042,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_calc_btn.clicked.connect(lambda: self._lvv_calc())
         self._lvv_vol_lbl = QLabel("--")
         self._lvv_vol_lbl.setVisible(False)
-        # Blood row-2 GROUP: Save / Load / Exit (shown while Blood/Endo active).
+        # Blood/Endo row 3 (spec order): Save, Load, Exit, All-Blood, LV-Blood,
+        # Epi-Border, Endo-Border(Auto), LVD, [gap], Endo-Border(Manual). The
+        # display toggles are created in the row-2 group block above and added
+        # to THIS row here (only attributes are referenced by logic).
         self._lv_grp_r2_blood = QWidget()
         r2b = QHBoxLayout(self._lv_grp_r2_blood)
         r2b.setContentsMargins(0, 0, 0, 0); r2b.setSpacing(4)
@@ -8054,14 +8053,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_save_btn.setHelpToolTip(
             t("Save the LV Vol landmarks, HU range, Epi surface and volume"))
         self._lvv_save_btn.clicked.connect(self._lvv_save)
-        r2b.addWidget(self._lvv_save_btn)
         self._lvv_load_btn = FitButton(t("Load"))
         self._lvv_load_btn.setHelpToolTip(t("Load a saved LV Vol dataset"))
         self._lvv_load_btn.clicked.connect(self._lvv_load)
-        r2b.addWidget(self._lvv_load_btn)
         self._lvv_exit_btn = FitButton(t("Exit"))
-        self._lvv_exit_btn.clicked.connect(self._lv_exit_all)
-        r2b.addWidget(self._lvv_exit_btn)
+        self._lvv_exit_btn.setHelpToolTip(
+            t("Leave Blood/Endo back to the LV selector (MV/AoV are kept)"))
+        self._lvv_exit_btn.clicked.connect(self._lv_submode_exit)
+        for b in (self._lvv_save_btn, self._lvv_load_btn, self._lvv_exit_btn,
+                  self._lvv_hl_btn, self._lvv_mask_btn, self._lvv_epi_btn,
+                  self._lvv_auto_endo_btn, self._lvv_lvd_btn):
+            r2b.addWidget(b)
+        r2b.addSpacing(24)                   # keep Manual apart from LVD
+        r2b.addWidget(self._lvv_manual_endo_btn)
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
