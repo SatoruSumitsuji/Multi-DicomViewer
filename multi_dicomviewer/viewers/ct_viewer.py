@@ -4985,6 +4985,46 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._toggle_measure()
         self._lv_update_valve_buttons()
         self._lv_update_submode_ui()            # both valves set → un-grey selectors
+        self._lv_on_valve_changed(which)
+
+    def _lv_on_valve_changed(self, which) -> None:
+        """A valve plane (MV/AoV) was (re)set. The Epi/Endo TRACE is valve-
+        INDEPENDENT — only the basal CUT changes — so drop the valve-dependent
+        caches (Epi border mask, Auto-Endo mask, 壁厚, LVL) so a redisplay/
+        recompute uses the NEW plane while REUSING the trace. In contour LV,
+        re-snap the traced border's basal ends onto the new MV so no full
+        re-trace is needed."""
+        try:
+            self._lvv_invalidate_epi_disp()
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            self._lvv_invalidate_auto_endo()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._lvv_lvl_cache = None
+        if getattr(self, "_lvv_thick_mode", None) is not None or getattr(
+                self, "_lvv_thick_cache", None):
+            try:
+                self._lvv_thick_clear()
+            except Exception:                            # noqa: BLE001
+                pass
+        if (which == "mitral" and self._lv is not None
+                and self._lv.get("phase") == "contour"):
+            for _pas in ("endo", "epi"):
+                try:
+                    self._lv_snap_base_to_mv(_pas)
+                except Exception:                        # noqa: BLE001
+                    pass
+        # Refresh the on-image Epi/Endo overlays for the new plane.
+        try:
+            if self._lvv is not None:
+                self._lvv_show_epi(render=False)
+                self._lvv_show_endo(render=False)
+            for k in ("A", "B"):
+                self.pane[k].render()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _lv_valve_show_from_geom(self, which) -> None:
         """(Re)create the on-screen valve ring on BOTH panes from the stored
@@ -5204,9 +5244,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_remember_dir(path)
             self._lv_update_valve_buttons()
             self._lv_update_submode_ui()        # both valves set → un-grey
+            self._lv_on_valve_changed(which)
             QMessageBox.information(
                 self.window(), t("LV"),
-                t("Loaded the {w} plane.").format(
+                t("Loaded the {w} plane. Epi/Endo reuse the existing trace with "
+                  "the new basal cut — re-run LV-Blood / Auto-Endo (or Calc Vol) "
+                  "to refresh the volumes.").format(
                     w="MV" if which == "mitral" else "AoV"))
         except Exception as exc:                        # noqa: BLE001
             import traceback
