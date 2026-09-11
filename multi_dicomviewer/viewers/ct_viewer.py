@@ -3315,6 +3315,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_ax_repos_btn.setHelpToolTip(
             t("Drop the set apex so you can move the crossing and Set again."))
         self._lv_ax_repos_btn.clicked.connect(self._lv_apex_reposition)
+        self._lv_ax_save_btn = FitButton(t("Save"))
+        self._lv_ax_save_btn.setHelpToolTip(
+            t("Save the apex point to its own .ApxLv.json (reusable like MV/AoV)."))
+        self._lv_ax_save_btn.clicked.connect(self._lv_save_apex)
+        self._lv_ax_load_btn = FitButton(t("Load"))
+        self._lv_ax_load_btn.setHelpToolTip(t("Load an apex from an .ApxLv.json."))
+        self._lv_ax_load_btn.clicked.connect(self._lv_load_apex)
+        self._lv_ax_clear_btn = FitButton(t("Clear"))
+        self._lv_ax_clear_btn.setHelpToolTip(
+            t("Remove the apex from the image (saved files are kept)."))
+        self._lv_ax_clear_btn.clicked.connect(self._lv_clear_apex)
         self._lv_ax_hide_btn = FitButton(t("Hide"))
         self._lv_ax_hide_btn.setHelpToolTip(
             t("Hide / show the apex marker on the image (the apex is kept)."))
@@ -3323,7 +3334,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_ax_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ax_exit_btn.clicked.connect(self._lv_exit_apex)
         for b in (self._lv_ax_set_btn, self._lv_ax_repos_btn,
-                  self._lv_ax_hide_btn, self._lv_ax_exit_btn):
+                  self._lv_ax_save_btn, self._lv_ax_load_btn,
+                  self._lv_ax_clear_btn, self._lv_ax_hide_btn,
+                  self._lv_ax_exit_btn):
             b.setStyleSheet(self._BTN_DIS)
             r2ax.addWidget(b)
         self._lv_grp_r2_apex.setVisible(False)
@@ -3971,7 +3984,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 has_apex = self._lv_apex is not None
                 self._lv_ax_set_btn.setEnabled(True)
                 self._lv_ax_exit_btn.setEnabled(True)
+                self._lv_ax_load_btn.setEnabled(True)
                 self._lv_ax_repos_btn.setEnabled(has_apex)
+                self._lv_ax_save_btn.setEnabled(has_apex)
+                self._lv_ax_clear_btn.setEnabled(has_apex)
                 self._lv_ax_hide_btn.setEnabled(has_apex)
                 self._lv_ax_hide_btn.setText(
                     t("Hide") if getattr(self, "_lv_apex_shown", True)
@@ -5587,6 +5603,93 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_exit_apex(self) -> None:
         """Leave the Apex step → back to the LV selector (the apex is kept)."""
         self._lv_apex_edit = False
+        self._lv_update_submode_ui()
+
+    def _lv_save_apex(self) -> None:
+        """Save the COMMON apex to its own .ApxLv.json (reusable like MV/AoV)."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if self._lv_apex is None:
+            QMessageBox.information(self.window(), t("LV"),
+                                    t("Set the apex first."))
+            return
+        data = {"type": "apex",
+                "series": (self._lv_series_meta()
+                           if hasattr(self, "_lv_series_meta") else {}),
+                "apex": list(map(float, np.asarray(self._lv_apex, float)))}
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "apex")
+        default = os.path.join(d, stem + ".ApxLv.json") if d \
+            else stem + ".ApxLv.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save apex"), default,
+            "Apex (*.ApxLv.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".ApxLv.json"
+        if hasattr(self, "_unlink_case_variant"):
+            self._unlink_case_variant(path)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        self._lv_remember_dir(path)
+        QMessageBox.information(self.window(), t("LV"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _lv_load_apex(self) -> None:
+        """Load an apex from an .ApxLv.json into the COMMON apex."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        if self._image is None:
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load apex"), d,
+            "Apex (*.ApxLv.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            saved = (data.get("series") or {}).get("series_uid", "")
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if saved and cur and saved != cur:
+                if QMessageBox.question(
+                        self.window(), t("LV"),
+                        t("This apex file was saved for a DIFFERENT series — it "
+                          "may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return
+            self._lv_apex = np.asarray(data["apex"], float)
+            self._lv_apex_shown = True
+            self._lv_apex_marker_draw()
+            self._lv_remember_dir(path)
+            self._lv_update_submode_ui()
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Load failed: {err}", err=str(exc)))
+
+    def _lv_clear_apex(self) -> None:
+        """Remove the common apex from the image (saved .ApxLv.json is kept)."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv_apex is None:
+            self._lvv_prompt(t("No apex on the image to clear."))
+            return
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("Remove the apex from the image? Saved files are kept.")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_apex = None
+        self._lv_apex_marker_draw()
         self._lv_update_submode_ui()
 
     # ---- MV/AoV guided edit step (Draw → Confirm → Save/Load/Clear/Exit) ----
