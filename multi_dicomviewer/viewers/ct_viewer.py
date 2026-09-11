@@ -3616,14 +3616,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_ve_save_btn.setEnabled(has)
                 self._lv_ve_clear_btn.setEnabled(has)
         # A group's visibility changed → re-lay-out the bar NOW so a row that was
-        # collapsed (empty row 2 in the initial state) appears on the FIRST click
-        # instead of needing a second interaction to trigger the relayout.
+        # collapsed (empty row 2 in the initial state) appears on the FIRST click,
+        # and a row that was hidden collapses immediately (no leftover gap).
         if _changed:
-            try:
-                self._lv_wrap.layout().activate()
-                self._lv_wrap.updateGeometry()
-            except Exception:                            # noqa: BLE001
-                pass
+            self._lv_relayout_bar()
         self._lv_update_valve_buttons()
         # MV / AoV row-1 buttons: grey the OTHER valve while editing one, and grey
         # BOTH while an Epi/Blood sub-mode is active (they are a prerequisite step
@@ -3675,6 +3671,36 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_start_btn.setChecked(blood)
         if self._lv is None or self._lv.get("sax") is None:
             self._lv_style_selectors()      # loaded/active colours (not in SAX)
+
+    def _lv_relayout_bar(self) -> None:
+        """Force a SYNCHRONOUS relayout of the LV bar up its whole parent chain
+        after a row was shown/hidden.
+
+        The bar sits in ``_lv_wrap`` → ``_below_wrap`` → a ``_ChromeScrollArea``
+        (``_below_scroll``, whose sizeHint tracks its content) → the viewer's
+        top-level layout. Activating only ``_lv_wrap``'s own layout does not
+        propagate the height change up, and ``updateGeometry()`` only *posts* a
+        deferred LayoutRequest — so a newly shown row appeared (or a hidden one
+        collapsed) only after a SECOND interaction pumped the event loop.
+        Invalidating + activating each layout in the chain, then re-reading the
+        image floor, makes the change take on the first click."""
+        for w in (getattr(self, "_lv_wrap", None),
+                  getattr(self, "_below_wrap", None)):
+            if w is not None and w.layout() is not None:
+                w.layout().invalidate()
+                w.layout().activate()
+        sc = getattr(self, "_below_scroll", None)
+        if sc is not None:
+            sc.updateGeometry()
+        top = self.layout()
+        if top is not None:
+            top.invalidate()
+            top.activate()
+        # The chrome scroll's cap depends on the (now changed) chrome heights.
+        try:
+            self._apply_image_floor()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _lv_style_selectors(self) -> None:
         """Colour the Endo / Epi / Blood selector buttons by whether their DATA is
