@@ -7294,25 +7294,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         epi = getattr(self, "_lvv_epi_surf", None)
         ax = getattr(epi, "axis", None) if epi is not None else None
         level = getattr(self, "_lvv_lvd_level", None)
-        # LVD is MANUAL: the MV-leaflet-tip level is set via the LVD表示 button;
-        # None until set → no LVD.
+        # LVD is MANUAL: the MV-leaflet-tip level is set via the LVD button; None
+        # until set → no LVD.
         if comp is None or bb is None or ax is None or level is None:
             self._lvv_diam_pts = None
             return None
+        # Cached by mask identity + level so the per-frame paint does NOT re-run
+        # the max-chord scan (the 計測 press primes this cache off-thread).
+        cache = getattr(self, "_lvv_lv_diam_cache", None)
+        if cache is not None and cache[0] is comp and cache[1] == level:
+            self._lvv_diam_pts = cache[3]
+            return cache[2]
+        v = None
+        pts = None
         try:
             from multi_dicomviewer.core.lv_compact import max_perp_diameter
             det = max_perp_diameter(comp, bb, ax.apex, ax.axis, ax.radial0,
                                     self._dims, at_along_mm=float(level),
                                     return_detail=True)
-            if det is None:
-                self._lvv_diam_pts = None
-                return None
-            self._lvv_diam_pts = (np.asarray(det[1], float),
-                                  np.asarray(det[2], float))
-            return float(det[0])
+            if det is not None:
+                v = float(det[0])
+                pts = (np.asarray(det[1], float), np.asarray(det[2], float))
         except Exception:                            # noqa: BLE001
-            self._lvv_diam_pts = None
-            return None
+            v, pts = None, None
+        self._lvv_lv_diam_cache = (comp, level, v, pts)
+        self._lvv_diam_pts = pts
+        return v
 
     def _lvv_lv_length_mm(self):
         """LVL (Left Ventricular Length) = distance between the TWO points where
@@ -8308,11 +8315,78 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_lvd_level = float((np.asarray(self._center, float)
                                          - apex) @ axis)
             self._lvv_lvd_shown = True
+            self._lvv_lv_diam_cache = None       # force recompute at the new level
+            self._lvv_style_lvd_btn()
+            self._lvv_measure_lvd_async()        # busy progress bar + threaded
+            return
         else:
             self._lvv_lvd_shown = not getattr(self, "_lvv_lvd_shown", False)
         self._lvv_style_lvd_btn()
         for k in ("A", "B"):
             self._overlay[k].update()
+
+    def _lvv_measure_lvd_async(self) -> None:
+        """Measure the LVD chord OFF the UI thread with a busy progress bar — the
+        max-chord scan over the Auto-Endo mask takes a moment on large volumes.
+        Primes the diameter cache, then repaints; falls back to a plain repaint
+        when there is nothing to compute."""
+        from PyQt6.QtWidgets import QProgressDialog
+        comp, bb = self._lvv_endo_mask_cached()
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        level = getattr(self, "_lvv_lvd_level", None)
+        if (comp is None or bb is None or ax is None
+                or self._dims is None or level is None):
+            for k in ("A", "B"):
+                self._overlay[k].update()
+            return
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        radial0 = np.asarray(ax.radial0, float)
+        dims = self._dims
+        lvl = float(level)
+
+        def _job():
+            from multi_dicomviewer.core.lv_compact import max_perp_diameter
+            return max_perp_diameter(comp, bb, apex, axis, radial0, dims,
+                                     at_along_mm=lvl, return_detail=True)
+
+        dlg = QProgressDialog(t("Measuring LVD…"), None, 0, 0, self.window())
+        dlg.setWindowTitle(t("LVD"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+        worker = _LvvWorker(_job, self)
+        self._lvv_lvd_worker = worker            # keep a ref so it isn't GC'd
+        worker.finished_result.connect(
+            lambda det: self._lvv_lvd_finish(det, comp, lvl, dlg))
+        worker.start()
+
+    def _lvv_lvd_finish(self, det, comp, level, dlg) -> None:
+        """LVD worker done: cache the value/endpoints (keyed by mask + level) and
+        repaint so the line shows without a per-frame re-scan."""
+        try:
+            dlg.close()
+        except Exception:                                # noqa: BLE001
+            pass
+        v = None
+        pts = None
+        if isinstance(det, dict):                        # worker error
+            det = None
+        if det is not None:
+            try:
+                v = float(det[0])
+                pts = (np.asarray(det[1], float), np.asarray(det[2], float))
+            except Exception:                            # noqa: BLE001
+                v, pts = None, None
+        self._lvv_lv_diam_cache = (comp, level, v, pts)
+        self._lvv_diam_pts = pts
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        self._lv_update_text()
 
     def _lvv_lvd_reset(self) -> None:
         if self._lvv is None:
@@ -8320,6 +8394,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lvd_level = None
         self._lvv_lvd_shown = False
         self._lvv_diam_pts = None
+        self._lvv_lv_diam_cache = None
         self._lvv_style_lvd_btn()
         for k in ("A", "B"):
             self._overlay[k].update()
