@@ -4341,9 +4341,76 @@ class CTViewer(CPRMixin, AbstractViewer):
                                          - apex) @ axis)
             self._lvv_lvd_shown = True
             self._lvv_lv_diam_cache = None       # force recompute at new level
+            self._lvv_style_lvd_btn()
+            self._lvv_measure_lvd_async()        # busy progress bar + threaded
+            return
         else:
             self._lvv_lvd_shown = not self._lvv_lvd_shown
         self._lvv_style_lvd_btn()
+        self._lvv_show_diameter()
+        self._lv_update_text()
+
+    def _lvv_measure_lvd_async(self) -> None:
+        """Measure the LVD chord (max Endo diameter ⟂ the axis at the set level)
+        OFF the UI thread, with a busy progress bar — the max-chord scan over the
+        Auto-Endo mask takes a moment on large volumes. Populates the diameter
+        cache, then draws the line. Falls back to a synchronous refresh when
+        there is nothing to compute."""
+        from PyQt6.QtWidgets import QProgressDialog
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        bbox = getattr(self, "_lv_endo_mask_bbox", None)
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        level = getattr(self, "_lvv_lvd_level", None)
+        if (comp is None or bbox is None or ax is None
+                or self._dims is None or level is None):
+            self._lvv_show_diameter()
+            self._lv_update_text()
+            return
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        radial0 = np.asarray(ax.radial0, float)
+        dims = self._dims
+        lvl = float(level)
+
+        def _job():
+            from multi_dicomviewer.core.lv_compact import max_perp_diameter
+            return max_perp_diameter(comp, bbox, apex, axis, radial0, dims,
+                                     at_along_mm=lvl, return_detail=True)
+
+        dlg = QProgressDialog(t("Measuring LVD…"), None, 0, 0, self.window())
+        dlg.setWindowTitle(t("LVD"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.show()
+        worker = _LvvWorker(_job, self)
+        self._lvv_lvd_worker = worker            # keep a ref so it isn't GC'd
+        worker.finished_result.connect(
+            lambda det: self._lvv_lvd_finish(det, comp, lvl, dlg))
+        worker.start()
+
+    def _lvv_lvd_finish(self, det, comp, level, dlg) -> None:
+        """LVD worker done: cache the value/endpoints (keyed by mask + level so
+        _lvv_lv_diameter_mm returns them without a re-scan) and draw the line."""
+        try:
+            dlg.close()
+        except Exception:                                # noqa: BLE001
+            pass
+        v = None
+        pts = None
+        if isinstance(det, dict):                        # worker error
+            det = None
+        if det is not None:
+            try:
+                v = float(det[0])
+                pts = (np.asarray(det[1], float), np.asarray(det[2], float))
+            except Exception:                            # noqa: BLE001
+                v, pts = None, None
+        self._lvv_lv_diam_cache = (comp, level, v, pts)
+        self._lvv_diam_pts = pts
         self._lvv_show_diameter()
         self._lv_update_text()
 
