@@ -9559,12 +9559,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         return axis_dir, radial0
 
     def _lv_confirm_apex_trace(self) -> None:
-        """'Apex' button (trace flow): SET this pass's apex at the centreline
-        crossing (the trace pane's plane centre); the LV long axis is then
-        DETERMINISTIC = apex → MV centre (no view alignment). Needs the MV plane
-        set first. Re-pressing just re-sets the apex + axis at the crossing."""
+        """'Apex' button (trace flow): SET this pass's apex at the CROSSHAIR
+        (self._center); the LV long axis is then DETERMINISTIC = apex → MV
+        center. A confirm dialog lets the user OK the crossing or Re-set it (move
+        the crosshair onto the apex, then press Apex again)."""
+        from PyQt6.QtWidgets import QMessageBox
         lv = self._lv
-        if lv is None:
+        if lv is None or self._center is None:
             return
         if lv.get("sax") is not None:                # not used in SAX review
             return
@@ -9572,22 +9573,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         if pas not in ("endo", "epi"):
             self._lvv_prompt(t("Choose Endo or Epi first, then set the apex."))
             return
-        P = np.asarray(self._pc[lv["pane"]], float).copy()   # crossing = plane ctr
+        # Confirm the crossing position before committing the apex.
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Apex"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t(
+            "Set the apex at this crossing?\nIf you need to reposition it, "
+            "choose Re-set, move the crossing onto the LV apex, then press "
+            "Apex again."))
+        b_ok = box.addButton(t("OK"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(t("Re-set"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_ok)
+        box.exec()
+        if box.clickedButton() is not b_ok:
+            return
+        P = np.asarray(self._center, float).copy()   # crossing = the crosshair
         axinfo = self._lv_long_axis_from_apex(P)
         if axinfo is None:
-            # Two causes: (a) no MV plane yet, or (b) the crosshair sits ON the
-            # MV centre (apex == MV → no axis). Distinguish so a loaded MV plane
-            # doesn't misreport "Set the MV plane first".
             mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
             if mv is None:
                 self._lvv_prompt(t(
                     "Set the MV plane first — the LV long axis runs from the "
-                    "apex to the MV centre."))
+                    "apex to the MV center."))
             else:
                 self._lvv_prompt(t(
-                    "Move the crosshair onto the LV APEX first, then press Apex — "
-                    "it is currently at the MV-plane centre, so no long axis can "
-                    "be formed."))
+                    "The crossing coincides with the MV center — move it onto "
+                    "the LV apex, then press Apex."))
             return
         from multi_dicomviewer.core.lv_axis import LVAxis
         axis_dir, radial0 = axinfo
@@ -9613,7 +9624,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_show_plane()
         self._lv_redraw_all()
         self._lvv_prompt(t(
-            "Apex set + LV long axis = apex→MV centre. Press 'Trace' to trace "
+            "Apex set + LV long axis = apex→MV center. Press 'Trace' to trace "
             "the border."))
 
     def _lv_apex_on_axis(self, tgt, sx, sy):

@@ -10545,24 +10545,34 @@ class CTViewer(CPRMixin, AbstractViewer):
         if pas not in ("endo", "epi"):
             self._lvv_prompt(t("Choose Endo or Epi first, then set the apex."))
             return
-        # Apex = the centreline crossing; the LV long axis is then DETERMINISTIC
-        # = apex → MV centre (no view alignment). Needs the MV plane set first.
+        # Apex = the crosshair crossing; the LV long axis is then DETERMINISTIC
+        # = apex → MV center. Confirm the crossing first (OK / Re-set).
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Apex"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t(
+            "Set the apex at this crossing?\nIf you need to reposition it, "
+            "choose Re-set, move the crossing onto the LV apex, then press "
+            "Apex again."))
+        b_ok = box.addButton(t("OK"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(t("Re-set"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_ok)
+        box.exec()
+        if box.clickedButton() is not b_ok:
+            return
         apex = np.asarray(self._center, float).copy()
         axinfo = self._lv_long_axis_from_apex(apex)
         if axinfo is None:
-            # Two causes: (a) no MV plane yet, or (b) the crosshair sits ON the
-            # MV centre (apex == MV → no axis). Distinguish so a loaded MV plane
-            # doesn't misreport "Set the MV plane first".
             mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
             if mv is None:
                 self._lvv_prompt(t(
                     "Set the MV plane first — the LV long axis runs from the "
-                    "apex to the MV centre."))
+                    "apex to the MV center."))
             else:
                 self._lvv_prompt(t(
-                    "Move the crosshair onto the LV APEX first, then press Apex — "
-                    "it is currently at the MV-plane centre, so no long axis can "
-                    "be formed."))
+                    "The crossing coincides with the MV center — move it onto "
+                    "the LV apex, then press Apex."))
             return
         from multi_dicomviewer.core.lv_axis import LVAxis
         axis_dir, radial0 = axinfo
@@ -10591,7 +10601,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self.pane[k].render()
         self._lvv_prompt(t(
-            "Apex set + LV long axis = apex→MV centre. Press 'Trace' to trace "
+            "Apex set + LV long axis = apex→MV center. Press 'Trace' to trace "
             "the border."))
 
     def _lv_start_trace(self) -> None:
