@@ -1446,6 +1446,28 @@ class _Pane:
         self.rot_arrow.GetProperty().SetLineWidth(1.6)
         self.rot_arrow.SetVisibility(False)
         self.ren.AddActor(self.rot_arrow)
+        # PERSISTENT move hint: the SAME straight double-arrows the centreline
+        # shows on hover, but drawn ALWAYS while a movable section line is present
+        # (Epi mode) so it is clear the line slides up/down — even without
+        # hovering. Same look (yellow + black halo). In _overlay_actors so it
+        # hides with the crosshair overlay / "Max Image"; geometry is emptied when
+        # not applicable (so it draws nothing then).
+        self.move_hint_halo_mapper = vtkPolyDataMapper()
+        self.move_hint_halo_mapper.SetInputData(vtkPolyData())
+        self.move_hint_halo = vtkActor()
+        self.move_hint_halo.SetMapper(self.move_hint_halo_mapper)
+        self.move_hint_halo.GetProperty().SetColor(0.0, 0.0, 0.0)   # black
+        self.move_hint_halo.GetProperty().SetLineWidth(4.2)
+        self.ren.AddActor(self.move_hint_halo)
+        self._overlay_actors.append(self.move_hint_halo)
+        self.move_hint_mapper = vtkPolyDataMapper()
+        self.move_hint_mapper.SetInputData(vtkPolyData())
+        self.move_hint = vtkActor()
+        self.move_hint.SetMapper(self.move_hint_mapper)
+        self.move_hint.GetProperty().SetColor(0.8, 0.8, 0.0)        # yellow
+        self.move_hint.GetProperty().SetLineWidth(1.6)
+        self.ren.AddActor(self.move_hint)
+        self._overlay_actors.append(self.move_hint)
         # Two dashed lines = the other pane's slab-MIP width.
         self.slab_mappers = []
         self.slab_actors = []
@@ -14212,6 +14234,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # move / center: keep the straight arrows glued to the moving
                 # crosshair centre so they FOLLOW a translate drag too.
                 p.set_rot_arrow(self._move_arrow_pd(key, hi[0]))
+
+        # Persistent up/down move hint on the Epi movable SECTION line (the
+        # horizontal crossline): the same straight double-arrows the centreline
+        # shows on hover, drawn ALWAYS in Epi mode so it reads as movable. Emptied
+        # otherwise, and while hovering (hi set) the transient hover arrow above
+        # takes over, so the two never double up.
+        if self._lv_current_submode() == "epi" and hi is None:
+            mpd = self._move_arrow_pd(key, "H")
+            p.move_hint_mapper.SetInputData(mpd)
+            p.move_hint_halo_mapper.SetInputData(mpd)
+        else:
+            p.move_hint_mapper.SetInputData(vtkPolyData())
+            p.move_hint_halo_mapper.SetInputData(vtkPolyData())
 
     def _update_info(self, key, title_only):
         p = self.pane[key]
