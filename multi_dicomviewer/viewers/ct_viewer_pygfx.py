@@ -8275,33 +8275,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                              float((np.asarray(av0[0], float) - apex) @ axis_dir))
         if along_base <= 6.0:
             return None
+        # Extend the generation basally PAST the tilted valve plane's highest
+        # point over the LV radius, so the plane clip below trims the Endo to the
+        # full TILTED annulus instead of leaving a flat short-axis cut at the
+        # plane centre (the "Auto-Endo cut at the short axis" report). The extra
+        # is trimmed by clip_mask_by_planes + the Epi clip, so it costs nothing.
+        _tan = 0.0
+        for _pl in (mv, av0):
+            if _pl is None:
+                continue
+            _n = np.asarray(_pl[1], float)
+            _n = _n / (np.linalg.norm(_n) or 1.0)
+            _cos = min(1.0, abs(float(_n @ axis_dir)))
+            _sin = math.sqrt(max(0.0, 1.0 - _cos * _cos))
+            _tan = max(_tan, _sin / max(0.2, _cos))         # tan(plane tilt)
+        along_base = along_base + min(40.0, 45.0 * _tan)    # R·tan, capped
         z0, z1, y0, y1, x0, x1 = self._lvv_blood_bbox
         blood = np.zeros(self._vol.shape, bool)
         blood[z0:z1, y0:y1, x0:x1] = self._lvv_blood_comp
         dims = self._dims
-        # Epi mask (full-volume) for the SUB-AORTIC lumen fix + final clip: where
-        # the Epi border touches the blood, the compact myocardium bulges into the
-        # cavity, so use the PURE lumen contour there instead of bridging.
+        # Epi mask (full-volume) for the SUB-AORTIC lumen fix + final cavity clip.
+        # Use the MV-plane-EXTENDED Epi mask (reaches the TILTED annulus) so the
+        # final "Endo ⊆ Epi" clip does NOT re-flatten the Endo base to a short-
+        # axis cut — it follows the tilted MV plane like the Epi border does.
+        self._lvv_ensure_epi_mask()
         epi_full = None
         try:
-            planes = []
-            if mv is not None:
-                planes.append((np.asarray(mv[0], float),
-                               np.asarray(mv[1], float)))
-            if av0 is not None:
-                planes.append((np.asarray(av0[0], float),
-                               np.asarray(av0[1], float)))
-            m = epi.inside_mask_bbox(dims, self._vol.shape, planes, apex)
-            if m and m[0] is not None:
-                comp2, bbox2 = m
+            ec = getattr(self, "_lvv_epi_mask_comp", None)
+            eb = getattr(self, "_lvv_epi_mask_bbox", None)
+            if ec is not None and eb is not None:
                 epi_full = np.zeros(self._vol.shape, bool)
-                pz0, pz1, py0, py1, px0, px1 = bbox2
-                epi_full[pz0:pz1, py0:py1, px0:px1] = comp2
-                # NOTE: do NOT cache this raw (flat-common-cut) Epi interior as
-                # _lvv_epi_mask_comp — _lvv_ensure_epi_mask builds the MV-plane-
-                # EXTENDED Epi mask for LVL / the Epi境界 line so it reaches the
-                # annulus; overwriting it here would shorten it to the short-axis
-                # common cut. epi_full here is only for the sub-aortic fix.
+                ez0, ez1, ey0, ey1, ex0, ex1 = eb
+                epi_full[ez0:ez1, ey0:ey1, ex0:ex1] = np.asarray(ec, bool)
         except Exception:                                # noqa: BLE001
             epi_full = None
         adv = self._lv_endo_adv()
