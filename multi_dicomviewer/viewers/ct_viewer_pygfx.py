@@ -8124,11 +8124,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         if mv is not None:
             planes.append((np.asarray(mv[0], float), np.asarray(mv[1], float)))
         dims, shape = self._dims, self._vol.shape
+        md = getattr(self, "_lvv_epi_model_dict", None)
         result: dict = {}
 
         class _EpiWorker(QThread):
             def run(self_) -> None:
                 try:
+                    # Prefer the MODEL's valve-extended Epi mask: _full_surface is
+                    # built to the DEEPEST traced extent and trimmed by the TILTED
+                    # MV/AoV planes, so the Epi region reaches the mitral annulus
+                    # (not the flat short-axis common cut that inside_mask_bbox
+                    # gives — the reported "base cut at the short axis"). This is
+                    # the SAME region the Epi volume counts.
+                    if md is not None and mv is not None:
+                        from multi_dicomviewer.core.lv_measure import LVModel
+                        mm = LVModel.from_dict(md)
+                        mm.build()
+                        comp, bbox, _v, _vm = mm.inside_mask_volumes(
+                            dims, shape, "epi", mv, av)
+                        if comp is not None:
+                            result["m"] = (comp, bbox)
+                            return
+                    # Fallback: raw traced-surface clip (no MV extension).
                     result["m"] = epi.inside_mask_bbox(dims, shape, planes, apex)
                 except Exception as exc:                 # noqa: BLE001
                     result["err"] = str(exc)
@@ -8280,10 +8297,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 epi_full = np.zeros(self._vol.shape, bool)
                 pz0, pz1, py0, py1, px0, px1 = bbox2
                 epi_full[pz0:pz1, py0:py1, px0:px1] = comp2
-                # Cache the (valve-clipped) Epi mask so LVL can measure the LV
-                # long-axis ∩ Epi extent without another modal build.
-                self._lvv_epi_mask_comp = np.asarray(comp2, bool)
-                self._lvv_epi_mask_bbox = tuple(bbox2)
+                # NOTE: do NOT cache this raw (flat-common-cut) Epi interior as
+                # _lvv_epi_mask_comp — _lvv_ensure_epi_mask builds the MV-plane-
+                # EXTENDED Epi mask for LVL / the Epi境界 line so it reaches the
+                # annulus; overwriting it here would shorten it to the short-axis
+                # common cut. epi_full here is only for the sub-aortic fix.
         except Exception:                                # noqa: BLE001
             epi_full = None
         adv = self._lv_endo_adv()
