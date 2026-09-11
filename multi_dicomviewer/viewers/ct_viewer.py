@@ -3592,9 +3592,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # changes. Calling setVisible every sync (many per view manipulation)
         # churned the layout and could momentarily drop the trace buttons
         # mid-align (reported: Set axis vanished while orienting the view).
+        _changed = []
+
         def _vis(w, on):
             if w.isVisible() != on:
                 w.setVisible(on)
+                _changed.append(w)
         ve = getattr(self, "_lv_valve_edit", None)     # 'mitral'/'aortic'/None
         _vis(self._lv_grp_trace, endoepi and not ve)
         _vis(self._lv_grp_blood, blood and not ve)
@@ -3612,6 +3615,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                     b.setEnabled(True)
                 self._lv_ve_save_btn.setEnabled(has)
                 self._lv_ve_clear_btn.setEnabled(has)
+        # A group's visibility changed → re-lay-out the bar NOW so a row that was
+        # collapsed (empty row 2 in the initial state) appears on the FIRST click
+        # instead of needing a second interaction to trigger the relayout.
+        if _changed:
+            try:
+                self._lv_wrap.layout().activate()
+                self._lv_wrap.updateGeometry()
+            except Exception:                            # noqa: BLE001
+                pass
         self._lv_update_valve_buttons()
         # MV / AoV row-1 buttons: grey the OTHER valve while editing one, and grey
         # BOTH while an Epi/Blood sub-mode is active (they are a prerequisite step
