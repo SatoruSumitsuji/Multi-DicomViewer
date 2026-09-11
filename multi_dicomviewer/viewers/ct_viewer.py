@@ -14734,12 +14734,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         return self._lv_active_apex() is not None
 
+    def _lv_cross_paint_suppressed(self) -> bool:
+        """Whether the crosshair should be HIDDEN from PAINT. Same as
+        _lv_cross_suppressed EXCEPT it stays DRAWN (but still non-interactive —
+        interaction keeps using _lv_cross_suppressed) during an Epi long-axis
+        trace, so its section line + up/down move-arrows remain a visible
+        reference while placing the border (the apex is set upfront)."""
+        lv = getattr(self, "_lv", None)
+        if (lv is not None and lv.get("pass") == "epi"
+                and lv.get("phase") == "contour" and lv.get("sax") is None):
+            return False
+        return self._lv_cross_suppressed()
+
     def _cross_overlay_on(self) -> bool:
         """Whether the crosshair overlay should be visible now: the CenterLine
-        button is ON and the LV crosshair is not suppressed. Used everywhere the
-        overlay is toggled so an LV SAX reslice can't re-show a suppressed
-        crosshair (the 'dragging the level/meridian line brings it back' bug)."""
-        return self._cl_btn.isChecked() and not self._lv_cross_suppressed()
+        button is ON and the LV crosshair is not paint-suppressed. Used
+        everywhere the overlay is toggled so an LV SAX reslice can't re-show a
+        suppressed crosshair (the 'dragging the level/meridian line brings it
+        back' bug)."""
+        return self._cl_btn.isChecked() and not self._lv_cross_paint_suppressed()
 
     def _update_cross(self, key):
         """Crosshair at world (0,0) — the projected CrossLine center,
@@ -14755,11 +14768,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # leaves 'contour' (→ align / ready / Exit) the overlay is restored to the
         # CenterLine button. Stays visible through align AND ready (Set axis done,
         # before Trace) so the view can still be adjusted.
-        if self._lv_cross_suppressed():
+        if self._lv_cross_paint_suppressed():
             p.set_overlay_visible(False)
             return
         # Not suppressed → keep the overlay in step with the CenterLine button so
         # the crosshair reappears the moment LV leaves Trace/SAX (→ align / Exit).
+        # During an Epi trace the crosshair is DRAWN (paint-suppression is off)
+        # but still non-interactive (drag gating uses _lv_cross_suppressed), so
+        # the section line + move-arrows stay visible without corrupting a trace.
         p.set_overlay_visible(self._cl_btn.isChecked())
         h = self._half
         zc = 0.5

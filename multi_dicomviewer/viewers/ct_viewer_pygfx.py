@@ -565,7 +565,7 @@ class _Overlay(QWidget):
             self._paint_cpr(p, w, h)
             self._paint_info(p, key, w, h)
             return
-        if v._cl_on and not v._lv_cross_suppressed():
+        if v._cl_on and not v._lv_cross_paint_suppressed():
             self._paint_cross(p, key, w, h)
         self._paint_measures(p, key, w, h)
         if v._lv is not None:
@@ -6623,6 +6623,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         return (getattr(self, "_lv", None) is not None
                 and self._lv_active_apex() is not None)
+
+    def _lv_cross_paint_suppressed(self) -> bool:
+        """Whether the crosshair should be HIDDEN from PAINT. Same as
+        _lv_cross_suppressed EXCEPT it stays DRAWN (but still non-interactive —
+        interaction keeps using _lv_cross_suppressed) during an Epi long-axis
+        trace, so its section line + up/down move-arrows remain a visible
+        reference while placing the border (the apex is now set upfront)."""
+        lv = getattr(self, "_lv", None)
+        if (lv is not None and lv.get("pass") == "epi"
+                and lv.get("phase") == "contour" and lv.get("sax") is None):
+            return False
+        return self._lv_cross_suppressed()
 
     def _style_cl(self):
         if not self._cl_btn.isEnabled():          # suppressed / 2-D → greyed out
