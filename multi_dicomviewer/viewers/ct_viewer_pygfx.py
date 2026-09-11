@@ -889,14 +889,15 @@ class _Overlay(QWidget):
                     self._paint_lv_wall(p, key, border_sm["endo"],
                                         border_sm["epi"])
                     self._paint_lv_wall_legend(p, w, h)
-                for which, colr in (("endo", (255, 64, 64)),
-                                    ("epi", (64, 192, 64))):
-                    sm = border_sm.get(which)
-                    if not sm:
-                        continue
-                    p.setBrush(Qt.BrushStyle.NoBrush)
-                    p.setPen(QPen(QColor(*colr), 2.2))
-                    p.drawPolyline(QPolygonF([S(q) for q in sm]))
+                if v._lv_border_show:                 # Epi-Border toggle (SAX)
+                    for which, colr in (("endo", (255, 64, 64)),
+                                        ("epi", (64, 192, 64))):
+                        sm = border_sm.get(which)
+                        if not sm:
+                            continue
+                        p.setBrush(Qt.BrushStyle.NoBrush)
+                        p.setPen(QPen(QColor(*colr), 2.2))
+                        p.drawPolyline(QPolygonF([S(q) for q in sm]))
                 p.setPen(Qt.PenStyle.NoPen)
                 green = QColor(64, 220, 64)
                 for q, is_edit in mark:               # fixed screen-size dots
@@ -1215,6 +1216,11 @@ class _Overlay(QWidget):
             # Hidden by "Hide/Show All Result" (global) or this measure's own
             # right-click Hide → skip its line, handles and id label entirely.
             if v._results_hidden or m.get("hidden"):
+                continue
+            # Epi-Border OFF hides the traced Endo/Epi border on the long-axis
+            # pane too (the green border shown there), so the toggle governs the
+            # border everywhere.
+            if m.get("_lv") and not getattr(v, "_lv_border_show", True):
                 continue
             # MV/AoV valve rings are LOCKED: draw the outline ONLY (no vertex
             # handles, no long/short-diameter lines) — to change, redraw + Save.
@@ -2023,6 +2029,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apex_shown = True
         #: Epi guided gate: True once Draw was pressed (or a border loaded/resumed).
         self._lv_epi_armed = False
+        #: Epi-Border toggle: show/hide the GREEN traced border (long-axis
+        #: polyline + SAX splines). Gated everywhere by this single flag.
+        self._lv_border_show = True
         self._lv_dirty = False
         self._lv_result_lines = []
         self._lv_wall = False
@@ -7707,6 +7716,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Show/hide the red measured region (after Calc Vol) and free the "
               "view (Rotate/Spin/Paging/CenterLine) to inspect it in 3-D."))
         self._lv_region_btn.clicked.connect(self._lv_toggle_region)
+        # Epi-Border: show/hide the GREEN traced border (long-axis polyline +
+        # SAX cross-section splines). Single flag _lv_border_show gates both.
+        self._lv_border_btn = FitButton(t("Epi-Border"))
+        self._lv_border_btn.setCheckable(True)
+        self._lv_border_btn.setChecked(True)
+        self._lv_border_btn.setHelpToolTip(
+            t("Show/hide the green Epi/Endo border outline (the traced border on "
+              "the long-axis pane and its short-axis cross-sections)."))
+        self._lv_border_btn.clicked.connect(self._lv_toggle_border)
+        self._lv_border_btn.setStyleSheet(
+            "QPushButton{background:#40c040;color:black;}")
         self._lv_wall_btn = FitButton(t("Wall"))
         self._lv_wall_btn.setCheckable(True)
         self._lv_wall_btn.setStyleSheet(
@@ -7727,7 +7747,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
         for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
                   self._lv_redo_btn, self._lv_exit_btn, self._lv_region_btn,
-                  self._lv_vol_btn, self._lv_stl_btn):
+                  self._lv_border_btn, self._lv_vol_btn, self._lv_stl_btn):
             r2t.addWidget(b)
         row2.addWidget(self._lv_grp_r2_trace)
         row2.addWidget(self._lv_grp_r2_blood)     # built by _build_lvv_bar
@@ -10012,6 +10032,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                   self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
                   self._lv_stl_btn):
             b.setEnabled(contour)
+        # Epi-Border toggle: enabled once tracing; its checked look + colour
+        # follow the single _lv_border_show flag (source of truth).
+        if getattr(self, "_lv_border_btn", None) is not None:
+            self._lv_border_btn.setEnabled(contour)
+            bon = bool(getattr(self, "_lv_border_show", True))
+            self._lv_border_btn.setChecked(bon)
+            self._lv_border_btn.setStyleSheet(
+                "QPushButton{background:#40c040;color:black;}" if bon else "")
         # CalcVol: blue once a volume has been computed for the CURRENT trace,
         # grey again after any edit (result stale). See lv["vol_done"].
         self._lv_vol_btn.setStyleSheet(
@@ -10977,6 +11005,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_mask_on = on and (self._lvv_mask_vol is not None)
         self._lvv_redraw()
         self._lv_apply_view_free()
+
+    def _lv_toggle_border(self) -> None:
+        """Epi-Border: show/hide the GREEN traced border. One flag
+        (_lv_border_show) gates both the long-axis polyline (skipped in
+        _paint_measures) and the SAX cross-section splines (skipped in
+        _paint_lv), so it works the same whether SAX is on or off."""
+        self._lv_border_show = self._lv_border_btn.isChecked()
+        self._lv_border_btn.setStyleSheet(
+            "QPushButton{background:#40c040;color:black;}"
+            if self._lv_border_show else "")
+        self._lv_redraw_all()
 
     def _lv_region_reset(self) -> None:
         if self._lv is not None:
