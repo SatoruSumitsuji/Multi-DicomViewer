@@ -14239,8 +14239,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # horizontal crossline): the same straight double-arrows the centreline
         # shows on hover, drawn ALWAYS in Epi mode so it reads as movable. Emptied
         # otherwise, and while hovering (hi set) the transient hover arrow above
-        # takes over, so the two never double up.
-        if self._lv_current_submode() == "epi" and hi is None:
+        # takes over, so the two never double up. RIGHT pane (B, long axis) ONLY —
+        # the LEFT pane is the short axis, where the crossline centre is bound to
+        # the LV long axis and cannot be slid up/down.
+        if key == "B" and self._lv_current_submode() == "epi" and hi is None:
             mpd = self._move_arrow_pd(key, "H")
             p.move_hint_mapper.SetInputData(mpd)
             p.move_hint_halo_mapper.SetInputData(mpd)
