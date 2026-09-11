@@ -2773,15 +2773,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_mv_btn.setHelpToolTip(
             t("Set the COMMON MV plane (shared by Epi / Blood-Endo): opens the "
               "MV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
-              "Load a saved MV plane."))
+              "Load a saved MV plane. Right-click to hide / show it (works while "
+              "tracing too)."))
         self._lv_mv_btn.clicked.connect(lambda: self._lv_enter_valve("mitral"))
+        self._lv_mv_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_mv_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_valve("mitral"))
         row1.addWidget(self._lv_mv_btn)
         self._lv_aov_btn = FitButton(t("AoV plane"))
         self._lv_aov_btn.setHelpToolTip(
             t("Set the COMMON AoV plane (shared by Epi / Blood-Endo): opens the "
               "AoV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
-              "Load a saved AoV plane."))
+              "Load a saved AoV plane. Right-click to hide / show it (works while "
+              "tracing too)."))
         self._lv_aov_btn.clicked.connect(lambda: self._lv_enter_valve("aortic"))
+        self._lv_aov_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_aov_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_valve("aortic"))
         row1.addWidget(self._lv_aov_btn)
         row1.addSpacing(8)
 
@@ -3195,13 +3205,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Remove this valve plane from the image (saved files are kept)."))
         self._lv_ve_clear_btn.clicked.connect(self._lv_valve_clear)
         r2ve.addWidget(self._lv_ve_clear_btn)
+        # Hide/Show toggle: the label follows the plane's visibility (Hide when
+        # shown, Show when hidden). The same toggle is on the MV/AoV buttons'
+        # right-click (see _lv_rclick_valve) so it also works while tracing.
+        self._lv_ve_show_btn = FitButton(t("Hide"))
+        self._lv_ve_show_btn.setHelpToolTip(
+            t("Hide / show this valve's ring on the image (the plane is kept)."))
+        self._lv_ve_show_btn.clicked.connect(
+            lambda: self._lv_toggle_valve_visibility(
+                self._lv_valve_edit or "mitral"))
+        r2ve.addWidget(self._lv_ve_show_btn)
         self._lv_ve_exit_btn = FitButton(t("Exit"))
         self._lv_ve_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
         r2ve.addWidget(self._lv_ve_exit_btn)
         for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                   self._lv_ve_save_btn, self._lv_ve_load_btn,
-                  self._lv_ve_clear_btn, self._lv_ve_exit_btn):
+                  self._lv_ve_clear_btn, self._lv_ve_show_btn,
+                  self._lv_ve_exit_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_grp_r2_valve_edit.setVisible(False)
         row2.addWidget(self._lv_grp_r2_valve_edit)
@@ -3615,6 +3636,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     b.setEnabled(True)
                 self._lv_ve_save_btn.setEnabled(has)
                 self._lv_ve_clear_btn.setEnabled(has)
+                self._lv_ve_show_btn.setEnabled(has)
+                # Label follows visibility: Hide when shown, Show when hidden.
+                self._lv_ve_show_btn.setText(
+                    t("Hide") if self._lv_valve_shown.get(ve, True)
+                    else t("Show"))
         # A group's visibility changed → re-lay-out the bar NOW so a row that was
         # collapsed (empty row 2 in the initial state) appears on the FIRST click,
         # and a row that was hidden collapses immediately (no leftover gap).
@@ -5242,6 +5268,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "transp": 50, "hidden": hidden})
             self._redraw_meas(k)
 
+    def _lv_rclick_valve(self, which) -> None:
+        """Right-click on the MV/AoV button: quick hide / show of that valve's
+        ring on the image, available in ANY mode (including while tracing Epi /
+        Blood-Endo) — a one-click alternative to entering the valve-edit step.
+        Does nothing until the plane is set (the button opens the edit step)."""
+        if self._image is None or self._lv_valves.get(which) is None:
+            self._lvv_prompt(t("Set the {v} plane first.").format(
+                v="MV" if which == "mitral" else "AoV"))
+            return
+        self._lv_toggle_valve_visibility(which)
+
     def _lv_toggle_valve_visibility(self, which) -> None:
         """Show/hide this valve's ellipse (button toggle once the plane is set),
         so MV/AoV can be hidden while tracing Endo/Epi. The valve plane geometry
@@ -5349,6 +5386,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 btn.setStyleSheet(
                     "QPushButton{background:palette(button);color:%s;"
                     "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
+        # Keep the valve-edit row's Hide/Show toggle in step with visibility.
+        ve = getattr(self, "_lv_valve_edit", None)
+        if ve is not None and getattr(self, "_lv_ve_show_btn", None) is not None:
+            has = self._lv_valves.get(ve) is not None
+            self._lv_ve_show_btn.setEnabled(has)
+            self._lv_ve_show_btn.setText(
+                t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
 
     def _lv_save_valve(self, which) -> None:
         """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
