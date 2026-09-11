@@ -7083,15 +7083,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         endoepi = sm in ("endo", "epi")
         blood = sm == "blood"
 
+        _changed = []
+
         def _vis(w, on):
             if w.isVisible() != on:
                 w.setVisible(on)
+                _changed.append(w)
         _vis(self._lv_grp_trace, endoepi)
         _vis(self._lv_grp_blood, blood)
         _vis(self._lv_grp_r2_trace, endoepi)
         _vis(self._lv_grp_r2_blood, blood)
         if getattr(self, "_lv_grp_r2_valves", None) is not None:
             _vis(self._lv_grp_r2_valves, sm is None)
+        if _changed:
+            self._lv_relayout_bar()
         self._lv_update_valve_buttons()
         ready = self._lv_valves_ready()
         if not ready:
@@ -7104,6 +7109,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_start_btn.setChecked(blood)
         if self._lv is None or self._lv.get("sax") is None:
             self._lv_style_selectors()
+
+    def _lv_relayout_bar(self) -> None:
+        """Force a SYNCHRONOUS relayout of the LV bar after a row was shown/hidden
+        so a newly shown row appears on the FIRST click (and a hidden one collapses
+        at once) instead of needing a second interaction. The bar is _lv_wrap added
+        directly to the viewer's top-level layout, so activate both."""
+        w = getattr(self, "_lv_wrap", None)
+        if w is not None and w.layout() is not None:
+            w.layout().invalidate()
+            w.layout().activate()
+            w.updateGeometry()
+        top = self.layout()
+        if top is not None:
+            top.invalidate()
+            top.activate()
 
     def _lv_select_submode(self, sm) -> None:
         from PyQt6.QtWidgets import QMessageBox
