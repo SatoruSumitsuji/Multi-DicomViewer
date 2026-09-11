@@ -3895,21 +3895,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         # and a row that was hidden collapses immediately (no leftover gap).
         if _changed:
             self._lv_relayout_bar()
-        self._lv_update_valve_buttons()
-        # MV / AoV row-1 buttons: grey the OTHER valve while editing one, and grey
-        # BOTH while an Epi/Blood sub-mode is active (they are a prerequisite step
-        # done from the initial selector). Highlight the valve being edited.
+        # MV / AoV / Apex row-1 selectors: grey the OTHER valve while editing one,
+        # and grey ALL while an Epi/Blood sub-mode is active. SOFT-grey (stay
+        # enabled) so their right-click hide/show still works while greyed — see
+        # _lv_soft_gray. _lv_update_valve_buttons (below) paints the grey.
         if getattr(self, "_lv_mv_btn", None) is not None:
-            self._lv_mv_btn.setEnabled(
-                (ve in (None, "mitral")) and sm is None and not ax)
-            self._lv_aov_btn.setEnabled(
-                (ve in (None, "aortic")) and sm is None and not ax)
-        # Apex selector: needs MV+AoV (the axis is apex → MV centre); available at
-        # the selector only. Greyed while editing a valve or in a sub-mode; stays
-        # live during its own step (it is the highlighted active one).
+            self._lv_soft_gray(
+                self._lv_mv_btn, (ve in (None, "mitral")) and sm is None and not ax)
+            self._lv_soft_gray(
+                self._lv_aov_btn, (ve in (None, "aortic")) and sm is None and not ax)
+        # Apex selector: needs MV+AoV (the axis is apex → MV centre); actionable at
+        # the selector only. Soft-greyed while editing a valve or in a sub-mode.
         if getattr(self, "_lv_apex_sel_btn", None) is not None:
-            self._lv_apex_sel_btn.setEnabled(
+            self._lv_soft_gray(
+                self._lv_apex_sel_btn,
                 self._lv_valves_ready() and sm is None and ve is None)
+        self._lv_update_valve_buttons()
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
         # others back). All three live when nothing is selected. Runs AFTER
@@ -5408,12 +5409,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                      "_lv_apex": True, "hidden": hidden})
             self._redraw_meas(which)
 
+    def _lv_soft_gray(self, btn, actionable) -> None:
+        """Keep *btn* ENABLED (so its right-click hide/show still fires even when
+        it looks greyed) but mark it non-actionable: its LEFT-click becomes a
+        no-op and _lv_update_valve_buttons paints it grey. Used for the MV / AoV /
+        Apex selectors, whose right-click must work even while greyed out."""
+        if btn is None:
+            return
+        btn.setEnabled(True)
+        btn._mdv_soft_off = not bool(actionable)
+
     def _lv_enter_apex(self) -> None:
         """Apex selector → enter the Apex edit step. Guides the user to place the
         crossing on the LV apex and press Set; shows the Set/RePosition/Hide/Exit
         row. Needs MV + AoV first (the axis is apex → MV centre)."""
         if self._image is None:
             return
+        if getattr(self._lv_apex_sel_btn, "_mdv_soft_off", False):
+            return                                # greyed → left-click no-op
         if not self._lv_valves_ready():
             self._lvv_prompt(t(
                 "Set the MV and AoV planes first — the LV long axis runs from "
@@ -5482,6 +5495,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         from the initial selector."""
         if self._image is None:
             return
+        btn = self._lv_mv_btn if which == "mitral" else self._lv_aov_btn
+        if getattr(btn, "_mdv_soft_off", False):
+            return                                # greyed → left-click no-op
         self._lv_valve_edit = which
         self._lv_update_submode_ui()
 
@@ -5508,22 +5524,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_submode_ui()
 
     def _lv_valve_draw(self) -> None:
-        """Draw step: arm Measure → Ellipse (Shift = true circle) and guide the
-        user; Confirm then sets the plane from that ellipse."""
+        """Draw step: guide the user. Measure is NOT auto-enabled here — the view
+        usually needs aligning first; the user turns Measure → Ellipse on when
+        ready. The measure TYPE is preset to Ellipse so it is armed the moment
+        they enable Measure. Confirm then sets the plane from that ellipse."""
         which = self._lv_valve_edit or "mitral"
-        if not self._meas_on:
-            self._meas_btn.setChecked(True)
-            self._toggle_measure()
-        self._set_measure_type("ellipse")
+        self._set_measure_type("ellipse")      # preset type; does NOT enable Measure
         vname = "MV" if which == "mitral" else "AoV"
         self._lvv_prompt(t(
-            "Draw the {v} annulus with Measure → Ellipse (hold Shift for a true "
-            "circle), then press Confirm.").format(v=vname))
+            "Align the view first, then draw the {v} annulus with Measure → "
+            "Ellipse (hold Shift for a true circle) and press Confirm.")
+            .format(v=vname))
 
     def _lv_valve_confirm(self) -> None:
-        """Confirm step: set the valve plane from the drawn Ellipse."""
+        """Confirm step: set the valve plane from the drawn Ellipse. Re-pressing
+        Confirm UPDATES the plane from a newer ellipse; it never toggles the
+        ring's visibility (that is Hide/Show or the button's right-click)."""
         which = self._lv_valve_edit or "mitral"
-        self._lv_capture_valve_common(which)   # captures the latest ellipse
+        self._lv_capture_valve_common(which, from_confirm=True)
         self._lv_update_submode_ui()
 
     def _lv_valve_clear(self) -> None:
@@ -5550,9 +5568,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_valve_buttons()
         self._lv_update_submode_ui()
 
-    def _lv_capture_valve_common(self, which) -> None:
+    def _lv_capture_valve_common(self, which, from_confirm=False) -> None:
         """Set the COMMON MV/AoV plane from the latest Ellipse (centre + the
-        pane's normal). Shared by Endo/Epi/Blood; independent of any sub-mode."""
+        pane's normal). Shared by Endo/Epi/Blood; independent of any sub-mode.
+        *from_confirm* = called by the Confirm button: with no fresh ellipse it
+        does NOT toggle visibility (Confirm only sets/updates the plane)."""
         from PyQt6.QtWidgets import QMessageBox
         if self._image is None:
             return
@@ -5567,8 +5587,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                     m, key = cand, k
         vname = "AoV" if which == "aortic" else "MV"
         if m is None:
-            # No fresh ellipse. If this valve is already set, the button just
-            # toggles its ellipse's visibility (hide it while tracing Endo/Epi).
+            # No fresh ellipse. From Confirm: the plane is already set (or nothing
+            # to set) — do NOT toggle visibility; just tell the user how to update.
+            if from_confirm:
+                if self._lv_valves.get(which) is not None:
+                    self._lvv_prompt(t(
+                        "{v} plane unchanged. Draw a new Measure → Ellipse to "
+                        "update it.").format(v=vname))
+                else:
+                    self._lvv_prompt(t(
+                        "Draw the {v} annulus with Measure → Ellipse first, then "
+                        "press Confirm.").format(v=vname))
+                return
+            # From the row-1 button (legacy): if already set, toggle the ring's
+            # visibility (hide it while tracing Endo/Epi).
             if self._lv_valves.get(which) is not None:
                 self._lv_toggle_valve_visibility(which)
                 return
@@ -5829,6 +5861,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 abtn.setStyleSheet(
                     "QPushButton{background:palette(button);color:%s;"
                     "border:2px solid %s;}%s" % (acol, acol, self._BTN_DIS))
+        # SOFT-greyed selectors are kept ENABLED (so their right-click hide/show
+        # still fires) but must LOOK inactive — override the colour styles above
+        # with a flat grey. Right-click still works; left-click is a no-op.
+        for b in (self._lv_mv_btn, self._lv_aov_btn,
+                  getattr(self, "_lv_apex_sel_btn", None)):
+            if b is not None and getattr(b, "_mdv_soft_off", False):
+                b.setStyleSheet(
+                    "QPushButton{background:palette(button);color:#9b9b9b;"
+                    "border:1px solid #c4c4c4;}")
 
     def _lv_save_valve(self, which) -> None:
         """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
