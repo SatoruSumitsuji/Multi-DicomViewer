@@ -1104,13 +1104,19 @@ class _Overlay(QWidget):
                         wmm = 0.9 * float(v._ps.get(key, 60.0))
                         p.drawLine(Sd(c - wmm * d), Sd(c + wmm * d))
 
-        # Apex (red) and seed (cyan) landmark dots. The apex dot hides when its
-        # button toggles it off (set → shown/hidden, like MV/AoV).
+        # Apex (red CROSS, matching the Windows viewer) and seed (cyan dot). The
+        # apex hides when its button toggles it off (set → shown/hidden).
         apex = lvv.get("apex")
         if apex is not None and getattr(v, "_lvv_apex_shown", True):
-            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
-            p.setBrush(QColor(255, 64, 64))
-            p.drawEllipse(Sd(np.asarray(apex, float)), 6.0, 6.0)
+            sp = Sd(np.asarray(apex, float))
+            rr = 7.0
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(0, 0, 0, 200), 3.2))   # black halo
+            p.drawLine(QPointF(sp.x() - rr, sp.y()), QPointF(sp.x() + rr, sp.y()))
+            p.drawLine(QPointF(sp.x(), sp.y() - rr), QPointF(sp.x(), sp.y() + rr))
+            p.setPen(QPen(QColor(255, 64, 64), 1.8))    # red cross
+            p.drawLine(QPointF(sp.x() - rr, sp.y()), QPointF(sp.x() + rr, sp.y()))
+            p.drawLine(QPointF(sp.x(), sp.y() - rr), QPointF(sp.x(), sp.y() + rr))
         seed = lvv.get("seed")
         if seed is not None:
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
@@ -2049,6 +2055,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_mask_comp = None   # valve-clipped Epi mask (for LVL)
         self._lvv_epi_mask_bbox = None
         self._lv_endo_close_mm = 5.0      # Auto-Endo papillary/trabecula bridging
+        self._lv_endo_method = "hull_smooth"   # Auto-Endo 方式 (default = Windows)
         self._lv_endo_adv_cache = None    # cached Settings → LV Auto-Endo params
         self._lvv_endo_show = False
         self._lv_endo_manual_dict = None
@@ -7463,6 +7470,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             lambda _v: self._lvv_close_changed())
         row.addWidget(self._lvv_close_lbl)
         row.addWidget(self._lvv_close_spin)
+        # Auto-Endo 方式 (method) — parity with the Windows viewer. The single knob
+        # above is relabelled per method (膨らみ / 丸み / 橋渡し / 肉柱) by
+        # _lvv_update_close_ui.
+        self._lvv_method_lbl = QLabel(t("方式"))
+        self._lvv_method_combo = QComboBox()
+        self._lvv_method_combo.addItem("凸包滑", "hull_smooth")
+        self._lvv_method_combo.addItem("凸包(層)", "hull")
+        self._lvv_method_combo.addItem("凸包(丸)", "hull_round")
+        self._lvv_method_combo.addItem("放射", "polar")
+        self._lvv_method_combo.addItem("3D凸包", "convex3d")
+        self._lvv_method_combo.setToolTip(
+            t("Auto-Endo の作り方: 凸包滑=凸包+外へ膨らむ滑らか輪郭 / 凸包(層)=各"
+              "短軸の凸包 / 凸包(丸)=円に近づけた凸包 / 放射=谷を角度で橋渡し / "
+              "3D凸包=3次元凸包"))
+        self._lvv_method_combo.currentIndexChanged.connect(
+            lambda _i: self._lvv_method_changed())
+        row.addWidget(self._lvv_method_lbl)
+        row.addWidget(self._lvv_method_combo)
+        self._lvv_update_close_ui()          # label the knob for the default method
         # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from Auto-Endo
         # the first time; the hand-edited border is retained across HU changes.
         self._lvv_manual_endo_btn = FitButton(t("Manual-Endo"))
@@ -7563,6 +7589,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_lvv_close_spin", None) is not None:
             self._lvv_close_lbl.setVisible(on)
             self._lvv_close_spin.setVisible(on)
+        if getattr(self, "_lvv_method_combo", None) is not None:
+            self._lvv_method_lbl.setVisible(on)
+            self._lvv_method_combo.setVisible(on)
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_mask_btn.setVisible(on)
         self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
@@ -7928,6 +7957,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
         self._lvv_redraw()
 
+    # The single knob is context-sensitive: its label follows the method
+    # (膨らみ / 丸み / 橋渡し / 肉柱), matching the Windows viewer.
+    _LVV_KNOB_ROLE = {
+        "hull_smooth": ("膨らみ", True),
+        "hull_round":  ("丸み", True),
+        "polar":       ("橋渡し", True),
+        "hull":        ("肉柱", False),
+        "convex3d":    ("肉柱", False),
+    }
+
+    def _lvv_update_close_ui(self) -> None:
+        """Relabel / enable the single knob to match the current 方式."""
+        if getattr(self, "_lvv_close_spin", None) is None:
+            return
+        method = getattr(self, "_lv_endo_method", "hull_smooth")
+        role, on = self._LVV_KNOB_ROLE.get(
+            method, self._LVV_KNOB_ROLE["hull_smooth"])
+        if getattr(self, "_lvv_close_lbl", None) is not None:
+            self._lvv_close_lbl.setText(t(role))
+            self._lvv_close_lbl.setEnabled(on)
+        self._lvv_close_spin.setEnabled(on)
+
+    def _lvv_method_changed(self) -> None:
+        """Auto-Endo 方式 changed → relabel the knob and drop the stale auto Endo
+        so a re-press of Auto-Endo表示 recomputes with the new method."""
+        self._lv_endo_method = (self._lvv_method_combo.currentData()
+                                or "hull_smooth")
+        self._lvv_update_close_ui()
+        self._lvv_close_changed()          # invalidate + hide (same as 肉柱 change)
+
     def _lvv_close_changed(self) -> None:
         """Auto-Endo 肉柱 bridging (close_mm) changed → drop the stale auto Endo +
         hide Auto-Endo表示 so a re-press recomputes. Manual Endo is unaffected."""
@@ -8220,9 +8279,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             epi_full = None
         adv = self._lv_endo_adv()
         knob = float(getattr(self, "_lv_endo_close_mm", 5.0))
-        method = "hull_smooth"          # Windows default (凸包滑らか + 膨らみ)
-        bridge = max(10.0, knob * 4.0)  # 肉柱 → bridged angular span
-        roundness = 0.0
+        method = getattr(self, "_lv_endo_method", "hull_smooth")  # 方式 combo
+        bridge = max(10.0, knob * 4.0)  # 放射: 橋渡し angular span
+        # 凸包(丸): 丸み → how far the hull rounds toward a circle (0..~0.85).
+        roundness = (min(0.85, knob / 24.0) if method == "hull_round" else 0.0)
+        # 凸包滑: 膨らみ → how far the concave chords bulge outward.
         bulge_frac = max(0.05, min(0.6, knob / 25.0))
         grid_mm = float(adv["grid_mm"])
         n_mer = int(adv["n_meridians"])
