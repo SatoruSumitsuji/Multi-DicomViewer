@@ -2425,6 +2425,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: resumed), unlocking the row-2 trace tools. Reset on fresh Epi entry /
         #: Clear / Exit. See _lv_epi_armed_now.
         self._lv_epi_armed = False
+        #: Content signatures at the last Save/Load, so Exit can skip the
+        #: "unsaved data" alert ONLY when the current content matches EXACTLY —
+        #: a content check (not an event flag), so no edit can be missed.
+        #: _lv_saved_sig: per-pass ("endo"/"epi") contour signature;
+        #: _lv_valve_saved_sig: per-valve ("mitral"/"aortic") plane signature.
+        self._lv_saved_sig = {}
+        self._lv_valve_saved_sig = {}
         # Whether each valve's ellipse is currently SHOWN (its button toggles it
         # once the plane is set, so it can be hidden while tracing Endo/Epi).
         self._lv_valve_shown = {"mitral": True, "aortic": True}
@@ -3360,6 +3367,74 @@ class CTViewer(CPRMixin, AbstractViewer):
         gate for the Epi / Blood-Endo sub-modes."""
         return self._lv_valves_ready() and self._lv_apex is not None
 
+    def _lv_pass_sig(self, pas):
+        """Content signature of ONE contour pass (its axis + apex + border
+        planes) — mirrors exactly the fields _lv_save writes for that pass, so
+        'saved' can be judged by CONTENT (no edit path can be missed). None when
+        that pass has no border."""
+        if self._lv is None:
+            return None
+        m = self._lv["model"]
+        planes = m.endo_planes if pas == "endo" else m.epi_planes
+        if not planes:
+            return None
+        try:
+            import json
+            import hashlib
+            d = m.to_dict()
+            sub = {k: d.get(k) for k in
+                   (pas + "_axis", pas + "_apex", pas + "_planes")}
+            return hashlib.md5(
+                json.dumps(sub, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def _lv_contour_unsaved(self) -> bool:
+        """True if the contour (Epi/Endo) model holds a border whose CONTENT does
+        not match its last Save/Load — checked per pass by signature, so ANY
+        edit (trace, SAX/vertex drag, apex move) is caught regardless of path.
+        False only when every present border exactly matches what was saved."""
+        if self._lv is None:
+            return False
+        m = self._lv["model"]
+        saved = getattr(self, "_lv_saved_sig", None) or {}
+        for pas in ("endo", "epi"):
+            planes = m.endo_planes if pas == "endo" else m.epi_planes
+            if not planes:
+                continue
+            cur = self._lv_pass_sig(pas)
+            if cur is None or cur != saved.get(pas):
+                return True                    # this pass is unsaved / changed
+        return False
+
+    def _lv_valve_sig(self, which):
+        """Content signature of a valve plane (centre, normal, radius). None when
+        the valve is unset. Tiny + fully captured, so 'saved' is exact."""
+        v = self._lv_valves.get(which)
+        if v is None:
+            return None
+        try:
+            import json
+            import hashlib
+            c, n, r = v
+            payload = [list(map(float, np.asarray(c, float))),
+                       list(map(float, np.asarray(n, float))), float(r)]
+            return hashlib.md5(
+                json.dumps(payload).encode("utf-8")).hexdigest()
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def _lv_has_fresh_ellipse(self) -> bool:
+        """A drawn Measure→Ellipse not yet Confirmed/tagged — Exiting the valve
+        step would discard it, so it must always trigger the confirm."""
+        for k in ("A", "B"):
+            for m in self._measures.get(k, []):
+                if (m.get("type") == "ellipse" and m.get("_lv_valve") is None
+                        and m.get("_lvv") is None and m.get("_lv") is None):
+                    return True
+        return False
+
     def _lv_mode_has_unsaved(self, mode) -> bool:
         """True if *mode* holds traced/measured data not saved since the last
         change (see the _lv_dirty / _lvv_dirty flags). Used to warn before a
@@ -3618,15 +3693,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         name = {"epi": "Epi", "endo": "Endo",
                 "blood": "Blood/Endo"}.get(sm, sm)
-        box = QMessageBox(self.window())
-        box.setWindowTitle(t("LV"))
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText(t("Leave {m} mode? Unsaved data is not saved.").format(m=name))
-        b_exit = box.addButton(t("Exit"), QMessageBox.ButtonRole.AcceptRole)
-        box.addButton(QMessageBox.StandardButton.Cancel)
-        box.exec()
-        if box.clickedButton() is not b_exit:
-            return
+        # Skip the "unsaved data" alert ONLY when we can PROVE nothing would be
+        # lost: for a contour pass, when its content matches the last Save/Load
+        # exactly (content check — no edit can be missed). Blood ALWAYS confirms
+        # (its content signature is not guaranteed complete — safety first).
+        if sm == "blood":
+            need_warn = True
+        else:
+            need_warn = self._lv_contour_unsaved()
+        if need_warn:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("LV"))
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText(
+                t("Leave {m} mode? Unsaved data is not saved.").format(m=name))
+            b_exit = box.addButton(t("Exit"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(QMessageBox.StandardButton.Cancel)
+            box.exec()
+            if box.clickedButton() is not b_exit:
+                return
         self._lv_epi_armed = False
         if sm == "blood":
             self._lvv_clear_markers()
@@ -3672,6 +3757,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         stash so the LV setup is blank after Exit."""
         self._lv_valves = {"mitral": None, "aortic": None}
         self._lv_valve_shown = {"mitral": True, "aortic": True}
+        self._lv_valve_saved_sig = {}
+        self._lv_saved_sig = {}
         # Also drop the COMMON apex + its marker.
         self._lv_apex = None
         self._lv_apex_edit = False
@@ -5503,15 +5590,24 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_exit_valve(self) -> None:
         """Leave the MV/AoV edit step → back to the LV selector. The captured
-        plane stays in memory (Confirm set it); only the on-screen draw ellipse
-        is dropped."""
+        plane stays in memory (Confirm set it); only an un-confirmed draw ellipse
+        is dropped. The alert is skipped ONLY when it is safe: the plane matches
+        the last Save/Load AND there is no un-confirmed ellipse to lose."""
         from PyQt6.QtWidgets import QMessageBox
-        if QMessageBox.question(
-                self.window(), t("LV"),
-                t("Return to the LV selector? Any unsaved plane is kept in memory "
-                  "but not written to a file.")) \
-                != QMessageBox.StandardButton.Yes:
-            return
+        which = self._lv_valve_edit or "mitral"
+        set_ = self._lv_valves.get(which) is not None
+        saved_match = (set_ and self._lv_valve_sig(which)
+                       == self._lv_valve_saved_sig.get(which))
+        # Warn unless: nothing to lose (no un-confirmed ellipse) AND either the
+        # plane is unset or it exactly matches what was saved.
+        need_warn = self._lv_has_fresh_ellipse() or (set_ and not saved_match)
+        if need_warn:
+            if QMessageBox.question(
+                    self.window(), t("LV"),
+                    t("Return to the LV selector? Any unsaved plane is kept in "
+                      "memory but not written to a file.")) \
+                    != QMessageBox.StandardButton.Yes:
+                return
         self._lv_valve_edit = None
         # Drop a leftover free-hand ellipse (not yet Confirmed).
         for k in ("A", "B"):
@@ -5560,6 +5656,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_valves[which] = None
         self._lv_valve_shown[which] = True
+        self._lv_valve_saved_sig[which] = None     # cleared → no 'saved' match
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if m.get("_lv_valve") != which]
@@ -5911,6 +6008,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                 t("Save failed: {err}", err=str(exc)))
             return
         self._lv_remember_dir(path)
+        self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)  # saved → exact
         QMessageBox.information(self.window(), t("LV"),
                                t("Saved: {p}", p=os.path.basename(path)))
 
@@ -5946,6 +6044,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_valve_shown[which] = True
             self._lv_valve_show_from_geom(which)   # draw the ring on both panes
             self._lv_remember_dir(path)
+            self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)  # = file
             self._lv_update_valve_buttons()
             self._lv_update_submode_ui()        # both valves set → un-grey
             self._lv_on_valve_changed(which)
@@ -11097,6 +11196,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
         self._lv_dirty = False                       # nothing traced yet
+        self._lv_saved_sig = {}                       # fresh session: no saved sig
         self._lv_result_lines = []                   # result-block lines (must
         #    exist before any _lv_invalidate_volume; the old click-to-place-apex
         #    path used to seed it, the Apex-button flow doesn't reach that path)
@@ -13118,6 +13218,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_remember_dir(path)
         self._lv_dirty = False               # borders saved → no unsaved-switch warn
+        # Record the saved content signature for THIS pass so Exit can skip the
+        # alert while it stays unchanged (content check — no edit can be missed).
+        self._lv_saved_sig[pas] = self._lv_pass_sig(pas)
         # Keep the volume readout on screen after saving (append the saved note,
         # don't replace it) so the result stays visible.
         note = t("Saved: {p}", p=os.path.basename(path))
@@ -13168,6 +13271,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         self._lv_apply_model(model, volume=data.get("volume"))
         self._lv_restore_region(data.get("region"))
+        # Loaded borders match their file → record the signature so Exit won't
+        # alert until they are edited.
+        for pas in ("endo", "epi"):
+            s = self._lv_pass_sig(pas)
+            if s is not None:
+                self._lv_saved_sig[pas] = s
 
     def _lv_restore_region(self, reg) -> None:
         """Make the RED region available right after a Load so BOTH toggles work
