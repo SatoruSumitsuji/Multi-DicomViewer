@@ -668,6 +668,28 @@ class _Overlay(QWidget):
             b2 = S(ax + 0.6 * sz * uh[0], ay + 0.6 * sz * uh[1])
             p.drawPolygon(QPolygonF([apex, b1, b2]))
 
+        # Yellow ○ direction marker on the section (horizontal) line — a slightly
+        # larger sibling of the ▲, pinned near the +uh VISIBLE edge so every
+        # cross-section shows its orientation at any zoom/pan (parity with the
+        # VTK viewer's dir_ring). Pane A's basis is mirrored, so flip the side.
+        ring_sgn = -1.0 if key == "A" else 1.0
+        s0 = S(ccx, ccy)
+        s1 = S(ccx + ring_sgn * uh[0], ccy + ring_sgn * uh[1])
+        rdx, rdy = s1.x() - s0.x(), s1.y() - s0.y()
+        rL = math.hypot(rdx, rdy) or 1.0
+        rdx, rdy = rdx / rL, rdy / rL
+        mrg = 12.0
+        tx = (((w - mrg) - s0.x()) / rdx if rdx > 1e-9
+              else ((mrg - s0.x()) / rdx if rdx < -1e-9 else 1e18))
+        ty = (((h - mrg) - s0.y()) / rdy if rdy > 1e-9
+              else ((mrg - s0.y()) / rdy if rdy < -1e-9 else 1e18))
+        rt = max(0.0, min(tx, ty))
+        rhx = min(w - mrg, max(mrg, s0.x() + rdx * rt))
+        rhy = min(h - mrg, max(mrg, s0.y() + rdy * rt))
+        p.setPen(QPen(QColor(255, 217, 0), 1.8))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(QPointF(rhx, rhy), 7.0, 7.0)
+
         # slab-width guides: two dashed lines parallel to the horizontal
         # line, offset by ±thick/2 of the OTHER pane.
         other = "B" if key == "A" else "A"
