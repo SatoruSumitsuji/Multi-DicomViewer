@@ -1637,6 +1637,18 @@ class _Pane:
         lgd.GetProperty().SetOpacity(0.22)          # ~78% transparent
         self.ren.AddActor(lgd)
         self.lv_guide_actor = lgd
+        # LV axis fraction guides: faint white DOTTED lines ⟂ the long axis at
+        # 1/8, 1/4, 1/2, 3/4, 7/8 of apex→MV-centre, as tracing references. Own
+        # actor (thin white, translucent) — drawn as short dashes (_dashed_pd).
+        self.lv_axis_guide_mapper = vtkPolyDataMapper()
+        self.lv_axis_guide_mapper.SetInputData(vtkPolyData())
+        lag = vtkActor()
+        lag.SetMapper(self.lv_axis_guide_mapper)
+        lag.GetProperty().SetColor(1.0, 1.0, 1.0)   # white
+        lag.GetProperty().SetLineWidth(1.0)
+        lag.GetProperty().SetOpacity(0.55)          # faint
+        self.ren.AddActor(lag)
+        self.lv_axis_guide_actor = lag
         # LV wall-thickness colour map (translucent annulus fill between the
         # short-axis endo & epi borders; per-cell RGBA set by _redraw_lv).
         self.lv_wall_mapper = vtkPolyDataMapper()
@@ -13749,6 +13761,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.lv_apex_mapper.SetInputData(vtkPolyData())    # user apex markers
         p.lv_hi_mapper.SetInputData(vtkPolyData())      # green edited crossing
         p.lv_guide_mapper.SetInputData(vtkPolyData())   # axis keep-out band
+        p.lv_axis_guide_mapper.SetInputData(vtkPolyData())   # axis fraction guides
         self._lv_update_wall_legend()                   # bottom-left colour key
         if lv is None:
             return
@@ -13935,6 +13948,42 @@ class CTViewer(CPRMixin, AbstractViewer):
             X = float(getattr(self, "_half", 100.0))
             p.lv_line_mapper.SetInputData(
                 _polylines_pd([[(-X, base), (X, base)]]))
+        self._lv_draw_axis_guides(key, p)
+
+    def _lv_draw_axis_guides(self, key, p) -> None:
+        """Faint white DOTTED lines ⟂ the LV long axis at 1/8, 1/4, 1/2, 3/4, 7/8
+        of apex→MV-centre — tracing references on the long-axis pane. Each line is
+        drawn as many short dash segments (one _polylines_pd, own white actor)."""
+        lv = self._lv
+        if lv is None or lv["model"].axis is None:
+            return
+        mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
+        if mv is None:
+            return
+        ax = lv["model"].axis
+        oa = np.asarray(self._world3d_to_out(key, np.asarray(ax.apex, float)),
+                        float)
+        om = np.asarray(self._world3d_to_out(key, np.asarray(mv[0], float)),
+                        float)
+        d = om - oa
+        L = float(np.hypot(d[0], d[1]))
+        if L < 1e-3:
+            return
+        perp = np.array([-d[1] / L, d[0] / L])
+        half = 0.42 * float(getattr(self, "_half", 100.0))
+        dash = max(0.6, 0.015 * half)          # dash length = gap length
+        segs = []
+        for frac in (0.125, 0.25, 0.5, 0.75, 0.875):
+            c = oa + frac * d
+            a2 = c - half * perp
+            n = max(2, int((2.0 * half) / (2.0 * dash)))
+            for i in range(n):
+                s = a2 + perp * (2.0 * dash * i)
+                e = a2 + perp * (2.0 * dash * i + dash)
+                segs.append([(float(s[0]), float(s[1])),
+                             (float(e[0]), float(e[1]))])
+        if segs:
+            p.lv_axis_guide_mapper.SetInputData(_polylines_pd(segs))
 
     def _lv_border_polys(self, key, which, phi):
         """Output-plane polylines of the captured *which* border for the two
