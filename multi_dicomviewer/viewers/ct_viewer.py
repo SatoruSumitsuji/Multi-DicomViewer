@@ -3643,7 +3643,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_apply_common_apex_to_pass("epi")   # set axis from the common apex
         self._lv_epi_armed = True
-        self._lv_update_submode_ui()          # unlock Trace / plane / SAX
+        # BEGIN tracing right away so the border points can be placed on the
+        # right pane — Draw is the "start drawing" action, not just an unlock.
+        self._lv_start_trace()                # ready + apex → enter contour (armed)
+        self._lv_update_submode_ui()          # reflect Trace/plane/SAX enabled
 
     def _lv_apply_common_apex_to_pass(self, pas) -> None:
         """Seed *pas*'s long axis + apex from the COMMON apex (self._lv_apex): the

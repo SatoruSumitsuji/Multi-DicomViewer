@@ -7139,6 +7139,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lv_apply_common_apex_to_pass("epi")
         self._lv_epi_armed = True
+        # BEGIN tracing right away so the border points can be placed on the
+        # right pane — Draw is the "start drawing" action, not just an unlock.
+        self._lv_start_trace()                # ready + apex → enter contour (armed)
         self._lv_update_submode_ui()
 
     def _lv_submode_exit(self) -> None:
