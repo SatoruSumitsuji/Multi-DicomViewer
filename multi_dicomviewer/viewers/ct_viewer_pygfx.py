@@ -706,6 +706,23 @@ class _Overlay(QWidget):
                 oy1 = ccy + half * uh[1] + off * uv[1]
                 p.drawLine(S(ox0, oy0), S(ox1, oy1))
 
+        # COMMON apex marker (red dot) — shown in any mode once set + shown.
+        ap = getattr(v, "_lv_apex", None)
+        if ap is not None and getattr(v, "_lv_apex_shown", True):
+            aox, aoy = v._world3d_to_out(key, np.asarray(ap, float))
+            asx, asy = v._world_to_screen(key, aox, aoy)
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(QColor(255, 64, 64))
+            p.drawEllipse(QPointF(asx, asy), 5.0, 5.0)
+
+        # Persistent up/down move-arrows on the Epi movable SECTION line — RIGHT
+        # (long-axis) pane only; the left pane's crossing is bound to the LV long
+        # axis. Same look as the hover 'move' hint; skipped while hovering.
+        if (key == "B" and hi is None
+                and v._lv_current_submode() == "epi"):
+            self._paint_gesture_arrow(p, S, ccx, ccy, v._ps[key],
+                                      uh, uv, "H", "move")
+
     @staticmethod
     def _arrow_barbs(tip, nxt, hs):
         """Two barbs at *tip*, fanned back from the outward direction tip←nxt.
@@ -1997,6 +2014,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
         self._lv_valves = {"mitral": None, "aortic": None}
         self._lv_valve_shown = {"mitral": True, "aortic": True}
+        #: Guided MV/AoV edit sub-step ("mitral"/"aortic"/None). When set, the LV
+        #: bar shows that valve's Draw/Confirm/Save/Load/Clear/Hide/Exit row.
+        self._lv_valve_edit = None
+        #: COMMON LV apex (world point) — third shared prerequisite with MV/AoV.
+        self._lv_apex = None
+        self._lv_apex_edit = False
+        self._lv_apex_shown = True
+        #: Epi guided gate: True once Draw was pressed (or a border loaded/resumed).
+        self._lv_epi_armed = False
         self._lv_dirty = False
         self._lv_result_lines = []
         self._lv_wall = False
@@ -3864,6 +3890,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # else contours/rings linger on a fresh CT with nothing loaded.
         self._lv_valves = {"mitral": None, "aortic": None}
         self._lv_valve_shown = {"mitral": True, "aortic": True}
+        self._lv_valve_edit = None
+        self._lv_apex = None
+        self._lv_apex_edit = False
+        self._lv_apex_shown = True
+        self._lv_epi_armed = False
         self._lv_result_lines = []
         for _k in ("A", "B"):
             self._measures[_k] = []
@@ -6800,6 +6831,292 @@ class CTViewer(CPRMixin, AbstractViewer):
                 btn.setStyleSheet(
                     "QPushButton{background:palette(button);color:%s;"
                     "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
+        # Valve-edit Hide/Show toggle label follows visibility.
+        ve = getattr(self, "_lv_valve_edit", None)
+        if ve is not None and getattr(self, "_lv_ve_show_btn", None) is not None:
+            has = self._lv_valves.get(ve) is not None
+            self._lv_ve_show_btn.setEnabled(has)
+            self._lv_ve_show_btn.setText(
+                t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
+        # Apex selector styling (red): plain unset, solid when set+shown, outline
+        # when set+hidden.
+        abtn = getattr(self, "_lv_apex_sel_btn", None)
+        if abtn is not None:
+            acol = "#d32f2f"
+            if self._lv_apex is None:
+                abtn.setStyleSheet(self._BTN_DIS)
+            elif getattr(self, "_lv_apex_shown", True):
+                abtn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
+                                   % (acol, self._BTN_DIS))
+            else:
+                abtn.setStyleSheet(
+                    "QPushButton{background:palette(button);color:%s;"
+                    "border:2px solid %s;}%s" % (acol, acol, self._BTN_DIS))
+
+    # ---- MV/AoV guided edit step ------------------------------------------
+    def _lv_enter_valve(self, which) -> None:
+        """MV/AoV selector → enter that valve's edit step (Draw/Confirm/…/Exit)."""
+        if self._vol is None:
+            return
+        self._lv_valve_edit = which
+        self._lv_update_submode_ui()
+
+    def _lv_exit_valve(self) -> None:
+        """Leave the MV/AoV edit step → back to the LV selector."""
+        from PyQt6.QtWidgets import QMessageBox
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("Return to the LV selector? Any unsaved plane is kept in memory "
+                  "but not written to a file.")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_valve_edit = None
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures.get(k, [])
+                                 if not (m.get("type") == "ellipse"
+                                         and m.get("_lv_valve") is None
+                                         and m.get("_lvv") is None
+                                         and m.get("_lv") is None)]
+            self._overlay[k].update()
+        self._lv_update_submode_ui()
+
+    def _lv_valve_draw(self) -> None:
+        """Draw step: arm Measure → Ellipse and guide the user; Confirm then sets
+        the plane from that ellipse."""
+        which = self._lv_valve_edit or "mitral"
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type("ellipse")
+        vname = "MV" if which == "mitral" else "AoV"
+        self._lvv_prompt(t(
+            "Draw the {v} annulus with Measure → Ellipse (hold Shift for a true "
+            "circle), then press Confirm.").format(v=vname))
+
+    def _lv_valve_confirm(self) -> None:
+        """Confirm step: set the valve plane from the drawn Ellipse."""
+        self._lv_capture_valve_common(self._lv_valve_edit or "mitral")
+        self._lv_update_submode_ui()
+
+    def _lv_valve_clear(self) -> None:
+        """Clear step: remove this valve plane from the image (saved files kept)."""
+        from PyQt6.QtWidgets import QMessageBox
+        which = self._lv_valve_edit or "mitral"
+        vname = "MV" if which == "mitral" else "AoV"
+        if self._lv_valves.get(which) is None:
+            self._lvv_prompt(t("No {v} plane on the image to clear.").format(
+                v=vname))
+            return
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("Remove the {v} plane from the image? Saved files are kept.")
+                .format(v=vname)) != QMessageBox.StandardButton.Yes:
+            return
+        self._lv_valves[which] = None
+        self._lv_valve_shown[which] = True
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                 if mm.get("_lv_valve") != which]
+            self._overlay[k].update()
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+
+    def _lv_rclick_valve(self, which) -> None:
+        """Right-click MV/AoV: quick hide/show of that valve's ring, any mode."""
+        if self._vol is None or self._lv_valves.get(which) is None:
+            self._lvv_prompt(t("Set the {v} plane first.").format(
+                v="MV" if which == "mitral" else "AoV"))
+            return
+        self._lv_toggle_valve_visibility(which)
+
+    # ---- Common APEX edit step --------------------------------------------
+    def _lv_setup_ready(self) -> bool:
+        """MV + AoV + apex all set — the gate for Epi / Blood-Endo."""
+        return self._lv_valves_ready() and self._lv_apex is not None
+
+    def _lv_apex_marker_draw(self) -> None:
+        """Repaint the panes so the common apex marker (drawn in _paint_cross from
+        self._lv_apex) refreshes."""
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _lv_enter_apex(self) -> None:
+        """Apex selector → enter the Apex edit step. Needs MV + AoV first."""
+        if self._vol is None:
+            return
+        if not self._lv_valves_ready():
+            self._lvv_prompt(t(
+                "Set the MV and AoV planes first — the LV long axis runs from "
+                "the apex to the MV centre."))
+            return
+        self._lv_apex_edit = True
+        self._lvv_prompt(t(
+            "Set the centreline crossing as the apex? Move the crossing onto the "
+            "LV apex, then press Set (RePosition to move it again)."))
+        self._lv_update_submode_ui()
+
+    def _lv_apex_set(self) -> None:
+        """Set the COMMON apex at the current centreline crossing (self._center)."""
+        if self._center is None:
+            return
+        apex = np.asarray(self._center, float).copy()
+        if self._lv_long_axis_from_apex(apex) is None:
+            self._lvv_prompt(t(
+                "The crossing coincides with the MV centre — move it onto the LV "
+                "apex, then press Set."))
+            return
+        self._lv_apex = apex
+        self._lv_apex_shown = True
+        self._lv_apex_marker_draw()
+        self._lvv_prompt(t("Apex set. Exit to the selector, then choose Epi or "
+                           "Blood/Endo."))
+        self._lv_update_submode_ui()
+
+    def _lv_apex_reposition(self) -> None:
+        """Drop the set apex so the crossing can be moved and Set again."""
+        self._lv_apex = None
+        self._lv_apex_marker_draw()
+        self._lvv_prompt(t("Move the crossing onto the LV apex, then press Set."))
+        self._lv_update_submode_ui()
+
+    def _lv_toggle_apex_common_visibility(self) -> None:
+        """Hide / show the common apex marker (the apex is kept)."""
+        if self._lv_apex is None:
+            self._lvv_prompt(t("Set the apex first."))
+            return
+        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_marker_draw()
+        self._lv_update_submode_ui()
+
+    def _lv_rclick_apex(self) -> None:
+        """Right-click the Apex selector: quick hide/show of the marker, any mode."""
+        if self._vol is None or self._lv_apex is None:
+            self._lvv_prompt(t("Set the apex first."))
+            return
+        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_marker_draw()
+        self._lv_update_valve_buttons()
+
+    def _lv_exit_apex(self) -> None:
+        """Leave the Apex step → back to the LV selector (the apex is kept)."""
+        self._lv_apex_edit = False
+        self._lv_update_submode_ui()
+
+    def _lv_apply_common_apex_to_pass(self, pas) -> None:
+        """Seed *pas*'s long axis + apex from the COMMON apex (apex → MV centre).
+        Non-clearing so any captured meridians survive. No-op if unavailable."""
+        lv = self._lv
+        if lv is None or self._lv_apex is None:
+            return
+        apex = np.asarray(self._lv_apex, float).copy()
+        axinfo = self._lv_long_axis_from_apex(apex)
+        if axinfo is None:
+            return
+        from multi_dicomviewer.core.lv_axis import LVAxis
+        axis_dir, radial0 = axinfo
+        ax = LVAxis.from_frame(apex, axis_dir, radial0)
+        m = lv["model"]
+        if pas == "endo":
+            m.endo_axis = ax
+        else:
+            m.epi_axis = ax
+        m.axis = ax
+        m.set_apex_point(pas, apex)
+        self._center = apex.copy()
+        lv["apex_target"] = None
+        lv["keep_view"] = True
+        if lv.get("phase") == "align":
+            lv["phase"] = "ready"
+            lv["plane_idx"] = 0
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        self._lv_show_plane()
+        self._lv_redraw_all()
+
+    def _lv_seed_blood_apex(self) -> None:
+        """Seed the COMMON apex into a freshly-entered Blood session."""
+        lvv = self._lvv
+        if lvv is None or self._lv_apex is None or lvv.get("apex") is not None:
+            return
+        lvv["apex"] = np.asarray(self._lv_apex, float).copy()
+        self._lvv_apex_shown = True
+        if self._lv_valves_ready():
+            lvv["step"] = "ready"
+        self._lvv_style_apex_btn()
+        self._lvv_sync()
+
+    # ---- Epi guided gate ---------------------------------------------------
+    def _lv_epi_armed_now(self) -> bool:
+        """The Epi row-2 trace tools are armed once Draw was pressed, or a border
+        is already present (loaded / resumed). The apex does NOT arm them."""
+        if getattr(self, "_lv_epi_armed", False):
+            return True
+        lv = self._lv
+        if lv is None:
+            return False
+        m = lv["model"]
+        return (len(m.epi_contours) >= 3 or bool(m.epi_planes))
+
+    def _lv_epi_draw(self) -> None:
+        """Epi 'Draw': apply the COMMON apex to the pass axis, confirm, then unlock
+        Trace / plane / SAX."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv_current_submode() != "epi":
+            return
+        if self._lv_apex is None:
+            self._lvv_prompt(t("Set the common Apex first (the Apex button)."))
+            return
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Epi"))
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(t(
+            "Trace the Epi border on the 6 planes, then refine it on the short "
+            "axis (SAX). The apex + long axis are already set."))
+        b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_draw:
+            return
+        self._lv_apply_common_apex_to_pass("epi")
+        self._lv_epi_armed = True
+        self._lv_update_submode_ui()
+
+    def _lv_submode_exit(self) -> None:
+        """Row-3 Exit: leave the current sub-mode back to the LV selector, keeping
+        the common MV/AoV/apex. Unsaved in-progress data is discarded (confirmed)."""
+        from PyQt6.QtWidgets import QMessageBox
+        sm = self._lv_current_submode()
+        if sm is None:
+            return
+        name = {"epi": "Epi", "endo": "Endo",
+                "blood": "Blood/Endo"}.get(sm, sm)
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("LV"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("Leave {m} mode? Unsaved data is not saved.").format(m=name))
+        b_exit = box.addButton(t("Exit"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_exit:
+            return
+        self._lv_epi_armed = False
+        if sm == "blood":
+            self._lvv_clear_markers()
+            self._lvv = None
+            self._lvv_sync()
+        elif self._lv is not None:
+            if self._lv.get("sax") is not None:
+                if getattr(self, "_lv_sax_btn", None) is not None:
+                    self._lv_sax_btn.setChecked(False)
+                self._lv_leave_sax()
+            m = self._lv["model"]
+            if bool(m.endo_planes or m.epi_planes):
+                self._lv_exit()          # drop contour → selector (keeps MV/AoV)
+            else:
+                self._lv["pass"] = None
+                self._lv_apply_target(None)
+                self._lv_sync_buttons()
+        self._lv_update_submode_ui()
 
     def _lv_save_valve(self, which) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
@@ -7083,28 +7400,84 @@ class CTViewer(CPRMixin, AbstractViewer):
         endoepi = sm in ("endo", "epi")
         blood = sm == "blood"
 
+        ve = getattr(self, "_lv_valve_edit", None)     # 'mitral'/'aortic'/None
+        ax = bool(getattr(self, "_lv_apex_edit", False))
         _changed = []
 
         def _vis(w, on):
             if w.isVisible() != on:
                 w.setVisible(on)
                 _changed.append(w)
-        _vis(self._lv_grp_trace, endoepi)
-        _vis(self._lv_grp_blood, blood)
-        _vis(self._lv_grp_r2_trace, endoepi)
-        _vis(self._lv_grp_r2_blood, blood)
+        _vis(self._lv_grp_trace, endoepi and not ve and not ax)
+        _vis(self._lv_grp_blood, blood and not ve and not ax)
+        _vis(self._lv_grp_r2_trace, endoepi and not ve and not ax)
+        _vis(self._lv_grp_r2_blood, blood and not ve and not ax)
         if getattr(self, "_lv_grp_r2_valves", None) is not None:
-            _vis(self._lv_grp_r2_valves, sm is None)
+            _vis(self._lv_grp_r2_valves, False)        # retired
+        # MV/AoV edit step row.
+        if getattr(self, "_lv_grp_r2_valve_edit", None) is not None:
+            _vis(self._lv_grp_r2_valve_edit, ve is not None)
+            if ve is not None:
+                has = self._lv_valves.get(ve) is not None
+                for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+                          self._lv_ve_load_btn, self._lv_ve_exit_btn):
+                    b.setEnabled(True)
+                self._lv_ve_save_btn.setEnabled(has)
+                self._lv_ve_clear_btn.setEnabled(has)
+                self._lv_ve_show_btn.setEnabled(has)
+                self._lv_ve_show_btn.setText(
+                    t("Hide") if self._lv_valve_shown.get(ve, True)
+                    else t("Show"))
+        # Apex edit step row.
+        if getattr(self, "_lv_grp_r2_apex", None) is not None:
+            _vis(self._lv_grp_r2_apex, ax)
+            if ax:
+                has_apex = self._lv_apex is not None
+                self._lv_ax_set_btn.setEnabled(True)
+                self._lv_ax_exit_btn.setEnabled(True)
+                self._lv_ax_repos_btn.setEnabled(has_apex)
+                self._lv_ax_hide_btn.setEnabled(has_apex)
+                self._lv_ax_hide_btn.setText(
+                    t("Hide") if getattr(self, "_lv_apex_shown", True)
+                    else t("Show"))
         if _changed:
             self._lv_relayout_bar()
         self._lv_update_valve_buttons()
-        ready = self._lv_valves_ready()
+        # MV / AoV selectors: grey the OTHER valve while editing one, and grey both
+        # while in a sub-mode or the apex step.
+        if getattr(self, "_lv_mv_btn", None) is not None:
+            self._lv_mv_btn.setEnabled(
+                (ve in (None, "mitral")) and sm is None and not ax)
+            self._lv_aov_btn.setEnabled(
+                (ve in (None, "aortic")) and sm is None and not ax)
+        # Apex selector: needs MV+AoV; available at the selector only.
+        if getattr(self, "_lv_apex_sel_btn", None) is not None:
+            self._lv_apex_sel_btn.setEnabled(
+                self._lv_valves_ready() and sm is None and ve is None)
+        # Epi / Blood-Endo gate: needs MV + AoV + apex. State machine: once a
+        # sub-mode is entered, only the active one stays clickable.
+        ready = self._lv_setup_ready()
         if not ready:
             self._lv_epi_btn.setEnabled(sm == "epi")
             self._lvv_start_btn.setEnabled(sm == "blood")
-        else:
+        elif sm is None:
             self._lv_epi_btn.setEnabled(True)
             self._lvv_start_btn.setEnabled(True)
+        else:
+            self._lv_epi_btn.setEnabled(sm == "epi")
+            self._lvv_start_btn.setEnabled(sm in ("blood", "endo"))
+        if ve is not None or ax:
+            self._lv_epi_btn.setEnabled(False)
+            self._lvv_start_btn.setEnabled(False)
+        # Epi guided gate: Draw is Epi-only; the row-2 trace tools stay greyed
+        # until Draw (or a loaded/resumed border) arms them.
+        if getattr(self, "_lv_epi_draw_btn", None) is not None:
+            self._lv_epi_draw_btn.setVisible(sm == "epi")
+            self._lv_epi_draw_btn.setEnabled(sm == "epi")
+        if sm == "epi" and not self._lv_epi_armed_now():
+            for b in (self._lv_trace_btn, self._lv_prev_btn,
+                      self._lv_next_btn, self._lv_sax_btn):
+                b.setEnabled(False)
         if self._lvv_start_btn.isChecked() != blood:
             self._lvv_start_btn.setChecked(blood)
         if self._lv is None or self._lv.get("sax") is None:
@@ -7145,12 +7518,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._lv_sync_buttons()
             self._lv_update_submode_ui()
             return
-        if not self._lv_valves_ready():
+        if not self._lv_setup_ready():
             QMessageBox.information(
                 self.window(), t("LV"),
-                t("Set the MV and AoV planes first. Draw an Ellipse on each "
-                  "annulus and press MV plane / AoV plane (or Load them); then "
-                  "Epi / Blood/Endo become available."))
+                t("Set MV, AoV and Apex first (the three buttons to the left); "
+                  "then Epi / Blood-Endo become available."))
             return
         if sm == "epi":
             if self._lvv is not None:
@@ -7183,6 +7555,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_stash_epi_for_blood(self._lv["model"])
                 self._lv_exit()
             self._lvv_toggle()
+            self._lv_seed_blood_apex()          # seed the COMMON apex
         self._lv_update_submode_ui()
 
     def _lv_exit_all(self) -> None:
@@ -7217,21 +7590,40 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Build the Blood GROUP first (creates _lvv_start_btn / _lv_grp_blood /
         # _lv_grp_r2_blood); embedded into row1/row2 below.
         _blood_grp = self._build_lvv_bar()
-        # ---- Common valve planes (MV / AoV): set once, shared by every sub-mode.
-        self._lv_mv_btn = FitButton(t("MV plane"))
+        # ---- Common valve planes (MV / AoV) + apex: set once, shared by every
+        # sub-mode. MV/AoV open a guided edit step; right-click hides/shows.
+        self._lv_mv_btn = FitButton(t("MV"))
         self._lv_mv_btn.setHelpToolTip(
-            t("Draw an Ellipse on the mitral annulus (Measure→Ellipse), then "
-              "press this to set the COMMON MV plane"))
-        self._lv_mv_btn.clicked.connect(
-            lambda: self._lv_capture_valve_common("mitral"))
+            t("Set the COMMON MV plane: opens the MV step (Draw an Ellipse → "
+              "Confirm, or Load). Right-click to hide / show it."))
+        self._lv_mv_btn.clicked.connect(lambda: self._lv_enter_valve("mitral"))
+        self._lv_mv_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_mv_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_valve("mitral"))
         row1.addWidget(self._lv_mv_btn)
-        self._lv_aov_btn = FitButton(t("AoV plane"))
+        self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
-            t("Draw an Ellipse on the aortic annulus (Measure→Ellipse), then "
-              "press this to set the COMMON AoV plane"))
-        self._lv_aov_btn.clicked.connect(
-            lambda: self._lv_capture_valve_common("aortic"))
+            t("Set the COMMON AoV plane: opens the AoV step (Draw an Ellipse → "
+              "Confirm, or Load). Right-click to hide / show it."))
+        self._lv_aov_btn.clicked.connect(lambda: self._lv_enter_valve("aortic"))
+        self._lv_aov_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_aov_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_valve("aortic"))
         row1.addWidget(self._lv_aov_btn)
+        # ---- Common APEX selector (third prerequisite; axis = apex → MV centre).
+        self._lv_apex_sel_btn = FitButton(t("Apex"))
+        self._lv_apex_sel_btn.setHelpToolTip(
+            t("Set the COMMON LV apex: opens the Apex step — move the crossing "
+              "onto the apex, then Set. Right-click hides / shows the marker. "
+              "Needs MV + AoV first."))
+        self._lv_apex_sel_btn.clicked.connect(self._lv_enter_apex)
+        self._lv_apex_sel_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_apex_sel_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_apex())
+        row1.addWidget(self._lv_apex_sel_btn)
         row1.addSpacing(8)
         # ---- Sub-mode selector: Epi → Blood/Endo (Endo merged into Blood/Endo).
         self._lv_epi_btn = FitButton(t("Epi"))
@@ -7253,14 +7645,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_setaxis_btn = FitButton(t("Set axis"))
         self._lv_setaxis_btn.setVisible(False)
         self._lv_setaxis_btn.clicked.connect(self._lv_set_axis)
-        # Apex button: set this pass's apex at the centreline crossing (no
-        # image-click). Move the crossing onto the apex, then press Apex → Trace.
+        # Per-pass Apex is RETIRED — the apex is a COMMON prerequisite (Apex
+        # selector), applied to the pass axis on Draw. Hidden placeholder.
         self._lv_apex_btn = FitButton(t("Apex"))
-        self._lv_apex_btn.setHelpToolTip(
-            t("Set the LV apex at the centreline crossing (move the crossing "
-              "onto the apex first), then press Trace."))
+        self._lv_apex_btn.setVisible(False)
         self._lv_apex_btn.clicked.connect(self._lv_confirm_apex_trace)
-        gt.addWidget(self._lv_apex_btn)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         gt.addWidget(self._lv_trace_btn)
@@ -7287,23 +7676,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         row1.addWidget(_blood_grp)
         row1.addStretch(1)
 
-        # ================= Row 2 =================
+        # ================= Row 2 (Epi row 3): guided order =================
+        # Draw, Save, Load, Clear, Exit, Epi-Area, Calc Vol, STL. (Windows also
+        # has an Epi-Border toggle here; the Mac trace overlay has no equivalent
+        # per-pass border button, so it is omitted.)
         self._lv_grp_r2_trace = QWidget()
         r2t = QHBoxLayout(self._lv_grp_r2_trace)
         r2t.setContentsMargins(0, 0, 0, 0); r2t.setSpacing(4)
+        self._lv_epi_draw_btn = FitButton(t("Draw"))
+        self._lv_epi_draw_btn.setHelpToolTip(
+            t("Begin the Epi trace: trace the border on 6 planes, then refine on "
+              "SAX (the apex + long axis are already set). Unlocks Trace / plane "
+              "/ SAX."))
+        self._lv_epi_draw_btn.clicked.connect(self._lv_epi_draw)
         self._lv_vol_btn = FitButton(t("Calc Vol"))
         self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
         self._lv_vol_btn.clicked.connect(self._lv_compute_volume)
-        r2t.addWidget(self._lv_vol_btn)
-        # Epi領域表示: toggle the red measured region + free the view for 3-D
+        # Epi-Area: toggle the red measured region + free the view for 3-D
         # inspection (Rotate/Spin/Paging/CenterLine unlocked while ON).
-        self._lv_region_btn = FitButton(t("Epi領域表示"))
+        self._lv_region_btn = FitButton(t("Epi-Area"))
         self._lv_region_btn.setCheckable(True)
         self._lv_region_btn.setHelpToolTip(
             t("Show/hide the red measured region (after Calc Vol) and free the "
               "view (Rotate/Spin/Paging/CenterLine) to inspect it in 3-D."))
         self._lv_region_btn.clicked.connect(self._lv_toggle_region)
-        r2t.addWidget(self._lv_region_btn)
         self._lv_wall_btn = FitButton(t("Wall"))
         self._lv_wall_btn.setCheckable(True)
         self._lv_wall_btn.setStyleSheet(
@@ -7314,59 +7710,118 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_wall_btn.setVisible(False)
         self._lv_save_btn = FitButton(t("Save"))
         self._lv_save_btn.clicked.connect(self._lv_save)
-        r2t.addWidget(self._lv_save_btn)
         self._lv_load_btn = FitButton(t("Load"))
         self._lv_load_btn.clicked.connect(self._lv_load)
-        r2t.addWidget(self._lv_load_btn)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
-        r2t.addWidget(self._lv_stl_btn)
-        self._lv_redo_btn = FitButton(t("Clear borders"))
+        self._lv_redo_btn = FitButton(t("Clear"))
         self._lv_redo_btn.clicked.connect(self._lv_clear_confirm)
-        r2t.addWidget(self._lv_redo_btn)
-        self._lv_exit_btn = FitButton(t("Exit LV"))
-        self._lv_exit_btn.clicked.connect(self._lv_exit_all)
-        r2t.addWidget(self._lv_exit_btn)
+        self._lv_exit_btn = FitButton(t("Exit"))
+        self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
+        for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
+                  self._lv_redo_btn, self._lv_exit_btn, self._lv_region_btn,
+                  self._lv_vol_btn, self._lv_stl_btn):
+            r2t.addWidget(b)
         row2.addWidget(self._lv_grp_r2_trace)
         row2.addWidget(self._lv_grp_r2_blood)     # built by _build_lvv_bar
-        # Valve-setup row-2 group (shown when NO sub-mode active): Save/Load valves.
+
+        # MV/AoV EDIT step (row 3): Draw / Confirm / Save / Load / Clear / Hide /
+        # Exit — acts on the valve being edited (self._lv_valve_edit).
+        self._lv_grp_r2_valve_edit = QWidget()
+        r2ve = QHBoxLayout(self._lv_grp_r2_valve_edit)
+        r2ve.setContentsMargins(0, 0, 0, 0); r2ve.setSpacing(4)
+        self._lv_ve_draw_btn = FitButton(t("Draw"))
+        self._lv_ve_draw_btn.setHelpToolTip(
+            t("Draw the valve annulus as an Ellipse (Shift = true circle), then "
+              "press Confirm."))
+        self._lv_ve_draw_btn.clicked.connect(self._lv_valve_draw)
+        self._lv_ve_confirm_btn = FitButton(t("Confirm"))
+        self._lv_ve_confirm_btn.setHelpToolTip(
+            t("Set the valve plane from the drawn Ellipse."))
+        self._lv_ve_confirm_btn.clicked.connect(self._lv_valve_confirm)
+        self._lv_ve_save_btn = FitButton(t("Save"))
+        self._lv_ve_save_btn.clicked.connect(
+            lambda: self._lv_save_valve(self._lv_valve_edit or "mitral"))
+        self._lv_ve_load_btn = FitButton(t("Load"))
+        self._lv_ve_load_btn.clicked.connect(
+            lambda: self._lv_load_valve(self._lv_valve_edit or "mitral"))
+        self._lv_ve_clear_btn = FitButton(t("Clear"))
+        self._lv_ve_clear_btn.clicked.connect(self._lv_valve_clear)
+        self._lv_ve_show_btn = FitButton(t("Hide"))
+        self._lv_ve_show_btn.clicked.connect(
+            lambda: self._lv_toggle_valve_visibility(
+                self._lv_valve_edit or "mitral"))
+        self._lv_ve_exit_btn = FitButton(t("Exit"))
+        self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
+        for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+                  self._lv_ve_save_btn, self._lv_ve_load_btn,
+                  self._lv_ve_clear_btn, self._lv_ve_show_btn,
+                  self._lv_ve_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
+            r2ve.addWidget(b)
+        self._lv_grp_r2_valve_edit.setVisible(False)
+        row2.addWidget(self._lv_grp_r2_valve_edit)
+
+        # APEX edit step (row 3): Set / RePosition / Hide / Exit.
+        self._lv_grp_r2_apex = QWidget()
+        r2ax = QHBoxLayout(self._lv_grp_r2_apex)
+        r2ax.setContentsMargins(0, 0, 0, 0); r2ax.setSpacing(4)
+        self._lv_ax_set_btn = FitButton(t("Set"))
+        self._lv_ax_set_btn.setHelpToolTip(
+            t("Set the LV apex at the current centreline crossing."))
+        self._lv_ax_set_btn.clicked.connect(self._lv_apex_set)
+        self._lv_ax_repos_btn = FitButton(t("RePosition"))
+        self._lv_ax_repos_btn.setHelpToolTip(
+            t("Drop the set apex so you can move the crossing and Set again."))
+        self._lv_ax_repos_btn.clicked.connect(self._lv_apex_reposition)
+        self._lv_ax_hide_btn = FitButton(t("Hide"))
+        self._lv_ax_hide_btn.setHelpToolTip(
+            t("Hide / show the apex marker (the apex is kept)."))
+        self._lv_ax_hide_btn.clicked.connect(self._lv_toggle_apex_common_visibility)
+        self._lv_ax_exit_btn = FitButton(t("Exit"))
+        self._lv_ax_exit_btn.setHelpToolTip(t("Return to the LV selector."))
+        self._lv_ax_exit_btn.clicked.connect(self._lv_exit_apex)
+        for b in (self._lv_ax_set_btn, self._lv_ax_repos_btn,
+                  self._lv_ax_hide_btn, self._lv_ax_exit_btn):
+            b.setStyleSheet(self._BTN_DIS)
+            r2ax.addWidget(b)
+        self._lv_grp_r2_apex.setVisible(False)
+        row2.addWidget(self._lv_grp_r2_apex)
+
+        # Retired Save/Load-valve row (replaced by the MV/AoV edit step). Kept as a
+        # hidden placeholder so old references stay valid.
         self._lv_grp_r2_valves = QWidget()
         r2v = QHBoxLayout(self._lv_grp_r2_valves)
         r2v.setContentsMargins(0, 0, 0, 0); r2v.setSpacing(4)
         self._lv_mv_save_btn = FitButton(t("Save MV"))
         self._lv_mv_save_btn.clicked.connect(lambda: self._lv_save_valve("mitral"))
-        r2v.addWidget(self._lv_mv_save_btn)
         self._lv_mv_load_btn = FitButton(t("Load MV"))
         self._lv_mv_load_btn.clicked.connect(lambda: self._lv_load_valve("mitral"))
-        r2v.addWidget(self._lv_mv_load_btn)
         self._lv_aov_save_btn = FitButton(t("Save AoV"))
         self._lv_aov_save_btn.clicked.connect(lambda: self._lv_save_valve("aortic"))
-        r2v.addWidget(self._lv_aov_save_btn)
         self._lv_aov_load_btn = FitButton(t("Load AoV"))
         self._lv_aov_load_btn.clicked.connect(lambda: self._lv_load_valve("aortic"))
-        r2v.addWidget(self._lv_aov_load_btn)
-        for b in (self._lv_mv_save_btn, self._lv_mv_load_btn,
-                  self._lv_aov_save_btn, self._lv_aov_load_btn):
-            b.setStyleSheet(self._BTN_DIS)
+        self._lv_grp_r2_valves.setVisible(False)
         row2.addWidget(self._lv_grp_r2_valves)
         row2.addStretch(1)
-        for b in (self._lv_prev_btn, self._lv_next_btn, self._lv_redo_btn,
-                  self._lv_save_btn, self._lv_stl_btn, self._lv_load_btn,
-                  self._lv_exit_btn):
+        for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
+                  self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
+                  self._lv_load_btn, self._lv_exit_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_stl_btn, self._lv_exit_btn]
+            self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn]
         # Explicit INITIAL group visibility (no sub-mode active): the idempotent
-        # _vis() in _lv_update_submode_ui can't take effect at build time because
-        # isVisible() is False before the parent is shown, so set it directly
-        # here — only the valve Save/Load row shows until Epi/Blood is picked.
+        # _vis() can't take effect at build time (isVisible() is False before the
+        # parent is shown). The initial state is the clean 2-row selector — every
+        # row-3 group hidden until MV/AoV/Apex/Epi/Blood is picked.
         for _g in (self._lv_grp_trace, self._lv_grp_blood,
-                   self._lv_grp_r2_trace, self._lv_grp_r2_blood):
+                   self._lv_grp_r2_trace, self._lv_grp_r2_blood,
+                   self._lv_grp_r2_valve_edit, self._lv_grp_r2_apex,
+                   self._lv_grp_r2_valves):
             _g.setVisible(False)
-        self._lv_grp_r2_valves.setVisible(True)
         self._lv_sync_buttons()
         self._lv_update_submode_ui()
         return self._lv_wrap
@@ -9665,6 +10120,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         lv = self._lv
         m = lv["model"]
+        # Fresh Epi entry starts LOCKED (Draw unlocks the trace tools); a resumed
+        # or loaded Epi re-arms itself via _lv_epi_armed_now's has-border check.
+        if which == "epi":
+            self._lv_epi_armed = False
         if lv.get("sax") is not None:               # in SAX → ARM this border
             # After promotion both borders live on the Epi axis and are shown on
             # the long-axis plane; the Endo/Epi button picks WHICH border's
@@ -10602,16 +11061,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_update_text()
 
     def _lv_clear_confirm(self) -> None:
-        """'Clear borders' button → confirm before discarding the traced borders."""
+        """'Clear' button → confirm before discarding the drawn / in-progress
+        border; the guided gate re-locks so Draw is needed to start again."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv.get("phase") != "contour":
             return
-        if QMessageBox.question(
-                self.window(), t("LV EF"),
-                t("Clear all traced borders? This cannot be undone.")) \
-                != QMessageBox.StandardButton.Yes:
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("LV"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("Discard the drawn / in-progress border? Unsaved data is "
+                      "not saved (saved files are kept)."))
+        b_clear = box.addButton(t("Clear"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is not b_clear:
             return
+        self._lv_epi_armed = False
         self._lv_clear_contours()
+        self._lv_update_submode_ui()
 
     def _lv_clear_contours(self) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":
