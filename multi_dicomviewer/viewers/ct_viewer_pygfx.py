@@ -8105,7 +8105,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         lvv = self._lvv or {}
+        # Apex for the valve-plane clip (which side to KEEP). Prefer the LV apex;
+        # fall back to the Epi surface's OWN axis apex so a not-yet-placed lvv
+        # apex can't collapse it to (0,0,0) and mis-clip the base (the Epi then
+        # stops short of the MV plane — the reported under-inclusion).
         apex = lvv.get("apex")
+        if apex is None:
+            _ax = getattr(epi, "axis", None)
+            apex = getattr(_ax, "apex", None) if _ax is not None else None
+        if apex is None:
+            apex = getattr(self, "_lvv_epi_apex", None)
         apex = np.asarray(apex, float) if apex is not None else np.zeros(3)
         mv = self._lv_valves.get("mitral") or lvv.get("mitral")
         av = self._lv_valves.get("aortic") or lvv.get("aortic")
