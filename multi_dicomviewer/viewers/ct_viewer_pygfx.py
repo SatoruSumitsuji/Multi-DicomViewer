@@ -6886,6 +6886,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
 
+    def _lv_sel_style(self, color, shown, soft) -> str:
+        """Stylesheet for a SET MV/AoV/Apex selector. Actionable = solid colour
+        (prominent). NON-selected (soft-off) = a FAINT translucent tint so it
+        stays legible as 'set' without dominating the bar. Hidden = coloured
+        outline (thinner when soft)."""
+        r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
+        if shown:
+            if soft:
+                return ("QPushButton{background:rgba(%d,%d,%d,0.22);color:%s;}%s"
+                        % (r, g, b, color, self._BTN_DIS))
+            return "QPushButton{background:%s;color:white;}%s" % (color,
+                                                                  self._BTN_DIS)
+        bw = 1 if soft else 2
+        return ("QPushButton{background:palette(button);color:%s;"
+                "border:%dpx solid %s;}%s" % (color, bw, color, self._BTN_DIS))
+
     def _lv_update_valve_buttons(self) -> None:
         if getattr(self, "_lv_mv_btn", None) is None:
             return
@@ -6893,13 +6909,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                                    ("aortic", self._lv_aov_btn, "#b8860b")):
             if self._lv_valves.get(which) is None:
                 btn.setStyleSheet(self._BTN_DIS)
-            elif self._lv_valve_shown.get(which, True):
-                btn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
-                                  % (color, self._BTN_DIS))
             else:
-                btn.setStyleSheet(
-                    "QPushButton{background:palette(button);color:%s;"
-                    "border:2px solid %s;}%s" % (color, color, self._BTN_DIS))
+                btn.setStyleSheet(self._lv_sel_style(
+                    color, self._lv_valve_shown.get(which, True),
+                    getattr(btn, "_mdv_soft_off", False)))
         # Valve-edit Hide/Show toggle label follows visibility.
         ve = getattr(self, "_lv_valve_edit", None)
         if ve is not None and getattr(self, "_lv_ve_show_btn", None) is not None:
@@ -6907,23 +6920,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_ve_show_btn.setEnabled(has)
             self._lv_ve_show_btn.setText(
                 t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
-        # Apex selector styling (red): plain unset, solid when set+shown, outline
-        # when set+hidden.
+        # Apex selector styling (red).
         abtn = getattr(self, "_lv_apex_sel_btn", None)
         if abtn is not None:
-            acol = "#d32f2f"
             if self._lv_apex is None:
                 abtn.setStyleSheet(self._BTN_DIS)
-            elif getattr(self, "_lv_apex_shown", True):
-                abtn.setStyleSheet("QPushButton{background:%s;color:white;}%s"
-                                   % (acol, self._BTN_DIS))
             else:
-                abtn.setStyleSheet(
-                    "QPushButton{background:palette(button);color:%s;"
-                    "border:2px solid %s;}%s" % (acol, acol, self._BTN_DIS))
-        # No flat-grey override: an UNSET selector uses _BTN_DIS (normal when
-        # actionable, standard grey when soft-disabled — same as Epi/Blood); a
-        # SET selector always shows its data colour above.
+                abtn.setStyleSheet(self._lv_sel_style(
+                    "#d32f2f", getattr(self, "_lv_apex_shown", True),
+                    getattr(abtn, "_mdv_soft_off", False)))
 
     def _lv_soft_gray(self, btn, actionable, has_data) -> None:
         """State the MV / AoV / Apex selector (mirrors the Epi/Blood look).
