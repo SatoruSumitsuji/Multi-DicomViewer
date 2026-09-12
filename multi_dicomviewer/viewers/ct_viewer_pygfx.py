@@ -4945,6 +4945,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         through to the tool (normal amber crosshair)."""
         if self._cross_grab or self._vol is None or not self._cl_on:
             return
+        # LV crosshair SUPPRESSED (Epi trace etc.: painted but non-interactive):
+        # never preview a grab, and proactively DROP any lingering highlight —
+        # otherwise a hover captured while aligning stays set, and the persistent
+        # Epi up/down move-arrows (gated on `hi is None`) never draw. Matches the
+        # VTK viewer's _hover_cross, which clears the highlight and returns here.
+        if self._lv_cross_suppressed():
+            if self._cross_hi.get(which) is not None:
+                self._cross_hi[which] = None
+                self._overlay[which].update()
+            return
         caught, line, mode = self._cross_zone(which, sx, sy)
         new = (line, mode) if caught else None
         if self._cross_hi.get(which) != new:
@@ -7320,6 +7330,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         if box.clickedButton() is not b_draw:
             return
         self._lv_apply_common_apex_to_pass("epi")
+        # Default Epi zoom for the RIGHT (long-axis) pane: show the apex→MV-centre
+        # length at 2/3 of the pane HEIGHT. _ps = half the pane height in mm, so
+        # ps = (3/4)·length gives length = (2/3)·(2·ps) = (2/3)·height. Set once
+        # on Draw as the sensible default; the user's later manual zoom is kept
+        # (no other view op auto-rescales).
+        ax = self._lv["model"].epi_axis
+        length = float(getattr(ax, "length_mm", 0.0)) if ax is not None else 0.0
+        if length > 1e-3:
+            self._ps["B"] = 0.75 * length
         self._lv_epi_armed = True
         # BEGIN tracing right away so the border points can be placed on the
         # right pane — Draw is the "start drawing" action, not just an unlock.
