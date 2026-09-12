@@ -935,6 +935,19 @@ class _Overlay(QWidget):
                 hs = v._lv_handle_screen(key)   # ○ handle pinned to the pane edge
                 if hs is not None:
                     p.drawEllipse(QPointF(hs[0], hs[1]), 9.0, 9.0)
+                # up/down move-arrows on the level line — RIGHT (long-axis) pane
+                # ONLY: a vertical double-headed arrow at the line centre showing
+                # the cross-section level slides along the axis (the "normal
+                # up/down move" line). Not on the short-axis pane.
+                ah = 0.13 * max(v._lv_view_half(key))    # shaft half-length
+                ahs = 0.05 * max(v._lv_view_half(key))   # arrowhead size
+                p.drawPolyline(QPolygonF([S((0.0, y - ah)), S((0.0, y + ah))]))
+                p.drawPolyline(QPolygonF([
+                    S((-ahs, y + ah - ahs)), S((0.0, y + ah)),
+                    S((ahs, y + ah - ahs))]))
+                p.drawPolyline(QPolygonF([
+                    S((-ahs, y - ah + ahs)), S((0.0, y - ah)),
+                    S((ahs, y - ah + ahs))]))
             return
         # LONG-AXIS view: base-cut line ⟂ the axis at the common basal level.
         if key != lv.get("pane"):
@@ -11368,7 +11381,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         idx = lv["plane_idx"] % len(angs)
         u, v, n = self._ortho(ax.meridian_dir(angs[idx]), ax.axis)
         self._frame[la] = (u, v, n)
-        self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        # Centre the long-axis pane on the LEVEL point (on the axis at lv['sax']),
+        # not the mid-axis, so the movable cross-section (level) line sits at the
+        # pane's VERTICAL centre on SAX entry (requested layout).
+        self._pc[la] = ax.apex + float(lv["sax"]) * ax.axis
         self._cross_ang[la] = 0.0
         # The reference long-axis pane is resliced on the SAX axis. For a single
         # pass show only that border; for 'both' (Endo promoted onto the Epi
@@ -11387,9 +11403,56 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["fitted_sax"] = True
         self._view_initial = first
         self._lv_update_sax_label()
-        self._refresh(reset_cam=first)
+        # Reslice without an auto-fit (the SAX default scales below are applied
+        # explicitly, so the generic fit must not fight them).
+        self._refresh(reset_cam=False)
+        if first:
+            # RIGHT (long-axis) pane: MV→apex length = 1/2 the pane HEIGHT
+            # (_ps = half-height, so ps = length). Level centred vertically above.
+            length = float(getattr(ax, "length_mm", 0.0))
+            if length > 1e-3:
+                self._ps[la] = length
+                self._config_cam(la)
+            # LEFT (short-axis) pane: Epi border MAX radius = 40% of the pane
+            # WIDTH (Epi diameter ≈ 80% of the frame).
+            ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
+            if ps_sa is not None:
+                self._ps[sa] = ps_sa
+                self._config_cam(sa)
+            else:
+                self._fit_pane(sa)                   # fallback: normal fit
         for k in (la, sa):
             self._overlay[k].update()
+
+    def _lv_sax_short_scale(self, ax, along0):
+        """_ps for the short-axis pane so the shown Epi border's MAX radius (from
+        the axis centre) = 40% of the pane WIDTH. _ps is half the pane HEIGHT in
+        mm, so a radius that must land at 0.40·width_px needs
+        ps = rmax·height_px / (0.80·width_px). None when there is no Epi crossing
+        at this level (caller falls back to a normal fit)."""
+        sa = self._lv.get("sax_pane")
+        if sa is None:
+            return None
+        try:
+            o, ex, ey, _n = ax.short_axis_basis(float(along0))
+        except Exception:                                # noqa: BLE001
+            return None
+        sp = self._lv["model"].short_axis_border_pts(
+            float(along0), "epi", ref_axis=ax)
+        if not sp or len(sp) < 3:
+            return None
+        o = np.asarray(o, float)
+        ex = np.asarray(ex, float)
+        ey = np.asarray(ey, float)
+        rmax = 0.0
+        for P in sp:
+            d = np.asarray(P, float) - o
+            rmax = max(rmax, math.hypot(float(d @ ex), float(d @ ey)))
+        if rmax < 1e-3:
+            return None
+        wpx = max(1, self.pane[sa].canvas.width())
+        hpx = max(1, self.pane[sa].canvas.height())
+        return rmax * hpx / (0.80 * wpx)
 
     def _lv_set_short_frame(self) -> None:
         lv = self._lv
