@@ -7485,6 +7485,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "stats": {k: float(v)
                           for k, v in (thit.get("stats") or {}).items()},
             }
+        # VIEW state: which display toggles were ON, so Load reproduces the exact
+        # last-shown state (not just the data). Wall mode / LVD-shown are already
+        # in 'thick'/'lvd_shown'; the 方式/膨らみ come back via 'endo'.
+        data["view"] = {
+            "all_blood": bool(getattr(self, "_lvv_hl_on", False)),
+            "lv_blood": bool(getattr(self, "_lvv_mask_on", False)),
+            "epi_border": bool(getattr(self, "_lvv_epi_show", False)),
+            "endo_auto": bool(getattr(self, "_lvv_endo_show", False)),
+        }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -7589,8 +7598,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_lv_diam_cache = None
             self._lvv_restore_thick(data.get("thick"))
             if blood_shown:
-                # Blood mask fresh in memory → show 水色, hide the 全域HU tint.
                 lvv["calc_sig"] = self._lvv_signature()
+            view = data.get("view")
+            if isinstance(view, dict):
+                # Reproduce the EXACT last-shown toggles, but only enable what the
+                # loaded data supports (LV-Blood needs the mask; Epi-Border needs
+                # an Epi surface; Endo-Border(Auto) needs the endo mask).
+                want_lv = bool(view.get("lv_blood")) and blood_shown
+                want_all = bool(view.get("all_blood")) and not want_lv
+                self._lvv_mask_on = want_lv
+                self._lvv_hl_on = want_all
+                self._lvv_mask_btn.setChecked(want_lv)
+                self._lvv_hl_btn.setChecked(want_all)
+                self._lvv_epi_show = bool(view.get("epi_border")) and (
+                    getattr(self, "_lvv_epi_surf", None) is not None)
+                if getattr(self, "_lvv_epi_btn", None) is not None:
+                    self._lvv_epi_btn.setChecked(self._lvv_epi_show)
+                self._lvv_endo_show = bool(view.get("endo_auto")) and (
+                    getattr(self, "_lv_endo_mask_comp", None) is not None)
+                if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+                    self._lvv_auto_endo_btn.setChecked(self._lvv_endo_show)
+            elif blood_shown:
+                # No saved view (old file), mask present → show 水色, hide 全域HU.
                 self._lvv_hl_on = False
                 self._lvv_mask_on = True
                 self._lvv_hl_btn.setChecked(False)
@@ -7605,6 +7634,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
             self._lvv_update_mask()
             self._lvv_update_highlight()
+            # Realise the restored Epi-Border / Auto-Endo overlays per the view.
+            if hasattr(self, "_lvv_show_epi"):
+                self._lvv_show_epi(render=False)
+            if hasattr(self, "_lvv_show_endo"):
+                self._lvv_show_endo(render=True)
             # Bring back the restored LVD line + 壁厚 heat map on screen.
             if getattr(self, "_lvv_lvd_level", None) is not None:
                 self._lvv_style_lvd_btn()
