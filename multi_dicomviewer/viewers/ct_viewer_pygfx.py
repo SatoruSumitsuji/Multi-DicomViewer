@@ -8050,6 +8050,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_save_btn.clicked.connect(self._lv_save)
         self._lv_load_btn = FitButton(t("Load"))
         self._lv_load_btn.clicked.connect(self._lv_load)
+        # Fit MV: converge the Epi border to the (updated) MV plane — drop points
+        # on the left-atrium side and snap the two basal ends onto the MV line.
+        self._lv_fit_mv_btn = FitButton(t("Fit MV"))
+        self._lv_fit_mv_btn.setHelpToolTip(
+            t("Converge the Epi border to the (updated) MV plane: drop points on "
+              "the left-atrium side and snap the two basal ends onto the MV "
+              "plane line."))
+        self._lv_fit_mv_btn.clicked.connect(self._lv_fit_mv)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
         self._lv_redo_btn = FitButton(t("Clear"))
@@ -8057,8 +8065,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn = FitButton(t("Exit"))
         self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
         for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
-                  self._lv_redo_btn, self._lv_exit_btn, self._lv_region_btn,
-                  self._lv_border_btn, self._lv_vol_btn, self._lv_stl_btn):
+                  self._lv_fit_mv_btn, self._lv_redo_btn, self._lv_exit_btn,
+                  self._lv_region_btn, self._lv_border_btn, self._lv_vol_btn,
+                  self._lv_stl_btn):
             r2t.addWidget(b)
         row2.addWidget(self._lv_grp_r2_trace)
         row2.addWidget(self._lv_grp_r2_blood)     # built by _build_lvv_bar
@@ -8157,7 +8166,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         row2.addStretch(1)
         for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
                   self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
-                  self._lv_load_btn, self._lv_exit_btn):
+                  self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
@@ -10604,6 +10613,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                   self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
                   self._lv_stl_btn):
             b.setEnabled(contour)
+        # Fit MV needs a traced border AND a common MV plane to converge onto.
+        if getattr(self, "_lv_fit_mv_btn", None) is not None:
+            _fm = self._lv["model"] if self._lv is not None else None
+            _fh = _fm is not None and bool(_fm.epi_planes or _fm.endo_planes)
+            self._lv_fit_mv_btn.setEnabled(
+                contour and _fh and self._lv_valves.get("mitral") is not None)
         # Epi-Border toggle: enabled once tracing; its checked look + colour
         # follow the single _lv_border_show flag (source of truth).
         if getattr(self, "_lv_border_btn", None) is not None:
@@ -11511,6 +11526,87 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_show_plane()
             self._lv_record_geom(before)            # one Ctrl+Z step
         return moved
+
+    def _lv_fit_mv(self) -> None:
+        """'Fit MV' — converge the active border to the (updated) MV plane: DELETE
+        the points on the left-atrium (anti-apex) side of the MV plane, then MOVE
+        the two remaining BASAL end points onto the MV plane's line WITHIN that
+        section (keeps them in the plane). The apex end is never touched.
+        Undoable; re-draws + invalidates the volume."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        mv = self._lv_valves.get("mitral")
+        if mv is None:
+            QMessageBox.information(self.window(), t("LV"),
+                                    t("Set the MV plane first."))
+            return
+        pas = self._lv.get("pass")
+        if pas not in ("endo", "epi"):
+            pas = "epi" if self._lv["model"].epi_planes else "endo"
+        m = self._lv["model"]
+        ax = m._axis_for(pas)
+        store = m.endo_planes if pas == "endo" else m.epi_planes
+        if ax is None or not store:
+            QMessageBox.information(self.window(), t("LV"),
+                                    t("Trace the border first."))
+            return
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        axis = axis / (float(np.linalg.norm(axis)) or 1.0)
+        along_mv = float((c - apex) @ axis)
+        thr = 0.4 * along_mv if along_mv > 1.0 else -1.0
+        sa = float(np.sign((apex - c) @ n)) or 1.0
+        eps = 1e-6
+
+        def _snap_to_mv_line(P, phi):
+            m_n = np.cross(axis, np.asarray(ax.meridian_dir(phi), float))
+            nrm = float(np.linalg.norm(m_n))
+            if nrm < eps:
+                return P
+            m_n = m_n / nrm
+            L = np.cross(n, m_n)
+            if float(np.linalg.norm(L)) < eps:
+                return P
+            L = L / float(np.linalg.norm(L))
+            w = np.cross(m_n, L)
+            w = w / (float(np.linalg.norm(w)) or 1.0)
+            d = float((P - c) @ n)
+            wn = float(w @ n)
+            if abs(wn) < eps:
+                return P
+            return P - (d / wn) * w
+
+        before = self._lv_geom_snap()
+        changed = False
+        for phi, arr in list(store.items()):
+            P = np.asarray(arr, float).reshape(-1, 3)
+            if len(P) < 2:
+                continue
+            keep = ((P - c) @ n) * sa >= -1e-3
+            Pk = P[keep]
+            if len(Pk) < 2:
+                continue
+            a0 = float((Pk[0] - apex) @ axis)
+            aL = float((Pk[-1] - apex) @ axis)
+            if a0 > thr:
+                Pk[0] = _snap_to_mv_line(Pk[0], phi)
+            if aL > thr:
+                Pk[-1] = _snap_to_mv_line(Pk[-1], phi)
+            if len(Pk) != len(P) or not np.allclose(Pk, P):
+                m.set_long_axis_contour(phi, Pk, which=pas)
+                changed = True
+        if not changed:
+            self._lvv_prompt(t("Border already fits the MV plane."))
+            return
+        self._lv_invalidate_volume()
+        self._lv_rebuild_measures()
+        self._lv_show_plane()
+        self._lv_record_geom(before)
+        self._lv_dirty = True
 
     def _lv_step_plane(self, delta) -> None:
         if self._lv is None or self._lv.get("phase") != "contour":
