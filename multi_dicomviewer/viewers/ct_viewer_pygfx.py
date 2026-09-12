@@ -10045,6 +10045,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_lvv_lvd_level", None) is not None:
             data["lvd_level"] = float(self._lvv_lvd_level)
             data["lvd_shown"] = bool(getattr(self, "_lvv_lvd_shown", False))
+        # VIEW state: which display toggles were ON, so Load reproduces the last
+        # shown view (the toggles Mac can honour without embedded masks —
+        # All-Blood tint and Epi-Border from the loaded Epi; LV-Blood / Auto-Endo
+        # need a recompute as this file embeds no masks yet).
+        data["view"] = {
+            "all_blood": bool(getattr(self, "_lvv_hl_on", False)),
+            "lv_blood": bool(getattr(self, "_lvv_mask_on", False)),
+            "epi_border": bool(getattr(self, "_lvv_epi_show", False)),
+            "endo_auto": bool(getattr(self, "_lvv_endo_show", False)),
+        }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -10149,8 +10159,33 @@ class CTViewer(CPRMixin, AbstractViewer):
             if lvv.get("last_ml") is not None:
                 self._lvv_vol_lbl.setText(
                     t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
+            # VIEW state: reproduce the last-shown toggles. This file embeds no
+            # masks yet, so LV-Blood / Auto-Endo need a recompute (skipped here);
+            # All-Blood (HU tint) and Epi-Border (from the loaded Epi) restore.
+            view = data.get("view")
+            if isinstance(view, dict):
+                self._lvv_hl_on = bool(view.get("all_blood"))
+                self._lvv_mask_on = False       # no embedded mask → recompute
+                if getattr(self, "_lvv_hl_btn", None) is not None:
+                    self._lvv_hl_btn.setChecked(self._lvv_hl_on)
+                if getattr(self, "_lvv_mask_btn", None) is not None:
+                    self._lvv_mask_btn.setChecked(False)
+                self._lvv_epi_show = bool(view.get("epi_border")) and (
+                    self._lvv_epi_surf is not None)
+                if self._lvv_epi_show and hasattr(self, "_lvv_ensure_epi_mask"):
+                    try:
+                        self._lvv_ensure_epi_mask()
+                    except Exception:                    # noqa: BLE001
+                        pass
+                if getattr(self, "_lvv_epi_btn", None) is not None:
+                    self._lvv_epi_btn.setChecked(self._lvv_epi_show)
+                self._lvv_endo_show = False      # needs the endo mask (recompute)
+                if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+                    self._lvv_auto_endo_btn.setChecked(False)
             self._lvv_sync()
             self._lvv_update_highlight()
+            if hasattr(self, "_lvv_redraw"):
+                self._lvv_redraw()
             for k in ("A", "B"):
                 self._overlay[k].update()
             # (A) Make the Epi source explicit, and (B) remind about the two-file
