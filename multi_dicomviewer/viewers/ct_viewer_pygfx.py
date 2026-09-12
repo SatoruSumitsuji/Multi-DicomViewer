@@ -447,6 +447,23 @@ class _PygfxPane:
     def __init__(self):
         # ondemand: only redraw when the viewer calls render() (request_draw).
         self.canvas = RenderCanvas(update_mode="ondemand")
+        # rendercanvas builds the QRenderCanvas (and its inner subwidget) with
+        # WA_DeleteOnClose=True, so ANY close() DELETES the C++ widget. On macOS
+        # force_draw() re-enters the Qt event loop (processEvents), which lets
+        # rendercanvas's loop watchdog deliver a close() to this canvas in the
+        # MIDDLE of a click handler (seen entering Epi, when _refresh→force_draw
+        # runs beside a synchronous LV-bar relayout). The overlay then paints
+        # against a deleted canvas → RuntimeError → a repaint-storm HARD FREEZE.
+        # Clear the attribute so a stray close() only HIDES the widget; the pane
+        # holds the Python ref, so the C++ object stays alive and paint is safe.
+        try:
+            self.canvas.setAttribute(
+                Qt.WidgetAttribute.WA_DeleteOnClose, False)
+            _sub = getattr(self.canvas, "_subwidget", None)
+            if _sub is not None:
+                _sub.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        except Exception:                                # noqa: BLE001
+            pass
         self.renderer = gfx.WgpuRenderer(self.canvas)
         self.scene = gfx.Scene()
         self.scene.add(gfx.Background(material=gfx.BackgroundMaterial(
