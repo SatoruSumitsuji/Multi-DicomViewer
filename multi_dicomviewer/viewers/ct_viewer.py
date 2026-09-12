@@ -6056,7 +6056,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center = c.copy()
         self._cross_ang = {"A": 0.0, "B": 0.0}
         self.set_side("Bi")
-        self._view_initial = bool(reset_cam)
+        # KEEP the current zoom (never auto-rescale): position + orientation may
+        # change, the scale must not. _view_initial=False → _fit_pane re-centres
+        # (reset_cam=True) but preserves the parallel scale.
+        self._view_initial = False
         self._refresh(reset_cam=reset_cam)
         for k in ("A", "B"):
             self.pane[k].render()
@@ -14656,14 +14659,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         pz = cam.GetPosition()[2]
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
-        hu, hv = self._content_half_on_plane(key)
-        pw = max(1, p.canvas.width())
-        ph = max(1, p.canvas.height())
-        # ParallelScale = half the viewport height in world units. To make
-        # the box of half-widths (hu, hv) fit tightly, pick the larger of
-        # "fit by height" and "fit by width (converted via aspect ratio)".
-        ps = max(hv, hu * ph / pw)
-        cam.SetParallelScale(max(1e-3, ps))
+        # ZOOM (ParallelScale): re-fit ONLY on a genuine initial/Reset view
+        # (_view_initial). On every OTHER view change (MV-perpendicular, rotate,
+        # recentre, …) KEEP the user's current zoom — only the framing/position
+        # is re-centred above. (User: the scale must never change automatically.)
+        if getattr(self, "_view_initial", True):
+            hu, hv = self._content_half_on_plane(key)
+            pw = max(1, p.canvas.width())
+            ph = max(1, p.canvas.height())
+            # ParallelScale = half the viewport height in world units. To make
+            # the box of half-widths (hu, hv) fit tightly, pick the larger of
+            # "fit by height" and "fit by width (converted via aspect ratio)".
+            ps = max(hv, hu * ph / pw)
+            cam.SetParallelScale(max(1e-3, ps))
         p.render()
 
     def _draw_cpr_overlay(self):

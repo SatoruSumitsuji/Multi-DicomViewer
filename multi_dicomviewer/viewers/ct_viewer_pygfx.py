@@ -4377,12 +4377,16 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _fit_pane(self, key):
         """Fit the volume content (projected onto the plane) to the viewport
-        and record the resulting half-height (ParallelScale equivalent)."""
+        and record the resulting half-height (ParallelScale equivalent).
+        The ZOOM is re-fit ONLY on a genuine initial/Reset view (_view_initial);
+        on every OTHER view change the user's current zoom is KEPT (only the pan
+        re-centres) — the scale must never change automatically."""
         p = self.pane[key]
-        hu, hv = self._content_half_on_plane(key)
-        pw = max(1, p.canvas.width())
-        ph = max(1, p.canvas.height())
-        self._ps[key] = max(1e-3, max(hv, hu * ph / pw))
+        if getattr(self, "_view_initial", True):
+            hu, hv = self._content_half_on_plane(key)
+            pw = max(1, p.canvas.width())
+            ph = max(1, p.canvas.height())
+            self._ps[key] = max(1e-3, max(hv, hu * ph / pw))
         self._pan[key] = np.zeros(2)
         self._config_cam(key)
 
@@ -6891,7 +6895,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._roll = {"A": 0.0, "B": 0.0}
             self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
         self.set_side("Bi")
-        self._view_initial = bool(reset_cam)
+        # KEEP the current zoom (never auto-rescale): position + orientation may
+        # change, the scale must not. _view_initial=False → _fit_pane re-centres
+        # (reset_cam=True) but preserves the zoom.
+        self._view_initial = False
         self._refresh(reset_cam=reset_cam)
         for k in ("A", "B"):
             self._overlay[k].update()
