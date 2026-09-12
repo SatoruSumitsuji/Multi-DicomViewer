@@ -11176,19 +11176,33 @@ class CTViewer(CPRMixin, AbstractViewer):
             p = self.pane[key]
             p.reslice.SetInputData(self._image)
             p.colors.SetLookupTable(self._lut())
-        # Hide the grayscale image until the FIRST on-screen fit render
-        # (_refit_on_show) so the pane can't briefly paint the reslice in its
-        # pre-fit/stale state (VTK auto-paints once, on show, before the deferred
-        # refit runs → the reported "garbled image flashes then corrects"). The
-        # pane then just shows black for that one frame, and _refresh re-shows the
-        # actor the moment it renders on screen.
-        self._awaiting_first_refit = True
-        for key in ("A", "B"):
-            self.pane[key].actor.SetVisibility(False)
         # Default 3-D MPR for thin-slice volumes (≥201 slices), 2-D native
-        # paging for ordinary (≤200-slice) series. _set_mode also fits & draws.
+        # paging for ordinary (≤200-slice) series. _set_mode also fits & draws
+        # (into the still-hidden stack page, so nothing paints on screen yet).
         nz = self._image.GetDimensions()[2]
         self._set_mode("3D" if nz >= _MODE_2D_MAX + 1 else "2D", reset_cam=True)
+        # Hide the WHOLE pane (image + every overlay) until the first on-screen
+        # fit render (_refit_on_show). When the shell brings this viewer to the
+        # front, VTK auto-paints ONCE before the deferred refit runs; painting
+        # the reslice/overlays in their pre-fit state was the reported "garbled
+        # image flashes then corrects" — and even with just the grayscale hidden
+        # the crosshair / DICOM-info / orientation / ▲ overlays still drew over a
+        # black image (a different "weird image on load"). Hiding every prop now,
+        # AFTER _set_mode has populated them, makes that one auto-paint a clean
+        # black; _refresh restores each prop's exact visibility the moment it
+        # renders on screen (a brief black is acceptable, a garbled frame is not).
+        self._awaiting_first_refit = True
+        self._prefit_vis = {}
+        for key in ("A", "B"):
+            props = self.pane[key].ren.GetViewProps()
+            saved = []
+            props.InitTraversal()
+            a = props.GetNextProp()
+            while a is not None:
+                saved.append((a, a.GetVisibility()))
+                a.SetVisibility(False)
+                a = props.GetNextProp()
+            self._prefit_vis[key] = saved
 
     def lv_active(self) -> bool:
         """True while this pane holds ANY LV analysis DATA — an open contour
@@ -14605,8 +14619,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # during load keep it hidden (no visible pane yet).
         if getattr(self, "_awaiting_first_refit", False) and any(
                 self.pane[k].canvas.isVisible() for k in ("A", "B")):
+            saved_all = getattr(self, "_prefit_vis", None) or {}
             for k in ("A", "B"):
-                self.pane[k].actor.SetVisibility(True)
+                saved = saved_all.get(k)
+                if saved:
+                    for a, vis in saved:
+                        a.SetVisibility(vis)
+                else:
+                    self.pane[k].actor.SetVisibility(True)
+            self._prefit_vis = None
             self._awaiting_first_refit = False
         base_step = max(1e-3, min(self._dims))
         for key in ("A", "B"):
