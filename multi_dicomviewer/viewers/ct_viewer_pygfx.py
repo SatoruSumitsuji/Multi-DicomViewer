@@ -7585,9 +7585,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_diam_pts = None
             return None
         # Cached by mask identity + level so the per-frame paint does NOT re-run
-        # the max-chord scan (the 計測 press primes this cache off-thread).
+        # the max-chord scan (the 計測 press primes this cache off-thread). A
+        # cached NONE (a failed / empty off-thread measure) must NOT stick — that
+        # made LVD "never measure": once the async worker returned nothing, every
+        # later paint cache-hit on (comp, level) and returned None WITHOUT ever
+        # retrying, so no line/value ever appeared. Treat a None value as a MISS
+        # and recompute synchronously here (this runs on the GUI thread, so it
+        # self-heals a worker that failed for any off-thread reason) — restoring
+        # the pre-cache behaviour. Only a real (non-None) value short-circuits.
         cache = getattr(self, "_lvv_lv_diam_cache", None)
-        if cache is not None and cache[0] is comp and cache[1] == level:
+        if (cache is not None and cache[0] is comp and cache[1] == level
+                and cache[2] is not None):
             self._lvv_diam_pts = cache[3]
             return cache[2]
         v = None
@@ -8775,8 +8783,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pts = (np.asarray(det[1], float), np.asarray(det[2], float))
             except Exception:                            # noqa: BLE001
                 v, pts = None, None
-        self._lvv_lv_diam_cache = (comp, level, v, pts)
-        self._lvv_diam_pts = pts
+        if v is None:
+            # The off-thread worker produced nothing (an error-dict, or a hiccup
+            # in the thread). The scan is pure-numpy and works on the GUI thread,
+            # so recompute synchronously NOW rather than caching a permanent None
+            # — otherwise LVD "never measured" from the button press. (The paint
+            # path also treats a None cache as a miss, but complete it here so the
+            # press itself lands the measure.)
+            self._lvv_lv_diam_cache = None
+            v = self._lvv_lv_diameter_mm()               # sets _lvv_diam_pts + cache
+            pts = self._lvv_diam_pts
+        else:
+            self._lvv_lv_diam_cache = (comp, level, v, pts)
+            self._lvv_diam_pts = pts
         for k in ("A", "B"):
             self._overlay[k].update()
         self._lv_update_text()
