@@ -4764,7 +4764,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         crossline."""
         other = "B" if which == "A" else "A"
         n = self._frame[which][2]
-        _ou, ov, on = self._frame[other]
+        ou, ov, on = self._frame[other]
+        # Crossing's CURRENT in-plane offset from the companion reslice centre
+        # (OLD frame) — kept so the crossing holds its SCREEN position (rotate the
+        # image AROUND the crossing, not snap it to the pane centre).
+        P = np.asarray(self._center, float)
+        off_u = float(np.dot(P - np.asarray(self._pc[other], float), ou))
+        off_v = float(np.dot(P - np.asarray(self._pc[other], float), ov))
         new_n = _norm(np.cross(crossdir, n))            # companion plane normal
         if float(np.dot(new_n, on)) < 0.0:
             new_n = -new_n                              # keep the viewing side stable
@@ -4776,7 +4782,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._frame[other] = (u_new, v_new, new_n)
         self._cross_ang[other] = math.degrees(math.atan2(
             float(np.dot(crossdir, v_new)), float(np.dot(crossdir, u_new))))
-        self._pc[other] = self._center.copy()
+        self._pc[other] = P - (off_u * np.asarray(u_new, float)
+                               + off_v * np.asarray(v_new, float))
 
     def _rotate_companion_by(self, which, d_deg) -> None:
         """Incremental companion coupling for a crossLINE ROTATE: the crossline
@@ -4791,10 +4798,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         other = "B" if which == "A" else "A"
         n = _norm(self._frame[which][2])
         u, v, _nn = self._frame[other]
+        # Keep the crossing's CURRENT screen position — rotate the image AROUND
+        # the crossing instead of snapping it to the pane centre (which jumped a
+        # user-moved crossing back to the middle).
+        P = np.asarray(self._center, float)
+        off_u = float(np.dot(P - np.asarray(self._pc[other], float), u))
+        off_v = float(np.dot(P - np.asarray(self._pc[other], float), v))
         u2 = _rotate(u, n, d_deg)
         v2 = _rotate(v, n, d_deg)
         self._frame[other] = self._ortho(u2, v2)
-        self._pc[other] = self._center.copy()
+        u2f, v2f, _ = self._frame[other]
+        self._pc[other] = P - (off_u * np.asarray(u2f, float)
+                               + off_v * np.asarray(v2f, float))
 
     def _patient_axis_vol(self, p):
         """A patient-LPS direction (e.g. (1,0,0)=Left) in volume coords."""
