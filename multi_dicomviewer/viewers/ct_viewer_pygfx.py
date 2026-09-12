@@ -10040,15 +10040,82 @@ class CTViewer(CPRMixin, AbstractViewer):
                           else float(lvv["last_ml"])),
             "epi_model": self._lvv_epi_model_dict,
         }
+        # Record the Epi source's series (if known) so a mismatch can be flagged.
+        em = getattr(self, "_lvv_epi_model_dict", None)
+        if isinstance(em, dict) and em.get("series"):
+            data["epi_series"] = em.get("series")
+        # Embed the computed blood mask (packed+zlib+base64) so Load restores the
+        # 水色 region — and enables 壁厚 — INSTANTLY, with no LV-Blood recompute.
+        if (getattr(self, "_lvv_blood_comp", None) is not None
+                and getattr(self, "_lvv_blood_bbox", None) is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            comp = np.ascontiguousarray(self._lvv_blood_comp, bool)
+            blood = {
+                "bbox": [int(x) for x in self._lvv_blood_bbox],
+                "shape": [int(s) for s in comp.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(np.packbits(comp).tobytes(), 6)).decode("ascii"),
+            }
+            if getattr(self, "_lvv_blood_apex", None) is not None:
+                blood["apex"] = list(map(float, self._lvv_blood_apex))
+            data["blood"] = blood
+        # Embed the Auto-Endo mask + its 方式/膨らみ so 壁厚 / Auto-Endo表示 restore
+        # with no recompute and a later re-derive reproduces this exact Endo.
+        if (getattr(self, "_lv_endo_mask_comp", None) is not None
+                and getattr(self, "_lv_endo_mask_bbox", None) is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            ec = np.ascontiguousarray(self._lv_endo_mask_comp, bool)
+            data["endo"] = {
+                "bbox": [int(x) for x in self._lv_endo_mask_bbox],
+                "shape": [int(s) for s in ec.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(np.packbits(ec).tobytes(), 6)).decode("ascii"),
+                "method": getattr(self, "_lv_endo_method", "hull_smooth"),
+                "close": float(getattr(self, "_lv_endo_close_mm", 5.0)),
+            }
+        data["spacing"] = [float(s) for s in self._dims]     # (sx, sy, sz) mm
+        _epi = getattr(self, "_lvv_epi_surf", None)
+        _ax = getattr(_epi, "axis", None) if _epi is not None else None
+        if _ax is not None:
+            data["axis"] = {
+                "apex": list(map(float, lvv["apex"])),
+                "dir": list(map(float, np.asarray(_ax.axis, float))),
+                "radial0": list(map(float, np.asarray(_ax.radial0, float)))}
+        # 3D wall-thickness result: embed the computed thickness field (mm, float
+        # sub-volume, packed) + its mode/stats so the heat map restores with NO
+        # recompute — the post-analysis state.
+        tmode = getattr(self, "_lvv_thick_mode", None)
+        thit = ((getattr(self, "_lvv_thick_cache", {}) or {}).get(tmode)
+                if tmode else None)
+        if (tmode and thit is not None and thit.get("sub") is not None
+                and self._vol is not None):
+            import base64
+            import zlib
+            sub = np.ascontiguousarray(thit["sub"], np.float32)
+            data["thick"] = {
+                "mode": tmode,
+                "bbox": [int(x) for x in thit["bbox"]],
+                "shape": [int(s) for s in sub.shape],
+                "vol_shape": [int(s) for s in self._vol.shape],
+                "packed": base64.b64encode(
+                    zlib.compress(sub.tobytes(), 6)).decode("ascii"),
+                "stats": {k: float(v)
+                          for k, v in (thit.get("stats") or {}).items()},
+            }
         # LVD: the MANUAL MV-leaflet-tip along-axis level (+ line-shown state),
         # so the LVD line/value come back exactly as analysed.
         if getattr(self, "_lvv_lvd_level", None) is not None:
             data["lvd_level"] = float(self._lvv_lvd_level)
             data["lvd_shown"] = bool(getattr(self, "_lvv_lvd_shown", False))
-        # VIEW state: which display toggles were ON, so Load reproduces the last
-        # shown view (the toggles Mac can honour without embedded masks —
-        # All-Blood tint and Epi-Border from the loaded Epi; LV-Blood / Auto-Endo
-        # need a recompute as this file embeds no masks yet).
+        # VIEW state: which display toggles were ON, so Load reproduces the exact
+        # last-shown state (not just the data). Wall mode / LVD-shown come back via
+        # 'thick'/'lvd_shown'; the 方式/膨らみ via 'endo'.
         data["view"] = {
             "all_blood": bool(getattr(self, "_lvv_hl_on", False)),
             "lv_blood": bool(getattr(self, "_lvv_mask_on", False)),
@@ -10056,18 +10123,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             "endo_auto": bool(getattr(self, "_lvv_endo_show", False)),
         }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
-        # Same auto name as the Epi .lv.json — "名前;日付_Se番号.lvvol.json".
+        # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file — parity
+        # with the VTK viewer).
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
-                else "lvvol")
-        name = stem + ".lvvol.json"
+                else "BldLv")
+        name = stem + ".BldLv.json"
         default = os.path.join(d, name) if d else name
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save LV Vol"), default,
-            "LV Vol (*.lvvol.json);;JSON (*.json)")
+            "Blood LV (*.BldLv.json);;LV Vol (*.lvvol.json);;JSON (*.json)")
         if not path:
             return
         if not path.endswith(".json"):
-            path += ".lvvol.json"
+            path += ".BldLv.json"
         self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
         try:
             with open(path, "w", encoding="utf-8") as f:
