@@ -7658,9 +7658,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                       or (m is not None and len(m.epi_contours) >= 3))
         endo_loaded = (m is not None and len(m.endo_contours) >= 3)
         blood_loaded = getattr(self, "_lvv_blood_comp", None) is not None
-        off = self._LV_STY.get("off", "")
+        # OFF style carries the _BTN_DIS ':disabled' rule so a DISABLED selector
+        # greys out on macOS too (an empty stylesheet there stays enabled-looking
+        # even when setEnabled(False)).
+        off = self._BTN_DIS
         self._lv_epi_btn.setStyleSheet(
-            self._LV_STY.get("epi", "") if (sm == "epi" or epi_loaded) else off)
+            (self._LV_STY.get("epi", "") + self._BTN_DIS)
+            if (sm == "epi" or epi_loaded) else off)
         be_on = (sm in ("blood", "endo") or blood_loaded or endo_loaded)
         self._lvv_start_btn.setStyleSheet(
             ("QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
@@ -10253,13 +10257,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_load_btn.setEnabled(True)
         if lv is None:                                # not in LV mode
             for b in (endo_btn, epi_btn, setax, trace):
-                b.setStyleSheet("")
+                b.setStyleSheet(self._BTN_DIS)       # :disabled → grey on macOS
             if apexb is not None:
-                apexb.setStyleSheet("")
+                apexb.setStyleSheet(self._BTN_DIS)
             self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
+            # Epi/Blood-Endo were enabled True above — re-apply the selector gate
+            # (grey them until MV+AoV+Apex) which _sync alone left open. (Parity
+            # with the VTK viewer, whose lv-None branch also calls this.)
+            self._lv_update_submode_ui()
             return
         ph = lv.get("phase")
         pas = lv.get("pass")
@@ -10282,14 +10290,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 apexb.setStyleSheet(self._LV_STY["neutral"])
                 apexb.setEnabled(False)
         else:
-            endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else "")
-            epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else "")
+            _dis = self._BTN_DIS                       # :disabled → grey on macOS
+            endo_btn.setStyleSheet(self._LV_STY["endo"] if pas == "endo" else _dis)
+            epi_btn.setStyleSheet(self._LV_STY["epi"] if pas == "epi" else _dis)
             setax.setStyleSheet(self._LV_STY["setaxis"]
-                                if ph in ("ready", "apex", "contour") else "")
+                                if ph in ("ready", "apex", "contour") else _dis)
             # Trace red while tracing; neutral once toggled to VIEW (trace_view).
             _tracing = (ph == "apex"
                         or (ph == "contour" and not lv.get("trace_view")))
-            trace.setStyleSheet(self._LV_STY["trace"] if _tracing else "")
+            trace.setStyleSheet(self._LV_STY["trace"] if _tracing else _dis)
             # LIFO enable: you can only turn OFF the LAST button turned on.
             setax.setEnabled(ph in ("align", "ready"))
             trace.setEnabled(ph in ("ready", "apex", "contour"))
@@ -10305,7 +10314,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     apexb.setStyleSheet(self._LV_STY["endo"] if pas == "endo"
                                         else self._LV_STY["epi"])
                 else:
-                    apexb.setStyleSheet("")
+                    apexb.setStyleSheet(self._BTN_DIS)
                 apexb.setEnabled(has_pass and ph in ("align", "ready"))
         self._lv_sax_btn.setEnabled(ph == "contour")
         contour = ph == "contour"
