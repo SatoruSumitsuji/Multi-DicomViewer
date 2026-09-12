@@ -7131,12 +7131,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_submode_ui()
 
     def _lv_rclick_apex(self) -> None:
-        """Right-click the Apex selector: quick hide/show of the marker, any mode."""
-        if self._vol is None or self._lv_apex is None:
+        """Right-click the Apex selector: quick hide/show of the marker, any mode.
+        In Blood/Endo the visible apex is the blood-session one (_lvv_apex_shown),
+        elsewhere the common one (_lv_apex_shown); toggle BOTH in sync so the
+        right-click works in every mode. No-op until an apex is set."""
+        has_common = self._lv_apex is not None
+        has_blood = (self._lvv is not None
+                     and self._lvv.get("apex") is not None)
+        if self._vol is None or not (has_common or has_blood):
             self._lvv_prompt(t("Set the apex first."))
             return
-        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
-        self._lv_apex_marker_draw()
+        shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_shown = shown
+        self._lvv_apex_shown = shown
+        if has_blood and getattr(self, "_lvv_style_apex_btn", None) is not None:
+            self._lvv_style_apex_btn()
+        for k in ("A", "B"):
+            self._overlay[k].update()
         self._lv_update_valve_buttons()
 
     def _lv_exit_apex(self) -> None:

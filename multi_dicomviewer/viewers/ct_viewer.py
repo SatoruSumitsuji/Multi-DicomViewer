@@ -5622,12 +5622,27 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_rclick_apex(self) -> None:
         """Right-click the Apex selector: quick hide / show of the apex marker in
-        ANY mode. No-op (with a prompt) until the apex is set."""
-        if self._image is None or self._lv_apex is None:
+        ANY mode. In Blood/Endo the visible apex marker is the blood-session one
+        (tag '_lvv'), elsewhere the common one (tag '_lv_apex'); toggle BOTH in
+        sync so the right-click works in every mode. No-op until an apex is set."""
+        has_common = self._lv_apex is not None
+        has_blood = (self._lvv is not None
+                     and self._lvv.get("apex") is not None)
+        if self._image is None or not (has_common or has_blood):
             self._lvv_prompt(t("Set the apex first."))
             return
-        self._lv_apex_shown = not getattr(self, "_lv_apex_shown", True)
-        self._lv_apex_marker_draw()
+        shown = not getattr(self, "_lv_apex_shown", True)
+        self._lv_apex_shown = shown
+        self._lvv_apex_shown = shown
+        if has_common:
+            self._lv_apex_marker_draw()          # redraws the '_lv_apex' marker
+        if has_blood:
+            for k in ("A", "B"):
+                for mm in self._measures.get(k, []):
+                    if mm.get("_lvv") == "apex":
+                        mm["hidden"] = not shown
+                self._redraw_meas(k)
+            self._lvv_style_apex_btn()
         self._lv_update_valve_buttons()
 
     def _lv_exit_apex(self) -> None:
