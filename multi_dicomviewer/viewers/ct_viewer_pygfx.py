@@ -10147,6 +10147,108 @@ class CTViewer(CPRMixin, AbstractViewer):
         QMessageBox.information(self.window(), t("LV Vol"),
                                t("Saved: {p}", p=os.path.basename(path)))
 
+    def _lvv_restore_blood(self, bd) -> bool:
+        """Decode an embedded blood mask (BldLv.json 'blood') into memory and
+        rebuild its 水色 display volume so LV-Blood表示 / Auto-Endo / 壁厚 work
+        immediately with NO recompute. Returns True on success."""
+        if not isinstance(bd, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(bd.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in bd["shape"])
+            bbox = tuple(int(x) for x in bd["bbox"])
+            raw = zlib.decompress(base64.b64decode(bd["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+        except Exception:                                # noqa: BLE001
+            return False
+        self._lvv_blood_comp = comp
+        self._lvv_blood_bbox = bbox
+        if bd.get("apex") is not None:
+            self._lvv_blood_apex = np.asarray(bd["apex"], float)
+        elif self._lvv is not None and self._lvv.get("apex") is not None:
+            self._lvv_blood_apex = np.asarray(self._lvv["apex"], float)
+        return self._lvv_blood_vol_from_comp()
+
+    def _lvv_restore_endo(self, ed) -> bool:
+        """Decode an embedded Auto-Endo mask (BldLv.json 'endo') into memory so
+        壁厚 / Auto-Endo表示 work with no recompute; restore its 方式/膨らみ so a
+        later re-derive reproduces this exact Endo."""
+        if not isinstance(ed, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(ed.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in ed["shape"])
+            bbox = tuple(int(x) for x in ed["bbox"])
+            raw = zlib.decompress(base64.b64decode(ed["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+        except Exception:                                # noqa: BLE001
+            return False
+        self._lv_endo_mask_comp = comp
+        self._lv_endo_mask_bbox = bbox
+        self._lv_endo_mask_sig = (self._lvv_signature()
+                                  if self._lvv is not None else None)
+        self._lv_endo_ghost = False
+        meth = ed.get("method")
+        if meth:
+            self._lv_endo_method = meth
+            combo = getattr(self, "_lvv_method_combo", None)
+            if combo is not None:
+                ci = combo.findData(meth)
+                if ci is not None and ci >= 0:
+                    combo.blockSignals(True)
+                    combo.setCurrentIndex(ci)
+                    combo.blockSignals(False)
+            if hasattr(self, "_lvv_update_close_ui"):
+                self._lvv_update_close_ui()
+        if ed.get("close") is not None:
+            self._lv_endo_close_mm = float(ed["close"])
+            spin = getattr(self, "_lvv_close_spin", None)
+            if spin is not None:
+                spin.blockSignals(True)
+                spin.setValue(int(round(float(ed["close"]))))
+                spin.blockSignals(False)
+        return True
+
+    def _lvv_restore_thick(self, td) -> bool:
+        """Decode an embedded 3D wall-thickness field (BldLv.json 'thick') so the
+        heat map restores with no recompute."""
+        if not isinstance(td, dict) or self._vol is None:
+            return False
+        try:
+            import base64
+            import zlib
+            if list(td.get("vol_shape", [])) != [int(s)
+                                                 for s in self._vol.shape]:
+                return False
+            shape = tuple(int(s) for s in td["shape"])
+            bbox = tuple(int(x) for x in td["bbox"])
+            raw = zlib.decompress(base64.b64decode(td["packed"]))
+            sub = np.frombuffer(raw, np.float32)[
+                :int(np.prod(shape))].reshape(shape).copy()
+        except Exception:                                # noqa: BLE001
+            return False
+        mode = td.get("mode") or "3d"
+        stats = {k: float(v) for k, v in (td.get("stats") or {}).items()}
+        cache = getattr(self, "_lvv_thick_cache", {}) or {}
+        cache[mode] = {"sub": sub, "bbox": bbox, "stats": stats,
+                       "epi": getattr(self, "_lvv_epi_surf", None),
+                       "endo": getattr(self, "_lv_endo_mask_comp", None)}
+        self._lvv_thick_cache = cache
+        self._lvv_thick_mode = mode
+        self._lvv_thick_vol = self._lvv_thick_vol_from_sub(sub, bbox)
+        self._lvv_thick_stats = stats
+        return True
+
     def _lvv_load(self) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         from multi_dicomviewer.core.lv_measure import LVModel
@@ -10156,7 +10258,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load LV Vol"), d,
-            "LV Vol (*.lvvol.json);;JSON (*.json)")
+            "Blood LV (*.BldLv.json *.lvvol.json);;JSON (*.json)")
         if not path:
             return
         try:
@@ -10227,44 +10329,78 @@ class CTViewer(CPRMixin, AbstractViewer):
             if lvv.get("last_ml") is not None:
                 self._lvv_vol_lbl.setText(
                     t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
-            # VIEW state: reproduce the last-shown toggles. This file embeds no
-            # masks yet, so LV-Blood / Auto-Endo need a recompute (skipped here);
-            # All-Blood (HU tint) and Epi-Border (from the loaded Epi) restore.
+            # Restore the embedded masks so the 水色 / Auto-Endo / 壁厚 come back
+            # with NO recompute (parity with the VTK BldLv.json).
+            blood_ok = self._lvv_restore_blood(data.get("blood"))
+            self._lvv_restore_endo(data.get("endo"))
+            self._lvv_restore_thick(data.get("thick"))
+            if blood_ok:
+                # Blood mask fresh in memory → the LV-Blood toggle can show it
+                # without a recompute (the have-check compares this signature).
+                lvv["calc_sig"] = self._lvv_signature()
+            # VIEW state: reproduce the EXACT last-shown toggles, enabling only
+            # what the restored data supports.
             view = data.get("view")
             if isinstance(view, dict):
-                self._lvv_hl_on = bool(view.get("all_blood"))
-                self._lvv_mask_on = False       # no embedded mask → recompute
-                if getattr(self, "_lvv_hl_btn", None) is not None:
-                    self._lvv_hl_btn.setChecked(self._lvv_hl_on)
+                if bool(view.get("epi_border")) and self._lvv_epi_surf is not None:
+                    try:                             # Epi border mask (once, ~1s)
+                        self._lvv_ensure_epi_mask()
+                    except Exception:                # noqa: BLE001
+                        pass
+                want_lv = bool(view.get("lv_blood")) and blood_ok
+                want_all = bool(view.get("all_blood")) and not want_lv
+                self._lvv_mask_on = want_lv
+                self._lvv_hl_on = want_all
                 if getattr(self, "_lvv_mask_btn", None) is not None:
-                    self._lvv_mask_btn.setChecked(False)
+                    self._lvv_mask_btn.setChecked(want_lv)
+                if getattr(self, "_lvv_hl_btn", None) is not None:
+                    self._lvv_hl_btn.setChecked(want_all)
                 self._lvv_epi_show = bool(view.get("epi_border")) and (
                     self._lvv_epi_surf is not None)
-                if self._lvv_epi_show and hasattr(self, "_lvv_ensure_epi_mask"):
-                    try:
-                        self._lvv_ensure_epi_mask()
-                    except Exception:                    # noqa: BLE001
-                        pass
                 if getattr(self, "_lvv_epi_btn", None) is not None:
                     self._lvv_epi_btn.setChecked(self._lvv_epi_show)
-                self._lvv_endo_show = False      # needs the endo mask (recompute)
+                self._lvv_endo_show = bool(view.get("endo_auto")) and (
+                    getattr(self, "_lv_endo_mask_comp", None) is not None)
                 if getattr(self, "_lvv_auto_endo_btn", None) is not None:
-                    self._lvv_auto_endo_btn.setChecked(False)
+                    self._lvv_auto_endo_btn.setChecked(self._lvv_endo_show)
+            elif blood_ok:
+                self._lvv_mask_on = True         # old file, mask present → 水色
+                self._lvv_hl_on = False
+                if getattr(self, "_lvv_mask_btn", None) is not None:
+                    self._lvv_mask_btn.setChecked(True)
+                if getattr(self, "_lvv_hl_btn", None) is not None:
+                    self._lvv_hl_btn.setChecked(False)
+            # Wall-thickness heat map + LVD line come back as saved.
+            if getattr(self, "_lvv_thick_mode", None) is not None:
+                if hasattr(self, "_lvv_thick_sync_buttons"):
+                    self._lvv_thick_sync_buttons()
+            if getattr(self, "_lvv_lvd_level", None) is not None:
+                self._lvv_lv_diam_cache = None
+                if hasattr(self, "_lvv_style_lvd_btn"):
+                    self._lvv_style_lvd_btn()
             self._lvv_sync()
             self._lvv_update_highlight()
+            if hasattr(self, "_lvv_thick_refresh_display"):
+                self._lvv_thick_refresh_display()
             if hasattr(self, "_lvv_redraw"):
                 self._lvv_redraw()
+            self._lv_update_text()
             for k in ("A", "B"):
                 self._overlay[k].update()
             # (A) Make the Epi source explicit, and (B) remind about the two-file
             # drift: the Epi lives in BOTH the .lv and .lvvol files, so an edit
             # in one must be re-saved to the other to stay in sync.
+            _bld = data.get("blood") is not None
             QMessageBox.information(
                 self.window(), t("LV Vol"),
-                t("Loaded — the volume is measured against the Epi border stored "
-                  "in THIS .lvvol file. If you later edit the Epi in contour LV "
-                  "and re-save the .lv file, re-save the .lvvol too so they stay "
-                  "in sync. Press LV Vol計測 to (re)compute the volume."))
+                t("Loaded — the last-saved state was restored" + (
+                    " (blood / Auto-Endo / 壁厚 came back with no recompute)."
+                    if _bld else
+                    ". This is an older file with no embedded masks — press "
+                    "LV Vol計測 to compute the volume.")) + t(
+                    " The volume is measured against the Epi border stored in "
+                    "THIS file; if you edit the Epi in contour LV and re-save the "
+                    ".lv file, re-save this file too so they stay in sync."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (load error)"),
