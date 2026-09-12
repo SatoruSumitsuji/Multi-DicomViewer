@@ -3705,9 +3705,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             m.epi_axis = ax
         m.axis = ax
         m.set_apex_point(pas, apex)
-        # Match the old per-pass Apex-set behaviour: centre on the apex, keep the
-        # exact view (no auto-fit jump) through tracing, default up-ref.
-        self._center = apex.copy()
+        # Keep the user's EXACT view on Draw — do NOT recentre on the apex (that
+        # jumped the image). keep_view preserves zoom + pan through tracing; only
+        # the trace plane's orientation follows the meridian (needed to draw on
+        # it). default up-ref.
         self._lv_up_ref = None
         lv["apex_target"] = None
         lv["keep_view"] = True
@@ -6008,12 +6009,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._redraw_meas(k)
         self._lv_update_valve_buttons()
 
-    def _lv_view_mv_perpendicular(self) -> None:
+    def _lv_view_mv_perpendicular(self, reset_cam=True) -> None:
         """Reorient both panes to view the MV plane perpendicular: the LEFT pane
         (A) looks straight down the MV normal → the MV ring is a true CIRCLE
         face-on; the RIGHT pane (B) contains the MV normal → the MV ring is a
         straight LINE edge-on. Centres both panes on the MV centre. A viewing aid
-        for setting the Epi/Endo base against the mitral annulus."""
+        for setting the Epi/Endo base against the mitral annulus.
+        reset_cam=False keeps the CURRENT zoom (no auto fit) — used by the
+        automatic re-orient on entering an Endo/Epi align."""
         mv = self._lv_valves.get("mitral")
         if mv is None or self._image is None:
             return
@@ -6053,8 +6056,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center = c.copy()
         self._cross_ang = {"A": 0.0, "B": 0.0}
         self.set_side("Bi")
-        self._view_initial = True
-        self._refresh(reset_cam=True)
+        self._view_initial = bool(reset_cam)
+        self._refresh(reset_cam=reset_cam)
         for k in ("A", "B"):
             self.pane[k].render()
 
@@ -11505,7 +11508,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                     mm["hidden"] = False
             self._redraw_meas(k)
         self._lv_update_valve_buttons()
-        self._lv_view_mv_perpendicular()
+        # Automatic re-orient on Endo/Epi entry: keep the CURRENT zoom (no auto
+        # shrink/grow) — the user asked for no automatic zoom on mode entry.
+        self._lv_view_mv_perpendicular(reset_cam=False)
 
     def _lv_set_axis(self) -> None:
         """'Set axis' button. ALIGN → READY: capture the current view as this

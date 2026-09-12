@@ -6845,12 +6845,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._redraw_meas(k)
         self._lv_update_valve_buttons()
 
-    def _lv_view_mv_perpendicular(self) -> None:
+    def _lv_view_mv_perpendicular(self, reset_cam=True) -> None:
         """Reorient both panes to view the MV plane perpendicular: pane A looks
         down the MV normal (ring = circle face-on); pane B contains the normal so
         the ring is edge-on a HORIZONTAL LINE. B's up is anchored to patient
         SUPERIOR (base at top), and roll/pan are reset + reset_cam so 'a' really
-        lands horizontal on screen (parity with the VTK viewer)."""
+        lands horizontal on screen (parity with the VTK viewer).
+        reset_cam=False keeps the CURRENT zoom + pan (no auto fit) — used by the
+        automatic re-orient on entering an Endo/Epi align."""
         mv = self._lv_valves.get("mitral")
         if mv is None or self._vol is None:
             return
@@ -6878,11 +6880,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pc["A"] = c.copy(); self._pc["B"] = c.copy()
         self._center = c.copy()
         self._cross_ang = {"A": 0.0, "B": 0.0}
-        self._roll = {"A": 0.0, "B": 0.0}
-        self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
+        if reset_cam:                       # keep the user's zoom/pan when False
+            self._roll = {"A": 0.0, "B": 0.0}
+            self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
         self.set_side("Bi")
-        self._view_initial = True
-        self._refresh(reset_cam=True)
+        self._view_initial = bool(reset_cam)
+        self._refresh(reset_cam=reset_cam)
         for k in ("A", "B"):
             self._overlay[k].update()
 
@@ -7219,7 +7222,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             m.epi_axis = ax
         m.axis = ax
         m.set_apex_point(pas, apex)
-        self._center = apex.copy()
+        # Keep the user's EXACT view on Draw — do NOT recentre on the apex (that
+        # jumped the image). keep_view preserves zoom + pan through tracing; only
+        # the trace plane's orientation follows the meridian.
         lv["apex_target"] = None
         lv["keep_view"] = True
         if lv.get("phase") == "align":
