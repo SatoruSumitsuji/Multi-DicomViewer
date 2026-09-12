@@ -4014,20 +4014,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         if _changed:
             self._lv_relayout_bar()
         # MV / AoV / Apex row-1 selectors: grey the OTHER valve while editing one,
-        # and grey ALL while an Epi/Blood sub-mode is active. SOFT-grey (stay
-        # enabled) so their right-click hide/show still works while greyed — see
-        # _lv_soft_gray. _lv_update_valve_buttons (below) paints the grey.
+        # and grey ALL while an Epi/Blood sub-mode is active — the SAME grey-out
+        # as Epi/Blood when they have no data; once data is set the button shows
+        # its own colour (see _lv_soft_gray + _lv_update_valve_buttons).
         if getattr(self, "_lv_mv_btn", None) is not None:
             self._lv_soft_gray(
-                self._lv_mv_btn, (ve in (None, "mitral")) and sm is None and not ax)
+                self._lv_mv_btn, (ve in (None, "mitral")) and sm is None and not ax,
+                self._lv_valves.get("mitral") is not None)
             self._lv_soft_gray(
-                self._lv_aov_btn, (ve in (None, "aortic")) and sm is None and not ax)
-        # Apex selector: needs MV+AoV (the axis is apex → MV centre); actionable at
-        # the selector only. Soft-greyed while editing a valve or in a sub-mode.
+                self._lv_aov_btn, (ve in (None, "aortic")) and sm is None and not ax,
+                self._lv_valves.get("aortic") is not None)
+        # Apex selector: selectable from the START (like MV/AoV) — actionable at
+        # the selector and during its own step; MV is only *desirable* (warned in
+        # _lv_enter_apex). Greyed while editing a valve or in a sub-mode.
         if getattr(self, "_lv_apex_sel_btn", None) is not None:
             self._lv_soft_gray(
-                self._lv_apex_sel_btn,
-                self._lv_valves_ready() and sm is None and ve is None)
+                self._lv_apex_sel_btn, sm is None and ve is None,
+                self._lv_apex is not None)
         self._lv_update_valve_buttons()
         # Sub-mode selector: once one is chosen, grey the other two (only the
         # active one stays clickable — re-click it to deselect and bring the
@@ -5527,51 +5530,57 @@ class CTViewer(CPRMixin, AbstractViewer):
                      "_lv_apex": True, "hidden": hidden})
             self._redraw_meas(which)
 
-    def _lv_soft_gray(self, btn, actionable) -> None:
-        """Keep *btn* ENABLED (so its right-click hide/show still fires even when
-        it looks greyed) but mark it non-actionable: its LEFT-click becomes a
-        no-op and _lv_update_valve_buttons paints it grey. Used for the MV / AoV /
-        Apex selectors, whose right-click must work even while greyed out."""
+    def _lv_soft_gray(self, btn, actionable, has_data) -> None:
+        """State the MV / AoV / Apex selector: mirrors the Epi/Blood look.
+        - has_data: keep ENABLED (so right-click hide/show works) and mark
+          non-actionable so its LEFT-click no-ops; _lv_update_valve_buttons
+          paints it in the data colour.
+        - no data: enable only when actionable (normal button); when not
+          actionable disable it → standard grey-out (same _BTN_DIS as Epi/Blood).
+          Nothing to hide/show, so right-click is not needed."""
         if btn is None:
             return
-        btn.setEnabled(True)
-        btn._mdv_soft_off = not bool(actionable)
+        act = bool(actionable)
+        btn._mdv_soft_off = not act
+        btn.setEnabled(True if has_data else act)
 
     def _lv_enter_apex(self) -> None:
-        """Apex selector → enter the Apex edit step. Guides the user to place the
-        crossing on the LV apex and press Set; shows the Set/RePosition/Hide/Exit
-        row. Needs MV + AoV first (the axis is apex → MV centre)."""
+        """Apex selector → enter the Apex edit step (selectable from the start,
+        like MV/AoV). MV is only DESIRABLE (the axis is apex → MV centre): warn
+        when it is missing, but still allow setting the apex point."""
         if self._image is None:
             return
         if getattr(self._lv_apex_sel_btn, "_mdv_soft_off", False):
             return                                # greyed → left-click no-op
-        if not self._lv_valves_ready():
-            self._lvv_prompt(t(
-                "Set the MV and AoV planes first — the LV long axis runs from "
-                "the apex to the MV centre."))
-            return
         self._lv_apex_edit = True
-        self._lvv_prompt(t(
-            "Set the centreline crossing as the apex? Move the crossing onto the "
-            "LV apex, then press Set (RePosition to move it again)."))
+        if self._lv_valves.get("mitral") is None:
+            self._lvv_prompt(t(
+                "Setting the apex: the MV plane is not set yet. It is desirable "
+                "to set MV first — the LV long axis is apex → MV centre. You can "
+                "still place the apex; the axis forms once MV is set."))
+        else:
+            self._lvv_prompt(t(
+                "Set the centreline crossing as the apex? Move the crossing onto "
+                "the LV apex, then press Set (RePosition to move it again)."))
         self._lv_update_submode_ui()
 
     def _lv_apex_set(self) -> None:
-        """Set the COMMON apex at the current centreline crossing (self._center),
-        after checking the LV long axis (apex → MV centre) is well defined."""
+        """Set the COMMON apex at the current centreline crossing (self._center).
+        The apex POINT is stored even without MV (a landmark); the apex → MV-centre
+        axis then forms once MV is set."""
         if self._center is None:
             return
         apex = np.asarray(self._center, float).copy()
-        if self._lv_long_axis_from_apex(apex) is None:
-            self._lvv_prompt(t(
-                "The crossing coincides with the MV centre — move it onto the LV "
-                "apex, then press Set."))
-            return
         self._lv_apex = apex
         self._lv_apex_shown = True
         self._lv_apex_marker_draw()
-        self._lvv_prompt(t("Apex set. Exit to the selector, then choose Epi or "
-                           "Blood/Endo."))
+        if self._lv_long_axis_from_apex(apex) is None:
+            self._lvv_prompt(t(
+                "Apex set. Set the MV plane so the LV long axis (apex → MV "
+                "centre) can form."))
+        else:
+            self._lvv_prompt(t("Apex set. Exit to the selector, then choose Epi "
+                               "or Blood/Endo."))
         self._lv_update_submode_ui()
 
     def _lv_apex_reposition(self) -> None:
@@ -6076,15 +6085,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 abtn.setStyleSheet(
                     "QPushButton{background:palette(button);color:%s;"
                     "border:2px solid %s;}%s" % (acol, acol, self._BTN_DIS))
-        # SOFT-greyed selectors are kept ENABLED (so their right-click hide/show
-        # still fires) but must LOOK inactive — override the colour styles above
-        # with a flat grey. Right-click still works; left-click is a no-op.
-        for b in (self._lv_mv_btn, self._lv_aov_btn,
-                  getattr(self, "_lv_apex_sel_btn", None)):
-            if b is not None and getattr(b, "_mdv_soft_off", False):
-                b.setStyleSheet(
-                    "QPushButton{background:palette(button);color:#9b9b9b;"
-                    "border:1px solid #c4c4c4;}")
+        # No flat-grey override: an UNSET selector uses _BTN_DIS (normal when
+        # enabled/actionable, standard grey when soft-disabled — same as
+        # Epi/Blood); a SET selector always shows its data colour above.
 
     def _lv_save_valve(self, which) -> None:
         """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
