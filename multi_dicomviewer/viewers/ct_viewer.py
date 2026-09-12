@@ -2016,6 +2016,16 @@ class _Pane:
         self.rot_arrow_halo.SetVisibility(bool(on))
 
     def render(self):
+        # HOLD every render during a load: the shell makes this pane the current
+        # (visible) stack page BEFORE load_series runs (show_series), so the many
+        # intermediate p.render() calls inside load_series (clearing measures /
+        # rebuilding overlays / _set_mode) would paint a half-built frame on
+        # screen — old crosslines/text over a transitioning image = the reported
+        # "変な画像" flash on load. load_series sets _hold_render; the first
+        # on-screen fit (_refresh's reveal gate) clears it, so nothing paints
+        # until the pane is fully built and fitted.
+        if getattr(self, "_hold_render", False):
+            return
         # Skip the GL Render while this pane's canvas is not actually on screen
         # (a hidden QStackedWidget page during load_series, or the inactive pane
         # in single-view). Rendering an unmapped native window binds VTK's GL
@@ -11068,6 +11078,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and getattr(self, "_loaded_uid", "") == new_uid):
             return
         self._loaded_uid = new_uid
+        # HOLD all rendering for the whole load: the shell already made this pane
+        # visible (show_series → setCurrentWidget before load_series), so every
+        # intermediate p.render() below would paint a half-built frame on screen
+        # (the "変な画像" flash). Cleared by the first on-screen fit (_refresh's
+        # reveal gate); a singleShot(_refit_on_show) at the end guarantees that
+        # fit fires even when showEvent already ran with no image.
+        for _k in ("A", "B"):
+            self.pane[_k]._hold_render = True
         self._undo_clear()               # fresh Ctrl+Z history for the new series
         vol = loaded.volume
         sr, sc = loaded.spacing_mm or (1.0, 1.0)
@@ -11212,6 +11230,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 a.SetVisibility(False)
                 a = props.GetNextProp()
             self._prefit_vis[key] = saved
+        # Guarantee the first on-screen fit (which lifts _hold_render + reveals
+        # the props) fires even if showEvent already ran while _image was None
+        # (setCurrentWidget happens before load_series). Idempotent with the
+        # showEvent-scheduled refit.
+        QTimer.singleShot(0, self._refit_on_show)
 
     def lv_active(self) -> bool:
         """True while this pane holds ANY LV analysis DATA — an open contour
@@ -14622,14 +14645,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         release repaints both."""
         if self._image is None:
             return
-        # First ON-SCREEN render after a fresh load: reveal the grayscale that
-        # load_series hid to avoid a pre-fit flash (this refresh has now fitted
-        # the reslice/camera, so what it draws is correct). Off-screen refreshes
-        # during load keep it hidden (no visible pane yet).
+        # First ON-SCREEN render after a fresh load: lift the render-hold and
+        # reveal the props that load_series hid, so this refresh (which has now
+        # fitted the reslice/camera) is the FIRST thing painted — a clean, fully
+        # built frame. Off-screen refreshes during load keep it held (no visible
+        # pane yet). Clearing _hold_render here, before this _refresh's own
+        # p.render() at the end, lets that render actually paint.
         if getattr(self, "_awaiting_first_refit", False) and any(
                 self.pane[k].canvas.isVisible() for k in ("A", "B")):
             saved_all = getattr(self, "_prefit_vis", None) or {}
             for k in ("A", "B"):
+                self.pane[k]._hold_render = False
                 saved = saved_all.get(k)
                 if saved:
                     for a, vis in saved:
