@@ -1067,9 +1067,15 @@ class _Overlay(QWidget):
                 for poly in polys:
                     if poly is None or len(poly) < 2:
                         continue
-                    p.drawPolyline(QPolygonF([
+                    qpts = [
                         QPointF(*v._world_to_screen(key, float(ou), float(ov)))
-                        for (ou, ov) in poly]))
+                        for (ou, ov) in poly]
+                    # region_outline returns a ring's vertices WITHOUT repeating
+                    # the first point; drawPolyline draws it OPEN, leaving a gap at
+                    # the seam ("境界の一部が切れる"). Close it like the VTK viewer.
+                    if len(qpts) >= 3:
+                        qpts.append(qpts[0])
+                    p.drawPolyline(QPolygonF(qpts))
             else:
                 try:
                     pts = np.asarray(v._lvv_epi_surf._all_ring_points(), float)
@@ -1115,6 +1121,10 @@ class _Overlay(QWidget):
                     qpts = [QPointF(*v._world_to_screen(key, float(ou),
                                                         float(ov)))
                             for (ou, ov) in poly]
+                    # Close the ring (unrepeated first vertex) so drawPolyline
+                    # doesn't leave a gap at the seam. (Parity with the VTK viewer.)
+                    if len(qpts) >= 3:
+                        qpts.append(qpts[0])
                     p.drawPolyline(QPolygonF(qpts))
 
         # LV Diameter (LVD): show WHERE it was measured. A short-axis-ish pane
