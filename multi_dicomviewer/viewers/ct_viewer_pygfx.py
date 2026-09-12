@@ -538,6 +538,19 @@ class _Overlay(QWidget):
         v, key = self._v, self._key
         if v._vol is None:
             return
+        # The paired GPU canvas (self._v.pane[key].canvas) can be torn down under
+        # us during a layout rebuild (e.g. an LV bar row appearing). The overlay
+        # paint reads canvas.height() via _world_to_screen → _scale_px; touching
+        # the deleted C++ object raises RuntimeError, and because a raising
+        # paintEvent leaves the widget dirty, Qt repaints it again immediately —
+        # a tight loop that HARD-FREEZES the app (reported entering Epi). Verify
+        # the canvas is alive first and bail cleanly (no exception, so no dirty
+        # re-paint loop) until a valid canvas is back.
+        try:
+            if v.pane[key].canvas.height() <= 0:
+                return
+        except RuntimeError:
+            return
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
