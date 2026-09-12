@@ -10408,6 +10408,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_thick_refresh_display()
             if hasattr(self, "_lvv_redraw"):
                 self._lvv_redraw()
+            # Re-reslice everything to the CURRENT plane so the restored 水色 blood
+            # region is aligned RIGHT AWAY (it was offset until a crosshair nudge).
+            # reset_cam=False keeps the zoom + position.
+            self._refresh(reset_cam=False)
             self._lv_update_text()
             for k in ("A", "B"):
                 self._overlay[k].update()

@@ -7671,6 +7671,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(self, "_lvv_thick_mode", None) is not None:
                 self._lvv_thick_refresh_display()
                 self._lvv_thick_sync_buttons()
+            # Re-reslice everything to the CURRENT plane so the restored 水色 blood
+            # region is aligned RIGHT AWAY (it was offset until a crosshair nudge
+            # forced a refresh). reset_cam=False keeps the zoom + position.
+            self._refresh(reset_cam=False)
             self._lv_update_text()     # show "Blood-Volume:" in the result block
             # The Epi is NOT in this file. If none is in memory, tell the user to
             # load one (Epi読み込み) before Calc Vol; otherwise the current Epi is
