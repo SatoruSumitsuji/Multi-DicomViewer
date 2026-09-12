@@ -632,6 +632,13 @@ class _Overlay(QWidget):
         # Hover/drag highlight: the caught line goes vivid (dimmed) yellow and
         # opaque; the rotate zone also draws small double-headed arrows.
         hi = v._cross_hi.get(key)
+        # Non-interactive crosshair (Epi trace: painted but not grabbable) — a
+        # hover-highlight captured earlier (while aligning) is never cleared, so
+        # it would linger and, via the `hi is None` gate, HIDE the persistent Epi
+        # move-arrows. Drop the stale hover here.
+        if hi is not None and v._lv_cross_suppressed():
+            v._cross_hi[key] = None
+            hi = None
         hl_line = hi[0] if hi else None
         both = hi is not None and hi[1] == "center"   # intersection → both lines
         base_pen = QPen(QColor(255, 217, 0, 128), 1.0)      # amber, 50%

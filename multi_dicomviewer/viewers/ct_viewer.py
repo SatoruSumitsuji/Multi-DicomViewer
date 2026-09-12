@@ -14914,6 +14914,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # highlighted in rotate mode, so it follows a rotate drag / SPIN instead
         # of drifting off the line.
         hi = self._cross_hi.get(key)
+        # The crosshair is non-interactive here whenever interaction is suppressed
+        # (Epi trace: painted but not grabbable). A hover-highlight captured
+        # earlier (e.g. while aligning) is never cleared then — _hover_cross
+        # returns early — so it would linger and, via the `hi is None` gate below,
+        # HIDE the persistent Epi move-arrows. Drop the stale hover here.
+        if hi is not None and self._lv_cross_suppressed():
+            self._cross_hi[key] = None
+            hi = None
+            p.show_rot_arrow(False)
         if hi is not None:
             if hi[1] == "rotate":
                 p.set_rot_arrow(self._rot_arrow_pd(key, hi[0]))
