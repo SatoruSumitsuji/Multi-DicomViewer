@@ -12211,7 +12211,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         idx = lv["plane_idx"] % len(angs)
         u, v, n = self._ortho(ax.meridian_dir(angs[idx]), ax.axis)
         self._frame[la] = (u, v, n)
-        self._pc[la] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        # Centre the long-axis pane on the LEVEL point (on the axis at lv['sax']),
+        # not the mid-axis, so the movable cross-section (level) line sits at the
+        # pane's VERTICAL centre on SAX entry (requested layout).
+        self._pc[la] = ax.apex + float(lv["sax"]) * ax.axis
         self._cross_ang[la] = 0.0
         # The reference long-axis pane is resliced on the SAX axis. For a single
         # pass show only that border; for 'both' (Endo promoted onto the Epi
@@ -12230,18 +12233,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["fitted_sax"] = True
         self._view_initial = first
         self._lv_update_sax_label()
-        # Do NOT auto-fit the LONG-AXIS (right) pane on SAX entry — keep the
-        # user's zoom AND pan exactly as they were. The previous code fitted BOTH
-        # panes then only restored the long-axis SCALE, so the fit's recenter +
-        # rescale still moved/shrank the right image ("右画面が勝手に小さくなる").
-        # Reslice without a camera reset, then fit ONLY the fresh short-axis pane.
+        # Reslice without a camera reset (the SAX default scales below are applied
+        # explicitly, so the generic fit must not fight them).
         self._refresh(reset_cam=False)
         if first:
-            self._fit_pane(sa)                       # fresh cross-section view
+            # RIGHT (long-axis) pane: scale so the MV→apex length spans 1/2 the
+            # pane HEIGHT. ParallelScale = half the pane height in mm, so
+            # ps = length gives length = 1/2·(2·ps) = 1/2·height. The level line
+            # was centred vertically via _pc[la] above.
+            length = float(getattr(ax, "length_mm", 0.0))
+            if length > 1e-3:
+                self.pane[la].ren.GetActiveCamera().SetParallelScale(length)
+            # LEFT (short-axis) pane: scale so the shown Epi border's MAX radius
+            # is 40% of the pane WIDTH (Epi diameter ≈ 80% of the frame).
+            ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
+            if ps_sa is not None:
+                self.pane[sa].ren.GetActiveCamera().SetParallelScale(ps_sa)
+            else:
+                self._fit_pane(sa)                   # fallback: normal fit
             self._update_cross(la)
-            # Redraw the long-axis overlays (level line + ○ handle) for the
-            # current camera so the ○ shows + hit-tests immediately on entry
-            # (otherwise it only appeared after a ◀/▶ reslice).
+            # Redraw the long-axis overlays (level line + ○ handle + move-arrows)
+            # for the current camera so they show + hit-test immediately on entry
+            # (otherwise they only appeared after a ◀/▶ reslice).
             self._redraw_lv(la)
         for k in (la, sa):
             self.pane[k].set_overlay_visible(self._cross_overlay_on())
@@ -12269,6 +12282,38 @@ class CTViewer(CPRMixin, AbstractViewer):
         for mm in self._measures[sa]:                # no long-axis borders here
             if mm.get("_lv") is not None:
                 mm["hidden"] = True
+
+    def _lv_sax_short_scale(self, ax, along0):
+        """ParallelScale for the short-axis (cross-section) pane so the shown Epi
+        border's MAX radius (from the axis centre) = 40% of the pane WIDTH.
+        ParallelScale is half the pane HEIGHT in mm, so a radius that must land at
+        0.40·width_px needs ps = rmax·height_px / (0.80·width_px). None when there
+        is no Epi crossing at this level (caller falls back to a normal fit)."""
+        sa = self._lv.get("sax_pane")
+        if sa is None:
+            return None
+        try:
+            o, ex, ey, _n = ax.short_axis_basis(float(along0))
+        except Exception:                                # noqa: BLE001
+            return None
+        sp = self._lv["model"].short_axis_border_pts(
+            float(along0), "epi", ref_axis=ax)
+        if not sp or len(sp) < 3:
+            return None
+        o = np.asarray(o, float)
+        ex = np.asarray(ex, float)
+        ey = np.asarray(ey, float)
+        rmax = 0.0
+        for P in sp:
+            d = np.asarray(P, float) - o
+            rmax = max(rmax, math.hypot(float(d @ ex), float(d @ ey)))
+        if rmax < 1e-3:
+            return None
+        # Use the Qt widget size (logical px) — the same measure _fit_pane uses,
+        # so DPI scaling of the render window can't skew the ratio.
+        wpx = max(1, self.pane[sa].canvas.width())
+        hpx = max(1, self.pane[sa].canvas.height())
+        return rmax * hpx / (0.80 * wpx)
 
     def _lv_update_sax_label(self) -> None:
         rng = self._lv_level_range()
@@ -14277,8 +14322,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                 XL = max(X, 4.0 * max(self._lv_view_half(key)))
                 line = [(cx - XL, y), (cx + XL, y)]
                 rx, ry = self._lv_ring_pos(key, cx, y, 1.0, 0.0)  # always visible
-                p.lv_line_mapper.SetInputData(_polylines_pd([
-                    line, self._circle_poly(rx, ry, cr)]))
+                # up/down move-arrows on the level line — RIGHT (long-axis) pane
+                # ONLY: a vertical double-headed arrow at the line centre showing
+                # the cross-section level slides along the axis (the "normal
+                # up/down move" line). Not drawn on the short-axis pane.
+                vh = max(self._lv_view_half(key))
+                ah = 0.13 * vh                       # shaft half-length
+                hs = 0.05 * vh                       # arrowhead size
+                arrows = [
+                    [(cx, y - ah), (cx, y + ah)],                     # shaft
+                    [(cx - hs, y + ah - hs), (cx, y + ah),
+                     (cx + hs, y + ah - hs)],                         # up head
+                    [(cx - hs, y - ah + hs), (cx, y - ah),
+                     (cx + hs, y - ah + hs)],                         # down head
+                ]
+                p.lv_line_mapper.SetInputData(_polylines_pd(
+                    [line, self._circle_poly(rx, ry, cr)] + arrows))
             return
         if key != lv.get("pane"):
             return
