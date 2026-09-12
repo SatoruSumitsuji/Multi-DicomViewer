@@ -11147,6 +11147,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             p = self.pane[key]
             p.reslice.SetInputData(self._image)
             p.colors.SetLookupTable(self._lut())
+        # Hide the grayscale image until the FIRST on-screen fit render
+        # (_refit_on_show) so the pane can't briefly paint the reslice in its
+        # pre-fit/stale state (VTK auto-paints once, on show, before the deferred
+        # refit runs → the reported "garbled image flashes then corrects"). The
+        # pane then just shows black for that one frame, and _refresh re-shows the
+        # actor the moment it renders on screen.
+        self._awaiting_first_refit = True
+        for key in ("A", "B"):
+            self.pane[key].actor.SetVisibility(False)
         # Default 3-D MPR for thin-slice volumes (≥201 slices), 2-D native
         # paging for ordinary (≤200-slice) series. _set_mode also fits & draws.
         nz = self._image.GetDimensions()[2]
@@ -14472,6 +14481,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         release repaints both."""
         if self._image is None:
             return
+        # First ON-SCREEN render after a fresh load: reveal the grayscale that
+        # load_series hid to avoid a pre-fit flash (this refresh has now fitted
+        # the reslice/camera, so what it draws is correct). Off-screen refreshes
+        # during load keep it hidden (no visible pane yet).
+        if getattr(self, "_awaiting_first_refit", False) and any(
+                self.pane[k].canvas.isVisible() for k in ("A", "B")):
+            for k in ("A", "B"):
+                self.pane[k].actor.SetVisibility(True)
+            self._awaiting_first_refit = False
         base_step = max(1e-3, min(self._dims))
         for key in ("A", "B"):
             if only is not None and key != only:
