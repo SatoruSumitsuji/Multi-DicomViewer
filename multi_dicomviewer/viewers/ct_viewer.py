@@ -3365,6 +3365,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_sync_buttons()           # initial (not in LV mode) state
         self._lvv_sync()
         self._lv_update_submode_ui()
+        # Windows' Segoe UI renders these button labels THINNER than macOS' font,
+        # so the active/inactive (grey) distinction reads less clearly than on the
+        # Mac. Bold the LV bar's button text on Windows to match the Mac look
+        # (the user's reference); macOS already renders heavy enough, leave it.
+        import sys
+        if sys.platform == "win32":
+            for _b in self._lv_wrap.findChildren(QPushButton):
+                _f = _b.font()
+                _f.setBold(True)
+                _b.setFont(_f)
         return self._lv_wrap
 
     # ==================================================================
