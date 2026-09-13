@@ -6116,8 +6116,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         r = int(color[1:3], 16); g = int(color[3:5], 16); b = int(color[5:7], 16)
         if shown:
             if soft:
-                return ("QPushButton{background:rgba(%d,%d,%d,0.22);color:%s;}%s"
-                        % (r, g, b, color, self._BTN_DIS))
+                # NON-selected SET selector (e.g. MV while editing AoV): a very
+                # faint tint AND translucent TEXT, so it reads as 'set' without
+                # competing with the one being edited (the full-colour text used
+                # to make MV look active — "どちらが選択中か分からない").
+                return ("QPushButton{background:rgba(%d,%d,%d,0.13);"
+                        "color:rgba(%d,%d,%d,0.45);}%s"
+                        % (r, g, b, r, g, b, self._BTN_DIS))
             return "QPushButton{background:%s;color:white;}%s" % (color,
                                                                   self._BTN_DIS)
         bw = 1 if soft else 2
