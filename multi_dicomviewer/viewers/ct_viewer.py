@@ -14417,7 +14417,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_draw_axis_guides(key, p)
 
     def _lv_draw_axis_guides(self, key, p) -> None:
-        """Faint white DOTTED lines ⟂ the LV long axis at 1/8, 1/4, 1/2, 3/4, 7/8
+        """Faint white DOTTED lines ⟂ the LV long axis at 1/16, 1/8, 1/4, 1/2,
+        3/4, 7/8, 15/16
         of apex→MV-centre — tracing references on the long-axis pane. Each line is
         drawn as many short dash segments (one _polylines_pd, own white actor)."""
         lv = self._lv
@@ -14439,7 +14440,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         half = 0.42 * float(getattr(self, "_half", 100.0))
         dash = max(0.6, 0.015 * half)          # dash length = gap length
         segs = []
-        for frac in (0.125, 0.25, 0.5, 0.75, 0.875):
+        for frac in (0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375):
             c = oa + frac * d
             a2 = c - half * perp
             n = max(2, int((2.0 * half) / (2.0 * dash)))

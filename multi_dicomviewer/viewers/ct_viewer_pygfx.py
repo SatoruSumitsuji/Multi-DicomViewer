@@ -1016,9 +1016,9 @@ class _Overlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(yellow, 2.4))
             p.drawLine(S((-X, base)), S((X, base)))
-        # Guide lines: ⟂ the LV long axis (apex → MV centre) at 1/8, 1/4, 1/2,
-        # 3/4, 7/8 of that distance (quarters, plus the apical & basal quarters
-        # halved) — faint white dotted references while tracing the border.
+        # Guide lines: ⟂ the LV long axis (apex → MV centre) at 1/16, 1/8, 1/4,
+        # 1/2, 3/4, 7/8, 15/16 of that distance — faint white dotted references
+        # while tracing the border.
         self._paint_lv_axis_guides(p, key, S)
 
     def _paint_lv_axis_guides(self, p, key, S) -> None:
@@ -1042,7 +1042,7 @@ class _Overlay(QWidget):
         pen.setStyle(Qt.PenStyle.DotLine)
         p.setPen(pen)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        for frac in (0.125, 0.25, 0.5, 0.75, 0.875):
+        for frac in (0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375):
             c = oa + frac * d
             a2 = c - half * perp
             b2 = c + half * perp
