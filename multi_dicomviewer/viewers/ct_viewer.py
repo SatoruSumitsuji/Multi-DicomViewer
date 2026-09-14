@@ -5016,6 +5016,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         # (output y on B) comes up vertical; the short axis (A) uses the AoV-
         # anchored radial0 basis for a consistent (un-rolled) orientation.
         self._refresh(reset_cam=True)
+        # Default Blood/Endo zoom = 1.5× the plain content fit on BOTH panes
+        # (user request); lock it, then re-apply once the row relayout settles.
+        self._lvv_enlarge_default_zoom()
+        for k in ("A", "B"):
+            self.pane[k].render()
+        QTimer.singleShot(0, self._lvv_reapply_default_zoom)
+
+    def _lvv_enlarge_default_zoom(self) -> None:
+        """Enlarge BOTH panes to 1.5× the current (just-fit) content on entering
+        Blood/Endo, and LOCK it (_view_initial off) so a later resize/relayout
+        auto-fit can't undo it. ParallelScale = half the pane height in mm, so
+        dividing by 1.5 makes the image 1.5× bigger."""
+        for k in ("A", "B"):
+            cam = self.pane[k].ren.GetActiveCamera()
+            cam.SetParallelScale(max(1e-3, cam.GetParallelScale() / 1.5))
+        self._view_initial = False
+
+    def _lvv_reapply_default_zoom(self) -> None:
+        """Deferred: re-fit BOTH panes then re-enlarge 1.5× once the Blood/Endo
+        row relayout has settled the pane sizes (so the default shows at the
+        right scale without a nudge). No-op if Blood/Endo was left meanwhile."""
+        if getattr(self, "_lvv", None) is None or self._image is None:
+            return
+        self._view_initial = True
+        for k in ("A", "B"):
+            self._fit_pane(k)
+        self._lvv_enlarge_default_zoom()
         for k in ("A", "B"):
             self.pane[k].render()
 
