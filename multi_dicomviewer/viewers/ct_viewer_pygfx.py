@@ -2594,21 +2594,25 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _on_move(self, key, ev):
         x, y = ev["x"], ev["y"]
-        # SAFETY NET (macOS dead-buttons self-recovery): if NO drag is in progress
-        # per our own state yet the canvas is still the Qt mouse grabber, that grab
-        # is stuck — a modal opened from a button/right-click context can leave it,
-        # which deadens every toolbar/LV button (only the active-pane frame reacts)
-        # until a canvas click. Releasing it on the next hover recovers the app
-        # automatically. (In normal hover there is no grabber, so this is a no-op.)
-        if (self._drag_btn is None and not self._cross_grab
-                and not self._meas_drag and self._lv_line_drag is None
-                and self._lv_apex_drag is None):
-            try:
-                gw = QWidget.mouseGrabber()
-                if gw is not None:
-                    gw.releaseMouse()
-            except Exception:                            # noqa: BLE001
-                pass
+        # SAFETY NET (macOS dead-buttons self-recovery): a TRUE hover — no mouse
+        # button currently held (rendercanvas gives ev["buttons"], empty on hover)
+        # — must never carry drag/grab state. If it does (a modal opened from a
+        # button/right-click context left a stuck _cross_grab / _meas_drag flag OR
+        # a Qt mouse grab), clicks divert to the canvas and every toolbar/LV button
+        # goes dead until a canvas click. Clear ALL of it via _reset_pointer_state
+        # (flags AND grab) so the app self-recovers on the next hover, whatever
+        # path left it. (In a normal hover nothing is stuck, so this is a no-op.)
+        if not ev.get("buttons"):
+            stuck = (self._drag_btn is not None or self._cross_grab
+                     or self._meas_drag or self._lv_line_drag is not None
+                     or self._lv_apex_drag is not None)
+            if not stuck:
+                try:
+                    stuck = QWidget.mouseGrabber() is not None
+                except Exception:                        # noqa: BLE001
+                    stuck = False
+            if stuck:
+                self._reset_pointer_state()
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
         # LV apex drag: slide the grabbed apex along its long axis (border points
@@ -7211,7 +7215,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                          and m.get("_lvv") is None
                                          and m.get("_lv") is None)]
             self._overlay[k].update()
-        self._reset_pointer_state()
+        QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
         self._lv_update_submode_ui()
 
     def _lv_valve_draw(self) -> None:
@@ -7236,7 +7240,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         (that is Hide/Show or the button's right-click)."""
         self._lv_capture_valve_common(self._lv_valve_edit or "mitral",
                                       from_confirm=True)
-        self._reset_pointer_state()          # macOS: release any post-modal grab
+        QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
         self._lv_update_submode_ui()
 
     def _lv_valve_clear(self) -> None:
@@ -7273,8 +7277,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # macOS: a modal shown from this button-context right-click (the MV
         # As-is / MV-perpendicular chooser in _lv_toggle_valve_visibility) can
         # leave the canvas holding the mouse grab after it closes → every toolbar
-        # button goes dead (only the active-pane frame reacts). Release it.
-        self._reset_pointer_state()
+        # button goes dead (only the active-pane frame reacts). Release it — but
+        # DEFERRED (next event-loop turn), because the modal's own teardown posts
+        # events that re-grab AFTER a synchronous reset here (that was why the
+        # previous inline reset didn't recover it). The _on_move hover net is the
+        # additional backstop.
+        QTimer.singleShot(0, self._reset_pointer_state)
 
     # ---- Common APEX edit step --------------------------------------------
     def _lv_setup_ready(self) -> bool:
@@ -7361,7 +7369,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
         self._lv_update_valve_buttons()
-        self._reset_pointer_state()          # macOS: release any post-modal grab
+        # Deferred so it runs AFTER any modal teardown re-grab (macOS recovery).
+        QTimer.singleShot(0, self._reset_pointer_state)
 
     def _lv_exit_apex(self) -> None:
         """Leave the Apex step → back to the LV selector (the apex is kept)."""
@@ -7631,7 +7640,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)  # saved → exact
         QMessageBox.information(self.window(), t("LV"),
                                t("Saved: {p}", p=os.path.basename(path)))
-        self._reset_pointer_state()          # macOS: release any post-modal grab
+        QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
 
     def _lv_load_valve(self, which) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
@@ -8868,10 +8877,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         QMessageBox.information(self.window(), t("LV Vol"), text)
         # macOS: a modal shown while the canvas still holds an implicit mouse grab
         # leaves that grab stuck after the dialog closes — clicks then divert to
-        # the canvas and every toolbar/LV button goes dead (reported after the
-        # MV Draw→Confirm→Save→Exit flow, whose Draw prompt is this dialog).
-        # Releasing the grab here recovers it.
-        self._reset_pointer_state()
+        # the canvas and every toolbar/LV button goes dead. Release it DEFERRED
+        # (after the dialog's own teardown re-grab), plus the _on_move hover net.
+        QTimer.singleShot(0, self._reset_pointer_state)
 
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
