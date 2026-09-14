@@ -11807,9 +11807,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lv_fit_mv(self) -> None:
         """'Fit MV' — converge the active border to the (updated) MV plane: DELETE
         the points on the left-atrium (anti-apex) side of the MV plane, then MOVE
-        the two remaining BASAL end points onto the MV plane's line WITHIN that
-        section (keeps them in the plane). The apex end is never touched.
-        Undoable; re-draws + invalidates the volume."""
+        the two remaining BASAL end points onto the MV line at a fixed 10 mm from
+        the MV centre, each on its own side of the long axis. The apex end is
+        never touched. Undoable; re-draws + invalidates the volume."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv.get("phase") != "contour":
             return
@@ -11840,22 +11840,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         eps = 1e-6
 
         def _snap_to_mv_line(P, phi):
+            # Converge P (basal endpoint) onto the MV line (MV ∩ meridian) at a
+            # FIXED 10 mm from the MV centre c, on P's own side — c is on the LV
+            # long axis, so staying on P's side never crosses that axis.
             m_n = np.cross(axis, np.asarray(ax.meridian_dir(phi), float))
             nrm = float(np.linalg.norm(m_n))
             if nrm < eps:
                 return P
             m_n = m_n / nrm
             L = np.cross(n, m_n)
-            if float(np.linalg.norm(L)) < eps:
+            Ln = float(np.linalg.norm(L))
+            if Ln < eps:
                 return P
-            L = L / float(np.linalg.norm(L))
-            w = np.cross(m_n, L)
-            w = w / (float(np.linalg.norm(w)) or 1.0)
-            d = float((P - c) @ n)
-            wn = float(w @ n)
-            if abs(wn) < eps:
-                return P
-            return P - (d / wn) * w
+            L = L / Ln
+            s = float(np.sign(float((P - c) @ L))) or 1.0
+            return c + 10.0 * s * L
 
         before = self._lv_geom_snap()
         changed = False
