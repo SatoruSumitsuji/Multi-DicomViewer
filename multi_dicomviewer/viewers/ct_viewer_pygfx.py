@@ -1229,15 +1229,22 @@ class _Overlay(QWidget):
                         p.setBrush(QColor(255, 235, 0))
                         p.drawEllipse(Sd(pi), 3.0, 3.0)
                     # else: plane doesn't meet the chord → draw nothing
-                else:                                 # long-axis → section line
+                else:                                 # long-axis → section line,
+                    #                     CLIPPED to the Endo outline (was a fixed
+                    #                     0.9·ps width → overshot the Endo border).
                     c = 0.5 * (pts[0] + pts[1])
                     d = np.asarray(u_ax, float)
                     d = d - float(np.dot(d, axis)) * axis
                     dn = float(np.linalg.norm(d))
                     if dn > 1e-6:
                         d = d / dn
-                        wmm = 0.9 * float(v._ps.get(key, 60.0))
-                        p.drawLine(Sd(c - wmm * d), Sd(c + wmm * d))
+                        seg = v._lvv_clip_lvd_to_endo(key, c, d)
+                        if seg is not None:
+                            p.drawLine(
+                                QPointF(*v._world_to_screen(
+                                    key, seg[0][0], seg[0][1])),
+                                QPointF(*v._world_to_screen(
+                                    key, seg[1][0], seg[1][1])))
 
         # Apex (red CROSS, matching the Windows viewer) and seed (cyan dot). The
         # apex hides when its button toggles it off (set → shown/hidden).
@@ -7829,6 +7836,78 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lv_diam_cache = (comp, level, v, pts)
         self._lvv_diam_pts = pts
         return v
+
+    @staticmethod
+    def _clip_line_to_rings(c, d, rings):
+        """Interior chord of the infinite 2-D line (c + t·d) across closed polygon
+        *rings* — the segment straddling c (max t≤0 → min t≥0). None if the line
+        doesn't cross the outline on both sides of c. (Parity with the VTK viewer.)"""
+        cx, cy = float(c[0]), float(c[1])
+        dx, dy = float(d[0]), float(d[1])
+        ts = []
+        for ring in rings:
+            for i in range(len(ring) - 1):
+                ax_, ay_ = ring[i]
+                bx_, by_ = ring[i + 1]
+                ex, ey = bx_ - ax_, by_ - ay_
+                denom = dx * ey - dy * ex
+                if abs(denom) < 1e-9:
+                    continue
+                acx, acy = ax_ - cx, ay_ - cy
+                t = (acx * ey - acy * ex) / denom
+                s = (acx * dy - acy * dx) / denom
+                if -1e-6 <= s <= 1.0 + 1e-6:
+                    ts.append(t)
+        if not ts:
+            return None
+        negs = [t for t in ts if t <= 1e-9]
+        poss = [t for t in ts if t >= -1e-9]
+        if not negs or not poss:
+            return None
+        tneg, tpos = max(negs), min(poss)
+        if tpos - tneg < 1e-6:
+            return None
+        return ((cx + tneg * dx, cy + tneg * dy),
+                (cx + tpos * dx, cy + tpos * dy))
+
+    def _lvv_clip_lvd_to_endo(self, key, c3d, d3d):
+        """Clip the LVD section line (through world point *c3d*, in-plane unit
+        direction *d3d*) to the Endo cross-section outline on pane *key*. Returns
+        the segment in the pane's OUTPUT (u,v) coords ((ou0,ov0),(ou1,ov1)), or
+        None when there is no Endo crossing — so the long-axis LVD line sits
+        WITHIN the Endo border instead of overshooting it."""
+        comp = getattr(self, "_lv_endo_mask_comp", None)
+        bbox = getattr(self, "_lv_endo_mask_bbox", None)
+        if comp is None or bbox is None or self._dims is None:
+            return None
+        from multi_dicomviewer.core.lv_compact import region_outline_on_plane
+        u_ax, v_ax, _n = self._axes_for(key)
+        half = float(getattr(self, "_half", 100.0))
+        try:
+            step = self._lv_outline_step(self._lv_endo_adv()["step_mm"])
+        except Exception:                                # noqa: BLE001
+            step = 0.8
+        try:
+            polys = region_outline_on_plane(
+                comp, bbox, self._dims, self._pc[key], u_ax, v_ax,
+                half_mm=half, step_mm=step, convex=False)
+        except Exception:                                # noqa: BLE001
+            return None
+        rings = []
+        for poly in polys or []:
+            pl = [tuple(q) for q in poly]
+            if len(pl) >= 3:
+                rings.append(pl + [pl[0]])               # close the ring
+        if not rings:
+            return None
+        c2d = np.asarray(self._world3d_to_out(key, np.asarray(c3d, float)), float)
+        e2d = np.asarray(self._world3d_to_out(
+            key, np.asarray(c3d, float) + np.asarray(d3d, float)), float)
+        dd = e2d - c2d
+        dn = float(np.linalg.norm(dd))
+        if dn < 1e-6:
+            return None
+        return self._clip_line_to_rings(c2d, dd / dn, rings)
 
     def _lvv_lv_length_mm(self):
         """LVL (Left Ventricular Length) = distance between the TWO points where
