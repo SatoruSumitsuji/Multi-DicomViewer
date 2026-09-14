@@ -1577,6 +1577,16 @@ class MainWindow(QMainWindow):
         ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
+        self._syncview_act = QAction(t("SyncView"), self)
+        self._syncview_act.setCheckable(True)
+        self._syncview_act.setToolTip(t(
+            "Compare two 3-D CTs side by side under identical manipulation: "
+            "align both views manually, then turn SyncView ON — every "
+            "pan / rotate / zoom / paging / W-L in one pane is mirrored to the "
+            "other as the same delta (needs two CT panes shown)"
+        ))
+        self._syncview_act.triggered.connect(self._toggle_syncview)
+        tm.addAction(self._syncview_act)
         self._casepres_act = QAction(t("Case Presentation…"), self)
         self._casepres_act.setToolTip(t(
             "Build a time-ordered list of the open series (XA / IVUS / CT …) "
@@ -1838,6 +1848,60 @@ class MainWindow(QMainWindow):
         self._as_taskbar_window(self._coreg_win)
         self._coreg_win.showMaximized()
         self._coreg_win.raise_()
+
+    # ============================ SyncView =============================
+    def _syncview_ct_viewers(self) -> list:
+        """The shown CT viewers eligible for a SyncView link (plain-MPR / 2-D
+        CT with an image), in reading order — at most the first two."""
+        out = []
+        for pane in self._shown_panes():
+            v = pane.current_viewer() if hasattr(pane, "current_viewer") else None
+            if (v is not None and getattr(v, "handles_modality", "") == "CT"
+                    and hasattr(v, "sync_view_available")
+                    and v.sync_view_available()):
+                out.append(v)
+        return out
+
+    def _toggle_syncview(self) -> None:
+        """Tools ▸ SyncView (checkable): link / unlink the two shown CTs for
+        mirrored view operations."""
+        if getattr(self, "_syncview_link", None) is not None:
+            self._stop_syncview()
+            return
+        viewers = self._syncview_ct_viewers()
+        if len(viewers) < 2:
+            self._syncview_act.setChecked(False)
+            QMessageBox.information(
+                self, t("SyncView"),
+                t("Show two 3-D CT series (one per pane) in plain MPR / 2-D "
+                  "view first, then turn SyncView on."),
+            )
+            return
+        viewers = viewers[:2]
+        from multi_dicomviewer.ui.sync_view import SyncViewLink
+        self._syncview_link = SyncViewLink(viewers[0], viewers[1], self)
+        # Offer the same-scale lock ("同一縮尺にしますか？"). The user has already
+        # aligned the two views; matching the zoom makes the mirrored deltas
+        # keep them at 1:1 scale for a true side-by-side comparison.
+        ans = QMessageBox.question(
+            self, t("SyncView"),
+            t("Match the two CTs to the same zoom (scale) now?\n"
+              "Choose No to keep each view's current zoom."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            self._syncview_link.match_scale()
+        self._syncview_act.setChecked(True)
+
+    def _stop_syncview(self) -> None:
+        """Drop the SyncView link (from the menu toggle or when panes change)."""
+        link = getattr(self, "_syncview_link", None)
+        if link is not None:
+            link.teardown()
+            self._syncview_link = None
+        if getattr(self, "_syncview_act", None) is not None:
+            self._syncview_act.setChecked(False)
 
     # ============================ Case Presentation ====================
     def _open_case_presentation(self) -> None:
@@ -3355,6 +3419,11 @@ class MainWindow(QMainWindow):
         return occ
 
     def _apply_layout(self, key: str, cells=None) -> None:
+        # A SyncView link binds two SHOWN CT panes; a re-layout can hide or
+        # rearrange them, so drop the link (the user re-enables it once the two
+        # CTs are side by side again).
+        if getattr(self, "_syncview_link", None) is not None:
+            self._stop_syncview()
         self._layout_key = key
         rows, cols, count = _LAYOUTS[key]
         # Which master cells to show: the passed rectangle, or the top-left
