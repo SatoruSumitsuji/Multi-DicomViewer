@@ -11145,6 +11145,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # "contours/regions show on a fresh CT with nothing loaded" bug.
         self._lv_valves = {"mitral": None, "aortic": None}
         self._lv_valve_shown = {"mitral": True, "aortic": True}
+        # The COMMON apex is in the OLD series' coordinates too — clear it, or a
+        # freshly loaded series shows an apex the user never set/loaded (its
+        # marker gets re-drawn from self._lv_apex on the next LV UI update).
+        self._lv_apex = None
+        self._lv_apex_edit = False
+        self._lv_apex_shown = True
         self._lv_region_comp = None
         self._lv_region_bbox = None
         self._lv_endo_mask_comp = None
