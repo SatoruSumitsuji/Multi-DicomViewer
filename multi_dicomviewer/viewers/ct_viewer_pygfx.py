@@ -12338,6 +12338,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv = self._lv
         if lv is not None and lv.get("target") in ("endo", "epi"):
             self._lv_capture_current()
+            # Add the MV terminal point NOW (previously only added on a plane
+            # step), so the basal endpoint appears the instant the border is
+            # finished (double-click / right-click) and can be adjusted right here
+            # — no plane change or second pass. Skipped in SAX.
+            pas = lv.get("pass")
+            if pas in ("endo", "epi") and lv.get("sax") is None:
+                self._lv_snap_base_to_mv(pas)
             self._lv_update_text()
 
     def _lv_clear_confirm(self) -> None:
