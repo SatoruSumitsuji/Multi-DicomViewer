@@ -11490,7 +11490,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         sp = self._lv["model"].short_axis_border_pts(
             float(along0), "epi", ref_axis=ax)
-        if not sp or len(sp) < 3:
+        # short_axis_border_pts returns None or a numpy array — never use a bare
+        # truthiness test on it ("truth value of an array is ambiguous").
+        if sp is None or len(sp) < 3:
             return None
         o = np.asarray(o, float)
         ex = np.asarray(ex, float)
