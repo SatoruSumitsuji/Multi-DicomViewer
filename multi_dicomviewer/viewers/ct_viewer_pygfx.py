@@ -2390,6 +2390,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
+        # Proactive backstop: poll for a stuck grab so it self-recovers within a
+        # frame or two WITHOUT a click. The eventFilter above only fires ON a
+        # press, and that very press is consumed by the stray grabber before it
+        # can reach the real target — the "recovers only on the 2nd click"
+        # symptom. The timer drops the grab while the app is idle, so the NEXT
+        # click already works. _drop_stray_grab is a no-op unless a grab is
+        # genuinely stuck (button held / popup / gesture all skip it).
+        self._grab_watchdog = QTimer(self)
+        self._grab_watchdog.setInterval(120)
+        self._grab_watchdog.timeout.connect(self._drop_stray_grab)
+        self._grab_watchdog.start()
 
     def eventFilter(self, obj, ev):  # noqa: N802 (Qt override)
         """Drop a STRAY Qt mouse grab held by one of this viewer's canvases.
@@ -2402,17 +2413,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         safe too: the grab is established only after this filter runs, so at
         filter time there is no grab yet. Never consumes the event."""
         if ev.type() == QEvent.Type.MouseButtonPress:
-            gw = QWidget.mouseGrabber()
-            if (gw is not None
-                    and gw in (self.pane["A"].canvas, self.pane["B"].canvas)
-                    and self._drag_btn is None
-                    and not self._cross_grab
-                    and not self._meas_drag):
-                try:
-                    gw.releaseMouse()
-                except Exception:
-                    pass
+            self._drop_stray_grab()
         return super().eventFilter(obj, ev)
+
+    def _drop_stray_grab(self) -> bool:
+        """Release a STRAY Qt mouse grab held by ANY of this viewer's widgets when
+        no gesture / popup / modal is active — the recovery for the macOS
+        'dead toolbar buttons' bug where a modal shown from a button's right-click
+        keeps the grab on that BUTTON (not the canvas), so clicks divert to it and
+        every button goes dead. The old filter only caught grabs by the CANVASES,
+        so a stuck BUTTON grab slipped through. Widened to any descendant of this
+        viewer (canvas OR button), guarded so it can never disturb a legitimate
+        grab: skipped while a canvas gesture is in progress (flags), while a menu /
+        popup is open, or while a mouse button is physically held. Returns True if
+        it released one."""
+        try:
+            if QApplication.mouseButtons():          # a real drag holds a button
+                return False
+            if QApplication.activePopupWidget() is not None:
+                return False                         # a menu/combo legitimately grabs
+            if (self._drag_btn is not None or self._cross_grab
+                    or self._meas_drag or self._lv_line_drag is not None
+                    or self._lv_apex_drag is not None):
+                return False                         # our own gesture in progress
+            gw = QWidget.mouseGrabber()
+            if gw is not None and self.isAncestorOf(gw):
+                gw.releaseMouse()
+                self._reset_pointer_state()
+                return True
+        except Exception:                            # noqa: BLE001
+            pass
+        return False
 
     # ------------------------------------------------------ event wiring
     def _wire_events(self, key):
