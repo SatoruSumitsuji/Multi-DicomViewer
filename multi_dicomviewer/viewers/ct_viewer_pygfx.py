@@ -2587,6 +2587,21 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _on_move(self, key, ev):
         x, y = ev["x"], ev["y"]
+        # SAFETY NET (macOS dead-buttons self-recovery): if NO drag is in progress
+        # per our own state yet the canvas is still the Qt mouse grabber, that grab
+        # is stuck — a modal opened from a button/right-click context can leave it,
+        # which deadens every toolbar/LV button (only the active-pane frame reacts)
+        # until a canvas click. Releasing it on the next hover recovers the app
+        # automatically. (In normal hover there is no grabber, so this is a no-op.)
+        if (self._drag_btn is None and not self._cross_grab
+                and not self._meas_drag and self._lv_line_drag is None
+                and self._lv_apex_drag is None):
+            try:
+                gw = QWidget.mouseGrabber()
+                if gw is not None:
+                    gw.releaseMouse()
+            except Exception:                            # noqa: BLE001
+                pass
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
         # LV apex drag: slide the grabbed apex along its long axis (border points
@@ -7248,6 +7263,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 v="MV" if which == "mitral" else "AoV"))
             return
         self._lv_toggle_valve_visibility(which)
+        # macOS: a modal shown from this button-context right-click (the MV
+        # As-is / MV-perpendicular chooser in _lv_toggle_valve_visibility) can
+        # leave the canvas holding the mouse grab after it closes → every toolbar
+        # button goes dead (only the active-pane frame reacts). Release it.
+        self._reset_pointer_state()
 
     # ---- Common APEX edit step --------------------------------------------
     def _lv_setup_ready(self) -> bool:
@@ -7334,6 +7354,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
         self._lv_update_valve_buttons()
+        self._reset_pointer_state()          # macOS: release any post-modal grab
 
     def _lv_exit_apex(self) -> None:
         """Leave the Apex step → back to the LV selector (the apex is kept)."""
