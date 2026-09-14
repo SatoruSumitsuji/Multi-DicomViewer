@@ -11731,7 +11731,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Set BOTH SAX panes to the default zoom and LOCK it (_view_initial off,
         so a later resize/relayout auto-fit can't override it). RIGHT (long-axis)
         pane: MV→apex spans 2/3 of the pane HEIGHT (_ps = 0.75·length). LEFT
-        (short-axis) pane: the Epi border's max radius = 90% of the pane WIDTH."""
+        (short-axis) pane: the Epi border's max radius = 45% of the pane WIDTH."""
         lv = getattr(self, "_lv", None)
         if lv is None or lv.get("sax") is None:
             return
@@ -11768,10 +11768,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_sax_short_scale(self, ax, along0):
         """_ps for the short-axis pane so the shown Epi border's MAX radius (from
-        the axis centre) = 90% of the pane WIDTH. _ps is half the pane HEIGHT in
-        mm, so a radius that must land at 0.90·width_px needs
-        ps = rmax·height_px / (1.80·width_px). None when there is no Epi crossing
-        at this level (caller falls back to a normal fit)."""
+        the axis centre) = 45% of the pane WIDTH (Epi diameter ≈ 90% of the frame,
+        fits inside). _ps is half the pane HEIGHT in mm, so a radius that must land
+        at 0.45·width_px needs ps = rmax·height_px / (0.90·width_px). None when
+        there is no Epi crossing at this level (caller falls back to a normal fit)."""
         sa = self._lv.get("sax_pane")
         if sa is None:
             return None
@@ -11796,7 +11796,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         wpx = max(1, self.pane[sa].canvas.width())
         hpx = max(1, self.pane[sa].canvas.height())
-        return rmax * hpx / (1.80 * wpx)
+        return rmax * hpx / (0.90 * wpx)
 
     def _lv_set_short_frame(self) -> None:
         lv = self._lv
