@@ -2348,6 +2348,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: CT (raw mm by default, or apex→base fraction under 左室長補正). Emitted only
     #: while this viewer is CoSync-linked and paged.
     lv_cosync_level_changed = pyqtSignal(float)
+    #: SyncView: a view operation (pan / rotate / zoom / W-L / paging / thick)
+    #: happened here — the shell mirrors it to the paired CT as an identical
+    #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
+    #: while SyncView-linked and NOT while applying a mirrored op (no echo).
+    sync_view_op = pyqtSignal(str, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2476,6 +2481,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: True, paging is redirected to an ALONG-LV-axis level step and the new
         #: level is broadcast (lv_cosync_level_changed) so the peer CT mirrors it.
         self._lv_cosync_on = False
+        #: SyncView: True while this CT is linked to a peer CT for mirrored
+        #: view operations; _applying guards against echoing a mirrored op back.
+        self._sync_view_on = False
+        self._sync_view_applying = False
         self._lvv_epi_surf = None        # Epi surface captured from contour mode
         self._lvv_epi_disp_comp = None   # Epi border display mask (for the line)
         self._lvv_epi_disp_bbox = None
@@ -5297,6 +5306,54 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.pane[k].render()
         except Exception:                                # noqa: BLE001
             pass
+
+    # ------------------------------------------------ SyncView contract
+    def sync_view_available(self) -> bool:
+        """Eligible for a SyncView link: a plain-MPR / 2-D CT with an image and
+        no derived-view lock (LV analysis, short-axis, CPR) that mirroring would
+        corrupt."""
+        return (self._image is not None
+                and self._lv is None
+                and getattr(self, "_lvv", None) is None
+                and not (hasattr(self, "cpr_active") and self.cpr_active())
+                and not self._lv_sax_active())
+
+    def set_sync_view_on(self, on: bool) -> None:
+        """Enter/leave SyncView. While ON, view gestures are broadcast
+        (sync_view_op) so the paired CT mirrors them."""
+        self._sync_view_on = bool(on)
+
+    def apply_sync_op(self, kind: str, params: dict) -> None:
+        """Replay a peer CT's mirrored operation here. Guarded so the replay
+        does not echo straight back out (no feedback loop)."""
+        if self._image is None:
+            return
+        self._sync_view_applying = True
+        try:
+            if kind == "drag":
+                self._drag(params["which"], params["dx"], params["dy"],
+                           shift=params.get("shift", False),
+                           sx=params.get("sx"), sy=params.get("sy"),
+                           ctrl=params.get("ctrl", False),
+                           tool=params.get("tool"))
+            elif kind == "wheel":
+                self._wheel(params["which"], params["delta"])
+        finally:
+            self._sync_view_applying = False
+
+    def sync_view_get_scale(self):
+        """Pane-A zoom (VTK ParallelScale) — the reference for the same-scale
+        option offered on SyncView entry."""
+        return self.lv_cosync_get_scale()
+
+    def sync_view_set_scale(self, ps) -> None:
+        """Force both panes to *ps* (same-scale lock) and redraw overlays."""
+        try:
+            for k in ("A", "B"):
+                self.pane[k].ren.GetActiveCamera().SetParallelScale(float(ps))
+        except Exception:                                # noqa: BLE001
+            return
+        self._refresh()
 
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
@@ -16041,10 +16098,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
 
-    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False):
+    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False,
+              tool=None):
         if self._image is None:
             return
-        t = self._tool
+        # *tool* overrides the active tool for this call — used by SyncView to
+        # replay a peer's operation with the SAME tool regardless of what this
+        # viewer's tool happens to be set to.
+        t = tool if tool is not None else self._tool
         # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
         # LEVEL; ROTATE is blocked because tilting the reslice FRAME would
         # corrupt the locked short-axis / long-axis geometry (use ◀ ▶ to rotate
@@ -16207,6 +16268,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cam.SetFocalPoint(fp[0] - dx * sc, fp[1] + dy * sc, fp[2])
                 cam.SetPosition(pos[0] - dx * sc, pos[1] + dy * sc, pos[2])
         self._refresh(only=only_pane)
+        # SyncView: mirror this gesture to the paired CT as the SAME delta.
+        # SPIN is excluded (its angle is derived from screen-absolute cursor
+        # position about each pane's own centre — not a portable delta).
+        if (self._sync_view_on and not self._sync_view_applying
+                and t in ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")):
+            self.sync_view_op.emit("drag", {
+                "which": which, "dx": dx, "dy": dy, "shift": shift,
+                "sx": sx, "sy": sy, "ctrl": ctrl, "tool": t})
 
     def _wheel(self, which, delta):
         if self._image is None:
@@ -16223,6 +16292,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._mode == "2D":
             self._page2d(1 if delta > 0 else -1)
+            self._sync_emit_wheel(which, delta)
             return
         # Same contract as the PAGING tool: page the wheeled pane itself —
         # the visible image scrolls through slices. Step C and THIS pane's
@@ -16240,6 +16310,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh()
         self._undo_view(before, self._view_snapshot())
+        self._sync_emit_wheel(which, delta)
+
+    def _sync_emit_wheel(self, which, delta):
+        """SyncView: mirror a paging wheel step to the paired CT (same slice
+        count, same pane)."""
+        if self._sync_view_on and not self._sync_view_applying:
+            self.sync_view_op.emit(
+                "wheel", {"which": which, "delta": int(delta)})
 
     def _screen_center(self, which):
         """Qt-widget pixel position (y down) of the crosshair centre."""
