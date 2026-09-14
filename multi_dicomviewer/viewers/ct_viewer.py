@@ -12242,15 +12242,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # explicitly, so the generic fit must not fight them).
         self._refresh(reset_cam=False)
         if first:
-            # RIGHT (long-axis) pane: scale so the MV→apex length spans 1/2 the
+            # RIGHT (long-axis) pane: scale so the MV→apex length spans 1/3 the
             # pane HEIGHT. ParallelScale = half the pane height in mm, so
-            # ps = length gives length = 1/2·(2·ps) = 1/2·height. The level line
-            # was centred vertically via _pc[la] above.
+            # ps = 1.5·length gives length = (1/3)·(2·ps) = 1/3·height. The level
+            # line was centred vertically via _pc[la] above.
             length = float(getattr(ax, "length_mm", 0.0))
             if length > 1e-3:
-                self.pane[la].ren.GetActiveCamera().SetParallelScale(length)
+                self.pane[la].ren.GetActiveCamera().SetParallelScale(1.5 * length)
             # LEFT (short-axis) pane: scale so the shown Epi border's MAX radius
-            # is 40% of the pane WIDTH (Epi diameter ≈ 80% of the frame).
+            # is 60% of the pane WIDTH (Epi diameter ≈ 120% of the frame width).
             ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
             if ps_sa is not None:
                 self.pane[sa].ren.GetActiveCamera().SetParallelScale(ps_sa)
@@ -12290,9 +12290,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_sax_short_scale(self, ax, along0):
         """ParallelScale for the short-axis (cross-section) pane so the shown Epi
-        border's MAX radius (from the axis centre) = 40% of the pane WIDTH.
+        border's MAX radius (from the axis centre) = 60% of the pane WIDTH.
         ParallelScale is half the pane HEIGHT in mm, so a radius that must land at
-        0.40·width_px needs ps = rmax·height_px / (0.80·width_px). None when there
+        0.60·width_px needs ps = rmax·height_px / (1.20·width_px). None when there
         is no Epi crossing at this level (caller falls back to a normal fit)."""
         sa = self._lv.get("sax_pane")
         if sa is None:
@@ -12320,7 +12320,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # so DPI scaling of the render window can't skew the ratio.
         wpx = max(1, self.pane[sa].canvas.width())
         hpx = max(1, self.pane[sa].canvas.height())
-        return rmax * hpx / (0.80 * wpx)
+        return rmax * hpx / (1.20 * wpx)
 
     def _lv_update_sax_label(self) -> None:
         rng = self._lv_level_range()

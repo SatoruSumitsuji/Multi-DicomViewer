@@ -11458,14 +11458,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # explicitly, so the generic fit must not fight them).
         self._refresh(reset_cam=False)
         if first:
-            # RIGHT (long-axis) pane: MV→apex length = 1/2 the pane HEIGHT
-            # (_ps = half-height, so ps = length). Level centred vertically above.
+            # RIGHT (long-axis) pane: MV→apex length = 1/3 the pane HEIGHT
+            # (_ps = half-height, so ps = 1.5·length). Level centred vertically.
             length = float(getattr(ax, "length_mm", 0.0))
             if length > 1e-3:
-                self._ps[la] = length
+                self._ps[la] = 1.5 * length
                 self._config_cam(la)
-            # LEFT (short-axis) pane: Epi border MAX radius = 40% of the pane
-            # WIDTH (Epi diameter ≈ 80% of the frame).
+            # LEFT (short-axis) pane: Epi border MAX radius = 60% of the pane
+            # WIDTH (Epi diameter ≈ 120% of the frame width).
             ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
             if ps_sa is not None:
                 self._ps[sa] = ps_sa
@@ -11477,9 +11477,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_sax_short_scale(self, ax, along0):
         """_ps for the short-axis pane so the shown Epi border's MAX radius (from
-        the axis centre) = 40% of the pane WIDTH. _ps is half the pane HEIGHT in
-        mm, so a radius that must land at 0.40·width_px needs
-        ps = rmax·height_px / (0.80·width_px). None when there is no Epi crossing
+        the axis centre) = 60% of the pane WIDTH. _ps is half the pane HEIGHT in
+        mm, so a radius that must land at 0.60·width_px needs
+        ps = rmax·height_px / (1.20·width_px). None when there is no Epi crossing
         at this level (caller falls back to a normal fit)."""
         sa = self._lv.get("sax_pane")
         if sa is None:
@@ -11505,7 +11505,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         wpx = max(1, self.pane[sa].canvas.width())
         hpx = max(1, self.pane[sa].canvas.height())
-        return rmax * hpx / (0.80 * wpx)
+        return rmax * hpx / (1.20 * wpx)
 
     def _lv_set_short_frame(self) -> None:
         lv = self._lv
