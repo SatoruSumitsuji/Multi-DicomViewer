@@ -7946,6 +7946,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         if top is not None:
             top.invalidate()
             top.activate()
+        # Re-fit every LV-bar FitButton at its NOW-final width, so a button in a
+        # just-shown row shows its full label instead of a stale elide ("Lo…").
+        from PyQt6.QtWidgets import QPushButton
+        if w is not None:
+            for b in w.findChildren(QPushButton):
+                if hasattr(b, "refit"):
+                    b.refit()
 
     def _lv_select_submode(self, sm) -> None:
         from PyQt6.QtWidgets import QMessageBox
