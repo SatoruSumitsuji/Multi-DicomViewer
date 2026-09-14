@@ -12876,12 +12876,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apply_target(new)
 
     def _lv_on_border_committed(self) -> None:
-        """A border was just finished (double-click). Capture it ONLY if an
-        Endo/Epi target is armed; otherwise leave it as a plain polyline. No
-        auto endo→epi switch — the user picks each target explicitly."""
+        """A border was just finished (double-click / right-click). Capture it
+        ONLY if an Endo/Epi target is armed; otherwise leave it as a plain
+        polyline. No auto endo→epi switch — the user picks each target
+        explicitly."""
         lv = self._lv
         if lv.get("target") in ("endo", "epi"):
             self._lv_capture_current()
+            # Add the MV terminal point NOW (previously only added on a plane
+            # step), so the basal endpoint appears the instant the border is
+            # finished and can be adjusted right here — no plane change or a whole
+            # second pass needed. Skipped in SAX (base snap belongs to the trace).
+            pas = lv.get("pass")
+            if pas in ("endo", "epi") and lv.get("sax") is None:
+                self._lv_snap_base_to_mv(pas)
             self._lv_update_text()
 
     def _lv_clear_confirm(self) -> None:
