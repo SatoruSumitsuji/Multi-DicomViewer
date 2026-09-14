@@ -16023,6 +16023,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # WL/Thick/Spin still work (they don't change the axis relationship).
         if self._lv_axis_locked() and t in ("ROTATE", "PAGING"):
             return
+        # Epi: the LEFT (non-trace) pane is a fixed reference — disable MOVE there
+        # so it can't be panned away (user request). The trace pane still pans.
+        if (t == "MOVE" and self._lv is not None
+                and self._lv.get("pass") == "epi"
+                and self._lv.get("sax") is None
+                and which != self._lv.get("pane")):
+            return
         if t != "WL":
             self._view_initial = False
         # This drag changes the view (W/L included, now captured in the
