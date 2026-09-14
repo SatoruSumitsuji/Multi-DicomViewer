@@ -7624,7 +7624,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._center = mid.copy()
         self._view_initial = True
         self._refresh(reset_cam=True)
+        # Default Blood/Endo zoom = 1.5× the plain content fit on BOTH panes
+        # (user request); lock it, then re-apply once the row relayout settles.
+        self._lvv_enlarge_default_zoom()
         for k in ("A", "B"):
+            self.pane[k].render()
+            self._overlay[k].update()
+        QTimer.singleShot(0, self._lvv_reapply_default_zoom)
+
+    def _lvv_enlarge_default_zoom(self) -> None:
+        """Enlarge BOTH panes to 1.5× the current (just-fit) content on entering
+        Blood/Endo, and LOCK it (_view_initial off) so a later resize/relayout
+        auto-fit can't undo it. _ps = half the pane height in mm, so dividing by
+        1.5 makes the image 1.5× bigger."""
+        for k in ("A", "B"):
+            self._ps[k] = max(1e-3, float(self._ps[k]) / 1.5)
+            self._config_cam(k)
+        self._view_initial = False
+
+    def _lvv_reapply_default_zoom(self) -> None:
+        """Deferred: re-fit BOTH panes then re-enlarge 1.5× once the Blood/Endo
+        row relayout has settled the pane sizes (so the default shows at the
+        right scale without a nudge). No-op if Blood/Endo was left meanwhile."""
+        if getattr(self, "_lvv", None) is None or self._vol is None:
+            return
+        self._view_initial = True
+        for k in ("A", "B"):
+            self._fit_pane(k)
+        self._lvv_enlarge_default_zoom()
+        for k in ("A", "B"):
+            self.pane[k].render()
             self._overlay[k].update()
 
     def _lvv_endo_mask_cached(self):
