@@ -13115,7 +13115,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """'Fit MV' — after the MV plane is updated, CONVERGE the active border to
         it (per traced long-axis plane): DELETE the points on the left-atrium
         (anti-apex) side of the MV plane, then MOVE the two remaining BASAL end
-        points onto the MV line at a fixed 5 mm from the MV centre, each on its
+        points onto the MV line at 5 mm radial from the LV long axis, each on its
         own side of the long axis. The apex end is never touched. Undoable;
         re-draws + invalidates the volume."""
         from PyQt6.QtWidgets import QMessageBox
@@ -13149,11 +13149,13 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         def _snap_to_mv_line(P, phi):
             """Converge P (a basal endpoint, in the meridian plane at phi) onto the
-            MV line (MV plane ∩ meridian plane) at a FIXED 5 mm from the MV centre
-            c, on the SAME side as P. The MV centre sits on the LV long axis (which
-            meets the MV line there), so staying on P's side keeps the endpoint in
-            its own half — it never crosses the long axis."""
-            m_n = np.cross(axis, np.asarray(ax.meridian_dir(phi), float))
+            MV line (MV plane ∩ meridian plane) at the point whose RADIAL distance
+            from the LV long axis is 5 mm, on the SAME wall side as P (never
+            crossing the axis). The MV centre c is on the axis (radial 0), so
+            radial(c + t·L) = t·(L·e_s) with e_s the meridian radial dir; solve t
+            for 5 mm (a tilted MV plane needs t≠5 to still land 5 mm off-axis)."""
+            e_s = np.asarray(ax.meridian_dir(phi), float)   # radial dir (⟂ axis)
+            m_n = np.cross(axis, e_s)
             nrm = float(np.linalg.norm(m_n))
             if nrm < eps:
                 return P
@@ -13163,8 +13165,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             if Ln < eps:                             # MV ∥ meridian (degenerate)
                 return P
             L = L / Ln
-            s = float(np.sign(float((P - c) @ L))) or 1.0   # P's side along the line
-            return c + 5.0 * s * L
+            Le = float(L @ e_s)                       # MV line's radial component
+            if abs(Le) < eps:                        # MV line ∥ axis → no radial extent
+                return P
+            s = float(np.sign(float((P - apex) @ e_s))) or 1.0   # P's wall side
+            return c + (5.0 * s / Le) * L
 
         before = self._lv_geom_snap()
         changed = False
