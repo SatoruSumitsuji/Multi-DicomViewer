@@ -2026,6 +2026,12 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: compute worker back to the GUI thread (see _lod_settle / _on_slab_done).
     _slab_done = pyqtSignal(object)
 
+    #: SyncView: a view operation (pan / rotate / zoom / W-L / paging / thick)
+    #: happened here — the shell mirrors it to the paired CT as an identical
+    #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
+    #: while SyncView-linked and NOT while applying a mirrored op (no echo).
+    sync_view_op = pyqtSignal(str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         # Unified button look (matches the Angio/IVUS viewer): a light-grey
@@ -2281,6 +2287,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cross_ppt = (0.0, 0.0)         # prev world point (move mode)
         self._cross_prev = 0.0               # crosshair-rotate prev angle
         self._spin_prev = None               # SPIN previous cursor angle
+        #: SyncView: True while this CT is linked to a peer CT for mirrored view
+        #: operations; _applying guards against echoing a mirrored op back.
+        self._sync_view_on = False
+        self._sync_view_applying = False
 
         self.pane = {"A": _PygfxPane(), "B": _PygfxPane()}
         self._overlay = {"A": _Overlay(self, "A"), "B": _Overlay(self, "B")}
@@ -4728,10 +4738,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._overlay[k].repaint()
 
     # ----------------------------------------------------------- tools
-    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False):
+    def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False,
+              tool=None):
         if self._vol is None:
             return
-        t = self._tool
+        # *tool* overrides the active tool for this call — used by SyncView to
+        # replay a peer's operation with the SAME tool regardless of what this
+        # viewer's tool happens to be set to.
+        t = tool if tool is not None else self._tool
         # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
         # LEVEL; ROTATE is blocked because tilting the reslice FRAME would
         # corrupt the locked short-axis / long-axis geometry (use ◀ ▶ to rotate
@@ -4856,6 +4870,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # image keeps its look; full quality returns when the drag settles).
         # THICK included: the coarse slab still updates live as it's adjusted.
         self._refresh(lod=True, only=only_pane)
+        # SyncView: mirror this gesture to the paired CT as the SAME delta.
+        # SPIN is excluded (its angle is derived from screen-absolute cursor
+        # position about each pane's own centre — not a portable delta).
+        if (self._sync_view_on and not self._sync_view_applying
+                and t in ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")):
+            self.sync_view_op.emit("drag", {
+                "which": which, "dx": dx, "dy": dy, "shift": shift,
+                "sx": sx, "sy": sy, "ctrl": ctrl, "tool": t})
 
     def _wheel(self, which, delta):
         if self._vol is None:
@@ -4867,6 +4889,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._mode == "2D":
             self._page2d(1 if delta > 0 else -1)
+            self._sync_emit_wheel(which, delta)
             return
         before = self._view_snapshot()
         _, _, n = self._axes_for(which)
@@ -4879,6 +4902,65 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh(lod=True)            # smooth wheel-paging (slab MIP defers)
         self._undo_view(before, self._view_snapshot())
+        self._sync_emit_wheel(which, delta)
+
+    def _sync_emit_wheel(self, which, delta):
+        """SyncView: mirror a paging wheel step to the paired CT (same slice
+        count, same pane)."""
+        if self._sync_view_on and not self._sync_view_applying:
+            self.sync_view_op.emit(
+                "wheel", {"which": which, "delta": int(delta)})
+
+    # ------------------------------------------------ SyncView contract
+    def sync_view_available(self) -> bool:
+        """Eligible for a SyncView link: a plain-MPR / 2-D CT with a volume and
+        no derived-view lock (LV analysis, short-axis, CPR) that mirroring would
+        corrupt."""
+        return (self._vol is not None
+                and self._lv is None
+                and getattr(self, "_lvv", None) is None
+                and not (hasattr(self, "cpr_active") and self.cpr_active())
+                and not self._lv_sax_active())
+
+    def set_sync_view_on(self, on: bool) -> None:
+        """Enter/leave SyncView. While ON, view gestures are broadcast
+        (sync_view_op) so the paired CT mirrors them."""
+        self._sync_view_on = bool(on)
+
+    def apply_sync_op(self, kind: str, params: dict) -> None:
+        """Replay a peer CT's mirrored operation here. Guarded so the replay
+        does not echo straight back out (no feedback loop)."""
+        if self._vol is None:
+            return
+        self._sync_view_applying = True
+        try:
+            if kind == "drag":
+                self._drag(params["which"], params["dx"], params["dy"],
+                           shift=params.get("shift", False),
+                           sx=params.get("sx"), sy=params.get("sy"),
+                           ctrl=params.get("ctrl", False),
+                           tool=params.get("tool"))
+            elif kind == "wheel":
+                self._wheel(params["which"], params["delta"])
+        finally:
+            self._sync_view_applying = False
+
+    def sync_view_get_scale(self):
+        """Pane-A zoom (half-height mm, _ps) — the reference for the same-scale
+        option offered on SyncView entry."""
+        try:
+            return float(self._ps["A"])
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def sync_view_set_scale(self, ps) -> None:
+        """Force both panes to *ps* (same-scale lock) and redraw."""
+        try:
+            for k in ("A", "B"):
+                self._ps[k] = max(1e-3, float(ps))
+        except Exception:                                # noqa: BLE001
+            return
+        self._refresh()
 
     def _paging_sign(self, which):
         """+1/-1 so that moving _center by +n advances the OTHER pane's
