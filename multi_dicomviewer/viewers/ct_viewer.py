@@ -14333,9 +14333,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # ONLY: a vertical double-headed arrow at the line centre showing
                 # the cross-section level slides along the axis (the "normal
                 # up/down move" line). Not drawn on the short-axis pane.
-                vh = max(self._lv_view_half(key))
-                ah = 0.13 * vh                       # shaft half-length
-                hs = 0.05 * vh                       # arrowhead size
+                # Match the SIZE of the normal centreline move-hint arrows
+                # (_move_arrow_pd: shaft half = 0.0384·ps, head = 0.019·ps) — the
+                # SAX arrows were ~3× too big.
+                ps_k = p.ren.GetActiveCamera().GetParallelScale()
+                ah = 0.0384 * ps_k                   # shaft half-length
+                hs = 0.019 * ps_k                    # arrowhead size
                 arrows = [
                     [(cx, y - ah), (cx, y + ah)],                     # shaft
                     [(cx - hs, y + ah - hs), (cx, y + ah),
