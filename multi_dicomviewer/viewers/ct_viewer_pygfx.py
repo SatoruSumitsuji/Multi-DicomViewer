@@ -7176,6 +7176,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                     != QMessageBox.StandardButton.Yes:
                 return
         self._lv_valve_edit = None
+        # Drawing is done — turn Measure back OFF (it was auto-enabled by Draw) so
+        # the selector isn't left in measure mode, and release any post-modal grab
+        # (macOS dead-buttons recovery).
+        if self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures.get(k, [])
                                  if not (m.get("type") == "ellipse"
@@ -7183,6 +7189,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                          and m.get("_lvv") is None
                                          and m.get("_lv") is None)]
             self._overlay[k].update()
+        self._reset_pointer_state()
         self._lv_update_submode_ui()
 
     def _lv_valve_draw(self) -> None:
@@ -7207,6 +7214,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         (that is Hide/Show or the button's right-click)."""
         self._lv_capture_valve_common(self._lv_valve_edit or "mitral",
                                       from_confirm=True)
+        self._reset_pointer_state()          # macOS: release any post-modal grab
         self._lv_update_submode_ui()
 
     def _lv_valve_clear(self) -> None:
@@ -7595,6 +7603,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)  # saved → exact
         QMessageBox.information(self.window(), t("LV"),
                                t("Saved: {p}", p=os.path.basename(path)))
+        self._reset_pointer_state()          # macOS: release any post-modal grab
 
     def _lv_load_valve(self, which) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
@@ -8757,6 +8766,12 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _lvv_prompt(self, text) -> None:
         from PyQt6.QtWidgets import QMessageBox
         QMessageBox.information(self.window(), t("LV Vol"), text)
+        # macOS: a modal shown while the canvas still holds an implicit mouse grab
+        # leaves that grab stuck after the dialog closes — clicks then divert to
+        # the canvas and every toolbar/LV button goes dead (reported after the
+        # MV Draw→Confirm→Save→Exit flow, whose Draw prompt is this dialog).
+        # Releasing the grab here recovers it.
+        self._reset_pointer_state()
 
     def _lvv_toggle(self, *args) -> None:
         from PyQt6.QtWidgets import QMessageBox
