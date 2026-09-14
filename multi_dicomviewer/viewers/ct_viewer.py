@@ -13115,7 +13115,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """'Fit MV' — after the MV plane is updated, CONVERGE the active border to
         it (per traced long-axis plane): DELETE the points on the left-atrium
         (anti-apex) side of the MV plane, then MOVE the two remaining BASAL end
-        points onto the MV line at a fixed 10 mm from the MV centre, each on its
+        points onto the MV line at a fixed 5 mm from the MV centre, each on its
         own side of the long axis. The apex end is never touched. Undoable;
         re-draws + invalidates the volume."""
         from PyQt6.QtWidgets import QMessageBox
@@ -13149,7 +13149,7 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         def _snap_to_mv_line(P, phi):
             """Converge P (a basal endpoint, in the meridian plane at phi) onto the
-            MV line (MV plane ∩ meridian plane) at a FIXED 10 mm from the MV centre
+            MV line (MV plane ∩ meridian plane) at a FIXED 5 mm from the MV centre
             c, on the SAME side as P. The MV centre sits on the LV long axis (which
             meets the MV line there), so staying on P's side keeps the endpoint in
             its own half — it never crosses the long axis."""
@@ -13164,7 +13164,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return P
             L = L / Ln
             s = float(np.sign(float((P - c) @ L))) or 1.0   # P's side along the line
-            return c + 10.0 * s * L
+            return c + 5.0 * s * L
 
         before = self._lv_geom_snap()
         changed = False
