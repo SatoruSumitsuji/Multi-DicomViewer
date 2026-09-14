@@ -444,6 +444,13 @@ class _PygfxPane:
     """One MPR pane: a wgpu canvas + scene + ortho camera + a Volume whose
     VolumeSliceMaterial cuts the oblique slice on the GPU."""
 
+    #: Class-level re-entrancy guard shared by BOTH panes. macOS 'bitmap'
+    #: force_draw() calls processEvents(), which re-enters the Qt event loop and
+    #: can invoke the OTHER pane's draw mid-draw — cross-pane recursion that was
+    #: behind the entering-Epi freeze / left-pane-white / dead-button states. A
+    #: shared flag drops any re-entrant force_draw so the nesting can't recurse.
+    _RENDERING = False
+
     def __init__(self):
         # ondemand: only redraw when the viewer calls render() (request_draw).
         self.canvas = RenderCanvas(update_mode="ondemand")
@@ -503,28 +510,27 @@ class _PygfxPane:
         self.scene.add(self.mesh)
 
     def render(self, sync: bool = False) -> None:
-        # DEFAULT (sync=False): request_draw() just SCHEDULES a redraw for the
-        # next paint — it does NOT re-enter the Qt event loop. force_draw() on
-        # macOS re-enters via processEvents(), which let rendercanvas's loop
-        # watchdog deliver a close() to this canvas in the MIDDLE of a click
-        # handler (LV/Epi relayout ran a _refresh→render there). That mid-handler
-        # re-entrancy was the root of the entering-Epi FREEZE and, after
-        # WA_DeleteOnClose was cleared, the follow-on "left pane goes white / tool
-        # buttons dead" state. Scheduling the draw instead keeps the event loop
-        # non-re-entrant, so the canvas is never torn down under us.
-        # sync=True (force_draw) is used ONLY for the snapshot readback, which
-        # must be synchronous and is not called from inside an interactive
-        # handler.
+        # force_draw renders SYNCHRONOUSLY so the GPU slice tracks Zoom / MOVE /
+        # scale changes with no lag (request_draw's async schedule left Zoom and
+        # the SAX default scale unpainted). The danger is macOS 'bitmap'
+        # force_draw calling processEvents() and re-entering the event loop
+        # mid-draw (recursing into the other pane / the scheduler). The shared
+        # _RENDERING guard drops any such re-entrant call — the skipped pane just
+        # redraws on its next request — so the nesting can't recurse into the
+        # freeze / white-pane / dead-button state. `sync` is accepted for API
+        # symmetry (the snapshot readback) but both paths force_draw now.
+        if _PygfxPane._RENDERING:
+            return
+        _PygfxPane._RENDERING = True
         try:
-            if sync:
-                self.canvas.force_draw()
-            else:
-                self.canvas.request_draw()
+            self.canvas.force_draw()
         except Exception:                                # noqa: BLE001
             try:
                 self.canvas.request_draw()
             except Exception:                            # noqa: BLE001
                 pass
+        finally:
+            _PygfxPane._RENDERING = False
 
 
 _BORDER = 3  # px; matches the active-pane QFrame border so children inset
@@ -985,8 +991,12 @@ class _Overlay(QWidget):
                 # ONLY: a vertical double-headed arrow at the line centre showing
                 # the cross-section level slides along the axis (the "normal
                 # up/down move" line). Not on the short-axis pane.
-                ah = 0.13 * max(v._lv_view_half(key))    # shaft half-length
-                ahs = 0.05 * max(v._lv_view_half(key))   # arrowhead size
+                # Match the SIZE of the normal centreline move-hint arrows
+                # (_paint_gesture_arrow 'move': shaft half = 0.0384·ps, head =
+                # 0.019·ps) — the SAX arrows were ~3× too big.
+                ps_k = float(v._ps[key])
+                ah = 0.0384 * ps_k                       # shaft half-length
+                ahs = 0.019 * ps_k                       # arrowhead size
                 p.drawPolyline(QPolygonF([S((0.0, y - ah)), S((0.0, y + ah))]))
                 p.drawPolyline(QPolygonF([
                     S((-ahs, y + ah - ahs)), S((0.0, y + ah)),
@@ -11473,6 +11483,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 self._fit_pane(sa)                   # fallback: normal fit
         for k in (la, sa):
+            # RE-RENDER the GPU slice after the scale change: _config_cam only
+            # reconfigures the camera, and _overlay.update() repaints just the
+            # QPainter overlay — without this the CT image kept the OLD scale
+            # (the "SAX default size not reflected" report). render() is the
+            # re-entrancy-guarded force_draw.
+            self.pane[k].render()
             self._overlay[k].update()
 
     def _lv_sax_short_scale(self, ax, along0):
