@@ -2512,7 +2512,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             # SHIFT held while drawing constrains the shape: Ellipse → 正円,
             # Line → 縦横 (axis-aligned). Consumed by the draft/commit.
             _sh = "Shift" in _mods
-            self._meas_circle = _sh
+            # MV/AoV valve-edit draws a TRUE CIRCLE (正円) by default — the annulus
+            # is modelled as a circle, so force the constraint on while editing a
+            # valve without needing Shift (Shift still forces it elsewhere).
+            _valve = getattr(self, "_lv_valve_edit", None) is not None
+            self._meas_circle = _sh or _valve
             self._meas_ortho = _sh
             # Left-click MEASURES while a type is selected or a Center-Angle
             # pick is in progress, and it also grabs an existing measure's
@@ -2603,8 +2607,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._meas_drag:
                 # Keep the Shift 縦横/正円 constraint live during the drag.
                 _sh = "Shift" in (ev.get("modifiers") or ())
+                _valve = getattr(self, "_lv_valve_edit", None) is not None
                 self._meas_ortho = _sh
-                self._meas_circle = _sh
+                self._meas_circle = _sh or _valve   # valve annulus = 正円
                 self._measure_drag(key, x, y)
                 return
             if self._draft and self._draft["pane"] == key:
@@ -2614,8 +2619,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # here, not the drag branch) — else the Ellipse preview stays an
                 # ellipse while Shift is held.
                 _sh = "Shift" in (ev.get("modifiers") or ())
+                _valve = getattr(self, "_lv_valve_edit", None) is not None
                 self._meas_ortho = _sh
-                self._meas_circle = _sh
+                self._meas_circle = _sh or _valve   # valve annulus = 正円
                 self._clear_hover_handle()
                 self._meas_hover = self._disp_to_world(key, x, y)
                 self._lv_apex_hover(key, x, y)     # glow apex if cursor in range
@@ -7114,16 +7120,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_submode_ui()
 
     def _lv_valve_draw(self) -> None:
-        """Draw step: guide the user. Measure is NOT auto-enabled (the view
-        usually needs aligning first); the type is preset to Ellipse so it is
-        armed the moment the user turns Measure on. Confirm then sets the plane."""
+        """Draw step: arm drawing right away — set the Ellipse type AND turn
+        Measure ON (reconsidered: auto-on is handier than align-first). While a
+        valve is being edited the Ellipse is forced to a TRUE CIRCLE (正円, see
+        the press/drag handlers), so a plain drag draws the annulus circle; press
+        Confirm to set the plane from it."""
         which = self._lv_valve_edit or "mitral"
-        self._set_measure_type("ellipse")      # preset type; does NOT enable Measure
+        self._set_measure_type("ellipse")      # arm Ellipse
+        if not self._meas_on:                  # auto-enable Measure
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
         vname = "MV" if which == "mitral" else "AoV"
         self._lvv_prompt(t(
-            "Align the view first, then draw the {v} annulus with Measure → "
-            "Ellipse (hold Shift for a true circle) and press Confirm.")
-            .format(v=vname))
+            "Draw the {v} annulus as a circle (drag on the annulus), then press "
+            "Confirm.").format(v=vname))
 
     def _lv_valve_confirm(self) -> None:
         """Confirm step: set/UPDATE the valve plane from the drawn Ellipse.

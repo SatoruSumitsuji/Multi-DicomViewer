@@ -1023,7 +1023,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # CIRCLE (正円), a Line → axis-aligned (縦横直線). Read here (the press
             # carries the modifiers) and consumed by the drag/commit.
             _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            self._owner._meas_circle = _sh
+            # MV/AoV valve-edit draws a TRUE CIRCLE (正円) by default — the annulus
+            # is modelled as a circle, so force the constraint on while editing a
+            # valve without needing Shift (Shift still forces it elsewhere).
+            _valve = getattr(self._owner, "_lv_valve_edit", None) is not None
+            self._owner._meas_circle = _sh or _valve
             self._owner._meas_ortho = _sh
             started = self._owner._measure_left(
                 self._which, e.position().x(), e.position().y()
@@ -1089,8 +1093,9 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # Keep the draw-constraint live so the Shift 縦横/正円 preview tracks
             # the modifier during the drag, not only at press.
             _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            _valve = getattr(self._owner, "_lv_valve_edit", None) is not None
             self._owner._meas_ortho = _sh
-            self._owner._meas_circle = _sh
+            self._owner._meas_circle = _sh or _valve   # valve annulus = 正円
             self._owner._measure_drag(
                 self._which, e.position().x(), e.position().y()
             )
@@ -5844,17 +5849,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_update_submode_ui()
 
     def _lv_valve_draw(self) -> None:
-        """Draw step: guide the user. Measure is NOT auto-enabled here — the view
-        usually needs aligning first; the user turns Measure → Ellipse on when
-        ready. The measure TYPE is preset to Ellipse so it is armed the moment
-        they enable Measure. Confirm then sets the plane from that ellipse."""
+        """Draw step: arm drawing right away — set the Ellipse type AND turn
+        Measure ON (reconsidered: auto-on is handier than align-first). While a
+        valve is being edited the Ellipse is forced to a TRUE CIRCLE (正円, see
+        the press/drag handlers), so a plain drag draws the annulus circle; press
+        Confirm to set the plane from it."""
         which = self._lv_valve_edit or "mitral"
-        self._set_measure_type("ellipse")      # preset type; does NOT enable Measure
+        self._set_measure_type("ellipse")      # arm Ellipse
+        if not self._meas_on:                  # auto-enable Measure
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
         vname = "MV" if which == "mitral" else "AoV"
         self._lvv_prompt(t(
-            "Align the view first, then draw the {v} annulus with Measure → "
-            "Ellipse (hold Shift for a true circle) and press Confirm.")
-            .format(v=vname))
+            "Draw the {v} annulus as a circle (drag on the annulus), then press "
+            "Confirm.").format(v=vname))
 
     def _lv_valve_confirm(self) -> None:
         """Confirm step: set the valve plane from the drawn Ellipse. Re-pressing
