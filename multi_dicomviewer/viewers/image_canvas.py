@@ -1585,8 +1585,8 @@ class ImageCanvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
 
-        # Free display rotation (IVUS + CoSync panes): an EMPTY left-drag on
-        # the image body rotates the image about the centre, MultiSync/CoSync-
+        # Free display rotation (IVUS + MultiReg panes): an EMPTY left-drag on
+        # the image body rotates the image about the centre, MultiSync/MultiReg-
         # style. Kept at the LOWEST priority so it never steals a measurement,
         # a handle/label edit, or the long-axis centre/cut-line gestures (all
         # handled above). Suppressed while a measure tool is armed (so drawing

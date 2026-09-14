@@ -1568,12 +1568,12 @@ class MainWindow(QMainWindow):
         ))
         self._coaxial_act.triggered.connect(self._open_coaxial_eval)
         tm.addAction(self._coaxial_act)
-        self._coreg_act = QAction(t("CoSync…"), self)
+        self._coreg_act = QAction(t("MultiReg…"), self)
         self._coreg_act.setToolTip(t(
-            "Co-register IVUS pull-back frames to positions on the angio "
-            "vessel: trace a guide, pin CoSync landmarks, then scrubbing "
-            "the IVUS drives a marker along the angio "
-            "(needs at least one IVUS and one XA series loaded)"
+            "Multi-registration of IVUS / coronary-CT short-axis / XA angio: "
+            "trace a guide, pin MultiReg landmarks, then scrubbing a driver "
+            "moves a marker along the angio (needs at least one pull-back / "
+            "short-axis or XA series shown)"
         ))
         self._coreg_act.triggered.connect(self._open_coreg)
         tm.addAction(self._coreg_act)
@@ -1772,19 +1772,9 @@ class MainWindow(QMainWindow):
               "左室長補正で分率連動に切替。"), 6000)
 
     def _open_coreg(self) -> None:
-        """Tools ▸ CoSync — single entry, then branch on what's shown: IVUS/XA
-        (or a coronary-CPR CT) → the IVUS-主体 snapshot window (CoregWindow);
-        else two LV-analysed CT panes → the CT-主体 live Diastole/Systole link."""
-        # CT-主体 branch: no IVUS/XA pull-back, but two LV-analysed CT panes.
-        has_pullback = any(
-            (se := self._series_by_uid.get(p.shown_series_uid())) is not None
-            and se.modality in (Modality.IVUS, Modality.XA)
-            for p in self._shown_panes())
-        if not has_pullback:
-            cts = self._lv_cosync_ct_viewers()
-            if len(cts) >= 2:
-                self._start_lv_cosync(cts[:2])
-                return
+        """Tools ▸ MultiReg — the IVUS / XA / coronary-CT co-registration window
+        (CoregWindow). (The former Diastole↔Systole 2-CT branch is retired; a
+        separate SyncView tool will handle 3-D CT compare.)"""
         self._open_coreg_ivus()
 
     def _open_coreg_ivus(self) -> None:
@@ -1833,18 +1823,15 @@ class MainWindow(QMainWindow):
                 if spec is not None:
                     cpr_specs.append(spec)
         specs = specs[:6]
-        # A CT short-axis is a driver too (is_ivus in the CoSync window), so it
-        # satisfies the "need a pull-back" requirement.
-        has_ivus = (any(s.modality == Modality.IVUS for s, *_ in specs)
-                    or bool(cpr_specs))
+        # No IVUS-required gate any more: MultiReg co-registers ANY mix of an
+        # IVUS pull-back, a coronary-CT short-axis (a driver too), and XA angio —
+        # e.g. CT-MPR + XA with no IVUS. Only require SOMETHING to show.
         specs = (specs + cpr_specs)[:6]
-        if not has_ivus:
+        if not specs:
             QMessageBox.information(
-                self, t("CoSync"),
-                t("Show at least one IVUS pull-back in the panes first "
-                  "(XA angio is optional). For a Diastole↔Systole CT compare, "
-                  "show TWO CT panes both in LV Vol analysis (with the long axis "
-                  "set) and press CoSync again."),
+                self, t("MultiReg"),
+                t("Show at least one IVUS pull-back, a coronary CT short-axis, "
+                  "or an XA angio in the panes first, then press MultiReg."),
             )
             return
         self._coreg_win = CoregWindow(specs)
