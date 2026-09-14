@@ -13149,28 +13149,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         eps = 1e-6
 
         def _snap_to_mv_line(P, phi):
-            """Converge P (a basal endpoint, in the meridian plane at phi) onto the
-            MV line (MV plane ∩ meridian plane) at the point whose RADIAL distance
-            from the LV long axis is 5 mm, on the SAME wall side as P (never
-            crossing the axis). The MV centre c is on the axis (radial 0), so
-            radial(c + t·L) = t·(L·e_s) with e_s the meridian radial dir; solve t
-            for 5 mm (a tilted MV plane needs t≠5 to still land 5 mm off-axis)."""
+            """Place the basal endpoint 5 mm RADIAL from the LV long axis, on P's
+            own wall side, at the MV-centre (base) level: c + 5·s·e_s, where e_s is
+            the meridian's unit radial direction (⟂ the axis) and c (the MV centre)
+            is on the axis. Since e_s ⟂ axis, this is exactly 5 mm off-axis with NO
+            move along the axis. (Constraining it to a TILTED MV *line* instead
+            shot the point far up/down the axis — the reported 'line goes straight
+            up'.)"""
             e_s = np.asarray(ax.meridian_dir(phi), float)   # radial dir (⟂ axis)
-            m_n = np.cross(axis, e_s)
-            nrm = float(np.linalg.norm(m_n))
-            if nrm < eps:
+            ne = float(np.linalg.norm(e_s))
+            if ne < eps:
                 return P
-            m_n = m_n / nrm
-            L = np.cross(n, m_n)                      # MV line direction (both planes)
-            Ln = float(np.linalg.norm(L))
-            if Ln < eps:                             # MV ∥ meridian (degenerate)
-                return P
-            L = L / Ln
-            Le = float(L @ e_s)                       # MV line's radial component
-            if abs(Le) < eps:                        # MV line ∥ axis → no radial extent
-                return P
+            e_s = e_s / ne
             s = float(np.sign(float((P - apex) @ e_s))) or 1.0   # P's wall side
-            return c + (5.0 * s / Le) * L
+            return c + 5.0 * s * e_s
 
         before = self._lv_geom_snap()
         changed = False
