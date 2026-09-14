@@ -13115,9 +13115,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         """'Fit MV' — after the MV plane is updated, CONVERGE the active border to
         it (per traced long-axis plane): DELETE the points on the left-atrium
         (anti-apex) side of the MV plane, then MOVE the two remaining BASAL end
-        points onto the MV plane's line WITHIN that section (keeps them in the
-        plane). The apex end is never touched (it is a whole LV from the base).
-        Undoable; re-draws + invalidates the volume."""
+        points onto the MV line at a fixed 10 mm from the MV centre, each on its
+        own side of the long axis. The apex end is never touched. Undoable;
+        re-draws + invalidates the volume."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv.get("phase") != "contour":
             return
@@ -13148,25 +13148,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         eps = 1e-6
 
         def _snap_to_mv_line(P, phi):
-            """Move P (in the meridian plane at phi) onto the MV plane, staying IN
-            the meridian plane — project along the in-plane normal to the MV line
-            (MV plane ∩ meridian plane)."""
+            """Converge P (a basal endpoint, in the meridian plane at phi) onto the
+            MV line (MV plane ∩ meridian plane) at a FIXED 10 mm from the MV centre
+            c, on the SAME side as P. The MV centre sits on the LV long axis (which
+            meets the MV line there), so staying on P's side keeps the endpoint in
+            its own half — it never crosses the long axis."""
             m_n = np.cross(axis, np.asarray(ax.meridian_dir(phi), float))
             nrm = float(np.linalg.norm(m_n))
             if nrm < eps:
                 return P
             m_n = m_n / nrm
-            L = np.cross(n, m_n)                      # line direction (in both planes)
-            if float(np.linalg.norm(L)) < eps:        # MV ∥ meridian (degenerate)
+            L = np.cross(n, m_n)                      # MV line direction (both planes)
+            Ln = float(np.linalg.norm(L))
+            if Ln < eps:                             # MV ∥ meridian (degenerate)
                 return P
-            L = L / float(np.linalg.norm(L))
-            w = np.cross(m_n, L)                      # in-meridian normal to the line
-            w = w / (float(np.linalg.norm(w)) or 1.0)
-            d = float((P - c) @ n)
-            wn = float(w @ n)
-            if abs(wn) < eps:
-                return P
-            return P - (d / wn) * w
+            L = L / Ln
+            s = float(np.sign(float((P - c) @ L))) or 1.0   # P's side along the line
+            return c + 10.0 * s * L
 
         before = self._lv_geom_snap()
         changed = False
