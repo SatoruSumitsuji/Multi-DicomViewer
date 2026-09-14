@@ -502,13 +502,29 @@ class _PygfxPane:
         self.mesh.local.position = (-sx, -sy, -sz)        # undo the 1-voxel pad
         self.scene.add(self.mesh)
 
-    def render(self) -> None:
-        # force_draw renders synchronously so the GPU slice tracks the cursor
-        # with no one-frame lag behind the QPainter overlay (MOVE/recenter feel).
+    def render(self, sync: bool = False) -> None:
+        # DEFAULT (sync=False): request_draw() just SCHEDULES a redraw for the
+        # next paint — it does NOT re-enter the Qt event loop. force_draw() on
+        # macOS re-enters via processEvents(), which let rendercanvas's loop
+        # watchdog deliver a close() to this canvas in the MIDDLE of a click
+        # handler (LV/Epi relayout ran a _refresh→render there). That mid-handler
+        # re-entrancy was the root of the entering-Epi FREEZE and, after
+        # WA_DeleteOnClose was cleared, the follow-on "left pane goes white / tool
+        # buttons dead" state. Scheduling the draw instead keeps the event loop
+        # non-re-entrant, so the canvas is never torn down under us.
+        # sync=True (force_draw) is used ONLY for the snapshot readback, which
+        # must be synchronous and is not called from inside an interactive
+        # handler.
         try:
-            self.canvas.force_draw()
-        except Exception:
-            self.canvas.request_draw()
+            if sync:
+                self.canvas.force_draw()
+            else:
+                self.canvas.request_draw()
+        except Exception:                                # noqa: BLE001
+            try:
+                self.canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                pass
 
 
 _BORDER = 3  # px; matches the active-pane QFrame border so children inset
@@ -2852,7 +2868,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Composite the pane's GPU render (read back from wgpu) with the
         QPainter overlay into one RGB QImage. Returns None on failure."""
         pane = self.pane[key]
-        pane.render()                   # synchronous force_draw before readback
+        pane.render(sync=True)          # synchronous force_draw before readback
         try:
             rgba = pane.renderer.snapshot()      # (H, W, 4), physical pixels
         except Exception:
