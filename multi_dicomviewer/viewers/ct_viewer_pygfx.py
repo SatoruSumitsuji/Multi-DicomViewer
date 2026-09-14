@@ -6173,11 +6173,77 @@ class CTViewer(CPRMixin, AbstractViewer):
                     _, _, nrm = self._axes_for(e["key"])
                     P = self._snap_to_lumen(P, nrm)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
+                # LV border on the LONG-AXIS pane: the two BASAL endpoints ride ON
+                # the MV plane (constrain to it — only in-plane radial sliding, no
+                # off-line drift); interior points stay on their own wall (don't
+                # cross the LV axis). Parity with the VTK viewer — this constraint
+                # was missing on Mac, so a snapped endpoint could be dragged off
+                # the MV centre line.
+                if (m.get("_lv") is not None and self._lv is not None
+                        and e["key"] == self._lv.get("pane")):
+                    npts = len(m["pts3d"])
+                    if e["vi"] in (0, npts - 1):
+                        P = self._lv_project_to_mv(P)
+                    else:
+                        side = self._lv_border_side(m, e["vi"])
+                        P = self._lv_clamp_border_point(P, m["_lv"], side)
+                    m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
                 m["pts3d"][e["vi"]] = P
             self._resnap_center_angle(m)
         self._recompute_compares(e["key"])     # live-update any comparison
         self._redraw_geom(e["key"])
         self._lv_live_recapture(e["key"], m)   # edited LV border → refresh SAX
+
+    def _lv_project_to_mv(self, P):
+        """Project *P* onto the MV plane, discarding the plane-normal (base↔apex)
+        component so a dragged basal endpoint rides ON the plane (in-plane radial
+        motion preserved). Unchanged if no MV plane is set. (VTK parity.)"""
+        mv = None
+        if getattr(self, "_lv_valves", None):
+            mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return P
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (float(np.linalg.norm(n)) or 1.0)
+        P = np.asarray(P, float)
+        return P - float((P - c) @ n) * n
+
+    def _lv_border_side(self, m, vi) -> float:
+        """+1 / −1: which WALL (side of the LV axis) LV-border point *vi* is on,
+        by the sign of its in-plane radial along its meridian. 1.0 if unknown."""
+        tag = m.get("_lv")
+        if tag is None or self._lv is None or not m.get("pts3d"):
+            return 1.0
+        idx, target = tag
+        ax = self._lv["model"]._axis_for(target)
+        if ax is None or not (0 <= vi < len(m["pts3d"])):
+            return 1.0
+        angs = self._lv["model"].plane_angles()
+        e_s = np.asarray(ax.meridian_dir(angs[idx % len(angs)]), float)
+        s = float((np.asarray(m["pts3d"][vi], float) - ax.apex) @ e_s)
+        return 1.0 if s >= 0.0 else -1.0
+
+    def _lv_clamp_border_point(self, P, tag, side, s_min: float = 2.5):
+        """Keep an LV-border point on its own wall: clamp its in-plane radial so
+        it stays on *side* of the LV axis and no closer than *s_min* mm (avoids a
+        radius-0 pinch and the cross-axis meridian reassignment). Adjusts only the
+        radial component along the meridian; the along-axis position is kept."""
+        if self._lv is None or side is None or tag is None:
+            return P
+        idx, target = tag
+        ax = self._lv["model"]._axis_for(target)
+        if ax is None:
+            return P
+        angs = self._lv["model"].plane_angles()
+        e_s = np.asarray(ax.meridian_dir(angs[idx % len(angs)]), float)
+        apex = np.asarray(ax.apex, float)
+        P = np.asarray(P, float)
+        s = float((P - apex) @ e_s)
+        s_cl = side * max(s_min, side * s)
+        if abs(s_cl - s) > 1e-9:
+            P = P + (s_cl - s) * e_s
+        return P
 
     def _resnap_center_angle(self, m):
         """After the shape itself changes (a vertex / ellipse-handle drag),
