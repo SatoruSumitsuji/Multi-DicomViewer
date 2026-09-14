@@ -135,6 +135,20 @@ class FitButton(QPushButton):
         super().resizeEvent(e)
         self._relayout_text()
 
+    def showEvent(self, e) -> None:  # noqa: N802 (Qt override)
+        # Re-fit when the button becomes visible: a button shown as part of a
+        # newly revealed row may have last been sized (and elided) while hidden
+        # at a narrow width, and no resize fires if its width is unchanged on
+        # show — leaving a stale "Lo…" label until something else nudges it.
+        super().showEvent(e)
+        self._relayout_text()
+
+    def refit(self) -> None:
+        """Re-run the elide against the CURRENT width. Call after a container's
+        layout has settled (e.g. an LV bar row was just shown) so the label
+        reflects the final button width instead of an intermediate one."""
+        self._relayout_text()
+
     def _chrome_px(self) -> int:
         """Non-text width (bezel + side margins) around the label, derived from
         Qt's own size hint so it is correct on every platform (macOS rounds /

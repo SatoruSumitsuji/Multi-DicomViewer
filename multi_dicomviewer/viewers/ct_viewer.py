@@ -4159,6 +4159,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._apply_image_floor()
         except Exception:                                # noqa: BLE001
             pass
+        # Re-fit every LV-bar FitButton against its NOW-final width, so a button
+        # in a just-shown row (e.g. Apex Set/Load) shows its full label instead
+        # of a stale elide ("Lo…") left from an intermediate/hidden width.
+        self._lv_refit_bar_buttons()
+
+    def _lv_refit_bar_buttons(self) -> None:
+        """Re-run each LV-bar FitButton's elide at the current width (duck-typed
+        on `refit`, so no FitButton import is needed here)."""
+        from PyQt6.QtWidgets import QPushButton
+        w = getattr(self, "_lv_wrap", None)
+        if w is None:
+            return
+        for b in w.findChildren(QPushButton):
+            if hasattr(b, "refit"):
+                b.refit()
 
     def _lv_style_selectors(self) -> None:
         """Colour the Endo / Epi / Blood selector buttons by whether their DATA is
