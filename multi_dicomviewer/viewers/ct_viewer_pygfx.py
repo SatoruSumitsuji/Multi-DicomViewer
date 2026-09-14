@@ -11475,20 +11475,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # explicitly, so the generic fit must not fight them).
         self._refresh(reset_cam=False)
         if first:
-            # RIGHT (long-axis) pane: MV→apex length = 1/3 the pane HEIGHT
-            # (_ps = half-height, so ps = 1.5·length). Level centred vertically.
-            length = float(getattr(ax, "length_mm", 0.0))
-            if length > 1e-3:
-                self._ps[la] = 1.5 * length
-                self._config_cam(la)
-            # LEFT (short-axis) pane: Epi border MAX radius = 60% of the pane
-            # WIDTH (Epi diameter ≈ 120% of the frame width).
-            ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
-            if ps_sa is not None:
-                self._ps[sa] = ps_sa
-                self._config_cam(sa)
-            else:
-                self._fit_pane(sa)                   # fallback: normal fit
+            self._lv_sax_apply_default_scale()
         for k in (la, sa):
             # RE-RENDER the GPU slice after the scale change: _config_cam only
             # reconfigures the camera, and _overlay.update() repaints just the
@@ -11497,12 +11484,58 @@ class CTViewer(CPRMixin, AbstractViewer):
             # re-entrancy-guarded force_draw.
             self.pane[k].render()
             self._overlay[k].update()
+        if first:
+            # Re-apply once the SAX-row relayout has SETTLED the pane sizes: on
+            # entry the short-axis scale reads a pre-relayout canvas width and the
+            # generic fit could still override _view_initial, so the default size
+            # only showed after a user nudge. Re-applying next event-loop turn
+            # (correct sizes, scale locked) makes it show at once.
+            QTimer.singleShot(0, self._lv_sax_refit_default)
+
+    def _lv_sax_apply_default_scale(self) -> None:
+        """Set BOTH SAX panes to the default zoom and LOCK it (_view_initial off,
+        so a later resize/relayout auto-fit can't override it). RIGHT (long-axis)
+        pane: MV→apex spans 2/3 of the pane HEIGHT (_ps = 0.75·length). LEFT
+        (short-axis) pane: the Epi border's max radius = 90% of the pane WIDTH."""
+        lv = getattr(self, "_lv", None)
+        if lv is None or lv.get("sax") is None:
+            return
+        ax = lv["model"].axis
+        if ax is None:
+            return
+        la, sa = lv["pane"], lv.get("sax_pane")
+        if sa is None:
+            return
+        length = float(getattr(ax, "length_mm", 0.0))
+        if length > 1e-3:
+            self._ps[la] = 0.75 * length
+            self._config_cam(la)
+        ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
+        if ps_sa is not None:
+            self._ps[sa] = ps_sa
+            self._config_cam(sa)
+        else:
+            self._fit_pane(sa)                           # fallback: normal fit
+        self._view_initial = False
+
+    def _lv_sax_refit_default(self) -> None:
+        """Deferred re-apply of the SAX default scale after the row relayout has
+        settled the pane sizes, then render — so entry shows the default
+        size/place with no user nudge. No-op if SAX was left meanwhile."""
+        lv = getattr(self, "_lv", None)
+        if (lv is None or lv.get("sax") is None or self._vol is None
+                or lv.get("sax_pane") is None):
+            return
+        self._lv_sax_apply_default_scale()
+        for k in (lv["pane"], lv["sax_pane"]):
+            self.pane[k].render()
+            self._overlay[k].update()
 
     def _lv_sax_short_scale(self, ax, along0):
         """_ps for the short-axis pane so the shown Epi border's MAX radius (from
-        the axis centre) = 60% of the pane WIDTH. _ps is half the pane HEIGHT in
-        mm, so a radius that must land at 0.60·width_px needs
-        ps = rmax·height_px / (1.20·width_px). None when there is no Epi crossing
+        the axis centre) = 90% of the pane WIDTH. _ps is half the pane HEIGHT in
+        mm, so a radius that must land at 0.90·width_px needs
+        ps = rmax·height_px / (1.80·width_px). None when there is no Epi crossing
         at this level (caller falls back to a normal fit)."""
         sa = self._lv.get("sax_pane")
         if sa is None:
@@ -11528,7 +11561,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         wpx = max(1, self.pane[sa].canvas.width())
         hpx = max(1, self.pane[sa].canvas.height())
-        return rmax * hpx / (1.20 * wpx)
+        return rmax * hpx / (1.80 * wpx)
 
     def _lv_set_short_frame(self) -> None:
         lv = self._lv
