@@ -1317,6 +1317,8 @@ class MainWindow(QMainWindow):
         col.addWidget(_bar_scroll)
         # LV-CoSync control bar (hidden until a Diastole/Systole CT link is on).
         col.addWidget(self._build_lv_cosync_bar())
+        # SyncView control bar (hidden until SyncView is on).
+        col.addWidget(self._build_syncview_bar())
         col.addWidget(self._grid_host, 1)
         self.setCentralWidget(central)
         # Studies dock: minimum width = roughly one minimum-size
@@ -1862,9 +1864,80 @@ class MainWindow(QMainWindow):
                 out.append(v)
         return out
 
+    def _build_syncview_bar(self):
+        """The thin strip shown ONLY while SyncView is active: a level-sync mode
+        selector (按分 ↔ mm), a 'match scale' button and 'End SyncView'. Hidden
+        otherwise."""
+        self._syncview_link = None
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(8, 2, 8, 2)
+        lay.setSpacing(8)
+        lbl = QLabel("🔗 " + t("SyncView"))
+        f = lbl.font(); f.setBold(True); lbl.setFont(f)
+        lay.addWidget(lbl)
+        lay.addSpacing(10)
+        # LV short-axis level-sync mode: a 2-button exclusive selector, the
+        # active one filled (matches the app's other exclusive selectors) so
+        # you can always see which of 按分 / mm is in effect.
+        self._sv_level_cap = QLabel(t("レベル同期:"))
+        lay.addWidget(self._sv_level_cap)
+        self._sv_frac_btn = QPushButton(t("按分"))
+        self._sv_frac_btn.setCheckable(True)
+        self._sv_frac_btn.setToolTip(t(
+            "apex→M弁中心を 0〜100% で対応（左室長が違っても同じ相対レベルを"
+            "並べる＝フェーズ間比較向け）"))
+        self._sv_frac_btn.clicked.connect(lambda: self._sv_set_level_mode(True))
+        lay.addWidget(self._sv_frac_btn)
+        self._sv_mm_btn = QPushButton(t("mm"))
+        self._sv_mm_btn.setCheckable(True)
+        self._sv_mm_btn.setToolTip(t("apex からの絶対 mm で対応（左室長の差が見える）"))
+        self._sv_mm_btn.clicked.connect(lambda: self._sv_set_level_mode(False))
+        lay.addWidget(self._sv_mm_btn)
+        lay.addSpacing(16)
+        self._sv_scale_btn = QPushButton(t("縮尺を合わせる"))
+        self._sv_scale_btn.setToolTip(t(
+            "両ペインを同じズームに合わせ直す（各自でズームした後に）"))
+        self._sv_scale_btn.clicked.connect(self._sv_match_scale)
+        lay.addWidget(self._sv_scale_btn)
+        self._sv_exit_btn = QPushButton(t("SyncView終了"))
+        self._sv_exit_btn.clicked.connect(self._stop_syncview)
+        lay.addWidget(self._sv_exit_btn)
+        lay.addStretch(1)
+        self._syncview_bar = bar
+        bar.setVisible(False)
+        return bar
+
+    def _sv_set_level_mode(self, fraction: bool) -> None:
+        """レベル同期 按分/mm selector clicked."""
+        if getattr(self, "_syncview_link", None) is not None:
+            self._syncview_link.set_level_fraction(fraction)
+        self._sv_update_level_buttons(fraction)
+
+    def _sv_update_level_buttons(self, fraction: bool) -> None:
+        active = "background:#1f77b4;color:white;"
+        self._sv_frac_btn.setChecked(fraction)
+        self._sv_mm_btn.setChecked(not fraction)
+        self._sv_frac_btn.setStyleSheet(active if fraction else "")
+        self._sv_mm_btn.setStyleSheet("" if fraction else active)
+
+    def _sv_sync_bar_state(self) -> None:
+        """Enable the level-sync selector only when both CTs are LV-volume (a
+        level to link exists); reflect the current mode."""
+        link = getattr(self, "_syncview_link", None)
+        lvl = link is not None and link.level_link_active()
+        for w in (self._sv_level_cap, self._sv_frac_btn, self._sv_mm_btn):
+            w.setEnabled(lvl)
+        if lvl:
+            self._sv_update_level_buttons(link.level_fraction)
+
+    def _sv_match_scale(self) -> None:
+        if getattr(self, "_syncview_link", None) is not None:
+            self._syncview_link.match_scale()
+
     def _toggle_syncview(self) -> None:
-        """Tools ▸ SyncView (checkable): link / unlink the two shown CTs for
-        mirrored view operations."""
+        """Tools ▸ SyncView (checkable): link / unlink the two shown CTs so mouse
+        / keyboard operations in either are mirrored to the other."""
         if getattr(self, "_syncview_link", None) is not None:
             self._stop_syncview()
             return
@@ -1873,35 +1946,50 @@ class MainWindow(QMainWindow):
             self._syncview_act.setChecked(False)
             QMessageBox.information(
                 self, t("SyncView"),
-                t("Show two 3-D CT series (one per pane) in plain MPR / 2-D "
-                  "view first, then turn SyncView on."),
+                t("Show two CT series (one per pane) first, then turn "
+                  "SyncView on."),
             )
             return
         viewers = viewers[:2]
+        # 1) Confirm starting from the CURRENT views as the initial position.
+        if QMessageBox.question(
+                self, t("SyncView"),
+                t("Start SyncView with the two panes' CURRENT views as the "
+                  "initial position?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+        ) != QMessageBox.StandardButton.Yes:
+            self._syncview_act.setChecked(False)
+            return
         from multi_dicomviewer.ui.sync_view import SyncViewLink
         self._syncview_link = SyncViewLink(viewers[0], viewers[1], self)
-        # Offer the same-scale lock ("同一縮尺にしますか？"). The user has already
-        # aligned the two views; matching the zoom makes the mirrored deltas
-        # keep them at 1:1 scale for a true side-by-side comparison.
-        ans = QMessageBox.question(
-            self, t("SyncView"),
-            t("Match the two CTs to the same zoom (scale) now?\n"
-              "Choose No to keep each view's current zoom."),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes,
-        )
-        if ans == QMessageBox.StandardButton.Yes:
+        # Default the level-sync to 按分 (fraction) — the phase-comparison case.
+        if self._syncview_link.level_link_active():
+            self._syncview_link.set_level_fraction(True)
+        # 2) Offer the same-scale lock.
+        if QMessageBox.question(
+                self, t("SyncView"),
+                t("Match the two CTs to the same zoom (scale) now?\n"
+                  "Choose No to keep each view's current zoom."),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+        ) == QMessageBox.StandardButton.Yes:
             self._syncview_link.match_scale()
         self._syncview_act.setChecked(True)
+        self._syncview_bar.setVisible(True)
+        self._sv_sync_bar_state()
 
     def _stop_syncview(self) -> None:
-        """Drop the SyncView link (from the menu toggle or when panes change)."""
+        """Drop the SyncView link (from the menu toggle, the bar, or when the
+        panes change)."""
         link = getattr(self, "_syncview_link", None)
         if link is not None:
             link.teardown()
             self._syncview_link = None
         if getattr(self, "_syncview_act", None) is not None:
             self._syncview_act.setChecked(False)
+        if getattr(self, "_syncview_bar", None) is not None:
+            self._syncview_bar.setVisible(False)
 
     # ============================ Case Presentation ====================
     def _open_case_presentation(self) -> None:

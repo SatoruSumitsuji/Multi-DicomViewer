@@ -2031,6 +2031,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
     #: while SyncView-linked and NOT while applying a mirrored op (no echo).
     sync_view_op = pyqtSignal(str, object)
+    #: SyncView LV-volume level link: the short-axis LEVEL changed — mm ALONG the
+    #: LV long axis from the apex. The shell mirrors it to the paired CT (raw mm,
+    #: or apex→base fraction under 按分). Emitted only while level-linked + paged.
+    lv_cosync_level_changed = pyqtSignal(float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2296,6 +2300,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: operations; _applying guards against echoing a mirrored op back.
         self._sync_view_on = False
         self._sync_view_applying = False
+        #: SyncView LV-volume level link: while True, paging steps along the LV
+        #: long axis and broadcasts the level (lv_cosync_level_changed).
+        self._lv_cosync_on = False
 
         self.pane = {"A": _PygfxPane(), "B": _PygfxPane()}
         self._overlay = {"A": _Overlay(self, "A"), "B": _Overlay(self, "B")}
@@ -4892,15 +4899,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh(lod=True, only=only_pane)
         # SyncView: mirror this gesture to the paired CT as the SAME delta.
         # SPIN is excluded (its angle is derived from screen-absolute cursor
-        # position about each pane's own centre — not a portable delta).
-        if (self._sync_view_on and not self._sync_view_applying
-                and t in ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")):
+        # position about each pane's own centre — not a portable delta). PAGING
+        # is excluded while the LV-level link is on (_lv_cosync_on): the level is
+        # mirrored as mm / apex→base fraction instead, not as a raw slice delta.
+        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK") \
+            if getattr(self, "_lv_cosync_on", False) \
+            else ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")
+        if (self._sync_view_on and not self._sync_view_applying and t in _ops):
             self.sync_view_op.emit("drag", {
                 "which": which, "dx": dx, "dy": dy, "shift": shift,
                 "sx": sx, "sy": sy, "ctrl": ctrl, "tool": t})
 
     def _wheel(self, which, delta):
         if self._vol is None:
+            return
+        # SyncView (LV-volume level link): paging steps ALONG the LV long axis and
+        # broadcasts the level so the paired CT mirrors it (mm / apex→base
+        # fraction). Takes priority so both views page together.
+        if (getattr(self, "_lv_cosync_on", False)
+                and self._lvv is not None and self._lv is None):
+            self.lv_cosync_step(1 if delta > 0 else -1)
             return
         # SAX: the wheel scrolls the cross-section LEVEL (up = toward the apex),
         # so you can page through the short-axis stack without grabbing the line.
@@ -4933,14 +4951,97 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ------------------------------------------------ SyncView contract
     def sync_view_available(self) -> bool:
-        """Eligible for a SyncView link: a plain-MPR / 2-D CT with a volume and
-        no derived-view lock (LV analysis, short-axis, CPR) that mirroring would
-        corrupt."""
-        return (self._vol is not None
-                and self._lv is None
-                and getattr(self, "_lvv", None) is None
-                and not (hasattr(self, "cpr_active") and self.cpr_active())
-                and not self._lv_sax_active())
+        """Eligible for a SyncView link: any CT with a volume loaded. LV-analysis
+        / short-axis / CPR views are fine — SyncView mirrors only VIEW operations
+        (pan/zoom/rotate/W-L/paging/thickness), never the LV geometry."""
+        return self._vol is not None
+
+    # ------------------------------------------------ LV-volume level link
+    # (SyncView reuses this contract — parity with the VTK viewer — to mirror the
+    #  short-axis LEVEL along the apex→MV axis as mm or apex→base fraction.)
+    def _lv_cosync_axis(self):
+        """(apex, axis_unit, along_min_mm, along_max_mm) of the LV long axis, or
+        None. Range = a nominal apex..Epi-length window."""
+        epi = getattr(self, "_lvv_epi_surf", None)
+        ax = getattr(epi, "axis", None) if epi is not None else None
+        if ax is None:
+            return None
+        apex = np.asarray(ax.apex, float)
+        axis = np.asarray(ax.axis, float)
+        nrm = float(np.linalg.norm(axis))
+        if nrm < 1e-9:
+            return None
+        axis = axis / nrm
+        return apex, axis, 0.0, (float(getattr(ax, "length_mm", 0.0)) or 90.0)
+
+    def lv_cosync_available(self) -> bool:
+        return (self._lvv is not None and self._lv is None
+                and self._lv_cosync_axis() is not None)
+
+    def set_lv_cosync_on(self, on: bool) -> None:
+        self._lv_cosync_on = bool(on)
+
+    def lv_cosync_length_mm(self):
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        _apex, _axis, amin, amax = info
+        return max(1e-3, amax - amin)
+
+    def lv_cosync_level_mm(self):
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        apex, axis, _amin, _amax = info
+        return float((np.asarray(self._center, float) - apex) @ axis)
+
+    def lv_cosync_set_level_mm(self, mm, silent: bool = False) -> None:
+        info = self._lv_cosync_axis()
+        if info is None or self._vol is None:
+            return
+        apex, axis, amin, amax = info
+        mm = float(np.clip(float(mm), amin, amax))
+        cur = float((np.asarray(self._center, float) - apex) @ axis)
+        mv = (mm - cur) * axis
+        self._center = np.asarray(self._center, float) + mv
+        try:
+            self._pc["A"] = np.asarray(self._pc["A"], float) + mv
+        except Exception:                                # noqa: BLE001
+            pass
+        self._clamp_center()
+        self._view_initial = False
+        self._refresh(lod=True)
+        if not silent:
+            self.lv_cosync_level_changed.emit(float(mm))
+
+    def lv_cosync_level_fraction(self):
+        info = self._lv_cosync_axis()
+        if info is None:
+            return None
+        apex, axis, amin, amax = info
+        span = max(1e-3, amax - amin)
+        cur = float((np.asarray(self._center, float) - apex) @ axis)
+        return (cur - amin) / span
+
+    def lv_cosync_set_level_fraction(self, frac, silent: bool = False) -> None:
+        info = self._lv_cosync_axis()
+        if info is None:
+            return
+        _apex, _axis, amin, amax = info
+        self.lv_cosync_set_level_mm(amin + float(frac) * (amax - amin),
+                                    silent=silent)
+
+    def lv_cosync_step(self, step: int) -> None:
+        """One paging notch along the long axis (used when SyncView-level-on)."""
+        info = self._lv_cosync_axis()
+        if info is None:
+            return
+        _apex, _axis, amin, amax = info
+        span = max(1.0, amax - amin)
+        dmm = float(step) * max(0.5, span / 48.0)        # ~48 steps apex→base
+        cur = self.lv_cosync_level_mm()
+        if cur is not None:
+            self.lv_cosync_set_level_mm(cur + dmm)
 
     def set_sync_view_on(self, on: bool) -> None:
         """Enter/leave SyncView. While ON, view gestures are broadcast
