@@ -30,17 +30,42 @@ class _ChromeScrollArea(QScrollArea):
     than hiding the whole container."""
     _mdv_chrome_scroll = True
 
+    def _wants_hbar(self) -> bool:
+        """The content is WIDER than the viewport → a horizontal scrollbar will
+        appear (e.g. a wide control bar in a narrow multi-pane column)."""
+        w = self.widget()
+        if w is None:
+            return False
+        vw = self.viewport().width()
+        return vw > 0 and w.sizeHint().width() > vw
+
     def sizeHint(self) -> QSize:
         base = super().sizeHint()
         w = self.widget()
-        if w is not None:
-            return QSize(base.width(),
-                         w.sizeHint().height() + 2 * self.frameWidth())
-        return base
+        if w is None:
+            return base
+        h = w.sizeHint().height() + 2 * self.frameWidth()
+        # When a horizontal scrollbar is needed it is drawn INSIDE the viewport
+        # and steals from the bottom, hiding the last control row (the reported
+        # "3rd row clipped only in a narrow 1×2 column"). Reserve its height so
+        # the parent layout gives us enough room to show every row above it.
+        if self._wants_hbar():
+            h += self.horizontalScrollBar().sizeHint().height()
+        return QSize(base.width(), h)
 
     def minimumSizeHint(self) -> QSize:
         s = super().minimumSizeHint()
         return QSize(s.width(), 0)          # allow shrinking below content
+
+    def resizeEvent(self, e):  # noqa: N802 (Qt override)
+        super().resizeEvent(e)
+        # A width change can flip whether the horizontal scrollbar is needed,
+        # which changes our height sizeHint — re-query it (only on a flip, to
+        # avoid a relayout loop).
+        over = self._wants_hbar()
+        if over != getattr(self, "_mdv_over", None):
+            self._mdv_over = over
+            self.updateGeometry()
 
 
 class ImageFloorMixin:
