@@ -704,7 +704,7 @@ class _Overlay(QWidget):
                    S(ccx + half * uv[0], ccy + half * uv[1]))
         if hi is not None and hi[1] in ("rotate", "move", "center"):
             self._paint_gesture_arrow(p, S, ccx, ccy, v._ps[key],
-                                      uh, uv, hi[0], hi[1])
+                                      uh, uv, hi[0], hi[1], w, h)
 
         # ▲ markers: the OTHER pane's projection direction, a constant
         # fraction of the viewport from the centre (size tied to ps).
@@ -780,7 +780,7 @@ class _Overlay(QWidget):
         if (key == "B" and hi is None
                 and v._lv_current_submode() == "epi"):
             self._paint_gesture_arrow(p, S, ccx, ccy, v._ps[key],
-                                      uh, uv, "H", "move")
+                                      uh, uv, "H", "move", w, h)
 
     @staticmethod
     def _arrow_barbs(tip, nxt, hs):
@@ -797,7 +797,8 @@ class _Overlay(QWidget):
             out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
         return out
 
-    def _paint_gesture_arrow(self, p, S, ccx, ccy, ps, uh, uv, line, mode):
+    def _paint_gesture_arrow(self, p, S, ccx, ccy, ps, uh, uv, line, mode,
+                             w=None, h=None):
         """Centreline gesture hint, drawn in OUTPUT coords so it FOLLOWS the
         (possibly rotating/translating) crosshair on every repaint — parity with
         the VTK viewer. rotate → two double-headed CURVED arrows (arcs) beside
@@ -809,7 +810,14 @@ class _Overlay(QWidget):
         if mode == "rotate":
             base = uh if line == "H" else uv
             base_ang = math.atan2(base[1], base[0])
-            r = 0.60 * ps
+            # ps is the half-HEIGHT (mm); on a PORTRAIT pane 0.60·ps along the
+            # mostly HORIZONTAL (H) line lands past the narrow width → the arc
+            # was off-screen (the "○ line shows no rotate arc" report). Clamp to
+            # the pane edge ALONG this line's direction so it stays on-screen
+            # (the vertical line, fitting the tall height, keeps its position).
+            hw = ps * (float(w) / max(1.0, float(h))) if (w and h) else ps
+            edge = min(hw / (abs(base[0]) or 1e-6), ps / (abs(base[1]) or 1e-6))
+            r = min(0.60 * ps, 0.82 * edge)
             span = math.radians(11.0 * 2.0 / 3.0)       # 2/3 length
             steps = 10                                  # smoother = clearer arc
             hs = 0.019 * ps                             # bigger heads (emphasis)
