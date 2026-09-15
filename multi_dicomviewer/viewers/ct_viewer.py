@@ -10332,6 +10332,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             "cam": {k: cam(k) for k in ("A", "B")},
             "cpr_T": (None if self._cpr is None else self._cpr["T"].copy()),
             "cpr_idx": (None if self._cpr is None else self._cpr.get("idx")),
+            # Full short-axis capture (Case Presentation restore rebuilds from
+            # this even when no CPR is currently open). JSON-safe (lists/floats).
+            "cpr": self._cpr_state_dict(),
+        }
+
+    def _cpr_state_dict(self):
+        """The active short-axis as a JSON-safe dict (centreline + display
+        state), or None. Shared by the view snapshot and .cpr.json save."""
+        c = self._cpr
+        if c is None:
+            return None
+        ctrl = self._cpr_ctrl_pts3d()
+        if not ctrl or len(ctrl) < 2:
+            return None
+        T = c["T"]
+        return {
+            "ctrl": [list(map(float, np.asarray(P, float))) for P in ctrl],
+            "ref_up": list(map(float, np.asarray(
+                c.get("ref_up", (0.0, 0.0, 1.0)), float))),
+            "state": {
+                "T": [[float(T[0, 0]), float(T[0, 1])],
+                      [float(T[1, 0]), float(T[1, 1])]],
+                "rot": float(c.get("rot", 0.0)),
+                "reversed": bool(c.get("reversed", False)),
+                "half": float(c.get("half", 25.0)),
+                "idx": int(c.get("idx", 0)),
+                "src": c.get("src", "A"),
+            },
         }
 
     def _view_restore(self, snap) -> None:
@@ -10409,7 +10437,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not isinstance(st, dict):
             return
         try:
-            self._view_restore(self._ct_rehydrate(st))
+            s = self._ct_rehydrate(st)
+            # Short-axis: rebuild it from the captured centreline+state (so a
+            # saved CPR view restores even with no CPR open); if the saved state
+            # had no CPR, leave short-axis mode.
+            cpr = s.get("cpr")
+            if isinstance(cpr, dict) and cpr.get("ctrl"):
+                self._cpr_apply_saved(cpr.get("ctrl"), cpr.get("ref_up"),
+                                      cpr.get("state", {}))
+            elif self._cpr is not None:
+                self._exit_cpr()
+            self._view_restore(s)
         except Exception:                                # noqa: BLE001
             pass
 
@@ -14907,29 +14945,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("Short-axis"),
                                    t("Open a short-axis (CPR) first."))
             return
-        ctrl = self._cpr_ctrl_pts3d()
-        if not ctrl or len(ctrl) < 2:
+        cpr = self._cpr_state_dict()
+        if cpr is None:
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("This short-axis has no centreline to save."))
             return
-        c = self._cpr
-        T = c["T"]
         data = {
             "format": "MDV-CPR", "version": 1, "type": "cpr",
             "series": (self._lv_series_meta()
                        if hasattr(self, "_lv_series_meta") else {}),
-            "ctrl": [list(map(float, np.asarray(P, float))) for P in ctrl],
-            "ref_up": list(map(float, np.asarray(
-                c.get("ref_up", (0.0, 0.0, 1.0)), float))),
-            "state": {
-                "T": [[float(T[0, 0]), float(T[0, 1])],
-                      [float(T[1, 0]), float(T[1, 1])]],
-                "rot": float(c.get("rot", 0.0)),
-                "reversed": bool(c.get("reversed", False)),
-                "half": float(c.get("half", 25.0)),
-                "idx": int(c.get("idx", 0)),
-                "src": c.get("src", "A"),
-            },
+            **cpr,
         }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -14992,49 +15017,64 @@ class CTViewer(CPRMixin, AbstractViewer):
                           "series — it may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return
-            ctrl = [np.asarray(P, float) for P in data["ctrl"]]
-            if len(ctrl) < 2:
-                raise ValueError(t("This short-axis has no centreline to save."))
-            st = data.get("state", {})
-            src = st.get("src", "A")
-            if src not in ("A", "B"):
-                src = "A"
-            if self._cpr is not None:
-                self._exit_cpr()
-            # Re-create the source polyline so the trace shows on the map pane
-            # and stays editable; its 3-D control points ARE the centreline.
-            u, v, _n = self._axes_for(src)
-            o = self._pc[src]
-            pts2d = [(float(np.dot(P - o, u)), float(np.dot(P - o, v)))
-                     for P in ctrl]
-            self._meas_seq += 1
-            self._measures[src].append({
-                "id": self._meas_seq, "type": "polyline", "pts": pts2d,
-                "pts3d": [list(map(float, P)) for P in ctrl]})
-            self._redraw_meas(src)
-            mi = len(self._measures[src]) - 1
-            self._enter_cpr(src, mi, ref_up=data.get("ref_up"))
-            if self._cpr is None:
-                raise ValueError(t("Load failed: {err}", err="build"))
-            c = self._cpr
-            T = st.get("T")
-            if T:
-                c["T"] = np.array([[float(T[0][0]), float(T[0][1])],
-                                   [float(T[1][0]), float(T[1][1])]], float)
-            c["rot"] = float(st.get("rot", 0.0))
-            c["reversed"] = bool(st.get("reversed", False))
-            c["half"] = float(st.get("half", c.get("half", 25.0)))
-            c["idx"] = int(min(max(int(st.get("idx", c["idx"])), 0),
-                               c["cl"].n - 1))
-            self._cpr_rev_btn.setChecked(c["reversed"])
-            self._cpr_apply_xform()
-            self._cpr_sync_bar()
+            if not self._cpr_apply_saved(
+                    data.get("ctrl"), data.get("ref_up"),
+                    data.get("state", {})):
+                raise ValueError(
+                    t("This short-axis has no centreline to save."))
             self._refresh(reset_cam=True)
             if hasattr(self, "_lv_remember_dir"):
                 self._lv_remember_dir(path)
         except Exception as exc:                        # noqa: BLE001
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("Load failed: {err}", err=str(exc)))
+
+    def _cpr_apply_saved(self, ctrl, ref_up, state) -> bool:
+        """Rebuild a short-axis from a saved centreline + display state — shared
+        by Load and the Case Presentation restore. Re-creates the source
+        polyline (tagged _cpr_src so repeated restores don't pile up), enters
+        CPR with the saved RMF seed, and restores T / rotation / reverse / FOV /
+        position. Returns True on success. Caller renders."""
+        ctrl = [np.asarray(P, float) for P in (ctrl or [])]
+        if len(ctrl) < 2:
+            return False
+        src = state.get("src", "A")
+        if src not in ("A", "B"):
+            src = "A"
+        if self._cpr is not None:
+            self._exit_cpr()
+        # Drop any AUTO-created trace from a previous load/restore (user-drawn
+        # traces are untagged and left untouched).
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures[k]
+                                 if not m.get("_cpr_src")]
+        u, v, _n = self._axes_for(src)
+        o = self._pc[src]
+        pts2d = [(float(np.dot(P - o, u)), float(np.dot(P - o, v)))
+                 for P in ctrl]
+        self._meas_seq += 1
+        self._measures[src].append({
+            "id": self._meas_seq, "type": "polyline", "pts": pts2d,
+            "pts3d": [list(map(float, P)) for P in ctrl], "_cpr_src": True})
+        self._redraw_meas(src)
+        mi = len(self._measures[src]) - 1
+        self._enter_cpr(src, mi, ref_up=ref_up)
+        if self._cpr is None:
+            return False
+        c = self._cpr
+        T = state.get("T")
+        if T:
+            c["T"] = np.array([[float(T[0][0]), float(T[0][1])],
+                               [float(T[1][0]), float(T[1][1])]], float)
+        c["rot"] = float(state.get("rot", 0.0))
+        c["reversed"] = bool(state.get("reversed", False))
+        c["half"] = float(state.get("half", c.get("half", 25.0)))
+        c["idx"] = int(min(max(int(state.get("idx", c["idx"])), 0),
+                           c["cl"].n - 1))
+        self._cpr_rev_btn.setChecked(c["reversed"])
+        self._cpr_apply_xform()
+        self._cpr_sync_bar()
+        return True
 
     # ---- CoSync interface + scrub/rotate/reverse/paging/rebuild:
     #      shared, in CPRMixin (viewers/cpr_mixin.py). ----
