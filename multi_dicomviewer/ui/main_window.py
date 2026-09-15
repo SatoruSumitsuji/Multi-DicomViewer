@@ -1864,49 +1864,172 @@ class MainWindow(QMainWindow):
                 out.append(v)
         return out
 
+    @staticmethod
+    def _sv_sep():
+        ln = QFrame()
+        ln.setFrameShape(QFrame.Shape.VLine)
+        ln.setFrameShadow(QFrame.Shadow.Sunken)
+        return ln
+
     def _build_syncview_bar(self):
-        """The thin strip shown ONLY while SyncView is active: a level-sync mode
-        selector (按分 ↔ mm), a 'match scale' button and 'End SyncView'. Hidden
-        otherwise."""
+        """The unified SyncView toolbar, shown ONLY while SyncView is active: ONE
+        control set that drives BOTH panes (per-pane toolbars are hidden). Row 1 =
+        view controls (Bi/Lt/Rt, CenterLine, Measure, the interaction tools, the
+        2-D transforms, Undo/Redo). Row 2 = SyncView meta (level-sync 按分/mm,
+        match-scale, End). Hidden otherwise. SyncView is view-only — no image or
+        border editing (Measure prompts to leave SyncView)."""
         self._syncview_link = None
         bar = QWidget()
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(8, 2, 8, 2)
-        lay.setSpacing(8)
+        outer = QVBoxLayout(bar)
+        outer.setContentsMargins(8, 2, 8, 2)
+        outer.setSpacing(2)
+        r1 = QHBoxLayout(); r1.setSpacing(4)
+        r2 = QHBoxLayout(); r2.setSpacing(8)
+        outer.addLayout(r1)
+        outer.addLayout(r2)
+
+        # ---- Row 1: the shared view controls (both panes) ----
+        self._sv_side_btns = {}
+        for side, lab in (("Bi", "Bi"), ("Lt", "Lt"), ("Rt", "Rt")):
+            b = QPushButton(t(lab)); b.setCheckable(True)
+            b.setToolTip(t("Show both / left / right MPR pane in BOTH viewers"))
+            b.clicked.connect(lambda _c, s=side: self._sv_side(s))
+            self._sv_side_btns[side] = b
+            r1.addWidget(b)
+        r1.addWidget(self._sv_sep())
+        self._sv_cl_btn = QPushButton(t("CenterLine")); self._sv_cl_btn.setCheckable(True)
+        self._sv_cl_btn.setChecked(True)
+        self._sv_cl_btn.setToolTip(t("Show/hide the crosshair on both panes"))
+        self._sv_cl_btn.clicked.connect(self._sv_centerline)
+        r1.addWidget(self._sv_cl_btn)
+        self._sv_meas_btn = QPushButton("📏 " + t("Measure"))
+        self._sv_meas_btn.setToolTip(t(
+            "Measuring is per-pane — it needs SyncView off. Click to leave "
+            "SyncView (re-enter later via Tools ▸ SyncView)."))
+        self._sv_meas_btn.clicked.connect(self._sv_measure)
+        r1.addWidget(self._sv_meas_btn)
+        r1.addWidget(self._sv_sep())
+        # Interaction tools (same set as a CT viewer's row 2).
+        self._sv_tool_btns = {}
+        for name, lab in (("ZOOM", "Zoom"), ("MOVE", "Move"), ("ROTATE", "Rotate"),
+                          ("SPIN", "Spin"), ("PAGING", "Paging"),
+                          ("THICK", "Thick"), ("WL", "WL")):
+            b = QPushButton(t(lab)); b.setCheckable(True)
+            b.clicked.connect(lambda _c, n=name: self._sv_tool(n))
+            self._sv_tool_btns[name] = b
+            r1.addWidget(b)
+        r1.addWidget(self._sv_sep())
+        for kind, lab in (("rt90", "Rt90°"), ("lt90", "Lt90°"),
+                          ("fliph", "Flip-H"), ("flipv", "Flip-V")):
+            b = QPushButton(t(lab))
+            b.clicked.connect(lambda _c, k=kind: self._sv_action("transform", k))
+            r1.addWidget(b)
+        _spin = QPushButton(t("Spin+"))
+        _spin.clicked.connect(lambda: self._sv_action("spin_snap"))
+        r1.addWidget(_spin)
+        self._sv_wb_btn = QPushButton(t("WB reverse")); self._sv_wb_btn.setCheckable(True)
+        self._sv_wb_btn.clicked.connect(self._sv_wb)
+        r1.addWidget(self._sv_wb_btn)
+        r1.addWidget(self._sv_sep())
+        self._sv_undo_btn = QPushButton(t("Undo"))
+        self._sv_undo_btn.clicked.connect(self._sv_undo)
+        r1.addWidget(self._sv_undo_btn)
+        self._sv_redo_btn = QPushButton(t("Redo"))
+        self._sv_redo_btn.clicked.connect(self._sv_redo)
+        r1.addWidget(self._sv_redo_btn)
+        r1.addStretch(1)
+
+        # ---- Row 2: SyncView meta ----
         lbl = QLabel("🔗 " + t("SyncView"))
         f = lbl.font(); f.setBold(True); lbl.setFont(f)
-        lay.addWidget(lbl)
-        lay.addSpacing(10)
-        # LV short-axis level-sync mode: a 2-button exclusive selector, the
-        # active one filled (matches the app's other exclusive selectors) so
-        # you can always see which of 按分 / mm is in effect.
+        r2.addWidget(lbl)
+        r2.addSpacing(10)
         self._sv_level_cap = QLabel(t("レベル同期:"))
-        lay.addWidget(self._sv_level_cap)
-        self._sv_frac_btn = QPushButton(t("按分"))
-        self._sv_frac_btn.setCheckable(True)
+        r2.addWidget(self._sv_level_cap)
+        self._sv_frac_btn = QPushButton(t("按分")); self._sv_frac_btn.setCheckable(True)
         self._sv_frac_btn.setToolTip(t(
             "apex→M弁中心を 0〜100% で対応（左室長が違っても同じ相対レベルを"
             "並べる＝フェーズ間比較向け）"))
         self._sv_frac_btn.clicked.connect(lambda: self._sv_set_level_mode(True))
-        lay.addWidget(self._sv_frac_btn)
-        self._sv_mm_btn = QPushButton(t("mm"))
-        self._sv_mm_btn.setCheckable(True)
+        r2.addWidget(self._sv_frac_btn)
+        self._sv_mm_btn = QPushButton(t("mm")); self._sv_mm_btn.setCheckable(True)
         self._sv_mm_btn.setToolTip(t("apex からの絶対 mm で対応（左室長の差が見える）"))
         self._sv_mm_btn.clicked.connect(lambda: self._sv_set_level_mode(False))
-        lay.addWidget(self._sv_mm_btn)
-        lay.addSpacing(16)
+        r2.addWidget(self._sv_mm_btn)
+        r2.addSpacing(16)
         self._sv_scale_btn = QPushButton(t("縮尺を合わせる"))
         self._sv_scale_btn.setToolTip(t(
             "両ペインを同じズームに合わせ直す（各自でズームした後に）"))
         self._sv_scale_btn.clicked.connect(self._sv_match_scale)
-        lay.addWidget(self._sv_scale_btn)
+        r2.addWidget(self._sv_scale_btn)
         self._sv_exit_btn = QPushButton(t("SyncView終了"))
         self._sv_exit_btn.clicked.connect(self._stop_syncview)
-        lay.addWidget(self._sv_exit_btn)
-        lay.addStretch(1)
+        r2.addWidget(self._sv_exit_btn)
+        r2.addStretch(1)
+
         self._syncview_bar = bar
         bar.setVisible(False)
         return bar
+
+    # ---- SyncView shared-toolbar actions (drive BOTH linked viewers) ----
+    def _sv_viewers(self) -> list:
+        link = getattr(self, "_syncview_link", None)
+        return link.viewers() if link is not None else []
+
+    def _sv_action(self, name: str, arg=None) -> None:
+        for v in self._sv_viewers():
+            try:
+                v.sync_action(name, arg)
+            except Exception:                            # noqa: BLE001
+                pass
+        # Tool selection doesn't change the view; the others (transform / side /
+        # centreline / WB / spin-snap) do → make them undoable too.
+        if name != "tool":
+            link = getattr(self, "_syncview_link", None)
+            if link is not None:
+                link.note_view_change()
+
+    def _sv_side(self, side: str) -> None:
+        for s, b in self._sv_side_btns.items():
+            b.setChecked(s == side)
+        self._sv_action("side", side)
+
+    def _sv_centerline(self) -> None:
+        self._sv_action("centerline", self._sv_cl_btn.isChecked())
+
+    def _sv_wb(self) -> None:
+        self._sv_action("wb", self._sv_wb_btn.isChecked())
+
+    def _sv_tool(self, name: str) -> None:
+        for n, b in self._sv_tool_btns.items():
+            b.setChecked(n == name)
+        self._sv_action("tool", name)
+
+    def _sv_measure(self) -> None:
+        """Measure is per-pane → leave SyncView to measure."""
+        if QMessageBox.question(
+                self, t("SyncView"),
+                t("Measuring is per-pane and needs SyncView OFF. Exit SyncView "
+                  "to measure?  (Re-enter later via Tools ▸ SyncView.)"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+        ) == QMessageBox.StandardButton.Yes:
+            self._stop_syncview()
+
+    def _sv_undo(self) -> None:
+        link = getattr(self, "_syncview_link", None)
+        if link is not None:
+            link.undo()
+
+    def _sv_redo(self) -> None:
+        link = getattr(self, "_syncview_link", None)
+        if link is not None:
+            link.redo()
+
+    def _sv_update_undo_buttons(self) -> None:
+        link = getattr(self, "_syncview_link", None)
+        self._sv_undo_btn.setEnabled(link is not None and link.can_undo())
+        self._sv_redo_btn.setEnabled(link is not None and link.can_redo())
 
     def _sv_set_level_mode(self, fraction: bool) -> None:
         """レベル同期 按分/mm selector clicked."""
@@ -1963,6 +2086,7 @@ class MainWindow(QMainWindow):
             return
         from multi_dicomviewer.ui.sync_view import SyncViewLink
         self._syncview_link = SyncViewLink(viewers[0], viewers[1], self)
+        self._syncview_link.set_undo_callback(self._sv_update_undo_buttons)
         # Default the level-sync to 按分 (fraction) — the phase-comparison case.
         if self._syncview_link.level_link_active():
             self._syncview_link.set_level_fraction(True)
@@ -1975,21 +2099,54 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
         ) == QMessageBox.StandardButton.Yes:
             self._syncview_link.match_scale()
+        # Hide each pane's own toolbar / below bars — the shared bar drives both.
+        for v in viewers:
+            try:
+                v.set_syncview_ui(True)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._syncview_active = True
+        self._sv_init_bar_state(viewers[0])
         self._syncview_act.setChecked(True)
         self._syncview_bar.setVisible(True)
         self._sv_sync_bar_state()
+        self._sv_update_undo_buttons()
+        self._refresh_active_pane_border()
+
+    def _sv_init_bar_state(self, v) -> None:
+        """Reflect viewer *v*'s current side / CenterLine / tool on the shared
+        bar so the toolbar matches what's on screen at SyncView start."""
+        try:
+            side = v.current_side() if hasattr(v, "current_side") else "Bi"
+        except Exception:                                # noqa: BLE001
+            side = "Bi"
+        for s, b in self._sv_side_btns.items():
+            b.setChecked(s == (side if side in self._sv_side_btns else "Bi"))
+        cl = bool(getattr(getattr(v, "_cl_btn", None), "isChecked", lambda: True)())
+        self._sv_cl_btn.setChecked(cl)
+        tool = getattr(v, "_tool", "PAGING")
+        for n, b in self._sv_tool_btns.items():
+            b.setChecked(n == tool)
 
     def _stop_syncview(self) -> None:
         """Drop the SyncView link (from the menu toggle, the bar, or when the
         panes change)."""
         link = getattr(self, "_syncview_link", None)
+        viewers = link.viewers() if link is not None else []
         if link is not None:
             link.teardown()
             self._syncview_link = None
+        for v in viewers:
+            try:
+                v.set_syncview_ui(False)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._syncview_active = False
         if getattr(self, "_syncview_act", None) is not None:
             self._syncview_act.setChecked(False)
         if getattr(self, "_syncview_bar", None) is not None:
             self._syncview_bar.setVisible(False)
+        self._refresh_active_pane_border()
 
     # ============================ Case Presentation ====================
     def _open_case_presentation(self) -> None:
@@ -3645,10 +3802,16 @@ class MainWindow(QMainWindow):
     def _set_active_pane(self, pane: ViewerPane) -> None:
         self._active = pane
         self._touch_pane(pane)
-        for p in self._panes:
-            p.set_active(p is pane and p.isVisible())
+        self._refresh_active_pane_border()
         self._sync_xa_shortcuts()
         self._follow_active_pane()
+
+    def _refresh_active_pane_border(self) -> None:
+        """Highlight the active pane — EXCEPT in SyncView, where operations drive
+        both panes so there is no single 'active' pane (the border is dropped)."""
+        sync = getattr(self, "_syncview_active", False)
+        for p in self._panes:
+            p.set_active((not sync) and p is self._active and p.isVisible())
 
     # ------------------------------------------------- memory cap (LRU sleep)
     def _load_live_caps(self) -> dict:

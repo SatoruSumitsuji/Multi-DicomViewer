@@ -23,7 +23,7 @@ Both layers are re-entrancy guarded so a mirrored change never echoes back.
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, QTimer
 
 
 class SyncViewLink(QObject):
@@ -32,6 +32,17 @@ class SyncViewLink(QObject):
         self._v = [viewer_a, viewer_b]
         self._syncing = False
         self._level_fraction = False            # False = mm, True = 按分 (fraction)
+        # Paired-snapshot undo/redo (method A): the shell's Undo/Redo revert the
+        # last SYNCED gesture on BOTH panes together. A short debounce coalesces
+        # the many per-increment sync_view_op emits of one drag into ONE entry.
+        self._undo = []                         # [(snapA, snapB), …] settled states
+        self._redo = []
+        self._on_undo_changed = None            # shell callback to refresh buttons
+        self._settle = QTimer(self)
+        self._settle.setSingleShot(True)
+        self._settle.setInterval(250)
+        self._settle.timeout.connect(self._push_snapshot)
+        self._restoring = False
         # --- view-operation mirror ---
         for i, v in enumerate(self._v):
             v.set_sync_view_on(True)
@@ -46,6 +57,7 @@ class SyncViewLink(QObject):
                 v.set_lv_cosync_on(True)
                 v.lv_cosync_level_changed.connect(
                     lambda mm, src=i: self._on_level(src, mm))
+        self._push_snapshot(force=True)         # base state (before any gesture)
 
     # -- view-operation mirror -------------------------------------------
     def _on_op(self, src: int, kind: str, params) -> None:
@@ -59,6 +71,70 @@ class SyncViewLink(QObject):
             pass
         finally:
             self._syncing = False
+        if not self._restoring:                 # coalesce this gesture's emits
+            self._settle.start()
+
+    # -- paired-snapshot undo / redo (method A) --------------------------
+    def _snap_pair(self):
+        try:
+            return (self._v[0].capture_view_state(),
+                    self._v[1].capture_view_state())
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def _push_snapshot(self, force: bool = False) -> None:
+        """Record the settled state of BOTH panes as one undo entry."""
+        pair = self._snap_pair()
+        if pair is None:
+            return
+        self._undo.append(pair)
+        if not force:
+            self._redo.clear()
+        if self._on_undo_changed:
+            self._on_undo_changed()
+
+    def _restore_pair(self, pair) -> None:
+        self._restoring = True
+        self._settle.stop()
+        try:
+            self._v[0].restore_view_state(dict(pair[0]))
+            self._v[1].restore_view_state(dict(pair[1]))
+        except Exception:                                # noqa: BLE001
+            pass
+        finally:
+            self._restoring = False
+
+    def can_undo(self) -> bool:
+        return len(self._undo) >= 2
+
+    def can_redo(self) -> bool:
+        return bool(self._redo)
+
+    def undo(self) -> None:
+        if len(self._undo) < 2:
+            return
+        self._redo.append(self._undo.pop())     # current → redo
+        self._restore_pair(self._undo[-1])       # revert to the previous state
+        if self._on_undo_changed:
+            self._on_undo_changed()
+
+    def redo(self) -> None:
+        if not self._redo:
+            return
+        pair = self._redo.pop()
+        self._undo.append(pair)
+        self._restore_pair(pair)
+        if self._on_undo_changed:
+            self._on_undo_changed()
+
+    def set_undo_callback(self, cb) -> None:
+        self._on_undo_changed = cb
+
+    def note_view_change(self) -> None:
+        """A shared-toolbar action (transform / side / centreline …) changed the
+        view directly (not via a drag) — schedule an undo snapshot for it too."""
+        if not self._restoring:
+            self._settle.start()
 
     # -- LV short-axis level link ----------------------------------------
     def level_link_active(self) -> bool:
@@ -97,6 +173,8 @@ class SyncViewLink(QObject):
             pass
         finally:
             self._syncing = False
+        if not self._restoring:                 # level paging is undoable too
+            self._settle.start()
 
     # -- same-scale option -----------------------------------------------
     def match_scale(self) -> None:
@@ -114,6 +192,9 @@ class SyncViewLink(QObject):
     def teardown(self) -> None:
         """Drop the link: disconnect both layers and leave SyncView / the level
         link on both viewers."""
+        self._settle.stop()
+        self._undo.clear()
+        self._redo.clear()
         for v in self._v:
             for sig in ("sync_view_op", "lv_cosync_level_changed"):
                 try:

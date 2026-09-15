@@ -5439,6 +5439,39 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._refresh()
 
+    def set_syncview_ui(self, on: bool) -> None:
+        """SyncView: hide this viewer's OWN toolbar + below bars, so one shared
+        toolbar (in the shell) drives both panes. SyncView is view-only, so
+        Measure is turned off (its bar stays hidden)."""
+        on = bool(on)
+        if on and getattr(self, "_meas_on", False):
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        for w in (getattr(self, "_toolbar_scroll", None),
+                  getattr(self, "_below_scroll", None)):
+            if w is not None:
+                w.setVisible(not on)
+
+    def sync_action(self, name: str, arg=None) -> None:
+        """Apply one shared-toolbar action to THIS viewer (the shell calls it on
+        both linked viewers). View-only actions — no image/border editing."""
+        if self._image is None:
+            return
+        if name == "tool":
+            self._set_tool(arg)
+        elif name == "side":
+            self.set_side(arg)
+        elif name == "centerline":
+            self._cl_btn.setChecked(bool(arg))
+            self._toggle_centerline()
+        elif name == "transform":                    # rt90 / lt90 / fliph / flipv
+            self._2d_transform(arg)
+        elif name == "spin_snap":
+            self._spin_snap()
+        elif name == "wb":
+            self._invert_btn.setChecked(bool(arg))
+            self._toggle_invert()
+
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
         Auto-Endo 橙 line) = the cross-section of the Epi mask on each pane, so it
