@@ -2335,6 +2335,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # hosts Series First/Prev/Next/Last, the Plane/3D/2D switch sits
         # under the image.
         plane_bar = self._build_plane_bar()
+        self._plane_bar = plane_bar
         lay.addWidget(self._build_toolbar())
         self._measure_bar = self._build_measure_bar()
         self._measure_bar.setVisible(False)
@@ -3487,6 +3488,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         scroll.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         scroll.setFixedHeight(bar.sizeHint().height() + 14)  # + scrollbar room
+        self._toolbar_scroll = scroll
         return scroll
 
     def _set_tool(self, name):
@@ -5090,6 +5092,51 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             return
         self._refresh()
+
+    def set_syncview_ui(self, on: bool) -> None:
+        """SyncView: hide this viewer's OWN toolbar + below bars (plane / LV /
+        seek / CPR), so one shared toolbar (in the shell) drives both panes.
+        Prior visibilities are remembered and restored on exit. View-only, so
+        Measure is turned off."""
+        on = bool(on)
+        if on and getattr(self, "_meas_on", False):
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        bars = [getattr(self, n, None) for n in
+                ("_toolbar_scroll", "_plane_bar", "_lv_wrap",
+                 "_seek_wrap", "_cpr_wrap")]
+        if on:
+            self._syncview_saved = [(w, w.isVisible()) for w in bars
+                                    if w is not None]
+            for w, _vis in self._syncview_saved:
+                w.setVisible(False)
+        else:
+            for w, vis in getattr(self, "_syncview_saved", []):
+                try:
+                    w.setVisible(vis)
+                except Exception:                        # noqa: BLE001
+                    pass
+            self._syncview_saved = []
+
+    def sync_action(self, name: str, arg=None) -> None:
+        """Apply one shared-toolbar action to THIS viewer (the shell calls it on
+        both linked viewers). View-only — no image/border editing."""
+        if self._vol is None:
+            return
+        if name == "tool":
+            self._set_tool(arg)
+        elif name == "side":
+            self.set_side(arg)
+        elif name == "centerline":
+            self._cl_btn.setChecked(bool(arg))
+            self._toggle_centerline()
+        elif name == "transform":
+            self._2d_transform(arg)
+        elif name == "spin_snap":
+            self._spin_snap()
+        elif name == "wb":
+            self._invert_btn.setChecked(bool(arg))
+            self._toggle_invert()
 
     def _paging_sign(self, which):
         """+1/-1 so that moving _center by +n advances the OTHER pane's
