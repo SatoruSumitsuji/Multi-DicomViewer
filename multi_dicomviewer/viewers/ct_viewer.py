@@ -2384,6 +2384,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
         self._cpr_drag = None                # control index being dragged
         self._cpr_rot_prev = None            # cursor angle while rotating (rad)
+        #: Coronary MPR: armed by the "Coronary: MPR" button — the NEXT finished
+        #: polyline is auto-built into a short-axis (CPR) instead of needing the
+        #: right-click ▸ "Short-axis MPR (CPR)" menu.
+        self._coronary_mpr_pending = False
         self._vol = None                     # (z,y,x) HU volume for lumen snap
         # Auto-snap a traced vertex to the brightest (contrast lumen) point
         # along the plane normal, near the click — the MIP shows WHERE the
@@ -2830,6 +2834,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         row2 = QHBoxLayout(); row2.setSpacing(4)
         outer.addLayout(row1)
         outer.addLayout(row2)
+
+        # ---- Coronary short-axis (CPR) entry, LEFT of the LV group: an explicit
+        # one-click start for "trace the vessel centreline → build the short-axis
+        # MPR", so the user need not discover the trace's right-click menu. ----
+        cor_cap = QLabel(t("Coronary:"))
+        cf = cor_cap.font(); cf.setBold(True); cor_cap.setFont(cf)
+        row1.addWidget(cor_cap)
+        self._coronary_mpr_btn = FitButton(t("MPR"))
+        self._coronary_mpr_btn.setCheckable(True)
+        self._coronary_mpr_btn.setHelpToolTip(
+            t("Build a coronary short-axis (CPR): click to START, then trace the "
+              "vessel centreline as a Polyline on the 3-D MPR (double- or "
+              "right-click to finish). The perpendicular cross-sections open "
+              "automatically. Click again to cancel. (Only in 3-D MPR view.)"))
+        self._coronary_mpr_btn.clicked.connect(self._toggle_coronary_mpr)
+        row1.addWidget(self._coronary_mpr_btn)
+        row1.addSpacing(12)
 
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
@@ -8699,6 +8720,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             for b in self._meas_btns.values():
                 b.setChecked(False)
                 b.setStyleSheet("")
+            # Turning Measure off cancels an armed Coronary: MPR trace.
+            if getattr(self, "_coronary_mpr_pending", False):
+                self._coronary_mpr_pending = False
+                if getattr(self, "_coronary_mpr_btn", None) is not None:
+                    self._coronary_mpr_btn.setChecked(False)
             self._measure_hover_clear()
             # Arm Reset: after a measure/LV session the view is off its initial
             # position, so the first Reset click should restore it (without this
@@ -10651,6 +10677,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             text=self._metrics_text(d["pane"], m_dict),
             mid=rid,
         ))
+        # Coronary: MPR one-click flow — this freshly-finished polyline becomes a
+        # short-axis (CPR) straight away (no right-click menu). Guarded to plain
+        # 3-D traces (not LV borders).
+        if (self._coronary_mpr_pending and d["type"] == "polyline"
+                and self._lv is None and self._mode == "3D" and len(pts) >= 2):
+            self._coronary_mpr_pending = False
+            if getattr(self, "_coronary_mpr_btn", None) is not None:
+                self._coronary_mpr_btn.setChecked(False)
+            if self._meas_on:                        # clean short-axis view
+                self._meas_btn.setChecked(False)
+                self._toggle_measure()
+            self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
 
     def _measure_finish_draft(self):
         d = self._draft
@@ -14740,6 +14778,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._refresh()
 
     # ------------------------------------------------ curved-MPR / short-axis
+    def _toggle_coronary_mpr(self):
+        """Coronary: MPR button — arm (or cancel) the one-click short-axis flow.
+        When armed, Measure+Polyline is turned on and the NEXT finished polyline
+        is auto-built into a short-axis (see _commit_draft)."""
+        if self._image is None:
+            self._coronary_mpr_btn.setChecked(False)
+            return
+        if self._coronary_mpr_pending:               # already armed → cancel
+            self._coronary_mpr_pending = False
+            self._coronary_mpr_btn.setChecked(False)
+            return
+        if self._mode != "3D":
+            from PyQt6.QtWidgets import QMessageBox
+            self._coronary_mpr_btn.setChecked(False)
+            QMessageBox.information(
+                self, t("Coronary MPR"),
+                t("Switch to the 3-D MPR view first, then press MPR and trace "
+                  "the coronary centreline."))
+            return
+        if self._cpr is not None:                    # trace on the MPR, not a disc
+            self._exit_cpr()
+        if not self._meas_on:                        # left-drag now traces
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type("polyline")
+        self._coronary_mpr_pending = True
+        self._coronary_mpr_btn.setChecked(True)
+
     def _enter_cpr(self, which, mi):
         """Turn the polyline *mi* on pane *which* into a vessel centreline and
         put pane A into short-axis (cross-section) scroll mode.
