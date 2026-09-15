@@ -5422,6 +5422,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                            tool=params.get("tool"))
             elif kind == "wheel":
                 self._wheel(params["which"], params["delta"])
+            elif kind == "spin":                     # roll-angle delta (SyncView)
+                w = params["which"]
+                self.pane[w].ren.GetActiveCamera().Roll(
+                    _SPIN_SIGN * float(params["dphi"]))
+                self._refresh(only=w)
         finally:
             self._sync_view_applying = False
 
@@ -16676,6 +16681,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                         self.pane[which].ren.GetActiveCamera().Roll(
                             _SPIN_SIGN * dphi
                         )
+                        # SyncView: mirror SPIN as the ROLL-ANGLE delta (screen
+                        # position isn't portable, but the roll increment is).
+                        if (self._sync_view_on
+                                and not self._sync_view_applying):
+                            self.sync_view_op.emit(
+                                "spin", {"which": which, "dphi": float(dphi)})
             only_pane = which                       # SPIN rolls only this pane
         elif t == "ZOOM":
             # Shift = zoom BOTH panes together, else just this one — EXCEPT while

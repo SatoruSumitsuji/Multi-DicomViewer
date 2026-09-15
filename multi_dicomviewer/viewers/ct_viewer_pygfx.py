@@ -4903,6 +4903,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                         dphi = (dphi + 180.0) % 360.0 - 180.0
                         self._spin_prev = phi
                         self._roll[which] += _SPIN_SIGN * dphi
+                        # SyncView: mirror SPIN as the ROLL-ANGLE delta (screen
+                        # position isn't portable, the roll increment is).
+                        if (self._sync_view_on
+                                and not self._sync_view_applying):
+                            self.sync_view_op.emit(
+                                "spin", {"which": which, "dphi": float(dphi)})
         # Build a reduced-quality slab MIP mid-drag for smoothness (the thick
         # image keeps its look; full quality returns when the drag settles).
         # THICK included: the coarse slab still updates live as it's adjusted.
@@ -5073,6 +5079,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                            tool=params.get("tool"))
             elif kind == "wheel":
                 self._wheel(params["which"], params["delta"])
+            elif kind == "spin":                     # roll-angle delta (SyncView)
+                w = params["which"]
+                self._roll[w] += _SPIN_SIGN * float(params["dphi"])
+                self._refresh(lod=True, only=w)
         finally:
             self._sync_view_applying = False
 
