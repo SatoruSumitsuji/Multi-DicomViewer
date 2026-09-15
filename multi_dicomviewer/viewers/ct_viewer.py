@@ -5396,14 +5396,11 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ------------------------------------------------ SyncView contract
     def sync_view_available(self) -> bool:
-        """Eligible for a SyncView link: a plain-MPR / 2-D CT with an image and
-        no derived-view lock (LV analysis, short-axis, CPR) that mirroring would
-        corrupt."""
-        return (self._image is not None
-                and self._lv is None
-                and getattr(self, "_lvv", None) is None
-                and not (hasattr(self, "cpr_active") and self.cpr_active())
-                and not self._lv_sax_active())
+        """Eligible for a SyncView link: any CT with an image loaded. LV-analysis
+        / short-axis / CPR views are fine — SyncView mirrors only VIEW operations
+        (pan/zoom/rotate/W-L/paging/thickness), never the LV geometry, borders or
+        SAX levels (those aren't view-tool ops)."""
+        return self._image is not None
 
     def set_sync_view_on(self, on: bool) -> None:
         """Enter/leave SyncView. While ON, view gestures are broadcast
@@ -16691,9 +16688,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh(only=only_pane)
         # SyncView: mirror this gesture to the paired CT as the SAME delta.
         # SPIN is excluded (its angle is derived from screen-absolute cursor
-        # position about each pane's own centre — not a portable delta).
-        if (self._sync_view_on and not self._sync_view_applying
-                and t in ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")):
+        # position about each pane's own centre — not a portable delta). PAGING
+        # is excluded while the LV-level link is on (_lv_cosync_on): the level is
+        # mirrored as mm / apex→base fraction instead, not as a raw slice delta.
+        _ops = ("MOVE", "ROTATE", "ZOOM", "WL", "THICK") \
+            if getattr(self, "_lv_cosync_on", False) \
+            else ("MOVE", "ROTATE", "ZOOM", "WL", "PAGING", "THICK")
+        if (self._sync_view_on and not self._sync_view_applying and t in _ops):
             self.sync_view_op.emit("drag", {
                 "which": which, "dx": dx, "dy": dy, "shift": shift,
                 "sx": sx, "sy": sy, "ctrl": ctrl, "tool": t})

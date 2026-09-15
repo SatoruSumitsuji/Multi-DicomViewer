@@ -1,23 +1,25 @@
 """SyncView: a live link between TWO 3-D CT viewers shown side by side so that
-mouse / keyboard view operations in EITHER are mirrored to the other, for
-"同一操作で2つの3DCTを比較" (compare two CTs under identical manipulation).
+mouse / keyboard operations in EITHER are mirrored to the other, for comparing
+two CTs under identical manipulation (e.g. the same case at MidDiastole vs
+EndSystole).
 
-The two CTs are DIFFERENT scans (different orientation, spacing, size, origin),
-so operations are mirrored as an incremental DELTA — pan by the same screen
-gesture, rotate by the same degrees, zoom by the same factor, page by the same
-slice count, window/level by the same step — NOT as an absolute state copy
-(which would be meaningless across unregistered volumes). The user first aligns
-the two views manually, then turns SyncView on; from then on every gesture is
-echoed to the peer.
+Two layers of mirroring:
 
-On entry the shell offers "同じ縮尺にしますか？" — if accepted, both viewers are
-forced to a common zoom (VTK ParallelScale) so the delta mirroring keeps them at
-1:1 scale.
+1. VIEW OPERATIONS (always) — pan / rotate / zoom / window-level / paging /
+   thickness are echoed as an incremental DELTA (the two scans are unregistered,
+   so an absolute copy is meaningless). The user aligns both views manually,
+   then turns SyncView on; from then on every gesture is echoed to the peer.
+   On entry the shell offers to match the zoom so the deltas keep the pair at
+   1:1 scale.
 
-Viewer contract (see CTViewer.sync_view_* / apply_sync_op):
-  set_sync_view_on(bool), sync_view_available() -> bool,
-  sync_view_op(kind, params)  [signal],  apply_sync_op(kind, params),
-  sync_view_get_scale(), sync_view_set_scale(ps).
+2. LV SHORT-AXIS LEVEL (when BOTH viewers are in LV-volume analysis with a valid
+   long axis) — paging the short-axis level along the apex→MV-centre axis is
+   mirrored, either as an absolute mm-from-apex ("mm" mode) or as an apex→base
+   FRACTION ("按分" mode, so the two phases align by RELATIVE depth despite
+   different LV lengths — the clinically meaningful comparison). This reuses the
+   viewers' lv_cosync_* contract (built for the retired LV-CoSync).
+
+Both layers are re-entrancy guarded so a mirrored change never echoes back.
 """
 from __future__ import annotations
 
@@ -25,21 +27,27 @@ from PyQt6.QtCore import QObject
 
 
 class SyncViewLink(QObject):
-    """Bidirectional view-operation mirror between two CT viewers. A re-entrancy
-    guard (``_syncing``) plus the viewers' own ``_sync_view_applying`` flag stop
-    the mirror from echoing back into a feedback loop."""
-
     def __init__(self, viewer_a, viewer_b, parent=None):
         super().__init__(parent)
         self._v = [viewer_a, viewer_b]
         self._syncing = False
+        self._level_fraction = False            # False = mm, True = 按分 (fraction)
+        # --- view-operation mirror ---
         for i, v in enumerate(self._v):
             v.set_sync_view_on(True)
-            # default-arg binds the source index at connect time.
             v.sync_view_op.connect(
                 lambda kind, params, src=i: self._on_op(src, kind, params))
+        # --- LV short-axis level link (only if BOTH are LV-volume with an axis) ---
+        self._level_on = all(
+            hasattr(v, "lv_cosync_available") and v.lv_cosync_available()
+            for v in self._v)
+        if self._level_on:
+            for i, v in enumerate(self._v):
+                v.set_lv_cosync_on(True)
+                v.lv_cosync_level_changed.connect(
+                    lambda mm, src=i: self._on_level(src, mm))
 
-    # -- linkage ----------------------------------------------------------
+    # -- view-operation mirror -------------------------------------------
     def _on_op(self, src: int, kind: str, params) -> None:
         if self._syncing:
             return
@@ -52,10 +60,47 @@ class SyncViewLink(QObject):
         finally:
             self._syncing = False
 
-    # -- same-scale option ------------------------------------------------
+    # -- LV short-axis level link ----------------------------------------
+    def level_link_active(self) -> bool:
+        return self._level_on
+
+    @property
+    def level_fraction(self) -> bool:
+        return self._level_fraction
+
+    def set_level_fraction(self, on: bool) -> None:
+        """Switch the level mirror between mm (False) and apex→base fraction /
+        按分 (True), and re-apply from viewer 0 so the peer reflects it at once."""
+        self._level_fraction = bool(on)
+        if not self._level_on:
+            return
+        try:
+            mm = self._v[0].lv_cosync_level_mm()
+        except Exception:                                # noqa: BLE001
+            mm = None
+        if mm is not None:
+            self._on_level(0, float(mm))
+
+    def _on_level(self, src: int, mm: float) -> None:
+        if self._syncing or not self._level_on:
+            return
+        vs, vd = self._v[src], self._v[1 - src]
+        self._syncing = True
+        try:
+            if self._level_fraction:
+                frac = vs.lv_cosync_level_fraction()
+                if frac is not None:
+                    vd.lv_cosync_set_level_fraction(float(frac), silent=True)
+            else:
+                vd.lv_cosync_set_level_mm(float(mm), silent=True)
+        except Exception:                                # noqa: BLE001
+            pass
+        finally:
+            self._syncing = False
+
+    # -- same-scale option -----------------------------------------------
     def match_scale(self) -> None:
-        """Force viewer B to viewer A's zoom so both start at 1:1 scale (the
-        "同じ縮尺にしますか？ → はい" path)."""
+        """Force viewer B to viewer A's zoom so both are at 1:1 scale."""
         try:
             ps = self._v[0].sync_view_get_scale()
             if ps:
@@ -67,14 +112,20 @@ class SyncViewLink(QObject):
         return list(self._v)
 
     def teardown(self) -> None:
-        """Drop the link: disconnect and leave SyncView on both viewers."""
+        """Drop the link: disconnect both layers and leave SyncView / the level
+        link on both viewers."""
         for v in self._v:
+            for sig in ("sync_view_op", "lv_cosync_level_changed"):
+                try:
+                    getattr(v, sig).disconnect()
+                except Exception:                        # noqa: BLE001
+                    pass
             try:
-                v.sync_view_op.disconnect()
+                v.set_sync_view_on(False)
             except Exception:                            # noqa: BLE001
                 pass
             try:
-                v.set_sync_view_on(False)
+                v.set_lv_cosync_on(False)
             except Exception:                            # noqa: BLE001
                 pass
         self._v = []
