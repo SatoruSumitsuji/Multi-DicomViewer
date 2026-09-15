@@ -17065,7 +17065,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         base = (c_, s_) if line == "H" else (-s_, c_)   # caught line direction
         ccx, ccy = self._cc(which)
         ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
-        r = 0.60 * ps                                   # original position/size
+        # ps is the half-HEIGHT (mm); on a PORTRAIT pane 0.60·ps along the mostly
+        # HORIZONTAL (H) line lands past the narrow width → the arc was drawn
+        # off-screen (the reported "○ line shows no rotate arc"). Clamp the radius
+        # to the pane edge ALONG this line's direction so it stays on-screen (the
+        # vertical line, which fits the tall height, keeps its outer position).
+        cw = self.pane[which].canvas
+        hw = ps * (cw.width() / max(1, cw.height()))    # visible half-width (mm)
+        edge = min(hw / (abs(base[0]) or 1e-6), ps / (abs(base[1]) or 1e-6))
+        r = min(0.60 * ps, 0.82 * edge)
         base_ang = math.atan2(base[1], base[0])
         span = math.radians(11.0 * 2.0 / 3.0)           # 2/3 length
         steps = 10                                      # smoother = clearer arc
