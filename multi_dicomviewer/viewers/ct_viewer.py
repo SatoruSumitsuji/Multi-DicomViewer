@@ -3380,7 +3380,7 @@ class CTViewer(CPRMixin, AbstractViewer):
               "press Confirm."))
         self._lv_ve_draw_btn.clicked.connect(self._lv_valve_draw)
         r2ve.addWidget(self._lv_ve_draw_btn)
-        self._lv_ve_confirm_btn = FitButton(t("Confirm"))
+        self._lv_ve_confirm_btn = FitButton(t("Set"))
         self._lv_ve_confirm_btn.setHelpToolTip(
             t("Set the valve plane from the drawn Ellipse."))
         self._lv_ve_confirm_btn.clicked.connect(self._lv_valve_confirm)
