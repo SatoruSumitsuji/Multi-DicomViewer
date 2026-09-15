@@ -13051,7 +13051,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_update_text()
 
     def _lv_live_recapture(self, key, m) -> None:
-        if not self._lv_sax_active():
+        """Feed an EDITED endo/epi border on the LV pane back into the model, so
+        the edit persists — crucially in the plane-by-plane TRACING phase too,
+        not only in short-axis. A dragged basal endpoint otherwise lived only in
+        the on-screen measure; stepping to another plane rebuilds the border FROM
+        THE MODEL, so the endpoint 'reverted to its original position'. When
+        short-axis is shown, also refresh it so the cross-section tracks the
+        edit."""
+        if self._lv is None:
             return
         tag = m.get("_lv")
         if (tag is None or key != self._lv.get("pane")
@@ -13061,7 +13068,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv["model"].set_long_axis_contour(
             angs[tag[0] % len(angs)], m["pts3d"], tag[1])
         self._lv_invalidate_volume()         # edited border → volume stale
-        self._overlay[self._lv["sax_pane"]].update()
+        if self._lv_sax_active():
+            self._overlay[self._lv["sax_pane"]].update()
 
     def _lv_compute_volume(self) -> None:
         """Build the endo/epi surfaces and report LV cavity + myocardial volume.
