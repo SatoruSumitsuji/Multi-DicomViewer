@@ -8414,8 +8414,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Build a coronary short-axis (CPR): click to START, then trace the "
               "vessel centreline as a Polyline on the 3-D MPR (double- or "
               "right-click to finish). The perpendicular cross-sections open "
-              "automatically. Hold Alt/Option while dragging to Zoom / Move / "
-              "Spin the view mid-trace. Click again to cancel. "
+              "automatically. Select a view tool then hold Alt/Option while "
+              "dragging to use ANY of them mid-trace — Zoom / Move / Rotate / "
+              "Spin / Paging / Thick / W-L. Click again to cancel. "
               "(Only in 3-D MPR view.)"))
         self._coronary_mpr_btn.clicked.connect(self._toggle_coronary_mpr)
         row1.addWidget(self._coronary_mpr_btn)
