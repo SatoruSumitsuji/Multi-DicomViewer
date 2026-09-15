@@ -9003,20 +9003,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lvv_close_lbl)
         row.addWidget(self._lvv_close_spin)
         self._lvv_update_close_ui()          # label the knob for the default method
-        # Spin boxes / combo are taller than a FitButton by default (min-size
-        # hint at the default font), so the Blood/Endo row grew and pushed the LV
-        # bar's 3rd row off-screen. A plain setMaximumHeight is ignored (min hint
-        # wins) — shrink the FONT (lowers the min hint) AND setFixedHeight to the
-        # button height so every sub-mode's rows line up. (See VTK viewer.)
-        _bh = self._lvv_epi_btn.sizeHint().height()
-        _cf = self._lvv_lo_spin.font()
-        _cf.setPointSizeF(max(6.5, _cf.pointSizeF() - 1.5))
-        for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
-                   self._lvv_hi_lbl, self._lvv_hi_spin,
-                   self._lvv_close_lbl, self._lvv_close_spin,
-                   self._lvv_method_lbl, self._lvv_method_combo):
-            _w.setFont(_cf)
-            _w.setFixedHeight(_bh)
         # Endo-Border(Manual): enter the Endo edit mode. Seeds from Auto-Endo the
         # first time; the hand-edited border is retained across HU changes. Moved
         # to row 3.

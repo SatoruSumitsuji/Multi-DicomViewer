@@ -3185,22 +3185,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         gb.addWidget(self._lvv_close_lbl)
         gb.addWidget(self._lvv_close_spin)
         self._lvv_update_close_ui()   # 膨らみ spin label/enable follows the method
-        # Spin boxes / combo are taller than a FitButton by default (their
-        # minimumSizeHint at the default font exceeds the button height), so the
-        # Blood/Endo row grew and pushed the LV bar's 3rd row off-screen (it fits
-        # in the MV/AoV/Apex/Epi sub-modes, which use only buttons). A plain
-        # setMaximumHeight is ignored because the min-size-hint wins — so shrink
-        # the FONT (which lowers the min hint) AND setFixedHeight to the button
-        # height, so every sub-mode's rows line up.
-        _bh = self._lvv_epi_btn.sizeHint().height()
-        _cf = self._lvv_lo_spin.font()
-        _cf.setPointSizeF(max(6.5, _cf.pointSizeF() - 1.5))
-        for _w in (self._lvv_lo_lbl, self._lvv_lo_spin,
-                   self._lvv_hi_lbl, self._lvv_hi_spin,
-                   self._lvv_close_lbl, self._lvv_close_spin,
-                   self._lvv_method_lbl, self._lvv_method_combo):
-            _w.setFont(_cf)
-            _w.setFixedHeight(_bh)
         # Manual-Endo: enter the Endo edit mode (13 handles). Seeds from the auto
         # Endo the first time; the hand-edited border is retained across HU
         # changes (Clear it to re-seed from a fresh auto).
