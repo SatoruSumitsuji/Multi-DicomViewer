@@ -2384,9 +2384,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
         self._cpr_drag = None                # control index being dragged
         self._cpr_rot_prev = None            # cursor angle while rotating (rad)
-        #: Coronary MPR: armed by the "Coronary: MPR" button — the NEXT finished
-        #: polyline is auto-built into a short-axis (CPR) instead of needing the
-        #: right-click ▸ "Short-axis MPR (CPR)" menu.
+        #: Coronary MPR: _coronary_mode = the Draw/Load/Save/Exit row is shown;
+        #: _coronary_mpr_pending = Draw is armed so the NEXT finished polyline is
+        #: auto-built into a short-axis (CPR) — no right-click menu needed.
+        self._coronary_mode = False
         self._coronary_mpr_pending = False
         self._vol = None                     # (z,y,x) HU volume for lumen snap
         # Auto-snap a traced vertex to the brightest (contrast lumen) point
@@ -2618,8 +2619,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         below_col.setSpacing(0)
         below_col.addWidget(plane_bar)
         below_col.addWidget(self._build_seek_bar())
-        below_col.addWidget(self._build_cpr_bar())
         below_col.addWidget(self._build_lv_bar())
+        # Coronary short-axis row sits BELOW the LV bar (its own 3rd row).
+        below_col.addWidget(self._build_cpr_bar())
         self._below_scroll = self._make_chrome_scroll(self._below_wrap)
         lay.addWidget(self._below_scroll)
 
@@ -2777,19 +2779,54 @@ class CTViewer(CPRMixin, AbstractViewer):
         # to the intended plane so the buttons don't wrongly default to "Rt".
         return self._side
 
-    # --------------------------------------------- curved-MPR scrubber bar
+    # --------------------------------------------- curved-MPR (coronary) bar
     def _build_cpr_bar(self) -> QWidget:
-        """A bottom scrubber for short-axis (CPR) mode: scroll the cross-
-        section along the traced vessel, plus an Exit button. Hidden unless
-        CPR is active. Survives 'Max Image' so scrolling stays usable."""
+        """The coronary short-axis (CPR) control row, shown once "Coronary: MPR"
+        is entered: Draw / Load / Save / Exit at the left, and — once a CPR is
+        built — the "Short-axis: Reverse [scrubber]" to the RIGHT of Exit.
+        Hidden unless in coronary MPR mode. Survives 'Max Image'."""
         self._cpr_wrap = QWidget()
         self._cpr_wrap._mdv_keep_on_max = True
         row = QHBoxLayout(self._cpr_wrap)
         row.setContentsMargins(8, 2, 8, 2)
-        cap = QLabel(t("Short-axis:"))
-        f = cap.font(); f.setBold(True); cap.setFont(f)
-        self._cpr_cap = cap
-        row.addWidget(cap)
+        # Draw: begin tracing (arm Measure + Polyline) — matches other modes'
+        # Draw button. The finished polyline auto-builds the short-axis.
+        self._cpr_draw_btn = FitButton(t("Draw"))
+        self._cpr_draw_btn.setCheckable(True)
+        self._cpr_draw_btn.setHelpToolTip(
+            t("Draw the vessel centreline as a Polyline on the 3-D MPR (double- "
+              "or right-click to finish) → the short-axis opens automatically. "
+              "Hold Alt/Option while dragging to Zoom / Move / Rotate / Spin / "
+              "Page / centreline-move mid-trace."))
+        self._cpr_draw_btn.clicked.connect(self._coronary_draw)
+        row.addWidget(self._cpr_draw_btn)
+        self._cpr_load_btn = FitButton(t("Load"))
+        self._cpr_load_btn.setHelpToolTip(
+            t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
+              "shows the trace, and opens the perpendicular cross-sections."))
+        self._cpr_load_btn.clicked.connect(self._cpr_load)
+        row.addWidget(self._cpr_load_btn)
+        self._cpr_save_btn = FitButton(t("Save"))
+        self._cpr_save_btn.setHelpToolTip(
+            t("Save this short-axis (centreline + rotation / flip / reverse / "
+              "FOV / position) to a .cpr.json for reuse (name it yourself, e.g. "
+              "by vessel / analysis)."))
+        self._cpr_save_btn.clicked.connect(self._cpr_save)
+        row.addWidget(self._cpr_save_btn)
+        self._cpr_exit_btn = FitButton(t("Exit"))
+        self._cpr_exit_btn.setHelpToolTip(
+            t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
+        self._cpr_exit_btn.clicked.connect(self._coronary_exit)
+        row.addWidget(self._cpr_exit_btn)
+        # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
+        # the layout (so the buttons keep their natural width instead of growing
+        # to fill the row); its CHILDREN are shown only once a CPR is built.
+        self._cpr_scrub = QWidget()
+        srow = QHBoxLayout(self._cpr_scrub)
+        srow.setContentsMargins(12, 0, 0, 0)
+        self._cpr_cap = QLabel(t("Short-axis:"))
+        f = self._cpr_cap.font(); f.setBold(True); self._cpr_cap.setFont(f)
+        srow.addWidget(self._cpr_cap)
         # Reverse the scroll direction (distal→proximal) to match an IVUS
         # pull-back; the cross-section content is unchanged.
         self._cpr_rev_btn = FitButton(t("Reverse"))
@@ -2798,32 +2835,54 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Reverse the scroll order to distal→proximal (match an IVUS "
               "pull-back). Cross-section content is unchanged."))
         self._cpr_rev_btn.clicked.connect(self._cpr_toggle_reverse)
-        row.addWidget(self._cpr_rev_btn)
+        srow.addWidget(self._cpr_rev_btn)
         self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
         self._cpr_slider.setMinimum(0)
         self._cpr_slider.setMaximum(0)
         self._cpr_slider.setMinimumHeight(26)
         self._cpr_slider.setStyleSheet(_SEEK_SLIDER_QSS)
         self._cpr_slider.valueChanged.connect(self._cpr_set_index)
-        row.addWidget(self._cpr_slider, 1)
+        srow.addWidget(self._cpr_slider, 1)
         self._cpr_lbl = QLabel("")
         self._cpr_lbl.setMinimumWidth(170)
         fl = self._cpr_lbl.font(); fl.setBold(True); self._cpr_lbl.setFont(fl)
-        row.addWidget(self._cpr_lbl)
-        self._cpr_save_btn = FitButton(t("Save"))
-        self._cpr_save_btn.setHelpToolTip(
-            t("Save this short-axis (centreline + rotation / flip / reverse / "
-              "FOV / position) to a .cpr.json for reuse (name it yourself, e.g. "
-              "by vessel / analysis)."))
-        self._cpr_save_btn.clicked.connect(self._cpr_save)
-        row.addWidget(self._cpr_save_btn)
-        self._cpr_exit_btn = FitButton(t("Exit CPR"))
-        self._cpr_exit_btn.setHelpToolTip(
-            t("Leave short-axis mode and restore the normal MPR"))
-        self._cpr_exit_btn.clicked.connect(self._exit_cpr)
-        row.addWidget(self._cpr_exit_btn)
+        srow.addWidget(self._cpr_lbl)
+        row.addWidget(self._cpr_scrub, 1)
+        self._cpr_scrub_widgets = (self._cpr_cap, self._cpr_rev_btn,
+                                   self._cpr_slider, self._cpr_lbl)
+        for w in self._cpr_scrub_widgets:
+            w.setVisible(False)
         self._cpr_wrap.setVisible(False)
         return self._cpr_wrap
+
+    def _coronary_sync_ui(self) -> None:
+        """Single source of truth for the coronary MPR row's visibility /
+        checked / enabled state, from _coronary_mode / _coronary_mpr_pending /
+        _cpr."""
+        mode = getattr(self, "_coronary_mode", False)
+        cpr = self._cpr is not None
+        pend = getattr(self, "_coronary_mpr_pending", False)
+        on = mode or cpr
+        if getattr(self, "_cpr_wrap", None) is not None:
+            self._cpr_wrap.setVisible(on)
+        for w in getattr(self, "_cpr_scrub_widgets", ()):   # scrub only when built
+            w.setVisible(cpr)
+        if getattr(self, "_cpr_save_btn", None) is not None:
+            self._cpr_save_btn.setEnabled(cpr)
+        if getattr(self, "_cpr_draw_btn", None) is not None:
+            self._cpr_draw_btn.setChecked(pend)
+        if getattr(self, "_coronary_mpr_btn", None) is not None:
+            self._coronary_mpr_btn.setChecked(on)
+        # LV valve/apex entries are disabled while in coronary MPR mode (they
+        # share pane A / the axis, which the short-axis repurposes).
+        for attr in ("_lv_mv_btn", "_lv_aov_btn", "_lv_apex_sel_btn"):
+            b = getattr(self, attr, None)
+            if b is not None:
+                b.setEnabled(not on)
+        # Force a synchronous relayout so showing/hiding this row doesn't leave
+        # stale vertical padding until the next click (see _lv_relayout_bar).
+        if hasattr(self, "_lv_relayout_bar"):
+            self._lv_relayout_bar()
 
     def _build_lv_bar(self) -> QWidget:
         """Unified LV bar (2 rows, always visible below the image). Row 1: the
@@ -2848,25 +2907,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         cor_cap = QLabel(t("Coronary:"))
         cf = cor_cap.font(); cf.setBold(True); cor_cap.setFont(cf)
         row1.addWidget(cor_cap)
-        self._coronary_mpr_btn = FitButton(t("MPR"))
+        self._coronary_mpr_btn = FitButton(t("CPR"))
         self._coronary_mpr_btn.setCheckable(True)
         self._coronary_mpr_btn.setHelpToolTip(
-            t("Build a coronary short-axis (CPR): click to START, then trace the "
-              "vessel centreline as a Polyline on the 3-D MPR (double- or "
-              "right-click to finish). The perpendicular cross-sections open "
-              "automatically. Select a view tool then hold Alt/Option while "
-              "dragging to use ANY of them mid-trace — Zoom / Move / Rotate / "
-              "Spin / Paging / Thick / W-L. Click again to cancel. "
+            t("Coronary short-axis (CPR): opens the Draw / Load / Save / Exit "
+              "row below — Draw traces the vessel centreline (the short-axis "
+              "then opens automatically), or Load a saved .cpr.json. "
               "(Only in 3-D MPR view.)"))
         self._coronary_mpr_btn.clicked.connect(self._toggle_coronary_mpr)
         row1.addWidget(self._coronary_mpr_btn)
-        self._coronary_load_btn = FitButton(t("Load"))
-        self._coronary_load_btn.setHelpToolTip(
-            t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
-              "shows the trace, and opens the perpendicular cross-sections. "
-              "(Only in 3-D MPR view.)"))
-        self._coronary_load_btn.clicked.connect(self._cpr_load)
-        row1.addWidget(self._coronary_load_btn)
         row1.addSpacing(12)
 
         cap = QLabel(t("LV:"))
@@ -8737,11 +8786,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             for b in self._meas_btns.values():
                 b.setChecked(False)
                 b.setStyleSheet("")
-            # Turning Measure off cancels an armed Coronary: MPR trace.
+            # Turning Measure off disarms the Coronary Draw (the row stays).
             if getattr(self, "_coronary_mpr_pending", False):
                 self._coronary_mpr_pending = False
-                if getattr(self, "_coronary_mpr_btn", None) is not None:
-                    self._coronary_mpr_btn.setChecked(False)
+                self._coronary_sync_ui()
             self._measure_hover_clear()
             # Arm Reset: after a measure/LV session the view is off its initial
             # position, so the first Reset click should restore it (without this
@@ -10445,8 +10493,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             if isinstance(cpr, dict) and cpr.get("ctrl"):
                 self._cpr_apply_saved(cpr.get("ctrl"), cpr.get("ref_up"),
                                       cpr.get("state", {}))
-            elif self._cpr is not None:
-                self._exit_cpr()
+            else:
+                self._coronary_mode = False
+                self._coronary_mpr_pending = False
+                if self._cpr is not None:
+                    self._cpr_drop_source()
+                    self._exit_cpr()
+                else:
+                    self._coronary_sync_ui()
             self._view_restore(s)
         except Exception:                                # noqa: BLE001
             pass
@@ -10738,11 +10792,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (self._coronary_mpr_pending and d["type"] == "polyline"
                 and self._lv is None and self._mode == "3D" and len(pts) >= 2):
             self._coronary_mpr_pending = False
-            if getattr(self, "_coronary_mpr_btn", None) is not None:
-                self._coronary_mpr_btn.setChecked(False)
             if self._meas_on:                        # clean short-axis view
                 self._meas_btn.setChecked(False)
                 self._toggle_measure()
+            # _enter_cpr shows the scrub + keeps the coronary row (syncs UI).
             self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
 
     def _measure_finish_draft(self):
@@ -11391,6 +11444,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pass
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
+        self._coronary_mode = False
+        self._coronary_mpr_pending = False
         self._cpr_wrap.setVisible(False)
 
         b = self._bounds
@@ -11522,6 +11577,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_endo_manual_dict = None
         if hasattr(self, "_lvv_start_btn"):
             self._lvv_sync()
+        self._coronary_mode = False
+        self._coronary_mpr_pending = False
         self._cpr_wrap.setVisible(False)
         self._vol = None
         self._image = None
@@ -14834,23 +14891,38 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ------------------------------------------------ curved-MPR / short-axis
     def _toggle_coronary_mpr(self):
-        """Coronary: MPR button — arm (or cancel) the one-click short-axis flow.
-        When armed, Measure+Polyline is turned on and the NEXT finished polyline
-        is auto-built into a short-axis (see _commit_draft)."""
+        """Coronary: MPR button — enter (or leave) coronary MPR mode, which shows
+        the Draw / Load / Save / Exit row below. Draw arms the trace; the
+        finished polyline auto-builds the short-axis (see _commit_draft)."""
         if self._image is None:
-            self._coronary_mpr_btn.setChecked(False)
+            self._coronary_sync_ui()
             return
-        if self._coronary_mpr_pending:               # already armed → cancel
-            self._coronary_mpr_pending = False
-            self._coronary_mpr_btn.setChecked(False)
+        if getattr(self, "_coronary_mode", False) or self._cpr is not None:
+            self._coronary_exit()                    # toggle off
             return
         if self._mode != "3D":
             from PyQt6.QtWidgets import QMessageBox
-            self._coronary_mpr_btn.setChecked(False)
+            self._coronary_sync_ui()
             QMessageBox.information(
                 self, t("Coronary MPR"),
                 t("Switch to the 3-D MPR view first, then press MPR and trace "
                   "the coronary centreline."))
+            return
+        self._coronary_mode = True
+        self._coronary_mpr_pending = False
+        self._coronary_sync_ui()
+
+    def _coronary_draw(self):
+        """Draw button on the coronary row — arm (or disarm) Measure + Polyline
+        so a left-drag traces the vessel centreline. The finished polyline
+        auto-builds the short-axis."""
+        if self._image is None or self._mode != "3D":
+            self._coronary_sync_ui()
+            return
+        self._coronary_mode = True
+        if getattr(self, "_coronary_mpr_pending", False):   # armed → disarm
+            self._coronary_mpr_pending = False
+            self._coronary_sync_ui()
             return
         if self._cpr is not None:                    # trace on the MPR, not a disc
             self._exit_cpr()
@@ -14859,7 +14931,38 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._toggle_measure()
         self._set_measure_type("polyline")
         self._coronary_mpr_pending = True
-        self._coronary_mpr_btn.setChecked(True)
+        self._coronary_sync_ui()
+
+    def _coronary_exit(self):
+        """Exit button on the coronary row — leave short-axis (if built) and
+        coronary MPR mode, DELETE the traced centreline polyline, and hide the
+        row."""
+        self._coronary_mode = False
+        self._coronary_mpr_pending = False
+        self._cpr_drop_source()                      # delete the Polyline data
+        self._draft = None                           # drop any in-progress trace
+        if self._cpr is not None:
+            self._exit_cpr()                         # clears _cpr, hides scrub
+        else:
+            for k in ("A", "B"):
+                self._redraw_meas(k)
+            self._coronary_sync_ui()
+            self._refresh()
+
+    def _cpr_drop_source(self):
+        """Delete the short-axis's source centreline polyline (the active CPR's
+        source measure + any _cpr_src-tagged auto-trace). User-drawn measures
+        that were not the CPR source are left untouched."""
+        c = self._cpr
+        if c is not None:
+            src, mi = c.get("src"), c.get("src_mi")
+            if src in ("A", "B") and mi is not None \
+                    and 0 <= mi < len(self._measures[src]):
+                del self._measures[src][mi]
+        for k in ("A", "B"):
+            self._measures[k] = [m for m in self._measures[k]
+                                 if not m.get("_cpr_src")]
+            self._redraw_meas(k)
 
     def _enter_cpr(self, which, mi, ref_up=None):
         """Turn the polyline *mi* on pane *which* into a vessel centreline and
@@ -14918,18 +15021,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in self._t2d_btns:                    # Rt90/Lt90/Flip work on CPR
             b.setEnabled(True)
         self._cpr_rev_btn.setChecked(False)         # fresh: proximal→distal
+        self._coronary_mode = True                  # keep the coronary row shown
+        self._coronary_mpr_pending = False          # trace consumed
         self._cpr_sync_bar()
+        self._coronary_sync_ui()                     # show scrub, enable Save
         self._refresh(reset_cam=True)
 
     def _exit_cpr(self):
-        """Leave short-axis mode and restore pane A's normal MPR."""
+        """Leave short-axis mode and restore pane A's normal MPR. The coronary
+        row's visibility follows _coronary_mode (see _coronary_sync_ui)."""
         if self._cpr is None:
+            self._coronary_sync_ui()
             return
         self._cpr = None
-        self._cpr_wrap.setVisible(False)
         self.pane["A"].set_overlay_visible(self._cl_btn.isChecked())
         for b in self._t2d_btns:                  # 2-D-only again once out of CPR
             b.setEnabled(self._mode == "2D")
+        self._coronary_sync_ui()                  # hide scrub; row per _coronary_mode
         self._init_frames()                       # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
 
@@ -15048,6 +15156,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._measures[k] = [m for m in self._measures[k]
                                  if not m.get("_cpr_src")]
+            self._redraw_meas(k)
         u, v, _n = self._axes_for(src)
         o = self._pc[src]
         pts2d = [(float(np.dot(P - o, u)), float(np.dot(P - o, v)))
@@ -15100,7 +15209,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         cl = c["cl"]
         d = self._cpr_disp(c["idx"])              # scrubber = display position
-        self._cpr_wrap.setVisible(True)
         self._cpr_slider.blockSignals(True)
         self._cpr_slider.setMaximum(cl.n - 1)
         self._cpr_slider.setValue(d)
@@ -15815,10 +15923,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         controls are disabled. Default mode is chosen per series on load."""
         if mode not in ("3D", "2D") or self._image is None:
             return
-        # A Plane/2D/3D switch leaves short-axis mode (it repurposes pane A).
-        if self._cpr is not None:
+        # A Plane/2D/3D switch leaves short-axis mode (it repurposes pane A) and
+        # coronary MPR mode; the traced centreline is dropped.
+        if self._cpr is not None or getattr(self, "_coronary_mode", False):
+            self._cpr_drop_source()
             self._cpr = None
-            self._cpr_wrap.setVisible(False)
+            self._coronary_mode = False
+            self._coronary_mpr_pending = False
+            self._coronary_sync_ui()
         prev = getattr(self, "_mode", None)
         self._mode = mode
         if prev is not None and prev != mode:
