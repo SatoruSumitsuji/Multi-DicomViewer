@@ -8608,7 +8608,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Draw the valve annulus as an Ellipse (Shift = true circle), then "
               "press Confirm."))
         self._lv_ve_draw_btn.clicked.connect(self._lv_valve_draw)
-        self._lv_ve_confirm_btn = FitButton(t("Confirm"))
+        self._lv_ve_confirm_btn = FitButton(t("Set"))
         self._lv_ve_confirm_btn.setHelpToolTip(
             t("Set the valve plane from the drawn Ellipse."))
         self._lv_ve_confirm_btn.clicked.connect(self._lv_valve_confirm)
