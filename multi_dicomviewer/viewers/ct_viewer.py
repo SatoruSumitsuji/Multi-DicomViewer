@@ -13330,14 +13330,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             if len(P) < 2:
                 continue
             snapped.add(key)                         # processed (lock it either way)
-            d0 = float((P[0] - c) @ n)               # first end offset to plane
-            dL = float((P[-1] - c) @ n)              # last end offset to plane
             a0 = float((P[0] - apex) @ axis)         # first end along-axis pos
             aL = float((P[-1] - apex) @ axis)        # last end along-axis pos
-            # New terminal = the end's ⟂ projection onto the MV plane, PREPENDED
-            # (first end) / APPENDED (last end) so the original point survives.
-            pre = (P[0] - d0 * n) if (a0 > thr and abs(d0) > eps_mm) else None
-            app = (P[-1] - dL * n) if (aL > thr and abs(dL) > eps_mm) else None
+            # New basal terminal = a point 5 mm RADIAL from the LV long axis at
+            # the MV-centre (base) level, on the end's own wall side: c + 5·s·e_s
+            # (e_s = the meridian's unit radial ⟂ the axis) — the SAME convergence
+            # 'Fit MV' uses. PREPENDED (first end) / APPENDED (last end), so the
+            # traced end survives and the border closes toward the annulus base.
+            e_s = np.asarray(ax.meridian_dir(phi), float)
+            ne = float(np.linalg.norm(e_s))
+            e_s = e_s / ne if ne > 1e-6 else None
+
+            def _base5(P_end):
+                if e_s is None:
+                    return None
+                s = float(np.sign(float((P_end - apex) @ e_s))) or 1.0
+                b = c + 5.0 * s * e_s
+                return None if np.linalg.norm(b - P_end) < eps_mm else b
+
+            pre = _base5(P[0]) if a0 > thr else None
+            app = _base5(P[-1]) if aL > thr else None
             if pre is None and app is None:
                 continue
             pieces = []
