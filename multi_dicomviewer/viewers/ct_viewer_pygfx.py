@@ -8420,6 +8420,13 @@ class CTViewer(CPRMixin, AbstractViewer):
               "(Only in 3-D MPR view.)"))
         self._coronary_mpr_btn.clicked.connect(self._toggle_coronary_mpr)
         row1.addWidget(self._coronary_mpr_btn)
+        self._coronary_load_btn = FitButton(t("Load"))
+        self._coronary_load_btn.setHelpToolTip(
+            t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
+              "shows the trace, and opens the perpendicular cross-sections. "
+              "(Only in 3-D MPR view.)"))
+        self._coronary_load_btn.clicked.connect(self._cpr_load)
+        row1.addWidget(self._coronary_load_btn)
         row1.addSpacing(12)
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
@@ -13688,6 +13695,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_lbl.setMinimumWidth(170)
         fl = self._cpr_lbl.font(); fl.setBold(True); self._cpr_lbl.setFont(fl)
         row.addWidget(self._cpr_lbl)
+        self._cpr_save_btn = FitButton(t("Save"))
+        self._cpr_save_btn.setHelpToolTip(
+            t("Save this short-axis (centreline + rotation / flip / reverse / "
+              "FOV / position) to a .cpr.json for reuse (name it yourself, e.g. "
+              "by vessel / analysis)."))
+        self._cpr_save_btn.clicked.connect(self._cpr_save)
+        row.addWidget(self._cpr_save_btn)
         self._cpr_exit_btn = FitButton(t("Exit CPR"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave short-axis mode and restore the normal MPR"))
@@ -13724,12 +13738,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coronary_mpr_pending = True
         self._coronary_mpr_btn.setChecked(True)
 
-    def _enter_cpr(self, which, mi):
+    def _enter_cpr(self, which, mi, ref_up=None):
         """Turn polyline *mi* on pane *which* into a vessel centreline and put
         pane A into short-axis (cross-section) scroll mode. Mirrors the VTK
-        viewer's _enter_cpr."""
+        viewer's _enter_cpr. *ref_up* overrides the RMF seed (used by Load so a
+        saved short-axis rebuilds with the exact base frame its state is
+        relative to)."""
         m = self._measures[which][mi]
         u, v, nrm = self._axes_for(which)
+        if ref_up is not None:
+            nrm = np.asarray(ref_up, float)
         p3 = m.get("pts3d")
         if p3 and len(p3) >= 2:
             ctrl = [np.asarray(P, dtype=float) for P in p3]
@@ -13773,6 +13791,147 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.setEnabled(True)
         self._init_frames()                        # rebuild pane A's MPR frame
         self._refresh(reset_cam=True)
+
+    # ---- short-axis (CPR) Save / Load: a .cpr.json sidecar --------------
+    def _cpr_save(self) -> None:
+        """Save the active short-axis to a .cpr.json — the centreline control
+        points (volume mm) + the RMF seed + the display state (rotation / flip /
+        reverse / FOV / position). The user names the file (no vessel binding)."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if self._cpr is None:
+            QMessageBox.information(self.window(), t("Short-axis"),
+                                   t("Open a short-axis (CPR) first."))
+            return
+        ctrl = self._cpr_ctrl_pts3d()
+        if not ctrl or len(ctrl) < 2:
+            QMessageBox.warning(self.window(), t("Short-axis"),
+                                t("This short-axis has no centreline to save."))
+            return
+        c = self._cpr
+        T = c["T"]
+        data = {
+            "format": "MDV-CPR", "version": 1, "type": "cpr",
+            "series": (self._lv_series_meta()
+                       if hasattr(self, "_lv_series_meta") else {}),
+            "ctrl": [list(map(float, np.asarray(P, float))) for P in ctrl],
+            "ref_up": list(map(float, np.asarray(
+                c.get("ref_up", (0.0, 0.0, 1.0)), float))),
+            "state": {
+                "T": [[float(T[0, 0]), float(T[0, 1])],
+                      [float(T[1, 0]), float(T[1, 1])]],
+                "rot": float(c.get("rot", 0.0)),
+                "reversed": bool(c.get("reversed", False)),
+                "half": float(c.get("half", 25.0)),
+                "idx": int(c.get("idx", 0)),
+                "src": c.get("src", "A"),
+            },
+        }
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "shortaxis")
+        default = os.path.join(d, stem + ".cpr.json") if d \
+            else stem + ".cpr.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save short-axis"), default,
+            "Short-axis (*.cpr.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".cpr.json"
+        if hasattr(self, "_unlink_case_variant"):
+            self._unlink_case_variant(path)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("Short-axis"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        if hasattr(self, "_lv_remember_dir"):
+            self._lv_remember_dir(path)
+        QMessageBox.information(self.window(), t("Short-axis"),
+                               t("Saved: {p}", p=os.path.basename(path)))
+
+    def _cpr_load(self) -> None:
+        """Load a .cpr.json: rebuild the centreline, re-show the trace (as an
+        editable polyline on the map pane) and open the perpendicular
+        cross-sections restored to the saved rotation / flip / reverse / FOV /
+        position."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        if self._vol is None:
+            return
+        if self._mode != "3D":
+            QMessageBox.information(
+                self.window(), t("Short-axis"),
+                t("Switch to the 3-D MPR view first, then load a short-axis."))
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load short-axis"), d,
+            "Short-axis (*.cpr.json);;JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("type") != "cpr" and data.get("format") != "MDV-CPR":
+                raise ValueError(t("Not a short-axis (.cpr.json) file."))
+            saved = (data.get("series") or {}).get("series_uid", "")
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if saved and cur and saved != cur:
+                if QMessageBox.question(
+                        self.window(), t("Short-axis"),
+                        t("This short-axis file was saved for a DIFFERENT "
+                          "series — it may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return
+            ctrl = [np.asarray(P, float) for P in data["ctrl"]]
+            if len(ctrl) < 2:
+                raise ValueError(t("This short-axis has no centreline to save."))
+            st = data.get("state", {})
+            src = st.get("src", "A")
+            if src not in ("A", "B"):
+                src = "A"
+            if self._cpr is not None:
+                self._exit_cpr()
+            # Re-create the source polyline so the trace shows on the map pane
+            # and stays editable; its 3-D control points ARE the centreline.
+            u, v, _n = self._axes_for(src)
+            o = self._pc[src]
+            pts2d = [(float(np.dot(P - o, u)), float(np.dot(P - o, v)))
+                     for P in ctrl]
+            self._meas_seq += 1
+            self._measures[src].append({
+                "id": self._meas_seq, "type": "polyline", "pts": pts2d,
+                "pts3d": [list(map(float, P)) for P in ctrl]})
+            self._redraw_meas(src)
+            mi = len(self._measures[src]) - 1
+            self._enter_cpr(src, mi, ref_up=data.get("ref_up"))
+            if self._cpr is None:
+                raise ValueError(t("Load failed: {err}", err="build"))
+            c = self._cpr
+            T = st.get("T")
+            if T:
+                c["T"] = np.array([[float(T[0][0]), float(T[0][1])],
+                                   [float(T[1][0]), float(T[1][1])]], float)
+            c["rot"] = float(st.get("rot", 0.0))
+            c["reversed"] = bool(st.get("reversed", False))
+            c["half"] = float(st.get("half", c.get("half", 25.0)))
+            c["idx"] = int(min(max(int(st.get("idx", c["idx"])), 0),
+                               c["cl"].n - 1))
+            self._cpr_rev_btn.setChecked(c["reversed"])
+            self._cpr_apply_xform()
+            self._cpr_sync_bar()
+            self._refresh(reset_cam=True)
+            if hasattr(self, "_lv_remember_dir"):
+                self._lv_remember_dir(path)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("Short-axis"),
+                                t("Load failed: {err}", err=str(exc)))
 
     def _cpr_sync_bar(self):
         c = self._cpr
