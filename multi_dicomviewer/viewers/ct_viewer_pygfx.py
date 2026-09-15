@@ -9003,6 +9003,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._lvv_close_lbl)
         row.addWidget(self._lvv_close_spin)
         self._lvv_update_close_ui()          # label the knob for the default method
+        # Cap the spin boxes / combo to the button height so the Blood/Endo rows
+        # don't grow taller than the MV/AoV/Apex/Epi sub-modes (see VTK viewer).
+        _bh = self._lvv_epi_btn.sizeHint().height()
+        for _w in (self._lvv_lo_spin, self._lvv_hi_spin,
+                   self._lvv_close_spin, self._lvv_method_combo):
+            _w.setMaximumHeight(_bh)
         # Endo-Border(Manual): enter the Endo edit mode. Seeds from Auto-Endo the
         # first time; the hand-edited border is retained across HU changes. Moved
         # to row 3.
