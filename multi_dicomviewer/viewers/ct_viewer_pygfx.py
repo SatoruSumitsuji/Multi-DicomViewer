@@ -7131,6 +7131,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Contour LV: re-converge the traced border's basal ends onto the new MV.
         if (which == "mitral" and self._lv is not None
                 and self._lv.get("phase") == "contour"):
+            # The MV plane moved → the base target changed, so re-arm every
+            # plane's one-time base→MV extension.
+            self._lv["base_snapped"] = set()
             for _pas in ("endo", "epi"):
                 try:
                     self._lv_snap_base_to_mv(_pas)
@@ -12071,6 +12074,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                                               which=lv["target"])
         except Exception:
             return
+        # A freshly (re)traced border re-arms ONE base→MV extension for this
+        # plane (see _lv_snap_base_to_mv); planes the user already adjusted are
+        # left alone.
+        snapped = lv.get("base_snapped")
+        if snapped is not None:
+            snapped.discard((lv["target"], round(float(phi), 4)))
         tag = (lv["plane_idx"], lv["target"])
         self._measures[pane] = [mm for mm in self._measures[pane]
                                 if mm is m or mm.get("_lv") != tag]
@@ -12129,12 +12138,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         axis = axis / (float(np.linalg.norm(axis)) or 1.0)
         along_mv = float((c - apex) @ axis)          # base level along the axis
         thr = 0.4 * along_mv if along_mv > 1.0 else -1.0
+        # Each traced plane's base is extended to the MV plane EXACTLY ONCE per
+        # LV session (tracked in _lv["base_snapped"]) — otherwise stepping to
+        # another plane re-ran this over ALL planes and re-appended a fresh
+        # on-plane terminal to a plane whose basal endpoint the user had since
+        # DRAGGED toward the long axis (the distance guard can't tell them
+        # apart). A freshly (re)traced plane is re-armed in _lv_capture_current.
+        snapped = self._lv.setdefault("base_snapped", set())
         before = self._lv_geom_snap()
         moved = False
         for phi, arr in list(store.items()):
+            key = (pas, round(float(phi), 4))
+            if key in snapped:                       # already extended once → keep
+                continue
             P = np.asarray(arr, float).reshape(-1, 3)
             if len(P) < 2:
                 continue
+            snapped.add(key)                         # processed (lock it either way)
             d0 = float((P[0] - c) @ n)               # first end offset to plane
             dL = float((P[-1] - c) @ n)              # last end offset to plane
             a0 = float((P[0] - apex) @ axis)         # first end along-axis pos
