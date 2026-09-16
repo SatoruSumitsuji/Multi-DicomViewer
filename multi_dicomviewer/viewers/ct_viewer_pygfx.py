@@ -3566,6 +3566,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
+        # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
+        # same, so a shared Rt90/Flip/… acts on the matching side in both.
+        if (getattr(self, "_sync_view_on", False)
+                and not getattr(self, "_sync_view_applying", False)):
+            self.sync_view_op.emit("active", {"which": which})
 
     def _update_active_frames(self):
         for key, f in self._frames.items():
@@ -5083,6 +5088,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 w = params["which"]
                 self._roll[w] += _SPIN_SIGN * float(params["dphi"])
                 self._refresh(lod=True, only=w)
+            elif kind == "cross":                    # crosshair move/rotate delta
+                self.apply_cross_delta(
+                    params["which"], float(params["du"]),
+                    float(params["dv"]), float(params["dang"]),
+                    params.get("mode", "move"))
+            elif kind == "active":                   # selected A/B sub-pane
+                self._set_active(params["which"])
         finally:
             self._sync_view_applying = False
 
@@ -5387,6 +5399,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measure_hover_clear(key)
 
     def _cross_move(self, which, sx, sy):
+        """Crosshair drag — wraps the impl to MIRROR the gesture to a SyncView
+        peer as a portable pane-plane delta (Δcentre in u,v + Δcrossline angle)."""
+        c0 = np.asarray(self._center, float).copy()
+        a0 = self._cross_ang[which]
+        self._cross_move_impl(which, sx, sy)
+        if self._sync_view_on and not self._sync_view_applying:
+            u, v, _n = self._frame[which]
+            dc = np.asarray(self._center, float) - c0
+            du = float(np.dot(dc, u))
+            dv = float(np.dot(dc, v))
+            dang = float(self._cross_ang[which] - a0)
+            if abs(du) > 1e-9 or abs(dv) > 1e-9 or abs(dang) > 1e-9:
+                self.sync_view_op.emit(
+                    "cross", {"which": which, "du": du, "dv": dv, "dang": dang,
+                              "mode": self._cross_mode})
+
+    def apply_cross_delta(self, which, du, dv, dang, mode="move") -> None:
+        """Apply a peer's crosshair gesture here (SyncView)."""
+        u, v, _n = self._frame[which]
+        other = "B" if which == "A" else "A"
+        if abs(du) > 1e-12 or abs(dv) > 1e-12:
+            self._center = np.asarray(self._center, float) + du * u + dv * v
+            if mode != "center":
+                self._pc[other] = np.asarray(self._center, float).copy()
+        if abs(dang) > 1e-12:
+            self._cross_ang[which] = self._cross_ang[which] + dang
+            self._rotate_companion_by(which, dang)
+        self._clamp_center()
+        self._refresh(lod=True)
+
+    def _cross_move_impl(self, which, sx, sy):
         self._gesture_moved = True             # centreline drag = one Ctrl+Z step
         wx, wy = self._disp_to_world(which, sx, sy)
         u, v, n = self._frame[which]
