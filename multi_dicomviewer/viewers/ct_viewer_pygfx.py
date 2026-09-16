@@ -4985,19 +4985,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         None. Range = a nominal apex..Epi-length window."""
         epi = getattr(self, "_lvv_epi_surf", None)
         ax = getattr(epi, "axis", None) if epi is not None else None
-        if ax is None:
-            return None
-        apex = np.asarray(ax.apex, float)
-        axis = np.asarray(ax.axis, float)
+        if ax is not None:
+            apex = np.asarray(ax.apex, float)
+            axis = np.asarray(ax.axis, float)
+            length = float(getattr(ax, "length_mm", 0.0))
+        else:
+            # Fallback: LV long axis = common apex → MV-centre (works without a
+            # built Epi surface, so the level link 按分/mm is available whenever
+            # MV + apex are set).
+            apex = getattr(self, "_lv_apex", None)
+            mv = (self._lv_valves.get("mitral")
+                  if getattr(self, "_lv_valves", None) else None)
+            if apex is None or mv is None:
+                return None
+            apex = np.asarray(apex, float)
+            axis = np.asarray(mv[0], float) - apex
+            length = float(np.linalg.norm(axis))
         nrm = float(np.linalg.norm(axis))
         if nrm < 1e-9:
             return None
         axis = axis / nrm
-        return apex, axis, 0.0, (float(getattr(ax, "length_mm", 0.0)) or 90.0)
+        return apex, axis, 0.0, (length or 90.0)
 
     def lv_cosync_available(self) -> bool:
-        return (self._lvv is not None and self._lv is None
-                and self._lv_cosync_axis() is not None)
+        return (self._lv is None and self._lv_cosync_axis() is not None)
 
     def set_lv_cosync_on(self, on: bool) -> None:
         self._lv_cosync_on = bool(on)
