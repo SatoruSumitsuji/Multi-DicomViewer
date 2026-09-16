@@ -5427,6 +5427,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.pane[w].ren.GetActiveCamera().Roll(
                     _SPIN_SIGN * float(params["dphi"]))
                 self._refresh(only=w)
+            elif kind == "cross":                    # crosshair move/rotate delta
+                self.apply_cross_delta(
+                    params["which"], float(params["du"]),
+                    float(params["dv"]), float(params["dang"]),
+                    params.get("mode", "move"))
+            elif kind == "active":                   # selected A/B sub-pane
+                self._set_active(params["which"])
         finally:
             self._sync_view_applying = False
 
@@ -15969,6 +15976,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
+        # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
+        # same, so a shared Rt90/Flip/… acts on the matching side in both.
+        if (getattr(self, "_sync_view_on", False)
+                and not getattr(self, "_sync_view_applying", False)):
+            self.sync_view_op.emit("active", {"which": which})
 
     def _update_active_frames(self):
         """Yellow border around the active CT pane (transparent on the
@@ -17169,6 +17181,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         return _polylines_pd(polylines)
 
     def _cross_move(self, which, sx, sy):
+        """Crosshair drag (move / rotate / recentre the reslice). Wraps the impl
+        to MIRROR the gesture to a SyncView peer as a portable pane-plane delta
+        (Δcentre in the pane's u,v + Δcrossline-angle), since the raw screen
+        coords aren't portable across two different volumes."""
+        c0 = self._center.copy()
+        a0 = self._cross_ang[which]
+        self._cross_move_impl(which, sx, sy)
+        if self._sync_view_on and not self._sync_view_applying:
+            u, v, _n = self._frame[which]
+            dc = np.asarray(self._center, float) - c0
+            du = float(np.dot(dc, u))
+            dv = float(np.dot(dc, v))
+            dang = float(self._cross_ang[which] - a0)
+            if abs(du) > 1e-9 or abs(dv) > 1e-9 or abs(dang) > 1e-9:
+                self.sync_view_op.emit(
+                    "cross", {"which": which, "du": du, "dv": dv, "dang": dang,
+                              "mode": self._cross_mode})
+
+    def apply_cross_delta(self, which, du, dv, dang, mode="move") -> None:
+        """Apply a peer's crosshair gesture here (SyncView): slide the reslice
+        centre by (du,dv) in this pane's u,v basis and turn the crossline by
+        *dang*° — the companion pane reslices/rotates to follow. A 'center'
+        (intersection) drag moves only the crosshair (companion image fixed)."""
+        u, v, _n = self._frame[which]
+        other = "B" if which == "A" else "A"
+        if abs(du) > 1e-12 or abs(dv) > 1e-12:
+            self._center = np.asarray(self._center, float) + du * u + dv * v
+            if mode != "center":
+                self._pc[other] = self._center.copy()
+        if abs(dang) > 1e-12:
+            self._cross_ang[which] = self._cross_ang[which] + dang
+            self._rotate_companion_by(which, dang)
+        self._clamp_center()
+        self._refresh()
+
+    def _cross_move_impl(self, which, sx, sy):
         # Intersection drag: the crosshair centre FOLLOWS the cursor while the
         # background image stays put (only _center moves, not _pc / the camera).
         # The actual recentre — moving that point to the middle of the screen —
