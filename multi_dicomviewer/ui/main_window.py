@@ -1956,6 +1956,11 @@ class MainWindow(QMainWindow):
         self._sv_mm_btn.setToolTip(t("apex からの絶対 mm で対応（左室長の差が見える）"))
         self._sv_mm_btn.clicked.connect(lambda: self._sv_set_level_mode(False))
         r2.addWidget(self._sv_mm_btn)
+        # Shown (in black) INSTEAD of the 按分/mm buttons when the LV long axis
+        # isn't defined yet — so the row always reads something in black.
+        self._sv_level_na = QLabel(t("MV・Apex未設定"))
+        self._sv_level_na.setStyleSheet("color:black;")
+        r2.addWidget(self._sv_level_na)
         r2.addSpacing(16)
         self._sv_scale_btn = QPushButton(t("縮尺を合わせる"))
         self._sv_scale_btn.setToolTip(t(
@@ -2045,12 +2050,15 @@ class MainWindow(QMainWindow):
         self._sv_mm_btn.setStyleSheet("" if fraction else active)
 
     def _sv_sync_bar_state(self) -> None:
-        """Enable the level-sync selector only when both CTs are LV-volume (a
-        level to link exists); reflect the current mode."""
+        """Level-sync row: when an LV long axis exists show the 按分/mm selector
+        (one filled); otherwise show a black 'MV・Apex未設定' label instead. The
+        'レベル同期:' caption is ALWAYS black (never greyed)."""
         link = getattr(self, "_syncview_link", None)
         lvl = link is not None and link.level_link_active()
-        for w in (self._sv_level_cap, self._sv_frac_btn, self._sv_mm_btn):
-            w.setEnabled(lvl)
+        self._sv_level_cap.setEnabled(True)          # caption always black
+        self._sv_frac_btn.setVisible(lvl)
+        self._sv_mm_btn.setVisible(lvl)
+        self._sv_level_na.setVisible(not lvl)
         if lvl:
             self._sv_update_level_buttons(link.level_fraction)
 
