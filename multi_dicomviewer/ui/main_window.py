@@ -2057,6 +2057,20 @@ class MainWindow(QMainWindow):
     def _sv_match_scale(self) -> None:
         if getattr(self, "_syncview_link", None) is not None:
             self._syncview_link.match_scale()
+            self._sv_set_scale_matched(True)
+
+    def _sv_set_scale_matched(self, matched: bool) -> None:
+        """Tint the '縮尺を合わせる' button green while both panes share one scale
+        (a synced zoom keeps them matched), so 'already same scale' is visible."""
+        b = getattr(self, "_sv_scale_btn", None)
+        if b is None:
+            return
+        if matched:
+            b.setStyleSheet("background:#2e7d32;color:white;")
+            b.setText(t("縮尺一致中"))
+        else:
+            b.setStyleSheet("")
+            b.setText(t("縮尺を合わせる"))
 
     def _toggle_syncview(self) -> None:
         """Tools ▸ SyncView (checkable): link / unlink the two shown CTs so mouse
@@ -2099,6 +2113,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes,
         ) == QMessageBox.StandardButton.Yes:
             self._syncview_link.match_scale()
+            self._sv_set_scale_matched(True)
+        else:
+            self._sv_set_scale_matched(False)
         # Hide each pane's own toolbar / below bars — the shared bar drives both.
         for v in viewers:
             try:
