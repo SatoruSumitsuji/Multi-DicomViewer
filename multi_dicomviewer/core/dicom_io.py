@@ -576,14 +576,14 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                 # rows. Costly only for these unusual series; common
                 # (biplane / single) series skip this entirely.
                 headers = [(path, _read_header(path)) for path in se.files]
-                # Tree "No" column for the split rows: promote each file's
-                # InstanceNumber ONLY when those are DISTINCT across the
-                # group — the vendor's per-instance numbering (Philips Allura
-                # / US pack many cines under one SeriesUID, numbered per
-                # instance). When they are NOT distinct (several cines all
-                # tagged the same InstanceNumber, e.g. all "#1", or none at
-                # all) promoting it would label every row "#1" and HIDE the
-                # real SeriesNumber, so keep the real SeriesNumber instead.
+                # Tree "Series No" for a split row = the file's OWN real
+                # SeriesNumber (0020,0011), so it matches the number burned into
+                # the image overlay. Vendors that pack a whole acquisition (cine +
+                # stills) under ONE SeriesUID give every file the SAME SeriesNumber
+                # and tell them apart by InstanceNumber — so those split rows share
+                # a Series No and are distinguished by the Instance No column
+                # (below) / time / frame count. (Older builds promoted
+                # InstanceNumber into Series No, which HID the real SeriesNumber.)
                 def _ino_of(ds):
                     if ds is None:
                         return None
@@ -592,9 +592,15 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                         return int(v)
                     except (TypeError, ValueError):
                         return None
-                distinct_ino = len(
-                    {_ino_of(ds) for _p, ds in headers if _ino_of(ds) is not None}
-                ) > 1
+
+                def _sn_of(ds):
+                    if ds is None:
+                        return None
+                    v = getattr(ds, "SeriesNumber", None)
+                    try:
+                        return int(v)
+                    except (TypeError, ValueError):
+                        return None
                 for idx, (path, ds) in enumerate(headers):
                     if ds is None:
                         # Unreadable: keep the original group key so the
@@ -622,12 +628,10 @@ def _split_packed_xa_series(patients: dict[str, Patient]) -> None:
                         modality=se.modality,
                         description=desc,
                         files=[path],
-                        # Promote InstanceNumber into the Series No column
-                        # (how other viewers label packed series) when it
-                        # actually discriminates the rows; otherwise fall
-                        # back to the real SeriesNumber so the tree matches
-                        # the number burned into the image.
-                        number=(ino_int if (distinct_ino and ino_int is not None)
+                        # Series No = the file's real SeriesNumber (matches the
+                        # image overlay); InstanceNumber stays in the Instance No
+                        # column (instance_number=) to tell split rows apart.
+                        number=(_sn_of(ds) if _sn_of(ds) is not None
                                 else se.number),
                         acq_number=anum_int,
                         instance_number=ino_int,
