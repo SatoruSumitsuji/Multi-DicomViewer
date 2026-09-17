@@ -432,8 +432,13 @@ class StudyBrowser(QTreeWidget):
         self._patients: dict[str, Patient] = {}
         self._anon = False
         #: GLOBAL sort (mode, asc) applied to EVERY study — a header click
-        #: sorts all studies alike, regardless of the current selection.
+        #: sorts all studies alike, regardless of the current selection. Default
+        #: = Series Number ASCENDING (small→large), reset every launch.
         self._sort_global: tuple = ("number", True)
+        #: True once the user has EXPLICITLY clicked a header. Until then a click
+        #: sorts ASCENDING (even on the pre-selected Series-No column) instead of
+        #: toggling to descending.
+        self._user_sorted = False
         hdr.setSortIndicator(1, Qt.SortOrder.AscendingOrder)
 
     def retranslate_ui(self) -> None:
@@ -455,10 +460,17 @@ class StudyBrowser(QTreeWidget):
         key = getattr(self, "_sort_cols", {}).get(col)
         if key is None:                       # Type/Description/Path
             return
-        # Sort ALL studies alike — no selection needed. Re-clicking the active
-        # column toggles the direction; a new column starts ascending.
+        # Sort ALL studies alike — no selection needed. The FIRST explicit click
+        # (or a new column) sorts ASCENDING; re-clicking the SAME column after
+        # that toggles the direction. Without the _user_sorted guard, the first
+        # click on the pre-selected Series-No column flipped straight to
+        # descending (the reported "default is descending").
         mode, asc = self._sort_global
-        asc = not asc if key == mode else True
+        if (not self._user_sorted) or key != mode:
+            asc = True
+        else:
+            asc = not asc
+        self._user_sorted = True
         self._sort_global = (key, asc)
         # Emits sortIndicatorChanged -> StudyPanel rebuilds tree+thumbs
         # (keeping any current selection).
