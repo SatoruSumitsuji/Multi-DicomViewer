@@ -2209,6 +2209,33 @@ class MainWindow(QMainWindow):
         w.show()
         w.raise_()
         w.activateWindow()
+        return w
+
+    @staticmethod
+    def _is_case_presentation_json(path: str) -> bool:
+        """True if *path* is a Case Presentation .json (structure heuristic), so a
+        drag&drop of it opens the Case Presentation panel instead of trying to
+        read it as DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return (isinstance(data, dict) and isinstance(data.get("rows"), list)
+                and ("reference" in data or "offsets" in data))
+
+    def _open_case_presentation_file(self, path: str) -> None:
+        """Drop a CasePresentation.json onto the shell → open the Case
+        Presentation panel and load it: the related folders load in the
+        background (series hidden in the tree), the panes stay blank, and each
+        row's 表示 button then restores its view. Same as Tools ▸ Case
+        Presentation ▸ 読込, one action."""
+        w = self._open_case_presentation()
+        if w is not None:
+            w.load_file(path)
 
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:
@@ -4391,6 +4418,14 @@ class MainWindow(QMainWindow):
         """Import a drop of ANY mix of folders and files — several folders at
         once included. Folders expand recursively; plain files do not."""
         paths = [p for p in (paths or []) if p]
+        # Peel off any Case Presentation .json drops → open them in the Case
+        # Presentation panel (loads the related folders in the background), not
+        # as DICOM. Works dropped on the Studies tree OR an image pane.
+        cp_files = [p for p in paths
+                    if os.path.isfile(p) and self._is_case_presentation_json(p)]
+        for p in cp_files:
+            self._open_case_presentation_file(p)
+        paths = [p for p in paths if p not in cp_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
         if not dirs and not files:

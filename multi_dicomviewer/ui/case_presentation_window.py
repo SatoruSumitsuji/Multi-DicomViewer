@@ -1083,13 +1083,19 @@ class CasePresentationWindow(SnapDock):
             t("JSON (*.json)"))
         if not path:
             return
+        self.load_file(path)
+
+    def load_file(self, path: str) -> bool:
+        """Load a Case Presentation *.json from *path* (also used by a drag&drop
+        of the file onto the shell): populate the rows and offer to open the
+        related folders in the background so the 表示 buttons work."""
         self._last_dir = os.path.dirname(path) or self._last_dir
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError) as exc:
             self._warn(t("読込に失敗しました: {e}", e=str(exc)))
-            return
+            return False
         self._reference = data.get("reference", "XA")
         self._offsets = {k: float(v) for k, v in
                          (data.get("offsets") or {}).items()}
@@ -1116,6 +1122,7 @@ class CasePresentationWindow(SnapDock):
         self._rebuild()
         self._hint.setText(t("読込みました: {p}", p=path))
         self._offer_open_missing()
+        return True
 
     def _offer_open_missing(self) -> None:
         """After a load, offer to re-scan the folders of any series that aren't
