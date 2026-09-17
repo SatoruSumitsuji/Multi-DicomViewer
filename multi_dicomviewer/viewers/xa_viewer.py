@@ -1324,13 +1324,26 @@ class XAViewer(AbstractViewer):
         the next resize. Re-apply it (deferred so Qt has settled the real
         geometry) so the chrome fits from the first frame."""
         super().showEvent(e)
-        QTimer.singleShot(0, self._apply_image_floor)
-        # The Play-range ▽ strip maps the seek slider's groove geometry, which is
-        # NOT final on the first paint (load_series runs on a hidden/pre-layout
-        # page). It repaints only on its own resizeEvent, so the strip showed a
-        # "partial" seek bar until any later resize/interaction nudged it. Repaint
-        # both once the layout has settled (after _apply_image_floor above).
-        QTimer.singleShot(0, self._settle_seek_bar)
+        # Re-apply the image-floor cap + repaint the seek bar as the geometry
+        # settles. On a fresh QStackedWidget page the real height isn't final at
+        # the first event-loop tick — worse for a BIPLANE pane (two canvases lay
+        # out later) — so a single singleShot(0) left the chrome capped to its
+        # 24px floor with the seek bar clipped until an interaction. Re-run across
+        # a few ticks so the full bar shows from the first frame.
+        for _delay in (0, 30, 120):
+            QTimer.singleShot(_delay, self._settle_chrome)
+
+    def _settle_chrome(self) -> None:
+        """Re-cap the below-image chrome to the now-final height and repaint the
+        seek bar, so the transport strip isn't clipped on first show."""
+        try:
+            self._apply_image_floor()
+            sc = getattr(self, "_below_scroll", None)
+            if sc is not None:
+                sc.updateGeometry()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._settle_seek_bar()
 
     def _settle_seek_bar(self) -> None:
         """Repaint the seek slider + its Play-range ▽ strip against the now-final
@@ -1664,10 +1677,12 @@ class XAViewer(AbstractViewer):
 
         self._relayout()
         self._refresh_overlay()
-        # Repaint the seek bar + ▽ strip once the (re)layout has settled, so a
-        # series loaded into an already-visible pane also shows the full bar with
-        # no nudge (showEvent covers the first-show case).
-        QTimer.singleShot(0, self._settle_seek_bar)
+        # Re-cap the chrome + repaint the seek bar once the (re)layout settles,
+        # so a series loaded into an already-visible pane also shows the full bar
+        # with no nudge (showEvent covers the first-show case). Multi-tick for a
+        # biplane pane whose two canvases lay out over a couple of ticks.
+        for _delay in (0, 30, 120):
+            QTimer.singleShot(_delay, self._settle_chrome)
         # Read this series' ECG (if any) and prime the strip — hidden until V.
         self._read_ecg_for_series()
 
