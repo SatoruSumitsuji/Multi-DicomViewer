@@ -58,10 +58,13 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 # Column layout — 表示 / 更新 / 削除 sit between 統合時間 and コメント (easier to
 # reach than the far right edge or the top toolbar), so the comment column is
 # last (and stretches).
-(C_NO, C_MOD, C_SER, C_FRAMES, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL,
- C_COMMENT) = range(10)
+# C_DEL = 除外 (drop the ROW from the presentation, files untouched);
+# C_ERASE = 削除 (MOVE the series' files to a CasePresentation-Erase trash folder
+# beside the image folder, then drop the row).
+(C_NO, C_MOD, C_SER, C_FRAMES, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL, C_ERASE,
+ C_COMMENT) = range(11)
 _HEADERS = ["No", "種別", "Ser", "Frame", "時間", "統合時間", "表示", "更新",
-            "削除", "コメント"]
+            "除外", "削除", "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
 
 
@@ -315,7 +318,8 @@ class CasePresentationWindow(SnapDock):
         col_menu = QMenu(b_cols)
         self._col_actions = {}
         for col, label in ((C_FRAMES, t("Frame")), (C_UNI, t("統合時間")),
-                           (C_UPD, t("更新")), (C_DEL, t("削除"))):
+                           (C_UPD, t("更新")), (C_DEL, t("除外")),
+                           (C_ERASE, t("削除"))):
             a = col_menu.addAction(label)
             a.setCheckable(True)
             a.setChecked(True)
@@ -367,9 +371,16 @@ class CasePresentationWindow(SnapDock):
                                "各行の読込状態を再確認"))
         b_refresh.clicked.connect(self._refresh_state)
         bar2.addWidget(b_refresh)
-        b_del = QPushButton(t("削除"))
+        b_del = QPushButton(t("除外"))
+        b_del.setToolTip(t("選択行をプレゼンから除外（元ファイルは残す）"))
         b_del.clicked.connect(self._delete_selected)
         bar2.addWidget(b_del)
+        b_erase = QPushButton(t("削除"))
+        b_erase.setToolTip(t(
+            "選択行のシリーズの元ファイルを CasePresentation-Erase フォルダへ移動"
+            "（元に戻せます）"))
+        b_erase.clicked.connect(self._erase_selected)
+        bar2.addWidget(b_erase)
         bar2.addSpacing(12)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
@@ -426,12 +437,12 @@ class CasePresentationWindow(SnapDock):
         # locked to its contents; the comment column stretches to fill the rest.
         # Sensible initial widths are set below and persist across rebuilds.
         for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_TIME, C_UNI, C_SHOW, C_UPD,
-                  C_DEL):
+                  C_DEL, C_ERASE):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_COMMENT, QHeaderView.ResizeMode.Stretch)
         for c, w in ((C_NO, 44), (C_MOD, 70), (C_SER, 56), (C_FRAMES, 56),
                      (C_TIME, 92), (C_UNI, 92), (C_SHOW, 64), (C_UPD, 56),
-                     (C_DEL, 56)):
+                     (C_DEL, 56), (C_ERASE, 56)):
             self._table.setColumnWidth(c, w)
         self._table.cellChanged.connect(self._on_cell_changed)
         # Row right-click menu: 状態更新 / 削除.
@@ -739,7 +750,7 @@ class CasePresentationWindow(SnapDock):
         self._after_rows_changed()
 
     def _delete_row(self, row) -> None:
-        """Delete the one row backing a per-row 削除 button."""
+        """除外: drop the one row backing a per-row 除外 button (files untouched)."""
         try:
             i = self._rows.index(row)
         except ValueError:
@@ -747,6 +758,56 @@ class CasePresentationWindow(SnapDock):
         self._record_undo()
         del self._rows[i]
         self._after_rows_changed()
+
+    # ---- 削除 (erase): MOVE the series' files to a trash folder + drop the row
+    def _erase_row(self, row) -> None:
+        self._erase_rows([row])
+
+    def _erase_selected(self) -> None:
+        sel = sorted(self._selected_row_indices())
+        rows = [self._rows[i] for i in sel if 0 <= i < len(self._rows)]
+        self._erase_rows(rows)
+
+    def _erase_rows(self, rows) -> None:
+        """削除: MOVE each row's series files to a CasePresentation-Erase folder
+        beside the image folder (reversible), then drop the row. Confirms first
+        (destructive). Rows whose series can't be resolved to files (not loaded /
+        ambiguous) are KEPT and reported."""
+        rows = [r for r in rows if r]
+        if not rows:
+            return
+        if QMessageBox.question(
+                self, t("削除（ファイル移動）"),
+                t("選択した {n} 件のシリーズの元ファイルを、画像フォルダの親にある "
+                  "CasePresentation-Erase フォルダへ移動します。\n"
+                  "（削除ではなく移動なので、後で手動で元に戻せます。）\n"
+                  "よろしいですか?", n=len(rows))) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self._record_undo()
+        moved, errs, kept = 0, [], 0
+        done = []
+        for r in rows:
+            uid = r.get("series_uid", "")
+            res = (self._shell.case_erase_series(uid) if uid
+                   else {"no_files": True})
+            if res.get("no_files"):
+                kept += 1
+                continue
+            moved += int(res.get("moved", 0))
+            errs.extend(res.get("errors", []))
+            done.append(r)
+        self._rows = [r for r in self._rows if r not in done]
+        self._after_rows_changed()
+        msg = t("{m} 個のファイルを CasePresentation-Erase へ移動しました。", m=moved)
+        if kept:
+            msg += t(" 未読込/特定不可で残した行: {k} 件（「状態更新」後に再実行）。",
+                     k=kept)
+        if errs:
+            msg += t(" 失敗: {e} 件。", e=len(errs))
+        self._hint.setText(msg)
+        if errs:
+            self._warn("\n".join(errs[:8]))
 
     def _refresh_row(self, row) -> None:
         """Per-row 更新: capture the row's CURRENT on-screen view as its key
@@ -904,7 +965,8 @@ class CasePresentationWindow(SnapDock):
         a_last = mv.addAction(t("最後へ"))
         menu.addSeparator()
         a_ref = menu.addAction(t("状態更新"))
-        a_del = menu.addAction(t("削除"))
+        a_del = menu.addAction(t("除外"))
+        a_erase = menu.addAction(t("削除（ファイル移動）"))
         chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
         if chosen is None:
             return
@@ -927,6 +989,8 @@ class CasePresentationWindow(SnapDock):
             self._rebuild()
         elif chosen is a_del:
             self._delete_selected()
+        elif chosen is a_erase:
+            self._erase_selected()
 
     def _clear_all(self) -> None:
         if not self._rows:
@@ -1226,10 +1290,16 @@ class CasePresentationWindow(SnapDock):
             b_upd.setToolTip(t("この行の読込状態を再確認"))
             b_upd.clicked.connect(lambda _c, row=r: self._refresh_row(row))
             tb.setCellWidget(i, C_UPD, b_upd)
-            b_del = QPushButton(t("削除"))
-            b_del.setToolTip(t("この行を削除"))
+            b_del = QPushButton(t("除外"))
+            b_del.setToolTip(t("この行をプレゼンから除外（元ファイルは残す）"))
             b_del.clicked.connect(lambda _c, row=r: self._delete_row(row))
             tb.setCellWidget(i, C_DEL, b_del)
+            b_erase = QPushButton(t("削除"))
+            b_erase.setToolTip(t(
+                "このシリーズの元ファイルを、画像フォルダの親にある "
+                "CasePresentation-Erase フォルダへ移動（元に戻せます）"))
+            b_erase.clicked.connect(lambda _c, row=r: self._erase_row(row))
+            tb.setCellWidget(i, C_ERASE, b_erase)
         tb.blockSignals(False)
         self._building = False
         if select is not None and 0 <= select < len(self._rows):
