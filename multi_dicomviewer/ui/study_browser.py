@@ -289,14 +289,15 @@ def _fmt_acq(acq: str) -> str:
     return f"{date} {t}".strip()
 
 
-def iter_study_groups(patients: dict[str, Patient], sort_modes=None):
+def iter_study_groups(patients: dict[str, Patient], sort_mode=None):
     """Yield (patient, study, kind, [Series…]) in browser display order:
     patient by name, study by date, modality kind alphabetical. Series
-    within a (study, kind) node are ordered by *sort_modes*
-    [(study_uid, kind)] = (mode, asc) — applied to THAT study only;
-    others stay Series-Number ascending. Single source of truth so the
+    within EVERY (study, kind) node are ordered by the SAME global
+    *sort_mode* = (mode, asc) — a header click sorts all studies alike,
+    regardless of which one is selected. Single source of truth so the
     tree and the thumbnail grid order series identically."""
-    sort_modes = sort_modes or {}
+    mode, asc = sort_mode if sort_mode else ("number", True)
+    skey = _series_sort_key(mode)
     for patient in sorted(patients.values(), key=lambda p: p.name):
         for study in sorted(
             patient.studies.values(), key=lambda s: s.date
@@ -305,12 +306,8 @@ def iter_study_groups(patients: dict[str, Patient], sort_modes=None):
             for se in study.series.values():
                 by_kind.setdefault(se.kind, []).append(se)
             for kind in sorted(by_kind):
-                mode, asc = sort_modes.get(
-                    (study.study_uid, kind), ("number", True)
-                )
                 yield patient, study, kind, sorted(
-                    by_kind[kind], key=_series_sort_key(mode),
-                    reverse=not asc,
+                    by_kind[kind], key=skey, reverse=not asc,
                 )
 
 
@@ -434,9 +431,9 @@ class StudyBrowser(QTreeWidget):
         self._study_items: dict[tuple, QTreeWidgetItem] = {}
         self._patients: dict[str, Patient] = {}
         self._anon = False
-        #: per (study_uid, kind) -> (mode, asc). Sorting affects only the
-        #: currently-selected Study; others stay Series-No ascending.
-        self._sort_modes: dict[tuple, tuple] = {}
+        #: GLOBAL sort (mode, asc) applied to EVERY study — a header click
+        #: sorts all studies alike, regardless of the current selection.
+        self._sort_global: tuple = ("number", True)
         hdr.setSortIndicator(1, Qt.SortOrder.AscendingOrder)
 
     def retranslate_ui(self) -> None:
@@ -458,14 +455,13 @@ class StudyBrowser(QTreeWidget):
         key = getattr(self, "_sort_cols", {}).get(col)
         if key is None:                       # Type/Description/Path
             return
-        cur = self.current_study_key()        # the selected Study only
-        if cur is None:
-            return
-        mode, asc = self._sort_modes.get(cur, ("number", True))
+        # Sort ALL studies alike — no selection needed. Re-clicking the active
+        # column toggles the direction; a new column starts ascending.
+        mode, asc = self._sort_global
         asc = not asc if key == mode else True
-        self._sort_modes[cur] = (key, asc)
+        self._sort_global = (key, asc)
         # Emits sortIndicatorChanged -> StudyPanel rebuilds tree+thumbs
-        # and re-selects this Study to keep context.
+        # (keeping any current selection).
         self.header().setSortIndicator(
             col,
             Qt.SortOrder.AscendingOrder if asc
@@ -515,7 +511,7 @@ class StudyBrowser(QTreeWidget):
         # One study node per (study, modality kind): XA and IVUS on the
         # same date appear as separate Study entries.
         for patient, study, kind, series_list in iter_study_groups(
-            patients, self._sort_modes
+            patients, self._sort_global
         ):
             if patient is not cur_patient:
                 cur_patient = patient
@@ -1555,7 +1551,7 @@ class StudyPanel(QWidget):
         anon = self.tree._anon
         key = self.tree.current_study_key()
         groups = list(iter_study_groups(
-            self._patients_cache, self.tree._sort_modes
+            self._patients_cache, self.tree._sort_global
         ))
         target = None
         for g in groups:
@@ -1575,9 +1571,7 @@ class StudyPanel(QWidget):
         # caption shows the DICOM InstanceNumber rather than Series No
         # so the user's grouping cue (which # they sorted by) matches
         # the grid.
-        mode, _asc = self.tree._sort_modes.get(
-            (study.study_uid, kind), ("number", True)
-        )
+        mode, _asc = self.tree._sort_global
         use_instance = mode == "instance"
         px = self._thumb_px
         hdr = self.thumbs.add_header(
