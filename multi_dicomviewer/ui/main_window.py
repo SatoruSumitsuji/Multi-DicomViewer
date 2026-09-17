@@ -2342,6 +2342,80 @@ class MainWindow(QMainWindow):
             self._load_paths(dirs)
         return len(dirs)
 
+    def _case_resolve_uids(self, uid: str) -> list:
+        """Index key(s) matching a Case Presentation row's series UID: an exact
+        match preferred, else a UNIQUE base-vs-'#'-split match. Ambiguous → []
+        (never guess which series to move for a destructive erase)."""
+        if not uid:
+            return []
+        if uid in self._series_by_uid:
+            return [uid]
+        base = uid.split("#", 1)[0]
+        matches = [k for k in self._series_by_uid
+                   if k.split("#", 1)[0] == base]
+        return matches if len(matches) == 1 else []
+
+    def case_erase_series(self, uid: str) -> dict:
+        """削除 from Case Presentation: MOVE this series' OWN files (only) to a
+        'CasePresentation-Erase' folder beside each file's image folder — a
+        reversible trash, not a delete — then drop the series from the list.
+        Returns {no_files, moved, errors}. Files that can't be resolved (series
+        not loaded / ambiguous) → {no_files: True} so the caller keeps the row."""
+        import shutil
+        keys = self._case_resolve_uids(uid)
+        files: list[str] = []
+        for k in keys:
+            se = self._series_by_uid.get(k)
+            for f in (getattr(se, "files", None) or []):
+                if f and f not in files:
+                    files.append(f)
+        if not files:
+            return {"no_files": True, "moved": 0, "errors": []}
+        base_uid = uid.split("#", 1)[0]
+        # Clear any pane showing this series first, so its files aren't locked.
+        for p in self._panes:
+            try:
+                su = p.shown_series_uid()
+            except Exception:                            # noqa: BLE001
+                su = None
+            if su and (su in keys or su.split("#", 1)[0] == base_uid):
+                try:
+                    p.reset()
+                except Exception:                        # noqa: BLE001
+                    pass
+        moved, errors = 0, []
+        for f in files:
+            try:
+                if not os.path.isfile(f):
+                    continue
+                d = os.path.dirname(f)
+                trash = os.path.join(os.path.dirname(d),
+                                     "CasePresentation-Erase")
+                os.makedirs(trash, exist_ok=True)
+                dst = os.path.join(trash, os.path.basename(f))
+                if os.path.exists(dst):                  # name clash → suffix
+                    stem, ext = os.path.splitext(os.path.basename(f))
+                    n = 1
+                    while os.path.exists(dst):
+                        dst = os.path.join(trash, f"{stem}_{n}{ext}")
+                        n += 1
+                shutil.move(f, dst)
+                moved += 1
+            except Exception as exc:                     # noqa: BLE001
+                errors.append(f"{os.path.basename(f)}: {exc}")
+        # Drop the (now-moved) series node from the tree/index + blank its panes.
+        for k in keys:
+            try:
+                dicom_io.remove_node(self._patients, "series", k)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._reindex_series_maps()
+        try:
+            self.browser.populate(self._patients)
+        except Exception:                                # noqa: BLE001
+            pass
+        return {"no_files": False, "moved": moved, "errors": errors}
+
     def case_image_dir(self) -> str:
         """The folder the currently active/shown pane's image data lives in, or ""
         if nothing is displayed. Case Presentation's file dialogs open ITS PARENT.
