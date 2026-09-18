@@ -2296,6 +2296,7 @@ class MainWindow(QMainWindow):
             "modality": (getattr(se, "kind", "") or "").upper(),
             "number": se.number,
             "frames": int(getattr(se, "n_images", 0) or 0),
+            "size_mb": self._series_size_mb(se),
             "pane_index": pane.index,
             "date": date,
             "time": tm,
@@ -2304,6 +2305,24 @@ class MainWindow(QMainWindow):
             "label": label,
             "src_dirs": src_dirs,
         }
+
+    @staticmethod
+    def _series_size_mb(se) -> float | None:
+        """Total on-disk size of a series' DICOM files, in MB. None if the files
+        can't be sized (not resolvable). Persisted on the row so it still shows
+        when the series isn't currently loaded."""
+        try:
+            total = 0
+            for f in (getattr(se, "files", None) or []):
+                try:
+                    total += os.path.getsize(f)
+                except OSError:
+                    pass
+            if total <= 0:
+                return None
+            return round(total / (1024 * 1024), 2)
+        except Exception:                                # noqa: BLE001
+            return None
 
     def case_series_loaded(self, uid: str) -> bool:
         """True if the series UID currently resolves to a loaded series — either
@@ -2740,6 +2759,7 @@ class MainWindow(QMainWindow):
                 "modality": (getattr(se, "kind", "") or "").upper(),
                 "number": se.number,
                 "frames": int(getattr(se, "n_images", 0) or 0),
+                "size_mb": self._series_size_mb(se),
                 "pane_index": 0,
                 "date": date,
                 "time": tm,
