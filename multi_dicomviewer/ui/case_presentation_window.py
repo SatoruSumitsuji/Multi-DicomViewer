@@ -746,8 +746,10 @@ class CasePresentationWindow(SnapDock):
         if not sel:
             return
         self._record_undo()
+        target = min(sel)
         self._rows = [r for i, r in enumerate(self._rows) if i not in sel]
         self._after_rows_changed()
+        self._show_at_index(target)
 
     def _delete_row(self, row) -> None:
         """除外: drop the one row backing a per-row 除外 button (files untouched)."""
@@ -758,6 +760,7 @@ class CasePresentationWindow(SnapDock):
         self._record_undo()
         del self._rows[i]
         self._after_rows_changed()
+        self._show_at_index(i)
 
     # ---- 削除 (erase): MOVE the series' files to a trash folder + drop the row
     def _erase_row(self, row) -> None:
@@ -797,8 +800,11 @@ class CasePresentationWindow(SnapDock):
             moved += int(res.get("moved", 0))
             errs.extend(res.get("errors", []))
             done.append(r)
+        target = min((i for i, r in enumerate(self._rows) if r in done),
+                     default=None)
         self._rows = [r for r in self._rows if r not in done]
         self._after_rows_changed()
+        self._show_at_index(target)
         msg = t("{m} 個のファイルを CasePresentation-Erase へ移動しました。", m=moved)
         if kept:
             msg += t(" 未読込/特定不可で残した行: {k} 件（「状態更新」後に再実行）。",
@@ -1243,6 +1249,15 @@ class CasePresentationWindow(SnapDock):
     def _selected_row_indices(self) -> list:
         return sorted({idx.row() for idx in self._table.selectionModel()
                        .selectedRows()}) if self._table.selectionModel() else []
+
+    def _show_at_index(self, idx: int | None) -> None:
+        """After a 除外/削除 removes rows, show the series that is now at *idx* —
+        i.e. the one just BELOW the removed row. If the removed row was the last,
+        *idx* clamps to the new last row (one above). No-op on an empty list."""
+        if idx is None or not self._rows:
+            return
+        idx = max(0, min(idx, len(self._rows) - 1))
+        self._show_row(self._rows[idx])
 
     def _warn(self, msg: str) -> None:
         QMessageBox.information(self, t("Case Presentation"), msg)
