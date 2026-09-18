@@ -18,7 +18,7 @@
   "%PA  (percent area — IVUS)": "%PA  （面积百分比 — IVUS）",
   "&Anonymize": "匿名化(&A)",
   "&Clear viewers": "清除查看器(&C)",
-  "&File": "文件(&F)",
+  "Fil&e": "文件(&E)",
   "&Language": "语言(&L)",
   "&Open DICOM folder…": "打开 DICOM 文件夹(&O)…",
   "&Quit": "退出(&Q)",

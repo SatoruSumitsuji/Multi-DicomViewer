@@ -421,16 +421,16 @@ class CasePresentationWindow(SnapDock):
 
         # -- toolbar row 3: reliable row navigation (select + display) -----
         # Click-based navigation that always works regardless of keyboard focus
-        # / active window (Shift+F/A = 次/前, Ctrl+F/A = 最後/最初 mirror these).
+        # / active window (Alt+F/A = 次/前, Ctrl+F/A = 最後/最初 mirror these).
         bar3 = QHBoxLayout()
         for label, tip, fn in (
                 (t("⤒ 最初"), t("一番最初の行へ移動して表示  (Ctrl+A)"),
                  self._nav_first),
                 (t("⏫ 10前"), t("10行前へ移動して表示"),
                  lambda: self._nav_row(-10)),
-                (t("◀ 前"), t("前の行へ移動して表示  (Shift+A)"),
+                (t("◀ 前"), t("前の行へ移動して表示  (Alt+A)"),
                  lambda: self._nav_row(-1)),
-                (t("次 ▶"), t("次の行へ移動して表示  (Shift+F)"),
+                (t("次 ▶"), t("次の行へ移動して表示  (Alt+F)"),
                  lambda: self._nav_row(+1)),
                 (t("10後 ⏬"), t("10行後へ移動して表示"),
                  lambda: self._nav_row(+10)),
@@ -506,13 +506,18 @@ class CasePresentationWindow(SnapDock):
         sc_redo2 = QShortcut(QKeySequence("Ctrl+Y"), self)
         sc_redo2.activated.connect(self._redo_action)
 
-        # Row navigation shortcuts. Plain F/A stay with the main viewer; the
-        # panel uses MODIFIED keys so there's no confusion regardless of which
-        # window is focused: Shift+F / Shift+A = next / prev row, Ctrl+F /
-        # Ctrl+A = last / first row. Application-wide but gated to when the panel
-        # is visible and a text field isn't being edited (see _nav_shortcut).
-        for seq, fn in (("Shift+F", lambda: self._nav_shortcut(+1)),
-                        ("Shift+A", lambda: self._nav_shortcut(-1)),
+        # Row navigation shortcuts. Plain F/A stay with the main viewer (its
+        # per-image stepping); the panel uses MODIFIED keys so there's no
+        # confusion regardless of which window is focused: Alt+F / Alt+A = next /
+        # prev SERIES, Ctrl+F / Ctrl+A = last / first row. Application-wide but
+        # gated to when the panel is visible and a text field isn't being edited
+        # (see _nav_shortcut). Alt (not Shift) for next/prev: the main window
+        # already binds app-wide Shift+F/Shift+A to the active pane's last/first
+        # image, and two app-wide shortcuts on one sequence go AMBIGUOUS in Qt so
+        # neither fires — which is exactly why series stepping "didn't work".
+        # Alt+F needs the &File menu mnemonic freed (done: it's Alt+E now).
+        for seq, fn in (("Alt+F", lambda: self._nav_shortcut(+1)),
+                        ("Alt+A", lambda: self._nav_shortcut(-1)),
                         ("Ctrl+F", lambda: self._nav_shortcut("last")),
                         ("Ctrl+A", lambda: self._nav_shortcut("first"))):
             sc = QShortcut(QKeySequence(seq), self)
@@ -577,7 +582,7 @@ class CasePresentationWindow(SnapDock):
                 self._table.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # (Plain F/A are intentionally NOT intercepted — they belong to the main
-    # viewer. Row navigation uses the 前/次 buttons and Shift+F/A · Ctrl+F/A
+    # viewer. Row navigation uses the 前/次 buttons and Alt+F/A · Ctrl+F/A
     # shortcuts set up in __init__. Title-bar double-click is handled by the
     # inherited SnapDock.eventFilter.)
 

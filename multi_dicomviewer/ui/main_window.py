@@ -1478,7 +1478,10 @@ class MainWindow(QMainWindow):
         self.update()
 
     def _build_menu(self) -> None:
-        m = self.menuBar().addMenu(t("&File"))
+        # Mnemonic is Alt+E (Fil&e), not Alt+F: Alt+F is reserved for Case
+        # Presentation's next-series shortcut, and a menu mnemonic would make it
+        # ambiguous. Alt+E is otherwise unused among the top-level menus.
+        m = self.menuBar().addMenu(t("Fil&e"))
 
         open_act = QAction(t("&Open DICOM folder…"), self)
         open_act.setShortcut("Ctrl+O")
