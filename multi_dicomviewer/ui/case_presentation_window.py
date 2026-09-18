@@ -61,10 +61,10 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 # C_DEL = 除外 (drop the ROW from the presentation, files untouched);
 # C_ERASE = 削除 (MOVE the series' files to a CasePresentation-Erase trash folder
 # beside the image folder, then drop the row).
-(C_NO, C_MOD, C_SER, C_FRAMES, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL, C_ERASE,
- C_COMMENT) = range(11)
-_HEADERS = ["No", "種別", "Ser", "Frame", "時間", "統合時間", "表示", "更新",
-            "除外", "削除", "コメント"]
+(C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI, C_SHOW, C_UPD, C_DEL,
+ C_ERASE, C_COMMENT) = range(12)
+_HEADERS = ["No", "種別", "Ser", "Frame", "サイズ", "時間", "統合時間", "表示",
+            "更新", "除外", "削除", "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
 
 
@@ -317,9 +317,9 @@ class CasePresentationWindow(SnapDock):
         b_cols.setToolTip(t("統合時間・更新・削除の列を表示/非表示"))
         col_menu = QMenu(b_cols)
         self._col_actions = {}
-        for col, label in ((C_FRAMES, t("Frame")), (C_UNI, t("統合時間")),
-                           (C_UPD, t("更新")), (C_DEL, t("除外")),
-                           (C_ERASE, t("削除"))):
+        for col, label in ((C_FRAMES, t("Frame")), (C_SIZE, t("サイズ")),
+                           (C_UNI, t("統合時間")), (C_UPD, t("更新")),
+                           (C_DEL, t("除外")), (C_ERASE, t("削除"))):
             a = col_menu.addAction(label)
             a.setCheckable(True)
             a.setChecked(True)
@@ -436,13 +436,13 @@ class CasePresentationWindow(SnapDock):
         # Every data column is USER-RESIZABLE (drag the header borders) instead of
         # locked to its contents; the comment column stretches to fill the rest.
         # Sensible initial widths are set below and persist across rebuilds.
-        for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_TIME, C_UNI, C_SHOW, C_UPD,
-                  C_DEL, C_ERASE):
+        for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI, C_SHOW,
+                  C_UPD, C_DEL, C_ERASE):
             hh.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
         hh.setSectionResizeMode(C_COMMENT, QHeaderView.ResizeMode.Stretch)
         for c, w in ((C_NO, 44), (C_MOD, 70), (C_SER, 56), (C_FRAMES, 56),
-                     (C_TIME, 92), (C_UNI, 92), (C_SHOW, 64), (C_UPD, 56),
-                     (C_DEL, 56), (C_ERASE, 56)):
+                     (C_SIZE, 68), (C_TIME, 92), (C_UNI, 92), (C_SHOW, 64),
+                     (C_UPD, 56), (C_DEL, 56), (C_ERASE, 56)):
             self._table.setColumnWidth(c, w)
         self._table.cellChanged.connect(self._on_cell_changed)
         # Row right-click menu: 状態更新 / 削除.
@@ -1062,6 +1062,7 @@ class CasePresentationWindow(SnapDock):
                 "modality": r.get("modality", ""),
                 "number": r.get("number"),
                 "frames": r.get("frames"),
+                "size_mb": r.get("size_mb"),
                 "pane_index": r.get("pane_index", 0),
                 "date": r.get("date", ""),
                 "time": r.get("time", ""),
@@ -1178,6 +1179,7 @@ class CasePresentationWindow(SnapDock):
                 "modality": r.get("modality", ""),
                 "number": r.get("number"),
                 "frames": r.get("frames"),
+                "size_mb": r.get("size_mb"),
                 "pane_index": r.get("pane_index", 0),
                 "date": r.get("date", ""),
                 "time": r.get("time", ""),
@@ -1276,10 +1278,13 @@ class CasePresentationWindow(SnapDock):
             ro.setFlags(ro.flags() & ~Qt.ItemFlag.ItemIsEditable)
             tb.setItem(i, C_NO, ro)
             frames = r.get("frames")
+            size_mb = r.get("size_mb")
             for col, val in ((C_MOD, r.get("modality", "")),
                              (C_SER, "" if r.get("number") is None
                               else str(r.get("number"))),
                              (C_FRAMES, "" if not frames else str(int(frames))),
+                             (C_SIZE, "" if size_mb in (None, 0)
+                              else f"{float(size_mb):.2f}"),
                              (C_TIME, _fmt_raw_time(r.get("time", ""))),
                              (C_UNI, _fmt_secs(uni))):
                 it = QTableWidgetItem(str(val))
