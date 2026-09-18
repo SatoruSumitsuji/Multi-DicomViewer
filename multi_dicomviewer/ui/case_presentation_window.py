@@ -1333,13 +1333,17 @@ class CasePresentationWindow(SnapDock):
             b.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
 
     @staticmethod
-    def _cell_btn_css(bar: bool = False, grey: bool = False) -> str:
+    def _cell_btn_css(bar: bool = False, grey: bool = False,
+                      bg: bool = False) -> str:
         """Stylesheet for a per-row action button. *bar* draws the left 縦棒
-        status indicator; *grey* dims the label (unloaded series). No flags →
-        empty string = native button (no bar), used for 除外・削除 always."""
+        status indicator; *bg* fills a green "done" background (used on 更新 once
+        the row has been updated); *grey* dims the label. No flags → empty string
+        = native button (no bar/background), used for 除外・削除 always."""
         rules = ""
         if grey:
             rules += "color:#999;"
+        if bg:
+            rules += "background-color:#d7f0d7;"
         if bar:
             rules += "border-left:4px solid #1e6fd0;"
         return ("QPushButton{" + rules + "}") if rules else ""
@@ -1396,7 +1400,7 @@ class CasePresentationWindow(SnapDock):
             # Per-row 更新 (re-check load state) / 削除 (remove this row) — saves
             # reaching the top toolbar or the right-click menu.
             b_upd = QPushButton(t("更新"))
-            b_upd.setStyleSheet(self._cell_btn_css(bar=refreshed))
+            b_upd.setStyleSheet(self._cell_btn_css(bar=refreshed, bg=refreshed))
             b_upd.setToolTip(t("この行の読込状態を再確認"))
             b_upd.clicked.connect(lambda _c, row=r: self._refresh_row(row))
             tb.setCellWidget(i, C_UPD, b_upd)
