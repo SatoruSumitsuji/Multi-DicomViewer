@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSpinBox,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -66,6 +67,24 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 _HEADERS = ["No", "種別", "Ser", "Frame", "サイズ", "時間", "統合時間", "表示",
             "更新", "除外", "削除", "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
+
+
+class _LeftBarDelegate(QStyledItemDelegate):
+    """Paints a thin left 縦棒 on a data cell. Set only on the data columns via
+    setItemDelegateForColumn, so the bar never bleeds onto the action-button
+    columns (whose 縦棒 is a per-button state indicator, or absent). Selection
+    highlighting is left to the default painter, so selected cells stay
+    readable (the QSS-border approach broke that)."""
+
+    _COL = QColor("#dcdcdc")
+
+    def paint(self, painter, option, index):
+        super().paint(painter, option, index)
+        painter.save()
+        painter.setPen(self._COL)
+        x = option.rect.left()
+        painter.drawLine(x, option.rect.top(), x, option.rect.bottom())
+        painter.restore()
 
 
 def _fmt_raw_time(tm: str) -> str:
@@ -446,15 +465,22 @@ class CasePresentationWindow(SnapDock):
                      (C_SIZE, 68), (C_TIME, 92), (C_UNI, 92), (C_SHOW, 64),
                      (C_UPD, 56), (C_DEL, 56), (C_ERASE, 56)):
             self._table.setColumnWidth(c, w)
-        # No global grid: we draw the left "縦棒" per item so it's controllable.
-        # Data cells get a light left bar + left padding, so text isn't glued to
-        # that bar (matching the button cells' inset). The four action buttons
-        # paint their OWN conditional left bar (see _cell_btn_css / _rebuild),
-        # so 除外・削除 show none and 表示/更新 show one depending on state.
+        # No global grid: the left "縦棒" is drawn per column so it's fully
+        # controllable. DATA columns get a light bar via a delegate (never
+        # bleeding onto the button columns); the padding keeps text off that bar.
+        # The four action buttons paint their OWN conditional bar (see
+        # _cell_btn_css / _rebuild) — 除外・削除 none, 表示/更新 state-dependent.
+        # Only padding + an explicit selection colour go through QSS: a QSS
+        # *border* here silently broke the selected-row highlight (cells went
+        # blank), so borders are the delegate's job, not the stylesheet's.
         self._table.setShowGrid(False)
         self._table.setStyleSheet(
-            "QTableWidget::item{border-left:1px solid #dcdcdc;"
-            "border-bottom:1px solid #f2f2f2;padding-left:6px;}")
+            "QTableWidget::item{padding-left:6px;}"
+            "QTableWidget::item:selected{background:#cfe4ff;color:#000;}")
+        self._bar_delegate = _LeftBarDelegate(self._table)
+        for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI,
+                  C_COMMENT):
+            self._table.setItemDelegateForColumn(c, self._bar_delegate)
         self._table.cellChanged.connect(self._on_cell_changed)
         # Row right-click menu: 状態更新 / 削除.
         self._table.setContextMenuPolicy(
