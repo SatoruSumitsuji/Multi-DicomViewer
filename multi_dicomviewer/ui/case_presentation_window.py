@@ -386,6 +386,8 @@ class CasePresentationWindow(SnapDock):
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
         b_overwrite.clicked.connect(self._save_overwrite)
         bar2.addWidget(b_overwrite)
+        self._b_overwrite = b_overwrite
+        self._update_overwrite_style()      # reflect the current saved/dirty state
         b_save = QPushButton(t("名前を付けて保存…"))
         b_save.clicked.connect(self._save)
         bar2.addWidget(b_save)
@@ -444,6 +446,15 @@ class CasePresentationWindow(SnapDock):
                      (C_SIZE, 68), (C_TIME, 92), (C_UNI, 92), (C_SHOW, 64),
                      (C_UPD, 56), (C_DEL, 56), (C_ERASE, 56)):
             self._table.setColumnWidth(c, w)
+        # No global grid: we draw the left "縦棒" per item so it's controllable.
+        # Data cells get a light left bar + left padding, so text isn't glued to
+        # that bar (matching the button cells' inset). The four action buttons
+        # paint their OWN conditional left bar (see _cell_btn_css / _rebuild),
+        # so 除外・削除 show none and 表示/更新 show one depending on state.
+        self._table.setShowGrid(False)
+        self._table.setStyleSheet(
+            "QTableWidget::item{border-left:1px solid #dcdcdc;"
+            "border-bottom:1px solid #f2f2f2;padding-left:6px;}")
         self._table.cellChanged.connect(self._on_cell_changed)
         # Row right-click menu: 状態更新 / 削除.
         self._table.setContextMenuPolicy(
@@ -822,12 +833,15 @@ class CasePresentationWindow(SnapDock):
         actually persist that frame."""
         before = row.get("view_state")
         self._capture_view_into(row)
+        captured = row.get("view_state") is not before
+        if captured:
+            row["_refreshed"] = True     # move the 縦棒 status bar to 更新
         try:
             i = self._rows.index(row)
         except ValueError:
             i = None
         self._rebuild(select=i)
-        if row.get("view_state") is not before:
+        if captured:
             self._hint.setText(t("この行のキー画像を現在の表示で更新しました。"))
         else:
             self._hint.setText(t(
@@ -840,7 +854,11 @@ class CasePresentationWindow(SnapDock):
         sel = self._selected_row_indices()
         for i in sel:
             if 0 <= i < len(self._rows):
-                self._capture_view_into(self._rows[i])
+                r = self._rows[i]
+                before = r.get("view_state")
+                self._capture_view_into(r)
+                if r.get("view_state") is not before:
+                    r["_refreshed"] = True   # move the 縦棒 status bar to 更新
         self._rebuild(select=sel[0] if sel else None)
 
     def _nav_goto(self, index: int) -> None:
@@ -1264,6 +1282,42 @@ class CasePresentationWindow(SnapDock):
     def _warn(self, msg: str) -> None:
         QMessageBox.information(self, t("Case Presentation"), msg)
 
+    # ---- dirty flag (drives the 上書き保存 "saved" cue) --------------------
+    @property
+    def _dirty(self) -> bool:
+        return getattr(self, "_dirty_flag", False)
+
+    @_dirty.setter
+    def _dirty(self, val: bool) -> None:
+        self._dirty_flag = bool(val)
+        self._update_overwrite_style()
+
+    def _update_overwrite_style(self) -> None:
+        """Give 上書き保存 a green background while the presentation matches its
+        file on disk (saved, no unsaved edits), so 'this is already saved' is
+        obvious at a glance. Any edit clears it back to the normal button."""
+        b = getattr(self, "_b_overwrite", None)
+        if b is None:                       # called before the button exists
+            return
+        if not self._dirty_flag and self._last_path:
+            b.setStyleSheet("background-color:#cdeccd;")
+            b.setToolTip(t("保存済み（未変更）— 直前のファイルへ上書き保存"))
+        else:
+            b.setStyleSheet("")
+            b.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
+
+    @staticmethod
+    def _cell_btn_css(bar: bool = False, grey: bool = False) -> str:
+        """Stylesheet for a per-row action button. *bar* draws the left 縦棒
+        status indicator; *grey* dims the label (unloaded series). No flags →
+        empty string = native button (no bar), used for 除外・削除 always."""
+        rules = ""
+        if grey:
+            rules += "color:#999;"
+        if bar:
+            rules += "border-left:4px solid #1e6fd0;"
+        return ("QPushButton{" + rules + "}") if rules else ""
+
     # ------------------------------------------------------------ render
     def _rebuild(self, select: int | None = None) -> None:
         self._building = True
@@ -1296,9 +1350,15 @@ class CasePresentationWindow(SnapDock):
             if not r.get("comment", "").strip():
                 cm.setBackground(QColor(255, 235, 235))    # empty = must fill
             tb.setItem(i, C_COMMENT, cm)
+            # Status 縦棒: 表示 carries it until the row has been 更新'd, then it
+            # moves to 更新 — so at a glance a bar on 表示 = "still to review",
+            # a bar on 更新 = "done". 除外・削除 never get one.
+            refreshed = bool(r.get("_refreshed"))
+            loaded = self._shell.case_series_loaded(r.get("series_uid", ""))
             btn = QPushButton(t("表示"))
-            if not self._shell.case_series_loaded(r.get("series_uid", "")):
-                btn.setStyleSheet("color:#999;")
+            btn.setStyleSheet(self._cell_btn_css(bar=not refreshed,
+                                                 grey=not loaded))
+            if not loaded:
                 btn.setToolTip(t(
                     "未読込 — 「読込」時に自動で開くか、元フォルダを開いて"
                     "から「状態更新」を押してください"))
@@ -1307,6 +1367,7 @@ class CasePresentationWindow(SnapDock):
             # Per-row 更新 (re-check load state) / 削除 (remove this row) — saves
             # reaching the top toolbar or the right-click menu.
             b_upd = QPushButton(t("更新"))
+            b_upd.setStyleSheet(self._cell_btn_css(bar=refreshed))
             b_upd.setToolTip(t("この行の読込状態を再確認"))
             b_upd.clicked.connect(lambda _c, row=r: self._refresh_row(row))
             tb.setCellWidget(i, C_UPD, b_upd)
