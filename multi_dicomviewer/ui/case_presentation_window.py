@@ -496,9 +496,13 @@ class CasePresentationWindow(SnapDock):
         self._rebuild()
 
         # Keyboard: Ctrl+S = 上書き保存, Ctrl+Z / Ctrl+Y = Undo / Redo.
+        # Save is APPLICATION-wide (gated to the panel being visible) so Ctrl+S
+        # works even while an image pane / the main window has focus — you don't
+        # have to click into the panel first. (No other Ctrl+S exists in the app.)
         from PyQt6.QtGui import QKeySequence, QShortcut
         sc_save = QShortcut(QKeySequence.StandardKey.Save, self)
-        sc_save.activated.connect(self._save_overwrite)
+        sc_save.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        sc_save.activated.connect(self._save_shortcut)
         sc_undo = QShortcut(QKeySequence.StandardKey.Undo, self)
         sc_undo.activated.connect(self._undo_action)
         sc_redo = QShortcut(QKeySequence.StandardKey.Redo, self)
@@ -943,6 +947,21 @@ class CasePresentationWindow(SnapDock):
             self._nav_last()
         else:
             self._nav_row(int(target))
+
+    def _save_shortcut(self) -> None:
+        """App-wide Ctrl+S → 上書き保存, gated to when the panel is visible and no
+        modal is up (so it never hijacks Ctrl+S for an unrelated window). If a
+        コメント cell is mid-edit its text is committed first so the save
+        includes it."""
+        if not self.isVisible():
+            return
+        app = QApplication.instance()
+        if app is not None and app.activeModalWidget() is not None:
+            return
+        # Flush any open cell editor so the current comment is persisted.
+        if self._table.state() == QAbstractItemView.State.EditingState:
+            self._table.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self._save_overwrite()
 
     def _display_row_deferred(self, row) -> None:
         # Stay silent on unloaded rows so rapid F/A stepping isn't interrupted
