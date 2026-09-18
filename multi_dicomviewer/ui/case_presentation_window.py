@@ -1356,8 +1356,11 @@ class CasePresentationWindow(SnapDock):
             refreshed = bool(r.get("_refreshed"))
             loaded = self._shell.case_series_loaded(r.get("series_uid", ""))
             btn = QPushButton(t("表示"))
-            btn.setStyleSheet(self._cell_btn_css(bar=not refreshed,
-                                                 grey=not loaded))
+            # 表示 text stays black even for a not-yet-loaded series (loading is
+            # backgrounded on a CasePresentation.json drop, so the row can render
+            # before the series is indexed). The unloaded state is conveyed by the
+            # tooltip only, not by greying the label.
+            btn.setStyleSheet(self._cell_btn_css(bar=not refreshed))
             if not loaded:
                 btn.setToolTip(t(
                     "未読込 — 「読込」時に自動で開くか、元フォルダを開いて"
