@@ -1023,14 +1023,15 @@ class CasePresentationWindow(SnapDock):
         table has no current row (e.g. right after a 読込 / a select=None
         rebuild), step from the CURRENTLY-DISPLAYED row instead of collapsing to
         the first/last edge — otherwise Alt+F ("next") would jump to row 0 and
-        look exactly like Alt+Shift+A ("first")."""
+        look exactly like Alt+Shift+A ("first"). With NO reference row at all
+        (nothing selected and nothing displayed) a relative move does nothing —
+        use 最初/最後 (Alt+Shift+A/F) or 表示 to establish a starting point."""
         if not self._rows:
             return
         cur = self._table.currentRow()
         if cur < 0:
             cur = self._displayed_index()
-        if cur < 0:                       # truly no reference row → sensible edge
-            self._nav_goto(0 if step > 0 else len(self._rows) - 1)
+        if cur < 0:                       # no reference row → do nothing
             return
         self._nav_goto(cur + step)
 
