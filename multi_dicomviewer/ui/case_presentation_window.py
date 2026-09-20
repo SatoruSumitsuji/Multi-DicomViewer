@@ -1205,6 +1205,7 @@ class CasePresentationWindow(SnapDock):
                 "comment": r.get("comment", ""),
                 "label": r.get("label", ""),
                 "src_dirs": r.get("src_dirs", []),
+                "refreshed": bool(r.get("_refreshed")),
                 "view_state": json_safe(r.get("view_state", {})),
             } for r in self._rows],
         }
@@ -1329,6 +1330,7 @@ class CasePresentationWindow(SnapDock):
                 "comment": r.get("comment", ""),
                 "label": r.get("label", ""),
                 "src_dirs": r.get("src_dirs", []),
+                "_refreshed": bool(r.get("refreshed")),
                 "view_state": r.get("view_state", {}),
             })
         self._last_path = path          # 上書き保存 targets the loaded file
