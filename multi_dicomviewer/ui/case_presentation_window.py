@@ -646,14 +646,37 @@ class CasePresentationWindow(SnapDock):
     def _undo_action(self) -> None:
         if not self._undo:
             return
-        self._redo.append(self._state_snapshot())
-        self._restore_state(self._undo.pop())
+        snap = self._undo.pop()
+        cur = self._state_snapshot()
+        fm = snap.pop("file_moves", None)
+        restored = None
+        if fm:                                   # 削除 was undone → restore files
+            try:
+                restored = self._shell.case_restore_erased(fm)
+            except Exception:                    # noqa: BLE001
+                restored = None
+            cur["file_moves"] = fm               # let Redo re-erase them
+        self._redo.append(cur)
+        self._restore_state(snap)                # rebuilds (resets the hint)
+        if restored is not None:
+            self._hint.setText(t(
+                "{n} 個のファイルを元の場所に戻しました"
+                "（読込完了後に表示できます）。", n=restored))
 
     def _redo_action(self) -> None:
         if not self._redo:
             return
-        self._undo.append(self._state_snapshot())
-        self._restore_state(self._redo.pop())
+        snap = self._redo.pop()
+        cur = self._state_snapshot()
+        fm = snap.pop("file_moves", None)
+        if fm:                                   # redo the 削除 → move files out
+            try:
+                self._shell.case_reerase(fm)
+            except Exception:                    # noqa: BLE001
+                pass
+            cur["file_moves"] = fm               # let Undo restore them again
+        self._undo.append(cur)
+        self._restore_state(snap)
 
     # ---------------------------------------------------------------- add
     def _add_active(self) -> None:
@@ -864,6 +887,7 @@ class CasePresentationWindow(SnapDock):
         self._record_undo()
         moved, errs, kept = 0, [], 0
         done = []
+        all_moves, all_keys, all_dirs = [], [], []
         for r in rows:
             uid = r.get("series_uid", "")
             res = (self._shell.case_erase_series(uid) if uid
@@ -873,7 +897,16 @@ class CasePresentationWindow(SnapDock):
                 continue
             moved += int(res.get("moved", 0))
             errs.extend(res.get("errors", []))
+            all_moves.extend(res.get("moves", []))
+            all_keys.extend(res.get("keys", []))
+            all_dirs.extend(res.get("dirs", []))
             done.append(r)
+        # Attach the file-move record to the undo snapshot we just pushed, so
+        # Ctrl+Z can move the files back out of CasePresentation-Erase (and
+        # Ctrl+Y re-erase them) — see _undo_action / _redo_action.
+        if all_moves and self._undo:
+            self._undo[-1]["file_moves"] = {
+                "moves": all_moves, "keys": all_keys, "dirs": all_dirs}
         target = min((i for i, r in enumerate(self._rows) if r in done),
                      default=None)
         self._rows = [r for r in self._rows if r not in done]

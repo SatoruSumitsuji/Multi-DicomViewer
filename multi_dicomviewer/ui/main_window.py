@@ -2381,7 +2381,10 @@ class MainWindow(QMainWindow):
         """削除 from Case Presentation: MOVE this series' OWN files (only) to a
         'CasePresentation-Erase' folder beside each file's image folder — a
         reversible trash, not a delete — then drop the series from the list.
-        Returns {no_files, moved, errors}. Files that can't be resolved (series
+        Returns {no_files, moved, errors, moves, keys, dirs}: *moves* is the list
+        of [original_path, trash_path] pairs actually moved (so an Undo can move
+        them straight back — see case_restore_erased), *keys* the index keys
+        dropped, *dirs* the source folders. Files that can't be resolved (series
         not loaded / ambiguous) → {no_files: True} so the caller keeps the row."""
         import shutil
         keys = self._case_resolve_uids(uid)
@@ -2392,7 +2395,8 @@ class MainWindow(QMainWindow):
                 if f and f not in files:
                     files.append(f)
         if not files:
-            return {"no_files": True, "moved": 0, "errors": []}
+            return {"no_files": True, "moved": 0, "errors": [],
+                    "moves": [], "keys": [], "dirs": []}
         base_uid = uid.split("#", 1)[0]
         # Clear any pane showing this series first, so its files aren't locked.
         for p in self._panes:
@@ -2405,12 +2409,14 @@ class MainWindow(QMainWindow):
                     p.reset()
                 except Exception:                        # noqa: BLE001
                     pass
-        moved, errors = 0, []
+        moved, errors, moves, dirs = 0, [], [], []
         for f in files:
             try:
                 if not os.path.isfile(f):
                     continue
                 d = os.path.dirname(f)
+                if d and d not in dirs:
+                    dirs.append(d)
                 trash = os.path.join(os.path.dirname(d),
                                      "CasePresentation-Erase")
                 os.makedirs(trash, exist_ok=True)
@@ -2422,6 +2428,7 @@ class MainWindow(QMainWindow):
                         dst = os.path.join(trash, f"{stem}_{n}{ext}")
                         n += 1
                 shutil.move(f, dst)
+                moves.append([f, dst])                   # [original, trash]
                 moved += 1
             except Exception as exc:                     # noqa: BLE001
                 errors.append(f"{os.path.basename(f)}: {exc}")
@@ -2436,7 +2443,70 @@ class MainWindow(QMainWindow):
             self.browser.populate(self._patients)
         except Exception:                                # noqa: BLE001
             pass
-        return {"no_files": False, "moved": moved, "errors": errors}
+        return {"no_files": False, "moved": moved, "errors": errors,
+                "moves": moves, "keys": list(keys), "dirs": dirs}
+
+    def case_restore_erased(self, fm: dict) -> int:
+        """Undo of 削除: move each file back from the CasePresentation-Erase
+        trash to its original location, then re-index the restored files so the
+        series is loadable again. *fm* is the payload returned via case_erase_series
+        (moves/keys/dirs). Returns the number of files restored."""
+        import shutil
+        restored_srcs = []
+        for pair in (fm.get("moves") or []):
+            try:
+                src, dst = pair[0], pair[1]
+                if os.path.exists(src):          # already back — nothing to do
+                    if os.path.isfile(src):
+                        restored_srcs.append(src)
+                    continue
+                if not os.path.isfile(dst):
+                    continue
+                os.makedirs(os.path.dirname(src), exist_ok=True)
+                shutil.move(dst, src)
+                restored_srcs.append(src)
+            except Exception:                            # noqa: BLE001
+                pass
+        # Re-index exactly the restored files (async) so the series binds again
+        # under its original UID; 表示 works once loading finishes.
+        if restored_srcs:
+            self._load_paths(restored_srcs)
+        return len(restored_srcs)
+
+    def case_reerase(self, fm: dict) -> int:
+        """Redo of 削除: move the files back OUT to the trash again and drop the
+        series node, mirroring the original erase. Returns files moved."""
+        import shutil
+        moved = 0
+        for pair in (fm.get("moves") or []):
+            try:
+                src, dst = pair[0], pair[1]
+                if not os.path.isfile(src):
+                    continue
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                target = dst
+                if os.path.exists(target):
+                    stem, ext = os.path.splitext(os.path.basename(dst))
+                    n = 1
+                    while os.path.exists(target):
+                        target = os.path.join(os.path.dirname(dst),
+                                               f"{stem}_{n}{ext}")
+                        n += 1
+                shutil.move(src, target)
+                moved += 1
+            except Exception:                            # noqa: BLE001
+                pass
+        for k in (fm.get("keys") or []):
+            try:
+                dicom_io.remove_node(self._patients, "series", k)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._reindex_series_maps()
+        try:
+            self.browser.populate(self._patients)
+        except Exception:                                # noqa: BLE001
+            pass
+        return moved
 
     def case_image_dir(self) -> str:
         """The folder the currently active/shown pane's image data lives in, or ""
