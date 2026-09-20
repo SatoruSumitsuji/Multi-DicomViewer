@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
@@ -67,6 +68,15 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 _HEADERS = ["No", "種別", "Ser", "Frame", "サイズ", "時間", "統合時間", "表示",
             "更新", "除外", "削除", "コメント"]
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
+
+
+def _accel(mod: str, key: str) -> str:
+    """Platform-aware shortcut label for a button caption: 'Alt+A' / 'Ctrl+A'
+    on Windows/Linux, '⌥A' / '⌘A' on macOS (Qt maps Ctrl→⌘, Alt→⌥ there).
+    *mod* is 'ctrl' or 'alt'."""
+    if sys.platform == "darwin":
+        return {"ctrl": "⌘", "alt": "⌥"}[mod] + key
+    return {"ctrl": "Ctrl", "alt": "Alt"}[mod] + "+" + key
 
 
 class _LeftBarDelegate(QStyledItemDelegate):
@@ -370,9 +380,13 @@ class CasePresentationWindow(SnapDock):
 
         # -- toolbar row 2: reorder / update-delete / file (left-packed) ---
         bar2 = QHBoxLayout()
-        # Row reorder: 最初 / 10上 / 一つ上 / 一つ下 / 10下 / 最後 (drag & drop
-        # also works). Symbols read top→bottom: bar+triangle = jump to the edge,
-        # double triangle = 10, single triangle = 1.
+        # "リスト変更": reorder the SELECTED row within the list (最初 / 10上 /
+        # 一つ上 / 一つ下 / 10下 / 最後; drag & drop also works). Vertical symbols
+        # (bar+triangle = edge, double = 10, single = 1) are deliberately kept
+        # DIFFERENT from row 3's horizontal arrows, which move which series is
+        # DISPLAYED. 状態更新・除外・削除 were removed here — each row now has its
+        # own buttons (and the right-click menu), so they were redundant.
+        bar2.addWidget(QLabel(t("リスト変更:")))
         for sym, tip, fn in (
                 ("⤒", t("選択行を最初へ"), lambda: self._move_edge(True)),
                 ("⏫", t("選択行を10上へ"), lambda: self._move(-10)),
@@ -385,21 +399,6 @@ class CasePresentationWindow(SnapDock):
             b.setFixedWidth(34)
             b.clicked.connect(fn)
             bar2.addWidget(b)
-        b_refresh = QPushButton(t("状態更新"))
-        b_refresh.setToolTip(t("選択行のキー画像を現在の表示で更新し、"
-                               "各行の読込状態を再確認"))
-        b_refresh.clicked.connect(self._refresh_state)
-        bar2.addWidget(b_refresh)
-        b_del = QPushButton(t("除外"))
-        b_del.setToolTip(t("選択行をプレゼンから除外（元ファイルは残す）"))
-        b_del.clicked.connect(self._delete_selected)
-        bar2.addWidget(b_del)
-        b_erase = QPushButton(t("削除"))
-        b_erase.setToolTip(t(
-            "選択行のシリーズの元ファイルを CasePresentation-Erase フォルダへ移動"
-            "（元に戻せます）"))
-        b_erase.clicked.connect(self._erase_selected)
-        bar2.addWidget(b_erase)
         bar2.addSpacing(12)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
@@ -419,22 +418,31 @@ class CasePresentationWindow(SnapDock):
         bar2.addStretch(1)
         outer.addWidget(self._wrap_bar(bar2))
 
-        # -- toolbar row 3: reliable row navigation (select + display) -----
+        # -- toolbar row 3: which SERIES is displayed (select + display) ---
         # Click-based navigation that always works regardless of keyboard focus
         # / active window (Alt+F/A = 次/前, Ctrl+F/A = 最後/最初 mirror these).
+        # HORIZONTAL arrows only (back = left-based, forward = right-based) so
+        # this row can't be confused with row 2's vertical reorder arrows. The
+        # shortcut is shown on each button that has one, in the platform's keys.
+        _ctrlA, _ctrlF = _accel("ctrl", "A"), _accel("ctrl", "F")
+        _altA, _altF = _accel("alt", "A"), _accel("alt", "F")
         bar3 = QHBoxLayout()
         for label, tip, fn in (
-                (t("⤒ 最初"), t("一番最初の行へ移動して表示  (Ctrl+A)"),
+                (f"|◀ {t('最初')} {_ctrlA}",
+                 f"{t('一番最初の行へ移動して表示')}  ({_ctrlA})",
                  self._nav_first),
-                (t("⏫ 10前"), t("10行前へ移動して表示"),
+                (f"◀◀ {t('10前')}", t("10行前へ移動して表示"),
                  lambda: self._nav_row(-10)),
-                (t("◀ 前"), t("前の行へ移動して表示  (Alt+A)"),
+                (f"◀ {t('前')} {_altA}",
+                 f"{t('前の行へ移動して表示')}  ({_altA})",
                  lambda: self._nav_row(-1)),
-                (t("次 ▶"), t("次の行へ移動して表示  (Alt+F)"),
+                (f"{t('次')} {_altF} ▶",
+                 f"{t('次の行へ移動して表示')}  ({_altF})",
                  lambda: self._nav_row(+1)),
-                (t("10後 ⏬"), t("10行後へ移動して表示"),
+                (f"{t('10後')} ▶▶", t("10行後へ移動して表示"),
                  lambda: self._nav_row(+10)),
-                (t("最後 ⤓"), t("一番最後の行へ移動して表示  (Ctrl+F)"),
+                (f"{t('最後')} {_ctrlF} ▶|",
+                 f"{t('一番最後の行へ移動して表示')}  ({_ctrlF})",
                  self._nav_last)):
             b = QPushButton(label)
             b.setToolTip(tip)
