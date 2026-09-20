@@ -360,15 +360,17 @@ class CasePresentationWindow(SnapDock):
             "その基準の直後に配置)"))
         b_sort.clicked.connect(self._sort_rows)
         bar1.addWidget(b_sort)
-        # Column visibility — hide 統合時間 / 更新 / 削除 to save width. 表示 and
-        # the rest stay always-on.
+        # Column visibility — toggle optional columns to save width. No/種別/Ser/
+        # 表示/コメント stay always-on. Listed in the table's column (title-row)
+        # order so the menu matches the header.
         b_cols = QPushButton(t("列表示"))
-        b_cols.setToolTip(t("統合時間・更新・削除の列を表示/非表示"))
+        b_cols.setToolTip(t("列の表示/非表示を切り替え"))
         col_menu = QMenu(b_cols)
         self._col_actions = {}
         for col, label in ((C_FRAMES, t("Frame")), (C_SIZE, t("サイズ")),
-                           (C_UNI, t("統合時間")), (C_UPD, t("更新")),
-                           (C_DEL, t("除外")), (C_ERASE, t("削除"))):
+                           (C_TIME, t("時間")), (C_UNI, t("統合時間")),
+                           (C_UPD, t("更新")), (C_DEL, t("除外")),
+                           (C_ERASE, t("削除"))):
             a = col_menu.addAction(label)
             a.setCheckable(True)
             a.setChecked(True)
@@ -1586,6 +1588,15 @@ class CasePresentationWindow(SnapDock):
                         cm.setBackground(red)  # empty-comment warning wins
                     else:
                         cm.setBackground(blue if is_disp else clear)
+                # 更新 only makes sense for the series whose image is on screen —
+                # capturing the "current view" of a series that isn't displayed
+                # does nothing. Enable it ONLY on the displayed row.
+                upd = tb.cellWidget(i, C_UPD)
+                if upd is not None:
+                    upd.setEnabled(is_disp)
+                    upd.setToolTip(
+                        t("この行の読込状態を再確認") if is_disp
+                        else t("表示中のシリーズのみ更新できます（先に「表示」）"))
         finally:
             tb.blockSignals(was)
 
