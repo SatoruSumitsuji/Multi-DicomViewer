@@ -20,7 +20,7 @@ import sys
 from datetime import datetime, timedelta
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QAbstractSpinBox,
@@ -310,6 +310,7 @@ class CasePresentationWindow(SnapDock):
         self._dirty = False                         # unsaved changes → close warns
         self._undo: list = []                       # Ctrl+Z snapshots (pre-change)
         self._redo: list = []                       # Ctrl+Y snapshots
+        self._displayed_uid: str | None = None      # row shown now → persistent tint
 
         central = QWidget()
         self.setWidget(central)
@@ -1034,6 +1035,8 @@ class CasePresentationWindow(SnapDock):
             self._shell.case_redisplay(row)
         except Exception:                            # noqa: BLE001
             pass
+        self._displayed_uid = row.get("series_uid")
+        self._update_displayed_highlight()
         self._return_focus()
 
     def _current_row_dict(self):
@@ -1142,6 +1145,7 @@ class CasePresentationWindow(SnapDock):
                 t("全ての行を消去しますか?")) == QMessageBox.StandardButton.Yes:
             self._record_undo()
             self._rows = []
+            self._displayed_uid = None
             self._after_rows_changed()
 
     # ---------------------------------------------------------- display
@@ -1160,6 +1164,8 @@ class CasePresentationWindow(SnapDock):
                 "このシリーズは現在読み込まれていません "
                 "(閉じられた可能性があります)。元のフォルダを開き直してください。"))
         else:
+            self._displayed_uid = row.get("series_uid")
+            self._update_displayed_highlight()
             self._return_focus()
 
     # ------------------------------------------------------------ file
@@ -1314,6 +1320,7 @@ class CasePresentationWindow(SnapDock):
         self._reference = data.get("reference", "XA")
         self._offsets = {k: float(v) for k, v in
                          (data.get("offsets") or {}).items()}
+        self._displayed_uid = None          # nothing shown yet after a load
         self._rows = []
         for r in data.get("rows", []):
             if not isinstance(r, dict):
@@ -1524,6 +1531,30 @@ class CasePresentationWindow(SnapDock):
         self._hint.setText(t(
             "{n} 行 / コメント未入力 {e} 行 (赤い欄にコメントを入力)。"
             "  基準: {ref}", n=n, e=empties, ref=self._reference))
+        self._update_displayed_highlight()
+
+    def _update_displayed_highlight(self) -> None:
+        """Persistently tint the CURRENTLY-DISPLAYED series' row light blue,
+        independent of the table's selection highlight. The selection blue is
+        focus-dependent — it fades when you click into the viewer / scrub the
+        seekbar — whereas this per-item background stays put, so "which series is
+        on screen" remains visible during image operations."""
+        disp = self._displayed_uid
+        blue = QColor("#cfe4ff")
+        clear = QBrush()                      # NoBrush → view default
+        red = QColor(255, 235, 235)
+        for i, r in enumerate(self._rows):
+            is_disp = bool(disp) and r.get("series_uid") == disp
+            for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI):
+                it = self._table.item(i, c)
+                if it is not None:
+                    it.setBackground(blue if is_disp else clear)
+            cm = self._table.item(i, C_COMMENT)
+            if cm is not None:
+                if not (r.get("comment", "") or "").strip():
+                    cm.setBackground(red)      # empty-comment warning wins
+                else:
+                    cm.setBackground(blue if is_disp else clear)
 
     def _on_cell_changed(self, row: int, col: int) -> None:
         if getattr(self, "_building", False) or col != C_COMMENT:
@@ -1541,3 +1572,5 @@ class CasePresentationWindow(SnapDock):
                 item.setBackground(QColor(255, 255, 255)
                                    if self._rows[row]["comment"].strip()
                                    else QColor(255, 235, 235))
+            # keep the displayed-row tint correct after editing its comment
+            self._update_displayed_highlight()
