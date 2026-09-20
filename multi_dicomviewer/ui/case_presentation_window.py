@@ -403,6 +403,22 @@ class CasePresentationWindow(SnapDock):
             b.clicked.connect(fn)
             bar2.addWidget(b)
         bar2.addSpacing(12)
+        # Batch remove of the CURRENT multi-selection (Shift/Ctrl-select rows,
+        # or right-click them). The per-row 除外/削除 buttons act on one row;
+        # these act on every selected row at once. Same handlers as the
+        # right-click menu — nothing happens if the selection is empty.
+        b_bdel = QPushButton(t("一括除外"))
+        b_bdel.setToolTip(t("選択中の複数シリーズをまとめてプレゼンから除外"
+                            "（元ファイルは残す）"))
+        b_bdel.clicked.connect(self._delete_selected)
+        bar2.addWidget(b_bdel)
+        b_berase = QPushButton(t("一括削除"))
+        b_berase.setToolTip(t(
+            "選択中の複数シリーズの元ファイルをまとめて CasePresentation-Erase "
+            "フォルダへ移動（元に戻せます）"))
+        b_berase.clicked.connect(self._erase_selected)
+        bar2.addWidget(b_berase)
+        bar2.addSpacing(12)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
         b_overwrite.clicked.connect(self._save_overwrite)
@@ -1051,8 +1067,12 @@ class CasePresentationWindow(SnapDock):
         a_last = mv.addAction(t("最後へ"))
         menu.addSeparator()
         a_ref = menu.addAction(t("状態更新"))
-        a_del = menu.addAction(t("除外"))
-        a_erase = menu.addAction(t("削除（ファイル移動）"))
+        nsel = len(self._selected_row_indices())
+        a_del = menu.addAction(t("一括除外 ({n}件)", n=nsel) if nsel > 1
+                               else t("除外"))
+        a_erase = menu.addAction(
+            t("一括削除・ファイル移動 ({n}件)", n=nsel) if nsel > 1
+            else t("削除（ファイル移動）"))
         chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
         if chosen is None:
             return
