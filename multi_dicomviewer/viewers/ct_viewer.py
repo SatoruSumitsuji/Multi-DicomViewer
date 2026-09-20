@@ -8287,10 +8287,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addWidget(self._series_nav_lbl)
         self._nav_btns: list[QPushButton] = []
         for label, where, tip in (
-            ("⏮ First", "first", t("First series (Home)")),
+            ("⏮ First", "first", t("First series — shortcut: Shift+A")),
             ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
             ("▶ Next (F)", "next", t("Next series — shortcut: F")),
-            ("⏭ Last", "last", t("Last series (End)")),
+            ("⏭ Last", "last", t("Last series — shortcut: Shift+F")),
         ):
             b = FitButton(label)
             b.setHelpToolTip(tip)
@@ -8528,10 +8528,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_series_nav_lbl", None) is not None:
             self._series_nav_lbl.setText(t("Series:"))
         nav_tips = (
-            t("First series (Home)"),
+            t("First series — shortcut: Shift+A"),
             t("Previous series — shortcut: A"),
             t("Next series — shortcut: F"),
-            t("Last series (End)"),
+            t("Last series — shortcut: Shift+F"),
         )
         for b, tip in zip(getattr(self, "_nav_btns", []), nav_tips):
             b.setHelpToolTip(tip)
