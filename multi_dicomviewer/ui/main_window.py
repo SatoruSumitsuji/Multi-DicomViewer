@@ -4167,13 +4167,12 @@ class MainWindow(QMainWindow):
         for key, fn in (
             ("F", lambda: self._nav_active("next")),
             ("A", lambda: self._nav_active("prev")),
-            # Shift = jump to the END / START of the series list (like Home/End),
-            # so F/A step one and Shift+F/Shift+A go to last/first. No conflict:
-            # Shift+F/Shift+A are otherwise unused (Ctrl+Shift+A is Anonymize).
+            # Shift = jump to the END / START of the series list, so F/A step one
+            # and Shift+F/Shift+A go to last/first. Everything is on the F/A
+            # family (no Home/End) per user request. No conflict: Shift+F/Shift+A
+            # are otherwise unused (Ctrl+Shift+A is Anonymize).
             ("Shift+F", lambda: self._nav_active("last")),
             ("Shift+A", lambda: self._nav_active("first")),
-            ("Home", lambda: self._nav_active("first")),
-            ("End", lambda: self._nav_active("last")),
         ):
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
@@ -4212,8 +4211,8 @@ class MainWindow(QMainWindow):
         on = _is_cine(v)
         for sc in getattr(self, "_xa_shortcuts", []):
             sc.setEnabled(on)
-        # F/A/Home/End also navigate CT panes (CT never sees these letters
-        # for tools, so enabling them app-wide is safe there too).
+        # F/A and Shift+F/Shift+A also navigate CT panes (CT never sees these
+        # letters for tools, so enabling them app-wide is safe there too).
         for sc in getattr(self, "_nav_shortcuts", []):
             sc.setEnabled(on or _is_ct(v))
         # Orthogonal-View depends on the active viewer being XA — refresh

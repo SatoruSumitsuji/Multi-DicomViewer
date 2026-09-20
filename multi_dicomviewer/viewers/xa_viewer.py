@@ -773,10 +773,10 @@ class XAViewer(AbstractViewer):
         # layouts the label elides from the right, so a right-side ▶/⏭ was
         # the first thing to disappear — leaving four look-alike buttons.
         for label, where, tip in (
-            ("⏮ First", "first", t("First series (Home)")),
+            ("⏮ First", "first", t("First series — shortcut: Shift+A")),
             ("◀ Prev (A)", "prev", t("Previous series — shortcut: A")),
             ("▶ Next (F)", "next", t("Next series — shortcut: F")),
-            ("⏭ Last", "last", t("Last series (End)")),
+            ("⏭ Last", "last", t("Last series — shortcut: Shift+F")),
         ):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -2681,10 +2681,10 @@ class XAViewer(AbstractViewer):
         nav_btns = getattr(self, "_nav_btns", None)
         if nav_btns:
             for b, tip in zip(nav_btns, (
-                t("First series (Home)"),
+                t("First series — shortcut: Shift+A"),
                 t("Previous series — shortcut: A"),
                 t("Next series — shortcut: F"),
-                t("Last series (End)"),
+                t("Last series — shortcut: Shift+F"),
             )):
                 b.setToolTip(tip)
 
