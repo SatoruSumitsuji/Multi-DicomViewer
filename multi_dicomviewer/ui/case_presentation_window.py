@@ -420,16 +420,15 @@ class CasePresentationWindow(SnapDock):
 
         # -- toolbar row 3: which SERIES is displayed (select + display) ---
         # Click-based navigation that always works regardless of keyboard focus
-        # / active window (Alt+F/A = 次/前, Ctrl+F/A = 最後/最初 mirror these).
-        # HORIZONTAL arrows only (back = left-based, forward = right-based) so
-        # this row can't be confused with row 2's vertical reorder arrows. The
-        # shortcut is shown on each button that has one, in the platform's keys.
-        _ctrlA, _ctrlF = _accel("ctrl", "A"), _accel("ctrl", "F")
+        # / active window (Alt+F/A = 次/前 mirror the 前/次 buttons; 最初/最後 are
+        # button-only — no shortcut). HORIZONTAL arrows only (back = left-based,
+        # forward = right-based) so this row can't be confused with row 2's
+        # vertical reorder arrows. The shortcut is shown on the buttons that have
+        # one (前/次), in the platform's keys.
         _altA, _altF = _accel("alt", "A"), _accel("alt", "F")
         bar3 = QHBoxLayout()
         for label, tip, fn in (
-                (f"|◀ {t('最初')} {_ctrlA}",
-                 f"{t('一番最初の行へ移動して表示')}  ({_ctrlA})",
+                (f"|◀ {t('最初')}", t("一番最初の行へ移動して表示"),
                  self._nav_first),
                 (f"◀◀ {t('10前')}", t("10行前へ移動して表示"),
                  lambda: self._nav_row(-10)),
@@ -441,8 +440,7 @@ class CasePresentationWindow(SnapDock):
                  lambda: self._nav_row(+1)),
                 (f"{t('10後')} ▶▶", t("10行後へ移動して表示"),
                  lambda: self._nav_row(+10)),
-                (f"{t('最後')} {_ctrlF} ▶|",
-                 f"{t('一番最後の行へ移動して表示')}  ({_ctrlF})",
+                (f"{t('最後')} ▶|", t("一番最後の行へ移動して表示"),
                  self._nav_last)):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -519,19 +517,17 @@ class CasePresentationWindow(SnapDock):
         sc_redo2.activated.connect(self._redo_action)
 
         # Row navigation shortcuts. Plain F/A stay with the main viewer (its
-        # per-image stepping); the panel uses MODIFIED keys so there's no
-        # confusion regardless of which window is focused: Alt+F / Alt+A = next /
-        # prev SERIES, Ctrl+F / Ctrl+A = last / first row. Application-wide but
-        # gated to when the panel is visible and a text field isn't being edited
-        # (see _nav_shortcut). Alt (not Shift) for next/prev: the main window
-        # already binds app-wide Shift+F/Shift+A to the active pane's last/first
-        # image, and two app-wide shortcuts on one sequence go AMBIGUOUS in Qt so
-        # neither fires — which is exactly why series stepping "didn't work".
-        # Alt+F needs the &File menu mnemonic freed (done: it's Alt+E now).
+        # per-image stepping); the panel uses Alt+F / Alt+A = next / prev SERIES,
+        # application-wide but gated to when the panel is visible and a text field
+        # isn't being edited (see _nav_shortcut). Alt (not Shift) for next/prev:
+        # the main window already binds app-wide Shift+F/Shift+A to the active
+        # pane's last/first image, and two app-wide shortcuts on one sequence go
+        # AMBIGUOUS in Qt so neither fires. Alt+F needs the &File menu mnemonic
+        # freed (done: it's Alt+E now). 最初/最後 have NO shortcut on purpose:
+        # Ctrl+A/Ctrl+F clashed with the conventional select-all / find (and with
+        # Studies' Ctrl+A select-all), so those rows are button-only.
         for seq, fn in (("Alt+F", lambda: self._nav_shortcut(+1)),
-                        ("Alt+A", lambda: self._nav_shortcut(-1)),
-                        ("Ctrl+F", lambda: self._nav_shortcut("last")),
-                        ("Ctrl+A", lambda: self._nav_shortcut("first"))):
+                        ("Alt+A", lambda: self._nav_shortcut(-1))):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
