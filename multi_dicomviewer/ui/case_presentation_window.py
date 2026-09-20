@@ -82,6 +82,22 @@ def _accel(*parts: str) -> str:
     return "+".join([name[m] for m in mods] + [key])
 
 
+def _cap_depth(obj, limit: int = 60, _d: int = 0):
+    """Return a copy of a JSON-ish view_state with nesting capped at *limit*
+    levels (deeper branches become None). A corrupt, pathologically deep
+    view_state would otherwise blow copy.deepcopy's recursion limit and crash
+    the app (seen when a saved .json carried a runaway-nested state). Real view
+    states are only a few levels deep, so the cap never touches valid data; it
+    also returns fresh dict/list objects, so it doubles as a safe copy."""
+    if _d >= limit:
+        return None
+    if isinstance(obj, dict):
+        return {k: _cap_depth(v, limit, _d + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_cap_depth(v, limit, _d + 1) for v in obj]
+    return obj
+
+
 class _LeftBarDelegate(QStyledItemDelegate):
     """Paints a thin left 縦棒 on a data cell. Set only on the data columns via
     setItemDelegateForColumn, so the bar never bleeds onto the action-button
@@ -642,7 +658,15 @@ class CasePresentationWindow(SnapDock):
     def _record_undo(self) -> None:
         """Snapshot the CURRENT state onto the undo stack (call BEFORE a change);
         a new change forks the redo history."""
-        self._undo.append(self._state_snapshot())
+        try:
+            snap = self._state_snapshot()
+        except RecursionError:
+            # Safety net: a pathologically deep row (corrupt view_state) could
+            # blow deepcopy's limit. Don't crash — skip this undo point; the edit
+            # still applies. (view_state is depth-capped on entry, so this should
+            # not normally happen.)
+            return
+        self._undo.append(snap)
         if len(self._undo) > 100:
             self._undo.pop(0)
         self._redo.clear()
@@ -688,6 +712,7 @@ class CasePresentationWindow(SnapDock):
         if row is None:
             self._warn(t("表示中のシリーズがありません。"))
             return
+        row["view_state"] = _cap_depth(row.get("view_state", {}))
         self._record_undo()
         self._rows.append(row)
         self._after_rows_changed(select_last=True)
@@ -697,6 +722,8 @@ class CasePresentationWindow(SnapDock):
         if not rows:
             self._warn(t("表示中のシリーズがありません。"))
             return
+        for r in rows:
+            r["view_state"] = _cap_depth(r.get("view_state", {}))
         self._record_undo()
         self._rows.extend(rows)
         self._after_rows_changed(select_last=True)
@@ -714,6 +741,7 @@ class CasePresentationWindow(SnapDock):
         for r in rows:
             if r.get("series_uid") and r["series_uid"] in have:
                 continue
+            r["view_state"] = _cap_depth(r.get("view_state", {}))
             self._rows.append(r)
             added += 1
         if added == 0:
@@ -1057,7 +1085,7 @@ class CasePresentationWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             vs = None
         if vs:
-            row["view_state"] = vs
+            row["view_state"] = _cap_depth(vs)   # guard against deep-nested state
             self._dirty = True
 
     def _capture_view_into_selected(self) -> None:
@@ -1338,7 +1366,7 @@ class CasePresentationWindow(SnapDock):
                 "label": r.get("label", ""),
                 "src_dirs": r.get("src_dirs", []),
                 "_refreshed": bool(r.get("refreshed")),
-                "view_state": r.get("view_state", {}),
+                "view_state": _cap_depth(r.get("view_state", {})),
             })
         self._last_path = path          # 上書き保存 targets the loaded file
         self._dirty = False             # freshly loaded = matches the file
@@ -1543,18 +1571,23 @@ class CasePresentationWindow(SnapDock):
         blue = QColor("#cfe4ff")
         clear = QBrush()                      # NoBrush → view default
         red = QColor(255, 235, 235)
-        for i, r in enumerate(self._rows):
-            is_disp = bool(disp) and r.get("series_uid") == disp
-            for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI):
-                it = self._table.item(i, c)
-                if it is not None:
-                    it.setBackground(blue if is_disp else clear)
-            cm = self._table.item(i, C_COMMENT)
-            if cm is not None:
-                if not (r.get("comment", "") or "").strip():
-                    cm.setBackground(red)      # empty-comment warning wins
-                else:
-                    cm.setBackground(blue if is_disp else clear)
+        tb = self._table
+        was = tb.blockSignals(True)           # setBackground emits cellChanged —
+        try:                                  # block it so _on_cell_changed (undo
+            for i, r in enumerate(self._rows):  # snapshot, dirty…) isn't triggered
+                is_disp = bool(disp) and r.get("series_uid") == disp
+                for c in (C_NO, C_MOD, C_SER, C_FRAMES, C_SIZE, C_TIME, C_UNI):
+                    it = tb.item(i, c)
+                    if it is not None:
+                        it.setBackground(blue if is_disp else clear)
+                cm = tb.item(i, C_COMMENT)
+                if cm is not None:
+                    if not (r.get("comment", "") or "").strip():
+                        cm.setBackground(red)  # empty-comment warning wins
+                    else:
+                        cm.setBackground(blue if is_disp else clear)
+        finally:
+            tb.blockSignals(was)
 
     def _on_cell_changed(self, row: int, col: int) -> None:
         if getattr(self, "_building", False) or col != C_COMMENT:
