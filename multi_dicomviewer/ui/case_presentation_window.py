@@ -620,17 +620,20 @@ class CasePresentationWindow(SnapDock):
 
     # ------------------------------------------------------------- undo/redo
     def _state_snapshot(self) -> dict:
-        """Deep copy of the editable state (rows / offsets / reference)."""
+        """Deep copy of the editable state (rows / offsets / reference), plus the
+        save target so undoing a 読込 also restores where 上書き保存 points."""
         return {
             "rows": copy.deepcopy(self._rows),
             "offsets": copy.deepcopy(self._offsets),
             "reference": self._reference,
+            "last_path": self._last_path,
         }
 
     def _restore_state(self, snap: dict) -> None:
         self._rows = copy.deepcopy(snap.get("rows", []))
         self._offsets = copy.deepcopy(snap.get("offsets", {}))
         self._reference = snap.get("reference", "XA")
+        self._last_path = snap.get("last_path", self._last_path)
         self._dirty = True
         self._refresh_ref_combo()
         self._rebuild()
@@ -1300,6 +1303,13 @@ class CasePresentationWindow(SnapDock):
         except (OSError, ValueError) as exc:
             self._warn(t("読込に失敗しました: {e}", e=str(exc)))
             return False
+        # A 読込 REPLACES the whole list. Snapshot the current state first so
+        # Ctrl+Z can bring back the (possibly unsaved) work that was here — but
+        # only when there IS existing content to lose (a load into an empty
+        # panel needs no undo point). A failed parse above returns before this,
+        # so a bad file never disturbs the current list or the undo history.
+        if self._rows:
+            self._record_undo()
         self._reference = data.get("reference", "XA")
         self._offsets = {k: float(v) for k, v in
                          (data.get("offsets") or {}).items()}
