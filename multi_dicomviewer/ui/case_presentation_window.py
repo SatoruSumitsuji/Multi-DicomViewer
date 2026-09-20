@@ -70,13 +70,16 @@ _HEADERS = ["No", "種別", "Ser", "Frame", "サイズ", "時間", "統合時間
 _SNAP_TOL_S = 10.0            # ±seconds: snap a non-ref event just after an XA
 
 
-def _accel(mod: str, key: str) -> str:
-    """Platform-aware shortcut label for a button caption: 'Alt+A' / 'Ctrl+A'
-    on Windows/Linux, '⌥A' / '⌘A' on macOS (Qt maps Ctrl→⌘, Alt→⌥ there).
-    *mod* is 'ctrl' or 'alt'."""
+def _accel(*parts: str) -> str:
+    """Platform-aware shortcut label for a button caption. Pass modifier names
+    ('ctrl' / 'alt' / 'shift') then the key, e.g. _accel('alt', 'shift', 'A'):
+    'Alt+Shift+A' on Windows/Linux, '⌥⇧A' on macOS (Qt maps Ctrl→⌘, Alt→⌥)."""
+    *mods, key = parts
     if sys.platform == "darwin":
-        return {"ctrl": "⌘", "alt": "⌥"}[mod] + key
-    return {"ctrl": "Ctrl", "alt": "Alt"}[mod] + "+" + key
+        sym = {"ctrl": "⌘", "alt": "⌥", "shift": "⇧"}
+        return "".join(sym[m] for m in mods) + key
+    name = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift"}
+    return "+".join([name[m] for m in mods] + [key])
 
 
 class _LeftBarDelegate(QStyledItemDelegate):
@@ -420,15 +423,17 @@ class CasePresentationWindow(SnapDock):
 
         # -- toolbar row 3: which SERIES is displayed (select + display) ---
         # Click-based navigation that always works regardless of keyboard focus
-        # / active window (Alt+F/A = 次/前 mirror the 前/次 buttons; 最初/最後 are
-        # button-only — no shortcut). HORIZONTAL arrows only (back = left-based,
-        # forward = right-based) so this row can't be confused with row 2's
-        # vertical reorder arrows. The shortcut is shown on the buttons that have
-        # one (前/次), in the platform's keys.
+        # / active window (Alt+F/A = 次/前, Alt+Shift+F/A = 最後/最初 mirror the
+        # buttons). HORIZONTAL arrows only (back = left-based, forward =
+        # right-based) so this row can't be confused with row 2's vertical
+        # reorder arrows. Each button with a shortcut shows it in the platform's
+        # keys (10前/10後 have none).
         _altA, _altF = _accel("alt", "A"), _accel("alt", "F")
+        _asA, _asF = _accel("alt", "shift", "A"), _accel("alt", "shift", "F")
         bar3 = QHBoxLayout()
         for label, tip, fn in (
-                (f"|◀ {t('最初')}", t("一番最初の行へ移動して表示"),
+                (f"|◀ {t('最初')} {_asA}",
+                 f"{t('一番最初の行へ移動して表示')}  ({_asA})",
                  self._nav_first),
                 (f"◀◀ {t('10前')}", t("10行前へ移動して表示"),
                  lambda: self._nav_row(-10)),
@@ -440,7 +445,8 @@ class CasePresentationWindow(SnapDock):
                  lambda: self._nav_row(+1)),
                 (f"{t('10後')} ▶▶", t("10行後へ移動して表示"),
                  lambda: self._nav_row(+10)),
-                (f"{t('最後')} ▶|", t("一番最後の行へ移動して表示"),
+                (f"{t('最後')} {_asF} ▶|",
+                 f"{t('一番最後の行へ移動して表示')}  ({_asF})",
                  self._nav_last)):
             b = QPushButton(label)
             b.setToolTip(tip)
@@ -523,11 +529,13 @@ class CasePresentationWindow(SnapDock):
         # the main window already binds app-wide Shift+F/Shift+A to the active
         # pane's last/first image, and two app-wide shortcuts on one sequence go
         # AMBIGUOUS in Qt so neither fires. Alt+F needs the &File menu mnemonic
-        # freed (done: it's Alt+E now). 最初/最後 have NO shortcut on purpose:
-        # Ctrl+A/Ctrl+F clashed with the conventional select-all / find (and with
-        # Studies' Ctrl+A select-all), so those rows are button-only.
+        # freed (done: it's Alt+E now). 最初/最後 use Alt+Shift+A / Alt+Shift+F
+        # (not Ctrl+A/Ctrl+F, which clashed with the conventional select-all /
+        # find and Studies' Ctrl+A select-all).
         for seq, fn in (("Alt+F", lambda: self._nav_shortcut(+1)),
-                        ("Alt+A", lambda: self._nav_shortcut(-1))):
+                        ("Alt+A", lambda: self._nav_shortcut(-1)),
+                        ("Alt+Shift+F", lambda: self._nav_shortcut("last")),
+                        ("Alt+Shift+A", lambda: self._nav_shortcut("first"))):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
