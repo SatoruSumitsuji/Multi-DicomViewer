@@ -1008,16 +1008,31 @@ class CasePresentationWindow(SnapDock):
         row = self._rows[index]
         QTimer.singleShot(0, lambda r=row: self._display_row_deferred(r))
 
+    def _displayed_index(self) -> int:
+        """Row index of the currently-displayed series (_displayed_uid), or -1."""
+        uid = self._displayed_uid
+        if not uid:
+            return -1
+        for i, r in enumerate(self._rows):
+            if r.get("series_uid") == uid:
+                return i
+        return -1
+
     def _nav_row(self, step: int) -> None:
-        """Move the selection by ``step`` (±1 / ±10) and display it."""
+        """Move the selection by ``step`` (±1 / ±10) and display it. When the
+        table has no current row (e.g. right after a 読込 / a select=None
+        rebuild), step from the CURRENTLY-DISPLAYED row instead of collapsing to
+        the first/last edge — otherwise Alt+F ("next") would jump to row 0 and
+        look exactly like Alt+Shift+A ("first")."""
         if not self._rows:
             return
         cur = self._table.currentRow()
         if cur < 0:
-            cur = 0 if step > 0 else len(self._rows) - 1
-        else:
-            cur += step
-        self._nav_goto(cur)
+            cur = self._displayed_index()
+        if cur < 0:                       # truly no reference row → sensible edge
+            self._nav_goto(0 if step > 0 else len(self._rows) - 1)
+            return
+        self._nav_goto(cur + step)
 
     def _nav_first(self) -> None:
         self._nav_goto(0)
