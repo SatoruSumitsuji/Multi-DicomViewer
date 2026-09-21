@@ -14009,8 +14009,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_draw_btn.setHelpToolTip(
             t("Draw the vessel centreline as a Polyline on the 3-D MPR (double- "
               "or right-click to finish) → the short-axis opens automatically. "
-              "Hold Alt/Option while dragging to Zoom / Move / Rotate / Spin / "
-              "Page / centreline-move mid-trace."))
+              "Hold Alt/Option while dragging to run the SELECTED view tool "
+              "(Zoom / Move / Rotate / Spin / Paging / Thick / W-L) or grab the "
+              "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
         self._cpr_load_btn = FitButton(t("Load"))
