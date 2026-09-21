@@ -3437,7 +3437,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._spin_snap_btn = FitButton(t("Spin+"))
         self._spin_snap_btn.setHelpToolTip(t(
             "Snap the centreline to the nearest vertical/horizontal "
-            "(45° snaps clockwise)"))
+            "(45° snaps clockwise). Shift+click snaps BOTH panes"))
         self._spin_snap_btn.clicked.connect(self._spin_snap)
         row2.addWidget(self._spin_snap_btn)
         # Grayscale invert (black↔white negative) — right of Spin+.
@@ -4012,11 +4012,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Spin+ : roll the ACTIVE pane's view so its centreline (crosshair)
         snaps to the nearest vertical / horizontal (a 45° tie snaps CLOCKWISE).
         The camera roll rotates the on-screen view only — frame / measurements
-        are unchanged. pygfx maps a roll R to on-screen angle = R − base, so the
-        roll delta equals the screen-angle delta measured here."""
+        are unchanged. Hold Shift when clicking to snap BOTH panes together
+        (matches Shift+Spin / Shift+Zoom)."""
         if self._vol is None:
             return
-        key = self._active_pane
+        shift = bool(QApplication.keyboardModifiers()
+                     & Qt.KeyboardModifier.ShiftModifier)
+        keys = ("A", "B") if shift else (self._active_pane,)
+        before = self._view_snapshot()
+        changed = False
+        for key in keys:
+            if self._spin_snap_pane(key):
+                changed = True
+        if changed:
+            self._view_initial = False
+            self._refresh(only=None if len(keys) > 1 else keys[0])
+            self._undo_view(before, self._view_snapshot())
+
+    def _spin_snap_pane(self, key) -> bool:
+        """Roll pane *key*'s view so its crossline snaps to the nearest vertical
+        / horizontal (45° tie → clockwise). Returns True if it rolled (so a
+        both-pane snap records a single undo step). pygfx maps a roll R to
+        on-screen angle = R − base, so the roll delta = the screen-angle delta."""
         ccx, ccy = self._cc(key)
         a = math.radians(self._cross_ang[key])
         uh = (math.cos(a), math.sin(a))            # a crossline dir (output uv)
@@ -4027,12 +4044,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         target = math.ceil(sa / 90.0 - 0.5) * 90.0
         delta = ((target - sa + 180.0) % 360.0) - 180.0
         if abs(delta) < 1e-4:
-            return
-        before = self._view_snapshot()
+            return False
         self._roll[key] += delta                    # snaps the crossline
-        self._view_initial = False
-        self._refresh(only=key)
-        self._undo_view(before, self._view_snapshot())
+        return True
 
     def _page_step(self, step):
         """One paging notch: a native slice in 2-D, a wheel step in 3-D."""
@@ -4893,7 +4907,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             px, py = self._pan[which]
             self._pan[which] = np.array([px - dx * sc, py + dy * sc])
         elif t == "SPIN":
-            only_pane = which
+            # Shift = spin BOTH panes together (like Shift+Zoom above); in
+            # LV/trace mode Shift alone stays single-pane and Ctrl+Shift does
+            # both (mirrors the ZOOM gating), so tracing keeps individual spin.
+            indiv = ((self._meas_on and bool(self._meas_type))
+                     or self._lv is not None)
+            both = (shift and ctrl) if indiv else shift
+            only_pane = None if both else which
             # Roll the camera by how far the cursor sweeps about the crosshair
             # centre (screen px, y-down) — image AND overlay rotate together.
             if sx is not None:
@@ -4907,7 +4927,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                         dphi = math.degrees(phi - self._spin_prev)
                         dphi = (dphi + 180.0) % 360.0 - 180.0
                         self._spin_prev = phi
-                        self._roll[which] += _SPIN_SIGN * dphi
+                        for k in (("A", "B") if both else (which,)):
+                            self._roll[k] += _SPIN_SIGN * dphi
                         # SyncView: mirror SPIN as the ROLL-ANGLE delta (screen
                         # position isn't portable, the roll increment is).
                         if (self._sync_view_on

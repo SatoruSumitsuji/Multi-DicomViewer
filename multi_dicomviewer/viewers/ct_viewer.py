@@ -8431,7 +8431,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._spin_snap_btn.setStyleSheet(self._BTN_DIS)
         self._spin_snap_btn.setHelpToolTip(
             t("Snap the centreline to the nearest vertical/horizontal "
-              "(45° snaps clockwise)"))
+              "(45° snaps clockwise). Shift+click snaps BOTH panes"))
         self._spin_snap_btn.clicked.connect(self._spin_snap)
         row2.addWidget(self._spin_snap_btn)
         # Grayscale invert (black↔white negative) — right of Flip-V.
@@ -16459,10 +16459,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Spin+ : roll the ACTIVE pane's camera so its centreline (crosshair)
         snaps to the nearest vertical / horizontal. A 45° tie snaps CLOCKWISE.
         Works in 2-D and 3-D (it just rotates the on-screen view; the frame /
-        measurements are unchanged)."""
+        measurements are unchanged). Hold Shift when clicking to snap BOTH panes
+        together (matches Shift+Spin / Shift+Zoom)."""
         if self._image is None:
             return
-        key = self._active_pane
+        from PyQt6.QtWidgets import QApplication
+        shift = bool(QApplication.keyboardModifiers()
+                     & Qt.KeyboardModifier.ShiftModifier)
+        keys = ("A", "B") if shift else (self._active_pane,)
+        before = self._view_snapshot()
+        changed = False
+        for key in keys:
+            if self._spin_snap_pane(key):
+                changed = True
+        if changed:
+            self._view_initial = False
+            self._refresh()
+            self._undo_view(before, self._view_snapshot())
+
+    def _spin_snap_pane(self, key) -> bool:
+        """Roll pane *key*'s camera so its crossline snaps to the nearest
+        vertical / horizontal (45° tie → clockwise). Returns True if it rolled
+        (so the caller can record a single undo step for a both-pane snap)."""
         ren = self.pane[key].ren
         cam = ren.GetActiveCamera()
         ccx, ccy = self._cc(key)
@@ -16486,17 +16504,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         per = ((crossline_angle() - sa + 180.0) % 360.0) - 180.0   # display °/1° roll
         cam.Roll(-1.0)
         if abs(per) < 1e-6:
-            return
+            return False
         # Nearest 90°; a 45° tie rounds DOWN = CLOCKWISE (display CW = decreasing).
         target = math.ceil(sa / 90.0 - 0.5) * 90.0
         delta = ((target - sa + 180.0) % 360.0) - 180.0            # shortest move
         if abs(delta) < 1e-4:
-            return
-        before = self._view_snapshot()
+            return False
         cam.Roll(delta / per)                       # snaps the crossline to target
-        self._view_initial = False
-        self._refresh()
-        self._undo_view(before, self._view_snapshot())
+        return True
 
     def _page_step(self, step):
         """One paging notch (keyboard / arrow): a native slice in 2-D, a
@@ -16684,6 +16699,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # how far the cursor sweeps AROUND the crosshair centre, so
             # vertical drags work too — right+up / left+down → CCW,
             # right+down / left+up → CW (sign via _SPIN_SIGN).
+            # Shift = spin BOTH panes together (like Shift+Zoom below). In
+            # LV/trace mode Shift alone stays single-pane and Ctrl+Shift does
+            # both (mirrors the ZOOM gating), so tracing keeps individual spin.
+            indiv = ((self._meas_on and bool(self._meas_type))
+                     or self._lv is not None)
+            both = (shift and ctrl) if indiv else shift
             if sx is not None:
                 # Angle of the cursor about the crosshair centre measured
                 # in *screen* pixels (Qt, y-down), so the quadrant feel is
@@ -16701,16 +16722,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                         dphi = math.degrees(phi - self._spin_prev)
                         dphi = (dphi + 180.0) % 360.0 - 180.0
                         self._spin_prev = phi
-                        self.pane[which].ren.GetActiveCamera().Roll(
-                            _SPIN_SIGN * dphi
-                        )
+                        for k in (("A", "B") if both else (which,)):
+                            self.pane[k].ren.GetActiveCamera().Roll(
+                                _SPIN_SIGN * dphi)
                         # SyncView: mirror SPIN as the ROLL-ANGLE delta (screen
                         # position isn't portable, but the roll increment is).
                         if (self._sync_view_on
                                 and not self._sync_view_applying):
                             self.sync_view_op.emit(
                                 "spin", {"which": which, "dphi": float(dphi)})
-            only_pane = which                       # SPIN rolls only this pane
+            only_pane = None if both else which     # both → refresh both panes
         elif t == "ZOOM":
             # Shift = zoom BOTH panes together, else just this one — EXCEPT while
             # actively tracing a border, where a plain left-drag is taken by the
