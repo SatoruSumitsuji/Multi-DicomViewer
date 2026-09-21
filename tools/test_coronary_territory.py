@@ -197,7 +197,33 @@ def test_engine_grids():
     print("OK TerritoryEngine grids (territory scatter + int-label assignment)")
 
 
+def test_json_roundtrip():
+    import json
+    tree, *_ = _build_tree()
+    # attach a control-point set to one vessel to exercise the ctrl round-trip
+    tree.vessels["d1"].ctrl = np.array([[10, 0, 0], [10, 25, 0]], float)
+    data = tree.to_json(series={"series_uid": "1.2.3"}, snap_tol_mm=3.0)
+    # must survive a real JSON encode/decode (no numpy types leaking through)
+    back = CoronaryTree.from_json(json.loads(json.dumps(data)))
+    assert data["format"] == "MDV-CoroTree" and data["series"]["series_uid"] == "1.2.3"
+    assert list(back.vessels) == list(tree.vessels), list(back.vessels)
+    for vid, v in tree.vessels.items():
+        b = back.vessels[vid]
+        assert b.role == v.role and b.parent == v.parent, vid
+        assert b.junction == v.junction, (vid, b.junction, v.junction)
+        assert np.allclose(b.points, v.points), vid
+    assert np.allclose(back.vessels["d1"].ctrl, tree.vessels["d1"].ctrl)
+    # territory is identical after the round-trip
+    a0, names, _ = _assign_probes(tree)
+    a1, _, _ = _assign_probes(back)
+    t0 = {names[i]: bool(tree.territory_mask(a0, "lad", 30)[i]) for i in range(len(names))}
+    t1 = {names[i]: bool(back.territory_mask(a1, "lad", 30)[i]) for i in range(len(names))}
+    assert t0 == t1, (t0, t1)
+    print("OK .corotree.json round-trip (topology/points/junctions/territory)")
+
+
 def main():
+    test_json_roundtrip()
     test_topology_and_snap()
     test_too_far_guard()
     test_assignment()
