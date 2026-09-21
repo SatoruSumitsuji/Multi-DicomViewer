@@ -138,11 +138,15 @@ class CoronaryTreeWindow(SnapDock):
         if v.parent is None:
             return t("root")
         p = self._tree.vessels.get(v.parent)
-        pct = ""
-        if p is not None and p.n > 1 and v.junction is not None:
-            pct = f" {round(100.0 * v.junction / (p.n - 1))}%"
         pname = p.name if p is not None else v.parent
-        return f"@{pname}{pct}"
+        if p is None or p.n < 2 or v.junction is None:
+            return f"@{pname}"
+        # Junction position along the parent as BOTH an arc-length fraction (0% =
+        # proximal/ostium, 100% = distal) and mm from the parent's proximal end;
+        # points are uniform arc-length samples, so idx maps linearly to length.
+        frac = v.junction / (p.n - 1)
+        total_mm = float(np.linalg.norm(np.diff(p.points, axis=0), axis=1).sum())
+        return f"@{pname} {round(100 * frac)}% / {frac * total_mm:.0f}mm"
 
     def _populate(self):
         self._building = True

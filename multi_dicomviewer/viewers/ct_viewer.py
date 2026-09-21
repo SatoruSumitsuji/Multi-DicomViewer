@@ -2353,6 +2353,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
     #: while SyncView-linked and NOT while applying a mirrored op (no echo).
     sync_view_op = pyqtSignal(str, object)
+    #: CT Territory: register the CURRENT CPR centreline into the Coronary Tree
+    #: panel. Carries (role, name, ctrl, points) — role is LM-LAD/LM-LCX/RCA or
+    #: "Branch"; ctrl/points are lists of [x,y,z] world-mm. The shell adds it as
+    #: a root or a snapped branch.
+    coronary_register = pyqtSignal(str, str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2818,6 +2823,28 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
         self._cpr_exit_btn.clicked.connect(self._coronary_exit)
         row.addWidget(self._cpr_exit_btn)
+        # CT Territory: register THIS centreline into the Coronary Tree panel as
+        # a root (LM-LAD/LM-LCX/RCA) or a Branch (snapped to the nearest vessel).
+        row.addSpacing(10)
+        row.addWidget(QLabel(t("役割:")))
+        self._cpr_role_combo = QComboBox()
+        self._cpr_role_combo.addItems(["LM-LAD", "LM-LCX", "RCA", "Branch"])
+        self._cpr_role_combo.setToolTip(t(
+            "ルート3種はそれぞれ入口を第1点に。Branchは既存血管の上から描き始める"))
+        row.addWidget(self._cpr_role_combo)
+        self._cpr_name_combo = QComboBox()
+        self._cpr_name_combo.setEditable(True)
+        self._cpr_name_combo.addItems([
+            "", "D9", "D9a", "D10", "D10a", "S1", "S2", "S3", "S4",
+            "X12", "X12a", "X12b", "X14", "X14a", "X14c", "X15",
+            "R4", "R16a", "R16b", "R16c", "R16d"])
+        self._cpr_name_combo.setToolTip(t("血管名 (プリセット選択または自由入力)"))
+        row.addWidget(self._cpr_name_combo)
+        self._cpr_tree_btn = FitButton(t("ツリーに追加"))
+        self._cpr_tree_btn.setHelpToolTip(t(
+            "このCPRを冠動脈ツリーに登録 (Tools ▸ Coronary Tree のパネル)"))
+        self._cpr_tree_btn.clicked.connect(self._coronary_add_to_tree)
+        row.addWidget(self._cpr_tree_btn)
         # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
         # the layout (so the buttons keep their natural width instead of growing
         # to fill the row); its CHILDREN are shown only once a CPR is built.
@@ -10465,6 +10492,28 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "src": c.get("src", "A"),
             },
         }
+
+    def _coronary_add_to_tree(self) -> None:
+        """Register the ACTIVE CPR centreline into the Coronary Tree panel via
+        the coronary_register signal (the shell adds it as a root or a snapped
+        branch). Needs a built CPR — Draw or Load one first."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._cpr is None:
+            QMessageBox.information(self, t("Coronary Tree"),
+                                    t("先に Draw か Load で CPR を作成してください。"))
+            return
+        ctrl = self._cpr_ctrl_pts3d()
+        if not ctrl or len(ctrl) < 2:
+            QMessageBox.information(self, t("Coronary Tree"),
+                                    t("CPR の中心線がありません。"))
+            return
+        pts = np.asarray(self._cpr["cl"].points, float)
+        role = self._cpr_role_combo.currentText()
+        name = self._cpr_name_combo.currentText().strip()
+        self.coronary_register.emit(
+            role, name,
+            [list(map(float, np.asarray(P, float))) for P in ctrl],
+            pts.round(4).tolist())
 
     def _view_restore(self, snap) -> None:
         if self._image is None or snap is None:
