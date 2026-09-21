@@ -51,9 +51,12 @@ class Vessel:
     points: np.ndarray
     parent: str | None = None           # parent vessel id (None for a root)
     junction: int | None = None         # sample index ON THE PARENT at the branch
+    ctrl: np.ndarray | None = None      # clicked control points (for redraw)
 
     def __post_init__(self):
         self.points = np.asarray(self.points, float).reshape(-1, 3)
+        if self.ctrl is not None:
+            self.ctrl = np.asarray(self.ctrl, float).reshape(-1, 3)
 
     @property
     def n(self) -> int:
@@ -235,6 +238,46 @@ class CoronaryTree:
         if full_codes:
             out |= np.isin(code, full_codes)
         return out
+
+    # ----------------------------------------------------- (de)serialise
+    def to_json(self, series: dict | None = None,
+                snap_tol_mm: float = 3.0) -> dict:
+        """Serialise the whole tree to a plain dict for a ``.corotree.json``
+        file. Sampled ``points`` are stored (self-contained → territory loads
+        without re-sampling); ``ctrl`` is kept too when present, for redraw.
+        Vessel order is preserved (parents before children)."""
+        vessels = []
+        for vid, v in self.vessels.items():
+            d = {"vid": vid, "name": v.name, "role": v.role,
+                 "parent": v.parent, "junction": v.junction,
+                 "points": np.asarray(v.points, float).round(4).tolist()}
+            if v.ctrl is not None:
+                d["ctrl"] = np.asarray(v.ctrl, float).round(4).tolist()
+            vessels.append(d)
+        out = {"format": "MDV-CoroTree", "version": 1,
+               "type": "coronary-tree", "snap_tol_mm": float(snap_tol_mm),
+               "vessels": vessels}
+        if series is not None:
+            out["series"] = series
+        return out
+
+    @classmethod
+    def from_json(cls, data: dict) -> "CoronaryTree":
+        """Rebuild a tree from a ``.corotree.json`` dict (order preserved)."""
+        tree = cls()
+        for d in (data or {}).get("vessels", []):
+            pts = d.get("points")
+            if pts is None:                         # tolerate ctrl-only files
+                pts = d.get("ctrl", [])
+            tree.vessels[d["vid"]] = Vessel(
+                vid=d["vid"], name=d.get("name", ""),
+                role=d.get("role", "branch"), points=np.asarray(pts, float),
+                parent=d.get("parent"),
+                junction=(None if d.get("junction") is None
+                          else int(d["junction"])),
+                ctrl=(np.asarray(d["ctrl"], float) if d.get("ctrl") is not None
+                      else None))
+        return tree
 
 
 # -------------------------------------------------------- mask <-> world
