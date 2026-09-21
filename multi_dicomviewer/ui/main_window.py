@@ -1600,6 +1600,13 @@ class MainWindow(QMainWindow):
         ))
         self._casepres_act.triggered.connect(self._open_case_presentation)
         tm.addAction(self._casepres_act)
+        self._corotree_act = QAction(t("Coronary Tree…"), self)
+        self._corotree_act.setToolTip(t(
+            "Manage the coronary centrelines for a CT Territory analysis as a "
+            "branch tree (roots LM-LAD / LM-LCX / RCA + branches); save/load a "
+            ".corotree.json. Floats or docks with Studies"))
+        self._corotree_act.triggered.connect(self._open_coronary_tree)
+        tm.addAction(self._corotree_act)
 
         tm.addSeparator()
         self._dicomcheck_act = QAction(t("DicomCheck…"), self)
@@ -2209,6 +2216,35 @@ class MainWindow(QMainWindow):
                 w.resize(760, 520)
                 c = self.geometry().center()
                 w.move(max(0, c.x() - 380), max(0, c.y() - 260))
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        return w
+
+    def _open_coronary_tree(self):
+        """Tools ▸ Coronary Tree — a dockable branch-tree list of the coronary
+        centrelines for a CT Territory analysis. One instance is kept. Starts
+        floating; drag it onto the Studies area to dock+tab it there."""
+        from multi_dicomviewer.ui.coronary_tree_window import CoronaryTreeWindow
+        w = getattr(self, "_corotree_win", None)
+        if w is None:
+            w = CoronaryTreeWindow(self)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
+            if getattr(self, "_studies_dock", None) is not None:
+                self.tabifyDockWidget(self._studies_dock, w)
+            self._corotree_win = w
+            w.setFloating(True)
+            w.resize(360, 520)
+        if not w.isVisible():
+            w.show()
+        if w.isFloating():
+            too_small = w.width() < 220 or w.height() < 160
+            scr = self.screen().availableGeometry() if self.screen() else None
+            off = scr is not None and not scr.intersects(w.frameGeometry())
+            if too_small or off:
+                w.resize(360, 520)
+                c = self.geometry().center()
+                w.move(max(0, c.x() - 180), max(0, c.y() - 260))
         w.show()
         w.raise_()
         w.activateWindow()
