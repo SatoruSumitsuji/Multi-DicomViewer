@@ -2830,19 +2830,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_role_combo = QComboBox()
         self._cpr_role_combo.addItems(["LM-LAD", "LM-LCX", "RCA", "Branch"])
         self._cpr_role_combo.setToolTip(t(
-            "ルート3種はそれぞれ入口を第1点に。Branchは既存血管の上から描き始める"))
+            "ルート3種はそれぞれ入口を第1点に。Branchは既存血管の上から描き始める "
+            "(枝の名前は追加後に指定)"))
         row.addWidget(self._cpr_role_combo)
-        self._cpr_name_combo = QComboBox()
-        self._cpr_name_combo.setEditable(True)
-        self._cpr_name_combo.addItems([
-            "", "D9", "D9a", "D10", "D10a", "S1", "S2", "S3", "S4",
-            "X12", "X12a", "X12b", "X14", "X14a", "X14c", "X15",
-            "R4", "R16a", "R16b", "R16c", "R16d"])
-        self._cpr_name_combo.setToolTip(t("血管名 (プリセット選択または自由入力)"))
-        row.addWidget(self._cpr_name_combo)
         self._cpr_tree_btn = FitButton(t("ツリーに追加"))
         self._cpr_tree_btn.setHelpToolTip(t(
-            "このCPRを冠動脈ツリーに登録 (Tools ▸ Coronary Tree のパネル)"))
+            "このCPRを冠動脈ツリーに登録 (Tools ▸ Coronary Tree のパネル)。"
+            "Branchは最近接血管に吸着、3mm超なら近づけて再度追加。枝は追加後に "
+            "名前(プリセット/自由)を指定"))
         self._cpr_tree_btn.clicked.connect(self._coronary_add_to_tree)
         row.addWidget(self._cpr_tree_btn)
         # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
@@ -10509,9 +10504,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         pts = np.asarray(self._cpr["cl"].points, float)
         role = self._cpr_role_combo.currentText()
-        name = self._cpr_name_combo.currentText().strip()
+        # Name is chosen AFTER a successful add (branches → preset/free prompt in
+        # the shell; roots → the role name).
         self.coronary_register.emit(
-            role, name,
+            role, "",
             [list(map(float, np.asarray(P, float))) for P in ctrl],
             pts.round(4).tolist())
 

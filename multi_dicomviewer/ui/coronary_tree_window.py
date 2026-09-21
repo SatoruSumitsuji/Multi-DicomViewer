@@ -126,6 +126,15 @@ class CoronaryTreeWindow(SnapDock):
         it = self._tree_w.currentItem()
         return None if it is None else it.data(0, _UID_ROLE)
 
+    def rename_vessel(self, vid: str, name: str) -> None:
+        """Public: set a vessel's name (used by the shell after the post-draw
+        name prompt for a branch)."""
+        v = self._tree.vessels.get(vid)
+        if v is not None and name and name.strip():
+            v.name = name.strip()
+            self._populate()
+            self.treeChanged.emit()
+
     # ----------------------------------------------------------- display
     def _root_role(self, vid: str) -> str:
         v = self._tree.vessels.get(vid)

@@ -2262,28 +2262,46 @@ class MainWindow(QMainWindow):
         while vid in tree.vessels:
             n += 1
             vid = f"v{n}"
+        from PyQt6.QtWidgets import QMessageBox
         if role in ROOT_ROLES:
             panel.add_root(vid, (name or role), role, points, ctrl=ctrl)
             self.statusBar().showMessage(
                 t("冠動脈ツリーに追加: {name} ({role})",
                   name=(name or role), role=role), 4000)
             return
-        res = panel.add_branch(vid, (name or "Branch"), points, ctrl=ctrl,
-                               snap_tol_mm=3.0)
+        # Branch: snap to the nearest existing vessel. On success the parent is
+        # DETERMINED and we ask for the name (preset + free); on a >3 mm miss we
+        # keep the drawn CPR active and ask the user to bring the start closer
+        # and press "ツリーに追加" again — so a branch always ends up attached.
+        res = panel.add_branch(vid, "Branch", points, ctrl=ctrl, snap_tol_mm=3.0)
         if res.get("ok"):
+            nm = self._prompt_branch_name()
+            if nm:
+                panel.rename_vessel(vid, nm)
             self.statusBar().showMessage(
                 t("冠動脈ツリーに追加: {name} → 親 @{d:.1f}mm",
-                  name=(name or "Branch"), d=res.get("dist_mm", 0.0)), 4000)
+                  name=(nm or "Branch"), d=res.get("dist_mm", 0.0)), 4000)
         elif res.get("reason") == "no-parent":
-            from PyQt6.QtWidgets import QMessageBox
             QMessageBox.information(self, t("Coronary Tree"), t(
                 "最初に LM-LAD / LM-LCX / RCA のいずれか(ルート)を登録してください。"))
-        else:                                    # too-far
-            from PyQt6.QtWidgets import QMessageBox
+        else:                                    # too-far → guide + retry
             QMessageBox.information(self, t("Coronary Tree"), t(
                 "枝の始点が既存血管から {d:.1f}mm 離れています(3mm以内が必要)。"
-                "始点を血管上に置いて描き直してください。",
+                "始点を血管に近づけて、もう一度「ツリーに追加」してください。",
                 d=res.get("dist_mm", 0.0)))
+
+    def _prompt_branch_name(self, default: str = "") -> str:
+        """Ask for a branch name after it has attached: a preset (D9…R16d) or a
+        free-typed value. Returns "" if cancelled (the placeholder name stays)."""
+        from PyQt6.QtWidgets import QInputDialog
+        presets = ["D9", "D9a", "D10", "D10a", "S1", "S2", "S3", "S4",
+                   "X12", "X12a", "X12b", "X14", "X14a", "X14c", "X15",
+                   "R4", "R16a", "R16b", "R16c", "R16d"]
+        cur = presets.index(default) if default in presets else 0
+        name, ok = QInputDialog.getItem(
+            self, t("枝の名前"), t("血管名 (選択または自由入力):"),
+            presets, cur, True)
+        return name.strip() if ok else ""
 
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
