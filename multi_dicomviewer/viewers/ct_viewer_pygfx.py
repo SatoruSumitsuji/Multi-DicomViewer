@@ -14066,6 +14066,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_wrap.setVisible(False)
         return self._cpr_wrap
 
+    def start_coronary_draw(self):
+        """Public: enter coronary MPR mode and arm the centreline trace (used
+        when the Coronary Tree panel opens). No-op unless a 3-D CT is shown; does
+        not disturb a CPR already built / in progress. (get_current_cpr is shared
+        from CPRMixin.)"""
+        if self._vol is None or self._mode != "3D":
+            return
+        self._coronary_mode = True
+        self._coronary_sync_ui()
+        if (not getattr(self, "_coronary_mpr_pending", False)
+                and self._cpr is None):
+            self._coronary_draw()
+
     def _coronary_sync_ui(self) -> None:
         """Single source of truth for the coronary MPR row's visibility /
         checked / enabled state."""
