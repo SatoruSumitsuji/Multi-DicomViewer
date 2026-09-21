@@ -20,6 +20,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QInputDialog,
@@ -52,6 +53,9 @@ class CoronaryTreeWindow(SnapDock):
     visibilityChanged = pyqtSignal(str, bool)
     #: the tree changed (add / delete / re-parent / load / clear)
     treeChanged = pyqtSignal()
+    #: "ツリーに追加" was pressed — register the active CT viewer's current CPR
+    #: with this role (LM-LAD / LM-LCX / RCA / Branch). The shell handles it.
+    addCprRequested = pyqtSignal(str)
 
     def __init__(self, shell):
         super().__init__(t("Coronary Tree"))
@@ -79,6 +83,26 @@ class CoronaryTreeWindow(SnapDock):
             bar.addWidget(b)
         bar.addStretch(1)
         outer.addLayout(bar)
+
+        # Role picker + "ツリーに追加" — the CT Territory workflow lives HERE (not
+        # on the image's plain CPR row) so the two stay clearly separate.
+        role_row = QHBoxLayout()
+        role_row.addWidget(QLabel(t("役割:")))
+        self._role_combo = QComboBox()
+        self._role_combo.addItems(["LM-LAD", "LM-LCX", "RCA", "Branch"])
+        self._role_combo.setToolTip(t(
+            "ルート3種は入口を第1点に。Branchは既存血管の上から描き始める "
+            "(枝名は追加後に指定)"))
+        role_row.addWidget(self._role_combo)
+        self._add_btn = QPushButton(t("ツリーに追加"))
+        self._add_btn.setToolTip(t(
+            "いま描いたCPR(アクティブなCT)をこの役割でツリーに追加。"
+            "Branchは最近接血管に吸着、3mm超なら近づけて再度追加"))
+        self._add_btn.clicked.connect(
+            lambda: self.addCprRequested.emit(self._role_combo.currentText()))
+        role_row.addWidget(self._add_btn)
+        role_row.addStretch(1)
+        outer.addLayout(role_row)
 
         self._tree_w = QTreeWidget()
         self._tree_w.setColumnCount(2)
