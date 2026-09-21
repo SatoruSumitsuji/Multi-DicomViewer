@@ -1,0 +1,148 @@
+"""Headless tests for the CT Territory geometry core (core/coronary_territory).
+
+Validates the Phase-0 engine on a synthetic LAD + diagonal-branch tree with a
+known topology: role-based roots, first-point snap attachment (incl. a
+multi-level sub-branch and the 3 mm too-far guard), nearest-centreline voxel
+assignment, and distal-territory extraction across the branch tree. Pure numpy
+(scipy optional) - no Qt / VTK - so it runs anywhere:
+
+    python tools/test_coronary_territory.py
+"""
+import sys
+
+sys.path.insert(0, r"C:\CC_Product\Multi-DicomViewer")
+
+import numpy as np  # noqa: E402
+
+from multi_dicomviewer.core.coronary_territory import (   # noqa: E402
+    CoronaryTree, voxel_centers_from_mask)
+
+
+def _line(p0, p1, step_mm=1.0):
+    """Straight polyline from p0 to p1 sampled ~every step_mm (proximal→distal)."""
+    p0 = np.asarray(p0, float)
+    p1 = np.asarray(p1, float)
+    n = max(2, int(round(np.linalg.norm(p1 - p0) / step_mm)) + 1)
+    t = np.linspace(0.0, 1.0, n)
+    return p0[None, :] + t[:, None] * (p1 - p0)[None, :]
+
+
+def _build_tree():
+    """LAD trunk (x 0→60) with D1@x10, D2@x40, and D1a off D1@y12."""
+    tree = CoronaryTree()
+    tree.add_root("lad", "LM-LAD", "LM-LAD", _line((0, 0, 0), (60, 0, 0)))
+    r1 = tree.add_branch("d1", "D1", _line((10, 0, 0), (10, 25, 0)))
+    r2 = tree.add_branch("d2", "D2", _line((40, 0, 0), (40, 25, 0)))
+    r3 = tree.add_branch("d1a", "D1a", _line((10, 12, 0), (25, 12, 0)))
+    return tree, r1, r2, r3
+
+
+def test_topology_and_snap():
+    tree, r1, r2, r3 = _build_tree()
+    assert tree.roots() == ["lad"], tree.roots()
+    assert set(tree.children("lad")) == {"d1", "d2"}, tree.children("lad")
+    assert tree.children("d1") == ["d1a"], tree.children("d1")
+    # branch attachment: parent + junction index on the parent
+    assert r1["ok"] and r1["parent"] == "lad" and r1["junction"] == 10, r1
+    assert r2["ok"] and r2["parent"] == "lad" and r2["junction"] == 40, r2
+    assert r3["ok"] and r3["parent"] == "d1" and r3["junction"] == 12, r3
+    assert set(tree.descendants("lad")) == {"d1", "d2", "d1a"}
+    print("OK topology + snap (parents/junctions correct, multi-level)")
+
+
+def test_too_far_guard():
+    tree, *_ = _build_tree()
+    # Proximal end 5 mm off any vessel (z=5 lifts it clear of the z=0 tree) →
+    # rejected (>3 mm) and NOT added.
+    res = tree.add_branch("x", "X", _line((10, 10, 5), (10, 30, 5)), snap_tol_mm=3.0)
+    assert not res["ok"] and res["reason"] == "too-far", res
+    assert "x" not in tree.vessels
+    assert abs(res["dist_mm"] - 5.0) < 1e-6, res
+    # Nudged within tolerance (z=2) it snaps (to D1, the nearest vessel).
+    ok = tree.add_branch("x", "X", _line((10, 10, 2), (10, 30, 2)), snap_tol_mm=3.0)
+    assert ok["ok"] and ok["parent"] == "d1", ok
+    print("OK 3 mm too-far guard (reject >3 mm, accept within)")
+
+
+# Probe voxels near known vessels (each maps deterministically to one vessel).
+_PROBES = {
+    "lad50": (50.0, 0.5, 0.0),    # LAD, distal   (idx ~50)
+    "lad20": (20.0, 0.5, 0.0),    # LAD, proximal (idx ~20)
+    "d1":    (10.0, 15.0, 0.0),   # on D1
+    "d2":    (40.0, 15.0, 0.0),   # on D2
+    "d1a":   (18.0, 12.0, 0.0),   # on D1a
+}
+
+
+def _assign_probes(tree):
+    names = list(_PROBES)
+    pts = np.array([_PROBES[k] for k in names], float)
+    a = tree.assign(pts, max_dist_mm=5.0)
+    c2v = a["code_to_vid"]
+    got = {names[i]: (c2v[a["code"][i]] if a["code"][i] >= 0 else None)
+           for i in range(len(names))}
+    return a, names, got
+
+
+def test_assignment():
+    tree, *_ = _build_tree()
+    _a, _names, got = _assign_probes(tree)
+    assert got["lad50"] == "lad" and got["lad20"] == "lad", got
+    assert got["d1"] == "d1" and got["d2"] == "d2" and got["d1a"] == "d1a", got
+    print("OK nearest-centreline assignment (each probe -> correct vessel)")
+
+
+def _territory(tree, a, names, vid, idx):
+    mask = tree.territory_mask(a, vid, idx)
+    return {names[i]: bool(mask[i]) for i in range(len(names))}
+
+
+def test_distal_territory():
+    tree, *_ = _build_tree()
+    a, names, _ = _assign_probes(tree)
+
+    # P on LAD at x=30: distal = LAD[>=30] + D2 (junction 40≥30). D1/D1a excluded.
+    t = _territory(tree, a, names, "lad", 30)
+    assert t == {"lad50": True, "lad20": False, "d1": False,
+                 "d2": True, "d1a": False}, t
+
+    # P on LAD at x=5: D1 (10≥5) and thus D1a distal; D2 distal; LAD[>=5].
+    t = _territory(tree, a, names, "lad", 5)
+    assert t == {"lad50": True, "lad20": True, "d1": True,
+                 "d2": True, "d1a": True}, t
+
+    # P at the very start of D1 (idx 0): D1 distal + D1a (its sub-branch); the
+    # parent LAD and the sibling D2 are NOT in D1's distal territory.
+    t = _territory(tree, a, names, "d1", 0)
+    assert t == {"lad50": False, "lad20": False, "d1": True,
+                 "d2": False, "d1a": True}, t
+    print("OK distal territory (tree walk: partial vessel + downstream branches)")
+
+
+def test_voxel_centers_from_mask():
+    # 2×2×2 sub-volume at offset (z0,y0,x0)=(1,2,3), spacing (0.5,0.5,1.0) mm.
+    mask = np.zeros((2, 2, 2), bool)
+    mask[0, 0, 0] = True          # full-vol index z=1,y=2,x=3
+    mask[1, 1, 1] = True          # full-vol index z=2,y=3,x=4
+    centers, zyx = voxel_centers_from_mask(
+        mask, bbox=(1, 3, 2, 4, 3, 5), spacing_xyz=(0.5, 0.5, 1.0))
+    order = np.lexsort((zyx[:, 0], zyx[:, 1], zyx[:, 2]))
+    zyx, centers = zyx[order], centers[order]
+    assert zyx.tolist() == [[1, 2, 3], [2, 3, 4]], zyx.tolist()
+    # world = voxel_index · spacing (x·sx, y·sy, z·sz); spacing = (0.5,0.5,1.0)
+    assert np.allclose(centers[0], [3 * 0.5, 2 * 0.5, 1 * 1.0]), centers[0]
+    assert np.allclose(centers[1], [4 * 0.5, 3 * 0.5, 2 * 1.0]), centers[1]
+    print("OK voxel_centers_from_mask (world = index*spacing, full-vol zyx)")
+
+
+def main():
+    test_topology_and_snap()
+    test_too_far_guard()
+    test_assignment()
+    test_distal_territory()
+    test_voxel_centers_from_mask()
+    print("\nAll CT Territory core tests passed.")
+
+
+if __name__ == "__main__":
+    main()
