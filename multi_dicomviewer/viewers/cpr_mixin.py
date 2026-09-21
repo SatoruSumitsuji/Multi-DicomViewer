@@ -76,6 +76,19 @@ class CPRMixin:
             return None
         return self._measures[src][mi].get("pts3d")
 
+    def get_current_cpr(self):
+        """(ctrl, points) of the ACTIVE CPR as lists of [x,y,z] world-mm, or None
+        if no CPR is built. The Coronary Tree panel's "ツリーに追加" pulls this to
+        register the vessel. Shared by both viewers (VTK + pygfx)."""
+        if self._cpr is None:
+            return None
+        ctrl = self._cpr_ctrl_pts3d()
+        if not ctrl or len(ctrl) < 2:
+            return None
+        pts = np.asarray(self._cpr["cl"].points, float)
+        return ([list(map(float, np.asarray(P, float))) for P in ctrl],
+                pts.round(4).tolist())
+
     def _cpr_frame(self):
         """(origin, u, v, tangent) of the current cross-section."""
         c = self._cpr

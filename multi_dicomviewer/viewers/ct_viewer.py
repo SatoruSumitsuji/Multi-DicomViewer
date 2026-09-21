@@ -10470,19 +10470,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             },
         }
 
-    def get_current_cpr(self):
-        """(ctrl, points) of the ACTIVE CPR as lists of [x,y,z] world-mm, or None
-        if there is no built CPR. The Coronary Tree panel's "ツリーに追加" pulls
-        this to register the vessel."""
-        if self._cpr is None:
-            return None
-        ctrl = self._cpr_ctrl_pts3d()
-        if not ctrl or len(ctrl) < 2:
-            return None
-        pts = np.asarray(self._cpr["cl"].points, float)
-        return ([list(map(float, np.asarray(P, float))) for P in ctrl],
-                pts.round(4).tolist())
-
     def start_coronary_draw(self):
         """Public: enter coronary MPR mode and arm the centreline trace (used
         when the Coronary Tree panel opens). No-op unless a 3-D CT is shown; does
