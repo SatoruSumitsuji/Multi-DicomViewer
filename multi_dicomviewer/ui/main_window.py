@@ -2250,6 +2250,41 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
+    def _on_coronary_register(self, role, name, ctrl, points):
+        """A CT viewer's CPR bar asked to register a centreline. Open/raise the
+        Coronary Tree panel and add it as a root (LM-LAD/LM-LCX/RCA) or a Branch
+        snapped to the nearest vessel (3 mm guard). Reports a failed snap."""
+        from multi_dicomviewer.core.coronary_territory import ROOT_ROLES
+        panel = self._open_coronary_tree()
+        tree = panel.tree
+        n = len(tree.vessels) + 1
+        vid = f"v{n}"
+        while vid in tree.vessels:
+            n += 1
+            vid = f"v{n}"
+        if role in ROOT_ROLES:
+            panel.add_root(vid, (name or role), role, points, ctrl=ctrl)
+            self.statusBar().showMessage(
+                t("冠動脈ツリーに追加: {name} ({role})",
+                  name=(name or role), role=role), 4000)
+            return
+        res = panel.add_branch(vid, (name or "Branch"), points, ctrl=ctrl,
+                               snap_tol_mm=3.0)
+        if res.get("ok"):
+            self.statusBar().showMessage(
+                t("冠動脈ツリーに追加: {name} → 親 @{d:.1f}mm",
+                  name=(name or "Branch"), d=res.get("dist_mm", 0.0)), 4000)
+        elif res.get("reason") == "no-parent":
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, t("Coronary Tree"), t(
+                "最初に LM-LAD / LM-LCX / RCA のいずれか(ルート)を登録してください。"))
+        else:                                    # too-far
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, t("Coronary Tree"), t(
+                "枝の始点が既存血管から {d:.1f}mm 離れています(3mm以内が必要)。"
+                "始点を血管上に置いて描き直してください。",
+                d=res.get("dist_mm", 0.0)))
+
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
         """True if *path* is a Case Presentation .json (structure heuristic), so a
@@ -5708,6 +5743,10 @@ class MainWindow(QMainWindow):
             viewer.measurement_updated.connect(self._update_measurement)
         if hasattr(viewer, "history_requested"):
             viewer.history_requested.connect(self._show_history)
+        # CT Territory: "ツリーに追加" on the CPR bar registers a centreline into
+        # the Coronary Tree panel (opened on demand).
+        if hasattr(viewer, "coronary_register"):
+            viewer.coronary_register.connect(self._on_coronary_register)
         # CT HU colour map is global: when it's edited in one CT pane, mirror it
         # onto every other CT pane (persistence is done in the viewer).
         if hasattr(viewer, "colormap_changed"):
