@@ -2353,11 +2353,6 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: DELTA. Carries (kind, params) where kind is "drag"/"wheel". Emitted only
     #: while SyncView-linked and NOT while applying a mirrored op (no echo).
     sync_view_op = pyqtSignal(str, object)
-    #: CT Territory: register the CURRENT CPR centreline into the Coronary Tree
-    #: panel. Carries (role, name, ctrl, points) — role is LM-LAD/LM-LCX/RCA or
-    #: "Branch"; ctrl/points are lists of [x,y,z] world-mm. The shell adds it as
-    #: a root or a snapped branch.
-    coronary_register = pyqtSignal(str, str, object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2823,23 +2818,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
         self._cpr_exit_btn.clicked.connect(self._coronary_exit)
         row.addWidget(self._cpr_exit_btn)
-        # CT Territory: register THIS centreline into the Coronary Tree panel as
-        # a root (LM-LAD/LM-LCX/RCA) or a Branch (snapped to the nearest vessel).
-        row.addSpacing(10)
-        row.addWidget(QLabel(t("役割:")))
-        self._cpr_role_combo = QComboBox()
-        self._cpr_role_combo.addItems(["LM-LAD", "LM-LCX", "RCA", "Branch"])
-        self._cpr_role_combo.setToolTip(t(
-            "ルート3種はそれぞれ入口を第1点に。Branchは既存血管の上から描き始める "
-            "(枝の名前は追加後に指定)"))
-        row.addWidget(self._cpr_role_combo)
-        self._cpr_tree_btn = FitButton(t("ツリーに追加"))
-        self._cpr_tree_btn.setHelpToolTip(t(
-            "このCPRを冠動脈ツリーに登録 (Tools ▸ Coronary Tree のパネル)。"
-            "Branchは最近接血管に吸着、3mm超なら近づけて再度追加。枝は追加後に "
-            "名前(プリセット/自由)を指定"))
-        self._cpr_tree_btn.clicked.connect(self._coronary_add_to_tree)
-        row.addWidget(self._cpr_tree_btn)
+        # NOTE: the CT Territory role picker + "ツリーに追加" live in the Coronary
+        # Tree panel (not here) so the plain CPR row stays distinct from the
+        # coronary-tree workflow. This viewer only supplies the current CPR
+        # (get_current_cpr) and can auto-start a trace (start_coronary_draw).
         # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
         # the layout (so the buttons keep their natural width instead of growing
         # to fill the row); its CHILDREN are shown only once a CPR is built.
@@ -10488,28 +10470,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             },
         }
 
-    def _coronary_add_to_tree(self) -> None:
-        """Register the ACTIVE CPR centreline into the Coronary Tree panel via
-        the coronary_register signal (the shell adds it as a root or a snapped
-        branch). Needs a built CPR — Draw or Load one first."""
-        from PyQt6.QtWidgets import QMessageBox
+    def get_current_cpr(self):
+        """(ctrl, points) of the ACTIVE CPR as lists of [x,y,z] world-mm, or None
+        if there is no built CPR. The Coronary Tree panel's "ツリーに追加" pulls
+        this to register the vessel."""
         if self._cpr is None:
-            QMessageBox.information(self, t("Coronary Tree"),
-                                    t("先に Draw か Load で CPR を作成してください。"))
-            return
+            return None
         ctrl = self._cpr_ctrl_pts3d()
         if not ctrl or len(ctrl) < 2:
-            QMessageBox.information(self, t("Coronary Tree"),
-                                    t("CPR の中心線がありません。"))
-            return
+            return None
         pts = np.asarray(self._cpr["cl"].points, float)
-        role = self._cpr_role_combo.currentText()
-        # Name is chosen AFTER a successful add (branches → preset/free prompt in
-        # the shell; roots → the role name).
-        self.coronary_register.emit(
-            role, "",
-            [list(map(float, np.asarray(P, float))) for P in ctrl],
-            pts.round(4).tolist())
+        return ([list(map(float, np.asarray(P, float))) for P in ctrl],
+                pts.round(4).tolist())
+
+    def start_coronary_draw(self):
+        """Public: enter coronary MPR mode and arm the centreline trace (used
+        when the Coronary Tree panel opens). No-op unless a 3-D CT is shown; does
+        not disturb a CPR already built / in progress."""
+        if self._image is None or self._mode != "3D":
+            return
+        self._coronary_mode = True
+        self._coronary_sync_ui()
+        if (not getattr(self, "_coronary_mpr_pending", False)
+                and self._cpr is None):
+            self._coronary_draw()
 
     def _view_restore(self, snap) -> None:
         if self._image is None or snap is None:

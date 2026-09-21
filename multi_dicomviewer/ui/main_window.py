@@ -2235,6 +2235,7 @@ class MainWindow(QMainWindow):
             self._corotree_win = w
             w.setFloating(True)
             w.resize(360, 520)
+            w.addCprRequested.connect(self._add_cpr_to_tree)
         if not w.isVisible():
             w.show()
         if w.isFloating():
@@ -2248,14 +2249,40 @@ class MainWindow(QMainWindow):
         w.show()
         w.raise_()
         w.activateWindow()
+        # Entering Coronary Tree also arms a coronary CPR trace on the active CT
+        # (Rt single-pane in practice), so the user can draw straight away.
+        p = self._ct_pane()
+        if p is not None:
+            v = p.current_viewer()
+            if v is not None and hasattr(v, "start_coronary_draw"):
+                v.start_coronary_draw()
         return w
 
-    def _on_coronary_register(self, role, name, ctrl, points):
-        """A CT viewer's CPR bar asked to register a centreline. Open/raise the
-        Coronary Tree panel and add it as a root (LM-LAD/LM-LCX/RCA) or a Branch
-        snapped to the nearest vessel (3 mm guard). Reports a failed snap."""
+    def _add_cpr_to_tree(self, role):
+        """Coronary Tree panel's "ツリーに追加": pull the active CT viewer's
+        current CPR and register it with *role*."""
+        from PyQt6.QtWidgets import QMessageBox
+        p = self._ct_pane()
+        v = p.current_viewer() if p is not None else None
+        if v is None or not hasattr(v, "get_current_cpr"):
+            QMessageBox.information(self, t("Coronary Tree"),
+                                    t("CTペインを表示してください。"))
+            return
+        cpr = v.get_current_cpr()
+        if cpr is None:
+            QMessageBox.information(self, t("Coronary Tree"), t(
+                "先に冠動脈CPRを作成(Draw)してください。"))
+            return
+        ctrl, points = cpr
+        self._register_cpr(role, ctrl, points)
+
+    def _register_cpr(self, role, ctrl, points):
+        """Add a centreline to the Coronary Tree as a root or a snapped branch,
+        prompting for a branch name after it attaches (see _prompt_branch_name)."""
         from multi_dicomviewer.core.coronary_territory import ROOT_ROLES
-        panel = self._open_coronary_tree()
+        panel = getattr(self, "_corotree_win", None)
+        if panel is None:
+            return
         tree = panel.tree
         n = len(tree.vessels) + 1
         vid = f"v{n}"
@@ -5761,10 +5788,6 @@ class MainWindow(QMainWindow):
             viewer.measurement_updated.connect(self._update_measurement)
         if hasattr(viewer, "history_requested"):
             viewer.history_requested.connect(self._show_history)
-        # CT Territory: "ツリーに追加" on the CPR bar registers a centreline into
-        # the Coronary Tree panel (opened on demand).
-        if hasattr(viewer, "coronary_register"):
-            viewer.coronary_register.connect(self._on_coronary_register)
         # CT HU colour map is global: when it's edited in one CT pane, mirror it
         # onto every other CT pane (persistence is done in the viewer).
         if hasattr(viewer, "colormap_changed"):
