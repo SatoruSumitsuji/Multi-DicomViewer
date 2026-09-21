@@ -256,3 +256,87 @@ def voxel_centers_from_mask(mask_zyx, bbox, spacing_xyz):
     centers = np.stack([x * sx, y * sy, z * sz], axis=1).astype(float)
     zyx = np.stack([z, y, x], axis=1).astype(int)
     return centers, zyx
+
+
+def myocardium_voxels(lvf):
+    """LV compact-layer (Epi minus Endo) voxels of an LVFunction-like object →
+    ``(centers (V,3) world-mm, local_zyx (V,3) int, shape, voxel_ml)``.
+
+    Duck-typed on ``lvf.epi`` / ``lvf.endo`` (bool [z,y,x] on a common grid),
+    ``lvf.spacing_zyx`` = (sz,sy,sx) and ``lvf.origin`` = world (x,y,z) of local
+    index 0 — exactly the fields ``core.lv_function.LVFunction`` exposes. World
+    coords use the SAME convention as the centrelines (world = origin +
+    index·spacing), so an LV mask and the coronary tree line up without any
+    affine. ``local_zyx`` indexes the mask grid, so a territory can be scattered
+    straight back onto it."""
+    myo = np.asarray(lvf.epi, bool) & ~np.asarray(lvf.endo, bool)
+    sz, sy, sx = (float(s) for s in lvf.spacing_zyx)
+    origin = getattr(lvf, "origin", None)
+    ox, oy, oz = (0.0, 0.0, 0.0) if origin is None else (
+        float(origin[0]), float(origin[1]), float(origin[2]))
+    zl, yl, xl = np.nonzero(myo)
+    centers = np.stack([ox + xl * sx, oy + yl * sy, oz + zl * sz],
+                       axis=1).astype(float)
+    local_zyx = np.stack([zl, yl, xl], axis=1).astype(int)
+    return centers, local_zyx, myo.shape, (sz * sy * sx) / 1000.0
+
+
+def tree_from_specs(specs, snap_tol_mm: float = 3.0):
+    """Build a CoronaryTree from an ORDERED list of vessel specs (draw order,
+    parents before children). Each spec is a dict with ``vid``, ``name``,
+    ``role`` (a ROOT_ROLES value → root, else a branch) and ``points`` (M,3
+    world-mm, proximal→distal). Returns ``(tree, results)`` where results[i] is
+    None for a root or the add_branch() dict for a branch (so the caller can see
+    which branches failed the snap)."""
+    tree = CoronaryTree()
+    results = []
+    for s in specs:
+        if s.get("role") in ROOT_ROLES:
+            tree.add_root(s["vid"], s["name"], s["role"], s["points"])
+            results.append(None)
+        else:
+            results.append(tree.add_branch(
+                s["vid"], s["name"], s["points"], snap_tol_mm=snap_tol_mm))
+    return tree, results
+
+
+class TerritoryEngine:
+    """Ties the coronary tree to an LV compact-layer myocardium and answers
+    "territory distal to a point" as a voxel mask + volume. The heavy step (the
+    nearest-centreline assignment of every myocardial voxel) runs ONCE in the
+    constructor; each territory query is then a cheap tree walk + boolean."""
+
+    def __init__(self, tree: CoronaryTree, lvf, max_dist_mm: float | None = None):
+        self.tree = tree
+        (self.centers, self.local_zyx,
+         self.shape, self.voxel_ml) = myocardium_voxels(lvf)
+        self.assignment = tree.assign(self.centers, max_dist_mm=max_dist_mm)
+
+    @property
+    def myocardium_ml(self) -> float:
+        return float(len(self.centers)) * self.voxel_ml
+
+    def territory(self, vid: str, idx: int):
+        """(mask_v (V,) bool over the myocardial voxels, volume_ml) distal to the
+        chosen coronary point."""
+        mask_v = self.tree.territory_mask(self.assignment, vid, idx)
+        return mask_v, float(int(mask_v.sum())) * self.voxel_ml
+
+    def territory_grid(self, vid: str, idx: int) -> np.ndarray:
+        """The territory scattered back onto the myocardium [z,y,x] mask grid."""
+        mask_v, _ = self.territory(vid, idx)
+        grid = np.zeros(self.shape, bool)
+        sel = self.local_zyx[mask_v]
+        grid[sel[:, 0], sel[:, 1], sel[:, 2]] = True
+        return grid
+
+    def assigned_grid(self):
+        """The full per-vessel assignment as an int-label [z,y,x] grid for a
+        multi-colour overlay: 0 = unassigned, otherwise vessel code + 1. Returns
+        ``(grid, code_to_vid)``."""
+        grid = np.zeros(self.shape, np.int32)
+        code = self.assignment["code"]
+        keep = code >= 0
+        sel = self.local_zyx[keep]
+        grid[sel[:, 0], sel[:, 1], sel[:, 2]] = code[keep] + 1
+        return grid, self.assignment["code_to_vid"]

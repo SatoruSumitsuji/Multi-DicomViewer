@@ -9,13 +9,14 @@ assignment, and distal-territory extraction across the branch tree. Pure numpy
     python tools/test_coronary_territory.py
 """
 import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, r"C:\CC_Product\Multi-DicomViewer")
 
 import numpy as np  # noqa: E402
 
 from multi_dicomviewer.core.coronary_territory import (   # noqa: E402
-    CoronaryTree, voxel_centers_from_mask)
+    CoronaryTree, TerritoryEngine, tree_from_specs, voxel_centers_from_mask)
 
 
 def _line(p0, p1, step_mm=1.0):
@@ -135,12 +136,75 @@ def test_voxel_centers_from_mask():
     print("OK voxel_centers_from_mask (world = index*spacing, full-vol zyx)")
 
 
+def _myo_lvf():
+    """A synthetic LVFunction-like myocardium: 10 compact-layer voxels (Epi &
+    ~Endo) at controlled world positions near the LAD/D1/D2 tree. spacing
+    (1,1,1) mm, origin 0 → world (x,y,z) = local (x,y,z)."""
+    epi = np.zeros((1, 30, 70), bool)
+    # LAD voxels at y=1 (1 mm off the y=0 trunk), avoiding the branch x's 10/40.
+    for x in (15, 20, 25, 30, 35, 45, 50, 55):
+        epi[0, 1, x] = True
+    epi[0, 15, 10] = True      # on D1
+    epi[0, 15, 40] = True      # on D2
+    endo = np.zeros_like(epi)
+    return SimpleNamespace(epi=epi, endo=endo,
+                           spacing_zyx=(1.0, 1.0, 1.0),
+                           origin=np.array([0.0, 0.0, 0.0]))
+
+
+def _engine():
+    specs = [
+        {"vid": "lad", "name": "LM-LAD", "role": "LM-LAD",
+         "points": _line((0, 0, 0), (60, 0, 0))},
+        {"vid": "d1", "name": "D1", "role": "branch",
+         "points": _line((10, 0, 0), (10, 25, 0))},
+        {"vid": "d2", "name": "D2", "role": "branch",
+         "points": _line((40, 0, 0), (40, 25, 0))},
+    ]
+    tree, results = tree_from_specs(specs)
+    assert results[0] is None and results[1]["ok"] and results[2]["ok"], results
+    return TerritoryEngine(tree, _myo_lvf())
+
+
+def test_engine_volume():
+    eng = _engine()
+    vml = 1.0 / 1000.0                       # 1 mm³ voxel
+    assert abs(eng.myocardium_ml - 10 * vml) < 1e-12, eng.myocardium_ml
+    # LAD @ idx30: LAD voxels x∈{30,35,45,50,55}=5 + D2 voxel(1) = 6.
+    m, vol = eng.territory("lad", 30)
+    assert int(m.sum()) == 6, int(m.sum())
+    assert abs(vol - 6 * vml) < 1e-12, vol
+    # LAD @ idx5: everything distal (both branches + all LAD voxels) = 10.
+    _m2, vol2 = eng.territory("lad", 5)
+    assert abs(vol2 - 10 * vml) < 1e-12, vol2
+    # D1 @ idx0: only the D1 voxel.
+    _m3, vol3 = eng.territory("d1", 0)
+    assert abs(vol3 - 1 * vml) < 1e-12, vol3
+    print("OK TerritoryEngine volumes (myocardium + distal territory mL)")
+
+
+def test_engine_grids():
+    eng = _engine()
+    grid = eng.territory_grid("lad", 30)
+    assert grid.shape == (1, 30, 70) and int(grid.sum()) == 6, int(grid.sum())
+    assert grid[0, 1, 55] and not grid[0, 1, 15]        # distal in, proximal out
+    assert grid[0, 15, 40] and not grid[0, 15, 10]      # D2 in, D1 out
+    lab, code_to_vid = eng.assigned_grid()
+    assert int((lab > 0).sum()) == 10, int((lab > 0).sum())   # all myo assigned
+    # the LAD voxel at x=55 is labelled with LAD's code (+1)
+    assert code_to_vid[lab[0, 1, 55] - 1] == "lad", lab[0, 1, 55]
+    assert code_to_vid[lab[0, 15, 40] - 1] == "d2"
+    print("OK TerritoryEngine grids (territory scatter + int-label assignment)")
+
+
 def main():
     test_topology_and_snap()
     test_too_far_guard()
     test_assignment()
     test_distal_territory()
     test_voxel_centers_from_mask()
+    test_engine_volume()
+    test_engine_grids()
     print("\nAll CT Territory core tests passed.")
 
 
