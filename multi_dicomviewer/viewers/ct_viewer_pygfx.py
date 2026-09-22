@@ -14095,6 +14095,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_save_btn.setEnabled(cpr)
         if getattr(self, "_cpr_draw_btn", None) is not None:
             self._cpr_draw_btn.setChecked(pend)
+            # Red "armed" background while tracing (matches the LV trace buttons)
+            # so it's obvious Draw is active / a CPR is being created.
+            self._cpr_draw_btn.setStyleSheet(
+                self._LV_STY["trace"] if pend else self._BTN_DIS)
         if getattr(self, "_coronary_mpr_btn", None) is not None:
             self._coronary_mpr_btn.setChecked(on)
         for attr in ("_lv_mv_btn", "_lv_aov_btn", "_lv_apex_sel_btn"):
