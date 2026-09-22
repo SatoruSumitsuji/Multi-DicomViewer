@@ -1217,11 +1217,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         super().leaveEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        _shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-        # Shift+double-click recentres even while Measuring (the trace follows
-        # the moved image, see _recenter → _redraw_meas). A plain double-click
-        # in Measure mode still finishes the polyline draft.
-        if self._owner._meas_on and not _shift:
+        _mods = e.modifiers()
+        _shift = bool(_mods & Qt.KeyboardModifier.ShiftModifier)
+        _alt = bool(_mods & Qt.KeyboardModifier.AltModifier)
+        # Alt OR Shift + double-click recentres (moves the centreline
+        # intersection to the clicked point) even while Measuring — Alt matches
+        # the "hold Alt to adjust the view mid-trace" concept, so a CPR trace can
+        # be recentred without leaving Measure. A PLAIN double-click in Measure
+        # still finishes the polyline draft. (_recenter → _redraw_meas keeps the
+        # trace on the moved image.)
+        if self._owner._meas_on and not (_shift or _alt):
             self._owner._measure_finish_draft()
             return
         self._owner._recenter(self._which, e.position().x(), e.position().y())

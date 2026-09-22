@@ -2849,10 +2849,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # from consecutive right-downs in _on_down — never recenter on it.
         if ev.get("button") == 2:
             return
-        # Shift+double-click recentres even while Measuring (the trace follows
-        # the moved image, see _recenter → _redraw_meas). A plain double-click
-        # in Measure mode still finishes the polyline draft.
-        if self._meas_on and "Shift" not in (ev.get("modifiers") or ()):
+        # Alt OR Shift + double-click recentres (moves the centreline
+        # intersection to the clicked point) even while Measuring — Alt matches
+        # the "hold Alt to adjust the view mid-trace" concept. A PLAIN
+        # double-click in Measure mode still finishes the polyline draft.
+        _mods = ev.get("modifiers") or ()
+        if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
             self._measure_finish_draft()       # LV capture handled inside now
             return
         if self._cpr is not None and key == "A":
