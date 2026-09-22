@@ -2801,6 +2801,15 @@ class CTViewer(CPRMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
+        # Fit: rebuild the short-axis from the (edited) control points, keeping
+        # the display state — so an in-place Measure edit of the centreline is
+        # followed by the cross-section without a Save→Exit→Load round-trip.
+        self._cpr_fit_btn = FitButton(t("Fit"))
+        self._cpr_fit_btn.setHelpToolTip(t(
+            "編集したCPR中心点に短軸断面を再フィット（Save→Exit→Load と同等の "
+            "再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す"))
+        self._cpr_fit_btn.clicked.connect(self._cpr_fit)
+        row.addWidget(self._cpr_fit_btn)
         self._cpr_load_btn = FitButton(t("Load"))
         self._cpr_load_btn.setHelpToolTip(
             t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
@@ -2874,6 +2883,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             w.setVisible(cpr)
         if getattr(self, "_cpr_save_btn", None) is not None:
             self._cpr_save_btn.setEnabled(cpr)
+        if getattr(self, "_cpr_fit_btn", None) is not None:
+            self._cpr_fit_btn.setEnabled(cpr)        # only once a short-axis exists
         if getattr(self, "_cpr_draw_btn", None) is not None:
             self._cpr_draw_btn.setChecked(pend)
             # Red "armed" background while tracing (matches the LV trace buttons)

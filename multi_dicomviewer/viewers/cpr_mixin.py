@@ -116,6 +116,51 @@ class CPRMixin:
                             return p3        # the canonical CPR-source trace
         return best
 
+    def _cpr_fit(self):
+        """Rebuild the short-axis centreline from the CURRENT (possibly edited)
+        source-polyline control points, KEEPING the display state (rotation /
+        flip / reverse / FOV / arc-length position). The one-shot equivalent of
+        Save→Exit→Load — press it after nudging CPR control points in Measure
+        mode so the cross-section follows the edit. Shared by both viewers."""
+        from PyQt6.QtWidgets import QMessageBox
+        c = self._cpr
+        if c is None:
+            QMessageBox.information(self, t("Short-axis"),
+                                   t("短軸(CPR)を作成してからFitしてください。"))
+            return
+        src, mi = c.get("src"), c.get("src_mi")
+        if (src not in ("A", "B") or mi is None
+                or not (0 <= mi < len(self._measures.get(src, [])))):
+            QMessageBox.information(self, t("Short-axis"),
+                                   t("中心線トレースが見つかりません。"))
+            return
+        p3 = self._measures[src][mi].get("pts3d")
+        if not p3 or len(p3) < 2:
+            QMessageBox.information(self, t("Short-axis"),
+                                   t("中心線の点が不足しています。"))
+            return
+        old_n = c["cl"].n
+        frac = (c["idx"] / (old_n - 1)) if old_n > 1 else 0.0
+        saved = {"T": np.asarray(c["T"], float).copy(),
+                 "rot": float(c.get("rot", 0.0)),
+                 "reversed": bool(c.get("reversed", False)),
+                 "half": float(c.get("half", 25.0)),
+                 "ref_up": np.asarray(c.get("ref_up", (0.0, 0.0, 1.0)), float)}
+        # Rebuild from the edited trace (resets the display state), then restore.
+        self._enter_cpr(src, mi, ref_up=saved["ref_up"])
+        c2 = self._cpr
+        if c2 is None:
+            return
+        c2["T"] = saved["T"]
+        c2["rot"] = saved["rot"]
+        c2["reversed"] = saved["reversed"]
+        c2["half"] = saved["half"]
+        n2 = c2["cl"].n
+        c2["idx"] = int(min(max(round(frac * (n2 - 1)), 0), n2 - 1))
+        self._cpr_apply_xform()          # rebuild u,v from u0,v0 + T + rot
+        self._cpr_sync_bar()
+        self._refresh(reset_cam=True)
+
     def _cpr_frame(self):
         """(origin, u, v, tangent) of the current cross-section."""
         c = self._cpr
