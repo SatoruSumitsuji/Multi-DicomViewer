@@ -77,17 +77,44 @@ class CPRMixin:
         return self._measures[src][mi].get("pts3d")
 
     def get_current_cpr(self):
-        """(ctrl, points) of the ACTIVE CPR as lists of [x,y,z] world-mm, or None
-        if no CPR is built. The Coronary Tree panel's "ツリーに追加" pulls this to
-        register the vessel. Shared by both viewers (VTK + pygfx)."""
-        if self._cpr is None:
-            return None
-        ctrl = self._cpr_ctrl_pts3d()
-        if not ctrl or len(ctrl) < 2:
-            return None
-        pts = np.asarray(self._cpr["cl"].points, float)
+        """(ctrl, points) of the current coronary centreline as lists of [x,y,z]
+        world-mm, or None. Works from the built short-axis (self._cpr) OR, when
+        the short-axis hasn't been built yet, straight from the DRAWN coronary
+        polyline — the Coronary Tree only needs the centreline geometry, not the
+        cross-section view. Shared by both viewers (VTK + pygfx)."""
+        if self._cpr is not None:
+            ctrl = self._cpr_ctrl_pts3d()
+            if not ctrl or len(ctrl) < 2:
+                return None
+            pts = np.asarray(self._cpr["cl"].points, float)
+        else:
+            ctrl = self._coronary_trace_ctrl()
+            if ctrl is None or len(ctrl) < 2:
+                return None
+            from multi_dicomviewer.core.centerline import CenterLine
+            step = max(1e-3, min(self._dims))
+            cl = CenterLine.from_points(np.asarray(ctrl, float), step_mm=step)
+            if cl.n < 2:
+                return None
+            pts = np.asarray(cl.points, float)
         return ([list(map(float, np.asarray(P, float))) for P in ctrl],
                 pts.round(4).tolist())
+
+    def _coronary_trace_ctrl(self):
+        """3-D control points of the drawn coronary centreline polyline when no
+        short-axis is built yet — the most recent polyline trace with pts3d
+        (prefer one tagged as a CPR source). None if there is no such trace."""
+        best = None
+        for k in ("A", "B"):
+            for m in (self._measures.get(k, []) if isinstance(self._measures, dict)
+                      else []):
+                if m.get("type") == "polyline":
+                    p3 = m.get("pts3d")
+                    if p3 and len(p3) >= 2:
+                        best = p3
+                        if m.get("_cpr_src"):
+                            return p3        # the canonical CPR-source trace
+        return best
 
     def _cpr_frame(self):
         """(origin, u, v, tangent) of the current cross-section."""
