@@ -14141,6 +14141,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coronary_mode = True
         self._coronary_mpr_pending = False
         self._coronary_sync_ui()
+        self._coronary_draw()                # auto-arm Draw on entering CPR mode
 
     def _coronary_draw(self):
         """Draw button on the coronary row — arm (or disarm) Measure + Polyline
