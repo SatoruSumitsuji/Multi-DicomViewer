@@ -4441,7 +4441,44 @@ class CTViewer(CPRMixin, AbstractViewer):
         wsum = float(w.sum())
         d_star = float(np.dot(w, ds[i:j]) / wsum) if wsum > 1e-9 \
             else float(ds[(i + j) // 2])
-        return np.asarray(P, float) + d_star * n
+        Pc = np.asarray(P, float) + d_star * n
+        # IN-PLANE guard: the along-normal run can be short where the normal only
+        # GRAZES a big chamber, so also measure the bright extent IN the
+        # cross-section plane at the candidate point — reject if wider than a
+        # vessel there (a chamber spreads far in-plane even at a grazing hit).
+        if self._bright_too_wide_inplane(Pc, n, thr, max_lumen_mm):
+            return np.asarray(P, float)
+        return Pc
+
+    def _bright_too_wide_inplane(self, Pc, n, thr, max_mm):
+        """True if the bright (≥thr) region around *Pc* spans more than *max_mm*
+        across any in-plane axis ⟂ *n* — i.e. a chamber cavity, not a coronary
+        lumen. Casts 12 rays (6 axes) in the plane and checks each diameter."""
+        import math
+        n = np.asarray(n, float)
+        n = n / (np.linalg.norm(n) + 1e-12)
+        a = np.array([1.0, 0.0, 0.0]) if abs(n[0]) < 0.9 \
+            else np.array([0.0, 1.0, 0.0])
+        u = a - np.dot(a, n) * n
+        u = u / (np.linalg.norm(u) + 1e-12)
+        v = np.cross(n, u)
+        step = max(0.25, min(self._dims) * 0.5)
+        offs = np.arange(0.0, max_mm + 4.0 + step, step)
+        ext = []
+        for k in range(12):
+            ang = math.pi * k / 6.0
+            d = math.cos(ang) * u + math.sin(ang) * v
+            hu = self._hu_along(Pc, d, offs)
+            if hu is None:
+                return False
+            e = 0.0
+            for idx in range(len(offs)):
+                if hu[idx] >= thr:
+                    e = float(offs[idx])
+                else:
+                    break
+            ext.append(e)
+        return any(ext[k] + ext[k + 6] > max_mm for k in range(6))
 
     def _snap_trace(self, which, mi):
         """Re-snap every vertex of a 3-D trace to the contrast lumen along the
