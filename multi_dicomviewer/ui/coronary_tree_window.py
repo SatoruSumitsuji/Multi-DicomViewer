@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
     ROOT_ROLES, CoronaryTree)
 from multi_dicomviewer.i18n import t
@@ -42,6 +43,9 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 #: One colour per root trunk; branches inherit their root's colour.
 ROOT_COLORS = {"LM-LAD": "#d62728", "LM-LCX": "#1f77b4", "RCA": "#2ca02c"}
 _UID_ROLE = Qt.ItemDataRole.UserRole
+#: Centreline resample step (mm) when rebuilding a .cpr.json's control points —
+#: dense enough for a coronary vessel; territory granularity, not correctness.
+_CPR_STEP_MM = 0.5
 
 
 class CoronaryTreeWindow(SnapDock):
@@ -51,11 +55,8 @@ class CoronaryTreeWindow(SnapDock):
     vesselSelected = pyqtSignal(str)
     #: a vessel's centreline visibility was toggled (vessel id, on)
     visibilityChanged = pyqtSignal(str, bool)
-    #: the tree changed (add / delete / re-parent / load / clear)
+    #: the tree changed (add / delete / re-parent / load / clear / connect)
     treeChanged = pyqtSignal()
-    #: "ツリーに追加" was pressed — register the active CT viewer's current CPR
-    #: with this role (LM-LAD / LM-LCX / RCA / Branch). The shell handles it.
-    addCprRequested = pyqtSignal(str)
 
     def __init__(self, shell):
         super().__init__(t("Coronary Tree"))
@@ -71,12 +72,22 @@ class CoronaryTreeWindow(SnapDock):
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(3)
 
+        # Batch workflow: load per-vessel .cpr.json files, set each role
+        # (right-click ▸ 役割), then 接続 grows the tree by nearest endpoint.
         bar = QHBoxLayout()
         for label, tip, fn in (
-                (t("読込…"), t("冠動脈ツリー (.corotree.json) を読込"), self._load),
-                (t("上書き保存"), t("直前のファイルへ上書き保存"), self._save_overwrite),
-                (t("名前を付けて保存…"), t("冠動脈ツリーを保存"), self._save_as),
-                (t("全消去"), t("全ての血管を消去 (元CPRは残る)"), self._clear_all)):
+                (t("CPR読込…"),
+                 t("枝ごとの .cpr.json を複数選択で読み込む（未接続で追加）"),
+                 self._load_cpr),
+                (t("接続"),
+                 t("読み込んだ枝を最近接端点でツリーに接続 (3mm以内)。"
+                   "後から追加読込→再度接続も可"), self._connect),
+                (t("ツリー保存…"), t("冠動脈ツリーを .corotree.json に保存"),
+                 self._save_as),
+                (t("ツリー読込…"),
+                 t("保存した冠動脈ツリー (.corotree.json) を読込"), self._load),
+                (t("全消去"), t("全ての血管を消去 (.cpr.json は残る)"),
+                 self._clear_all)):
             b = QPushButton(label)
             b.setToolTip(tip)
             b.clicked.connect(fn)
@@ -84,30 +95,11 @@ class CoronaryTreeWindow(SnapDock):
         bar.addStretch(1)
         outer.addLayout(bar)
 
-        # Role picker + "ツリーに追加" — the CT Territory workflow lives HERE (not
-        # on the image's plain CPR row) so the two stay clearly separate.
-        role_row = QHBoxLayout()
-        role_row.addWidget(QLabel(t("役割:")))
-        self._role_combo = QComboBox()
-        self._role_combo.addItems(["LM-LAD", "LM-LCX", "RCA", "Branch"])
-        self._role_combo.setToolTip(t(
-            "ルート3種は入口を第1点に。Branchは既存血管の上から描き始める "
-            "(枝名は追加後に指定)"))
-        role_row.addWidget(self._role_combo)
-        self._add_btn = QPushButton(t("ツリーに追加"))
-        self._add_btn.setToolTip(t(
-            "いま描いたCPR(アクティブなCT)をこの役割でツリーに追加。"
-            "Branchは最近接血管に吸着、3mm超なら近づけて再度追加"))
-        self._add_btn.clicked.connect(
-            lambda: self.addCprRequested.emit(self._role_combo.currentText()))
-        role_row.addWidget(self._add_btn)
-        role_row.addStretch(1)
-        outer.addLayout(role_row)
-
         self._tree_w = QTreeWidget()
-        self._tree_w.setColumnCount(2)
-        self._tree_w.setHeaderLabels([t("血管"), t("分岐")])
-        self._tree_w.setColumnWidth(0, 150)
+        self._tree_w.setColumnCount(3)
+        self._tree_w.setHeaderLabels([t("血管"), t("役割"), t("分岐")])
+        self._tree_w.setColumnWidth(0, 130)
+        self._tree_w.setColumnWidth(1, 70)
         self._tree_w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree_w.customContextMenuRequested.connect(self._menu)
         self._tree_w.itemChanged.connect(self._on_item_changed)
@@ -125,26 +117,75 @@ class CoronaryTreeWindow(SnapDock):
     def tree(self) -> CoronaryTree:
         return self._tree
 
-    def add_root(self, vid, name, role, points, ctrl=None):
-        """Register an explicit root trunk (viewer entry point)."""
-        v = self._tree.add_root(vid, name, role, points)
-        if ctrl is not None:
-            v.ctrl = np.asarray(ctrl, float).reshape(-1, 3)
+    def _unique_vid(self) -> str:
+        n = len(self._tree.vessels) + 1
+        vid = f"v{n}"
+        while vid in self._tree.vessels:
+            n += 1
+            vid = f"v{n}"
+        return vid
+
+    def _load_cpr(self):
+        """Load one or more per-vessel .cpr.json files as UNCONNECTED vessels
+        (role defaults to branch; set roots via right-click ▸ 役割). Press 接続
+        afterwards to attach them by nearest endpoint."""
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, t("CPR (.cpr.json) を読込"),
+            os.path.dirname(self._last_path) if self._last_path else "",
+            t("CPR (*.cpr.json)"))
+        if not paths:
+            return
+        added, errs = 0, []
+        for p in paths:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("format") != "MDV-CPR":
+                    errs.append(f"{os.path.basename(p)}: " + t("CPR形式でない"))
+                    continue
+                ctrl = data.get("ctrl")
+                if not ctrl or len(ctrl) < 2:
+                    errs.append(f"{os.path.basename(p)}: " + t("中心点が不足"))
+                    continue
+                ctrl = np.asarray(ctrl, float)
+                cl = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM)
+                # strip ".cpr.json" → vessel name
+                name = os.path.splitext(
+                    os.path.splitext(os.path.basename(p))[0])[0]
+                self._tree.add_vessel(self._unique_vid(), name or "vessel",
+                                      "branch", cl.points, ctrl=ctrl)
+                added += 1
+            except (OSError, ValueError) as exc:            # noqa: BLE001
+                errs.append(f"{os.path.basename(p)}: {exc}")
+        self._last_path = paths[0]
         self._populate()
         self.treeChanged.emit()
-        return v
+        msg = t("{n} 本を読込（役割を設定して「接続」）。", n=added)
+        if errs:
+            msg += " " + t("失敗 {e} 件。", e=len(errs))
+        self._hint.setText(msg)
+        if errs:
+            self._warn("\n".join(errs[:8]))
 
-    def add_branch(self, vid, name, points, ctrl=None, snap_tol_mm=3.0):
-        """Register a branch (viewer entry point). Returns the snap result; the
-        vessel is only added when ``ok`` is True (within snap_tol_mm)."""
-        res = self._tree.add_branch(vid, name, points, snap_tol_mm=snap_tol_mm)
-        if res.get("ok"):
-            if ctrl is not None:
-                self._tree.vessels[vid].ctrl = np.asarray(
-                    ctrl, float).reshape(-1, 3)
-            self._populate()
-            self.treeChanged.emit()
-        return res
+    def _connect(self):
+        """Grow the tree: attach every loose branch to the nearest connected
+        vessel by its nearest endpoint (3 mm). Roots must be set first."""
+        if not self._tree.vessels:
+            self._warn(t("先に CPR を読み込んでください。"))
+            return
+        if not self._tree.roots():
+            self._warn(t("ルート (LM-LAD / LM-LCX / RCA) を1本以上設定して"
+                         "ください。血管を右クリック →「役割」で設定できます。"))
+            return
+        res = self._tree.connect_all(snap_tol_mm=3.0)
+        self._populate()
+        self.treeChanged.emit()
+        msg = t("{c} 本を接続しました。", c=len(res["connected"]))
+        if res["unconnected"]:
+            msg += t(" 未接続 {u} 本（3mm以内に幹/枝がありません。近い枝を"
+                     "先に接続するか、右クリックで親を指定）。",
+                     u=len(res["unconnected"]))
+        self._hint.setText(msg)
 
     def selected_vid(self) -> str | None:
         it = self._tree_w.currentItem()
@@ -181,30 +222,44 @@ class CoronaryTreeWindow(SnapDock):
         total_mm = float(np.linalg.norm(np.diff(p.points, axis=0), axis=1).sum())
         return f"@{pname} {round(100 * frac)}% / {frac * total_mm:.0f}mm"
 
+    def _make_item(self, vid: str) -> QTreeWidgetItem:
+        v = self._tree.vessels[vid]
+        role_txt = v.role if v.role in ROOT_ROLES else t("枝")
+        it = QTreeWidgetItem([v.name, role_txt, self._junction_text(vid)])
+        it.setData(0, _UID_ROLE, vid)
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        it.setCheckState(0, Qt.CheckState.Checked)          # visible by default
+        it.setForeground(0, QColor(ROOT_COLORS.get(
+            self._root_role(vid), "#333333")))
+        return it
+
     def _populate(self):
         self._building = True
         self._tree_w.blockSignals(True)
         self._tree_w.clear()
-        items: dict[str, QTreeWidgetItem] = {}
+        loose = set(self._tree.unconnected())
 
-        def add_item(vid):
-            v = self._tree.vessels[vid]
-            it = QTreeWidgetItem([v.name, self._junction_text(vid)])
-            it.setData(0, _UID_ROLE, vid)
-            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            it.setCheckState(0, Qt.CheckState.Checked)      # visible by default
-            it.setForeground(0, QColor(ROOT_COLORS.get(
-                self._root_role(vid), "#333333")))
-            parent = self._tree.vessels[vid].parent
-            if parent in items:
-                items[parent].addChild(it)
-            else:
+        # Connected tree — traverse from the roots so nesting is correct
+        # regardless of the order vessels were loaded.
+        def add_recursive(vid, parent_item):
+            it = self._make_item(vid)
+            if parent_item is None:
                 self._tree_w.addTopLevelItem(it)
-            items[vid] = it
+            else:
+                parent_item.addChild(it)
+            for c in self._tree.children(vid):
+                add_recursive(c, it)
 
-        # Insertion order guarantees parents precede children.
-        for vid in self._tree.vessels:
-            add_item(vid)
+        for r in self._tree.roots():
+            add_recursive(r, None)
+        # Unconnected branches → a red "（未接続）" group.
+        if loose:
+            grp = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose)), "", ""])
+            grp.setForeground(0, QColor("#b00000"))
+            self._tree_w.addTopLevelItem(grp)
+            for vid in self._tree.vessels:
+                if vid in loose:
+                    grp.addChild(self._make_item(vid))
         self._tree_w.expandAll()
         self._tree_w.blockSignals(False)
         self._building = False
@@ -213,7 +268,9 @@ class CoronaryTreeWindow(SnapDock):
     def _refresh_hint(self):
         n = len(self._tree.vessels)
         roots = len(self._tree.roots())
-        self._hint.setText(t("{n} 本 / ルート {r} 本", n=n, r=roots))
+        loose = len(self._tree.unconnected())
+        self._hint.setText(
+            t("{n} 本 / ルート {r} / 未接続 {u}", n=n, r=roots, u=loose))
 
     # -------------------------------------------------------- edit slots
     def _on_selection(self):
@@ -229,19 +286,45 @@ class CoronaryTreeWindow(SnapDock):
 
     def _menu(self, pos):
         it = self._tree_w.itemAt(pos)
+        vid = it.data(0, _UID_ROLE) if it is not None else None
         menu = QMenu(self)
+        role_menu = menu.addMenu(t("役割"))
+        role_acts = {}
+        for r in (*ROOT_ROLES, "branch"):
+            a = role_menu.addAction(t("枝") if r == "branch" else r)
+            role_acts[a] = r
+        a_rev = menu.addAction(t("向きを反転 (近位↔遠位)"))
         a_ren = menu.addAction(t("名前を変更"))
         a_par = menu.addAction(t("親を変更…"))
         a_del = menu.addAction(t("削除 (枝ごと)"))
-        for a in (a_ren, a_par, a_del):
-            a.setEnabled(it is not None)
+        for a in (a_rev, a_ren, a_par, a_del):
+            a.setEnabled(vid is not None)
+        role_menu.setEnabled(vid is not None)
         chosen = menu.exec(self._tree_w.viewport().mapToGlobal(pos))
-        if chosen is a_ren:
+        if chosen in role_acts and vid is not None:
+            self._tree.set_role(vid, role_acts[chosen])
+            self._populate()
+            self.treeChanged.emit()
+        elif chosen is a_rev and vid is not None:
+            self._reverse(vid)
+        elif chosen is a_ren:
             self._rename()
         elif chosen is a_par:
             self._reparent()
         elif chosen is a_del:
             self._delete()
+
+    def _reverse(self, vid):
+        """Flip a vessel's proximal↔distal direction. A connected branch is also
+        detached so 接続 re-attaches it with the corrected direction; a root just
+        flips (fix an ostium drawn at the wrong end)."""
+        self._tree.reverse_vessel(vid)
+        v = self._tree.vessels.get(vid)
+        if v is not None and v.role not in ROOT_ROLES:
+            v.parent = None                 # re-attach on next 接続
+            v.junction = None
+        self._populate()
+        self.treeChanged.emit()
 
     def _rename(self):
         vid = self.selected_vid()

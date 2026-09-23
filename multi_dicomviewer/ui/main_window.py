@@ -2235,7 +2235,6 @@ class MainWindow(QMainWindow):
             self._corotree_win = w
             w.setFloating(True)
             w.resize(360, 520)
-            w.addCprRequested.connect(self._add_cpr_to_tree)
         if not w.isVisible():
             w.show()
         if w.isFloating():
@@ -2249,86 +2248,7 @@ class MainWindow(QMainWindow):
         w.show()
         w.raise_()
         w.activateWindow()
-        # Entering Coronary Tree also arms a coronary CPR trace on the active CT
-        # (Rt single-pane in practice), so the user can draw straight away.
-        p = self._ct_pane()
-        if p is not None:
-            v = p.current_viewer()
-            if v is not None and hasattr(v, "start_coronary_draw"):
-                v.start_coronary_draw()
         return w
-
-    def _add_cpr_to_tree(self, role):
-        """Coronary Tree panel's "ツリーに追加": pull the active CT viewer's
-        current CPR and register it with *role*."""
-        from PyQt6.QtWidgets import QMessageBox
-        p = self._ct_pane()
-        v = p.current_viewer() if p is not None else None
-        if v is None or not hasattr(v, "get_current_cpr"):
-            QMessageBox.information(self, t("Coronary Tree"),
-                                    t("CTペインを表示してください。"))
-            return
-        cpr = v.get_current_cpr()
-        if cpr is None:
-            QMessageBox.information(self, t("Coronary Tree"), t(
-                "先に冠動脈CPRを作成(Draw)してください。"))
-            return
-        ctrl, points = cpr
-        self._register_cpr(role, ctrl, points)
-
-    def _register_cpr(self, role, ctrl, points):
-        """Add a centreline to the Coronary Tree as a root or a snapped branch,
-        prompting for a branch name after it attaches (see _prompt_branch_name)."""
-        from multi_dicomviewer.core.coronary_territory import ROOT_ROLES
-        panel = getattr(self, "_corotree_win", None)
-        if panel is None:
-            return
-        tree = panel.tree
-        n = len(tree.vessels) + 1
-        vid = f"v{n}"
-        while vid in tree.vessels:
-            n += 1
-            vid = f"v{n}"
-        from PyQt6.QtWidgets import QMessageBox
-        if role in ROOT_ROLES:
-            panel.add_root(vid, (name or role), role, points, ctrl=ctrl)
-            self.statusBar().showMessage(
-                t("冠動脈ツリーに追加: {name} ({role})",
-                  name=(name or role), role=role), 4000)
-            return
-        # Branch: snap to the nearest existing vessel. On success the parent is
-        # DETERMINED and we ask for the name (preset + free); on a >3 mm miss we
-        # keep the drawn CPR active and ask the user to bring the start closer
-        # and press "ツリーに追加" again — so a branch always ends up attached.
-        res = panel.add_branch(vid, "Branch", points, ctrl=ctrl, snap_tol_mm=3.0)
-        if res.get("ok"):
-            nm = self._prompt_branch_name()
-            if nm:
-                panel.rename_vessel(vid, nm)
-            self.statusBar().showMessage(
-                t("冠動脈ツリーに追加: {name} → 親 @{d:.1f}mm",
-                  name=(nm or "Branch"), d=res.get("dist_mm", 0.0)), 4000)
-        elif res.get("reason") == "no-parent":
-            QMessageBox.information(self, t("Coronary Tree"), t(
-                "最初に LM-LAD / LM-LCX / RCA のいずれか(ルート)を登録してください。"))
-        else:                                    # too-far → guide + retry
-            QMessageBox.information(self, t("Coronary Tree"), t(
-                "枝の始点が既存血管から {d:.1f}mm 離れています(3mm以内が必要)。"
-                "始点を血管に近づけて、もう一度「ツリーに追加」してください。",
-                d=res.get("dist_mm", 0.0)))
-
-    def _prompt_branch_name(self, default: str = "") -> str:
-        """Ask for a branch name after it has attached: a preset (D9…R16d) or a
-        free-typed value. Returns "" if cancelled (the placeholder name stays)."""
-        from PyQt6.QtWidgets import QInputDialog
-        presets = ["D9", "D9a", "D10", "D10a", "S1", "S2", "S3", "S4",
-                   "X12", "X12a", "X12b", "X14", "X14a", "X14c", "X15",
-                   "R4", "R16a", "R16b", "R16c", "R16d"]
-        cur = presets.index(default) if default in presets else 0
-        name, ok = QInputDialog.getItem(
-            self, t("枝の名前"), t("血管名 (選択または自由入力):"),
-            presets, cur, True)
-        return name.strip() if ok else ""
 
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
