@@ -4389,14 +4389,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         out[inb] = np.asarray(val, float)[inb]
         return out
 
-    def _snap_to_lumen(self, P, n, reach=8.0, floor_hu=150.0):
+    def _snap_to_lumen(self, P, n, reach=8.0, floor_hu=150.0,
+                       max_lumen_mm=6.0):
         """Move P along ±*reach* mm of the plane normal *n* to the centre of
         the nearest contrast-bright (lumen) run — the depth the slab MIP hid.
 
-        Picks the brightest run whose centre is closest to the click (so it
-        can't jump to a distant bright structure), then returns its intensity-
-        weighted centroid. No-op (returns P) if nothing rises above *floor_hu*
-        or the volume isn't available."""
+        Picks the nearest VESSEL-SIZED bright run and returns its intensity-
+        weighted centroid. A bright run WIDER than *max_lumen_mm* is treated as
+        a chamber/great-vessel cavity (LV / RV / aorta …) and IGNORED, so a
+        point in a low-HU (occluded) segment next to a bright cavity is NOT
+        pulled into it. No-op (returns P) if no vessel-sized run rises above
+        *floor_hu* within reach, or the volume isn't available."""
         n = np.asarray(n, float)
         nn = float(np.linalg.norm(n))
         if self._vol is None or nn < 1e-9:
@@ -4412,7 +4415,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return np.asarray(P, float)          # no lumen in reach → leave it
         thr = max(floor_hu, 0.5 * peak)
         bright = hu >= thr
-        best = None                    # contiguous bright runs; pick nearest d=0
+        # Contiguous bright runs; keep only VESSEL-SIZED ones (width ≤
+        # max_lumen_mm — a coronary lumen is a few mm, a cavity spans much more),
+        # then pick the one nearest d=0 (the click).
+        best = None
         i = 0
         N = len(ds)
         while i < N:
@@ -4422,11 +4428,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             j = i
             while j < N and bright[j]:
                 j += 1
+            width = float(ds[j - 1] - ds[i])
             centre = 0.5 * (ds[i] + ds[j - 1])
-            if best is None or abs(centre) < abs(best[2]):
+            if width <= max_lumen_mm and (best is None
+                                          or abs(centre) < abs(best[2])):
                 best = (i, j, centre)
             i = j
-        if best is None:
+        if best is None:                         # only cavity-sized runs → skip
             return np.asarray(P, float)
         i, j, _c = best
         w = hu[i:j] - thr
@@ -14025,6 +14033,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             "再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す"))
         self._cpr_fit_btn.clicked.connect(self._cpr_fit)
         row.addWidget(self._cpr_fit_btn)
+        # Snap: toggle the trace-to-lumen auto-snap (green = on). Turn OFF to
+        # hand-place points through an occluded / low-HU segment near a bright
+        # chamber. (Editing an existing point never snaps, regardless.)
+        self._cpr_snap_btn = FitButton(t("Snap"))
+        self._cpr_snap_btn.setCheckable(True)
+        self._cpr_snap_btn.setChecked(self._snap_lumen)
+        self._cpr_snap_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_snap_btn.setHelpToolTip(t(
+            "トレース点を造影ルーメンへ自動スナップ（深さ補正）。閉塞部などで"
+            "腔へ引き寄せられる場合はオフに。太い高HV腔は自動で無視します。"
+            "既存点の編集移動は常にスナップしません"))
+        self._cpr_snap_btn.toggled.connect(
+            lambda on: setattr(self, "_snap_lumen", bool(on)))
+        row.addWidget(self._cpr_snap_btn)
         self._cpr_load_btn = FitButton(t("Load"))
         self._cpr_load_btn.setHelpToolTip(
             t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
@@ -14106,6 +14129,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_save_btn.setEnabled(cpr)
         if getattr(self, "_cpr_fit_btn", None) is not None:
             self._cpr_fit_btn.setEnabled(cpr)        # only once a short-axis exists
+        if getattr(self, "_cpr_snap_btn", None) is not None:
+            self._cpr_snap_btn.blockSignals(True)    # reflect the right-click toggle
+            self._cpr_snap_btn.setChecked(self._snap_lumen)
+            self._cpr_snap_btn.blockSignals(False)
         if getattr(self, "_cpr_draw_btn", None) is not None:
             self._cpr_draw_btn.setChecked(pend)
             # Red "armed" background while tracing (matches the LV trace buttons)
