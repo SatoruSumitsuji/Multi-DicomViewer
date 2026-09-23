@@ -222,7 +222,45 @@ def test_json_roundtrip():
     print("OK .corotree.json round-trip (topology/points/junctions/territory)")
 
 
+def test_batch_connect():
+    """Batch workflow: add vessels unconnected (any draw direction), then
+    connect_all grows the tree by nearest endpoint, reversing as needed."""
+    tree = CoronaryTree()
+    tree.add_vessel("lad", "LM-LAD", "LM-LAD", _line((0, 0, 0), (60, 0, 0)))
+    # D9 drawn REVERSED (distal→proximal): its LAST point sits on the LAD.
+    tree.add_vessel("d9", "D9", "branch", _line((45, 22, 0), (30, 0, 0)))
+    # D9a off D9 (normal direction), first point on D9.
+    tree.add_vessel("d9a", "D9a", "branch", _line((37, 11, 0), (50, 16, 0)))
+    # A stray branch far from everything → must stay unconnected.
+    tree.add_vessel("x", "X", "branch", _line((200, 200, 0), (210, 210, 0)))
+
+    assert tree.roots() == ["lad"], tree.roots()
+    assert set(tree.unconnected()) == {"d9", "d9a", "x"}, tree.unconnected()
+
+    res = tree.connect_all(snap_tol_mm=3.0)
+    assert set(res["connected"]) == {"d9", "d9a"}, res
+    assert res["unconnected"] == ["x"], res
+    # D9 was reversed so its proximal end (points[0]) is now the junction on LAD.
+    assert tree.vessels["d9"].parent == "lad", tree.vessels["d9"].parent
+    assert np.allclose(tree.vessels["d9"].points[0], [30, 0, 0]), \
+        tree.vessels["d9"].points[0]
+    assert tree.vessels["d9"].junction == 30, tree.vessels["d9"].junction
+    # D9a attached to D9 (multi-level, resolved after D9 connected).
+    assert tree.vessels["d9a"].parent == "d9", tree.vessels["d9a"].parent
+    assert tree.children("lad") == ["d9"] and tree.children("d9") == ["d9a"]
+
+    # Incremental: add another branch near D9 and reconnect — prior links kept.
+    tree.add_vessel("d9b", "D9b", "branch", _line((45, 14, 0), (55, 18, 0)))
+    res2 = tree.connect_all(snap_tol_mm=3.0)
+    assert "d9b" in res2["connected"], res2
+    assert tree.vessels["d9"].parent == "lad"          # unchanged
+    assert tree.vessels["d9b"].parent in ("d9a", "d9"), tree.vessels["d9b"].parent
+    print("OK batch connect_all (nearest-endpoint, auto-reverse, multi-level, "
+          "incremental, far branch left loose)")
+
+
 def main():
+    test_batch_connect()
     test_json_roundtrip()
     test_topology_and_snap()
     test_too_far_guard()

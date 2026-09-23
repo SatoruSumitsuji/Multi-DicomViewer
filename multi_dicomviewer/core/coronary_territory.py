@@ -135,10 +135,95 @@ class CoronaryTree:
 
     # --------------------------------------------------------- topology
     def roots(self) -> list[str]:
-        return [vid for vid, v in self.vessels.items() if v.parent is None]
+        """The trunk vessels — those whose ROLE is a root (LM-LAD/LM-LCX/RCA).
+        (An unconnected branch also has parent None but is NOT a root.)"""
+        return [vid for vid, v in self.vessels.items() if v.role in ROOT_ROLES]
 
     def children(self, vid: str) -> list[str]:
         return [c for c, v in self.vessels.items() if v.parent == vid]
+
+    def unconnected(self) -> list[str]:
+        """Branch vessels not yet attached to the tree (parent None)."""
+        return [vid for vid, v in self.vessels.items()
+                if v.role not in ROOT_ROLES and v.parent is None]
+
+    # --------------------------------------------------- batch build
+    def add_vessel(self, vid: str, name: str, role: str, points,
+                   ctrl=None) -> Vessel:
+        """Add a vessel WITHOUT connecting it (parent stays None). *role* is a
+        ROOT_ROLES value (a trunk) or 'branch' (attached later by connect_all).
+        Used by the batch .cpr.json load."""
+        if vid in self.vessels:
+            raise ValueError(f"duplicate vessel id {vid!r}")
+        v = Vessel(vid=vid, name=name, role=role, points=points, ctrl=ctrl)
+        self.vessels[vid] = v
+        return v
+
+    def set_role(self, vid: str, role: str) -> None:
+        """Change a vessel's role. Switching to a root role detaches it (a trunk
+        has no parent); switching to 'branch' leaves it for connect_all."""
+        v = self.vessels[vid]
+        v.role = role
+        if role in ROOT_ROLES:
+            v.parent = None
+            v.junction = None
+
+    def reverse_vessel(self, vid: str) -> None:
+        """Flip a vessel's proximal↔distal direction (its points and ctrl)."""
+        v = self.vessels[vid]
+        v.points = v.points[::-1].copy()
+        if v.ctrl is not None:
+            v.ctrl = v.ctrl[::-1].copy()
+
+    def _nearest_endpoint_to(self, vid: str, targets):
+        """Nearest attachment of vessel *vid*'s TWO endpoints to any vessel in
+        *targets* (ids). Returns {parent, junction, dist, end} or None. 'end' is
+        which endpoint ('first'/'last') was the nearer (→ the proximal side)."""
+        v = self.vessels[vid]
+        if v.n < 2:
+            return None
+        best = None
+        for end, xyz in (("first", v.points[0]), ("last", v.points[-1])):
+            xyz = np.asarray(xyz, float)
+            for pvid in targets:
+                if pvid == vid:
+                    continue
+                p = self.vessels[pvid]
+                d = np.linalg.norm(p.points - xyz, axis=1)
+                j = int(np.argmin(d))
+                if best is None or d[j] < best["dist"]:
+                    best = {"parent": pvid, "junction": j,
+                            "dist": float(d[j]), "end": end}
+        return best
+
+    def connect_all(self, snap_tol_mm: float = 3.0) -> dict:
+        """Grow the tree by proximity: roots anchor it; each unconnected branch
+        attaches by whichever of its TWO endpoints is nearest a CONNECTED vessel
+        (within *snap_tol_mm*), reversing the branch so proximal = first. Repeats
+        until no more attach (so multi-level D9→D9a resolves). Prior connections
+        are kept, so it can be called again after loading more vessels. Returns
+        {connected:[vid…] newly attached, unconnected:[vid…] still loose}."""
+        connected = set(self.roots())
+        for vid, v in self.vessels.items():
+            if v.role not in ROOT_ROLES and v.parent is not None:
+                connected.add(vid)                 # keep prior connections
+        pending = self.unconnected()
+        newly, changed = [], True
+        while changed and pending:
+            changed = False
+            for vid in list(pending):
+                best = self._nearest_endpoint_to(vid, connected)
+                if best is not None and best["dist"] <= snap_tol_mm:
+                    if best["end"] == "last":       # near end is distal → flip
+                        self.reverse_vessel(vid)
+                    v = self.vessels[vid]
+                    v.parent = best["parent"]
+                    v.junction = int(best["junction"])
+                    connected.add(vid)
+                    pending.remove(vid)
+                    newly.append(vid)
+                    changed = True
+        return {"connected": newly, "unconnected": list(pending)}
 
     def descendants(self, vid: str) -> list[str]:
         """All vessels downstream of ``vid`` (its whole sub-tree, exclusive)."""
