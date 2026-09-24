@@ -2136,6 +2136,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measures = {"A": [], "B": []}  # finalized {id,type,pts,...}
         self._meas_seq = 0
         self._snap_lumen = True              # snap trace clicks to the lumen
+        # Chamber-exclude for the lumen snap (seed a bright LV/RV cavity to ignore)
+        self._cpr_exclude = []               # list of (comp, bbox) chamber masks
+        self._cpr_exclude_seeding = False    # next MPR click seeds a chamber
         self._draft = None                   # {type, pane, pts} in progress
         self._undo_clear()                   # unified Ctrl+Z / Ctrl+Y state
         self._edit = None                    # {key, mi, vi} handle drag
@@ -2499,6 +2502,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
+        # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
+        # and excludes it from the lumen snap (consumes the click; no trace).
+        if getattr(self, "_cpr_exclude_seeding", False) and self._drag_btn == 1:
+            self._cpr_seed_exclude(key, x, y)
+            self._reset_pointer_state()
+            return
         # Compare-select mode: a left-click picks the two shapes to compare.
         if self._cmp_on and self._drag_btn == 1:
             self._compare_pick(key, x, y)
@@ -4410,6 +4419,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         hu = self._hu_along(P, n, ds)
         if hu is None:
             return np.asarray(P, float)
+        hu = self._excl_apply(hu, P, n, ds)      # drop excluded-chamber samples
         peak = float(hu.max())
         if peak < floor_hu:
             return np.asarray(P, float)          # no lumen in reach → leave it
@@ -4471,6 +4481,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             hu = self._hu_along(Pc, d, offs)
             if hu is None:
                 return False
+            hu = self._excl_apply(hu, Pc, d, offs)   # ignore excluded chambers
             e = 0.0
             for idx in range(len(offs)):
                 if hu[idx] >= thr:
@@ -4479,6 +4490,55 @@ class CTViewer(CPRMixin, AbstractViewer):
                     break
             ext.append(e)
         return any(ext[k] + ext[k + 6] > max_mm for k in range(6))
+
+    def _excl_apply(self, hu, origin, dirn, offs):
+        """Set samples inside a chamber-exclude mask below floor for the snap."""
+        if not self._cpr_exclude or hu is None:
+            return hu
+        from multi_dicomviewer.core.chamber_mask import point_excluded
+        origin = np.asarray(origin, float)
+        dirn = np.asarray(dirn, float)
+        out = np.asarray(hu, float).copy()
+        for k in range(len(offs)):
+            P = origin + float(offs[k]) * dirn
+            if point_excluded(P, self._dims, self._cpr_exclude):
+                out[k] = -1000.0
+        return out
+
+    def _cpr_seed_exclude(self, which, sx, sy):
+        """Flood the bright chamber under a seed click and add it to the lumen-
+        snap exclusion set. Armed by 腔除外; disarms after one seed."""
+        from PyQt6.QtWidgets import QMessageBox
+        from multi_dicomviewer.core.chamber_mask import chamber_component
+        self._cpr_exclude_seeding = False
+        if getattr(self, "_cpr_excl_btn", None) is not None:
+            self._cpr_excl_btn.setChecked(False)
+        if self._vol is None:
+            return
+        wx, wy = self._disp_to_world(which, sx, sy)
+        P = self._out_to_world3d(which, wx, wy)
+        sxs, sys, szs = self._dims
+        seed = (int(round(P[2] / max(szs, 1e-6))),
+                int(round(P[1] / max(sys, 1e-6))),
+                int(round(P[0] / max(sxs, 1e-6))))
+        comp, bbox = chamber_component(self._vol, self._dims, seed,
+                                       hu_lo=200.0, hu_hi=1000.0, r_max_mm=60.0)
+        if comp is None:
+            QMessageBox.information(self, t("腔除外"), t(
+                "その位置は高HVの腔ではありません（造影された腔 HU 200–1000 の "
+                "内部をクリックしてください）。"))
+            return
+        self._cpr_exclude.append((comp, bbox))
+        vol_ml = int(comp.sum()) * (float(np.prod(self._dims)) / 1000.0)
+        if vol_ml > 300.0:
+            QMessageBox.warning(self, t("腔除外"), t(
+                "抽出領域が大きすぎます ({v:.0f} mL)。大動脈や漏れの可能性が"
+                "あります。「除外クリア」して別の点で試してください。", v=vol_ml))
+        self._refresh()
+
+    def _cpr_clear_exclude(self):
+        self._cpr_exclude = []
+        self._refresh()
 
     def _snap_trace(self, which, mi):
         """Re-snap every vertex of a 3-D trace to the contrast lumen along the
@@ -14085,6 +14145,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_snap_btn.toggled.connect(
             lambda on: setattr(self, "_snap_lumen", bool(on)))
         row.addWidget(self._cpr_snap_btn)
+        # 腔除外: seed a bright chamber (LV/RV) to exclude from the lumen snap.
+        self._cpr_excl_btn = FitButton(t("腔除外"))
+        self._cpr_excl_btn.setCheckable(True)
+        self._cpr_excl_btn.setStyleSheet(
+            "QPushButton:checked{background:#8e44ad;color:white;}")
+        self._cpr_excl_btn.setHelpToolTip(t(
+            "オンにして心腔(LV/RV)の内部をクリック → その血液プールを抽出し "
+            "スナップ対象から除外（閉塞冠動脈が腔へ吸着するのを防止）。"
+            "大動脈には使わないでください（近位冠動脈に漏れます）"))
+        self._cpr_excl_btn.toggled.connect(
+            lambda on: setattr(self, "_cpr_exclude_seeding", bool(on)))
+        row.addWidget(self._cpr_excl_btn)
+        self._cpr_excl_clr_btn = FitButton(t("除外クリア"))
+        self._cpr_excl_clr_btn.setHelpToolTip(t("腔除外マスクを全て消去"))
+        self._cpr_excl_clr_btn.clicked.connect(self._cpr_clear_exclude)
+        row.addWidget(self._cpr_excl_clr_btn)
         self._cpr_load_btn = FitButton(t("Load"))
         self._cpr_load_btn.setHelpToolTip(
             t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
@@ -14232,6 +14308,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         DELETE the traced centreline polyline, and hide the row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_exclude = []                        # drop chamber-exclude masks
+        self._cpr_exclude_seeding = False
         self._cpr_drop_source()
         self._draft = None
         if self._cpr is not None:
