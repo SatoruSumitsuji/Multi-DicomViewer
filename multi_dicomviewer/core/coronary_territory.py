@@ -110,14 +110,24 @@ class CoronaryTree:
                 "dist_mm": float(dist)}
 
     def set_parent(self, vid: str, parent: str, junction: int | None = None):
-        """Manual override of a branch's parent (fallback when auto-snap picked
-        the wrong vessel). ``junction`` defaults to the nearest sample on the
-        new parent to this vessel's proximal end."""
+        """Manually attach a branch to *parent* (fallback for an unconnected
+        branch, or to fix a wrong auto-connect). When *junction* is not given it
+        uses whichever of the branch's TWO endpoints is nearest the parent as the
+        proximal side — reversing the branch (points/ctrl) if that is its last
+        point — so the direction comes out proximal→distal regardless of how it
+        was drawn."""
         v = self.vessels[vid]
         p = self.vessels[parent]
         if junction is None:
-            d = np.linalg.norm(p.points - v.points[0], axis=1)
-            junction = int(np.argmin(d))
+            df = np.linalg.norm(p.points - v.points[0], axis=1)
+            dl = np.linalg.norm(p.points - v.points[-1], axis=1)
+            jf, jl = int(np.argmin(df)), int(np.argmin(dl))
+            if dl[jl] < df[jf]:                  # last point is the nearer end
+                self.reverse_vessel(vid)
+                junction = int(np.argmin(
+                    np.linalg.norm(p.points - v.points[0], axis=1)))
+            else:
+                junction = jf
         v.parent = parent
         v.junction = int(junction)
         v.role = "branch"
