@@ -210,7 +210,9 @@ class CoronaryTreeWindow(SnapDock):
     def _junction_text(self, vid: str) -> str:
         v = self._tree.vessels[vid]
         if v.parent is None:
-            return t("root")
+            # A true trunk shows "root"; a loose branch (parent None but NOT a
+            # root role) shows "未接続" so it is never mistaken for a trunk.
+            return t("root") if v.role in ROOT_ROLES else t("未接続")
         p = self._tree.vessels.get(v.parent)
         pname = p.name if p is not None else v.parent
         if p is None or p.n < 2 or v.junction is None:
