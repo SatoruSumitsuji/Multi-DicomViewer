@@ -14286,6 +14286,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._coronary_mode = True
         self._coronary_mpr_pending = False
+        # Freeze the view so showing the coronary/measure rows (which shrink the
+        # image area) doesn't re-fit and shift the image on entry.
+        self._view_initial = False
         self._coronary_sync_ui()
         self._coronary_draw()                # auto-arm Draw on entering CPR mode
 
@@ -14300,6 +14303,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._coronary_mpr_pending = False
             self._coronary_sync_ui()
             return
+        self._view_initial = False                   # don't auto-refit (keep img)
         if self._cpr is not None:
             self._exit_cpr(keep_view=True)           # keep the current image
         if not self._meas_on:
