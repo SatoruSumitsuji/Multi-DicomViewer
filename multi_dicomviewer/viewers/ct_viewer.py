@@ -1865,6 +1865,37 @@ class _Pane:
         self.ren.AddActor(mod)
         self._meas_line_actors.append((2.4, mod))    # off-plane dotted outline
         self.meas_labels = []                 # number billboards
+        # Coronary Tree overlay: all vessel centrelines (solid, per-root colour)
+        # + a dotted mapper for the off-plane stretches, drawn UNDER user
+        # measures. Per-cell RGBA so each root keeps its colour and off-plane
+        # segments fade. Rebuilt from world-mm points on every redraw.
+        self.coro_mapper = vtkPolyDataMapper()
+        self.coro_mapper.SetInputData(vtkPolyData())
+        self.coro_mapper.ScalarVisibilityOn()
+        self.coro_mapper.SetScalarModeToUseCellData()
+        self.coro_mapper.SetColorModeToDirectScalars()
+        cva = vtkActor()
+        cva.SetMapper(self.coro_mapper)
+        cva.GetProperty().SetColor(0.85, 0.4, 0.4)   # fallback (cells carry RGBA)
+        cva.GetProperty().SetLineWidth(2.0)
+        if hasattr(cva.GetProperty(), "SetRenderLinesAsTubes"):
+            cva.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(cva)
+        self._meas_line_actors.append((2.6, cva))    # coronary solid centreline
+        self.coro_dash_mapper = vtkPolyDataMapper()
+        self.coro_dash_mapper.SetInputData(vtkPolyData())
+        self.coro_dash_mapper.ScalarVisibilityOn()
+        self.coro_dash_mapper.SetScalarModeToUseCellData()
+        self.coro_dash_mapper.SetColorModeToDirectScalars()
+        cvd = vtkActor()
+        cvd.SetMapper(self.coro_dash_mapper)
+        cvd.GetProperty().SetColor(0.85, 0.4, 0.4)
+        cvd.GetProperty().SetLineWidth(2.0)
+        if hasattr(cvd.GetProperty(), "SetRenderLinesAsTubes"):
+            cvd.GetProperty().SetRenderLinesAsTubes(True)
+        self.ren.AddActor(cvd)
+        self._meas_line_actors.append((2.6, cvd))    # coronary off-plane dotted
+        self.coro_labels = []                 # vessel-name billboards
 
         self.info = vtkCornerAnnotation()
         self.info.SetMaximumFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
@@ -2556,6 +2587,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_ortho = False        # Shift while drawing → 縦横直線 (Line)
         self._meas_type = None          # line|polyline|ellipse|polygon
         self._measures = {"A": [], "B": []}   # finalized {id,type,pts}
+        # Coronary Tree overlay: a list of {vid,name,points(world-mm),color,
+        # selected}, pushed by the shell (set_coronary_overlay). Drawn in 3-D MPR
+        # only, reprojected onto each pane's plane every redraw.
+        self._coro_overlay = None
         self._meas_seq = 0              # type-independent running number
         self._draft = None              # {type, pane, pts} in progress
         self._edit = None               # {key, mi, vi} handle drag
@@ -9707,7 +9742,78 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.meas_off_dash_mapper.SetInputData(
             _colored_dashed_rgba_pd(off_dash_segs, off_dash_cols))
         self._rebuild_labels(p, labels)
+        self._redraw_coronary(key)
         p.render()
+
+    def set_coronary_overlay(self, spec) -> None:
+        """Public (shell): set / clear the Coronary Tree overlay and redraw. A
+        *spec* is a list of {vid,name,points(world-mm),color,selected} or None
+        to clear. No-op storage is cheap; drawing happens only in 3-D MPR."""
+        self._coro_overlay = spec or None
+        try:
+            for k in ("A", "B"):
+                self._redraw_geom(k)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _redraw_coronary(self, key):
+        """Draw the Coronary Tree overlay on pane *key*'s current plane: every
+        visible vessel's world-mm centreline reprojected via _world3d_to_out,
+        coloured by its root, off-plane stretches dotted + faded, a name label
+        at the proximal end. 3-D MPR only."""
+        p = self.pane[key]
+        spec = self._coro_overlay if self._mode == "3D" else None
+        if not spec:
+            p.coro_mapper.SetInputData(vtkPolyData())
+            p.coro_dash_mapper.SetInputData(vtkPolyData())
+            self._rebuild_coro_labels(p, [])
+            return
+        _, _, _pn = self._axes_for(key)
+        _po = self._pc[key]
+        solid, solid_c, dash, dash_c, labels = [], [], [], [], []
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            rgb = _hex_to_rgb(ves.get("color"))
+            sel = bool(ves.get("selected"))
+            a_full = 255 if sel else 210
+            a_half = 150 if sel else 90
+            out = [self._world3d_to_out(key, np.asarray(P, float))
+                   for P in pts3d]
+            off = [abs(float(np.dot(np.asarray(P, float) - _po, _pn))) > 1.0
+                   for P in pts3d]
+            for i in range(len(out) - 1):
+                o0, o1 = off[i], off[i + 1]
+                if o0 and o1:
+                    dash.append((out[i], out[i + 1]))
+                    dash_c.append((rgb[0], rgb[1], rgb[2], a_half))
+                else:
+                    solid.append([out[i], out[i + 1]])
+                    seg_a = a_full if not (o0 or o1) else a_half
+                    solid_c.append((rgb[0], rgb[1], rgb[2], seg_a))
+            labels.append((ves.get("name", ""), out[0], rgb, sel))
+        p.coro_mapper.SetInputData(_colored_multi_pd(solid, solid_c))
+        p.coro_dash_mapper.SetInputData(
+            _colored_dashed_rgba_pd(dash, dash_c))
+        self._rebuild_coro_labels(p, labels)
+
+    def _rebuild_coro_labels(self, p, labels):
+        for a in getattr(p, "coro_labels", []):
+            p.ren.RemoveActor(a)
+        p.coro_labels = []
+        for text, (x, y), rgb, sel in labels:
+            if not text:
+                continue
+            ta = vtkBillboardTextActor3D()
+            ta.SetInput(text)
+            ta.SetPosition(float(x), float(y), 0.7)
+            ta.GetTextProperty().SetColor(
+                rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+            ta.GetTextProperty().SetFontSize(18 if sel else 14)
+            ta.GetTextProperty().SetBold(True)
+            p.ren.AddActor(ta)
+            p.coro_labels.append(ta)
 
     def _redraw_meas(self, key):
         self._recompute_compares(key)      # keep comparisons in sync on edit/delete

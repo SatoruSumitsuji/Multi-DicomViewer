@@ -64,6 +64,8 @@ class CoronaryTreeWindow(SnapDock):
         self._tree = CoronaryTree()
         self._last_path: str | None = None
         self._building = False
+        self._hidden: set[str] = set()      # vids the user unchecked (overlay off)
+        self._ct_uid: str = ""              # source-CT series UID (overlay target)
 
         central = QWidget()
         self.setWidget(central)
@@ -112,6 +114,11 @@ class CoronaryTreeWindow(SnapDock):
         outer.addWidget(self._hint)
         self._refresh_hint()
 
+        # Push the on-image overlay whenever the tree, selection or a vessel's
+        # visibility changes (the shell fans it out to every CT viewer).
+        self.treeChanged.connect(self._push_overlay)
+        self.vesselSelected.connect(lambda *_: self._push_overlay())
+
     # ------------------------------------------------------------- model
     @property
     def tree(self) -> CoronaryTree:
@@ -159,6 +166,8 @@ class CoronaryTreeWindow(SnapDock):
                 if not ct_uid:               # remember the CT to open the overlay on
                     ct_uid = (data.get("series") or {}).get("series_uid", "")
                     ct_dir = data.get("src_dir", "") or ""
+                    if ct_uid:
+                        self._ct_uid = ct_uid   # overlay target for the shell
             except (OSError, ValueError) as exc:            # noqa: BLE001
                 errs.append(f"{os.path.basename(p)}: {exc}")
         self._last_path = paths[0]
@@ -297,7 +306,44 @@ class CoronaryTreeWindow(SnapDock):
         vid = item.data(0, _UID_ROLE)
         if vid:
             on = item.checkState(0) == Qt.CheckState.Checked
+            if on:
+                self._hidden.discard(vid)
+            else:
+                self._hidden.add(vid)
             self.visibilityChanged.emit(vid, on)
+            self._push_overlay()
+
+    # --------------------------------------------------------- overlay
+    def overlay_spec(self) -> list:
+        """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
+        its world-mm centreline, root colour and name — for the CT viewers to
+        reproject onto their MPR planes. The currently-selected vessel is
+        flagged so the viewer can highlight it."""
+        sel = self.selected_vid()
+        out = []
+        for vid, v in self._tree.vessels.items():
+            if vid in self._hidden:
+                continue
+            pts = np.asarray(v.points, float)
+            if pts.ndim != 2 or pts.shape[0] < 2:
+                continue
+            out.append({
+                "vid": vid,
+                "name": v.name,
+                "points": pts.tolist(),
+                "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
+                "selected": (vid == sel),
+            })
+        return out
+
+    def _push_overlay(self):
+        """Ask the shell to fan the current overlay out to every CT viewer."""
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_overlay_refresh"):
+            try:
+                self._shell.coronary_overlay_refresh()
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _menu(self, pos):
         it = self._tree_w.itemAt(pos)
