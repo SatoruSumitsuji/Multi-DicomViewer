@@ -14432,6 +14432,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             "format": "MDV-CPR", "version": 1, "type": "cpr",
             "series": (self._lv_series_meta()
                        if hasattr(self, "_lv_series_meta") else {}),
+            # Source-CT folder, so a Coronary Tree CPR read can re-open the same
+            # 3-D CT to draw the overlay on (falls back to UID match if moved).
+            "src_dir": (self._lv_series_dir()
+                        if hasattr(self, "_lv_series_dir") else ""),
             **cpr,
         }
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
