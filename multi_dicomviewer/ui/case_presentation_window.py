@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timedelta
 
-from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QRect, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView,
@@ -233,6 +233,41 @@ class _OffsetDialog(QDialog):
         return {m: e.seconds() for m, e in self._entries.items()}
 
 
+class _CloseHeader(QHeaderView):
+    """Horizontal header that draws a small red ✕ at the right of each section
+    and emits ``closeClicked(logicalIndex)`` when it is clicked — a one-click
+    "hide this column". A click elsewhere on the header behaves normally."""
+
+    closeClicked = pyqtSignal(int)
+    _X_W = 16                                # ✕ hit-box width (px) at section right
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.setSectionsClickable(True)
+
+    def _x_rect(self, rect) -> QRect:
+        return QRect(rect.right() - self._X_W, rect.top(),
+                     self._X_W, rect.height())
+
+    def paintSection(self, painter, rect, logicalIndex):   # noqa: N802
+        super().paintSection(painter, rect, logicalIndex)
+        painter.save()
+        painter.setPen(QColor("#c0392b"))
+        painter.drawText(self._x_rect(rect), Qt.AlignmentFlag.AlignCenter, "✕")
+        painter.restore()
+
+    def mousePressEvent(self, e):                          # noqa: N802
+        x = int(e.position().x())
+        log = self.logicalIndexAt(x)
+        if log >= 0:
+            left = self.sectionViewportPosition(log)
+            right = left + self.sectionSize(log)
+            if right - self._X_W <= x <= right - 1:
+                self.closeClicked.emit(log)
+                return                        # consume — don't sort/select
+        super().mousePressEvent(e)
+
+
 class _DnDTable(QTableWidget):
     """QTableWidget with single-row internal drag & drop. Rather than let Qt
     shuffle the QTableWidgetItems (which would desync from the owner's row
@@ -364,14 +399,13 @@ class CasePresentationWindow(SnapDock):
         # 表示/コメント stay always-on. Listed in the table's column (title-row)
         # order so the menu matches the header.
         b_cols = QPushButton(t("列表示"))
-        b_cols.setToolTip(t("列の表示/非表示を切り替え"))
+        b_cols.setToolTip(t("列の表示/非表示を切り替え（ヘッダの ✕ でも非表示）"))
         col_menu = QMenu(b_cols)
         self._col_actions = {}
-        for col, label in ((C_FRAMES, t("Frame")), (C_SIZE, t("サイズ")),
-                           (C_TIME, t("時間")), (C_UNI, t("統合時間")),
-                           (C_UPD, t("更新")), (C_DEL, t("除外")),
-                           (C_ERASE, t("削除"))):
-            a = col_menu.addAction(label)
+        # Every column is toggleable here so anything hidden with the header ✕ can
+        # be brought back. Listed in table (title-row) order.
+        for col in range(len(_HEADERS)):
+            a = col_menu.addAction(t(_HEADERS[col]))
             a.setCheckable(True)
             a.setChecked(True)
             a.toggled.connect(lambda on, c=col: self._set_col_visible(c, on))
@@ -500,6 +534,10 @@ class CasePresentationWindow(SnapDock):
         self._table = _DnDTable(0, len(_HEADERS))
         self._table.rowMoved.connect(self._on_row_dragged)
         self._table.navRow.connect(self._nav_row)
+        # Header with a per-column ✕ → click to hide that column (restore via 列表示).
+        _hdr = _CloseHeader(self._table)
+        _hdr.closeClicked.connect(self._hide_col)
+        self._table.setHorizontalHeader(_hdr)
         self._table.setHorizontalHeaderLabels([t(h) for h in _HEADERS])
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(
@@ -624,6 +662,16 @@ class CasePresentationWindow(SnapDock):
 
     def _set_col_visible(self, col: int, on: bool) -> None:
         self._table.setColumnHidden(col, not on)
+        a = self._col_actions.get(col)          # keep the 列表示 menu in sync
+        if a is not None and a.isChecked() != on:
+            a.blockSignals(True)
+            a.setChecked(on)
+            a.blockSignals(False)
+
+    def _hide_col(self, col: int) -> None:
+        """Header ✕ clicked → hide that column (restore via the 列表示 menu)."""
+        if 0 <= col < len(_HEADERS):
+            self._set_col_visible(col, False)
 
     def changeEvent(self, e):  # noqa: N802 (Qt override)
         super().changeEvent(e)
