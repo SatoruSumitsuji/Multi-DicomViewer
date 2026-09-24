@@ -450,6 +450,12 @@ class CasePresentationWindow(SnapDock):
         b_load = QPushButton(t("読込…"))
         b_load.clicked.connect(self._load)
         bar2.addWidget(b_load)
+        b_reloc = QPushButton(t("フォルダ再指定…"))
+        b_reloc.setToolTip(t(
+            "画像フォルダを移動/改名して「見当たりません」になった時に、新しい"
+            "フォルダを再指定して再スキャン。SeriesUIDで自動的に再結合します"))
+        b_reloc.clicked.connect(self._relocate_folders)
+        bar2.addWidget(b_reloc)
         b_clear = QPushButton(t("全消去"))
         b_clear.clicked.connect(self._clear_all)
         bar2.addWidget(b_clear)
@@ -1421,6 +1427,37 @@ class CasePresentationWindow(SnapDock):
             self._hint.setText(t(
                 "{m} 個のフォルダを読み込み中… 完了後に「状態更新」を押すと"
                 "[表示]が有効になります。", m=opened))
+
+    def _relocate_folders(self) -> None:
+        """Re-point the presentation at moved / renamed image folders. Pick a
+        folder; it is re-scanned recursively and the series RE-BIND by their
+        SeriesInstanceUID (path-independent), so "見当たりません" rows become
+        displayable again. The chosen folder is recorded on the still-missing
+        rows so a re-save keeps the new location."""
+        from PyQt6.QtWidgets import QFileDialog
+        start = os.path.dirname(self._last_path) if self._last_path else \
+            self._last_dir
+        d = QFileDialog.getExistingDirectory(
+            self, t("画像フォルダを再指定（配下を再帰的に探索）"), start or "")
+        if not d:
+            return
+        missing = [r for r in self._rows
+                   if not self._shell.case_series_loaded(r.get("series_uid", ""))]
+        opened = self._shell.case_open_folders([d])
+        if not opened:
+            self._warn(t("そのフォルダには読み込める画像がありませんでした。"))
+            return
+        # Record the new folder on the rows that were missing (best-effort), so a
+        # re-save points at the new location next time.
+        for r in missing:
+            sd = r.setdefault("src_dirs", [])
+            if d not in sd:
+                sd.append(d)
+        self._dirty = True
+        self._hint.setText(t(
+            "フォルダを再指定して読込中… 完了後に右クリック →「状態更新」で "
+            "[表示] が有効になります（SeriesUID で自動再結合、{n} 件対象）。",
+            n=len(missing)))
 
     # ----------------------------------------------------------- helpers
     def _on_ref_changed(self, text: str) -> None:
