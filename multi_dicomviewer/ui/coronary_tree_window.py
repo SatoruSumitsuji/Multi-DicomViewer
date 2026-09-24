@@ -343,8 +343,9 @@ class CoronaryTreeWindow(SnapDock):
         if not vid:
             return
         v = self._tree.vessels[vid]
-        if v.parent is None:
-            self._warn(t("ルート血管の親は変更できません。"))
+        if v.role in ROOT_ROLES:                 # a true trunk has no parent
+            self._warn(t("ルート(LM-LAD/LM-LCX/RCA)の親は変更できません。"
+                         "役割を「枝」に変えてから接続してください。"))
             return
         # Candidate parents = every OTHER vessel that is not a descendant of vid.
         banned = {vid, *self._tree.descendants(vid)}
