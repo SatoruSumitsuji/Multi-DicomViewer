@@ -136,6 +136,7 @@ class CoronaryTreeWindow(SnapDock):
         if not paths:
             return
         added, errs = 0, []
+        ct_uid, ct_dir = "", ""              # source 3-D CT of the first vessel
         for p in paths:
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -155,6 +156,9 @@ class CoronaryTreeWindow(SnapDock):
                 self._tree.add_vessel(self._unique_vid(), name or "vessel",
                                       "branch", cl.points, ctrl=ctrl)
                 added += 1
+                if not ct_uid:               # remember the CT to open the overlay on
+                    ct_uid = (data.get("series") or {}).get("series_uid", "")
+                    ct_dir = data.get("src_dir", "") or ""
             except (OSError, ValueError) as exc:            # noqa: BLE001
                 errs.append(f"{os.path.basename(p)}: {exc}")
         self._last_path = paths[0]
@@ -163,6 +167,15 @@ class CoronaryTreeWindow(SnapDock):
         msg = t("{n} 本を読込（役割を設定して「接続」）。", n=added)
         if errs:
             msg += " " + t("失敗 {e} 件。", e=len(errs))
+        # Bring the source 3-D CT into view so the tree overlay has its volume.
+        if added and (ct_uid or ct_dir) and self._shell is not None \
+                and hasattr(self._shell, "coronary_show_ct"):
+            try:
+                st = self._shell.coronary_show_ct(ct_uid, ct_dir)
+                if st:
+                    msg += " " + t("3DCT: {s}", s=st)
+            except Exception:                               # noqa: BLE001
+                pass
         self._hint.setText(msg)
         if errs:
             self._warn("\n".join(errs[:8]))

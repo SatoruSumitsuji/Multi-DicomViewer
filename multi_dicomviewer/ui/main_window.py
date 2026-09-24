@@ -2250,6 +2250,64 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
+    def coronary_show_ct(self, series_uid: str, src_dir: str = "") -> str:
+        """Ensure the 3-D CT a coronary CPR was built on is loaded and shown, so
+        the Coronary Tree can draw its overlay on that volume. Called by the
+        panel's CPR read. Order of preference:
+          1. the series is already loaded (by UID) → focus / show it;
+          2. a valid saved source folder → scan it, then show (deferred);
+          3. ask the user to pick the folder (renamed / moved).
+        Returns a short status string for the panel hint ('' = nothing shown)."""
+        import os
+        from PyQt6.QtCore import QTimer
+        from PyQt6.QtWidgets import QFileDialog
+        if series_uid and self.case_series_loaded(series_uid):
+            return t("表示中") if self._coronary_display_uid(series_uid) else ""
+        if src_dir and os.path.isdir(src_dir):
+            self.case_open_folders([src_dir])
+            QTimer.singleShot(
+                700, lambda: self._coronary_display_uid(series_uid))
+            return t("3DCTを読込中…")
+        folder = QFileDialog.getExistingDirectory(
+            self, t("この冠動脈の元となった3DCTフォルダを選択してください"),
+            src_dir if src_dir else "")
+        if folder:
+            self.case_open_folders([folder])
+            QTimer.singleShot(
+                700, lambda: self._coronary_display_uid(series_uid))
+            return t("3DCTを読込中…")
+        return ""
+
+    def _coronary_display_uid(self, series_uid: str) -> bool:
+        """Show the series with this UID (base-vs-'#' tolerant) in a pane —
+        focusing it in place if already visible, else opening it in the active
+        pane. Used by coronary_show_ct after a (possibly deferred) folder scan."""
+        if not series_uid:
+            return False
+        base = series_uid.split("#", 1)[0]
+        for p in self._shown_panes():
+            try:
+                su = p.shown_series_uid() or ""
+                if su == series_uid or su.split("#", 1)[0] == base:
+                    self._set_active_pane(p)
+                    return True
+            except Exception:                            # noqa: BLE001
+                pass
+        se = self._series_by_uid.get(series_uid)
+        if se is None:
+            for k, s in self._series_by_uid.items():
+                if k.split("#", 1)[0] == base:
+                    se = s
+                    break
+        if se is None:
+            return False
+        shown = self._shown_panes()
+        pane = self._active if self._active in shown \
+            else (shown[0] if shown else self._active)
+        self._set_active_pane(pane)
+        self._open_series(se, pane)
+        return True
+
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
         """True if *path* is a Case Presentation .json (structure heuristic), so a
