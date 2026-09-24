@@ -2261,20 +2261,24 @@ class MainWindow(QMainWindow):
         import os
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
+        def _show_then_overlay():
+            self._coronary_display_uid(series_uid)
+            self.coronary_overlay_refresh()
+
         if series_uid and self.case_series_loaded(series_uid):
-            return t("表示中") if self._coronary_display_uid(series_uid) else ""
+            ok = self._coronary_display_uid(series_uid)
+            self.coronary_overlay_refresh()
+            return t("表示中") if ok else ""
         if src_dir and os.path.isdir(src_dir):
             self.case_open_folders([src_dir])
-            QTimer.singleShot(
-                700, lambda: self._coronary_display_uid(series_uid))
+            QTimer.singleShot(700, _show_then_overlay)
             return t("3DCTを読込中…")
         folder = QFileDialog.getExistingDirectory(
             self, t("この冠動脈の元となった3DCTフォルダを選択してください"),
             src_dir if src_dir else "")
         if folder:
             self.case_open_folders([folder])
-            QTimer.singleShot(
-                700, lambda: self._coronary_display_uid(series_uid))
+            QTimer.singleShot(700, _show_then_overlay)
             return t("3DCTを読込中…")
         return ""
 
@@ -2307,6 +2311,42 @@ class MainWindow(QMainWindow):
         self._set_active_pane(pane)
         self._open_series(se, pane)
         return True
+
+    def coronary_overlay_refresh(self) -> None:
+        """Fan the Coronary Tree's current overlay spec out to every CT viewer
+        so the vessel centrelines redraw. Called by the panel on any tree /
+        selection / visibility change, and after the source CT is shown."""
+        w = getattr(self, "_corotree_win", None)
+        spec = None
+        if w is not None and hasattr(w, "overlay_spec"):
+            try:
+                spec = w.overlay_spec()
+            except Exception:                            # noqa: BLE001
+                spec = None
+        # Only draw on the pane showing the tree's SOURCE CT (world-mm points
+        # belong to that one volume); clear any other CT pane. If the source UID
+        # is unknown (older files), fall back to drawing on every CT viewer.
+        ct_uid = getattr(w, "_ct_uid", "") if w is not None else ""
+        base = ct_uid.split("#", 1)[0] if ct_uid else ""
+        for p in self._panes:
+            try:
+                v = p.current_viewer()
+            except Exception:                            # noqa: BLE001
+                v = None
+            if v is None or not hasattr(v, "set_coronary_overlay"):
+                continue
+            this_spec = spec
+            if base:
+                try:
+                    su = p.shown_series_uid() or ""
+                except Exception:                        # noqa: BLE001
+                    su = ""
+                match = (su == ct_uid or su.split("#", 1)[0] == base)
+                this_spec = spec if match else None
+            try:
+                v.set_coronary_overlay(this_spec)
+            except Exception:                            # noqa: BLE001
+                pass
 
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:

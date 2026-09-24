@@ -619,6 +619,7 @@ class _Overlay(QWidget):
             return
         if v._cl_on and not v._lv_cross_paint_suppressed():
             self._paint_cross(p, key, w, h)
+        self._paint_coronary(p, key, w, h)
         self._paint_measures(p, key, w, h)
         if v._lv is not None:
             self._paint_lv(p, key, w, h)
@@ -644,6 +645,54 @@ class _Overlay(QWidget):
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
             p.setBrush(QColor(255, 235, 0))
             p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
+
+    def _paint_coronary(self, p, key, w, h):
+        """Coronary Tree overlay: every visible vessel's world-mm centreline
+        reprojected onto this pane's plane, coloured by its root, off-plane
+        stretches dotted + faded, a name label at the proximal end. 3-D MPR
+        only (mirrors the VTK viewer's _redraw_coronary)."""
+        v = self._v
+        spec = v._coro_overlay if v._mode == "3D" else None
+        if not spec:
+            return
+        _pu, _pv, _pn = v._axes_for(key)
+        _po = v._pc[key]
+
+        def S(out):
+            sx, sy = v._world_to_screen(key, out[0], out[1])
+            return QPointF(sx, sy)
+
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            rgb = _hex_to_rgb(ves.get("color"))
+            sel = bool(ves.get("selected"))
+            a_full = 255 if sel else 210
+            a_half = 150 if sel else 90
+            width = 3.0 if sel else 2.2
+            out = [v._world3d_to_out(key, np.asarray(P, float)) for P in pts3d]
+            off = [abs(float(np.dot(np.asarray(P, float) - _po, _pn))) > 1.0
+                   for P in pts3d]
+            for i in range(len(out) - 1):
+                o0, o1 = off[i], off[i + 1]
+                if o0 and o1:                     # both off-plane → dotted, faint
+                    pen = QPen(QColor(rgb[0], rgb[1], rgb[2], a_half), width)
+                    pen.setStyle(Qt.PenStyle.DotLine)
+                else:
+                    seg_a = a_full if not (o0 or o1) else a_half
+                    pen = QPen(QColor(rgb[0], rgb[1], rgb[2], seg_a), width)
+                p.setPen(pen)
+                p.drawLine(S(out[i]), S(out[i + 1]))
+            # Name label at the proximal end.
+            name = ves.get("name", "")
+            if name:
+                lx, ly = v._world_to_screen(key, out[0][0], out[0][1])
+                _draw_outlined_text(
+                    p, QRectF(lx + 6, ly - 16, 160, 18),
+                    int(Qt.AlignmentFlag.AlignLeft)
+                    | int(Qt.AlignmentFlag.AlignVCenter),
+                    name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
 
     def _paint_wall_legend(self, p, v, w, h):
         """Colour-band legend for the 壁厚 heat map: a vertical bar (green=thick on
@@ -2134,6 +2183,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_on = False
         self._meas_type = None               # line|polyline|ellipse|polygon|angle
         self._measures = {"A": [], "B": []}  # finalized {id,type,pts,...}
+        # Coronary Tree overlay: a list of {vid,name,points(world-mm),color,
+        # selected}, pushed by the shell (set_coronary_overlay). Painted in 3-D
+        # MPR only, reprojected onto each pane's plane every repaint.
+        self._coro_overlay = None
         self._meas_seq = 0
         self._snap_lumen = True              # snap trace clicks to the lumen
         # Chamber-exclude for the lumen snap (seed a bright LV/RV cavity to ignore)
@@ -6348,6 +6401,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (d is not None and d.get("pane") == key and d.get("pts3d")
                 and len(d["pts3d"]) == len(d["pts"])):
             d["pts"] = [self._world3d_to_out(key, P) for P in d["pts3d"]]
+
+    def set_coronary_overlay(self, spec) -> None:
+        """Public (shell): set / clear the Coronary Tree overlay and repaint. A
+        *spec* is a list of {vid,name,points(world-mm),color,selected} or None
+        to clear. Painting happens only in 3-D MPR (see _paint_coronary)."""
+        self._coro_overlay = spec or None
+        try:
+            for k in ("A", "B"):
+                if self._overlay.get(k) is not None:
+                    self._overlay[k].update()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _redraw_geom(self, key):
         self._reproject_traces(key)
