@@ -14301,7 +14301,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._coronary_sync_ui()
             return
         if self._cpr is not None:
-            self._exit_cpr()
+            self._exit_cpr(keep_view=True)           # keep the current image
         if not self._meas_on:
             self._meas_btn.setChecked(True)
             self._toggle_measure()
@@ -14346,6 +14346,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         viewer's _enter_cpr. *ref_up* overrides the RMF seed (used by Load so a
         saved short-axis rebuilds with the exact base frame its state is
         relative to)."""
+        # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
+        self._cpr_prev_view = self._view_snapshot()
         m = self._measures[which][mi]
         u, v, nrm = self._axes_for(which)
         if ref_up is not None:
@@ -14383,9 +14385,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coronary_sync_ui()                   # show scrub, enable Save
         self._refresh(reset_cam=True)
 
-    def _exit_cpr(self):
+    def _exit_cpr(self, keep_view=False):
         """Leave short-axis mode and restore pane A's normal MPR. The coronary
-        row's visibility follows _coronary_mode (see _coronary_sync_ui)."""
+        row's visibility follows _coronary_mode (see _coronary_sync_ui).
+
+        *keep_view* restores the MPR view that was showing when this short-axis
+        was built (so re-Draw traces on the SAME image) instead of resetting."""
         if self._cpr is None:
             self._coronary_sync_ui()
             return
@@ -14396,8 +14401,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in self._t2d_btns:                   # work in 2-D and 3-D MPR
             b.setEnabled(True)
         self._coronary_sync_ui()                   # hide scrub; row per _coronary_mode
-        self._init_frames()                        # rebuild pane A's MPR frame
-        self._refresh(reset_cam=True)
+        if keep_view and getattr(self, "_cpr_prev_view", None) is not None:
+            self._view_restore(self._cpr_prev_view)   # back to the traced MPR view
+        else:
+            self._init_frames()                    # rebuild pane A's MPR frame
+            self._refresh(reset_cam=True)
 
     # ---- short-axis (CPR) Save / Load: a .cpr.json sidecar --------------
     def _cpr_save(self) -> None:
