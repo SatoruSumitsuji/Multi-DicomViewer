@@ -684,9 +684,9 @@ class _Overlay(QWidget):
                     pen = QPen(QColor(rgb[0], rgb[1], rgb[2], seg_a), width)
                 p.setPen(pen)
                 p.drawLine(S(out[i]), S(out[i + 1]))
-            # Name label at the proximal end.
+            # Name label at the proximal end (off by default — see _coro_names).
             name = ves.get("name", "")
-            if name:
+            if name and ves.get("vid") in v._coro_names:
                 lx, ly = v._world_to_screen(key, out[0][0], out[0][1])
                 _draw_outlined_text(
                     p, QRectF(lx + 6, ly - 16, 160, 18),
@@ -2187,6 +2187,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Painted in 3-D
         # MPR only, reprojected onto each pane's plane every repaint.
         self._coro_overlay = None
+        # vids whose NAME label is painted. Empty by default (labels cluttered
+        # the view); turned on per-vessel via the CPR line's right-click menu.
+        self._coro_names: set[str] = set()
         self._meas_seq = 0
         self._snap_lumen = True              # snap trace clicks to the lumen
         # Chamber-exclude for the lumen snap (seed a bright LV/RV cavity to ignore)
@@ -2587,6 +2590,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._meas_drag = False
             if self._meas_on and self._measure_right(key, x, y):
                 return                        # handled a measure line/handle
+            # Coronary-tree overlay line → name show/hide menu (any mode; the
+            # overlay is always visible in 3-D MPR). Deferred out of the pointer
+            # handler (modal-in-pointer-handler safety).
+            cvid = self._coronary_pick(key, x, y)
+            if cvid is not None:
+                self._reset_pointer_state()
+                QTimer.singleShot(
+                    0, lambda k=key, v=cvid, sx=x, sy=y:
+                    self._coronary_menu(k, v, sx, sy))
+                return
             ci = self._compare_hit(key, x, y)
             if ci is not None:
                 target = self._compares[ci]
@@ -6413,6 +6426,48 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._overlay[k].update()
         except Exception:                                # noqa: BLE001
             pass
+
+    def _coronary_pick(self, which, sx, sy, tol=6.0):
+        """vid of the coronary-overlay vessel whose reprojected centreline is
+        within *tol* px of (sx, sy) on pane *which*, or None. 3-D MPR only."""
+        spec = self._coro_overlay if self._mode == "3D" else None
+        if not spec:
+            return None
+        best, best_vid = tol, None
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            scr = []
+            for P in pts3d:
+                wx, wy = self._world3d_to_out(which, np.asarray(P, float))
+                scr.append(self._world_to_screen(which, wx, wy))
+            for i in range(len(scr) - 1):
+                d = _seg_dist(sx, sy, scr[i], scr[i + 1])
+                if d < best:
+                    best, best_vid = d, ves.get("vid")
+        return best_vid
+
+    def _coronary_menu(self, which, vid, sx, sy):
+        """Deferred menu (out of the pointer handler) to show / hide a coronary
+        vessel's NAME on the image. Names are off by default."""
+        names = self._coro_names
+        menu = QMenu(self)
+        show_act = menu.addAction(
+            t("名前を非表示") if vid in names else t("名前を表示"))
+        hide_all = menu.addAction(t("すべての名前を非表示")) if names else None
+        try:
+            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+                QPoint(int(sx), int(sy))))
+        finally:
+            self._reset_pointer_state()
+        if chosen is show_act:
+            names.discard(vid) if vid in names else names.add(vid)
+        elif hide_all is not None and chosen is hide_all:
+            names.clear()
+        for k in ("A", "B"):
+            if self._overlay.get(k) is not None:
+                self._overlay[k].update()
 
     def _redraw_geom(self, key):
         self._reproject_traces(key)

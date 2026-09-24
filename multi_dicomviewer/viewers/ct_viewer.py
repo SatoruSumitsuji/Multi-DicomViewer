@@ -957,6 +957,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             if self._owner._meas_on and self._owner._measure_right(
                     self._which, e.position().x(), e.position().y()):
                 return                        # handled a measure line/handle
+            # Coronary-tree overlay line → name show/hide menu (works in any
+            # mode, since the overlay is always visible in 3-D MPR).
+            if self._owner._coronary_right(
+                    self._which, e.position().x(), e.position().y()):
+                return
             ci = self._owner._compare_hit(
                 self._which, e.position().x(), e.position().y())
             if ci is not None:
@@ -2591,6 +2596,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Drawn in 3-D MPR
         # only, reprojected onto each pane's plane every redraw.
         self._coro_overlay = None
+        # vids whose NAME label is shown on the image. Empty by default (labels
+        # cluttered the view); the user turns a name on per-vessel via the CPR
+        # line's right-click menu.
+        self._coro_names: set[str] = set()
         self._meas_seq = 0              # type-independent running number
         self._draft = None              # {type, pane, pts} in progress
         self._edit = None               # {key, mi, vi} handle drag
@@ -9792,7 +9801,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     solid.append([out[i], out[i + 1]])
                     seg_a = a_full if not (o0 or o1) else a_half
                     solid_c.append((rgb[0], rgb[1], rgb[2], seg_a))
-            labels.append((ves.get("name", ""), out[0], rgb, sel))
+            if ves.get("vid") in self._coro_names:   # names off by default
+                labels.append((ves.get("name", ""), out[0], rgb, sel))
         p.coro_mapper.SetInputData(_colored_multi_pd(solid, solid_c))
         p.coro_dash_mapper.SetInputData(
             _colored_dashed_rgba_pd(dash, dash_c))
@@ -9814,6 +9824,49 @@ class CTViewer(CPRMixin, AbstractViewer):
             ta.GetTextProperty().SetBold(True)
             p.ren.AddActor(ta)
             p.coro_labels.append(ta)
+
+    def _coronary_pick(self, which, sx, sy, tol=6.0):
+        """vid of the coronary-overlay vessel whose reprojected centreline is
+        within *tol* px of (sx, sy) on pane *which*, or None. 3-D MPR only."""
+        spec = self._coro_overlay if self._mode == "3D" else None
+        if not spec:
+            return None
+        best, best_vid = tol, None
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            scr = []
+            for P in pts3d:
+                wx, wy = self._world3d_to_out(which, np.asarray(P, float))
+                scr.append(self._world_to_qt(which, wx, wy))
+            for i in range(len(scr) - 1):
+                d = _seg_dist(sx, sy, scr[i], scr[i + 1])
+                if d < best:
+                    best, best_vid = d, ves.get("vid")
+        return best_vid
+
+    def _coronary_right(self, which, sx, sy) -> bool:
+        """Right-click on a coronary-overlay line → a small menu to show / hide
+        that vessel's NAME on the image (names are off by default). Returns True
+        if a vessel line was hit and the menu shown."""
+        vid = self._coronary_pick(which, sx, sy)
+        if vid is None:
+            return False
+        menu = QMenu(self)
+        names = self._coro_names
+        show_act = menu.addAction(
+            t("名前を非表示") if vid in names else t("名前を表示"))
+        hide_all = menu.addAction(t("すべての名前を非表示")) if names else None
+        chosen = menu.exec(
+            self.pane[which].canvas.mapToGlobal(QtPoint(int(sx), int(sy))))
+        if chosen is show_act:
+            names.discard(vid) if vid in names else names.add(vid)
+        elif hide_all is not None and chosen is hide_all:
+            names.clear()
+        for k in ("A", "B"):
+            self._redraw_geom(k)
+        return True
 
     def _redraw_meas(self, key):
         self._recompute_compares(key)      # keep comparisons in sync on edit/delete
