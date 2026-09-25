@@ -2251,39 +2251,58 @@ class MainWindow(QMainWindow):
         return w
 
     def coronary_show_ct(self, series_uid: str, src_dir: str = "",
-                         prompt: bool = True) -> str:
+                         cpr_dir: str = "", prompt: bool = True) -> str:
         """Ensure the 3-D CT a coronary CPR was built on is loaded and shown, so
-        the Coronary Tree can draw its overlay on that volume. Called by the
-        panel's CPR read. Order of preference:
+        the Coronary Tree can draw its overlay on that volume. Order of
+        preference:
           1. the series is already loaded (by UID) → focus / show it;
-          2. a valid saved source folder → scan it, then show (deferred);
-          3. (only when *prompt*) ask the user to pick the folder (moved/renamed).
+          2. a valid saved source folder (src_dir from the .cpr.json) → scan it;
+          3. (only when *prompt*) the folder holding the .cpr.json/.corotree.json
+             (cpr_dir) → scan it recursively (the CT usually lives here / below),
+             so the source CT is auto-identified without asking;
+          4. (only when *prompt*) ask the user to pick the folder.
+        After a scan it POLLS until the series is indexed, then shows it and
+        refreshes the overlay again once the volume has decoded — so the CPR
+        lines appear on the first go (no need to press 画像表示 twice).
         *prompt* is False for the automatic CPR-load path so a plain drag&drop of
-        .cpr.json never pops a native folder dialog; the 画像表示 button and a
-        .corotree.json drop pass prompt=True. Returns a short status string."""
+        .cpr.json never scans or pops a dialog. Returns a short status string."""
         import os
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
-        def _show_then_overlay():
-            self._coronary_display_uid(series_uid)
-            self.coronary_overlay_refresh()
+
+        def _poll_show(attempt=0):
+            # Wait for the (async) folder scan to index the series, then show it
+            # and draw the overlay; refresh again after the volume decodes.
+            if series_uid and self._coronary_display_uid(series_uid):
+                for ms in (0, 700, 1600):
+                    QTimer.singleShot(ms, self.coronary_overlay_refresh)
+                return
+            if attempt < 40:                    # ~12 s max
+                QTimer.singleShot(300, lambda: _poll_show(attempt + 1))
 
         if series_uid and self.case_series_loaded(series_uid):
             ok = self._coronary_display_uid(series_uid)
-            self.coronary_overlay_refresh()
+            for ms in (0, 700, 1600):
+                QTimer.singleShot(ms, self.coronary_overlay_refresh)
             return t("表示中") if ok else ""
         if src_dir and os.path.isdir(src_dir):
             self.case_open_folders([src_dir])
-            QTimer.singleShot(700, _show_then_overlay)
+            QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
         if not prompt:
-            return t("元3DCT未読込")           # no dialog on the auto path
+            return t("元3DCT未読込")           # auto path: never scan / prompt
+        # Deliberate action (画像表示 / ツリー読込 / .corotree.json drop): try the
+        # folder the tree file came from before asking, so the CT is found itself.
+        if cpr_dir and os.path.isdir(cpr_dir):
+            self.case_open_folders([cpr_dir])
+            QTimer.singleShot(300, lambda: _poll_show(0))
+            return t("3DCTを読込中…")
         folder = QFileDialog.getExistingDirectory(
             self, t("この冠動脈の元となった3DCTフォルダを選択してください"),
             src_dir if src_dir else "")
         if folder:
             self.case_open_folders([folder])
-            QTimer.singleShot(700, _show_then_overlay)
+            QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
         return ""
 
@@ -5810,6 +5829,12 @@ class MainWindow(QMainWindow):
         # of the same modality if we're over the memory cap — freeing their
         # volume/clip while keeping their last image on screen.
         self._enforce_live_caps(keep=pane)
+        # A CT the Coronary Tree is waiting on may have JUST finished decoding
+        # here (shown_series_uid is only set now, after the async load); push the
+        # overlay so the CPR lines appear on this first display without the user
+        # pressing 画像表示 again. Cheap no-op when no tree panel is open.
+        if getattr(self, "_corotree_win", None) is not None:
+            self.coronary_overlay_refresh()
         self.statusBar().showMessage(t("Loaded {label}", label=series.label))
 
     def _clear_all(self) -> None:

@@ -212,15 +212,19 @@ class CoronaryTreeWindow(SnapDock):
                                   "フォルダを選択してください。"))
 
     def _show_source_ct(self, prompt: bool = True) -> str:
-        """Ask the shell to show the tree's source CT (by UID / saved folder /
-        optional folder prompt) and refresh the overlay. *prompt* False = never
-        pop a folder dialog (used by the automatic CPR-load path). Returns a
-        short status string."""
+        """Ask the shell to show the tree's source CT (by UID / saved folder / the
+        tree-file's own folder / optional prompt) and refresh the overlay.
+        *prompt* False = never scan or pop a dialog (the automatic CPR-load path).
+        Returns a short status string."""
         if self._shell is None or not hasattr(self._shell, "coronary_show_ct"):
             return ""
+        # The folder the .cpr.json / .corotree.json came from — the CT usually
+        # lives here or in a subfolder, so a deliberate 画像表示 can find it
+        # without asking.
+        cpr_dir = os.path.dirname(self._last_path) if self._last_path else ""
         try:
             return self._shell.coronary_show_ct(
-                self._ct_uid, self._ct_dir, prompt=prompt) or ""
+                self._ct_uid, self._ct_dir, cpr_dir=cpr_dir, prompt=prompt) or ""
         except Exception:                                   # noqa: BLE001
             return ""
 
@@ -590,5 +594,6 @@ class CoronaryTreeWindow(SnapDock):
         d = os.path.dirname(self._last_path) if self._last_path else ""
         path, _ = QFileDialog.getOpenFileName(
             self, t("冠動脈ツリーを読込"), d, t("CoroTree (*.corotree.json)"))
-        if path:
-            self.load_file(path)
+        if path and self.load_file(path):
+            # ツリー読込 → also bring up the source CT with the overlay drawn.
+            self._show_image()
