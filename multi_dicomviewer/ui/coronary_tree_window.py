@@ -190,8 +190,10 @@ class CoronaryTreeWindow(SnapDock):
         if errs:
             msg += " " + t("失敗 {e} 件。", e=len(errs))
         # Bring the source 3-D CT into view so the tree overlay has its volume.
+        # prompt=False: a plain .cpr.json load / drop must never pop a native
+        # folder dialog (use 画像表示 to pick the folder when it can't be found).
         if added and (self._ct_uid or self._ct_dir):
-            st = self._show_source_ct()
+            st = self._show_source_ct(prompt=False)
             if st:
                 msg += " " + t("3DCT: {s}", s=st)
         self._hint.setText(msg)
@@ -209,13 +211,16 @@ class CoronaryTreeWindow(SnapDock):
                            else t("元の3DCTが特定できません。CPRを読み込み直すか"
                                   "フォルダを選択してください。"))
 
-    def _show_source_ct(self) -> str:
+    def _show_source_ct(self, prompt: bool = True) -> str:
         """Ask the shell to show the tree's source CT (by UID / saved folder /
-        prompt) and refresh the overlay. Returns a short status string."""
+        optional folder prompt) and refresh the overlay. *prompt* False = never
+        pop a folder dialog (used by the automatic CPR-load path). Returns a
+        short status string."""
         if self._shell is None or not hasattr(self._shell, "coronary_show_ct"):
             return ""
         try:
-            return self._shell.coronary_show_ct(self._ct_uid, self._ct_dir) or ""
+            return self._shell.coronary_show_ct(
+                self._ct_uid, self._ct_dir, prompt=prompt) or ""
         except Exception:                                   # noqa: BLE001
             return ""
 
