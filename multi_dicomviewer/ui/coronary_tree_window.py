@@ -476,20 +476,24 @@ class CoronaryTreeWindow(SnapDock):
         # loose branch is attached to a root; further branch-to-branch nesting is
         # done via 接続 (nearest endpoint).
         banned = {vid, *self._tree.descendants(vid)}
-        cands = [(k, self._tree.vessels[k].name)
+        cands = [(k, self._tree.vessels[k].name, self._tree.vessels[k].role)
                  for k, vv in self._tree.vessels.items()
                  if k not in banned and vv.role in ROOT_ROLES]
         if not cands:
             self._warn(t("親にできるルート(LM-LAD/LM-LCX/RCA)がありません。"
                          "先にルートを設定してください。"))
             return
-        labels = [f"{name} ({k})" for k, name in cands]
-        cur = labels[[k for k, _ in cands].index(v.parent)] \
-            if v.parent in [k for k, _ in cands] else labels[0]
+        # Show the ROLE (LM-LAD / LM-LCX / RCA) first, then the vessel name only
+        # when it differs from the role — so the picker reads as roots, not file
+        # names.
+        labels = [role if name == role else f"{role}（{name}）"
+                  for _k, name, role in cands]
+        keys = [k for k, _n, _r in cands]
+        cur = labels[keys.index(v.parent)] if v.parent in keys else labels[0]
         pick, ok = QInputDialog.getItem(self, t("親を変更"), t("新しい親:"),
                                         labels, labels.index(cur), False)
         if ok and pick:
-            new_parent = cands[labels.index(pick)][0]
+            new_parent = keys[labels.index(pick)]
             self._tree.set_parent(vid, new_parent)   # junction = nearest sample
             self._populate()
             self.treeChanged.emit()
