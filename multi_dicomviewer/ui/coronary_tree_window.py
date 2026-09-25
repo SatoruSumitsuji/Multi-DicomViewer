@@ -66,6 +66,8 @@ class CoronaryTreeWindow(SnapDock):
         self._building = False
         self._hidden: set[str] = set()      # vids the user unchecked (overlay off)
         self._ct_uid: str = ""              # source-CT series UID (overlay target)
+        self._ct_dir: str = ""              # source-CT folder (re-open fallback)
+        self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
         self.setWidget(central)
@@ -84,6 +86,9 @@ class CoronaryTreeWindow(SnapDock):
                 (t("接続"),
                  t("読み込んだ枝を最近接端点でツリーに接続 (3mm以内)。"
                    "後から追加読込→再度接続も可"), self._connect),
+                (t("画像表示"),
+                 t("元の3DCTをデフォルト表示し、冠動脈ツリーを重畳表示"),
+                 self._show_image),
                 (t("ツリー保存…"), t("冠動脈ツリーを .corotree.json に保存"),
                  self._save_as),
                 (t("ツリー読込…"),
@@ -135,13 +140,18 @@ class CoronaryTreeWindow(SnapDock):
     def _load_cpr(self):
         """Load one or more per-vessel .cpr.json files as UNCONNECTED vessels
         (role defaults to branch; set roots via right-click ▸ 役割). Press 接続
-        afterwards to attach them by nearest endpoint."""
+        afterwards to attach them by nearest endpoint. Files can also be dragged
+        and dropped onto the panel (see dropEvent)."""
         paths, _ = QFileDialog.getOpenFileNames(
             self, t("CPR (.cpr.json) を読込"),
             os.path.dirname(self._last_path) if self._last_path else "",
             t("CPR (*.cpr.json)"))
-        if not paths:
-            return
+        if paths:
+            self._load_cpr_paths(paths)
+
+    def _load_cpr_paths(self, paths):
+        """Load the given .cpr.json paths (shared by the file dialog and drag &
+        drop) as unconnected vessels, then bring the source CT into view."""
         added, errs = 0, []
         ct_uid, ct_dir = "", ""              # source 3-D CT of the first vessel
         for p in paths:
@@ -166,28 +176,81 @@ class CoronaryTreeWindow(SnapDock):
                 if not ct_uid:               # remember the CT to open the overlay on
                     ct_uid = (data.get("series") or {}).get("series_uid", "")
                     ct_dir = data.get("src_dir", "") or ""
-                    if ct_uid:
-                        self._ct_uid = ct_uid   # overlay target for the shell
             except (OSError, ValueError) as exc:            # noqa: BLE001
                 errs.append(f"{os.path.basename(p)}: {exc}")
-        self._last_path = paths[0]
+        if paths:
+            self._last_path = paths[0]
+        if ct_uid:                           # overlay target for the shell
+            self._ct_uid = ct_uid
+        if ct_dir:
+            self._ct_dir = ct_dir
         self._populate()
         self.treeChanged.emit()
         msg = t("{n} 本を読込（役割を設定して「接続」）。", n=added)
         if errs:
             msg += " " + t("失敗 {e} 件。", e=len(errs))
         # Bring the source 3-D CT into view so the tree overlay has its volume.
-        if added and (ct_uid or ct_dir) and self._shell is not None \
-                and hasattr(self._shell, "coronary_show_ct"):
-            try:
-                st = self._shell.coronary_show_ct(ct_uid, ct_dir)
-                if st:
-                    msg += " " + t("3DCT: {s}", s=st)
-            except Exception:                               # noqa: BLE001
-                pass
+        if added and (self._ct_uid or self._ct_dir):
+            st = self._show_source_ct()
+            if st:
+                msg += " " + t("3DCT: {s}", s=st)
         self._hint.setText(msg)
         if errs:
             self._warn("\n".join(errs[:8]))
+
+    def _show_image(self):
+        """画像表示 button: (re)open the source 3-D CT at its default view and
+        overlay the coronary tree on it."""
+        if not self._tree.vessels:
+            self._warn(t("先に CPR を読み込んでください。"))
+            return
+        st = self._show_source_ct()
+        self._hint.setText(t("画像表示: {s}", s=st) if st
+                           else t("元の3DCTが特定できません。CPRを読み込み直すか"
+                                  "フォルダを選択してください。"))
+
+    def _show_source_ct(self) -> str:
+        """Ask the shell to show the tree's source CT (by UID / saved folder /
+        prompt) and refresh the overlay. Returns a short status string."""
+        if self._shell is None or not hasattr(self._shell, "coronary_show_ct"):
+            return ""
+        try:
+            return self._shell.coronary_show_ct(self._ct_uid, self._ct_dir) or ""
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    # --------------------------------------------------- drag & drop
+    def dragEnterEvent(self, e):
+        """Accept a drag that carries at least one .cpr.json file."""
+        md = e.mimeData()
+        if md is not None and md.hasUrls() and any(
+                u.toLocalFile().lower().endswith(".cpr.json")
+                for u in md.urls()):
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        md = e.mimeData()
+        if md is not None and md.hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        """Load every .cpr.json dropped onto the panel."""
+        md = e.mimeData()
+        paths = []
+        if md is not None and md.hasUrls():
+            for u in md.urls():
+                f = u.toLocalFile()
+                if f.lower().endswith(".cpr.json"):
+                    paths.append(f)
+        if paths:
+            e.acceptProposedAction()
+            self._load_cpr_paths(paths)
+        else:
+            super().dropEvent(e)
 
     def _connect(self):
         """Grow the tree: attach every loose branch to the nearest connected
@@ -408,11 +471,17 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("ルート(LM-LAD/LM-LCX/RCA)の親は変更できません。"
                          "役割を「枝」に変えてから接続してください。"))
             return
-        # Candidate parents = every OTHER vessel that is not a descendant of vid.
+        # Candidate parents = ROOT vessels only (role LM-LAD/LM-LCX/RCA), never a
+        # descendant of vid. Per user request the picker lists trunks only, so a
+        # loose branch is attached to a root; further branch-to-branch nesting is
+        # done via 接続 (nearest endpoint).
         banned = {vid, *self._tree.descendants(vid)}
         cands = [(k, self._tree.vessels[k].name)
-                 for k in self._tree.vessels if k not in banned]
+                 for k, vv in self._tree.vessels.items()
+                 if k not in banned and vv.role in ROOT_ROLES]
         if not cands:
+            self._warn(t("親にできるルート(LM-LAD/LM-LCX/RCA)がありません。"
+                         "先にルートを設定してください。"))
             return
         labels = [f"{name} ({k})" for k, name in cands]
         cur = labels[[k for k, _ in cands].index(v.parent)] \
@@ -476,8 +545,12 @@ class CoronaryTreeWindow(SnapDock):
 
     def _write_to(self, path):
         try:
+            # Embed the source-CT identity so a later load (or a drag&drop of
+            # the .corotree.json onto the shell) can re-open the same 3-D CT.
+            series = {"series_uid": self._ct_uid, "src_dir": self._ct_dir}
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(self._tree.to_json(), f, ensure_ascii=False, indent=2)
+                json.dump(self._tree.to_json(series=series), f,
+                          ensure_ascii=False, indent=2)
             self._last_path = path
             self._hint.setText(t("保存しました: {p}", p=path))
         except OSError as exc:
@@ -494,6 +567,10 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("冠動脈ツリー形式のファイルではありません。"))
             return False
         self._tree = CoronaryTree.from_json(data)
+        self._hidden.clear()
+        ser = data.get("series") or {}
+        self._ct_uid = ser.get("series_uid", "") or ""
+        self._ct_dir = ser.get("src_dir", "") or ""
         self._last_path = path
         self._populate()
         self.treeChanged.emit()
