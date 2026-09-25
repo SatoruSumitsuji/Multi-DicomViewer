@@ -2250,14 +2250,17 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
-    def coronary_show_ct(self, series_uid: str, src_dir: str = "") -> str:
+    def coronary_show_ct(self, series_uid: str, src_dir: str = "",
+                         prompt: bool = True) -> str:
         """Ensure the 3-D CT a coronary CPR was built on is loaded and shown, so
         the Coronary Tree can draw its overlay on that volume. Called by the
         panel's CPR read. Order of preference:
           1. the series is already loaded (by UID) → focus / show it;
           2. a valid saved source folder → scan it, then show (deferred);
-          3. ask the user to pick the folder (renamed / moved).
-        Returns a short status string for the panel hint ('' = nothing shown)."""
+          3. (only when *prompt*) ask the user to pick the folder (moved/renamed).
+        *prompt* is False for the automatic CPR-load path so a plain drag&drop of
+        .cpr.json never pops a native folder dialog; the 画像表示 button and a
+        .corotree.json drop pass prompt=True. Returns a short status string."""
         import os
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
@@ -2273,6 +2276,8 @@ class MainWindow(QMainWindow):
             self.case_open_folders([src_dir])
             QTimer.singleShot(700, _show_then_overlay)
             return t("3DCTを読込中…")
+        if not prompt:
+            return t("元3DCT未読込")           # no dialog on the auto path
         folder = QFileDialog.getExistingDirectory(
             self, t("この冠動脈の元となった3DCTフォルダを選択してください"),
             src_dir if src_dir else "")
