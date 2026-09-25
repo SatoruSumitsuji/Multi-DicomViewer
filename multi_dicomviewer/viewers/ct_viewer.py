@@ -15876,9 +15876,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # so the pseudo-centre points AND their lines follow the image even
         # after Measure is turned off. Cheap guard: only runs when such a trace
         # exists (a plain measure has no pts3d).
-        if self._mode == "3D" and (self._lv is not None or any(
-                m.get("pts3d") for kk in ("A", "B")
-                for m in self._measures[kk])):
+        if self._mode == "3D" and (self._lv is not None or self._coro_overlay
+                or any(m.get("pts3d") for kk in ("A", "B")
+                       for m in self._measures[kk])):
             for kk in ("A", "B"):
                 if only is not None and kk != only:
                     continue

@@ -2375,6 +2375,29 @@ class MainWindow(QMainWindow):
             w.load_file(path)
 
     @staticmethod
+    def _is_coronary_tree_json(path: str) -> bool:
+        """True if *path* is a Coronary Tree .corotree.json (format marker), so a
+        drag&drop of it opens the Coronary Tree panel instead of reading DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return isinstance(data, dict) and data.get("format") == "MDV-CoroTree"
+
+    def _open_coronary_tree_file(self, path: str) -> None:
+        """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
+        load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /
+        saved folder / prompt) and the vessel overlay is drawn on it."""
+        w = self._open_coronary_tree()
+        if w is not None and hasattr(w, "load_file") and w.load_file(path):
+            if hasattr(w, "_show_image"):
+                w._show_image()          # opens the source CT + draws the overlay
+
+    @staticmethod
     def _case_extract_dt(hdr) -> tuple:
         """(date 'YYYYMMDD', time 'HHMMSS[.ffffff]') from a DICOM header, trying
         Acquisition → Content → Series → Study. '' for anything missing."""
@@ -4726,6 +4749,13 @@ class MainWindow(QMainWindow):
         for p in cp_files:
             self._open_case_presentation_file(p)
         paths = [p for p in paths if p not in cp_files]
+        # Peel off Coronary Tree .corotree.json drops → open the panel, load the
+        # tree and re-open its source 3-D CT with the overlay.
+        ct_files = [p for p in paths
+                    if os.path.isfile(p) and self._is_coronary_tree_json(p)]
+        for p in ct_files:
+            self._open_coronary_tree_file(p)
+        paths = [p for p in paths if p not in ct_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
         if not dirs and not files:
