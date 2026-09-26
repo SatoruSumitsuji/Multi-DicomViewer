@@ -101,6 +101,7 @@ class CoronaryTreeWindow(SnapDock):
             b = QPushButton(label)
             b.setToolTip(tip)
             b.clicked.connect(fn)
+            b.setStyleSheet("text-align: left; padding: 3px 8px;")  # 左揃え
             bar.addWidget(b)
             if label == t("ツリー表示"):        # keep a handle to relabel it
                 self._overlay_btn = b
