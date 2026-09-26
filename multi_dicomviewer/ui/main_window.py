@@ -2418,8 +2418,8 @@ class MainWindow(QMainWindow):
         saved folder / prompt) and the vessel overlay is drawn on it."""
         w = self._open_coronary_tree()
         if w is not None and hasattr(w, "load_file") and w.load_file(path):
-            if hasattr(w, "_show_image"):
-                w._show_image()          # opens the source CT + draws the overlay
+            if hasattr(w, "_set_overlay"):
+                w._set_overlay(True)     # overlay ON + open the source CT
 
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:

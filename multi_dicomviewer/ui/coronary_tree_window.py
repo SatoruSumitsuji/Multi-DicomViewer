@@ -67,6 +67,8 @@ class CoronaryTreeWindow(SnapDock):
         self._hidden: set[str] = set()      # vids the user unchecked (overlay off)
         self._ct_uid: str = ""              # source-CT series UID (overlay target)
         self._ct_dir: str = ""              # source-CT folder (re-open fallback)
+        self._overlay_on: bool = False      # ツリー表示 toggle (off until pressed)
+        self._overlay_btn = None            # the ツリー表示/非表示 toggle button
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
@@ -86,9 +88,10 @@ class CoronaryTreeWindow(SnapDock):
                 (t("接続"),
                  t("読み込んだ枝を最近接端点でツリーに接続 (3mm以内)。"
                    "後から追加読込→再度接続も可"), self._connect),
-                (t("画像表示"),
-                 t("元の3DCTをデフォルト表示し、冠動脈ツリーを重畳表示"),
-                 self._show_image),
+                (t("ツリー表示"),
+                 t("冠動脈ツリーを3DCTに重畳表示 (再クリックで非表示)。"
+                   "3DCT未読込なら自動で読み込んで表示"),
+                 self._toggle_overlay),
                 (t("ツリー保存…"), t("冠動脈ツリーを .corotree.json に保存"),
                  self._save_as),
                 (t("ツリー読込…"),
@@ -99,6 +102,8 @@ class CoronaryTreeWindow(SnapDock):
             b.setToolTip(tip)
             b.clicked.connect(fn)
             bar.addWidget(b)
+            if label == t("ツリー表示"):        # keep a handle to relabel it
+                self._overlay_btn = b
         bar.addStretch(1)
         outer.addLayout(bar)
 
@@ -186,30 +191,46 @@ class CoronaryTreeWindow(SnapDock):
             self._ct_dir = ct_dir
         self._populate()
         self.treeChanged.emit()
-        msg = t("{n} 本を読込（役割を設定して「接続」）。", n=added)
+        # CPR読込 just loads the vessels; the 3-D CT + overlay come up only when
+        # the user presses ツリー表示 (which auto-loads the CT if needed). If the
+        # overlay is already ON, refresh it so the newly-loaded vessels appear.
+        if self._overlay_on:
+            self._push_overlay()
+        msg = t("{n} 本を読込（役割を設定して「接続」→「ツリー表示」）。", n=added)
         if errs:
             msg += " " + t("失敗 {e} 件。", e=len(errs))
-        # Bring the source 3-D CT into view so the tree overlay has its volume.
-        # prompt=False: a plain .cpr.json load / drop must never pop a native
-        # folder dialog (use 画像表示 to pick the folder when it can't be found).
-        if added and (self._ct_uid or self._ct_dir):
-            st = self._show_source_ct(prompt=False)
-            if st:
-                msg += " " + t("3DCT: {s}", s=st)
         self._hint.setText(msg)
         if errs:
             self._warn("\n".join(errs[:8]))
 
-    def _show_image(self):
-        """画像表示 button: (re)open the source 3-D CT at its default view and
-        overlay the coronary tree on it."""
+    def _toggle_overlay(self):
+        """ツリー表示 / ツリー非表示 button: toggle the whole coronary overlay on
+        the 3-D CT. Turning it ON also (re)opens the source CT if it isn't
+        loaded, so one click gives a CT with the tree drawn on it."""
         if not self._tree.vessels:
             self._warn(t("先に CPR を読み込んでください。"))
             return
-        st = self._show_source_ct()
-        self._hint.setText(t("画像表示: {s}", s=st) if st
-                           else t("元の3DCTが特定できません。CPRを読み込み直すか"
-                                  "フォルダを選択してください。"))
+        self._set_overlay(not self._overlay_on)
+
+    def _set_overlay(self, on: bool):
+        """Set the overlay on/off, update the button label, (re)show the source
+        CT when turning on, and push the overlay (draw when on, clear when off).
+        Used by the toggle button and by ツリー読込 / .corotree.json drop (on)."""
+        self._overlay_on = bool(on)
+        if self._overlay_btn is not None:
+            self._overlay_btn.setText(t("ツリー非表示") if on
+                                      else t("ツリー表示"))
+        if on:
+            # overlay_spec now returns the vessels; showing the CT triggers the
+            # overlay refresh (and again once the volume finishes decoding).
+            st = self._show_source_ct(prompt=True)
+            self._hint.setText(
+                t("ツリー表示: {s}", s=st) if st
+                else t("元の3DCTが特定できません。CPRを読み込み直すか"
+                       "フォルダを選択してください。"))
+        else:
+            self._push_overlay()             # overlay_spec is now empty → clear
+            self._hint.setText(t("ツリー非表示"))
 
     def _show_source_ct(self, prompt: bool = True) -> str:
         """Ask the shell to show the tree's source CT (by UID / saved folder / the
@@ -390,7 +411,10 @@ class CoronaryTreeWindow(SnapDock):
         """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
         its world-mm centreline, root colour and name — for the CT viewers to
         reproject onto their MPR planes. The currently-selected vessel is
-        flagged so the viewer can highlight it."""
+        flagged so the viewer can highlight it. Empty while the ツリー表示 toggle
+        is OFF (so the overlay only shows on demand)."""
+        if not self._overlay_on:
+            return []
         sel = self.selected_vid()
         out = []
         for vid, v in self._tree.vessels.items():
@@ -595,5 +619,5 @@ class CoronaryTreeWindow(SnapDock):
         path, _ = QFileDialog.getOpenFileName(
             self, t("冠動脈ツリーを読込"), d, t("CoroTree (*.corotree.json)"))
         if path and self.load_file(path):
-            # ツリー読込 → also bring up the source CT with the overlay drawn.
-            self._show_image()
+            # ツリー読込 → turn the overlay ON and bring up the source CT.
+            self._set_overlay(True)
