@@ -14249,6 +14249,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "編集したCPR中心点に短軸断面を再フィット（Save→Exit→Load と同等の "
             "再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す"))
         self._cpr_fit_btn.clicked.connect(self._cpr_fit)
+        self._cpr_fit_btn.setStyleSheet(self._BTN_DIS)   # explicit grey when off
         row.addWidget(self._cpr_fit_btn)
         # Snap: toggle the trace-to-lumen auto-snap (green = on). Turn OFF to
         # hand-place points through an occluded / low-HU segment near a bright
@@ -14286,6 +14287,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
               "shows the trace, and opens the perpendicular cross-sections."))
         self._cpr_load_btn.clicked.connect(self._cpr_load)
+        self._cpr_load_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_load_btn)
         self._cpr_save_btn = FitButton(t("Save"))
         self._cpr_save_btn.setHelpToolTip(
@@ -14293,11 +14295,13 @@ class CTViewer(CPRMixin, AbstractViewer):
               "FOV / position) to a .cpr.json for reuse (name it yourself, e.g. "
               "by vessel / analysis)."))
         self._cpr_save_btn.clicked.connect(self._cpr_save)
+        self._cpr_save_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_save_btn)
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
         self._cpr_exit_btn.clicked.connect(self._coronary_exit)
+        self._cpr_exit_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_exit_btn)
         # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
         # the layout (so the buttons keep their natural width); its CHILDREN are
