@@ -8158,6 +8158,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         Returns True if anything was applied."""
         if self._image is None:
             return False
+        # Epi / Blood require the MV plane, AoV plane AND apex to be set first
+        # (the correct workflow) — either present in THIS drop or already loaded.
+        # If any is missing, alert and apply NOTHING (don't open a partial LV).
+        if files.get("epi") is not None or files.get("blood") is not None:
+            from PyQt6.QtWidgets import QMessageBox
+            have_mv = (files.get("valve_mitral") is not None
+                       or self._lv_valves.get("mitral") is not None)
+            have_av = (files.get("valve_aortic") is not None
+                       or self._lv_valves.get("aortic") is not None)
+            have_apex = (files.get("apex") is not None
+                         or getattr(self, "_lv_apex", None) is not None)
+            if not (have_mv and have_av and have_apex):
+                missing = []
+                if not have_mv:
+                    missing.append("MV")
+                if not have_av:
+                    missing.append("AoV")
+                if not have_apex:
+                    missing.append("Apex")
+                QMessageBox.warning(
+                    self.window(), t("LV"),
+                    t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
+                      "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
+                      "ドロップしてください。", m="・".join(missing)))
+                return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")             # overlays only draw in 3-D MPR
         applied = False
