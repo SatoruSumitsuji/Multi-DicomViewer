@@ -6111,6 +6111,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         data = {"type": "apex",
                 "series": (self._lv_series_meta()
                            if hasattr(self, "_lv_series_meta") else {}),
+                "src_dir": (self._lv_series_dir()     # drop re-opens just this CT
+                            if hasattr(self, "_lv_series_dir") else ""),
                 "apex": list(map(float, np.asarray(self._lv_apex, float)))}
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -6619,6 +6621,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         data = {"type": "valve", "valve": which,
                 "series": (self._lv_series_meta()
                            if hasattr(self, "_lv_series_meta") else {}),
+                "src_dir": (self._lv_series_dir()     # drop re-opens just this CT
+                            if hasattr(self, "_lv_series_dir") else ""),
                 "c": list(map(float, c)), "n": list(map(float, n)),
                 "r": float(r)}
         suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
@@ -7915,6 +7919,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             "type": "lvvol",
             "series": (self._lv_series_meta()
                        if hasattr(self, "_lv_series_meta") else {}),
+            "src_dir": (self._lv_series_dir()         # drop re-opens just this CT
+                        if hasattr(self, "_lv_series_dir") else ""),
             "apex": list(map(float, lvv["apex"])),
             "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
                        "r": float(r_a)},
@@ -14392,6 +14398,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             data["endo_planes"] = {}
             data.pop("endo_orig", None)
         data["series"] = self._lv_series_meta()      # for the load-time match
+        data["src_dir"] = (self._lv_series_dir()     # so a drop re-opens just this CT
+                           if hasattr(self, "_lv_series_dir") else "")
         # Persist THIS sub-mode's computed volume (if a VALID result is showing —
         # vol_done is cleared on any edit) so Load can redisplay it.
         vv = self._lv.get(vol_key)

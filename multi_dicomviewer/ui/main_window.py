@@ -2515,7 +2515,7 @@ class MainWindow(QMainWindow):
         import os
         import json
         files: dict = {}
-        uid, drop_dir = "", ""
+        uid, src_dir, drop_dir = "", "", ""
         for p in paths:
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -2528,6 +2528,8 @@ class MainWindow(QMainWindow):
             files[kind] = data
             if not uid:
                 uid = (data.get("series") or {}).get("series_uid", "")
+            if not src_dir:                          # the CT's OWN folder (if saved)
+                src_dir = data.get("src_dir", "") or ""
             if not drop_dir:
                 drop_dir = os.path.dirname(p)
         if not files or not uid:
@@ -2536,8 +2538,14 @@ class MainWindow(QMainWindow):
         if self.case_series_loaded(uid):
             self._poll_lv_apply(uid, files, 0)
             return
-        if drop_dir and os.path.isdir(drop_dir):
-            self.case_open_folders([drop_dir])
+        # Prefer the CT's OWN folder (src_dir) so ONLY the CT is scanned — not the
+        # whole case folder (which would also index XA / IVUS / OT / SR). Fall back
+        # to the dropped folder for older files that have no src_dir, then a prompt.
+        scan = src_dir if (src_dir and os.path.isdir(src_dir)) else ""
+        if not scan and drop_dir and os.path.isdir(drop_dir):
+            scan = drop_dir
+        if scan:
+            self.case_open_folders([scan])
             self._poll_lv_apply(uid, files, 0)
             return
         folder = QFileDialog.getExistingDirectory(
