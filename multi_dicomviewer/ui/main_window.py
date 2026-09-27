@@ -1603,7 +1603,7 @@ class MainWindow(QMainWindow):
         self._corotree_act = QAction(t("Coronary Tree…"), self)
         self._corotree_act.setToolTip(t(
             "Manage the coronary centrelines for a CT Territory analysis as a "
-            "branch tree (roots LM-LAD / LM-LCX / RCA + branches); save/load a "
+            "branch tree (roots LM / LAD / LCX / RCA + branches); save/load a "
             ".corotree.json. Floats or docks with Studies"))
         self._corotree_act.triggered.connect(self._open_coronary_tree)
         tm.addAction(self._corotree_act)
