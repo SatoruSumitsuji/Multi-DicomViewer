@@ -5303,19 +5303,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         finally:
             self._sync_view_applying = False
 
+    def _sv_shown_pane(self) -> str:
+        """The pane the user actually SEES: B when side=Rt, A when side=Lt, else
+        (Bi) the active pane. The same-scale match must use this pane, not always
+        pane A — matching a HIDDEN pane left the shown one at a different zoom."""
+        side = getattr(self, "_side", "Bi")
+        if side == "Rt":
+            return "B"
+        if side == "Lt":
+            return "A"
+        k = getattr(self, "_active_pane", "A")
+        return k if k in ("A", "B") else "A"
+
     def sync_view_get_scale(self):
-        """Pane-A zoom (half-height mm, _ps) — the reference for the same-scale
-        option offered on SyncView entry."""
+        """The SHOWN pane's on-screen scale as world-mm per pixel — the reference
+        for the same-scale lock. Using mm/px (not the raw half-height _ps)
+        equalises the ACTUAL on-screen size regardless of each pane's pixel
+        height, and uses the pane the user sees (B when side=Rt)."""
         try:
-            return float(self._ps["A"])
+            return 1.0 / self._scale_px(self._sv_shown_pane())   # mm per px
         except Exception:                                # noqa: BLE001
             return None
 
-    def sync_view_set_scale(self, ps) -> None:
-        """Force both panes to *ps* (same-scale lock) and redraw."""
+    def sync_view_set_scale(self, mmpp) -> None:
+        """Set BOTH panes so their world-mm-per-pixel = *mmpp* (from the peer's
+        shown pane), so whichever pane is shown matches the peer's scale.
+        _ps (half visible height, mm) = mmpp · (pane px height / 2)."""
         try:
+            mmpp = float(mmpp)
             for k in ("A", "B"):
-                self._ps[k] = max(1e-3, float(ps))
+                ph = max(1, self.pane[k].canvas.height())
+                self._ps[k] = max(1e-3, mmpp * ph / 2.0)
         except Exception:                                # noqa: BLE001
             return
         self._refresh()

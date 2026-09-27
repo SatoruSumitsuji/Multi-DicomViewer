@@ -5583,16 +5583,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         finally:
             self._sync_view_applying = False
 
-    def sync_view_get_scale(self):
-        """Pane-A zoom (VTK ParallelScale) — the reference for the same-scale
-        option offered on SyncView entry."""
-        return self.lv_cosync_get_scale()
+    def _sv_shown_pane(self) -> str:
+        """The pane the user actually SEES: B when side=Rt, A when side=Lt, else
+        (Bi) the active pane. The same-scale match must use this pane, not always
+        pane A — matching a HIDDEN pane left the shown one at a different zoom."""
+        side = getattr(self, "_side", "Bi")
+        if side == "Rt":
+            return "B"
+        if side == "Lt":
+            return "A"
+        k = getattr(self, "_active_pane", "A")
+        return k if k in ("A", "B") else "A"
 
-    def sync_view_set_scale(self, ps) -> None:
-        """Force both panes to *ps* (same-scale lock) and redraw overlays."""
+    def sync_view_get_scale(self):
+        """The SHOWN pane's on-screen scale as world-mm per DISPLAY pixel (DPR-
+        aware) — the reference for the same-scale lock. Using mm/px (not the raw
+        ParallelScale) equalises the ACTUAL on-screen size regardless of each
+        pane's pixel height, and uses the pane the user sees."""
         try:
+            p = self.pane[self._sv_shown_pane()]
+            ps = float(p.ren.GetActiveCamera().GetParallelScale())
+            dpr = max(1.0, p.canvas.devicePixelRatioF())
+            h = max(1.0, p.canvas.height() * dpr)
+            return ps / (h / 2.0)
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def sync_view_set_scale(self, mmpp) -> None:
+        """Set BOTH panes so their world-mm-per-display-pixel = *mmpp* (from the
+        peer's shown pane), so whichever pane is shown matches the peer's scale.
+        PS = mmpp · (pane display-px height / 2)."""
+        try:
+            mmpp = float(mmpp)
             for k in ("A", "B"):
-                self.pane[k].ren.GetActiveCamera().SetParallelScale(float(ps))
+                p = self.pane[k]
+                dpr = max(1.0, p.canvas.devicePixelRatioF())
+                h = max(1.0, p.canvas.height() * dpr)
+                p.ren.GetActiveCamera().SetParallelScale(mmpp * (h / 2.0))
         except Exception:                                # noqa: BLE001
             return
         self._refresh()
