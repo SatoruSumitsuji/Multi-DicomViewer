@@ -4,7 +4,7 @@ up a CT Territory analysis, shown as their parent/child branch tree.
 Like the Case Presentation panel it is a :class:`SnapDock`, so it can FLOAT or
 dock into the left Studies frame (tabbed with Studies / Case Presentation). One
 instance is kept by the shell. The panel owns the ``CoronaryTree`` model; the CT
-viewer registers vessels into it (roots LM-LAD / LM-LCX / RCA, or snapped
+viewer registers vessels into it (roots LM / LAD / LCX / RCA, or snapped
 branches) and reads back the selection / visibility to draw the overlays. This
 first increment covers the model, the tree view, edit actions (rename /
 re-parent / delete) and ``.corotree.json`` save / load; the viewer wiring and
@@ -40,8 +40,19 @@ from multi_dicomviewer.core.coronary_territory import (
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.ui.snap_dock import SnapDock
 
-#: One colour per root trunk; branches inherit their root's colour.
-ROOT_COLORS = {"LM-LAD": "#d62728", "LM-LCX": "#1f77b4", "RCA": "#2ca02c"}
+#: One colour per root trunk; branches inherit their root's colour. Soft/pale
+#: tones so the lines read on a grey CT: LAD pale blue, LCX pale yellow, RCA pale
+#: green, LM pale purple (the left-main stub). Legacy LM-LAD/LM-LCX keys alias to
+#: LAD/LCX so an old tree still colours before it is normalised.
+ROOT_COLORS = {
+    "LM":  "#b4a7d6",       # pale purple
+    "LAD": "#6fa8dc",       # pale blue
+    "LCX": "#ffd966",       # pale yellow
+    "RCA": "#93c47d",       # pale green
+    "LM-LAD": "#6fa8dc", "LM-LCX": "#ffd966",   # legacy aliases
+}
+#: Reserved for the (future-phase) perfusion-territory overlay — pale red.
+TARGET_COLOR = "#ea9999"
 _UID_ROLE = Qt.ItemDataRole.UserRole
 #: Centreline resample step (mm) when rebuilding a .cpr.json's control points —
 #: dense enough for a coronary vessel; territory granularity, not correctness.
@@ -290,7 +301,7 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("先に CPR を読み込んでください。"))
             return
         if not self._tree.roots():
-            self._warn(t("ルート (LM-LAD / LM-LCX / RCA) を1本以上設定して"
+            self._warn(t("ルート (LM / LAD / LCX / RCA) を1本以上設定して"
                          "ください。血管を右クリック →「役割」で設定できます。"))
             return
         res = self._tree.connect_all(snap_tol_mm=3.0)
@@ -502,10 +513,10 @@ class CoronaryTreeWindow(SnapDock):
             return
         v = self._tree.vessels[vid]
         if v.role in ROOT_ROLES:                 # a true trunk has no parent
-            self._warn(t("ルート(LM-LAD/LM-LCX/RCA)の親は変更できません。"
+            self._warn(t("ルート(LM/LAD/LCX/RCA)の親は変更できません。"
                          "役割を「枝」に変えてから接続してください。"))
             return
-        # Candidate parents = ROOT vessels only (role LM-LAD/LM-LCX/RCA), never a
+        # Candidate parents = ROOT vessels only (role LM/LAD/LCX/RCA), never a
         # descendant of vid. Per user request the picker lists trunks only, so a
         # loose branch is attached to a root; further branch-to-branch nesting is
         # done via 接続 (nearest endpoint).
@@ -514,10 +525,10 @@ class CoronaryTreeWindow(SnapDock):
                  for k, vv in self._tree.vessels.items()
                  if k not in banned and vv.role in ROOT_ROLES]
         if not cands:
-            self._warn(t("親にできるルート(LM-LAD/LM-LCX/RCA)がありません。"
+            self._warn(t("親にできるルート(LM/LAD/LCX/RCA)がありません。"
                          "先にルートを設定してください。"))
             return
-        # Show the ROLE (LM-LAD / LM-LCX / RCA) first, then the vessel name only
+        # Show the ROLE (LM / LAD / LCX / RCA) first, then the vessel name only
         # when it differs from the role — so the picker reads as roots, not file
         # names.
         labels = [role if name == role else f"{role}（{name}）"

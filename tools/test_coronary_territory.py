@@ -31,7 +31,7 @@ def _line(p0, p1, step_mm=1.0):
 def _build_tree():
     """LAD trunk (x 0→60) with D1@x10, D2@x40, and D1a off D1@y12."""
     tree = CoronaryTree()
-    tree.add_root("lad", "LM-LAD", "LM-LAD", _line((0, 0, 0), (60, 0, 0)))
+    tree.add_root("lad", "LAD", "LAD", _line((0, 0, 0), (60, 0, 0)))
     r1 = tree.add_branch("d1", "D1", _line((10, 0, 0), (10, 25, 0)))
     r2 = tree.add_branch("d2", "D2", _line((40, 0, 0), (40, 25, 0)))
     r3 = tree.add_branch("d1a", "D1a", _line((10, 12, 0), (25, 12, 0)))
@@ -154,7 +154,7 @@ def _myo_lvf():
 
 def _engine():
     specs = [
-        {"vid": "lad", "name": "LM-LAD", "role": "LM-LAD",
+        {"vid": "lad", "name": "LAD", "role": "LAD",
          "points": _line((0, 0, 0), (60, 0, 0))},
         {"vid": "d1", "name": "D1", "role": "branch",
          "points": _line((10, 0, 0), (10, 25, 0))},
@@ -226,7 +226,7 @@ def test_batch_connect():
     """Batch workflow: add vessels unconnected (any draw direction), then
     connect_all grows the tree by nearest endpoint, reversing as needed."""
     tree = CoronaryTree()
-    tree.add_vessel("lad", "LM-LAD", "LM-LAD", _line((0, 0, 0), (60, 0, 0)))
+    tree.add_vessel("lad", "LAD", "LAD", _line((0, 0, 0), (60, 0, 0)))
     # D9 drawn REVERSED (distal→proximal): its LAST point sits on the LAD.
     tree.add_vessel("d9", "D9", "branch", _line((45, 22, 0), (30, 0, 0)))
     # D9a off D9 (normal direction), first point on D9.

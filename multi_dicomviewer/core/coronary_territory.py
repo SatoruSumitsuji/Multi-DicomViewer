@@ -2,9 +2,10 @@
 
 Model
 -----
-A set of coronary centrelines organised into up to three trees whose ROOTS are
-the explicit vessels ``LM-LAD`` / ``LM-LCX`` / ``RCA`` (LM-LCX also covers the
-LM-absent "LCX from aorta" case).  Every other vessel is a *branch* that
+A set of coronary centrelines organised into trees whose ROOTS are the explicit
+major vessels ``LM`` / ``LAD`` / ``LCX`` / ``RCA``, each drawn as a pure segment
+(LM = ostium→bifurcation, LAD/LCX from that bifurcation). An absent vessel
+(anomaly) is simply not drawn.  Every other vessel is a *branch* that
 attaches to an already-drawn vessel by snapping its PROXIMAL end (its first
 sample) to the nearest sample on any existing vessel — roots *or* branches, so
 multi-level sub-branches (D9→D9a, X12→X12a, R4→R16a…) are supported.
@@ -37,8 +38,20 @@ try:                                    # cKDTree is the fast path (scipy is a d
 except Exception:                       # pragma: no cover - brute-force fallback
     _KDTree = None
 
-#: The three roles that start a NEW tree (an explicit ostial trunk).
-ROOT_ROLES = ("LM-LAD", "LM-LCX", "RCA")
+#: The roles that start a NEW tree (an explicit ostial trunk). Each major vessel
+#: is its OWN root, drawn as a pure segment: LM = ostium→LAD/LCX bifurcation,
+#: LAD/LCX = from that bifurcation, RCA = its own. An absent vessel (anomaly) is
+#: simply not drawn. "Left system" reporting sums LM+LAD+LCX.
+ROOT_ROLES = ("LM", "LAD", "LCX", "RCA")
+
+#: Old role names (when LAD/LCX were labelled by their LM origin) → new names, so
+#: pre-existing .corotree.json / .cpr.json still load as the right roots.
+ROLE_ALIASES = {"LM-LAD": "LAD", "LM-LCX": "LCX"}
+
+
+def normalize_role(role):
+    """Map a possibly-legacy role name to the current vocabulary."""
+    return ROLE_ALIASES.get(role, role)
 
 
 @dataclass
@@ -73,8 +86,9 @@ class CoronaryTree:
 
     # ------------------------------------------------------------ build
     def add_root(self, vid: str, name: str, role: str, points) -> Vessel:
-        """Add an explicit root trunk (LM-LAD / LM-LCX / RCA). First point is the
+        """Add an explicit root trunk (LM / LAD / LCX / RCA). First point is the
         ostium (proximal)."""
+        role = normalize_role(role)
         if role not in ROOT_ROLES:
             raise ValueError(f"root role must be one of {ROOT_ROLES!r}, got {role!r}")
         if vid in self.vessels:
@@ -145,7 +159,7 @@ class CoronaryTree:
 
     # --------------------------------------------------------- topology
     def roots(self) -> list[str]:
-        """The trunk vessels — those whose ROLE is a root (LM-LAD/LM-LCX/RCA).
+        """The trunk vessels — those whose ROLE is a root (LM/LAD/LCX/RCA).
         (An unconnected branch also has parent None but is NOT a root.)"""
         return [vid for vid, v in self.vessels.items() if v.role in ROOT_ROLES]
 
@@ -165,13 +179,15 @@ class CoronaryTree:
         Used by the batch .cpr.json load."""
         if vid in self.vessels:
             raise ValueError(f"duplicate vessel id {vid!r}")
-        v = Vessel(vid=vid, name=name, role=role, points=points, ctrl=ctrl)
+        v = Vessel(vid=vid, name=name, role=normalize_role(role),
+                   points=points, ctrl=ctrl)
         self.vessels[vid] = v
         return v
 
     def set_role(self, vid: str, role: str) -> None:
         """Change a vessel's role. Switching to a root role detaches it (a trunk
         has no parent); switching to 'branch' leaves it for connect_all."""
+        role = normalize_role(role)
         v = self.vessels[vid]
         v.role = role
         if role in ROOT_ROLES:
@@ -366,7 +382,8 @@ class CoronaryTree:
                 pts = d.get("ctrl", [])
             tree.vessels[d["vid"]] = Vessel(
                 vid=d["vid"], name=d.get("name", ""),
-                role=d.get("role", "branch"), points=np.asarray(pts, float),
+                role=normalize_role(d.get("role", "branch")),
+                points=np.asarray(pts, float),
                 parent=d.get("parent"),
                 junction=(None if d.get("junction") is None
                           else int(d["junction"])),
@@ -429,7 +446,7 @@ def tree_from_specs(specs, snap_tol_mm: float = 3.0):
     tree = CoronaryTree()
     results = []
     for s in specs:
-        if s.get("role") in ROOT_ROLES:
+        if normalize_role(s.get("role")) in ROOT_ROLES:
             tree.add_root(s["vid"], s["name"], s["role"], s["points"])
             results.append(None)
         else:
