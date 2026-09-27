@@ -2421,6 +2421,95 @@ class MainWindow(QMainWindow):
             if hasattr(w, "_set_overlay"):
                 w._set_overlay(True)     # overlay ON + open the source CT
 
+    # ------------------------------------------------- LV analysis drop
+    @staticmethod
+    def _lv_analysis_kind(data) -> str | None:
+        """Map a parsed LV-analysis JSON to a kind key, else None. Types come from
+        the LV save methods: valve → MV/AoV, lvvol → Blood/Endo, apex → ApxLv,
+        kind 'mdv-lvef' → EpiLv."""
+        if not isinstance(data, dict):
+            return None
+        typ = data.get("type")
+        if typ == "valve":
+            return "valve_mitral" if data.get("valve") == "mitral" \
+                else "valve_aortic"
+        if typ == "lvvol":
+            return "blood"
+        if typ == "apex":
+            return "apex"
+        if data.get("kind") == "mdv-lvef":
+            return "epi"
+        return None
+
+    @classmethod
+    def _is_lv_analysis_json(cls, path: str) -> bool:
+        """True if *path* is one of the 5 LV-analysis JSONs (MV/AoV/Apex/Epi/Bld),
+        so a drag&drop opens the source CT with the overlays instead of DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return cls._lv_analysis_kind(data) is not None
+
+    def _open_lv_analysis_files(self, paths: list) -> None:
+        """Drop the LV-analysis JSONs (MV / AoV / Apex / Epi / Bld) onto the shell
+        → open the source 3-D CT and overlay every analysis result on it. The CT
+        is found by UID, else the dropped folder is scanned, else the user picks
+        it; then the files are applied once the volume is shown."""
+        import os
+        import json
+        files: dict = {}
+        uid, drop_dir = "", ""
+        for p in paths:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                continue
+            kind = self._lv_analysis_kind(data)
+            if kind is None:
+                continue
+            files[kind] = data
+            if not uid:
+                uid = (data.get("series") or {}).get("series_uid", "")
+            if not drop_dir:
+                drop_dir = os.path.dirname(p)
+        if not files or not uid:
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        if self.case_series_loaded(uid):
+            self._poll_lv_apply(uid, files, 0)
+            return
+        if drop_dir and os.path.isdir(drop_dir):
+            self.case_open_folders([drop_dir])
+            self._poll_lv_apply(uid, files, 0)
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, t("この解析の元となった3DCTフォルダを選択してください"))
+        if folder:
+            self.case_open_folders([folder])
+            self._poll_lv_apply(uid, files, 0)
+
+    def _poll_lv_apply(self, uid: str, files: dict, attempt: int = 0) -> None:
+        """Wait for the CT to be shown + decoded, then apply the LV overlays."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid)
+        v = self._active.current_viewer() if self._active is not None else None
+        if shown and v is not None and getattr(v, "_image", None) is not None \
+                and hasattr(v, "apply_lv_analysis"):
+            try:
+                v.apply_lv_analysis(files)
+            except Exception:                            # noqa: BLE001
+                pass
+            return
+        if attempt < 40:                                 # ~12 s
+            QTimer.singleShot(
+                300, lambda: self._poll_lv_apply(uid, files, attempt + 1))
+
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:
         """(date 'YYYYMMDD', time 'HHMMSS[.ffffff]') from a DICOM header, trying
@@ -4780,6 +4869,14 @@ class MainWindow(QMainWindow):
         for p in ct_files:
             self._open_coronary_tree_file(p)
         paths = [p for p in paths if p not in ct_files]
+        # Peel off LV-analysis JSON drops (MV / AoV / Apex / Epi / Bld) → open the
+        # source CT and overlay all analysis results. Handle them together so a
+        # multi-file drop applies as ONE analysis on ONE CT.
+        lv_files = [p for p in paths
+                    if os.path.isfile(p) and self._is_lv_analysis_json(p)]
+        if lv_files:
+            self._open_lv_analysis_files(lv_files)
+        paths = [p for p in paths if p not in lv_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
         if not dirs and not files:
