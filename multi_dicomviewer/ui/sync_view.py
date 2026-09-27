@@ -178,11 +178,23 @@ class SyncViewLink(QObject):
 
     # -- same-scale option -----------------------------------------------
     def match_scale(self) -> None:
-        """Force viewer B to viewer A's zoom so both are at 1:1 scale."""
+        """Force viewer B to viewer A's on-screen scale so both CTs read at the
+        same size. Matches CORRESPONDING panes (A↔A and B↔B) so the two CTs stay
+        the same scale no matter which pane is shown (Bi / Lt / Rt) — not just the
+        one visible when matched. Falls back to the shown-pane match on an older
+        viewer without the per-pane API."""
+        a, b = self._v[0], self._v[1]
         try:
-            ps = self._v[0].sync_view_get_scale()
+            if hasattr(a, "sync_view_get_scale_pane") \
+                    and hasattr(b, "sync_view_set_scale_pane"):
+                for k in ("A", "B"):
+                    mmpp = a.sync_view_get_scale_pane(k)
+                    if mmpp:
+                        b.sync_view_set_scale_pane(k, mmpp)
+                return
+            ps = a.sync_view_get_scale()
             if ps:
-                self._v[1].sync_view_set_scale(ps)
+                b.sync_view_set_scale(ps)
         except Exception:                                # noqa: BLE001
             pass
 

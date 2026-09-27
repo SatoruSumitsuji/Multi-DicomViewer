@@ -5595,13 +5595,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         k = getattr(self, "_active_pane", "A")
         return k if k in ("A", "B") else "A"
 
-    def sync_view_get_scale(self):
-        """The SHOWN pane's on-screen scale as world-mm per DISPLAY pixel (DPR-
-        aware) — the reference for the same-scale lock. Using mm/px (not the raw
-        ParallelScale) equalises the ACTUAL on-screen size regardless of each
-        pane's pixel height, and uses the pane the user sees."""
+    def sync_view_get_scale_pane(self, key):
+        """One pane's on-screen scale as world-mm per DISPLAY pixel (DPR-aware).
+        mm/px (not the raw ParallelScale) equalises the ACTUAL on-screen size
+        regardless of pixel height."""
         try:
-            p = self.pane[self._sv_shown_pane()]
+            p = self.pane[key]
             ps = float(p.ren.GetActiveCamera().GetParallelScale())
             dpr = max(1.0, p.canvas.devicePixelRatioF())
             h = max(1.0, p.canvas.height() * dpr)
@@ -5609,10 +5608,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             return None
 
+    def sync_view_set_scale_pane(self, key, mmpp) -> None:
+        """Set ONE pane so its world-mm-per-display-pixel = *mmpp*."""
+        try:
+            p = self.pane[key]
+            dpr = max(1.0, p.canvas.devicePixelRatioF())
+            h = max(1.0, p.canvas.height() * dpr)
+            p.ren.GetActiveCamera().SetParallelScale(float(mmpp) * (h / 2.0))
+        except Exception:                                # noqa: BLE001
+            return
+        self._refresh()
+
+    def sync_view_get_scale(self):
+        """The SHOWN pane's mm/px — reference for the shown-pane same-scale lock."""
+        return self.sync_view_get_scale_pane(self._sv_shown_pane())
+
     def sync_view_set_scale(self, mmpp) -> None:
-        """Set BOTH panes so their world-mm-per-display-pixel = *mmpp* (from the
-        peer's shown pane), so whichever pane is shown matches the peer's scale.
-        PS = mmpp · (pane display-px height / 2)."""
+        """Set BOTH panes to *mmpp* (fallback single-value lock)."""
         try:
             mmpp = float(mmpp)
             for k in ("A", "B"):
