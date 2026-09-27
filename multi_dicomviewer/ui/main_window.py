@@ -2559,8 +2559,10 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         shown = self._coronary_display_uid(uid)
         v = self._active.current_viewer() if self._active is not None else None
-        if shown and v is not None and getattr(v, "_image", None) is not None \
-                and hasattr(v, "apply_lv_analysis"):
+        # Volume decoded? VTK exposes _image, pygfx exposes _vol.
+        ready = v is not None and (getattr(v, "_image", None) is not None
+                                   or getattr(v, "_vol", None) is not None)
+        if shown and ready and hasattr(v, "apply_lv_analysis"):
             try:
                 v.apply_lv_analysis(files)
             except Exception:                            # noqa: BLE001
