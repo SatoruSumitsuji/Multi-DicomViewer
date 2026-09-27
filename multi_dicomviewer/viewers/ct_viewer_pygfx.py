@@ -5315,20 +5315,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         k = getattr(self, "_active_pane", "A")
         return k if k in ("A", "B") else "A"
 
-    def sync_view_get_scale(self):
-        """The SHOWN pane's on-screen scale as world-mm per pixel — the reference
-        for the same-scale lock. Using mm/px (not the raw half-height _ps)
-        equalises the ACTUAL on-screen size regardless of each pane's pixel
-        height, and uses the pane the user sees (B when side=Rt)."""
+    def sync_view_get_scale_pane(self, key):
+        """One pane's on-screen scale as world-mm per pixel (matches _scale_px)."""
         try:
-            return 1.0 / self._scale_px(self._sv_shown_pane())   # mm per px
+            return 1.0 / self._scale_px(key)             # mm per px
         except Exception:                                # noqa: BLE001
             return None
 
+    def sync_view_set_scale_pane(self, key, mmpp) -> None:
+        """Set ONE pane so its world-mm-per-pixel = *mmpp*."""
+        try:
+            ph = max(1, self.pane[key].canvas.height())
+            self._ps[key] = max(1e-3, float(mmpp) * ph / 2.0)
+        except Exception:                                # noqa: BLE001
+            return
+        self._refresh()
+
+    def sync_view_get_scale(self):
+        """The SHOWN pane's mm/px — reference for the shown-pane same-scale lock."""
+        return self.sync_view_get_scale_pane(self._sv_shown_pane())
+
     def sync_view_set_scale(self, mmpp) -> None:
-        """Set BOTH panes so their world-mm-per-pixel = *mmpp* (from the peer's
-        shown pane), so whichever pane is shown matches the peer's scale.
-        _ps (half visible height, mm) = mmpp · (pane px height / 2)."""
+        """Set BOTH panes to *mmpp* (fallback single-value lock)."""
         try:
             mmpp = float(mmpp)
             for k in ("A", "B"):
