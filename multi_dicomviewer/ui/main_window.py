@@ -2591,8 +2591,10 @@ class MainWindow(QMainWindow):
     def _open_cpr_files(self, paths: list) -> None:
         """Drop a .cpr.json onto the shell → open the source 3-D CT and show the
         short-axis centreline on it. Only ONE short-axis shows at a time, so the
-        FIRST valid file is applied. The CT is found by UID → the CT's own folder
-        → the dropped folder → a prompt."""
+        FIRST valid file is applied. The CT is found by UID → the CT's saved
+        folder (src_dir) → else the user is ASKED to point at it (the .cpr.json
+        often sits in a collection folder with no DICOM, so we never scan the
+        dropped folder blindly — that produced a 'no DICOM' dead end)."""
         import os
         import json
         data = None
@@ -2613,25 +2615,32 @@ class MainWindow(QMainWindow):
             break
         if data is None or not uid:
             return
-        from PyQt6.QtWidgets import QFileDialog
         if self.case_series_loaded(uid):
             self._poll_cpr_apply(uid, data, 0)
             return
-        scan = src_dir if (src_dir and os.path.isdir(src_dir)) else ""
-        if not scan and drop_dir and os.path.isdir(drop_dir):
-            scan = drop_dir
-        if scan:
-            self.case_open_folders([scan])
+        if src_dir and os.path.isdir(src_dir):
+            self.case_open_folders([src_dir])
             self._poll_cpr_apply(uid, data, 0)
             return
+        self._prompt_cpr_ct(uid, data, drop_dir)
+
+    def _prompt_cpr_ct(self, uid: str, data: dict, start_dir: str = "") -> None:
+        """Ask the user for the source-CT folder (the 3-D CT the short-axis was
+        built on), scan it, then draw the short-axis. Shown when the CT isn't
+        loaded and no valid saved folder is known."""
+        import os
+        from PyQt6.QtWidgets import QFileDialog
         folder = QFileDialog.getExistingDirectory(
-            self, t("この短軸(CPR)の元となった3DCTフォルダを選択してください"))
+            self, t("この短軸(CPR)の元となった3DCTフォルダを選択してください"),
+            start_dir if (start_dir and os.path.isdir(start_dir)) else "")
         if folder:
             self.case_open_folders([folder])
             self._poll_cpr_apply(uid, data, 0)
 
     def _poll_cpr_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
-        """Wait for the CT to be shown + decoded, then draw the short-axis."""
+        """Wait for the CT to be shown + decoded, then draw the short-axis. If it
+        never appears (wrong folder / no such series), fall back to the folder
+        prompt instead of failing silently."""
         from PyQt6.QtCore import QTimer
         shown = self._coronary_display_uid(uid)
         v = self._active.current_viewer() if self._active is not None else None
@@ -2646,6 +2655,8 @@ class MainWindow(QMainWindow):
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
                 300, lambda: self._poll_cpr_apply(uid, data, attempt + 1))
+        elif not self.case_series_loaded(uid):
+            self._prompt_cpr_ct(uid, data, "")           # CT never showed → ask
 
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:

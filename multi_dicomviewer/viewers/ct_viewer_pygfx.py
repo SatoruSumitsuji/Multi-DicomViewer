@@ -14575,6 +14575,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._view_initial = False                   # don't auto-refit (keep img)
         if self._cpr is not None:
+            # Keep EXACTLY what's on screen NOW — the old keep_view restored the
+            # view captured when the CPR was BUILT, but a dropped/loaded .cpr.json
+            # build-time view is the initial-load image, so arming Draw snapped
+            # back to it. Re-take the snapshot from the current view.
+            self._cpr_prev_view = self._view_snapshot()
             self._exit_cpr(keep_view=True)           # keep the current image
         if not self._meas_on:
             self._meas_btn.setChecked(True)
@@ -14753,6 +14758,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         if ok:
             self._refresh(reset_cam=True)
+            self._view_initial = False           # lock the view (no resize refit)
         return bool(ok)
 
     def _cpr_load(self) -> None:
