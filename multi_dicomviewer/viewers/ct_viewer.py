@@ -15724,6 +15724,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         QMessageBox.information(self.window(), t("Short-axis"),
                                t("Saved: {p}", p=os.path.basename(path)))
 
+    def apply_cpr_data(self, data) -> bool:
+        """Headless: rebuild the short-axis (CPR) from a parsed .cpr.json on THIS
+        CT and show its centreline trace + cross-sections. Used by the .cpr.json
+        drag&drop (the shell opens the source CT first). Returns True on success."""
+        if self._image is None:
+            return False
+        if self._mode != "3D" and hasattr(self, "_set_mode"):
+            self._set_mode("3D")                 # short-axis needs 3-D MPR
+        if self._mode != "3D":
+            return False
+        try:
+            ok = self._cpr_apply_saved(data.get("ctrl"), data.get("ref_up"),
+                                       data.get("state", {}))
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        if ok:
+            self._refresh(reset_cam=True)
+        return bool(ok)
+
     def _cpr_load(self) -> None:
         """Load a .cpr.json: rebuild the centreline, re-show the trace (as an
         editable polyline on the map pane) and open the perpendicular
