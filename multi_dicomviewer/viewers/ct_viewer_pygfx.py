@@ -8097,15 +8097,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                           "may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return
-            self._lv_apex = np.asarray(data["apex"], float)
-            self._lv_apex_shown = True
-            self._lv_apex_marker_draw()
+            self._lv_apply_apex_data(data)
             if hasattr(self, "_lv_remember_dir"):
                 self._lv_remember_dir(path)
-            self._lv_update_submode_ui()
         except Exception as exc:                        # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV"),
                                 t("Load failed: {err}", err=str(exc)))
+
+    def _lv_apply_apex_data(self, data) -> None:
+        """Apply a parsed ApxLv dict to the common apex + draw (headless)."""
+        self._lv_apex = np.asarray(data["apex"], float)
+        self._lv_apex_shown = True
+        self._lv_apex_marker_draw()
+        self._lv_update_submode_ui()
 
     def _lv_clear_apex(self) -> None:
         """Remove the common apex from the image (saved .ApxLv.json is kept)."""
@@ -8302,6 +8306,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                                t("Saved: {p}", p=os.path.basename(path)))
         QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
 
+    def _lv_apply_valve_data(self, which, data) -> None:
+        """Apply a parsed MVLv/AoVLv dict to the common valve planes + draw the
+        ring (headless — no dialog). Shared by the file-dialog load and the
+        LV-analysis batch drop."""
+        self._lv_valves[which] = (np.asarray(data["c"], float),
+                                  np.asarray(data["n"], float),
+                                  float(data.get("r", 20.0)))
+        self._lv_valve_shown[which] = True
+        self._lv_valve_show_from_geom(which)
+        self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)   # = file
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+        self._lv_on_valve_changed(which)
+
     def _lv_load_valve(self, which) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
@@ -8317,15 +8335,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self._lv_valves[which] = (np.asarray(data["c"], float),
-                                      np.asarray(data["n"], float),
-                                      float(data.get("r", 20.0)))
-            self._lv_valve_shown[which] = True
-            self._lv_valve_show_from_geom(which)
-            self._lv_valve_saved_sig[which] = self._lv_valve_sig(which)  # = file
-            self._lv_update_valve_buttons()
-            self._lv_update_submode_ui()
-            self._lv_on_valve_changed(which)
+            self._lv_apply_valve_data(which, data)
             QMessageBox.information(
                 self.window(), t("LV"), t("Loaded the {w} plane. Epi/Endo reuse "
                     "the existing trace with the new basal cut — re-press "
@@ -11379,137 +11389,228 @@ class CTViewer(CPRMixin, AbstractViewer):
                           "landmarks and Epi may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return
-            # (C) Contour LV and LV Vol are mutually exclusive: leave contour LV
-            # first so both modes can't be active at once (this used to leave
-            # self._lv AND self._lvv set). _lv_exit stashes the contour Epi, but
-            # we overwrite _lvv_epi_surf with THIS file's Epi just below, so the
-            # loaded file stays the single Epi source — (A).
-            if self._lv is not None:
-                self._lv_exit()
-            # Drop any prior LV Vol overlay/markers so a reload doesn't stack.
-            if self._lvv is not None:
-                self._lvv_clear_markers()
-            model = LVModel.from_dict(data["epi_model"])
-            model.build()
-            if model.epi is None:
-                raise ValueError("no Epi surface in file")
-            self._lvv_epi_surf = model.epi
-            self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
-            self._lvv_epi_model_dict = data["epi_model"]
-            self._lvv_epi_ml = None          # re-derive from the loaded dict
-            if self._lvv is None:
-                self._lvv = {"apex": None, "aortic": None, "mitral": None,
-                             "hu_lo": None, "hu_hi": None, "seed": None,
-                             "step": "apex", "last_ml": None, "calc_sig": None}
-            lvv = self._lvv
-            lvv["apex"] = np.asarray(data["apex"], float)
-            if data.get("seed") is not None:         # legacy files only
-                lvv["seed"] = np.asarray(data["seed"], float)
-            a, m = data["aortic"], data["mitral"]
-            lvv["aortic"] = (np.asarray(a["c"], float), np.asarray(a["n"], float),
-                             float(a.get("r", 20.0)))
-            lvv["mitral"] = (np.asarray(m["c"], float), np.asarray(m["n"], float),
-                             float(m.get("r", 20.0)))
-            lvv["hu_lo"] = float(data["hu_lo"])
-            lvv["hu_hi"] = float(data["hu_hi"])
-            lvv["last_ml"] = data.get("volume_ml")
-            lvv["step"] = "ready"
-            # LVD manual level (+ line-shown), if the file carries one.
-            if data.get("lvd_level") is not None:
-                self._lvv_lvd_level = float(data["lvd_level"])
-                self._lvv_lvd_shown = bool(data.get("lvd_shown", True))
+            self._lvv_apply_data(data)
+            if self._lvv_epi_surf is None:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Loaded the Blood landmarks. This file has no Epi border "
+                      "— load the matching EpiLv.json before Calc Vol."))
             else:
-                self._lvv_lvd_level = None
-                self._lvv_lvd_shown = False
-            self._lvv_diam_pts = None
-            for spin, vv in ((self._lvv_lo_spin, data["hu_lo"]),
-                             (self._lvv_hi_spin, data["hu_hi"])):
-                spin.blockSignals(True)
-                spin.setValue(int(round(float(vv))))
-                spin.blockSignals(False)
-            if lvv.get("last_ml") is not None:
-                self._lvv_vol_lbl.setText(
-                    t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
-            # Restore the embedded masks so the 水色 / Auto-Endo / 壁厚 come back
-            # with NO recompute (parity with the VTK BldLv.json).
-            blood_ok = self._lvv_restore_blood(data.get("blood"))
-            self._lvv_restore_endo(data.get("endo"))
-            self._lvv_restore_thick(data.get("thick"))
-            if blood_ok:
-                # Blood mask fresh in memory → the LV-Blood toggle can show it
-                # without a recompute (the have-check compares this signature).
-                lvv["calc_sig"] = self._lvv_signature()
-            # VIEW state: reproduce the EXACT last-shown toggles, enabling only
-            # what the restored data supports.
-            view = data.get("view")
-            if isinstance(view, dict):
-                if bool(view.get("epi_border")) and self._lvv_epi_surf is not None:
-                    try:                             # Epi border mask (once, ~1s)
-                        self._lvv_ensure_epi_mask()
-                    except Exception:                # noqa: BLE001
-                        pass
-                want_lv = bool(view.get("lv_blood")) and blood_ok
-                want_all = bool(view.get("all_blood")) and not want_lv
-                self._lvv_mask_on = want_lv
-                self._lvv_hl_on = want_all
-                if getattr(self, "_lvv_mask_btn", None) is not None:
-                    self._lvv_mask_btn.setChecked(want_lv)
-                if getattr(self, "_lvv_hl_btn", None) is not None:
-                    self._lvv_hl_btn.setChecked(want_all)
-                self._lvv_epi_show = bool(view.get("epi_border")) and (
-                    self._lvv_epi_surf is not None)
-                if getattr(self, "_lvv_epi_btn", None) is not None:
-                    self._lvv_epi_btn.setChecked(self._lvv_epi_show)
-                self._lvv_endo_show = bool(view.get("endo_auto")) and (
-                    getattr(self, "_lv_endo_mask_comp", None) is not None)
-                if getattr(self, "_lvv_auto_endo_btn", None) is not None:
-                    self._lvv_auto_endo_btn.setChecked(self._lvv_endo_show)
-            elif blood_ok:
-                self._lvv_mask_on = True         # old file, mask present → 水色
-                self._lvv_hl_on = False
-                if getattr(self, "_lvv_mask_btn", None) is not None:
-                    self._lvv_mask_btn.setChecked(True)
-                if getattr(self, "_lvv_hl_btn", None) is not None:
-                    self._lvv_hl_btn.setChecked(False)
-            # Wall-thickness heat map + LVD line come back as saved.
-            if getattr(self, "_lvv_thick_mode", None) is not None:
-                if hasattr(self, "_lvv_thick_sync_buttons"):
-                    self._lvv_thick_sync_buttons()
-            if getattr(self, "_lvv_lvd_level", None) is not None:
-                self._lvv_lv_diam_cache = None
-                if hasattr(self, "_lvv_style_lvd_btn"):
-                    self._lvv_style_lvd_btn()
-            self._lvv_sync()
-            self._lvv_update_highlight()
-            if hasattr(self, "_lvv_thick_refresh_display"):
-                self._lvv_thick_refresh_display()
-            if hasattr(self, "_lvv_redraw"):
-                self._lvv_redraw()
-            # Re-reslice everything to the CURRENT plane so the restored 水色 blood
-            # region is aligned RIGHT AWAY (it was offset until a crosshair nudge).
-            # reset_cam=False keeps the zoom + position.
-            self._refresh(reset_cam=False)
-            self._lv_update_text()
-            for k in ("A", "B"):
-                self._overlay[k].update()
-            # (A) Make the Epi source explicit, and (B) remind about the two-file
-            # drift: the Epi lives in BOTH the .lv and .lvvol files, so an edit
-            # in one must be re-saved to the other to stay in sync.
-            _bld = data.get("blood") is not None
-            QMessageBox.information(
-                self.window(), t("LV Vol"),
-                t("Loaded — the last-saved state was restored" + (
-                    " (blood / Auto-Endo / 壁厚 came back with no recompute)."
-                    if _bld else
-                    ". This is an older file with no embedded masks — press "
-                    "LV Vol計測 to compute the volume.")) + t(
-                    " The volume is measured against the Epi border stored in "
-                    "THIS file; if you edit the Epi in contour LV and re-save the "
-                    ".lv file, re-save this file too so they stay in sync."))
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Loaded — the last-saved state was restored (blood / "
+                      "Auto-Endo / 壁厚 with no recompute). The Epi in memory "
+                      "bounds the volume."))
         except Exception as exc:                        # noqa: BLE001
             import traceback
             QMessageBox.critical(self.window(), t("LV Vol (load error)"),
                                  traceback.format_exc() or repr(exc))
+
+    def _lvv_apply_data(self, data) -> None:
+        """Apply a parsed BldLv dict (Blood/Endo landmarks + masks + view)
+        headlessly — no dialog. Enters LV-Vol state and restores every overlay
+        as saved. The Epi is NOT in this file (split EpiLv.json) — whatever Epi
+        is already in memory bounds the volume. Shared by the dialog load and
+        the LV-analysis batch drop."""
+        # (C) Contour LV and LV Vol are mutually exclusive: leave contour LV
+        # first so both modes can't be active at once (this used to leave
+        # self._lv AND self._lvv set). _lv_exit stashes the contour Epi, but
+        # we overwrite _lvv_epi_surf with THIS file's Epi just below, so the
+        # loaded file stays the single Epi source — (A).
+        if self._lv is not None:
+            self._lv_exit()
+        # Drop any prior LV Vol overlay/markers so a reload doesn't stack.
+        if self._lvv is not None:
+            self._lvv_clear_markers()
+        # The Epi is NOT in this file — it lives in its own EpiLv.json
+        # (split format). Keep whatever Epi is already in memory (Epi trace
+        # / read); the batch drop applies EpiLv before this.
+        if self._lvv is None:
+            self._lvv = {"apex": None, "aortic": None, "mitral": None,
+                         "hu_lo": None, "hu_hi": None, "seed": None,
+                         "step": "apex", "last_ml": None, "calc_sig": None}
+        lvv = self._lvv
+        lvv["apex"] = np.asarray(data["apex"], float)
+        if data.get("seed") is not None:         # legacy files only
+            lvv["seed"] = np.asarray(data["seed"], float)
+        a, m = data["aortic"], data["mitral"]
+        lvv["aortic"] = (np.asarray(a["c"], float), np.asarray(a["n"], float),
+                         float(a.get("r", 20.0)))
+        lvv["mitral"] = (np.asarray(m["c"], float), np.asarray(m["n"], float),
+                         float(m.get("r", 20.0)))
+        lvv["hu_lo"] = float(data["hu_lo"])
+        lvv["hu_hi"] = float(data["hu_hi"])
+        lvv["last_ml"] = data.get("volume_ml")
+        lvv["step"] = "ready"
+        # LVD manual level (+ line-shown), if the file carries one.
+        if data.get("lvd_level") is not None:
+            self._lvv_lvd_level = float(data["lvd_level"])
+            self._lvv_lvd_shown = bool(data.get("lvd_shown", True))
+        else:
+            self._lvv_lvd_level = None
+            self._lvv_lvd_shown = False
+        self._lvv_diam_pts = None
+        for spin, vv in ((self._lvv_lo_spin, data["hu_lo"]),
+                         (self._lvv_hi_spin, data["hu_hi"])):
+            spin.blockSignals(True)
+            spin.setValue(int(round(float(vv))))
+            spin.blockSignals(False)
+        if lvv.get("last_ml") is not None:
+            self._lvv_vol_lbl.setText(
+                t("{v:.1f} mL").format(v=float(lvv["last_ml"])))
+        # Restore the embedded masks so the 水色 / Auto-Endo / 壁厚 come back
+        # with NO recompute (parity with the VTK BldLv.json).
+        blood_ok = self._lvv_restore_blood(data.get("blood"))
+        self._lvv_restore_endo(data.get("endo"))
+        self._lvv_restore_thick(data.get("thick"))
+        if blood_ok:
+            # Blood mask fresh in memory → the LV-Blood toggle can show it
+            # without a recompute (the have-check compares this signature).
+            lvv["calc_sig"] = self._lvv_signature()
+        # VIEW state: reproduce the EXACT last-shown toggles, enabling only
+        # what the restored data supports.
+        view = data.get("view")
+        if isinstance(view, dict):
+            if bool(view.get("epi_border")) and self._lvv_epi_surf is not None:
+                try:                             # Epi border mask (once, ~1s)
+                    self._lvv_ensure_epi_mask()
+                except Exception:                # noqa: BLE001
+                    pass
+            want_lv = bool(view.get("lv_blood")) and blood_ok
+            want_all = bool(view.get("all_blood")) and not want_lv
+            self._lvv_mask_on = want_lv
+            self._lvv_hl_on = want_all
+            if getattr(self, "_lvv_mask_btn", None) is not None:
+                self._lvv_mask_btn.setChecked(want_lv)
+            if getattr(self, "_lvv_hl_btn", None) is not None:
+                self._lvv_hl_btn.setChecked(want_all)
+            self._lvv_epi_show = bool(view.get("epi_border")) and (
+                self._lvv_epi_surf is not None)
+            if getattr(self, "_lvv_epi_btn", None) is not None:
+                self._lvv_epi_btn.setChecked(self._lvv_epi_show)
+            self._lvv_endo_show = bool(view.get("endo_auto")) and (
+                getattr(self, "_lv_endo_mask_comp", None) is not None)
+            if getattr(self, "_lvv_auto_endo_btn", None) is not None:
+                self._lvv_auto_endo_btn.setChecked(self._lvv_endo_show)
+        elif blood_ok:
+            self._lvv_mask_on = True         # old file, mask present → 水色
+            self._lvv_hl_on = False
+            if getattr(self, "_lvv_mask_btn", None) is not None:
+                self._lvv_mask_btn.setChecked(True)
+            if getattr(self, "_lvv_hl_btn", None) is not None:
+                self._lvv_hl_btn.setChecked(False)
+        # Wall-thickness heat map + LVD line come back as saved.
+        if getattr(self, "_lvv_thick_mode", None) is not None:
+            if hasattr(self, "_lvv_thick_sync_buttons"):
+                self._lvv_thick_sync_buttons()
+        if getattr(self, "_lvv_lvd_level", None) is not None:
+            self._lvv_lv_diam_cache = None
+            if hasattr(self, "_lvv_style_lvd_btn"):
+                self._lvv_style_lvd_btn()
+        self._lvv_sync()
+        self._lvv_update_highlight()
+        if hasattr(self, "_lvv_thick_refresh_display"):
+            self._lvv_thick_refresh_display()
+        if hasattr(self, "_lvv_redraw"):
+            self._lvv_redraw()
+        # Re-reslice everything to the CURRENT plane so the restored 水色 blood
+        # region is aligned RIGHT AWAY (it was offset until a crosshair nudge).
+        # reset_cam=False keeps the zoom + position.
+        self._refresh(reset_cam=False)
+        self._lv_update_text()
+        for k in ("A", "B"):
+            self._overlay[k].update()
+
+    def _lvv_apply_epi_data(self, data) -> None:
+        """Apply a parsed EpiLv dict as the Epi surface (headless). Raises if the
+        file has no Epi surface. Used by the LV-analysis batch drop before Blood
+        (Blood's view-restore then draws the Epi border)."""
+        from multi_dicomviewer.core.lv_measure import LVModel
+        model = LVModel.from_dict(data)
+        model.build()
+        if model.epi is None:
+            raise ValueError("no Epi surface in file")
+        self._lvv_epi_surf = model.epi
+        self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
+        self._lvv_epi_model_dict = data
+        self._lvv_epi_ml = None
+        # New Epi → drop the cached border mask so it rebuilds for THIS Epi
+        # (_lvv_ensure_epi_mask returns the cache without checking identity).
+        self._lvv_epi_mask_comp = None
+        self._lvv_epi_mask_bbox = None
+        if getattr(self, "_lvv_epi_show", False):
+            try:
+                self._lvv_ensure_epi_mask()
+            except Exception:                        # noqa: BLE001
+                pass
+
+    def apply_lv_analysis(self, files) -> bool:
+        """Apply a set of parsed LV-analysis dicts and show ALL overlays at once
+        (headless — for the 5-file drag&drop). *files* maps
+        "valve_mitral"/"valve_aortic"/"apex"/"epi"/"blood" → parsed dict (any
+        subset). Epi/Blood require MV + AoV + Apex first (dropped here or already
+        loaded), else it warns and applies nothing. Order: valves + apex + Epi,
+        then Blood (restores the combined overlay view). Returns True if applied."""
+        if self._vol is None:
+            return False
+        if files.get("epi") is not None or files.get("blood") is not None:
+            from PyQt6.QtWidgets import QMessageBox
+            have_mv = (files.get("valve_mitral") is not None
+                       or self._lv_valves.get("mitral") is not None)
+            have_av = (files.get("valve_aortic") is not None
+                       or self._lv_valves.get("aortic") is not None)
+            have_apex = (files.get("apex") is not None
+                         or getattr(self, "_lv_apex", None) is not None)
+            if not (have_mv and have_av and have_apex):
+                missing = []
+                if not have_mv:
+                    missing.append("MV")
+                if not have_av:
+                    missing.append("AoV")
+                if not have_apex:
+                    missing.append("Apex")
+                QMessageBox.warning(
+                    self.window(), t("LV"),
+                    t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
+                      "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
+                      "ドロップしてください。", m="・".join(missing)))
+                return False
+        if self._mode != "3D" and hasattr(self, "_set_mode"):
+            self._set_mode("3D")
+        applied = False
+        try:
+            if files.get("valve_mitral") is not None:
+                self._lv_apply_valve_data("mitral", files["valve_mitral"])
+                applied = True
+            if files.get("valve_aortic") is not None:
+                self._lv_apply_valve_data("aortic", files["valve_aortic"])
+                applied = True
+            if files.get("apex") is not None:
+                self._lv_apply_apex_data(files["apex"])
+                applied = True
+            if files.get("epi") is not None:
+                self._lvv_apply_epi_data(files["epi"])
+                applied = True
+            if files.get("blood") is not None:
+                self._lvv_apply_data(files["blood"])
+                applied = True
+            elif files.get("epi") is not None:
+                # No Blood file to drive the view → at least show the Epi border.
+                self._lvv_epi_show = True
+                if getattr(self, "_lvv_epi_btn", None) is not None:
+                    self._lvv_epi_btn.setChecked(True)
+                try:
+                    self._lvv_ensure_epi_mask()
+                except Exception:                    # noqa: BLE001
+                    pass
+        except Exception:                            # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        if applied:
+            self._refresh(reset_cam=False)
+            for k in ("A", "B"):
+                self._overlay[k].update()
+        return applied
 
     def _lvv_clear_markers(self) -> None:
         # NOTE: the retained blood/Endo/Epi surfaces and the 壁厚 cache survive
