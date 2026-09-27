@@ -15543,6 +15543,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False                   # don't auto-refit on the
         #                                              layout change (keep image)
         if self._cpr is not None:                    # trace on the MPR, not a disc
+            # Keep EXACTLY what's on screen NOW. The old keep_view restored the
+            # view captured when the CPR was BUILT — but a dropped / loaded
+            # .cpr.json's build-time view is the initial-load image, so arming
+            # Draw snapped back to it (losing the user's rotate/zoom). Re-take the
+            # snapshot from the current view so Draw traces on the SAME image.
+            self._cpr_prev_view = self._view_snapshot()
             self._exit_cpr(keep_view=True)           # keep the current image
         if not self._meas_on:                        # left-drag now traces
             self._meas_btn.setChecked(True)
@@ -15743,6 +15749,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         if ok:
             self._refresh(reset_cam=True)
+            self._view_initial = False           # lock the view (no resize refit)
         return bool(ok)
 
     def _cpr_load(self) -> None:
