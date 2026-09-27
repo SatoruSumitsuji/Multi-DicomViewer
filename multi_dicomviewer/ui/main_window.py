@@ -2572,6 +2572,81 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(
                 300, lambda: self._poll_lv_apply(uid, files, attempt + 1))
 
+    # ------------------------------------------------- CPR (.cpr.json) drop
+    @staticmethod
+    def _is_cpr_json(path: str) -> bool:
+        """True if *path* is a short-axis .cpr.json (MDV-CPR), so a drag&drop
+        opens the source CT and draws the centreline instead of reading DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return isinstance(data, dict) and (
+            data.get("format") == "MDV-CPR" or data.get("type") == "cpr")
+
+    def _open_cpr_files(self, paths: list) -> None:
+        """Drop a .cpr.json onto the shell → open the source 3-D CT and show the
+        short-axis centreline on it. Only ONE short-axis shows at a time, so the
+        FIRST valid file is applied. The CT is found by UID → the CT's own folder
+        → the dropped folder → a prompt."""
+        import os
+        import json
+        data = None
+        uid, src_dir, drop_dir = "", "", ""
+        for p in paths:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if not (isinstance(d, dict) and (d.get("format") == "MDV-CPR"
+                                             or d.get("type") == "cpr")):
+                continue
+            data = d
+            uid = (d.get("series") or {}).get("series_uid", "")
+            src_dir = d.get("src_dir", "") or ""
+            drop_dir = os.path.dirname(p)
+            break
+        if data is None or not uid:
+            return
+        from PyQt6.QtWidgets import QFileDialog
+        if self.case_series_loaded(uid):
+            self._poll_cpr_apply(uid, data, 0)
+            return
+        scan = src_dir if (src_dir and os.path.isdir(src_dir)) else ""
+        if not scan and drop_dir and os.path.isdir(drop_dir):
+            scan = drop_dir
+        if scan:
+            self.case_open_folders([scan])
+            self._poll_cpr_apply(uid, data, 0)
+            return
+        folder = QFileDialog.getExistingDirectory(
+            self, t("この短軸(CPR)の元となった3DCTフォルダを選択してください"))
+        if folder:
+            self.case_open_folders([folder])
+            self._poll_cpr_apply(uid, data, 0)
+
+    def _poll_cpr_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
+        """Wait for the CT to be shown + decoded, then draw the short-axis."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid)
+        v = self._active.current_viewer() if self._active is not None else None
+        ready = v is not None and (getattr(v, "_image", None) is not None
+                                   or getattr(v, "_vol", None) is not None)
+        if shown and ready and hasattr(v, "apply_cpr_data"):
+            try:
+                v.apply_cpr_data(data)
+            except Exception:                            # noqa: BLE001
+                pass
+            return
+        if attempt < 40:                                 # ~12 s
+            QTimer.singleShot(
+                300, lambda: self._poll_cpr_apply(uid, data, attempt + 1))
+
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:
         """(date 'YYYYMMDD', time 'HHMMSS[.ffffff]') from a DICOM header, trying
@@ -4963,6 +5038,13 @@ class MainWindow(QMainWindow):
         if lv_files:
             self._open_lv_analysis_files(lv_files)
         paths = [p for p in paths if p not in lv_files]
+        # Peel off a short-axis .cpr.json drop → open its source CT + draw the
+        # centreline (only one short-axis shows at a time).
+        cpr_files = [p for p in paths
+                     if os.path.isfile(p) and self._is_cpr_json(p)]
+        if cpr_files:
+            self._open_cpr_files(cpr_files)
+        paths = [p for p in paths if p not in cpr_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
         if not dirs and not files:
