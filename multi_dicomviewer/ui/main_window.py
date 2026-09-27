@@ -2141,6 +2141,8 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
         self._syncview_active = True
+        self._sv_set_tool_shortcuts(True)    # Z/V/R/S/G/T/W → shared tools
+        self._sync_xa_shortcuts()            # keep cine keys off during SyncView
         self._sv_init_bar_state(viewers[0])
         self._syncview_act.setChecked(True)
         self._syncview_bar.setVisible(True)
@@ -2177,6 +2179,8 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
         self._syncview_active = False
+        self._sv_set_tool_shortcuts(False)   # release Z/V/R/S/G/T/W
+        self._sync_xa_shortcuts()            # restore cine keys per active pane
         if getattr(self, "_syncview_act", None) is not None:
             self._syncview_act.setChecked(False)
         if getattr(self, "_syncview_bar", None) is not None:
@@ -4544,11 +4548,35 @@ class MainWindow(QMainWindow):
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
             self._xa_shortcuts.append(sc)
+        # SyncView tool keys: the shared toolbar's tools need keyboard access too.
+        # App-wide QShortcuts ENABLED ONLY while SyncView is active (both panes
+        # are CT then, so the cine keys are disabled → no clash), routed to
+        # _sv_tool so BOTH CTs switch and the shared bar updates. Disabled
+        # otherwise, so each CT viewer's own keyPressEvent keeps handling
+        # Z/V/R/S/G/T/W when not in SyncView.
+        self._sv_tool_shortcuts = []
+        for key, tool in (("Z", "ZOOM"), ("V", "MOVE"), ("R", "ROTATE"),
+                          ("S", "SPIN"), ("G", "PAGING"), ("T", "THICK"),
+                          ("W", "WL")):
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
+            sc.activated.connect(lambda _=False, n=tool: self._sv_tool(n))
+            sc.setEnabled(False)
+            self._sv_tool_shortcuts.append(sc)
         self._sync_xa_shortcuts()
+
+    def _sv_set_tool_shortcuts(self, on: bool) -> None:
+        """Enable the SyncView tool keys (Z/V/R/S/G/T/W → _sv_tool) only while
+        SyncView is active."""
+        for sc in getattr(self, "_sv_tool_shortcuts", []):
+            sc.setEnabled(bool(on))
 
     def _sync_xa_shortcuts(self) -> None:
         v = self._active.current_viewer()
-        on = _is_cine(v)
+        # While SyncView is active the cine keys must stay OFF even if a cine pane
+        # is somehow active, so they can't collide with the SyncView tool keys
+        # (two enabled ApplicationShortcuts on one key = neither fires).
+        on = _is_cine(v) and not getattr(self, "_syncview_active", False)
         for sc in getattr(self, "_xa_shortcuts", []):
             sc.setEnabled(on)
         # F/A and Shift+F/Shift+A also navigate CT panes (CT never sees these
