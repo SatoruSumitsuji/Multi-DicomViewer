@@ -2588,6 +2588,21 @@ class MainWindow(QMainWindow):
         return isinstance(data, dict) and (
             data.get("format") == "MDV-CPR" or data.get("type") == "cpr")
 
+    @staticmethod
+    def _folder_cpr_files(folder: str) -> list:
+        """Every .cpr.json found under *folder* (recursively), sorted — so a
+        dropped vessel-collection folder loads into the Coronary Tree."""
+        import os
+        out = []
+        try:
+            for root, _dirs, names in os.walk(folder):
+                for nm in names:
+                    if nm.lower().endswith(".cpr.json"):
+                        out.append(os.path.join(root, nm))
+        except OSError:
+            pass
+        return sorted(out)
+
     def _open_cpr_files(self, paths: list) -> None:
         """Drop a .cpr.json onto the shell → open the source 3-D CT and show the
         short-axis centreline on it. Only ONE short-axis shows at a time, so the
@@ -5058,6 +5073,19 @@ class MainWindow(QMainWindow):
         paths = [p for p in paths if p not in cpr_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
+        # A dropped FOLDER that holds .cpr.json files (a vessel collection) →
+        # load them into the Coronary Tree, and DON'T DICOM-scan that folder
+        # (a cpr-only folder has no DICOM, which otherwise dead-ends in the
+        # "no DICOM files" warning).
+        cpr_dirs = []
+        for d in list(dirs):
+            cprs = self._folder_cpr_files(d)
+            if cprs:
+                cpr_dirs.append(d)
+                w = self._open_coronary_tree()
+                if w is not None and hasattr(w, "_load_cpr_paths"):
+                    w._load_cpr_paths(cprs)
+        dirs = [d for d in dirs if d not in cpr_dirs]
         if not dirs and not files:
             return
         if dirs:
