@@ -8189,6 +8189,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_update_mask()
         self._lvv_update_highlight()
         # Realise the restored Epi-Border / Auto-Endo overlays per the view.
+        # Build the Epi border DISPLAY mask first when Epi-Border was restored ON
+        # but its mask isn't built yet (the batch drop applies Epi before Blood,
+        # which invalidates the disp mask) — else the SOLID line has nothing to
+        # draw and the border stays invisible until the button is toggled.
+        if getattr(self, "_lvv_epi_show", False) \
+                and getattr(self, "_lvv_epi_surf", None) is not None \
+                and getattr(self, "_lvv_epi_disp_comp", None) is None \
+                and hasattr(self, "_lvv_build_epi_disp_mask"):
+            self._lvv_build_epi_disp_mask()
         if hasattr(self, "_lvv_show_epi"):
             self._lvv_show_epi(render=False)
         if hasattr(self, "_lvv_show_endo"):
