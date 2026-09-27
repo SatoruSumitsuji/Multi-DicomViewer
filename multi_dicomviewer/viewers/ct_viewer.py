@@ -15738,7 +15738,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("Short-axis"),
                 t("Switch to the 3-D MPR view first, then load a short-axis."))
             return
-        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        # Default to the SHOWN CT's OWN data folder (the .cpr.json is tied to this
+        # 3-D CT), not the source's parent — so Load opens where the vessel's
+        # short-axis lives instead of a distant grandparent / last-used folder.
+        d = ((self._lv_series_dir() if hasattr(self, "_lv_series_dir") else "")
+             or (self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""))
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load short-axis"), d,
             "Short-axis (*.cpr.json);;JSON (*.json)")
