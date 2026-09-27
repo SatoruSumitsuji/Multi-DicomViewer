@@ -5668,6 +5668,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif name == "wb":
             self._invert_btn.setChecked(bool(arg))
             self._toggle_invert()
+        elif name == "reset":
+            self._reset()
+        elif name == "color":
+            self._cmap_btn.setChecked(bool(arg))
+            self._toggle_color()
+        elif name == "slab":                          # slab-MIP thickness (mm)
+            for k in ("A", "B"):
+                self._thick[k] = float(arg)
+            self._view_initial = False
+            if hasattr(self, "_sync_slab_spin"):
+                self._sync_slab_spin()
+            self._refresh()
 
     def _lvv_show_epi(self, render=True) -> None:
         """Epi表示: draw the Epi border as a SOLID green line (same weight as the
