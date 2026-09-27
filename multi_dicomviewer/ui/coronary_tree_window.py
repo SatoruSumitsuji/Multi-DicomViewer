@@ -262,11 +262,37 @@ class CoronaryTreeWindow(SnapDock):
             return ""
 
     # --------------------------------------------------- drag & drop
+    @staticmethod
+    def _collect_cpr_paths(urls) -> list:
+        """Every .cpr.json among the dropped URLs — files directly, and (for a
+        dropped FOLDER) every .cpr.json found under it recursively. Sorted for a
+        stable load order."""
+        out = []
+        for u in urls or []:
+            f = u.toLocalFile()
+            if not f:
+                continue
+            if os.path.isdir(f):
+                for root, _dirs, names in os.walk(f):
+                    for nm in names:
+                        if nm.lower().endswith(".cpr.json"):
+                            out.append(os.path.join(root, nm))
+            elif f.lower().endswith(".cpr.json"):
+                out.append(f)
+        # De-dup on a normalised key (a folder + a file inside it can overlap,
+        # and QUrl vs os.walk spell separators differently) but keep one path.
+        seen = {}
+        for p in out:
+            seen.setdefault(os.path.normcase(os.path.normpath(p)), p)
+        return sorted(seen.values())
+
     def dragEnterEvent(self, e):
-        """Accept a drag that carries at least one .cpr.json file."""
+        """Accept a drag that carries at least one .cpr.json file OR a folder
+        (which may contain .cpr.json files)."""
         md = e.mimeData()
         if md is not None and md.hasUrls() and any(
-                u.toLocalFile().lower().endswith(".cpr.json")
+                (u.toLocalFile() and (os.path.isdir(u.toLocalFile())
+                 or u.toLocalFile().lower().endswith(".cpr.json")))
                 for u in md.urls()):
             e.acceptProposedAction()
         else:
@@ -280,14 +306,11 @@ class CoronaryTreeWindow(SnapDock):
             super().dragMoveEvent(e)
 
     def dropEvent(self, e):
-        """Load every .cpr.json dropped onto the panel."""
+        """Load every .cpr.json dropped onto the panel — individual files and/or
+        all .cpr.json inside any dropped folder."""
         md = e.mimeData()
-        paths = []
-        if md is not None and md.hasUrls():
-            for u in md.urls():
-                f = u.toLocalFile()
-                if f.lower().endswith(".cpr.json"):
-                    paths.append(f)
+        paths = self._collect_cpr_paths(md.urls()) \
+            if (md is not None and md.hasUrls()) else []
         if paths:
             e.acceptProposedAction()
             self._load_cpr_paths(paths)
