@@ -34,6 +34,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QApplication,
     QDockWidget,
+    QDoubleSpinBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -1902,10 +1903,23 @@ class MainWindow(QMainWindow):
         self._sv_side_btns = {}
         for side, lab in (("Bi", "Bi"), ("Lt", "Lt"), ("Rt", "Rt")):
             b = QPushButton(t(lab)); b.setCheckable(True)
+            b.setMaximumWidth(40)                 # 2-char label → narrow
             b.setToolTip(t("Show both / left / right MPR pane in BOTH viewers"))
             b.clicked.connect(lambda _c, s=side: self._sv_side(s))
             self._sv_side_btns[side] = b
             r1.addWidget(b)
+        # Reset + Color (view utilities) drive BOTH panes, next to Bi/Lt/Rt.
+        self._sv_reset_btn = QPushButton(t("Reset"))
+        self._sv_reset_btn.setToolTip(t(
+            "両ペインの表示位置をリセット（初期位置で再クリックすると W/L も）"))
+        self._sv_reset_btn.clicked.connect(self._sv_reset)
+        r1.addWidget(self._sv_reset_btn)
+        self._sv_color_btn = QPushButton(t("Color")); self._sv_color_btn.setCheckable(True)
+        self._sv_color_btn.setStyleSheet(
+            "QPushButton:checked{background:#e3ddaa;color:#101010;}")
+        self._sv_color_btn.setToolTip(t("両ペインのHU疑似カラー表示を切替"))
+        self._sv_color_btn.clicked.connect(self._sv_color)
+        r1.addWidget(self._sv_color_btn)
         r1.addWidget(self._sv_sep())
         self._sv_cl_btn = QPushButton(t("CenterLine")); self._sv_cl_btn.setCheckable(True)
         self._sv_cl_btn.setChecked(True)
@@ -1918,6 +1932,17 @@ class MainWindow(QMainWindow):
             "SyncView (re-enter later via Tools ▸ SyncView)."))
         self._sv_meas_btn.clicked.connect(self._sv_measure)
         r1.addWidget(self._sv_meas_btn)
+        # Slab厚 (both panes): a display + selector to the right of Measure.
+        self._sv_slab_lbl = QLabel(t("Slab(mm):"))
+        r1.addWidget(self._sv_slab_lbl)
+        self._sv_slab_spin = QDoubleSpinBox()
+        self._sv_slab_spin.setRange(0.0, 50.0)
+        self._sv_slab_spin.setSingleStep(0.5)
+        self._sv_slab_spin.setDecimals(1)
+        self._sv_slab_spin.setMaximumWidth(66)
+        self._sv_slab_spin.setToolTip(t("両ペインのSlab-MIP厚 (0=薄いMPR)"))
+        self._sv_slab_spin.valueChanged.connect(self._sv_slab)
+        r1.addWidget(self._sv_slab_spin)
         r1.addWidget(self._sv_sep())
         # Interaction tools (same set as a CT viewer's row 2).
         self._sv_tool_btns = {}
@@ -1932,9 +1957,11 @@ class MainWindow(QMainWindow):
         for kind, lab in (("rt90", "Rt90°"), ("lt90", "Lt90°"),
                           ("fliph", "Flip-H"), ("flipv", "Flip-V")):
             b = QPushButton(t(lab))
+            b.setMaximumWidth(58)                 # compact — free width for r1
             b.clicked.connect(lambda _c, k=kind: self._sv_action("transform", k))
             r1.addWidget(b)
         _spin = QPushButton(t("Spin+"))
+        _spin.setMaximumWidth(52)
         _spin.clicked.connect(lambda: self._sv_action("spin_snap"))
         r1.addWidget(_spin)
         self._sv_wb_btn = QPushButton(t("WB reverse")); self._sv_wb_btn.setCheckable(True)
@@ -2019,6 +2046,15 @@ class MainWindow(QMainWindow):
         for n, b in self._sv_tool_btns.items():
             b.setChecked(n == name)
         self._sv_action("tool", name)
+
+    def _sv_reset(self) -> None:
+        self._sv_action("reset")
+
+    def _sv_color(self) -> None:
+        self._sv_action("color", self._sv_color_btn.isChecked())
+
+    def _sv_slab(self, mm) -> None:
+        self._sv_action("slab", float(mm))
 
     def _sv_measure(self) -> None:
         """Measure is per-pane → leave SyncView to measure."""
@@ -2164,6 +2200,18 @@ class MainWindow(QMainWindow):
         tool = getattr(v, "_tool", "PAGING")
         for n, b in self._sv_tool_btns.items():
             b.setChecked(n == tool)
+        # Reflect Color + Slab厚 from the reference viewer.
+        if getattr(self, "_sv_color_btn", None) is not None:
+            self._sv_color_btn.setChecked(bool(getattr(v, "_color", False)))
+        if getattr(self, "_sv_slab_spin", None) is not None:
+            try:
+                k = v._sv_shown_pane() if hasattr(v, "_sv_shown_pane") else "A"
+                mm = float(getattr(v, "_thick", {}).get(k, 0.0))
+            except Exception:                            # noqa: BLE001
+                mm = 0.0
+            self._sv_slab_spin.blockSignals(True)
+            self._sv_slab_spin.setValue(mm)
+            self._sv_slab_spin.blockSignals(False)
 
     def _stop_syncview(self) -> None:
         """Drop the SyncView link (from the menu toggle, the bar, or when the

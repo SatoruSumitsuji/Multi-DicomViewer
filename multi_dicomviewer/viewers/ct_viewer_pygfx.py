@@ -5390,6 +5390,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif name == "wb":
             self._invert_btn.setChecked(bool(arg))
             self._toggle_invert()
+        elif name == "reset":
+            self._reset()
+        elif name == "color":
+            self._cmap_btn.setChecked(bool(arg))
+            self._toggle_color()
+        elif name == "slab":                          # slab-MIP thickness (mm)
+            for k in ("A", "B"):
+                self._thick[k] = float(arg)
+            if hasattr(self, "_sync_slab_spin"):
+                self._sync_slab_spin()
+            self._refresh()
 
     def _paging_sign(self, which):
         """+1/-1 so that moving _center by +n advances the OTHER pane's
