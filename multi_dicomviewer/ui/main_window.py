@@ -1423,10 +1423,7 @@ class MainWindow(QMainWindow):
         self._studies_dock.setWindowTitle(t("Studies"))
 
         # Top layout bar.
-        self._info_btn.setText(
-            t("◀ Hide Studies") if self._studies_dock.isVisible()
-            else t("Show Studies ▶")
-        )
+        self._update_info_btn_text()
         self._info_btn.setHelpToolTip(
             t("Show/hide the left Info window (study tree)")
         )
@@ -4013,9 +4010,10 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout(bar)
         row.setContentsMargins(6, 3, 6, 3)
 
-        self._info_btn = FitButton(t("◀ Hide Studies"))
+        self._info_btn = FitButton(t("◀ Hide Studies&Tools"))
         self._info_btn.setHelpToolTip(
-            t("Show/hide the left Info window (study tree)")
+            t("Show/hide the left Studies tree AND every shown Tools panel "
+              "(Coronary Tree / Case Presentation) together")
         )
         self._info_btn.clicked.connect(self._toggle_info)
         row.addWidget(self._info_btn)
@@ -4172,12 +4170,53 @@ class MainWindow(QMainWindow):
             self._hide_btns_btn.setEnabled(not hidden)
             self._show_btns_btn.setEnabled(hidden)
 
-    def _toggle_info(self, *_a) -> None:
-        vis = not self._studies_dock.isVisible()
-        self._studies_dock.setVisible(vis)
+    def _chrome_tool_panels(self) -> list:
+        """The dockable Tools panels that share the Studies area (Coronary Tree /
+        Case Presentation) and exist right now — hidden or shown by the
+        Studies&Tools button together with the Studies dock."""
+        out = []
+        for attr in ("_corotree_win", "_casepres_win"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                out.append(w)
+        return out
+
+    def _update_info_btn_text(self) -> None:
+        panels = self._chrome_tool_panels()
+        vis = self._studies_dock.isVisible() or any(
+            p.isVisible() for p in panels)
         self._info_btn.setText(
-            t("◀ Hide Studies") if vis else t("Show Studies ▶")
-        )
+            t("◀ Hide Studies&Tools") if vis else t("Show Studies&Tools ▶"))
+
+    def _toggle_info(self, *_a) -> None:
+        """Hide / show the Studies dock AND every currently-shown Tools panel
+        (Coronary Tree / Case Presentation) together. Hiding remembers which were
+        shown so showing restores exactly those (a panel the user had closed
+        stays closed)."""
+        panels = self._chrome_tool_panels()
+        any_visible = self._studies_dock.isVisible() or any(
+            p.isVisible() for p in panels)
+        if any_visible:                              # → hide everything
+            self._chrome_left_hidden = {
+                "studies": self._studies_dock.isVisible(),
+                "panels": [p for p in panels if p.isVisible()],
+            }
+            self._studies_dock.setVisible(False)
+            for p in panels:
+                p.setVisible(False)
+        else:                                        # → restore what was hidden
+            st = getattr(self, "_chrome_left_hidden", None)
+            if st is None:
+                self._studies_dock.setVisible(True)
+            else:
+                if st.get("studies", True):
+                    self._studies_dock.setVisible(True)
+                for p in st.get("panels", []):
+                    try:
+                        p.setVisible(True)
+                    except Exception:                # noqa: BLE001
+                        pass
+        self._update_info_btn_text()
 
     #: Non-modal tool windows opened as their OWN owner-less taskbar window.
     #: Attribute names on self; closed together with the main window below.
