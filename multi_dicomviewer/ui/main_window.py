@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -1291,6 +1292,12 @@ class MainWindow(QMainWindow):
         self._grid = QGridLayout(self._grid_host)
         self._grid.setContentsMargins(0, 0, 0, 0)
         self._grid.setSpacing(2)
+        # Each grid ROW holds ONE horizontal QSplitter spanning its columns, so
+        # the column dividers are draggable and INDEPENDENT per row (rows keep
+        # the equal-height grid behaviour). Remember each row's dragged widths by
+        # (layout_key, row) so they survive a layout switch.
+        self._pane_splitters: list = []
+        self._split_sizes: dict = {}
 
         central = QWidget()
         col = QVBoxLayout(central)
@@ -4315,6 +4322,20 @@ class MainWindow(QMainWindow):
                 occ.add(divmod(idx, _MAX_GRID_COLS))
         return occ
 
+    def _clear_pane_splitters(self) -> None:
+        """Reparent every pane out of its row splitter (so deleting the splitters
+        can't destroy the panes), drop the splitters, and clear any direct 1×1
+        placement — leaving a clean grid for _apply_layout to rebuild."""
+        for pane in self._panes:
+            pane.setParent(self._grid_host)          # rescue from any splitter
+        for sp in getattr(self, "_pane_splitters", []):
+            self._grid.removeWidget(sp)
+            sp.setParent(None)
+            sp.deleteLater()
+        self._pane_splitters = []
+        for pane in self._panes:
+            self._grid.removeWidget(pane)            # any 1×1 direct placement
+
     def _apply_layout(self, key: str, cells=None) -> None:
         # A SyncView link binds two SHOWN CT panes; a re-layout can hide or
         # rearrange them, so drop the link (the user re-enables it once the two
@@ -4330,9 +4351,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_layout_btn"):
             self._layout_btn.setText(self._layout_btn_text())
 
-        # Detach every pane, then re-add the visible subset to the grid.
+        # Detach every pane + drop the old row splitters, then rebuild.
+        self._clear_pane_splitters()
         for pane in self._panes:
-            self._grid.removeWidget(pane)
             pane.setVisible(False)
         full = key == "1x1"
         self._grid.setSpacing(0 if full else 2)
@@ -4344,14 +4365,29 @@ class MainWindow(QMainWindow):
             shown.setVisible(True)
             shown.set_full_bleed(True)
         else:
-            # Place the selected master cells (the chosen rectangle) into a
-            # rows×cols grid, preserving their reading-order positions.
-            for i, cell_idx in enumerate(self._layout_cells):
-                r, c = divmod(i, cols)
-                pane = self._order[cell_idx]
-                self._grid.addWidget(pane, r, c)
-                pane.setVisible(True)
-                pane.set_full_bleed(False)
+            # One horizontal QSplitter per row (spanning all columns): its column
+            # dividers are draggable and INDEPENDENT of the other rows. The grid
+            # still gives every row equal height (row stretch below).
+            for r in range(rows):
+                sp = QSplitter(Qt.Orientation.Horizontal)
+                sp.setChildrenCollapsible(False)   # keep the ≥50% image floor
+                sp.setHandleWidth(6)
+                for c in range(cols):
+                    pane = self._order[self._layout_cells[r * cols + c]]
+                    sp.addWidget(pane)
+                    sp.setStretchFactor(c, 1)
+                    pane.setVisible(True)
+                    pane.set_full_bleed(False)
+                saved = self._split_sizes.get((key, r))
+                if saved and len(saved) == cols:
+                    sp.setSizes(saved)             # restore the dragged widths
+                else:
+                    sp.setSizes([1000] * cols)     # equal by default
+                sp.splitterMoved.connect(
+                    lambda _p, _i, k=key, rr=r, s=sp:
+                    self._split_sizes.__setitem__((k, rr), s.sizes()))
+                self._grid.addWidget(sp, r, 0, 1, cols)
+                self._pane_splitters.append(sp)
         # Reset stretch on ALL grid lines (up to the largest layout, 2×3): a
         # leftover stretch on a now-empty row/col from a bigger layout would
         # otherwise still reserve space, shrinking the panes on the way back.
