@@ -6033,6 +6033,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "Set the centreline crossing as the apex? Move the crossing onto "
                 "the LV apex, then press Set (RePosition to move it again)."))
         self._lv_update_submode_ui()
+        # Auto-orient to the MV-perpendicular view on entering Apex (a no-op when
+        # MV isn't set yet) — the apex is easiest to find looking down the LV
+        # long axis, i.e. the MV plane face-on / edge-on.
+        self._lv_view_mv_perpendicular()
 
     def _lv_apex_set(self) -> None:
         """Set the COMMON apex at the current centreline crossing (self._center).
