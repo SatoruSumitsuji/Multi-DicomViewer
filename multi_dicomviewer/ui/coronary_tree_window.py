@@ -57,6 +57,9 @@ _UID_ROLE = Qt.ItemDataRole.UserRole
 #: Centreline resample step (mm) when rebuilding a .cpr.json's control points —
 #: dense enough for a coronary vessel; territory granularity, not correctness.
 _CPR_STEP_MM = 0.5
+#: 接続 (auto-connect) snap tolerance: a branch endpoint within this distance of
+#: an existing vessel attaches to it. Was 3 mm; widened to 5 mm per user request.
+_CONNECT_TOL_MM = 5.0
 
 
 class CoronaryTreeWindow(SnapDock):
@@ -97,7 +100,7 @@ class CoronaryTreeWindow(SnapDock):
                  t("枝ごとの .cpr.json を複数選択で読み込む（未接続で追加）"),
                  self._load_cpr),
                 (t("接続"),
-                 t("読み込んだ枝を最近接端点でツリーに接続 (3mm以内)。"
+                 t("読み込んだ枝を最近接端点でツリーに接続 (5mm以内)。"
                    "後から追加読込→再度接続も可"), self._connect),
                 (t("ツリー表示"),
                  t("冠動脈ツリーを3DCTに重畳表示 (再クリックで非表示)。"
@@ -319,7 +322,7 @@ class CoronaryTreeWindow(SnapDock):
 
     def _connect(self):
         """Grow the tree: attach every loose branch to the nearest connected
-        vessel by its nearest endpoint (3 mm). Roots must be set first."""
+        vessel by its nearest endpoint (5 mm). Roots must be set first."""
         if not self._tree.vessels:
             self._warn(t("先に CPR を読み込んでください。"))
             return
@@ -327,12 +330,12 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("ルート (LM / LAD / LCX / RCA) を1本以上設定して"
                          "ください。血管を右クリック →「役割」で設定できます。"))
             return
-        res = self._tree.connect_all(snap_tol_mm=3.0)
+        res = self._tree.connect_all(snap_tol_mm=_CONNECT_TOL_MM)
         self._populate()
         self.treeChanged.emit()
         msg = t("{c} 本を接続しました。", c=len(res["connected"]))
         if res["unconnected"]:
-            msg += t(" 未接続 {u} 本（3mm以内に幹/枝がありません。近い枝を"
+            msg += t(" 未接続 {u} 本（5mm以内に幹/枝がありません。近い枝を"
                      "先に接続するか、右クリックで親を指定）。",
                      u=len(res["unconnected"]))
         self._hint.setText(msg)
