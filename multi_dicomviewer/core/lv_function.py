@@ -80,6 +80,15 @@ class LVFunction:
         return cls(endo_in, epi, (sz, sy, sx), apex, axis_dir, radial0, origin)
 
     @classmethod
+    def from_full(cls, full_data):
+        """Build from a single ``.FullLv.json`` — the territory bundle that packs
+        the EpiLv dict (``epi``) and the BldLv dict (``bld``) into one file. Just
+        forwards the two embedded dicts to :meth:`from_files`, so there is ONE
+        myocardium-building path. None if the bundle is missing either part."""
+        fd = full_data or {}
+        return cls.from_files(fd.get("epi"), fd.get("bld"))
+
+    @classmethod
     def from_files(cls, epilv_data, bldlv_data):
         """Combine EpiLv.json (Epi region mask = the single source of the Epi) +
         BldLv.json (Endo mask + spacing + axis) → a full LVFunction, with NO

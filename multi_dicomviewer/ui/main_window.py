@@ -1612,6 +1612,13 @@ class MainWindow(QMainWindow):
             ".corotree.json. Floats or docks with Studies"))
         self._corotree_act.triggered.connect(self._open_coronary_tree)
         tm.addAction(self._corotree_act)
+        self._territory_act = QAction(t("Territory…"), self)
+        self._territory_act.setToolTip(t(
+            "CT perfusion-territory analysis: load a coronary tree "
+            "(.corotree.json) + an LV bundle (.FullLv.json) and report the "
+            "myocardium each vessel perfuses. Floats or docks with Studies"))
+        self._territory_act.triggered.connect(self._open_territory)
+        tm.addAction(self._territory_act)
 
         tm.addSeparator()
         self._dicomcheck_act = QAction(t("DicomCheck…"), self)
@@ -2301,6 +2308,34 @@ class MainWindow(QMainWindow):
                 w.resize(360, 520)
                 c = self.geometry().center()
                 w.move(max(0, c.x() - 180), max(0, c.y() - 260))
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        return w
+
+    def _open_territory(self):
+        """Tools ▸ Territory — the two-file CT perfusion-territory panel. One
+        instance is kept; starts floating, drag onto Studies to dock+tab."""
+        from multi_dicomviewer.ui.territory_window import TerritoryWindow
+        w = getattr(self, "_territory_win", None)
+        if w is None:
+            w = TerritoryWindow(self)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
+            if getattr(self, "_studies_dock", None) is not None:
+                self.tabifyDockWidget(self._studies_dock, w)
+            self._territory_win = w
+            w.setFloating(True)
+            w.resize(480, 560)
+        if not w.isVisible():
+            w.show()
+        if w.isFloating():
+            too_small = w.width() < 240 or w.height() < 180
+            scr = self.screen().availableGeometry() if self.screen() else None
+            off = scr is not None and not scr.intersects(w.frameGeometry())
+            if too_small or off:
+                w.resize(480, 560)
+                c = self.geometry().center()
+                w.move(max(0, c.x() - 240), max(0, c.y() - 280))
         w.show()
         w.raise_()
         w.activateWindow()
