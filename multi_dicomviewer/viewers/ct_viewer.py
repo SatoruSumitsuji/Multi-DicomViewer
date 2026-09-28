@@ -2557,6 +2557,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_ml = None          # Epi (epicardial) volume mL, cached
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
+        self._lvv_loaded_bld = None      # last LOADED BldLv dict (FullLV fallback)
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
@@ -8100,7 +8101,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             miss.append(t("AoV"))
         if mv is None:
             miss.append(t("MV"))
-        if getattr(self, "_lv_endo_mask_comp", None) is None:
+        # Endo mask: in memory, OR still carried by the loaded BldLv (used as the
+        # FullLV fallback when a mask restore was skipped).
+        lb = getattr(self, "_lvv_loaded_bld", None)
+        endo_ok = getattr(self, "_lv_endo_mask_comp", None) is not None or (
+            lvv is not None and isinstance(lb, dict)
+            and isinstance(lb.get("endo"), dict))
+        if not endo_ok:
             miss.append(t("Endo"))
         epi = getattr(self, "_lvv_epi_model_dict", None)
         if not (isinstance(epi, dict) and isinstance(epi.get("region"), dict)):
@@ -8131,6 +8138,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         try:
             bld = self._lvv_build_dict(warn=True)
+            # If the in-memory rebuild is missing the Endo mask (a mask restore
+            # was skipped on load), bundle the LOADED BldLv instead — it carries
+            # the Endo/blood masks verbatim from the saved file.
+            lb = getattr(self, "_lvv_loaded_bld", None)
+            if (bld is None or not isinstance(bld.get("endo"), dict)) \
+                    and self._lvv is not None and isinstance(lb, dict) \
+                    and isinstance(lb.get("endo"), dict):
+                bld = lb
             epi = getattr(self, "_lvv_epi_model_dict", None)
             full, err = (full_lv.build(epi, bld) if bld is not None
                          else (None, t("Blood/Endo build failed")))
@@ -8240,6 +8255,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv = {"apex": None, "aortic": None, "mitral": None,
                          "hu_lo": None, "hu_hi": None, "seed": None,
                          "step": "apex", "last_ml": None, "calc_sig": None}
+        # Keep the LOADED BldLv dict verbatim — it carries the Endo/blood masks
+        # + valves + apex + axis. The FullLV export falls back to it when an
+        # in-memory mask restore was skipped (e.g. a 1-slice vol_shape drift), so
+        # a loaded analysis can always be bundled for territory.
+        self._lvv_loaded_bld = data
         self._lvv_dirty = False              # loaded = matches the file
         lvv = self._lvv
         lvv["apex"] = np.asarray(data["apex"], float)
