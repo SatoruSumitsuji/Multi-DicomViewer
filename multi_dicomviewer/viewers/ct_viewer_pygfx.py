@@ -8854,6 +8854,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_start_btn.setChecked(blood)
         if self._lv is None or self._lv.get("sax") is None:
             self._lv_style_selectors()
+        # FullLV export: live only when an Epi (region) + a Blood/Endo analysis
+        # are both present (i.e. the myocardium can be bundled for territory).
+        if getattr(self, "_full_lv_btn", None) is not None:
+            self._full_lv_btn.setEnabled(self._full_lv_ready())
 
     def _lv_relayout_bar(self) -> None:
         """Force a SYNCHRONOUS relayout of the LV bar after a row was shown/hidden
@@ -9028,6 +9032,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_epi_btn.clicked.connect(lambda: self._lv_select_submode("epi"))
         row1.addWidget(self._lv_epi_btn)
         row1.addWidget(self._lvv_start_btn)      # "Blood/Endo" (built in lvv bar)
+        # FullLV: bundle the loaded EpiLv + the Blood/Endo (BldLv) analysis into
+        # one .FullLv.json — the LV input to CT Territory (paired with a
+        # corotree.json). Enabled only when both parts are available.
+        self._full_lv_btn = FitButton(t("FullLV"))
+        self._full_lv_btn.setHelpToolTip(
+            t("Save a .FullLv.json (Epi + Endo/Blood bundle). Load it together "
+              "with a corotree.json in Tools ▸ Territory to run perfusion-"
+              "territory analysis. Enabled once an Epi (with region mask) and a "
+              "Blood/Endo analysis are both present."))
+        self._full_lv_btn.clicked.connect(self._full_lv_save)
+        row1.addWidget(self._full_lv_btn)
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
         self._lv_endo_btn.setVisible(False)
@@ -11148,13 +11163,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._lvv_do_save()
 
-    def _lvv_do_save(self) -> None:
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        import json
-        import os
+    def _lvv_build_dict(self, warn: bool = True):
+        """Build the BldLv.json data dict from the current LV-Vol state — headless
+        (no file dialog). Returns None if a prerequisite (apex / MV / AoV) is
+        missing (*warn* explains why). Shared by _lvv_do_save (which writes it)
+        and the FullLV territory bundle."""
+        from PyQt6.QtWidgets import QMessageBox
         lvv = self._lvv
         if lvv is None or lvv.get("apex") is None:
-            return
+            return None
+        if lvv.get("aortic") is None or lvv.get("mitral") is None:
+            if warn:
+                QMessageBox.information(
+                    self.window(), t("LV Vol"),
+                    t("Set the MV and AoV planes first, then Save."))
+            return None
         c_a, n_a, r_a = lvv["aortic"]
         c_m, n_m, r_m = lvv["mitral"]
         data = {
@@ -11256,6 +11279,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             "epi_border": bool(getattr(self, "_lvv_epi_show", False)),
             "endo_auto": bool(getattr(self, "_lvv_endo_show", False)),
         }
+        self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
+        return data
+
+    def _lvv_do_save(self) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        data = self._lvv_build_dict(warn=True)
+        if data is None:
+            return
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         # Auto name "名前;日付_Se番号.BldLv.json" (Blood sub-mode file — parity
         # with the VTK viewer).
@@ -11270,7 +11303,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if not path.endswith(".json"):
             path += ".BldLv.json"
-        self._lv_stamp_axis_def(data)        # apex→MV-centre long-axis marker
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -11280,6 +11312,63 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         QMessageBox.information(self.window(), t("LV Vol"),
                                t("Saved: {p}", p=os.path.basename(path)))
+
+    # ---- FullLV: the EpiLv + BldLv territory bundle ---------------------
+    def _full_lv_ready(self) -> bool:
+        """FullLV button gate: a Blood/Endo analysis (apex + MV + AoV + Endo mask)
+        AND an Epi with a region mask are present — i.e. the myocardium
+        (Epi ∧ ¬Endo) can be bundled for territory. CHEAP: only presence checks,
+        no dict build (this runs on every LV UI refresh)."""
+        lvv = self._lvv
+        if lvv is None or lvv.get("apex") is None:
+            return False
+        if lvv.get("aortic") is None or lvv.get("mitral") is None:
+            return False
+        if getattr(self, "_lv_endo_mask_comp", None) is None:
+            return False
+        epi = getattr(self, "_lvv_epi_model_dict", None)
+        return isinstance(epi, dict) and isinstance(epi.get("region"), dict)
+
+    def _full_lv_save(self) -> None:
+        """Write a .FullLv.json — the EpiLv + BldLv bundle that pairs with a
+        corotree.json as the two inputs to CT Territory (Tools ▸ Territory)."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core import full_lv
+        import json
+        import os
+        bld = self._lvv_build_dict(warn=True)
+        if bld is None:
+            return
+        bld.pop("epi_model", None)   # Epi lives at FullLv's top level — no dup
+        epi = getattr(self, "_lvv_epi_model_dict", None)
+        full, err = full_lv.build(epi, bld)
+        if full is None:
+            QMessageBox.information(self.window(), t("FullLV"),
+                                    t("Cannot build FullLv: {e}", e=err))
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "FullLv")
+        name = stem + ".FullLv.json"
+        default = os.path.join(d, name) if d else name
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save FullLV"), default,
+            "Full LV (*.FullLv.json);;JSON (*.json)")
+        if not path:
+            return
+        if not path.endswith(".json"):
+            path += ".FullLv.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(full, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("FullLV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        QMessageBox.information(
+            self.window(), t("FullLV"),
+            t("Saved: {p} — load it with a corotree.json in Tools ▸ Territory.",
+              p=os.path.basename(path)))
 
     def _lvv_restore_blood(self, bd) -> bool:
         """Decode an embedded blood mask (BldLv.json 'blood') into memory and

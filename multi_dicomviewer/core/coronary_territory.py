@@ -495,3 +495,72 @@ class TerritoryEngine:
         sel = self.local_zyx[keep]
         grid[sel[:, 0], sel[:, 1], sel[:, 2]] = code[keep] + 1
         return grid, self.assignment["code_to_vid"]
+
+
+# ---------------------------------------------------------- text report
+#: Roots that make up the LEFT coronary system (summed for LM-lesion reporting).
+_LEFT_ROLES = ("LM", "LAD", "LCX")
+
+
+def short_vessel_name(name: str) -> str:
+    """A readable vessel label from a long CPR filename stem, e.g.
+    'ARIFIN;20260629_Se006@LM-LAD@202609231139' → 'LM-LAD'."""
+    import re
+    toks = str(name).split("@")
+    if len(toks) < 2:
+        return name
+    keep = [x for x in toks[1:] if not re.fullmatch(r"[0-9;]+", x)]
+    return "@".join(keep) if keep else toks[1]
+
+
+def format_territory_report(tree: CoronaryTree, lvf,
+                            max_dist_mm: float | None = None):
+    """Human-readable CT Territory report as a list of text lines — the SAME
+    output for the headless tool (tools/territory_report.py) and the Tools ▸
+    Territory panel. Pure (no Qt). Returns ``(lines, engine)`` so a caller can
+    reuse the engine (e.g. for an overlay) without recomputing."""
+    eng = TerritoryEngine(tree, lvf, max_dist_mm=max_dist_mm)
+    total = eng.myocardium_ml
+    myo_only = lvf.myocardial_volume_ml()
+
+    def pct(ml):
+        return f"{100.0 * ml / total:5.1f}%" if total > 0 else "  n/a"
+
+    L = [f"Myocardium (Epi & ~Endo) : {myo_only:8.1f} mL",
+         f"  assigned voxels total  : {total:8.1f} mL"]
+    if max_dist_mm is not None:
+        L.append(f"  assignment cap         : {max_dist_mm:g} mm")
+    L.append("")
+    roots = tree.roots()
+    by_role: dict = {}
+    L.append("Per-root territory (whole subtree, from ostium):")
+    for vid in roots:
+        v = tree.vessels[vid]
+        _mask, ml = eng.territory(vid, 0)
+        by_role[v.role] = by_role.get(v.role, 0.0) + ml
+        L.append(f"  {v.role:<4} {short_vessel_name(v.name):<16} : "
+                 f"{ml:8.1f} mL  {pct(ml)}")
+    if not roots:
+        L.append("  (no roots set — assign LM/LAD/LCX/RCA roles first)")
+    left = sum(by_role.get(r, 0.0) for r in _LEFT_ROLES)
+    if left > 0:
+        present = [r for r in _LEFT_ROLES if by_role.get(r)]
+        L.append("")
+        L.append(f"Left system ({'+'.join(present)}) : {left:8.1f} mL  "
+                 f"{pct(left)}")
+    code = eng.assignment["code"]
+    unassigned_ml = float(int((code < 0).sum())) * eng.voxel_ml
+    if unassigned_ml > 0:
+        L.append("")
+        L.append(f"Unassigned (beyond cap)  : {unassigned_ml:8.1f} mL  "
+                 f"{pct(unassigned_ml)}")
+    L.append("")
+    L.append("Per-vessel own share (nearest voxels), largest first:")
+    c2v = eng.assignment["code_to_vid"]
+    uniq, cnt = np.unique(code[code >= 0], return_counts=True)
+    for u, c in sorted(zip(uniq, cnt), key=lambda x: -x[1]):
+        vid = c2v[int(u)]
+        ml = float(c) * eng.voxel_ml
+        L.append(f"  {short_vessel_name(tree.vessels[vid].name):<18} : "
+                 f"{ml:8.1f} mL  {pct(ml)}")
+    return L, eng
