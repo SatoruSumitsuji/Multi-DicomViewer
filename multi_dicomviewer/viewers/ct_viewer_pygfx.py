@@ -1522,16 +1522,8 @@ class _Overlay(QWidget):
             ax, ay = v._world_to_screen(key, *v._anchor(m))
             p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
 
-        # CPR: on the MAP pane, mark where the short-axis is currently cut (the
-        # scrubbed centreline point projected onto this plane) — the CT analogue
-        # of the IVUS pull-back position marker. Green, matching the VTK viewer.
-        if v._cpr is not None and key == v._cpr.get("src"):
-            cl = v._cpr["cl"]
-            i = int(v._cpr["idx"])
-            if 0 <= i < len(cl.points):
-                pw = np.asarray(cl.points[i], float) - _po
-                dots([(float(np.dot(pw, _pu)), float(np.dot(pw, _pv)))],
-                     QColor(59, 219, 90), 7.0)
+        # (The green CPR cut-position marker on the map pane was removed to match
+        # the VTK viewer — users found it an eyesore.)
 
         d = v._draft
         if d and d["pane"] == key and d["pts"]:
