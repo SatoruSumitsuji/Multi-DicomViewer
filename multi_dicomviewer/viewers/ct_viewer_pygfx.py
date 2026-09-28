@@ -2260,6 +2260,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_surf = None             # LVSurface (Epi outer bound)
         self._lvv_epi_apex = None             # Epi apex (world mm)
         self._lvv_epi_model_dict = None       # LVModel dict for Save
+        self._lvv_loaded_bld = None           # last LOADED BldLv dict (FullLV fallback)
         self._lvv_epi_ml = None               # cached epicardial volume (mL)
         self._lvv_hl_on = True                # 血流領域表示 (in-range tint) on
         self._lvv_epi_show = False            # Epi境界 (green border) on
@@ -11328,7 +11329,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             miss.append(t("AoV"))
         if not lvv or lvv.get("mitral") is None:
             miss.append(t("MV"))
-        if getattr(self, "_lv_endo_mask_comp", None) is None:
+        # Endo mask: in memory, OR still carried by the loaded BldLv (used as the
+        # FullLV fallback when a mask restore was skipped).
+        lb = getattr(self, "_lvv_loaded_bld", None)
+        endo_ok = getattr(self, "_lv_endo_mask_comp", None) is not None or (
+            lvv is not None and isinstance(lb, dict)
+            and isinstance(lb.get("endo"), dict))
+        if not endo_ok:
             miss.append(t("Endo"))
         epi = getattr(self, "_lvv_epi_model_dict", None)
         if not (isinstance(epi, dict) and isinstance(epi.get("region"), dict)):
@@ -11361,6 +11368,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             bld = self._lvv_build_dict(warn=True)
             if bld is not None:
                 bld.pop("epi_model", None)   # Epi lives at FullLv top level — no dup
+            # If the in-memory rebuild lacks the Endo mask (a restore was skipped
+            # on load), bundle the LOADED BldLv instead — it carries the masks.
+            lb = getattr(self, "_lvv_loaded_bld", None)
+            if (bld is None or not isinstance(bld.get("endo"), dict)) \
+                    and self._lvv is not None and isinstance(lb, dict) \
+                    and isinstance(lb.get("endo"), dict):
+                bld = dict(lb)
+                bld.pop("epi_model", None)
             epi = getattr(self, "_lvv_epi_model_dict", None)
             full, err = (full_lv.build(epi, bld) if bld is not None
                          else (None, t("Blood/Endo build failed")))
@@ -11568,6 +11583,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv = {"apex": None, "aortic": None, "mitral": None,
                          "hu_lo": None, "hu_hi": None, "seed": None,
                          "step": "apex", "last_ml": None, "calc_sig": None}
+        # Keep the LOADED BldLv dict verbatim (Endo/blood masks + valves + apex +
+        # axis) as the FullLV fallback when an in-memory mask restore is skipped.
+        self._lvv_loaded_bld = data
         lvv = self._lvv
         lvv["apex"] = np.asarray(data["apex"], float)
         if data.get("seed") is not None:         # legacy files only
