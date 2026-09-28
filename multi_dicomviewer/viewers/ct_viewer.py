@@ -4381,8 +4381,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_style_selectors()      # loaded/active colours (not in SAX)
         # FullLV export: live only when an Epi (region) + a Blood/Endo analysis
         # are both present (i.e. the myocardium can be bundled for territory).
-        if getattr(self, "_full_lv_btn", None) is not None:
-            self._full_lv_btn.setEnabled(self._full_lv_ready())
+        self._full_lv_refresh_btn()
 
     def _lv_relayout_bar(self) -> None:
         """Force a SYNCHRONOUS relayout of the LV bar up its whole parent chain
@@ -8119,6 +8118,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         present, so the myocardium (Epi ∧ ¬Endo) can be bundled for territory."""
         return not self._full_lv_missing()
 
+    def _full_lv_refresh_btn(self) -> None:
+        """Enable/disable the FullLV button AND set a tooltip that NAMES what is
+        still missing when it's greyed — so the reason is visible on hover."""
+        b = getattr(self, "_full_lv_btn", None)
+        if b is None:
+            return
+        miss = self._full_lv_missing()
+        b.setEnabled(not miss)
+        b.setHelpToolTip(       # FitButton keeps this as the hover tooltip
+            t("FullLv を保存（Epi + Endo/Blood バンドル → Tools ▸ Territory）")
+            if not miss else
+            t("FullLV は準備できていません — 不足: {m}", m=" / ".join(miss)))
+
     def _full_lv_save(self) -> None:
         """Write a .FullLv.json — the EpiLv + BldLv bundle that pairs with a
         corotree.json as the two inputs to CT Territory (Tools ▸ Territory).
@@ -8428,8 +8440,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._refresh(reset_cam=False)
         # Reflect the just-loaded LV analysis in the FullLV button (territory
         # export becomes available once Epi region + Endo + valves + apex exist).
-        if getattr(self, "_full_lv_btn", None) is not None:
-            self._full_lv_btn.setEnabled(self._full_lv_ready())
+        self._full_lv_refresh_btn()
         return applied
 
     def _lvv_clear_markers(self) -> None:
