@@ -4170,52 +4170,44 @@ class MainWindow(QMainWindow):
             self._hide_btns_btn.setEnabled(not hidden)
             self._show_btns_btn.setEnabled(hidden)
 
-    def _chrome_tool_panels(self) -> list:
-        """The dockable Tools panels that share the Studies area (Coronary Tree /
-        Case Presentation) and exist right now — hidden or shown by the
-        Studies&Tools button together with the Studies dock."""
+    def _chrome_left_docks(self) -> list:
+        """Every dock widget currently in the LEFT Studies/Tools frame — the
+        Studies tree plus any Tools panel DOCKED there (Coronary Tree, Case
+        Presentation, and any future tool docked into the left area). FLOATING
+        panels are excluded, so the Studies&Tools button leaves them alone. Works
+        by area, not a hardcoded list, so new left-docked tools are covered."""
+        from PyQt6.QtWidgets import QDockWidget
         out = []
-        for attr in ("_corotree_win", "_casepres_win"):
-            w = getattr(self, attr, None)
-            if w is not None:
-                out.append(w)
+        for d in self.findChildren(QDockWidget):
+            try:
+                if not d.isFloating() and self.dockWidgetArea(d) == \
+                        Qt.DockWidgetArea.LeftDockWidgetArea:
+                    out.append(d)
+            except Exception:                        # noqa: BLE001
+                pass
         return out
 
     def _update_info_btn_text(self) -> None:
-        panels = self._chrome_tool_panels()
-        vis = self._studies_dock.isVisible() or any(
-            p.isVisible() for p in panels)
+        vis = any(d.isVisible() for d in self._chrome_left_docks())
         self._info_btn.setText(
             t("◀ Hide Studies&Tools") if vis else t("Show Studies&Tools ▶"))
 
     def _toggle_info(self, *_a) -> None:
-        """Hide / show the Studies dock AND every currently-shown Tools panel
-        (Coronary Tree / Case Presentation) together. Hiding remembers which were
-        shown so showing restores exactly those (a panel the user had closed
-        stays closed)."""
-        panels = self._chrome_tool_panels()
-        any_visible = self._studies_dock.isVisible() or any(
-            p.isVisible() for p in panels)
-        if any_visible:                              # → hide everything
-            self._chrome_left_hidden = {
-                "studies": self._studies_dock.isVisible(),
-                "panels": [p for p in panels if p.isVisible()],
-            }
-            self._studies_dock.setVisible(False)
-            for p in panels:
-                p.setVisible(False)
+        """Hide / show everything in the LEFT Studies/Tools frame together — the
+        Studies tree and every Tools panel docked there. Hiding remembers which
+        were shown so showing restores exactly those (a panel the user had closed
+        stays closed). Floating panels are untouched."""
+        docks = self._chrome_left_docks()
+        if any(d.isVisible() for d in docks):        # → hide the shown ones
+            self._chrome_left_hidden = [d for d in docks if d.isVisible()]
+            for d in self._chrome_left_hidden:
+                d.setVisible(False)
         else:                                        # → restore what was hidden
-            st = getattr(self, "_chrome_left_hidden", None)
-            if st is None:
-                self._studies_dock.setVisible(True)
-            else:
-                if st.get("studies", True):
-                    self._studies_dock.setVisible(True)
-                for p in st.get("panels", []):
-                    try:
-                        p.setVisible(True)
-                    except Exception:                # noqa: BLE001
-                        pass
+            for d in (getattr(self, "_chrome_left_hidden", None) or docks):
+                try:
+                    d.setVisible(True)
+                except Exception:                    # noqa: BLE001
+                    pass
         self._update_info_btn_text()
 
     #: Non-modal tool windows opened as their OWN owner-less taskbar window.
