@@ -9892,14 +9892,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.meas_arc_mapper.SetInputData(
             _colored_multi_pd(arc_lines, [(255, 140, 0)] * len(arc_lines))
         )
-        # CPR: on the MAP pane, mark where the short-axis is currently cut
-        # (the scrubbed centreline point projected onto this plane) — the CT
-        # analogue of the IVUS pull-back position marker. Drawn green via the
-        # edit-points actor (no vertex is being edited on the map pane in CPR).
-        if self._cpr is not None and key == self._cpr.get("src"):
-            i = self._cpr["idx"]
-            edit_pts.append(
-                self._world3d_to_out(key, self._cpr["cl"].points[i]))
+        # (The green CPR cut-position marker on the map pane was removed — users
+        # found it an eyesore, and a stale one could linger after leaving the
+        # short-axis until the next map-pane redraw.)
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
         p.meas_pts_edit_mapper.SetInputData(_points_pd(edit_pts))
