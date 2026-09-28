@@ -168,6 +168,127 @@ class CPRMixin:
         return (np.asarray(c["cl"].points[i], float), c["u"][i], c["v"][i],
                 np.asarray(c["cl"].tangents[i], float))
 
+    # ---- edit-point (control-point) navigation & editing -----------------
+    def _cpr_ctrl_indices(self):
+        """Dense-centreline index of EACH control point, aligned to the trace's
+        pts3d. Cached on _cpr; invalidated on rebuild/Fit so it always matches
+        the current centreline. Empty when there's no short-axis."""
+        c = self._cpr
+        if c is None:
+            return []
+        cached = c.get("_ctrl_idx")
+        if cached is not None:
+            return cached
+        p3 = self._cpr_ctrl_pts3d()
+        out = []
+        if p3:
+            pts = np.asarray(c["cl"].points, float)
+            for P in p3:
+                out.append(int(np.argmin(
+                    np.linalg.norm(pts - np.asarray(P, float), axis=1))))
+        c["_ctrl_idx"] = out
+        return out
+
+    def _cpr_at_ctrl(self):
+        """Index (into pts3d) of the control point the CURRENT cross-section sits
+        exactly on, or None between control points (an interpolated section)."""
+        c = self._cpr
+        if c is None:
+            return None
+        cur = c["idx"]
+        for k, di in enumerate(self._cpr_ctrl_indices()):
+            if di == cur:
+                return k
+        return None
+
+    def _cpr_jump_ctrl(self, direction: int) -> None:
+        """Alt+F / Alt+A in the short-axis: move the cross-section to the NEXT /
+        PREVIOUS control (edit) point so it can be adjusted."""
+        c = self._cpr
+        if c is None:
+            return
+        idxs = sorted(set(self._cpr_ctrl_indices()))
+        if not idxs:
+            return
+        cur = c["idx"]
+        if direction > 0:
+            nxt = next((i for i in idxs if i > cur), idxs[-1])
+        else:
+            nxt = next((i for i in reversed(idxs) if i < cur), idxs[0])
+        c["idx"] = int(nxt)
+        self._cpr_sync_bar()
+        self._refresh()
+
+    def _cpr_set_ctrl(self, m, src, p3) -> None:
+        """Write a new control-point list back onto the trace measure (both the
+        3-D points and their 2-D projection on the src/map pane)."""
+        m["pts3d"] = [list(map(float, np.asarray(q, float))) for q in p3]
+        m["pts"] = [self._world3d_to_out(src, np.asarray(q, float)) for q in p3]
+
+    def _cpr_edit_rebuild(self) -> None:
+        """Rebuild after an Add/Delete, re-mapping the scroll index by arc-length
+        fraction so the view stays at ~the same place along the vessel (P2)."""
+        c = self._cpr
+        old_n = c["cl"].n
+        frac = (c["idx"] / (old_n - 1)) if old_n > 1 else 0.0
+        self._cpr_rebuild()
+        n2 = self._cpr["cl"].n
+        self._cpr["idx"] = int(min(max(round(frac * (n2 - 1)), 0), n2 - 1))
+        self._cpr_sync_bar()
+        self._refresh()
+
+    def _cpr_add_ctrl_at(self, P) -> None:
+        """Insert a new control (edit) point at 3-D world point *P*, keeping the
+        proximal→distal order, then rebuild. Used by the cross-section right-click
+        Add Point (long-axis edits are made by adding points)."""
+        c = self._cpr
+        if c is None:
+            return
+        src, mi = c.get("src"), c.get("src_mi")
+        if src not in ("A", "B") or mi is None \
+                or not (0 <= mi < len(self._measures.get(src, []))):
+            return
+        m = self._measures[src][mi]
+        p3 = [np.asarray(q, float) for q in (m.get("pts3d") or [])]
+        if len(p3) < 2:
+            return
+        # Insert just after the control points that precede the current section.
+        ci = self._cpr_ctrl_indices()
+        k = int(min(max(sum(1 for di in ci if di <= c["idx"]), 1), len(p3)))
+        p3.insert(k, np.asarray(P, float))
+        self._cpr_set_ctrl(m, src, p3)
+        self._cpr_rebuild()
+        idxs = self._cpr_ctrl_indices()            # land ON the new point (edit)
+        if 0 <= k < len(idxs):
+            self._cpr["idx"] = int(idxs[k])
+            self._cpr_sync_bar()
+            self._refresh()
+
+    def _cpr_delete_ctrl_near(self) -> None:
+        """Delete the control (edit) point nearest the current cross-section,
+        keeping AT LEAST TWO (a centreline needs two), then rebuild."""
+        from PyQt6.QtWidgets import QMessageBox
+        c = self._cpr
+        if c is None:
+            return
+        src, mi = c.get("src"), c.get("src_mi")
+        if src not in ("A", "B") or mi is None \
+                or not (0 <= mi < len(self._measures.get(src, []))):
+            return
+        m = self._measures[src][mi]
+        p3 = [np.asarray(q, float) for q in (m.get("pts3d") or [])]
+        if len(p3) <= 2:
+            QMessageBox.information(
+                self, t("Short-axis"),
+                t("At least 2 edit points are required "
+                  "(cannot delete any more)."))
+            return
+        ci = self._cpr_ctrl_indices()
+        k = int(np.argmin([abs(di - c["idx"]) for di in ci])) if ci else 0
+        del p3[k]
+        self._cpr_set_ctrl(m, src, p3)
+        self._cpr_edit_rebuild()
+
     def _cpr_apply_xform(self):
         """Rebuild the CPR display axes u, v from the base frame (u0, v0), the
         cumulative Rt90/Flip transform T, and the continuous rotation ``rot``
@@ -336,6 +457,7 @@ class CPRMixin:
         fu = -fu                                  # view first->last (un-mirror)
         c["cl"], c["u0"], c["v0"] = cl, fu, fv
         c["idx"] = min(c["idx"], cl.n - 1)
+        c.pop("_ctrl_idx", None)                  # control-point indices changed
         self._cpr_apply_xform()                   # re-apply Rt90/Flip -> u, v
         self._cpr_sync_bar()
         self._refresh()
@@ -343,11 +465,19 @@ class CPRMixin:
     # ---- marker-drag release (grab / move stay per-backend: coordinate + actor
     #      coupled) ----
     def _cpr_drag_end(self):
-        """Release: rebuild the centreline from the adjusted control points."""
+        """Release: rebuild the centreline from the adjusted control points, then
+        re-snap the view onto the dragged edit point (its dense index shifts a
+        little as arc-length changes) so it stays FILLED / editable."""
         if self._cpr_drag is None:
             return
+        ci = self._cpr_drag
         self._cpr_drag = None
         self._cpr_rebuild()
+        idxs = self._cpr_ctrl_indices()
+        if 0 <= ci < len(idxs):
+            self._cpr["idx"] = int(idxs[ci])
+            self._cpr_sync_bar()
+            self._refresh()
 
     # ---- manual short-axis rotation (drag the section like a dial) ----
     def _cpr_cursor_angle(self, sx, sy) -> float:

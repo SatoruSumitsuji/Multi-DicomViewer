@@ -954,6 +954,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             self._last = None
+            # CPR short-axis (pane A): Add Point / Delete Point on the edit
+            # (control) points — takes priority so it works in any tool mode.
+            if (self._which == "A" and self._owner._cpr is not None
+                    and self._owner._cpr_context_menu(
+                        e.position().x(), e.position().y())):
+                return
             if self._owner._meas_on and self._owner._measure_right(
                     self._which, e.position().x(), e.position().y()):
                 return                        # handled a measure line/handle
@@ -16166,27 +16172,42 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draw_cpr_ctrl_markers()
 
     def _draw_cpr_ctrl_markers(self):
-        """Show the control points near the current cross-section as draggable
-        dots at their in-plane offset from the centreline, so the user can see
-        and fine-tune how each pseudo-centre sits versus the lumen."""
+        """Cross-section (CPR) pane: mark the centreline point of THIS slice.
+
+        Only EDIT (control) points are editable. When the current section sits
+        exactly on a control point, draw a FILLED yellow dot the user can drag
+        in-plane to re-centre it. On an interpolated section (between control
+        points) draw a HOLLOW yellow ring at the spline centre — a visible cue
+        that it is NOT editable here; use Alt+F / Alt+A to step to a control
+        point, or right-click ▸ Add Point to insert one."""
         p = self.pane["A"]
         p3 = self._cpr_ctrl_pts3d()
-        pts = []
+        filled = []
+        hollow = []
         self._cpr_marker_pts = []
         if p3:
-            o, u, vv, n = self._cpr_frame()
-            # Show exactly ONE dot: the control point nearest this cross-section
-            # (along the vessel), at its in-plane offset. Always visible (never a
-            # gap) and unambiguous — scroll to a pseudo-centre, then drag it.
-            dns = [abs(float(np.dot(np.asarray(P, float) - o, n))) for P in p3]
-            near = int(np.argmin(dns))
-            P = np.asarray(p3[near], float)
-            du = float(np.dot(P - o, u))
-            dv = float(np.dot(P - o, vv))
-            pts.append((du, dv))
-            self._cpr_marker_pts.append((near, (du, dv)))
-        p.meas_pts_mapper.SetInputData(_points_pd(pts))
-        p.meas_pts_off_mapper.SetInputData(vtkPolyData())
+            o, u, vv, _n = self._cpr_frame()
+            k = self._cpr_at_ctrl()
+            if k is not None:
+                P = np.asarray(p3[k], float)
+                du = float(np.dot(P - o, u))
+                dv = float(np.dot(P - o, vv))
+                filled.append((du, dv))
+                self._cpr_marker_pts.append((k, (du, dv)))
+            else:
+                hollow.append((0.0, 0.0))       # spline centre (interpolated)
+        p.meas_pts_mapper.SetInputData(_points_pd(filled))
+        if hollow:
+            dpr = max(1.0, p.canvas.devicePixelRatioF())
+            ps = p.ren.GetActiveCamera().GetParallelScale()
+            h_phys = max(1.0, p.canvas.height() * dpr)
+            ring_r_px = max(1.0, _MEAS_PT_PX / 2.0 - 1.2 * dpr)
+            ring_r_world = ring_r_px * (2.0 * ps) / h_phys
+            rings = _ring_polylines(hollow, ring_r_world)
+            p.meas_pts_off_mapper.SetInputData(
+                _colored_multi_pd(rings, [(255, 217, 0, 220)] * len(rings)))
+        else:
+            p.meas_pts_off_mapper.SetInputData(vtkPolyData())
         p.meas_off_dash_mapper.SetInputData(vtkPolyData())
         p.meas_pts_edit_mapper.SetInputData(vtkPolyData())
 
@@ -16217,6 +16238,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draw_cpr_ctrl_markers()
         self.pane["A"].render()
         self._redraw_meas(self._cpr["src"])        # map-pane trace follows
+
+    def _cpr_context_menu(self, sx, sy) -> bool:
+        """Short-axis right-click menu: Add / Delete an edit (control) point.
+        Add inserts a control point at the clicked in-plane spot on THIS
+        cross-section (so an interpolated section can be pinned / re-centred);
+        Delete removes the edit point nearest this section (guards ≥2)."""
+        if self._cpr is None:
+            return False
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QCursor
+        menu = QMenu(self)
+        a_add = menu.addAction(t("Add Point"))
+        a_del = menu.addAction(t("Delete Point"))
+        act = menu.exec(QCursor.pos())
+        if act is a_add:
+            o, u, vv, _n = self._cpr_frame()
+            du, dv = self._disp_to_world("A", sx, sy)
+            self._cpr_add_ctrl_at(o + du * u + dv * vv)
+        elif act is a_del:
+            self._cpr_delete_ctrl_near()
+        return True                                # consume the right-click
 
     # ---- _cpr_drag_end / _cpr_cursor_angle / _cpr_rot_* / _cpr_page_drag /
     #      _cpr_rebuild: shared, in CPRMixin (viewers/cpr_mixin.py). ----
@@ -18013,6 +18055,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (e.key() == Qt.Key.Key_V
                 and (e.modifiers() & Qt.KeyboardModifier.ControlModifier)):
             self._paste_measure()                 # paste a copied measure (new #)
+            return
+        # CPR short-axis: Alt+F / Alt+A step to the next / previous EDIT point.
+        if (self._cpr is not None
+                and (e.modifiers() & Qt.KeyboardModifier.AltModifier)
+                and e.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
+            self._cpr_jump_ctrl(+1 if e.key() == Qt.Key.Key_F else -1)
             return
         if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())

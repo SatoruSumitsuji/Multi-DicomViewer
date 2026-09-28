@@ -638,13 +638,21 @@ class _Overlay(QWidget):
             p.setPen(pen)
             p.drawLine(QPointF(0, cy), QPointF(w, cy))
             p.drawLine(QPointF(cx, 0), QPointF(cx, h))
-        # Editable pseudo-centre marker(s): the nearest control point, drawn at
-        # its in-plane offset from the centreline, draggable to fine-tune it.
-        for _ci, (du, dv) in v._cpr_marker_geom():
-            mx, my = v._world_to_screen("A", du, dv)
-            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
-            p.setBrush(QColor(255, 235, 0))
-            p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
+        # Edit (control) point on THIS section → a FILLED yellow dot, draggable
+        # in-plane. On an interpolated section → a HOLLOW yellow ring at the
+        # spline centre (not editable; Alt+F/A steps to an edit point, or
+        # right-click ▸ Add Point).
+        markers = v._cpr_marker_geom()
+        if markers:
+            for _ci, (du, dv) in markers:
+                mx, my = v._world_to_screen("A", du, dv)
+                p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+                p.setBrush(QColor(255, 235, 0))
+                p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
+        else:
+            p.setPen(QPen(QColor(255, 217, 0, 220), 1.6))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(QPointF(cx, cy), 5.0, 5.0)
 
     def _paint_coronary(self, p, key, w, h):
         """Coronary Tree overlay: every visible vessel's world-mm centreline
@@ -2436,6 +2444,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         sc_c = QShortcut(QKeySequence("C"), self)
         sc_c.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         sc_c.activated.connect(self._key_toggle_color)
+        # CPR short-axis: Alt+F / Alt+A step to the next / previous EDIT point.
+        # DISABLED unless a short-axis is active — otherwise these viewer-scoped
+        # shortcuts would go AMBIGUOUS with Case Presentation's app-wide Alt+F/A
+        # (next/prev series) whenever a CT pane has focus, breaking BOTH. Enabled
+        # in _enter_cpr, disabled in _exit_cpr.
+        self._cpr_jump_sc = []
+        for seq, direction in (("Alt+F", +1), ("Alt+A", -1)):
+            sc = QShortcut(QKeySequence(seq), self)
+            sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            sc.activated.connect(lambda d=direction: self._cpr_jump_ctrl(d))
+            sc.setEnabled(False)
+            self._cpr_jump_sc.append(sc)
         # Ctrl+Z = unified undo, Ctrl+Y = redo. macOS note: Qt's portable "Ctrl"
         # maps to ⌘, so StandardKey.Undo/Redo are ⌘Z / ⌘⇧Z and "Ctrl+Y" is ⌘Y.
         # Physical-Ctrl ("Meta") shortcuts are NOT bound: on macOS a physical
@@ -2675,6 +2695,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._meas_drag = bool(started)
                 return
             # idle Measure mode → fall through to the tool / crosshair setup
+        # Short-axis (CPR) pane A: right-click ▸ Add Point / Delete Point on the
+        # edit (control) points. Deferred out of the pointer handler so the
+        # modal menu never swallows the pointer-up (the Mac dead-buttons bug).
+        if self._drag_btn == 2 and self._cpr is not None and key == "A":
+            self._reset_pointer_state()
+            QTimer.singleShot(0, lambda sx=x, sy=y: self._cpr_context_menu(sx, sy))
+            return
         # Right-click (not measuring): a single click exports a still image;
         # a double click forces the full-quality ("high-res") rebuild. Defer
         # the export by one double-click interval so a second right-press can
@@ -14664,6 +14691,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_rev_btn.setChecked(False)
         self._coronary_mode = True                 # keep the coronary row shown
         self._coronary_mpr_pending = False         # trace consumed
+        for sc in getattr(self, "_cpr_jump_sc", []):   # Alt+F/A edit-point nav
+            sc.setEnabled(True)
         self._cpr_sync_bar()
         self._coronary_sync_ui()                   # show scrub, enable Save
         self._refresh(reset_cam=True)
@@ -14681,6 +14710,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_drag = None
         self._cpr_rot_prev = None
         self._cpr_marker_pts = []
+        for sc in getattr(self, "_cpr_jump_sc", []):   # release Alt+F/A back to CP
+            sc.setEnabled(False)
         for b in self._t2d_btns:                   # work in 2-D and 3-D MPR
             b.setEnabled(True)
         self._coronary_sync_ui()                   # hide scrub; row per _coronary_mode
@@ -14915,20 +14946,23 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # ---- control-point markers (edit the pseudo-centres in the section) ----
     def _cpr_marker_geom(self):
-        """Recompute the single nearest control-point marker's in-plane offset
-        (du,dv) and cache it in _cpr_marker_pts for hit-testing. Returns the
-        list of (ctrl_idx, (du,dv))."""
+        """Edit-point marker for the CURRENT section: the control point this
+        slice sits exactly on, at its in-plane offset (du,dv), cached in
+        _cpr_marker_pts for hit-testing. Empty on an INTERPOLATED section
+        (nothing is editable between control points — step to one with
+        Alt+F / Alt+A, or right-click ▸ Add Point)."""
         self._cpr_marker_pts = []
         p3 = self._cpr_ctrl_pts3d()
         if not p3:
             return self._cpr_marker_pts
-        o, u, vv, n = self._cpr_frame()
-        dns = [abs(float(np.dot(np.asarray(P, float) - o, n))) for P in p3]
-        near = int(np.argmin(dns))
-        P = np.asarray(p3[near], float)
+        k = self._cpr_at_ctrl()
+        if k is None:
+            return self._cpr_marker_pts
+        o, u, vv, _n = self._cpr_frame()
+        P = np.asarray(p3[k], float)
         du = float(np.dot(P - o, u))
         dv = float(np.dot(P - o, vv))
-        self._cpr_marker_pts.append((near, (du, dv)))
+        self._cpr_marker_pts.append((k, (du, dv)))
         return self._cpr_marker_pts
 
     def _cpr_grab(self, sx, sy) -> bool:
@@ -14957,6 +14991,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         p3[ci] = np.asarray(o, float) + du * u + dv * vv + dn * n
         self._overlay["A"].update()
         self._redraw_meas(self._cpr["src"])        # map-pane trace follows
+
+    def _cpr_context_menu(self, sx, sy) -> None:
+        """Short-axis right-click menu: Add / Delete an edit (control) point.
+        Add inserts a control point at the clicked in-plane spot on THIS
+        cross-section (so an interpolated section can be pinned / re-centred);
+        Delete removes the edit point nearest this section (guards >=2)."""
+        if self._cpr is None:
+            return
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QCursor
+        menu = QMenu(self)
+        a_add = menu.addAction(t("Add Point"))
+        a_del = menu.addAction(t("Delete Point"))
+        act = menu.exec(QCursor.pos())
+        if act is a_add:
+            o, u, vv, _n = self._cpr_frame()
+            du, dv = self._disp_to_world("A", sx, sy)
+            self._cpr_add_ctrl_at(o + du * u + dv * vv)
+        elif act is a_del:
+            self._cpr_delete_ctrl_near()
 
     def reload_display_quality(self) -> None:
         """Re-read the app-wide display-quality prefs (the shell calls this after
