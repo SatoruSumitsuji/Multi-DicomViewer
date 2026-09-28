@@ -3125,6 +3125,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # one .FullLv.json — the LV input to CT Territory (paired with a
         # corotree.json). Enabled only when both parts are available.
         self._full_lv_btn = FitButton(t("FullLV"))
+        self._full_lv_btn.setStyleSheet(self._BTN_DIS)   # grey text when disabled
+        self._full_lv_btn.setEnabled(False)              # off until an LV analysis
         self._full_lv_btn.setHelpToolTip(
             t("Save a .FullLv.json (Epi + Endo/Blood bundle). Load it together "
               "with a corotree.json in Tools ▸ Territory to run perfusion-"
@@ -8084,38 +8086,62 @@ class CTViewer(CPRMixin, AbstractViewer):
                                t("Saved: {p}", p=os.path.basename(path)))
 
     # ---- FullLV: the EpiLv + BldLv territory bundle ---------------------
-    def _full_lv_ready(self) -> bool:
-        """FullLV button gate: a Blood/Endo analysis (apex + MV + AoV + Endo mask)
-        AND an Epi with a region mask are present — i.e. the myocardium
-        (Epi ∧ ¬Endo) can be bundled for territory. CHEAP: only presence checks,
-        no dict build (this runs on every LV UI refresh)."""
+    def _full_lv_missing(self) -> list:
+        """What territory still needs before a FullLv can be built — a list of
+        human labels, EMPTY when ready. CHEAP: presence checks only (this runs on
+        every LV UI refresh and drives the FullLV button's enabled state)."""
+        miss = []
         lvv = self._lvv
         if lvv is None or lvv.get("apex") is None:
-            return False
-        av = self._lv_valves.get("aortic") or lvv.get("aortic")
-        mv = self._lv_valves.get("mitral") or lvv.get("mitral")
-        if av is None or mv is None:
-            return False
+            miss.append(t("Apex"))
+        av = self._lv_valves.get("aortic") or (lvv.get("aortic") if lvv else None)
+        mv = self._lv_valves.get("mitral") or (lvv.get("mitral") if lvv else None)
+        if av is None:
+            miss.append(t("AoV"))
+        if mv is None:
+            miss.append(t("MV"))
         if getattr(self, "_lv_endo_mask_comp", None) is None:
-            return False
+            miss.append(t("Endo"))
         epi = getattr(self, "_lvv_epi_model_dict", None)
-        return isinstance(epi, dict) and isinstance(epi.get("region"), dict)
+        if not (isinstance(epi, dict) and isinstance(epi.get("region"), dict)):
+            miss.append(t("Epi(region)"))
+        return miss
+
+    def _full_lv_ready(self) -> bool:
+        """FullLV button gate: apex + MV + AoV + Endo mask + an Epi region are all
+        present, so the myocardium (Epi ∧ ¬Endo) can be bundled for territory."""
+        return not self._full_lv_missing()
 
     def _full_lv_save(self) -> None:
         """Write a .FullLv.json — the EpiLv + BldLv bundle that pairs with a
-        corotree.json as the two inputs to CT Territory (Tools ▸ Territory)."""
+        corotree.json as the two inputs to CT Territory (Tools ▸ Territory).
+        Never fails silently: reports exactly what is missing / went wrong."""
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         from multi_dicomviewer.core import full_lv
         import json
         import os
-        bld = self._lvv_build_dict(warn=True)
-        if bld is None:
+        import traceback
+        miss = self._full_lv_missing()
+        if miss:
+            QMessageBox.information(
+                self.window(), t("FullLV"),
+                t("FullLv をまだ作成できません。不足: {m}\n\nMV・AoV・Apex を設定し、"
+                  "Epi（CalcVol 後に保存した region 付き）と Blood/Endo（Endoマスク）"
+                  "を用意してください。", m=" / ".join(miss)))
             return
-        epi = getattr(self, "_lvv_epi_model_dict", None)
-        full, err = full_lv.build(epi, bld)
+        try:
+            bld = self._lvv_build_dict(warn=True)
+            epi = getattr(self, "_lvv_epi_model_dict", None)
+            full, err = (full_lv.build(epi, bld) if bld is not None
+                         else (None, t("Blood/Endo build failed")))
+        except Exception as exc:                        # noqa: BLE001
+            traceback.print_exc()
+            QMessageBox.warning(self.window(), t("FullLV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
         if full is None:
             QMessageBox.information(self.window(), t("FullLV"),
-                                    t("Cannot build FullLv: {e}", e=err))
+                                    t("Cannot build FullLv: {e}", e=err or ""))
             return
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
@@ -8380,6 +8406,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             traceback.print_exc()
         if applied:
             self._refresh(reset_cam=False)
+        # Reflect the just-loaded LV analysis in the FullLV button (territory
+        # export becomes available once Epi region + Endo + valves + apex exist).
+        if getattr(self, "_full_lv_btn", None) is not None:
+            self._full_lv_btn.setEnabled(self._full_lv_ready())
         return applied
 
     def _lvv_clear_markers(self) -> None:
