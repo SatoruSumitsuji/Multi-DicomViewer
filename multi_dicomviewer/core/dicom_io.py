@@ -1350,6 +1350,67 @@ def apply_color_mode_to_planes(planes: list["XAPlane"], color: bool) -> bool:
     return achieved
 
 
+def _planes_parallel_safe(planes: list["XAPlane"]) -> bool:
+    """True only when EVERY plane can be decoded from several threads at once:
+    a per-file stack (each frame is its own dcmread), or a single-dataset cine
+    whose imagecodecs fast path is validated (_mdv_fast_ok) and enabled — then
+    the concurrent decodes only READ per-dataset flags. The pydicom shared-ds
+    fallback is not proven thread-safe, so it stays serial."""
+    for p in planes:
+        if getattr(p, "frame_files", None) is not None:
+            continue                                 # per-file → independent
+        ds = getattr(p, "_ds", None)
+        if ds is None or getattr(ds, "_mdv_nofast", False):
+            return False
+        if not getattr(ds, "_mdv_fast_ok", False):
+            return False
+    return True
+
+
+def _prefetch_parallel(
+    planes: list["XAPlane"],
+    should_stop: Callable[[], bool],
+) -> None:
+    """Warm all planes' frames CONCURRENTLY (imagecodecs releases the GIL, so a
+    few workers scale ~linearly). Frame-major task order keeps a biplane's two
+    planes in lockstep; the decode runs lock-free and only the volume write is
+    serialised per plane. Joins its pool before returning, so _stop_prefetch's
+    wait on the prefetch thread still cleanly ends all decoding."""
+    import os
+    from concurrent.futures import ThreadPoolExecutor
+    maxf = max(p.total_frames for p in planes)
+    tasks = [(p, i) for i in range(maxf) for p in planes
+             if i < p.total_frames and not p._ready[i]]
+    if not tasks:
+        return
+    workers = max(1, min(4, (os.cpu_count() or 2)))
+
+    def _do(task) -> None:
+        p, i = task
+        if should_stop() or p._ready[i]:
+            return
+        try:
+            arr = _plane_decode(p, i)                 # slow decode, lock-free
+        except Exception:                            # noqa: BLE001
+            return
+        with p._lock:                                # fast store only
+            if not p._ready[i]:
+                p.volume[i] = arr
+                p._ready[i] = True
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_do, tk) for tk in tasks]
+        for f in futs:
+            if should_stop():
+                for g in futs:
+                    g.cancel()
+                break
+            try:
+                f.result()
+            except Exception:                        # noqa: BLE001
+                pass
+
+
 def prefetch_planes(
     planes: list["XAPlane"],
     should_stop: Callable[[], bool],
@@ -1387,6 +1448,16 @@ def prefetch_planes(
     """
     planes = [p for p in planes if p.total_frames >= 1]
     if not planes or all(p.total_frames <= 1 for p in planes):
+        return
+    # FAST PATH: when every plane decodes via imagecodecs (which RELEASES the GIL
+    # during the C decode — measured ~3-4× on a real IVUS pull-back) or is a
+    # per-file stack (independent dcmread), warm frames CONCURRENTLY. Frame 0 was
+    # decoded at load time, so the per-dataset fast-path flags are already set →
+    # the parallel decodes only READ them (race-free); the write into the shared
+    # volume is serialised by plane._lock. Anything else (pydicom's shared-ds
+    # fallback) is NOT proven thread-safe → keep the serial warmer below.
+    if _planes_parallel_safe(planes):
+        _prefetch_parallel(planes, should_stop)
         return
     maxf = max(p.total_frames for p in planes)
     # Inter-frame yield when NOT playing. The JPEG codec holds the GIL for the
