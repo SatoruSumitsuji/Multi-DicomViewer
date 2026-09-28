@@ -497,7 +497,6 @@
   "Playback frame rate. XA/IVUS default = the source cine rate when available; otherwise 30 fps.": "再生フレームレート。XA/IVUSの既定値は、利用可能な場合は元のシネレート、そうでない場合は30fps。",
   "Playback limit": "同時再生の上限",
   "Please choose a valid DICOM file.": "有効なDICOMファイルを選択してください。",
-  "Point": "点",
   "Points are locked to frame {N}. Return to that frame to specify.": "点は フレーム {N} にロックされています。そのフレームに戻して指定してください。",
   "Points are locked to frame {n}. Return to that frame to specify.": "点はフレーム {n} にロックされています。指定するにはそのフレームに戻ってください。",
   "Positioner Primary Angle": "ポジショナー第1角度",
@@ -798,5 +797,9 @@
   "Notes": "注記",
   "Drag-zoom — drag a rectangle over the image to magnify that region to fill the view": "ドラッグズーム — 画像上で矩形をドラッグすると、その範囲が画面いっぱいに拡大されます",
   "Scanning {n} folders …": "{n} 個のフォルダをスキャン中 …",
-  "Showing {shown} of {total} folders — the rest are in the list on the left; drag one onto a pane to display it.": "{total} 個中 {shown} 個のフォルダを表示中 — 残りは左のリストにあります。ペインへドラッグすると表示できます。"
+  "Showing {shown} of {total} folders — the rest are in the list on the left; drag one onto a pane to display it.": "{total} 個中 {shown} 個のフォルダを表示中 — 残りは左のリストにあります。ペインへドラッグすると表示できます。",
+  "Add Point": "点を追加",
+  "Delete Point": "点を削除",
+  "Short-axis": "短軸",
+  "At least 2 edit points are required (cannot delete any more).": "編集点は最低2点必要です（これ以上は削除できません）。"
 }
