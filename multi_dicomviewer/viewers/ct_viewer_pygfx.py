@@ -15119,6 +15119,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
         self._cpr_prev_view = self._view_snapshot()
         m = self._measures[which][mi]
+        # A confirmed CPR is ALWAYS splined: the centreline itself is a Catmull-Rom
+        # spline through the control points (CenterLine.from_points), so smooth the
+        # on-map trace too — the drawn line then matches the actual vessel curve.
+        m["smooth"] = True
         u, v, nrm = self._axes_for(which)
         if ref_up is not None:
             nrm = np.asarray(ref_up, float)
