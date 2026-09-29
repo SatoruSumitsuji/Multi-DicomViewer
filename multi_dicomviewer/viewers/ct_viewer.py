@@ -1131,12 +1131,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
-        # Volume Rendering: left-drag trackball-rotates the volume.
+        # Volume Rendering: a left-drag runs the SELECTED tool on the volume
+        # (Zoom / Move / Rotate / Spin); default = trackball rotate.
         if self._vr_drag and self._last is not None:
             dx = e.position().x() - self._last.x()
             dy = e.position().y() - self._last.y()
             self._last = e.position()
-            self._owner._vr_rotate(self._which, dx, dy)
+            self._owner._vr_drag_dispatch(self._which, dx, dy)
             return
         # Short-axis (CPR) pane, left-drag in progress → dispatch by tool.
         if (self._owner._cpr is not None and self._which == "A"
@@ -10737,15 +10738,51 @@ class CTViewer(CPRMixin, AbstractViewer):
         key = self._active_pane
         self._vr_set(key, self._vr_btn.isChecked())
 
-    def _vr_rotate(self, key, dx, dy) -> None:
+    def _vr_drag_dispatch(self, key, dx, dy) -> None:
+        """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
+        Move (pan), Spin (roll), WL (transfer-function shift), else Rotate."""
         if not self._vr_on.get(key):
             return
-        cam = self.pane[key].ren.GetActiveCamera()
-        cam.Azimuth(-dx * 0.4)
-        cam.Elevation(dy * 0.4)
-        cam.OrthogonalizeViewUp()
-        self.pane[key].ren.ResetCameraClippingRange()
-        self.pane[key].render()
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        tool = getattr(self, "_tool", "ROTATE")
+        if tool == "ZOOM":
+            cam.Zoom(max(0.5, min(2.0, 1.0 + (-dy) * 0.005)))
+        elif tool == "MOVE":
+            self._vr_pan(key, dx, dy)
+        elif tool == "SPIN":
+            cam.Roll(-dx * 0.3)
+        elif tool == "WL":                          # drag tunes how much shows
+            self._lvl = float(self._lvl) - dy * 3.0
+            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
+        else:                                       # ROTATE (default) / others
+            cam.Azimuth(-dx * 0.4)
+            cam.Elevation(dy * 0.4)
+            cam.OrthogonalizeViewUp()
+        p.ren.ResetCameraClippingRange()
+        p.render()
+
+    def _vr_pan(self, key, dx, dy) -> None:
+        """Pan the VR camera by a screen-pixel delta (move the model in space)."""
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        fp = np.array(cam.GetFocalPoint(), float)
+        pos = np.array(cam.GetPosition(), float)
+        up = np.array(cam.GetViewUp(), float)
+        dirn = fp - pos
+        dist = float(np.linalg.norm(dirn)) or 1.0
+        dirn = dirn / dist
+        right = np.cross(dirn, up)
+        rn = float(np.linalg.norm(right)) or 1.0
+        right = right / rn
+        trueup = np.cross(right, dirn)
+        size = p.ren.GetRenderWindow().GetSize()
+        hpx = max(1, size[1])
+        wpp = 2.0 * dist * math.tan(math.radians(cam.GetViewAngle()) / 2.0) / hpx
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        shift = (-dx * dpr * wpp) * right + (dy * dpr * wpp) * trueup
+        cam.SetFocalPoint(*(fp + shift))
+        cam.SetPosition(*(pos + shift))
 
     def _vr_zoom(self, key, factor) -> None:
         if not self._vr_on.get(key):
