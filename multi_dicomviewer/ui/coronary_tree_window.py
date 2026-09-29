@@ -180,7 +180,7 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_w.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._targets_w.customContextMenuRequested.connect(self._targets_menu)
-        self._targets_w.itemSelectionChanged.connect(self._push_overlay)
+        self._targets_w.itemSelectionChanged.connect(self._on_target_selection)
         tv.addWidget(self._targets_w, 1)
         self._terr_out = QPlainTextEdit()
         self._terr_out.setReadOnly(True)
@@ -304,6 +304,7 @@ class CoronaryTreeWindow(SnapDock):
         else:
             self._push_overlay()             # overlay_spec is now empty → clear
             self._hint.setText(t("ツリー非表示"))
+        self._push_territory()               # tint follows the overlay toggle
 
     def _show_source_ct(self, prompt: bool = True) -> str:
         """Ask the shell to show the tree's source CT (by UID / saved folder / the
@@ -605,6 +606,7 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_out.setPlainText("\n".join(lines))
         self._recompute_targets()
         self._push_overlay()
+        self._push_territory()
 
     def _recompute_targets(self) -> None:
         """Recompute each target's mL / % against the current engine, dropping any
@@ -648,6 +650,55 @@ class CoronaryTreeWindow(SnapDock):
         self._targets.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
         self._refresh_targets_table()
         self._push_overlay()
+        self._push_territory()
+
+    def _territory_full_mask(self):
+        """Full-volume 0/1 [z,y,x] mask of the SELECTED target's distal territory
+        (or the union of all targets when none is selected), for the CT tint.
+        None when there is nothing to draw."""
+        eng = self._territory
+        if eng is None or not self._targets:
+            return None
+        fd = self._full_lv_data or {}
+        bld = fd.get("bld") or {}
+        epi = fd.get("epi") or {}
+        sp = bld.get("spacing") or epi.get("spacing")
+        vs = ((bld.get("endo") or {}).get("vol_shape")
+              or (epi.get("region") or {}).get("vol_shape"))
+        if not sp or not vs:
+            return None
+        sx, sy, sz = (float(s) for s in sp)
+        vs = [int(s) for s in vs]
+        sel = None
+        it = self._targets_w.currentItem()
+        if it is not None:
+            sel = it.data(0, _UID_ROLE)
+        tgs = ([self._targets[sel]]
+               if isinstance(sel, int) and 0 <= sel < len(self._targets)
+               else self._targets)
+        full = np.zeros(vs, bool)
+        for tg in tgs:
+            mask_v, _ml = eng.territory(tg["vid"], tg["idx"])
+            c = eng.centers[mask_v]
+            if len(c) == 0:
+                continue
+            fx = np.clip(np.round(c[:, 0] / sx).astype(int), 0, vs[2] - 1)
+            fy = np.clip(np.round(c[:, 1] / sy).astype(int), 0, vs[1] - 1)
+            fz = np.clip(np.round(c[:, 2] / sz).astype(int), 0, vs[0] - 1)
+            full[fz, fy, fx] = True
+        return full
+
+    def _push_territory(self):
+        """Compute the target territory mask and ask the shell to tint it on the
+        CT (cleared when the overlay is off or nothing is set)."""
+        if self._shell is None \
+                or not hasattr(self._shell, "coronary_territory_refresh"):
+            return
+        mask = self._territory_full_mask() if self._overlay_on else None
+        try:
+            self._shell.coronary_territory_refresh(mask)
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _toggle_target_mode(self):
         self._target_mode = self._target_btn.isChecked()
@@ -660,10 +711,15 @@ class CoronaryTreeWindow(SnapDock):
                 and hasattr(self._shell, "coronary_target_mode"):
             self._shell.coronary_target_mode(self._target_mode)
 
+    def _on_target_selection(self):
+        self._push_overlay()          # re-highlight the selected Target marker
+        self._push_territory()        # re-tint the selected Target's territory
+
     def _clear_targets(self):
         self._targets = []
         self._refresh_targets_table()
         self._push_overlay()
+        self._push_territory()
 
     def _targets_menu(self, pos):
         it = self._targets_w.itemAt(pos)
@@ -677,6 +733,7 @@ class CoronaryTreeWindow(SnapDock):
             del self._targets[ti]
             self._refresh_targets_table()
             self._push_overlay()
+            self._push_territory()
 
     def target_specs(self) -> list:
         """Target markers/territories for the CT overlay: each = the target 3-D
