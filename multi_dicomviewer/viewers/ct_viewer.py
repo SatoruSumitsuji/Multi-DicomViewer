@@ -8689,6 +8689,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             traceback.print_exc()
             return False
         self._lvv_lvd_shown = False          # LVD is clutter in a territory review
+        # Lay the panes on the LV long axis: LEFT (A) = LV short-axis (⟂ the long
+        # axis), RIGHT (B) = long-axis (turned into VR next). Uses the Epi axis.
+        try:
+            self._lvv_setup_axis_views()
+        except Exception:                                # noqa: BLE001
+            pass
         if self._lvv is not None:            # display-only: keep overlays, no edit
             self._lvv_observe_exit()
         self._refresh(reset_cam=False)
