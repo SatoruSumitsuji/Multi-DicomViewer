@@ -12544,6 +12544,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self.measurement_removed.emit(int(m["id"]))
         del self._measures[which][mi]
         self._draft = d
+        # In the coronary CPR workflow, re-arm "the next finished polyline becomes
+        # a CPR" (the flag the original Draw consumed when the trace first finished
+        # — e.g. an accidental double-click). Without this, a resumed CPR trace
+        # commits as a plain polyline and can no longer be Saved as a short-axis.
+        # Guarded to coronary mode so ordinary measurement resumes are unaffected.
+        if getattr(self, "_coronary_mode", False):
+            self._coronary_mpr_pending = True
+            self._coronary_sync_ui()
         self._redraw_meas(which)
 
     def _measure_right(self, which, sx, sy) -> bool:
