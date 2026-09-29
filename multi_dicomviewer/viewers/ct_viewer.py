@@ -67,17 +67,23 @@ from vtkmodules.vtkRenderingCore import (
     vtkActor,
     vtkActor2D,
     vtkBillboardTextActor3D,
+    vtkColorTransferFunction,
     vtkImageActor,
     vtkPolyDataMapper,
     vtkPolyDataMapper2D,
     vtkRenderer,
     vtkRenderWindow,
     vtkTextActor,
+    vtkVolume,
+    vtkVolumeProperty,
     vtkWindowToImageFilter,
 )
+from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
 
 # Rendering / interaction implementations VTK loads lazily.
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
+import vtkmodules.vtkRenderingVolumeOpenGL2  # noqa: F401  (GPU volume ray-cast)
+from vtkmodules.vtkRenderingVolumeOpenGL2 import vtkSmartVolumeMapper
 import vtkmodules.vtkInteractionStyle  # noqa: F401
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 
@@ -668,6 +674,34 @@ def _lvv_highlight_lut(lo: float, hi: float,
     return lut
 
 
+def _vr_cta_property(shift: float = 0.0) -> vtkVolumeProperty:
+    """A contrast-CTA volume property: soft tissue transparent, contrast-filled
+    vessels + bone opaque and bright, gently shaded. *shift* (HU) slides the whole
+    opacity/colour ramp so the W/L can push more or less tissue in."""
+    prop = vtkVolumeProperty()
+    prop.SetInterpolationTypeToLinear()
+    prop.ShadeOn()
+    prop.SetAmbient(0.30)
+    prop.SetDiffuse(0.70)
+    prop.SetSpecular(0.30)
+    prop.SetSpecularPower(10.0)
+    opac = vtkPiecewiseFunction()
+    for hu, a in ((-1000, 0.0), (80, 0.0), (150, 0.03), (250, 0.12),
+                  (400, 0.35), (600, 0.60), (1000, 0.85), (2000, 0.95)):
+        opac.AddPoint(hu + shift, a)
+    prop.SetScalarOpacity(opac)
+    col = vtkColorTransferFunction()
+    col.AddRGBPoint(-1000 + shift, 0.0, 0.0, 0.0)
+    col.AddRGBPoint(100 + shift, 0.40, 0.20, 0.15)
+    col.AddRGBPoint(250 + shift, 0.85, 0.50, 0.40)    # contrast blush
+    col.AddRGBPoint(450 + shift, 1.00, 0.85, 0.70)
+    col.AddRGBPoint(1000 + shift, 1.00, 0.98, 0.92)
+    col.AddRGBPoint(2000 + shift, 1.00, 1.00, 1.00)
+    prop.SetColor(col)
+    prop.SetScalarOpacityUnitDistance(0.8)
+    return prop
+
+
 def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
                   alpha: float = 0.5) -> vtkLookupTable:
     """LUT for the measured-region mask reslice: value 1 → red at 50% opacity
@@ -886,6 +920,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = None
         self._cross = False
         self._meas_drag = False
+        self._vr_drag = False             # rotating the VR volume
         style = vtkInteractorStyleUser()  # neutralise default VTK style
         self.SetInteractorStyle(style)
         # Track motion with no button down so the crosshair can preview (vivid
@@ -894,6 +929,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
+        # Volume Rendering: a left-drag rotates the volume (trackball); a
+        # right/middle-drag pans is left to the normal tools below (VR is a
+        # display; targets are picked from the coronary overlay in a later phase).
+        if (self._owner._vr_on.get(self._which)
+                and e.button() == Qt.MouseButton.LeftButton):
+            self._vr_drag = True
+            self._last = e.position()
+            return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
         if (e.button() == Qt.MouseButton.LeftButton
@@ -1081,6 +1124,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
+        # Volume Rendering: left-drag trackball-rotates the volume.
+        if self._vr_drag and self._last is not None:
+            dx = e.position().x() - self._last.x()
+            dy = e.position().y() - self._last.y()
+            self._last = e.position()
+            self._owner._vr_rotate(self._which, dx, dy)
+            return
         # Short-axis (CPR) pane, left-drag in progress → dispatch by tool.
         if (self._owner._cpr is not None and self._which == "A"
                 and self._last is not None):
@@ -1180,6 +1230,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if self._vr_drag:
+            self._vr_drag = False
+            self._last = None
+            return
         if self._owner._lv_apex_drag is not None:
             self._owner._lv_apex_drag = None
             self._owner._lv_record_geom(self._owner._lv_apex_snap)  # Ctrl+Z step
@@ -1259,6 +1313,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._owner._recenter(self._which, e.position().x(), e.position().y())
 
     def wheelEvent(self, e):
+        if self._owner._vr_on.get(self._which):
+            self._owner._vr_zoom(
+                self._which, 1.1 if e.angleDelta().y() > 0 else 1 / 1.1)
+            return
         self._owner._wheel(self._which, e.angleDelta().y())
 
     def keyPressEvent(self, e):
@@ -2645,6 +2703,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_targets: list = []
         self._coro_target_mode = False
         self._coro_target_cb = None
+        # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
+        # with a contrast-CTA preset, replacing the MPR image. Built lazily.
+        self._vr_on = {"A": False, "B": False}
+        self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
         # line's right-click menu.
@@ -8962,6 +9024,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
+        # Volume Rendering toggle (contrast-CTA preset) on the active pane.
+        self._vr_btn = FitButton("VR")
+        self._vr_btn.setCheckable(True)
+        self._vr_btn.setStyleSheet(
+            "QPushButton:checked { background:#8e44ad; color:white; }")
+        self._vr_btn.setHelpToolTip(t(
+            "Volume Rendering of the CT (contrast-CTA preset) on the active "
+            "pane — left-drag rotates, wheel zooms. Click again for MPR."))
+        self._vr_btn.clicked.connect(self._toggle_vr)
+        row.addWidget(self._vr_btn)
+
         self._meas_btn = FitButton("📏 Measure")
         self._meas_btn.setCheckable(True)
         self._meas_btn.setStyleSheet(            # blue when in Measure mode (= IVUS)
@@ -10396,6 +10469,104 @@ class CTViewer(CPRMixin, AbstractViewer):
                 _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
             p.colors_terr.Modified()
         self._refresh(reset_cam=False)
+
+    # ---- Volume Rendering (VR) -----------------------------------------
+    def _vr_ensure(self, p) -> None:
+        """Create the pane's GPU ray-cast VR pipeline once (lazy)."""
+        if getattr(p, "vr_volume", None) is not None:
+            return
+        p.vr_mapper = vtkSmartVolumeMapper()
+        p.vr_mapper.SetBlendModeToComposite()
+        p.vr_volume = vtkVolume()
+        p.vr_volume.SetMapper(p.vr_mapper)
+        p.vr_volume.SetProperty(_vr_cta_property())
+        p.vr_volume.SetVisibility(False)
+        p.ren.AddViewProp(p.vr_volume)
+
+    def _vr_mpr_actors(self, p):
+        """The MPR image / tint actors to hide while VR shows on this pane."""
+        return [a for a in (p.actor, p.actor_mask, p.actor_terr, p.actor_thick)
+                if a is not None]
+
+    def vr_active(self, key=None) -> bool:
+        if key is None:
+            return any(self._vr_on.values())
+        return bool(self._vr_on.get(key))
+
+    def _vr_shift(self) -> float:
+        """HU shift of the VR preset from the current W/L centre, so W/L still
+        tunes how much tissue the VR shows (300 ≈ the preset's contrast knee)."""
+        return float(self._lvl) - 300.0
+
+    def _vr_set(self, key, on) -> None:
+        """Turn Volume Rendering on/off for pane *key* (contrast-CTA preset)."""
+        if self._image is None:
+            return
+        p = self.pane[key]
+        on = bool(on)
+        self._vr_on[key] = on
+        cam = p.ren.GetActiveCamera()
+        if on:
+            self._vr_ensure(p)
+            p.vr_mapper.SetInputData(self._image)
+            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
+            p.vr_volume.SetVisibility(True)
+            for a in self._vr_mpr_actors(p):
+                a.SetVisibility(False)
+            p.set_overlay_visible(False)
+            self._vr_prev_cam[key] = (
+                cam.GetParallelProjection(), cam.GetPosition(),
+                cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
+            cam.ParallelProjectionOff()             # perspective depth for VR
+            p.ren.ResetCamera(self._image.GetBounds())
+            cam.Elevation(-70.0)                    # a cardiac-ish top view
+            cam.OrthogonalizeViewUp()
+            p.ren.ResetCameraClippingRange()
+        else:
+            if getattr(p, "vr_volume", None) is not None:
+                p.vr_volume.SetVisibility(False)
+            for a in self._vr_mpr_actors(p):
+                a.SetVisibility(True)
+            snap = self._vr_prev_cam.get(key)
+            if snap is not None:
+                pp, pos, fp, up, ps = snap
+                cam.SetParallelProjection(pp)
+                cam.SetPosition(*pos)
+                cam.SetFocalPoint(*fp)
+                cam.SetViewUp(*up)
+                cam.SetParallelScale(ps)
+            else:
+                cam.ParallelProjectionOn()
+            self._vr_prev_cam[key] = None
+        p.render()
+        if not on:
+            self._refresh(reset_cam=False)          # rebuild the MPR overlays
+
+    def _vr_toggle(self, key) -> None:
+        self._vr_set(key, not self._vr_on.get(key))
+
+    def _toggle_vr(self) -> None:
+        """VR button → toggle Volume Rendering on the ACTIVE pane."""
+        key = self._active_pane
+        self._vr_set(key, self._vr_btn.isChecked())
+
+    def _vr_rotate(self, key, dx, dy) -> None:
+        if not self._vr_on.get(key):
+            return
+        cam = self.pane[key].ren.GetActiveCamera()
+        cam.Azimuth(-dx * 0.4)
+        cam.Elevation(dy * 0.4)
+        cam.OrthogonalizeViewUp()
+        self.pane[key].ren.ResetCameraClippingRange()
+        self.pane[key].render()
+
+    def _vr_zoom(self, key, factor) -> None:
+        if not self._vr_on.get(key):
+            return
+        cam = self.pane[key].ren.GetActiveCamera()
+        cam.Zoom(factor)
+        self.pane[key].ren.ResetCameraClippingRange()
+        self.pane[key].render()
 
     def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
         """Nearest coronary-overlay (vid, sample-index) within *tol* px of
@@ -16353,6 +16524,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         for key in ("A", "B"):
             if only is not None and key != only:
                 continue
+            if self._vr_on.get(key):         # VR pane: no MPR reslice/overlays
+                self.pane[key].render()
+                continue
             p = self.pane[key]
             # Pane A in short-axis (CPR) mode: reslice the cross-section plane
             # with a tight FOV instead of the normal MPR matrix.
@@ -16516,6 +16690,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # In CPR, pane A is the cross-section (its overlay is the
                 # control-point markers, drawn separately) — don't overwrite it.
                 if self._cpr is not None and kk == "A":
+                    continue
+                if self._vr_on.get(kk):        # VR pane draws no 2-D overlay
                     continue
                 self._redraw_geom(kk)
         # LV EF axis + points re-project onto the (possibly moved) planes too.
