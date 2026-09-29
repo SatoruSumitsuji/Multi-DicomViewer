@@ -11336,10 +11336,68 @@ class CTViewer(CPRMixin, AbstractViewer):
             and isinstance(lb.get("endo"), dict))
         if not endo_ok:
             miss.append(t("Endo"))
+        # Epi region: a loaded EpiLv with a "region" mask, OR an active Epi
+        # SURFACE we can rebuild the region from at save time (so a traced /
+        # non-file Epi also qualifies — the surface is what draws the border).
         epi = getattr(self, "_lvv_epi_model_dict", None)
-        if not (isinstance(epi, dict) and isinstance(epi.get("region"), dict)):
+        epi_ok = (isinstance(epi, dict) and isinstance(epi.get("region"), dict)) \
+            or getattr(self, "_lvv_epi_surf", None) is not None
+        if not epi_ok:
             miss.append(t("Epi(region)"))
         return miss
+
+    def _full_lv_build_epi_region(self):
+        """Pack the active Epi surface's interior (valve-clipped) into a 'region'
+        dict — the same voxel mask an EpiLv 'region' holds — so FullLv can be
+        built even when the loaded EpiLv dict carries no region. None if it can't
+        be built."""
+        surf = getattr(self, "_lvv_epi_surf", None)
+        if surf is None or self._vol is None:
+            return None
+        lvv = self._lvv or {}
+        av = lvv.get("aortic") or self._lv_valves.get("aortic")
+        mv = lvv.get("mitral") or self._lv_valves.get("mitral")
+        apex = lvv.get("apex")
+        if apex is None:
+            apex = getattr(self, "_lvv_epi_apex", None)
+        if av is None or mv is None or apex is None:
+            return None
+        try:
+            c_a, n_a = np.asarray(av[0], float), np.asarray(av[1], float)
+            c_m, n_m = np.asarray(mv[0], float), np.asarray(mv[1], float)
+            comp, bb = surf.inside_mask_bbox(
+                self._dims, self._vol.shape,
+                [(c_a, n_a), (c_m, n_m)], np.asarray(apex, float))
+        except Exception:                                # noqa: BLE001
+            return None
+        if comp is None:
+            return None
+        import base64
+        import zlib
+        comp = np.ascontiguousarray(comp, bool)
+        return {
+            "bbox": [int(x) for x in bb],
+            "shape": [int(s) for s in comp.shape],
+            "vol_shape": [int(s) for s in self._vol.shape],
+            "packed": base64.b64encode(
+                zlib.compress(np.packbits(comp).tobytes(), 6)).decode("ascii"),
+        }
+
+    def _full_lv_epi_dict(self):
+        """The EpiLv dict for the FullLv bundle. Prefer the loaded EpiLv (region +
+        axes); if it has no region, reconstruct one from the active Epi surface.
+        None if there is no Epi at all."""
+        epi = getattr(self, "_lvv_epi_model_dict", None)
+        if isinstance(epi, dict) and isinstance(epi.get("region"), dict):
+            return epi
+        region = self._full_lv_build_epi_region()
+        if region is None:
+            return None
+        out = dict(epi) if isinstance(epi, dict) else {"kind": "mdv-lvef"}
+        out["region"] = region
+        if not out.get("series") and hasattr(self, "_lv_series_meta"):
+            out["series"] = self._lv_series_meta()
+        return out
 
     def _full_lv_ready(self) -> bool:
         """FullLV button gate: apex + MV + AoV + Endo mask + an Epi region are all
@@ -11388,7 +11446,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     and isinstance(lb.get("endo"), dict):
                 bld = dict(lb)
                 bld.pop("epi_model", None)
-            epi = getattr(self, "_lvv_epi_model_dict", None)
+            epi = self._full_lv_epi_dict()      # rebuilds region if the file lacks it
             full, err = (full_lv.build(epi, bld) if bld is not None
                          else (None, t("Blood/Endo build failed")))
         except Exception as exc:                        # noqa: BLE001
