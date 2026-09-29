@@ -91,7 +91,8 @@ class CoronaryTreeWindow(SnapDock):
         self._full_lv_data = None           # loaded FullLv dict (LV masks)
         self._territory = None              # TerritoryEngine (tree + FullLv)
         self._myo_ml = None                 # myocardium (Compact) volume mL
-        self._targets: list = []            # [{vid, idx, ml, pct}] set on the CT
+        self._targets: list = []            # [{vid, idx, ml, pct, hidden}] set on CT
+        self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
         self._target_btn = None
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
@@ -103,50 +104,63 @@ class CoronaryTreeWindow(SnapDock):
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(3)
 
-        # Batch workflow: load per-vessel .cpr.json files, set each role
-        # (right-click ▸ 役割), then 接続 grows the tree by nearest endpoint.
-        bar = QHBoxLayout()
-        for label, tip, fn in (
-                (t("CPR読込…"),
-                 t("枝ごとの .cpr.json を複数選択で読み込む（未接続で追加）"),
-                 self._load_cpr),
-                (t("接続"),
-                 t("読み込んだ枝を最近接端点でツリーに接続 (5mm以内)。"
-                   "後から追加読込→再度接続も可"), self._connect),
-                (t("ツリー表示"),
-                 t("冠動脈ツリーを3DCTに重畳表示 (再クリックで非表示)。"
-                   "3DCT未読込なら自動で読み込んで表示"),
-                 self._toggle_overlay),
-                (t("ツリー保存…"), t("冠動脈ツリーを .corotree.json に保存"),
-                 self._save_as),
-                (t("ツリー読込…"),
-                 t("保存した冠動脈ツリー (.corotree.json) を読込"), self._load),
-                (t("全消去"), t("全ての血管を消去 (.cpr.json は残る)"),
-                 self._clear_all)):
-            b = QPushButton(label)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            b.setStyleSheet("text-align: left; padding: 3px 8px;")  # 左揃え
-            bar.addWidget(b)
-            if label == t("ツリー表示"):        # keep a handle to relabel it
-                self._overlay_btn = b
-        # Territory target toggle: while ON, clicking a vessel on the CT sets a
-        # Target point (its distal territory mL / % is added to the table).
-        self._target_btn = QPushButton(t("ターゲット設定"))
-        self._target_btn.setToolTip(
-            t("ONの間、CT上の血管の中心線をクリックするとその点を Target に設定。"
-              "その点より遠位の灌流域 (mL・心筋%) を下の表と画像に表示します。"))
-        self._target_btn.setCheckable(True)
-        self._target_btn.setStyleSheet("text-align: left; padding: 3px 8px;")
-        self._target_btn.clicked.connect(self._toggle_target_mode)
-        bar.addWidget(self._target_btn)
-        b_ct = QPushButton(t("Target消去"))
-        b_ct.setToolTip(t("設定した Target を全て消去"))
-        b_ct.setStyleSheet("text-align: left; padding: 3px 8px;")
-        b_ct.clicked.connect(self._clear_targets)
-        bar.addWidget(b_ct)
-        bar.addStretch(1)
-        outer.addLayout(bar)
+        # Compact, docked-friendly rows: a fixed prefix label + short buttons, so
+        # the text never elides in a narrow left-dock.
+        def _row(prefix, specs):
+            row = QHBoxLayout()
+            row.setSpacing(3)
+            lbl = QLabel(prefix)
+            lbl.setStyleSheet("font-weight:bold;")
+            row.addWidget(lbl)
+            made = []
+            for label, tip, fn, checkable in specs:
+                b = QPushButton(label)
+                b.setToolTip(tip)
+                b.setCheckable(checkable)
+                if checkable:
+                    b.clicked.connect(fn)
+                else:
+                    b.clicked.connect(fn)
+                b.setStyleSheet("padding: 2px 6px;")
+                row.addWidget(b)
+                made.append(b)
+            row.addStretch(1)
+            outer.addLayout(row)
+            return made
+
+        # CPR row: build the tree from per-vessel .cpr.json files.
+        _row(t("CPR："), [
+            (t("読込"), t("枝ごとの .cpr.json を複数選択で読込（未接続で追加）"),
+             self._load_cpr, False),
+            (t("接続"), t("読み込んだ枝を最近接端点で接続 (5mm以内)"),
+             self._connect, False),
+        ])
+        # Tree row: overlay toggle / save / load / clear.
+        tree_btns = _row(t("ツリー："), [
+            (t("非表示"),
+             t("冠動脈ツリーを3DCTに重畳 (再クリックで非表示)。未読込なら自動読込"),
+             self._toggle_overlay, False),
+            (t("保存"), t("冠動脈ツリーを .corotree.json に保存"),
+             self._save_as, False),
+            (t("読込み"), t("保存した .corotree.json を読込"), self._load, False),
+            (t("全消去"), t("全ての血管を消去 (.cpr.json は残る)"),
+             self._clear_all, False),
+        ])
+        self._overlay_btn = tree_btns[0]     # relabelled 表示/非表示
+        # Target row: set / show-hide / delete-last / delete-all.
+        tgt_btns = _row(t("ターゲット："), [
+            (t("設定"),
+             t("ON中、CT (VR/短軸) 上の血管をクリックで Target 設定。遠位の"
+               "灌流域 (mL・心筋%) を表と画像に表示"),
+             self._toggle_target_mode, True),
+            (t("表示/非表示"), t("設定した Target/灌流域の表示を切替",),
+             self._toggle_targets_shown, False),
+            (t("最後の1つ削除"), t("最後に設定した Target を削除"),
+             self._delete_last_target, False),
+            (t("全削除"), t("設定した Target を全て削除"),
+             self._clear_targets, False),
+        ])
+        self._target_btn = tgt_btns[0]
 
         split = QSplitter(Qt.Orientation.Vertical)
         outer.addWidget(split, 1)
@@ -293,8 +307,7 @@ class CoronaryTreeWindow(SnapDock):
         Used by the toggle button and by ツリー読込 / .corotree.json drop (on)."""
         self._overlay_on = bool(on)
         if self._overlay_btn is not None:
-            self._overlay_btn.setText(t("ツリー非表示") if on
-                                      else t("ツリー表示"))
+            self._overlay_btn.setText(t("非表示") if on else t("表示"))
         if on:
             # overlay_spec now returns the vessels; showing the CT triggers the
             # overlay refresh (and again once the volume finishes decoding).
@@ -623,7 +636,8 @@ class CoronaryTreeWindow(SnapDock):
             idx = max(0, min(int(tg["idx"]), n - 1))
             _mask, ml = eng.territory(vid, idx)
             pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-            good.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+            good.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct,
+                         "hidden": tg.get("hidden", False)})
         self._targets = good
         self._refresh_targets_table()
 
@@ -641,7 +655,12 @@ class CoronaryTreeWindow(SnapDock):
             it = QTreeWidgetItem([f"Target {i}", label, f"{pos:.0f}%",
                                   f"{tg['pct']:.1f}%", f"{tg['ml']:.1f}"])
             it.setData(0, _UID_ROLE, i - 1)     # row → index into _targets
-            it.setForeground(0, QColor(TARGET_COLOR))
+            hidden = tg.get("hidden", False)
+            it.setForeground(0, QColor("#999999" if hidden
+                                       else TARGET_COLOR))
+            if hidden:
+                for c in range(self._targets_w.columnCount()):
+                    it.setForeground(c, QColor("#999999"))
             self._targets_w.addTopLevelItem(it)
 
     def add_target(self, vid: str, idx: int) -> None:
@@ -653,17 +672,30 @@ class CoronaryTreeWindow(SnapDock):
         idx = max(0, min(int(idx), n - 1))
         _mask, ml = self._territory.territory(vid, idx)
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-        self._targets.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+        self._targets.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct,
+                              "hidden": False})
         self._refresh_targets_table()
         self._push_overlay()
         self._push_territory()
+
+    def _toggle_targets_shown(self):
+        self._targets_shown = not self._targets_shown
+        self._push_overlay()
+        self._push_territory()
+
+    def _delete_last_target(self):
+        if self._targets:
+            self._targets.pop()
+            self._refresh_targets_table()
+            self._push_overlay()
+            self._push_territory()
 
     def _territory_full_mask(self):
         """Full-volume 0/1 [z,y,x] mask of the SELECTED target's distal territory
         (or the union of all targets when none is selected), for the CT tint.
         None when there is nothing to draw."""
         eng = self._territory
-        if eng is None or not self._targets:
+        if eng is None or not self._targets or not self._targets_shown:
             return None
         fd = self._full_lv_data or {}
         bld = fd.get("bld") or {}
@@ -679,9 +711,11 @@ class CoronaryTreeWindow(SnapDock):
         it = self._targets_w.currentItem()
         if it is not None:
             sel = it.data(0, _UID_ROLE)
-        tgs = ([self._targets[sel]]
-               if isinstance(sel, int) and 0 <= sel < len(self._targets)
-               else self._targets)
+        if isinstance(sel, int) and 0 <= sel < len(self._targets) \
+                and not self._targets[sel].get("hidden"):
+            tgs = [self._targets[sel]]
+        else:
+            tgs = [tg for tg in self._targets if not tg.get("hidden")]
         full = np.zeros(vs, bool)
         for tg in tgs:
             mask_v, _ml = eng.territory(tg["vid"], tg["idx"])
@@ -732,10 +766,19 @@ class CoronaryTreeWindow(SnapDock):
         if it is None:
             return
         ti = it.data(0, _UID_ROLE)
+        if not (isinstance(ti, int) and 0 <= ti < len(self._targets)):
+            return
+        hidden = self._targets[ti].get("hidden", False)
         menu = QMenu(self)
-        a_del = menu.addAction(t("この Target を削除"))
-        if menu.exec(self._targets_w.viewport().mapToGlobal(pos)) is a_del \
-                and isinstance(ti, int) and 0 <= ti < len(self._targets):
+        a_vis = menu.addAction(t("表示") if hidden else t("非表示"))
+        a_del = menu.addAction(t("削除"))
+        ch = menu.exec(self._targets_w.viewport().mapToGlobal(pos))
+        if ch is a_vis:
+            self._targets[ti]["hidden"] = not hidden
+            self._refresh_targets_table()
+            self._push_overlay()
+            self._push_territory()
+        elif ch is a_del:
             del self._targets[ti]
             self._refresh_targets_table()
             self._push_overlay()
@@ -746,7 +789,7 @@ class CoronaryTreeWindow(SnapDock):
         point (on its vessel) + its distal territory volume, for the viewer to
         draw a marker (and, later, a colour fill). Empty when the overlay is off
         or nothing is set."""
-        if not self._overlay_on or not self._targets:
+        if not self._overlay_on or not self._targets or not self._targets_shown:
             return []
         sel = None
         it = self._targets_w.currentItem()
@@ -754,6 +797,8 @@ class CoronaryTreeWindow(SnapDock):
             sel = it.data(0, _UID_ROLE)
         out = []
         for i, tg in enumerate(self._targets):
+            if tg.get("hidden"):
+                continue
             v = self._tree.vessels.get(tg["vid"])
             if v is None:
                 continue
