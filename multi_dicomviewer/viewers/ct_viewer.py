@@ -58,6 +58,7 @@ from vtkmodules.vtkCommonDataModel import (
     vtkPolyData,
 )
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
+from vtkmodules.vtkFiltersCore import vtkTubeFilter
 from vtkmodules.vtkFiltersSources import vtkLineSource
 from vtkmodules.vtkImagingCore import vtkImageMapToColors, vtkImageReslice
 from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth
@@ -934,6 +935,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # display; targets are picked from the coronary overlay in a later phase).
         if (self._owner._vr_on.get(self._which)
                 and e.button() == Qt.MouseButton.LeftButton):
+            # Target-set mode: a click 3-D-picks the nearest vessel (no rotate);
+            # otherwise a left-drag trackball-rotates the volume.
+            if (getattr(self._owner, "_coro_target_mode", False)
+                    and self._owner._vr_pick_target(
+                        self._which, e.position().x(), e.position().y())):
+                return
             self._vr_drag = True
             self._last = e.position()
             return
@@ -10333,7 +10340,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_overlay = spec or None
         try:
             for k in ("A", "B"):
-                self._redraw_geom(k)
+                if self._vr_on.get(k):           # VR pane draws 3-D tubes
+                    self._vr_update_coronary(k)
+                    self.pane[k].render()
+                else:
+                    self._redraw_geom(k)
         except Exception:                                # noqa: BLE001
             pass
 
@@ -10469,11 +10480,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.colors_terr.SetLookupTable(
                 _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
             p.colors_terr.Modified()
+            if self._vr_on.get(k):               # VR pane shows a 3-D iso-surface
+                self._vr_update_territory(k)
+                p.render()
         self._refresh(reset_cam=False)
 
     # ---- Volume Rendering (VR) -----------------------------------------
     def _vr_ensure(self, p) -> None:
-        """Create the pane's GPU ray-cast VR pipeline once (lazy)."""
+        """Create the pane's GPU ray-cast VR pipeline + its 3-D overlays once."""
         if getattr(p, "vr_volume", None) is not None:
             return
         p.vr_mapper = vtkSmartVolumeMapper()
@@ -10483,6 +10497,129 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetProperty(_vr_cta_property())
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
+        # Coronary tree as 3-D tubes (world-mm, so they sit in the volume and
+        # rotate with it). Per-root colour via per-cell RGB scalars.
+        p.vr_coro_tube = vtkTubeFilter()
+        p.vr_coro_tube.SetRadius(0.6)            # mm
+        p.vr_coro_tube.SetNumberOfSides(8)
+        p.vr_coro_tube.CappingOn()
+        p.vr_coro_tube.SetInputData(vtkPolyData())
+        p.vr_coro_mapper = vtkPolyDataMapper()
+        p.vr_coro_mapper.SetInputConnection(p.vr_coro_tube.GetOutputPort())
+        p.vr_coro_mapper.ScalarVisibilityOn()
+        p.vr_coro_mapper.SetScalarModeToUseCellData()
+        p.vr_coro_actor = vtkActor()
+        p.vr_coro_actor.SetMapper(p.vr_coro_mapper)
+        p.vr_coro_actor.SetVisibility(False)
+        p.ren.AddActor(p.vr_coro_actor)
+        # Territory as pale-red translucent 3-D spheres (glyph-free point cloud).
+        p.vr_terr_mapper = vtkPolyDataMapper()
+        p.vr_terr_mapper.SetInputData(vtkPolyData())
+        p.vr_terr_actor = vtkActor()
+        p.vr_terr_actor.SetMapper(p.vr_terr_mapper)
+        p.vr_terr_actor.GetProperty().SetColor(0.918, 0.6, 0.6)
+        p.vr_terr_actor.GetProperty().SetOpacity(0.35)
+        p.vr_terr_actor.SetVisibility(False)
+        p.ren.AddActor(p.vr_terr_actor)
+
+    def _vr_update_coronary(self, key) -> None:
+        """Rebuild the 3-D coronary tubes on VR pane *key* from the overlay spec."""
+        p = self.pane[key]
+        if getattr(p, "vr_coro_actor", None) is None:
+            return
+        spec = self._coro_overlay if self._vr_on.get(key) else None
+        if not spec:
+            p.vr_coro_tube.SetInputData(vtkPolyData())
+            p.vr_coro_actor.SetVisibility(False)
+            return
+        pts = vtkPoints()
+        lines = vtkCellArray()
+        cols = vtkUnsignedCharArray()
+        cols.SetNumberOfComponents(3)
+        for ves in spec:
+            p3 = ves.get("points")
+            if p3 is None or len(p3) < 2:
+                continue
+            rgb = _hex_to_rgb(ves.get("color"))
+            start = pts.GetNumberOfPoints()
+            for P in p3:
+                pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
+            lines.InsertNextCell(len(p3))
+            for i in range(len(p3)):
+                lines.InsertCellPoint(start + i)
+            cols.InsertNextTuple3(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+        pd = vtkPolyData()
+        pd.SetPoints(pts)
+        pd.SetLines(lines)
+        pd.GetCellData().SetScalars(cols)
+        p.vr_coro_tube.SetInputData(pd)
+        p.vr_coro_tube.Modified()
+        p.vr_coro_actor.SetVisibility(True)
+
+    def _vr_update_territory(self, key) -> None:
+        """Rebuild the 3-D territory surface on VR pane *key* from the target
+        territory mask (a pale-red translucent iso-surface)."""
+        p = self.pane[key]
+        if getattr(p, "vr_terr_actor", None) is None:
+            return
+        vol = getattr(self, "_terr_mask_vol", None)
+        if vol is None or not self._vr_on.get(key):
+            p.vr_terr_mapper.SetInputData(vtkPolyData())
+            p.vr_terr_actor.SetVisibility(False)
+            return
+        from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D
+        mc = vtkFlyingEdges3D()
+        mc.SetInputData(vol)
+        mc.SetValue(0, 0.5)
+        mc.ComputeNormalsOn()
+        p.vr_terr_mapper.SetInputConnection(mc.GetOutputPort())
+        p._vr_terr_mc = mc                       # keep a ref (pipeline lifetime)
+        p.vr_terr_actor.SetVisibility(True)
+
+    def _vr_pick_target(self, key, sx, sy) -> bool:
+        """3-D target pick on the VR: cast a ray through (sx, sy) and set a Target
+        at the nearest coronary sample within tolerance. Returns True if set."""
+        if not self._vr_on.get(key) or self._coro_target_cb is None \
+                or not self._coro_overlay:
+            return False
+        p = self.pane[key]
+        ren = p.ren
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        size = ren.GetRenderWindow().GetSize()
+        vx = sx * dpr
+        vy = size[1] - sy * dpr
+
+        def world_at(z):
+            ren.SetDisplayPoint(vx, vy, z)
+            ren.DisplayToWorld()
+            w = ren.GetWorldPoint()
+            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
+
+        a = world_at(0.0)
+        d = world_at(1.0) - a
+        dn = float(np.linalg.norm(d))
+        if dn < 1e-6:
+            return False
+        d = d / dn
+        best, best_vid, best_idx = 1e18, None, None
+        for ves in self._coro_overlay:
+            p3 = ves.get("points")
+            if p3 is None or len(p3) < 2:
+                continue
+            P = np.asarray(p3, float)
+            t = (P - a) @ d
+            proj = a + np.outer(t, d)
+            dist = np.linalg.norm(P - proj, axis=1)
+            i = int(np.argmin(dist))
+            if dist[i] < best:
+                best, best_vid, best_idx = dist[i], ves.get("vid"), i
+        if best_vid is None or best > 8.0:       # 8 mm ray tolerance
+            return False
+        try:
+            self._coro_target_cb(best_vid, int(best_idx))
+        except Exception:                                # noqa: BLE001
+            return False
+        return True
 
     def _vr_epi_full_mask(self):
         """Full-volume bool [z,y,x] Epi-region mask from the loaded EpiLv (so VR
@@ -10557,6 +10694,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._vr_hidden[key].append(a)
                     a.SetVisibility(False)
             p.vr_volume.SetVisibility(True)
+            self._vr_update_coronary(key)           # 3-D coronary tubes
+            self._vr_update_territory(key)          # 3-D territory cloud
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
@@ -10568,6 +10707,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         else:
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
+            for _a in (getattr(p, "vr_coro_actor", None),
+                       getattr(p, "vr_terr_actor", None)):
+                if _a is not None:
+                    _a.SetVisibility(False)
             for a in self._vr_hidden.get(key, []):
                 a.SetVisibility(True)
             self._vr_hidden[key] = []
