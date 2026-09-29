@@ -2416,6 +2416,7 @@ class MainWindow(QMainWindow):
             if v is None or not hasattr(v, "set_coronary_overlay"):
                 continue
             this_spec = spec
+            match = True
             if base:
                 try:
                     su = p.shown_series_uid() or ""
@@ -2425,6 +2426,42 @@ class MainWindow(QMainWindow):
                 this_spec = spec if match else None
             try:
                 v.set_coronary_overlay(this_spec)
+            except Exception:                            # noqa: BLE001
+                pass
+            # Territory Target markers (same source-CT gate as the vessels).
+            if hasattr(v, "set_coronary_targets"):
+                tspec = []
+                if match and w is not None and hasattr(w, "target_specs"):
+                    try:
+                        tspec = w.target_specs()
+                    except Exception:                    # noqa: BLE001
+                        tspec = []
+                try:
+                    v.set_coronary_targets(tspec)
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def coronary_target_mode(self, on: bool) -> None:
+        """Coronary Tree ▸ ターゲット設定 toggle: put every CT viewer into (or out
+        of) the territory-target pick mode (left-click a vessel line → a Target)."""
+        for p in self._panes:
+            try:
+                v = p.current_viewer()
+            except Exception:                            # noqa: BLE001
+                v = None
+            if v is not None and hasattr(v, "set_coronary_target_mode"):
+                try:
+                    v.set_coronary_target_mode(bool(on), self.coronary_target_pick)
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def coronary_target_pick(self, vid: str, idx: int) -> None:
+        """A CT viewer reported a target click on vessel (vid, sample idx) → add it
+        as a Target in the Coronary Tree panel."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "add_target"):
+            try:
+                w.add_target(vid, int(idx))
             except Exception:                            # noqa: BLE001
                 pass
 
