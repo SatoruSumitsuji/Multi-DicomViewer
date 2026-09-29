@@ -2558,6 +2558,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None  # epi model (for LV Vol save/load)
         self._lvv_loaded_bld = None      # last LOADED BldLv dict (FullLV fallback)
+        self._full_lv_bld_snapshot = None  # BldLv captured on Blood/Endo Exit
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
@@ -4032,6 +4033,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         self._lv_epi_armed = False
         if sm == "blood":
+            # Capture the BldLv WHILE the session is still live, so FullLV can be
+            # saved AFTER leaving Blood/Endo (it activates only once you've left).
+            self._full_lv_snapshot()
             self._lvv_clear_markers()
             self._lvv = None
             self._lvv_sync()
@@ -4088,6 +4092,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_surf = None
         self._lvv_epi_apex = None
         self._lvv_epi_model_dict = None
+        self._full_lv_bld_snapshot = None
+        self._lvv_loaded_bld = None
         self._lvv_blood_comp = None
         self._lvv_blood_bbox = None
         self._lvv_blood_apex = None
@@ -6046,15 +6052,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self._lv_apex_sel_btn, "_mdv_soft_off", False):
             return                                # greyed → left-click no-op
         self._lv_apex_edit = True
+        msg = t("Set the apex, or load Apex data. To set it, move the centreline "
+                "crossing onto the correct apex position and press Set.")
         if self._lv_valves.get("mitral") is None:
-            self._lvv_prompt(t(
-                "Setting the apex: the MV plane is not set yet. It is desirable "
-                "to set MV first — the LV long axis is apex → MV centre. You can "
-                "still place the apex; the axis forms once MV is set."))
-        else:
-            self._lvv_prompt(t(
-                "Set the centreline crossing as the apex? Move the crossing onto "
-                "the LV apex, then press Set (RePosition to move it again)."))
+            msg += "\n\n" + t(
+                "(The MV plane is not set yet. The LV long axis is apex → MV "
+                "centre, so setting MV first is desirable.)")
+        self._lvv_prompt(msg)
         self._lv_update_submode_ui()
         # Auto-orient to the MV-perpendicular view on entering Apex (a no-op when
         # MV isn't set yet) — the apex is easiest to find looking down the LV
@@ -8086,31 +8090,31 @@ class CTViewer(CPRMixin, AbstractViewer):
                                t("Saved: {p}", p=os.path.basename(path)))
 
     # ---- FullLV: the EpiLv + BldLv territory bundle ---------------------
+    def _full_lv_snapshot(self) -> None:
+        """Capture the BldLv dict WHILE the Blood/Endo session is still live, so
+        FullLV can be written AFTER leaving Blood/Endo. Called from the Blood/Endo
+        Exit (before _lvv is cleared)."""
+        bld = self._lvv_build_dict(warn=False)
+        if bld is not None:
+            self._full_lv_bld_snapshot = bld
+
     def _full_lv_missing(self) -> list:
         """What territory still needs before a FullLv can be built — a list of
-        human labels, EMPTY when ready. CHEAP: presence checks only (this runs on
-        every LV UI refresh and drives the FullLV button's enabled state)."""
+        human labels, EMPTY when ready. CHEAP presence checks (drives the FullLV
+        button's enabled state on every LV UI refresh).
+
+        FullLV is the step AFTER Blood/Endo: it is offered only once you have
+        LEFT the Blood/Endo session (Save + Exit), so it never sits at the same
+        level as the Blood/Endo Save."""
+        if self._lvv is not None:                      # still in Blood/Endo mode
+            return [t("Blood/Endo を保存して Exit")]
         miss = []
-        lvv = self._lvv
-        if lvv is None or lvv.get("apex") is None:
-            miss.append(t("Apex"))
-        av = self._lv_valves.get("aortic") or (lvv.get("aortic") if lvv else None)
-        mv = self._lv_valves.get("mitral") or (lvv.get("mitral") if lvv else None)
-        if av is None:
-            miss.append(t("AoV"))
-        if mv is None:
-            miss.append(t("MV"))
-        # Endo mask: in memory, OR still carried by the loaded BldLv (used as the
-        # FullLV fallback when a mask restore was skipped).
-        lb = getattr(self, "_lvv_loaded_bld", None)
-        endo_ok = getattr(self, "_lv_endo_mask_comp", None) is not None or (
-            lvv is not None and isinstance(lb, dict)
-            and isinstance(lb.get("endo"), dict))
-        if not endo_ok:
-            miss.append(t("Endo"))
-        # Epi region: a loaded EpiLv with a "region" mask, OR an active Epi
-        # SURFACE we can rebuild the region from at save time (so a traced /
-        # non-file Epi also qualifies — the surface is what draws the border).
+        # Blood/Endo captured on Exit (or a loaded BldLv) — carries apex / MV /
+        # AoV / Endo mask. _full_lv_bld_for_save picks whichever has an Endo mask.
+        if self._full_lv_bld_for_save() is None:
+            miss.append(t("Blood/Endo"))
+        # Epi region: a loaded EpiLv with a "region" mask, OR a retained Epi
+        # SURFACE we can rebuild the region from at save time.
         epi = getattr(self, "_lvv_epi_model_dict", None)
         epi_ok = (isinstance(epi, dict) and isinstance(epi.get("region"), dict)) \
             or getattr(self, "_lvv_epi_surf", None) is not None
@@ -8189,11 +8193,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             if not miss else
             t("FullLV は準備できていません — 不足: {m}", m=" / ".join(miss)))
 
+    def _full_lv_bld_for_save(self):
+        """The BldLv dict to bundle: the snapshot captured on Blood/Endo Exit,
+        else a loaded BldLv. None if neither carries an Endo mask."""
+        for src in (getattr(self, "_full_lv_bld_snapshot", None),
+                    getattr(self, "_lvv_loaded_bld", None)):
+            if isinstance(src, dict) and isinstance(src.get("endo"), dict):
+                return src
+        return None
+
     def _full_lv_save(self) -> None:
         """Write a .FullLv.json — the EpiLv + BldLv bundle that pairs with a
         corotree.json as the two inputs to CT Territory (Tools ▸ Territory).
-        Never fails silently: reports exactly what is missing / went wrong."""
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        Offered only after leaving Blood/Endo. Never fails silently."""
+        from PyQt6.QtWidgets import (QApplication, QFileDialog, QMessageBox,
+                                     QProgressDialog)
         from multi_dicomviewer.core import full_lv
         import json
         import os
@@ -8202,32 +8216,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if miss:
             QMessageBox.information(
                 self.window(), t("FullLV"),
-                t("FullLv をまだ作成できません。不足: {m}\n\nMV・AoV・Apex を設定し、"
-                  "Epi（CalcVol 後に保存した region 付き）と Blood/Endo（Endoマスク）"
-                  "を用意してください。", m=" / ".join(miss)))
+                t("FullLv をまだ作成できません。不足: {m}\n\nMV・AoV・Apex・Epi・"
+                  "Blood/Endo を用意し、Blood/Endo を保存して Exit してください。",
+                  m=" / ".join(miss)))
             return
-        try:
-            bld = self._lvv_build_dict(warn=True)
-            # If the in-memory rebuild is missing the Endo mask (a mask restore
-            # was skipped on load), bundle the LOADED BldLv instead — it carries
-            # the Endo/blood masks verbatim from the saved file.
-            lb = getattr(self, "_lvv_loaded_bld", None)
-            if (bld is None or not isinstance(bld.get("endo"), dict)) \
-                    and self._lvv is not None and isinstance(lb, dict) \
-                    and isinstance(lb.get("endo"), dict):
-                bld = lb
-            epi = self._full_lv_epi_dict()      # rebuilds region if the file lacks it
-            full, err = (full_lv.build(epi, bld) if bld is not None
-                         else (None, t("Blood/Endo build failed")))
-        except Exception as exc:                        # noqa: BLE001
-            traceback.print_exc()
-            QMessageBox.warning(self.window(), t("FullLV"),
-                                t("Save failed: {err}", err=str(exc)))
-            return
-        if full is None:
-            QMessageBox.information(self.window(), t("FullLV"),
-                                    t("Cannot build FullLv: {e}", e=err or ""))
-            return
+        # Pick the path FIRST (so the user isn't left staring at a frozen screen
+        # before any dialog), THEN do the possibly-slow build behind a busy window.
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "FullLv")
@@ -8240,13 +8234,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if not path.endswith(".json"):
             path += ".FullLv.json"
-        self._unlink_case_variant(path)
+        busy = QProgressDialog(
+            t("FullLv 保存のためのデータを確認中…（少し時間がかかります）"),
+            "", 0, 0, self.window())
+        busy.setWindowTitle(t("FullLV"))
+        busy.setCancelButton(None)
+        busy.setMinimumDuration(0)
+        busy.setWindowModality(Qt.WindowModality.WindowModal)
+        busy.show()
+        QApplication.processEvents()
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(full, f, ensure_ascii=False)
+            bld = self._full_lv_bld_for_save()
+            epi = self._full_lv_epi_dict()   # rebuilds region if the file lacks it
+            full, err = (full_lv.build(epi, bld) if bld is not None
+                         else (None, t("Blood/Endo build failed")))
+            if full is not None:
+                self._unlink_case_variant(path)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(full, f, ensure_ascii=False)
         except Exception as exc:                        # noqa: BLE001
+            traceback.print_exc()
+            busy.close()
             QMessageBox.warning(self.window(), t("FullLV"),
                                 t("Save failed: {err}", err=str(exc)))
+            return
+        busy.close()
+        if full is None:
+            QMessageBox.information(self.window(), t("FullLV"),
+                                    t("Cannot build FullLv: {e}", e=err or ""))
             return
         QMessageBox.information(
             self.window(), t("FullLV"),
@@ -8254,7 +8269,8 @@ class CTViewer(CPRMixin, AbstractViewer):
               p=os.path.basename(path)))
 
     def _lvv_load(self) -> None:
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from PyQt6.QtWidgets import (QApplication, QFileDialog, QMessageBox,
+                                     QProgressDialog)
         import json
         if self._image is None:
             return
@@ -8281,7 +8297,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                           "landmarks may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return
-            self._lvv_apply_data(data)
+            # Restoring the masks + re-reslicing takes a moment and the
+            # intermediate frame can look mis-aligned; show a busy window so the
+            # half-built view isn't mistaken for the final result.
+            busy = QProgressDialog(
+                t("Blood/Endo データを読み込み中…"), "", 0, 0, self.window())
+            busy.setWindowTitle(t("LV Vol"))
+            busy.setCancelButton(None)
+            busy.setMinimumDuration(0)
+            busy.setWindowModality(Qt.WindowModality.WindowModal)
+            busy.show()
+            QApplication.processEvents()
+            try:
+                self._lvv_apply_data(data)
+            finally:
+                busy.close()
             # The Epi is NOT in this file. If none is in memory, tell the user to
             # load one (Epi読み込み) before Calc Vol; otherwise the current Epi is
             # used.
