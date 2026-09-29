@@ -159,20 +159,27 @@ class TerritoryWindow(QDockWidget):
             e.acceptProposedAction()
 
     def dropEvent(self, e):                                   # noqa: N802
-        matched = 0
-        for u in e.mimeData().urls():
-            f = u.toLocalFile()
-            if f and os.path.isfile(f) and self._route_drop(f):
-                matched += 1
-        if matched:
+        paths = [u.toLocalFile() for u in e.mimeData().urls()]
+        if self.add_files([p for p in paths if p]):
             e.acceptProposedAction()
-            self._update_labels()
-            if self._corotree_path and self._full_path:
-                self._run()                       # both present → analyse now
         else:
             QMessageBox.information(
                 self, t("CT Territory"),
                 t("corotree.json か FullLv.json を落としてください。"))
+
+    def add_files(self, paths) -> bool:
+        """Route dropped/opened files into the corotree / FullLv slots (by content)
+        and run when both are set. Returns True if at least one matched. Public so
+        the shell can forward a main-window drop here."""
+        matched = 0
+        for f in paths or []:
+            if f and os.path.isfile(f) and self._route_drop(f):
+                matched += 1
+        if matched:
+            self._update_labels()
+            if self._corotree_path and self._full_path:
+                self._run()                       # both present → analyse now
+        return matched > 0
 
     # ------------------------------------------------------- run
     def _run(self):

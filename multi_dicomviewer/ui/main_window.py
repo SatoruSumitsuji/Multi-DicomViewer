@@ -2503,6 +2503,21 @@ class MainWindow(QMainWindow):
             return False
         return isinstance(data, dict) and data.get("format") == "MDV-CoroTree"
 
+    @staticmethod
+    def _is_full_lv_json(path: str) -> bool:
+        """True if *path* is a .FullLv.json (the CT-Territory LV bundle), so a
+        drag&drop of it opens Tools ▸ Territory instead of reading DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        from multi_dicomviewer.core import full_lv
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return full_lv.is_full_lv(data)
+
     def _open_coronary_tree_file(self, path: str) -> None:
         """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
         load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /
@@ -5158,6 +5173,16 @@ class MainWindow(QMainWindow):
         for p in ct_files:
             self._open_coronary_tree_file(p)
         paths = [p for p in paths if p not in ct_files]
+        # Peel off .FullLv.json drops → open Tools ▸ Territory and load them; a
+        # corotree.json in the SAME drop is forwarded there too (so dropping the
+        # two territory inputs together just runs the analysis).
+        full_files = [p for p in paths
+                      if os.path.isfile(p) and self._is_full_lv_json(p)]
+        if full_files:
+            w = self._open_territory()
+            if w is not None:
+                w.add_files(full_files + ct_files)
+        paths = [p for p in paths if p not in full_files]
         # Peel off LV-analysis JSON drops (MV / AoV / Apex / Epi / Bld) → open the
         # source CT and overlay all analysis results. Handle them together so a
         # multi-file drop applies as ONE analysis on ONE CT.
