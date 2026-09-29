@@ -2707,6 +2707,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
+        self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
         # line's right-click menu.
@@ -10483,10 +10484,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
 
-    def _vr_mpr_actors(self, p):
-        """The MPR image / tint actors to hide while VR shows on this pane."""
-        return [a for a in (p.actor, p.actor_mask, p.actor_terr, p.actor_thick)
-                if a is not None]
+    def _vr_epi_full_mask(self):
+        """Full-volume bool [z,y,x] Epi-region mask from the loaded EpiLv (so VR
+        can be cropped to the LV/Epi). None when no Epi region is available."""
+        epi = getattr(self, "_lvv_epi_model_dict", None)
+        reg = epi.get("region") if isinstance(epi, dict) else None
+        if not isinstance(reg, dict) or self._vol is None:
+            return None
+        try:
+            import base64
+            import zlib
+            vs = [int(s) for s in reg.get("vol_shape", [])]
+            if vs != [int(s) for s in self._vol.shape]:
+                return None
+            shape = tuple(int(s) for s in reg["shape"])
+            z0, z1, y0, y1, x0, x1 = (int(x) for x in reg["bbox"])
+            raw = zlib.decompress(base64.b64decode(reg["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+            full = np.zeros(self._vol.shape, bool)
+            full[z0:z1, y0:y1, x0:x1] = comp
+            return full
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def _vr_input_image(self):
+        """The image the VR renders: the CT cropped to the Epi region when one is
+        loaded (soft tissue outside Epi → air/transparent), else the full CT."""
+        epi = self._vr_epi_full_mask()
+        if epi is None or self._vol is None:
+            return self._image
+        sx, sy, sz = self._dims
+        masked = np.where(epi, self._vol, -1000).astype(np.int16)
+        return numpy_to_vtk_image(masked, sx, sy, sz)
 
     def vr_active(self, key=None) -> bool:
         if key is None:
@@ -10508,25 +10538,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam = p.ren.GetActiveCamera()
         if on:
             self._vr_ensure(p)
-            p.vr_mapper.SetInputData(self._image)
+            img = self._vr_input_image()            # cropped to Epi when available
+            p.vr_mapper.SetInputData(img)
             p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
+            # Hide EVERY existing prop (MPR image, tints, crosshair, coronary /
+            # measure overlays, labels, info) so nothing 2-D lingers, misplaced,
+            # over the 3-D volume; restored verbatim on VR off.
+            self._vr_hidden[key] = []
+            props = p.ren.GetViewProps()
+            props.InitTraversal()
+            while True:
+                a = props.GetNextProp()
+                if a is None:
+                    break
+                if a is p.vr_volume:
+                    continue
+                if a.GetVisibility():
+                    self._vr_hidden[key].append(a)
+                    a.SetVisibility(False)
             p.vr_volume.SetVisibility(True)
-            for a in self._vr_mpr_actors(p):
-                a.SetVisibility(False)
-            p.set_overlay_visible(False)
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
             cam.ParallelProjectionOff()             # perspective depth for VR
-            p.ren.ResetCamera(self._image.GetBounds())
+            p.ren.ResetCamera(img.GetBounds())
             cam.Elevation(-70.0)                    # a cardiac-ish top view
             cam.OrthogonalizeViewUp()
             p.ren.ResetCameraClippingRange()
         else:
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
-            for a in self._vr_mpr_actors(p):
+            for a in self._vr_hidden.get(key, []):
                 a.SetVisibility(True)
+            self._vr_hidden[key] = []
             snap = self._vr_prev_cam.get(key)
             if snap is not None:
                 pp, pos, fp, up, ps = snap
