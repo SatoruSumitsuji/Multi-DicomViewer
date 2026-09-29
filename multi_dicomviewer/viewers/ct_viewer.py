@@ -15190,9 +15190,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         return float(fp[0]), float(fp[1])
 
     def _lv_ring_radius(self, key):
-        """Output-mm radius of the ○ grab handle for *key* (grows with zoom-out
-        so it stays a sensible on-screen size)."""
-        return max(2.0, 0.04 * self._lv_view_half(key)[1])
+        """Output-mm radius of the ○ grab handle for *key*. Tied to the parallel
+        scale (half the visible height in mm) so it is a CONSTANT on-screen size
+        at EVERY zoom — no floor, which used to pin the world radius at 2 mm and
+        balloon the handle on screen once zoomed in past ~50 mm/half-height."""
+        return 0.04 * self._lv_view_half(key)[1]
 
     def _lv_line_clip(self, key, ax0, ay0, ux, uy):
         """Clip the (infinite) line through (ax0, ay0) with direction (ux, uy) to
