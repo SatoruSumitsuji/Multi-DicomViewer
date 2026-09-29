@@ -389,6 +389,7 @@
   "LV EF: set a long-axis view first (the current view becomes the rotation axis), then trace the endo/epi border on each rotated plane to measure LV volume": "LV EF：先に長軸ビューを作る(その向きが回転軸になります)→ 各回転断面で心内膜/心外膜をトレースして左室容積を計測",
   "Endo": "心内膜",
   "Epi": "心外膜",
+  "Loading Epi data…": "Epiデータを読み込み中…",
   "Redo axis": "長軸を取り直す",
   "Re-pick the apex + 2 basal points": "心尖部+基部2点を取り直す",
   "Exit LV": "LV終了",
