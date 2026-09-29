@@ -8617,6 +8617,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             import traceback
             traceback.print_exc()
             return False
+        self._lvv_lvd_shown = False          # LVD is clutter in a territory review
         if self._lvv is not None:            # display-only: keep overlays, no edit
             self._lvv_observe_exit()
         self._refresh(reset_cam=False)
