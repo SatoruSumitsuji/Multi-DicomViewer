@@ -172,11 +172,13 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_lbl.setStyleSheet("font-weight:bold;")
         tv.addWidget(self._terr_lbl)
         self._targets_w = QTreeWidget()
-        self._targets_w.setColumnCount(4)
+        self._targets_w.setColumnCount(5)
         self._targets_w.setHeaderLabels(
-            [t("Target"), t("血管"), t("灌流域 mL"), t("心筋 %")])
-        self._targets_w.setColumnWidth(0, 64)
-        self._targets_w.setColumnWidth(1, 120)
+            [t("Target"), t("血管"), t("位置"), t("心筋 %"), t("灌流域 mL")])
+        self._targets_w.setColumnWidth(0, 60)
+        self._targets_w.setColumnWidth(1, 96)
+        self._targets_w.setColumnWidth(2, 52)
+        self._targets_w.setColumnWidth(3, 56)
         self._targets_w.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._targets_w.customContextMenuRequested.connect(self._targets_menu)
@@ -632,8 +634,12 @@ class CoronaryTreeWindow(SnapDock):
             vname = short_vessel_name(v.name) if v is not None else tg["vid"]
             role = self._root_role(tg["vid"])
             label = f"{role}:{vname}" if role else vname
-            it = QTreeWidgetItem([f"Target {i}", label,
-                                  f"{tg['ml']:.1f}", f"{tg['pct']:.1f}%"])
+            # 位置 = arc-length from the vessel's PROXIMAL end as a % of its length
+            # (points are uniform arc-length samples, so idx maps linearly).
+            n = v.n if v is not None else 1
+            pos = (100.0 * int(tg["idx"]) / (n - 1)) if n > 1 else 0.0
+            it = QTreeWidgetItem([f"Target {i}", label, f"{pos:.0f}%",
+                                  f"{tg['pct']:.1f}%", f"{tg['ml']:.1f}"])
             it.setData(0, _UID_ROLE, i - 1)     # row → index into _targets
             it.setForeground(0, QColor(TARGET_COLOR))
             self._targets_w.addTopLevelItem(it)
