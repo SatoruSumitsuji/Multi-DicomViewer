@@ -2717,6 +2717,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
         self._territory_display = False              # FullLv review: L=SAX, R=VR
+        self._vr_shell = True                        # VR crop: True=Epi+1cm shell
+        self._vr_shell_mm = 10.0                     # outward shell thickness (mm)
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
         # line's right-click menu.
@@ -10490,11 +10492,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._coro_target_cb = cb
 
     def set_coronary_targets(self, specs) -> None:
-        """Public (shell): the Target markers to draw (from the Coronary Tree)."""
+        """Public (shell): the Target markers to draw (from the Coronary Tree) —
+        2-D on the MPR panes, 3-D spheres on the VR pane."""
         self._coro_targets = list(specs or [])
         try:
             for k in ("A", "B"):
-                self._redraw_geom(k)
+                if self._vr_on.get(k):
+                    self._vr_update_targets(k)
+                    self.pane[k].render()
+                else:
+                    self._redraw_geom(k)
         except Exception:                                # noqa: BLE001
             pass
 
@@ -10550,7 +10557,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_actor.SetMapper(p.vr_coro_mapper)
         p.vr_coro_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_coro_actor)
-        # Territory as pale-red translucent 3-D spheres (glyph-free point cloud).
+        # Territory as pale-red translucent 3-D iso-surface.
         p.vr_terr_mapper = vtkPolyDataMapper()
         p.vr_terr_mapper.SetInputData(vtkPolyData())
         p.vr_terr_actor = vtkActor()
@@ -10559,6 +10566,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_terr_actor.GetProperty().SetOpacity(0.35)
         p.vr_terr_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_terr_actor)
+        # Target points as bright-red spheres at each Target's 3-D location.
+        p.vr_tgt_mapper = vtkPolyDataMapper()
+        p.vr_tgt_mapper.SetInputData(vtkPolyData())
+        p.vr_tgt_actor = vtkActor()
+        p.vr_tgt_actor.SetMapper(p.vr_tgt_mapper)
+        p.vr_tgt_actor.GetProperty().SetColor(0.95, 0.15, 0.15)
+        p.vr_tgt_actor.GetProperty().SetPointSize(16.0)
+        if hasattr(p.vr_tgt_actor.GetProperty(), "SetRenderPointsAsSpheres"):
+            p.vr_tgt_actor.GetProperty().SetRenderPointsAsSpheres(True)
+        p.vr_tgt_actor.SetVisibility(False)
+        p.ren.AddActor(p.vr_tgt_actor)
 
     def _vr_update_coronary(self, key) -> None:
         """Rebuild the 3-D coronary tubes on VR pane *key* from the overlay spec."""
@@ -10593,6 +10611,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_tube.SetInputData(pd)
         p.vr_coro_tube.Modified()
         p.vr_coro_actor.SetVisibility(True)
+
+    def _vr_update_targets(self, key) -> None:
+        """Rebuild the 3-D Target point markers (bright-red spheres) on VR pane
+        *key* from the pushed target specs."""
+        p = self.pane[key]
+        if getattr(p, "vr_tgt_actor", None) is None:
+            return
+        specs = self._coro_targets if self._vr_on.get(key) else []
+        if not specs:
+            p.vr_tgt_mapper.SetInputData(vtkPolyData())
+            p.vr_tgt_actor.SetVisibility(False)
+            return
+        pts = vtkPoints()
+        for tg in specs:
+            P = tg.get("point")
+            if P is None:
+                continue
+            pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
+        verts = vtkCellArray()
+        for i in range(pts.GetNumberOfPoints()):
+            verts.InsertNextCell(1)
+            verts.InsertCellPoint(i)
+        pd = vtkPolyData()
+        pd.SetPoints(pts)
+        pd.SetVerts(verts)
+        p.vr_tgt_mapper.SetInputData(pd)
+        p.vr_tgt_actor.SetVisibility(pts.GetNumberOfPoints() > 0)
 
     def _vr_update_territory(self, key) -> None:
         """Rebuild the 3-D territory surface on VR pane *key* from the target
@@ -10683,14 +10728,51 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             return None
 
-    def _vr_input_image(self):
-        """The image the VR renders: the CT cropped to the Epi region when one is
-        loaded (soft tissue outside Epi → air/transparent), else the full CT."""
+    def _vr_shell_mask(self):
+        """Full-volume mask of the Epi surface + an outward shell (~_vr_shell_mm),
+        where the coronary arteries sit — so the VR shows the heart SURFACE and its
+        vessels (the reference coronary-CTA look), not the LV interior. Computed on
+        the Epi bbox + margin for speed. None if no Epi / no scipy."""
         epi = self._vr_epi_full_mask()
-        if epi is None or self._vol is None:
+        if epi is None:
+            return None
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except Exception:                                # noqa: BLE001
+            return epi                                   # fall back to inside-Epi
+        sx, sy, sz = self._dims
+        sampling = (sz, sy, sx)
+        out_mm = float(getattr(self, "_vr_shell_mm", 10.0))
+        in_mm = 4.0                                      # thin inner rim (surface)
+        zs, ys, xs = np.where(epi)
+        if len(zs) == 0:
+            return epi
+        mz = int(np.ceil(out_mm / sz)) + 2
+        my = int(np.ceil(out_mm / sy)) + 2
+        mx = int(np.ceil(out_mm / sx)) + 2
+        z0, z1 = max(0, zs.min() - mz), min(epi.shape[0], zs.max() + mz + 1)
+        y0, y1 = max(0, ys.min() - my), min(epi.shape[1], ys.max() + my + 1)
+        x0, x1 = max(0, xs.min() - mx), min(epi.shape[2], xs.max() + mx + 1)
+        sub = epi[z0:z1, y0:y1, x0:x1]
+        d_out = distance_transform_edt(~sub, sampling=sampling)
+        d_in = distance_transform_edt(sub, sampling=sampling)
+        shell = ((~sub) & (d_out <= out_mm)) | (sub & (d_in <= in_mm))
+        full = np.zeros(epi.shape, bool)
+        full[z0:z1, y0:y1, x0:x1] = shell
+        return full
+
+    def _vr_input_image(self):
+        """The image the VR renders: the CT cropped to the Epi+shell (default) or
+        the Epi interior (_vr_shell False), else the full CT. The shell view shows
+        the heart surface + coronaries for Target picking."""
+        if self._vol is None:
+            return self._image
+        mask = (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
+                else self._vr_epi_full_mask())
+        if mask is None:
             return self._image
         sx, sy, sz = self._dims
-        masked = np.where(epi, self._vol, -1000).astype(np.int16)
+        masked = np.where(mask, self._vol, -1000).astype(np.int16)
         return numpy_to_vtk_image(masked, sx, sy, sz)
 
     def vr_active(self, key=None) -> bool:
@@ -10733,7 +10815,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     a.SetVisibility(False)
             p.vr_volume.SetVisibility(True)
             self._vr_update_coronary(key)           # 3-D coronary tubes
-            self._vr_update_territory(key)          # 3-D territory cloud
+            self._vr_update_territory(key)          # 3-D territory surface
+            self._vr_update_targets(key)            # 3-D target spheres
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
@@ -10764,7 +10847,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
-                       getattr(p, "vr_terr_actor", None)):
+                       getattr(p, "vr_terr_actor", None),
+                       getattr(p, "vr_tgt_actor", None)):
                 if _a is not None:
                     _a.SetVisibility(False)
             for a in self._vr_hidden.get(key, []):
