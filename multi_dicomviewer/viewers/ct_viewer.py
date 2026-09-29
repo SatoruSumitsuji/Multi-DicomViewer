@@ -8556,6 +8556,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._full_lv_refresh_btn()
         return applied
 
+    def apply_full_lv(self, full_data) -> bool:
+        """Apply a FullLv bundle (EpiLv + BldLv) as display-only LV overlays for a
+        CT Territory review, then drop to the OBSERVE display (overlays kept on
+        screen, editing off, selector back). Returns True if applied."""
+        if self._image is None:
+            return False
+        fd = full_data or {}
+        epi, bld = fd.get("epi"), fd.get("bld")
+        if not isinstance(bld, dict):
+            return False
+        if self._mode != "3D" and hasattr(self, "_set_mode"):
+            self._set_mode("3D")             # overlays only draw in 3-D MPR
+        try:
+            if isinstance(epi, dict):
+                self._lvv_apply_epi_data(epi)
+            self._lvv_apply_data(bld)        # enter Blood/Endo + restore overlays
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        if self._lvv is not None:            # display-only: keep overlays, no edit
+            self._lvv_observe_exit()
+        self._refresh(reset_cam=False)
+        return True
+
     def _lvv_clear_markers(self) -> None:
         # NOTE: the retained blood mask (_lvv_blood_comp) is intentionally NOT
         # dropped here — it must survive leaving Blood so 自動Endo can use it when
