@@ -50,7 +50,8 @@ from PyQt6.QtWidgets import (
 from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
 from vtkmodules.util.numpy_support import numpy_to_vtk, vtk_to_numpy
 from vtkmodules.vtkCommonCore import (
-    VTK_FLOAT, vtkLookupTable, vtkPoints, vtkUnsignedCharArray,
+    VTK_FLOAT, VTK_UNSIGNED_CHAR, vtkLookupTable, vtkPoints,
+    vtkUnsignedCharArray,
 )
 from vtkmodules.vtkCommonDataModel import (
     vtkCellArray,
@@ -84,7 +85,7 @@ from vtkmodules.vtkCommonDataModel import vtkPiecewiseFunction
 # Rendering / interaction implementations VTK loads lazily.
 import vtkmodules.vtkRenderingOpenGL2  # noqa: F401
 import vtkmodules.vtkRenderingVolumeOpenGL2  # noqa: F401  (GPU volume ray-cast)
-from vtkmodules.vtkRenderingVolumeOpenGL2 import vtkSmartVolumeMapper
+from vtkmodules.vtkRenderingVolume import vtkGPUVolumeRayCastMapper
 import vtkmodules.vtkInteractionStyle  # noqa: F401
 from vtkmodules.vtkInteractionStyle import vtkInteractorStyleUser
 
@@ -10535,7 +10536,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Create the pane's GPU ray-cast VR pipeline + its 3-D overlays once."""
         if getattr(p, "vr_volume", None) is not None:
             return
-        p.vr_mapper = vtkSmartVolumeMapper()
+        p.vr_mapper = vtkGPUVolumeRayCastMapper()
         p.vr_mapper.SetBlendModeToComposite()
         p.vr_volume = vtkVolume()
         p.vr_volume.SetMapper(p.vr_mapper)
@@ -10761,19 +10762,39 @@ class CTViewer(CPRMixin, AbstractViewer):
         full[z0:z1, y0:y1, x0:x1] = shell
         return full
 
-    def _vr_input_image(self):
-        """The image the VR renders: the CT cropped to the Epi+shell (default) or
-        the Epi interior (_vr_shell False), else the full CT. The shell view shows
-        the heart surface + coronaries for Target picking."""
+    def _vr_crop_mask(self):
+        """The numpy bool crop for the VR: Epi+shell (default) or Epi interior.
+        None → no crop (full CT)."""
         if self._vol is None:
-            return self._image
-        mask = (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
+            return None
+        return (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
                 else self._vr_epi_full_mask())
-        if mask is None:
-            return self._image
+
+    def _mask_to_vtk_binary(self, mask):
+        """A bool [z,y,x] mask → a uint8 vtkImageData binary mask for the GPU
+        volume mapper (0 = skip, 1 = render). Cropping this way keeps the REAL CT
+        scalars, so there is no fake -1000 boundary surface (the earlier 'smooth
+        blob' — the mask edge was being rendered as an opaque shell)."""
         sx, sy, sz = self._dims
-        masked = np.where(mask, self._vol, -1000).astype(np.int16)
-        return numpy_to_vtk_image(masked, sx, sy, sz)
+        z, y, x = mask.shape
+        flat = np.ascontiguousarray(mask.astype(np.uint8).ravel(order="C"))
+        arr = numpy_to_vtk(flat, deep=True, array_type=VTK_UNSIGNED_CHAR)
+        img = vtkImageData()
+        img.SetDimensions(x, y, z)
+        img.SetSpacing(float(sx), float(sy), float(sz))
+        img.GetPointData().SetScalars(arr)
+        return img
+
+    def _mask_world_bounds(self, mask):
+        """World-mm bounds (xmin,xmax,…) of a bool crop mask, to frame the VR on
+        the heart instead of the whole thorax. None if empty."""
+        zs, ys, xs = np.where(mask)
+        if len(zs) == 0:
+            return None
+        sx, sy, sz = self._dims
+        return (float(xs.min() * sx), float(xs.max() * sx),
+                float(ys.min() * sy), float(ys.max() * sy),
+                float(zs.min() * sz), float(zs.max() * sz))
 
     def vr_active(self, key=None) -> bool:
         if key is None:
@@ -10795,8 +10816,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam = p.ren.GetActiveCamera()
         if on:
             self._vr_ensure(p)
-            img = self._vr_input_image()            # cropped to Epi when available
-            p.vr_mapper.SetInputData(img)
+            p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
+            mask = self._vr_crop_mask()             # Epi+shell / Epi interior
+            if mask is not None:
+                p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
+                p.vr_mapper.SetMaskTypeToBinary()
+                vr_bounds = self._mask_world_bounds(mask) or self._image.GetBounds()
+            else:
+                try:
+                    p.vr_mapper.SetMaskInput(None)
+                except Exception:                    # noqa: BLE001
+                    pass
+                vr_bounds = self._image.GetBounds()
             p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
             # Hide EVERY existing prop (MPR image, tints, crosshair, coronary /
             # measure overlays, labels, info) so nothing 2-D lingers, misplaced,
@@ -10821,7 +10852,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
             cam.ParallelProjectionOff()             # perspective depth for VR
-            p.ren.ResetCamera(img.GetBounds())
+            p.ren.ResetCamera(vr_bounds)            # frame the heart, not the thorax
             # Centre the VR on the centreline crossing (LV mid) rather than the
             # cropped-volume bounding-box centre, so it sits at the same centre as
             # the short-axis pane. Only when that point is finite AND inside the
@@ -10829,7 +10860,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             ctr = getattr(self, "_center", None)
             if ctr is not None:
                 ctr = np.asarray(ctr, float)
-                b = img.GetBounds()
+                b = vr_bounds
                 inside = (np.all(np.isfinite(ctr))
                           and b[0] - 1 <= ctr[0] <= b[1] + 1
                           and b[2] - 1 <= ctr[1] <= b[3] + 1
@@ -10889,7 +10920,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam = p.ren.GetActiveCamera()
         tool = getattr(self, "_tool", "ROTATE")
         if tool == "ZOOM":
-            cam.Zoom(max(0.5, min(2.0, 1.0 + (-dy) * 0.005)))
+            # Drag DOWN = zoom in, UP = zoom out (match the MPR Zoom tool).
+            cam.Zoom(max(0.5, min(2.0, 1.0 + dy * 0.005)))
         elif tool == "MOVE":
             self._vr_pan(key, dx, dy)
         elif tool == "SPIN":
