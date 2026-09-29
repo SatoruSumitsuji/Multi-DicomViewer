@@ -2716,6 +2716,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on = {"A": False, "B": False}
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
+        self._territory_display = False              # FullLv review: L=SAX, R=VR
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
         # line's right-click menu.
@@ -8698,6 +8699,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._lvv is not None:            # display-only: keep overlays, no edit
             self._lvv_observe_exit()
         self._refresh(reset_cam=False)
+        # Territory review layout: LEFT = LV short-axis, RIGHT = VR (auto). Rotate
+        # / Thick are greyed for the short-axis pane (see _refresh_tool_availability).
+        self._territory_display = True
+        self._vr_set("B", True)
+        self._refresh_tool_availability()
         return True
 
     def _lvv_clear_markers(self) -> None:
@@ -9383,9 +9389,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         # are DISABLED (re-tilt / long-axis shift); Zoom/Move/Thick/WL stay live.
         lv_lock = self._lv_axis_locked() or self._lv_sax_active()
 
+        # Territory review (L = LV short-axis, R = VR): Rotate would re-tilt the
+        # short-axis and Thick is meaningless here → both greyed (VR still rotates
+        # with the Paging tool / default drag on the right pane).
+        terr = getattr(self, "_territory_display", False)
+
         def _disabled(n):
             return ((is2d and n in _MPR_ONLY_TOOLS)
-                    or (lv_lock and n in _LV_LOCK_DISABLED))
+                    or (lv_lock and n in _LV_LOCK_DISABLED)
+                    or (terr and n in ("ROTATE", "THICK")))
 
         # If the ACTIVE tool just became unavailable, fall back to Move (this
         # re-enters via _set_tool, which re-runs this refresh with a safe tool).
@@ -10708,6 +10720,17 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
             cam.ParallelProjectionOff()             # perspective depth for VR
             p.ren.ResetCamera(img.GetBounds())
+            # Centre the VR on the centreline crossing (LV mid) rather than the
+            # cropped-volume bounding-box centre, so it sits at the same centre as
+            # the short-axis pane.
+            ctr = getattr(self, "_center", None)
+            if ctr is not None:
+                fp = np.array(cam.GetFocalPoint(), float)
+                pos = np.array(cam.GetPosition(), float)
+                off = pos - fp
+                ctr = np.asarray(ctr, float)
+                cam.SetFocalPoint(*ctr)
+                cam.SetPosition(*(ctr + off))
             cam.Elevation(-70.0)                    # a cardiac-ish top view
             cam.OrthogonalizeViewUp()
             p.ren.ResetCameraClippingRange()
@@ -10735,6 +10758,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.render()
         if not on:
             self._refresh(reset_cam=False)          # rebuild the MPR overlays
+            if not any(self._vr_on.values()):       # left the territory VR layout
+                self._territory_display = False
+                self._refresh_tool_availability()
 
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
