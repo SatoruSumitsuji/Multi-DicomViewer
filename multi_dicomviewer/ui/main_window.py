@@ -2465,6 +2465,32 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def coronary_territory_refresh(self, mask=None) -> None:
+        """Tint the Target's distal territory (a full-volume 0/1 mask, or None to
+        clear) on the CT pane showing the tree's source volume."""
+        w = getattr(self, "_corotree_win", None)
+        ct_uid = getattr(w, "_ct_uid", "") if w is not None else ""
+        base = ct_uid.split("#", 1)[0] if ct_uid else ""
+        for p in self._panes:
+            try:
+                v = p.current_viewer()
+            except Exception:                            # noqa: BLE001
+                v = None
+            if v is None or not hasattr(v, "set_territory_mask"):
+                continue
+            m = mask
+            if base:
+                try:
+                    su = p.shown_series_uid() or ""
+                except Exception:                        # noqa: BLE001
+                    su = ""
+                if not (su == ct_uid or su.split("#", 1)[0] == base):
+                    m = None
+            try:
+                v.set_territory_mask(m)
+            except Exception:                            # noqa: BLE001
+                pass
+
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
         """True if *path* is a Case Presentation .json (structure heuristic), so a

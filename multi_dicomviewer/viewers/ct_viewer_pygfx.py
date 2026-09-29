@@ -611,6 +611,11 @@ class _Overlay(QWidget):
             if thick is not None:
                 p.drawImage(self.rect(), thick)
                 self._paint_wall_legend(p, v, w, h)
+        # CT Territory tint (independent of LV mode — a coronary Target's distal
+        # perfusion territory), drawn under the crosshair / overlay.
+        terr = v._terr_img.get(key)
+        if terr is not None:
+            p.drawImage(self.rect(), terr)
         # Short-axis (CPR): pane A shows a centred crosshair + the editable
         # control-point marker instead of the normal MPR crosshair / measures.
         if v._cpr is not None and key == "A":
@@ -2291,6 +2296,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_cyan_img = {"A": None, "B": None}   # in-range tint RGBA per pane
         self._lvv_red_img = {"A": None, "B": None}    # measured-region RGBA per pane
         self._lvv_thick_img = {"A": None, "B": None}  # 壁厚 heat-map RGBA per pane
+        self._terr_mask_vol = None                    # territory 0/1 volume (numpy)
+        self._terr_img = {"A": None, "B": None}       # territory tint RGBA per pane
         # 壁厚 (wall thickness) state — None/"3d"/"sax"; the field is a full-grid
         # numpy mm volume; cache lets mode re-entry skip the EDT/radial recompute.
         self._lvv_thick_mode = None
@@ -4903,6 +4910,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._lvv is not None or (self._lv is not None
                                          and self._lvv_mask_on):
                 self._lvv_refresh_overlays(key)
+            # Territory tint follows the plane too (independent of LV mode).
+            if getattr(self, "_terr_mask_vol", None) is not None:
+                self._terr_img[key] = self._lvv_plane_rgba(key, "terr")
+            else:
+                self._terr_img[key] = None
             p.render()
             self._overlay[key].update()
         # Whenever a slab is on screen, (re)arm the off-thread NATIVE-resolution
@@ -6546,6 +6558,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._overlay[k].update()
         except Exception:                                # noqa: BLE001
             pass
+
+    def set_territory_mask(self, mask) -> None:
+        """Public (shell): tint the Target's distal territory (pale red) on the CT.
+        *mask* = full-volume 0/1 numpy [z,y,x] at the viewer volume shape, or
+        None to clear."""
+        self._terr_mask_vol = None
+        if mask is not None and self._vol is not None:
+            m = np.asarray(mask)
+            if m.shape == tuple(self._vol.shape):
+                self._terr_mask_vol = np.ascontiguousarray(m, np.float32)
+        for k in ("A", "B"):
+            self._terr_img[k] = (self._lvv_plane_rgba(k, "terr")
+                                 if self._terr_mask_vol is not None else None)
+            if self._overlay.get(k) is not None:
+                self._overlay[k].update()
 
     def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
         """Nearest coronary-overlay (vid, sample-index) within *tol* px, or
@@ -10019,7 +10046,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             rgba = np.ascontiguousarray(rgba)
             return QImage(rgba.data, iw, ih, 4 * iw,
                           QImage.Format.Format_RGBA8888).copy()
-        if kind == "cyan":
+        if kind == "terr":
+            if getattr(self, "_terr_mask_vol", None) is None:
+                return None
+            mv = _trilinear_sample(self._terr_mask_vol, vx, vy, vz)
+            inmask = (mv >= 0.5) & ~oob
+            col = (234, 153, 153, 128)         # TARGET_COLOR pale red
+        elif kind == "cyan":
             lo = float(self._lvv_lo_spin.value())
             hi = float(self._lvv_hi_spin.value())
             hu = _trilinear_sample(self._vol, vx, vy, vz)

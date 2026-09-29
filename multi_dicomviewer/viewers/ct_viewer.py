@@ -1393,6 +1393,23 @@ class _Pane:
             self.colors_thick.GetOutputPort())
         self.actor_thick.SetInterpolate(False)
         self.actor_thick.SetPosition(0.0, 0.0, 0.12)
+        # CT Territory tint: the coronary Target's distal perfusion territory as a
+        # pale-red (TARGET_COLOR) 0/1 mask resliced on the same plane. Its own
+        # channel so it never disturbs the blood/thick overlays.
+        self.reslice_terr = vtkImageReslice()
+        self.reslice_terr.SetInputData(_placeholder_image())
+        self.reslice_terr.SetOutputDimensionality(2)
+        self.reslice_terr.SetInterpolationModeToNearestNeighbor()
+        self.reslice_terr.SetBackgroundLevel(0.0)
+        self.colors_terr = vtkImageMapToColors()
+        self.colors_terr.SetOutputFormatToRGBA()
+        self.colors_terr.SetLookupTable(_lvv_mask_lut(False))
+        self.colors_terr.SetInputConnection(self.reslice_terr.GetOutputPort())
+        self.actor_terr = vtkImageActor()
+        self.actor_terr.GetMapper().SetInputConnection(
+            self.colors_terr.GetOutputPort())
+        self.actor_terr.SetInterpolate(False)
+        self.actor_terr.SetPosition(0.0, 0.0, 0.11)
         # Wall-thickness colour LEGEND (which colour = how many mm), shown only
         # while a 壁厚 heat map is on. Hidden until the viewer sets its LUT.
         self.thick_bar = vtkScalarBarActor()
@@ -1422,6 +1439,7 @@ class _Pane:
         self.ren.AddActor(self.actor)
         self.ren.AddActor(self.actor_hl)              # blood tint over grayscale
         self.ren.AddActor(self.actor_mask)           # measured region (red) on top
+        self.ren.AddActor(self.actor_terr)           # territory tint (pale red)
         self.ren.AddActor(self.actor_thick)          # wall-thickness heat map
         self.ren.AddActor2D(self.thick_bar)          # wall-thickness colour legend
 
@@ -2576,6 +2594,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_loaded_bld = None      # last LOADED BldLv dict (FullLV fallback)
         self._full_lv_bld_snapshot = None  # BldLv captured on Blood/Endo Exit
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
+        self._terr_mask_vol = None       # territory tint 0/1 vtkImageData
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -10355,6 +10374,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
+    def set_territory_mask(self, mask) -> None:
+        """Public (shell): tint the Target's distal perfusion territory (pale red)
+        on the CT. *mask* = a full-volume 0/1 numpy [z,y,x] at the viewer volume's
+        shape, or None to clear."""
+        self._terr_mask_vol = None
+        if mask is not None and self._image is not None \
+                and getattr(self, "_vol", None) is not None:
+            m = np.asarray(mask)
+            if m.shape == tuple(self._vol.shape):
+                sx, sy, sz = self._dims
+                self._terr_mask_vol = numpy_to_vtk_image(
+                    np.ascontiguousarray(m, np.float32), sx, sy, sz)
+        on = self._terr_mask_vol is not None
+        for k in ("A", "B"):
+            p = self.pane[k]
+            p.reslice_terr.SetInputData(
+                self._terr_mask_vol if on else _placeholder_image())
+            p.colors_terr.SetLookupTable(
+                _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
+            p.colors_terr.Modified()
+        self._refresh(reset_cam=False)
+
     def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
         """Nearest coronary-overlay (vid, sample-index) within *tol* px of
         (sx, sy), or (None, None). Used to set a Territory target at the clicked
@@ -16434,6 +16475,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if hasattr(p.reslice_mask, "SetSlabNumberOfSlices"):
                     p.reslice_mask.SetSlabNumberOfSlices(1)
                 p.reslice_mask.Modified()
+            # Territory tint tracks the SAME plane (only when a target is set).
+            if getattr(self, "_terr_mask_vol", None) is not None:
+                p.reslice_terr.SetResliceAxes(self._matrix(key))
+                p.reslice_terr.SetOutputSpacing(spacing, spacing, base_step)
+                p.reslice_terr.SetOutputOrigin(fx - box_u, fy - box_v, 0.0)
+                p.reslice_terr.SetOutputExtent(0, nu - 1, 0, nv - 1, 0, 0)
+                if hasattr(p.reslice_terr, "SetSlabNumberOfSlices"):
+                    p.reslice_terr.SetSlabNumberOfSlices(1)
+                p.reslice_terr.Modified()
             # Wall-thickness heat map tracks the SAME plane (only when built).
             if getattr(self, "_lvv_thick_vol", None) is not None:
                 p.reslice_thick.SetResliceAxes(self._matrix(key))
