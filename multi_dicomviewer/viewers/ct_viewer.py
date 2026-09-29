@@ -979,6 +979,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._which, e.position().x(), e.position().y()
             )
             return
+        # Territory target mode: a left-click on a coronary line sets a Target.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and getattr(self._owner, "_coro_target_mode", False)
+                and self._owner._coronary_target_click(
+                    self._which, e.position().x(), e.position().y())):
+            return
         # (LV blood-pool volume apex/threshold points are placed by DOUBLE-click
         # — see mouseDoubleClickEvent — so single-click still navigates.)
         # LV apex points: place the two apex vertices (apex phase) or grab an
@@ -1906,6 +1912,16 @@ class _Pane:
             cvd.GetProperty().SetRenderLinesAsTubes(True)
         self.ren.AddActor(cvd)
         self._meas_line_actors.append((2.6, cvd))    # coronary off-plane dotted
+        # CT Territory target markers: pale-red filled dots at each Target point.
+        self.coro_target_mapper = vtkPolyDataMapper()
+        self.coro_target_mapper.SetInputData(vtkPolyData())
+        cvt = vtkActor()
+        cvt.SetMapper(self.coro_target_mapper)
+        cvt.GetProperty().SetColor(0.918, 0.6, 0.6)  # TARGET_COLOR (#ea9999)
+        cvt.GetProperty().SetPointSize(14.0)
+        if hasattr(cvt.GetProperty(), "SetRenderPointsAsSpheres"):
+            cvt.GetProperty().SetRenderPointsAsSpheres(True)
+        self.ren.AddActor(cvt)
         self.coro_labels = []                 # vessel-name billboards
 
         self.info = vtkCornerAnnotation()
@@ -2604,6 +2620,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Drawn in 3-D MPR
         # only, reprojected onto each pane's plane every redraw.
         self._coro_overlay = None
+        # CT Territory targets: markers {n, point(world-mm), ml, pct, selected}
+        # pushed from the Coronary Tree panel; while target-mode is ON a left-click
+        # on a vessel line sets a Target (reported via _coro_target_cb).
+        self._coro_targets: list = []
+        self._coro_target_mode = False
+        self._coro_target_cb = None
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
         # line's right-click menu.
@@ -10259,9 +10281,23 @@ class CTViewer(CPRMixin, AbstractViewer):
                     solid_c.append((rgb[0], rgb[1], rgb[2], seg_a))
             if ves.get("vid") in self._coro_names:   # names off by default
                 labels.append((ves.get("name", ""), out[0], rgb, sel))
+        # Territory Target markers: a filled dot + a "T{n} {ml}mL/{pct}%" label at
+        # each target point (pale red), reprojected onto this plane.
+        t_rgb = (234, 153, 153)
+        t_pts = []
+        for tg in self._coro_targets:
+            P = tg.get("point")
+            if P is None:
+                continue
+            o = self._world3d_to_out(key, np.asarray(P, float))
+            t_pts.append(o)
+            labels.append((
+                f"T{tg.get('n', '')}  {tg.get('ml', 0):.1f}mL / "
+                f"{tg.get('pct', 0):.0f}%", o, t_rgb, bool(tg.get("selected"))))
         p.coro_mapper.SetInputData(_colored_multi_pd(solid, solid_c))
         p.coro_dash_mapper.SetInputData(
             _colored_dashed_rgba_pd(dash, dash_c))
+        p.coro_target_mapper.SetInputData(_points_pd(t_pts))
         self._rebuild_coro_labels(p, labels)
 
     def _rebuild_coro_labels(self, p, labels):
@@ -10301,6 +10337,58 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if d < best:
                     best, best_vid = d, ves.get("vid")
         return best_vid
+
+    # ---- CT Territory targets ------------------------------------------
+    def set_coronary_target_mode(self, on: bool, cb=None) -> None:
+        """Public (shell): enter/leave the target-pick mode. While ON, a left-click
+        on a coronary line sets a Target and reports (vid, idx) via *cb*."""
+        self._coro_target_mode = bool(on)
+        if cb is not None:
+            self._coro_target_cb = cb
+
+    def set_coronary_targets(self, specs) -> None:
+        """Public (shell): the Target markers to draw (from the Coronary Tree)."""
+        self._coro_targets = list(specs or [])
+        try:
+            for k in ("A", "B"):
+                self._redraw_geom(k)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
+        """Nearest coronary-overlay (vid, sample-index) within *tol* px of
+        (sx, sy), or (None, None). Used to set a Territory target at the clicked
+        point along the vessel."""
+        spec = self._coro_overlay if self._mode == "3D" else None
+        if not spec:
+            return None, None
+        best = tol
+        best_vid, best_idx = None, None
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            for i, P in enumerate(pts3d):
+                wx, wy = self._world3d_to_out(which, np.asarray(P, float))
+                mx, my = self._world_to_qt(which, wx, wy)
+                d = ((mx - sx) ** 2 + (my - sy) ** 2) ** 0.5
+                if d < best:
+                    best, best_vid, best_idx = d, ves.get("vid"), i
+        return best_vid, best_idx
+
+    def _coronary_target_click(self, which, sx, sy) -> bool:
+        """Left-click in target mode → set a Target at the nearest vessel sample.
+        Returns True if a vessel was hit (click consumed)."""
+        if not self._coro_target_mode or self._coro_target_cb is None:
+            return False
+        vid, idx = self._coronary_pick_sample(which, sx, sy)
+        if vid is None:
+            return False
+        try:
+            self._coro_target_cb(vid, int(idx))
+        except Exception:                                # noqa: BLE001
+            pass
+        return True
 
     def _coronary_right(self, which, sx, sy) -> bool:
         """Right-click on a coronary-overlay line → a small menu to show / hide

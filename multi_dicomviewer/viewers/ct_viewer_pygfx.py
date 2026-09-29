@@ -701,6 +701,23 @@ class _Overlay(QWidget):
                     int(Qt.AlignmentFlag.AlignLeft)
                     | int(Qt.AlignmentFlag.AlignVCenter),
                     name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
+        # Territory Target markers: a pale-red dot + "T{n} {ml}/{pct}%" label.
+        tcol = QColor(234, 153, 153)
+        for tg in v._coro_targets:
+            P = tg.get("point")
+            if P is None:
+                continue
+            ox, oy = v._world3d_to_out(key, np.asarray(P, float))
+            mx, my = v._world_to_screen(key, ox, oy)
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(tcol)
+            p.drawEllipse(QPointF(mx, my), 6.0, 6.0)
+            _draw_outlined_text(
+                p, QRectF(mx + 8, my - 18,
+                          180, 18), int(Qt.AlignmentFlag.AlignLeft)
+                | int(Qt.AlignmentFlag.AlignVCenter),
+                f"T{tg.get('n','')}  {tg.get('ml',0):.1f}mL / {tg.get('pct',0):.0f}%",
+                tcol, width=1.2)
 
     def _paint_wall_legend(self, p, v, w, h):
         """Colour-band legend for the 壁厚 heat map: a vertical bar (green=thick on
@@ -2187,6 +2204,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Painted in 3-D
         # MPR only, reprojected onto each pane's plane every repaint.
         self._coro_overlay = None
+        # CT Territory targets (see the VTK viewer): markers + pick mode.
+        self._coro_targets: list = []
+        self._coro_target_mode = False
+        self._coro_target_cb = None
         # vids whose NAME label is painted. Empty by default (labels cluttered
         # the view); turned on per-vessel via the CPR line's right-click menu.
         self._coro_names: set[str] = set()
@@ -2581,6 +2602,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Compare-select mode: a left-click picks the two shapes to compare.
         if self._cmp_on and self._drag_btn == 1:
             self._compare_pick(key, x, y)
+            return
+        # Territory target mode: a left-click on a coronary line sets a Target.
+        if (self._drag_btn == 1 and getattr(self, "_coro_target_mode", False)
+                and self._coronary_target_click(key, x, y)):
+            self._reset_pointer_state()
             return
         # Right-click ON the bottom-centre angio readout → angle dialog
         # (rotate the slice to match a chosen LAO/RAO·CRA/CAU view). Checked
@@ -6505,6 +6531,53 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if d < best:
                     best, best_vid = d, ves.get("vid")
         return best_vid
+
+    # ---- CT Territory targets ------------------------------------------
+    def set_coronary_target_mode(self, on: bool, cb=None) -> None:
+        self._coro_target_mode = bool(on)
+        if cb is not None:
+            self._coro_target_cb = cb
+
+    def set_coronary_targets(self, specs) -> None:
+        self._coro_targets = list(specs or [])
+        try:
+            for k in ("A", "B"):
+                if self._overlay.get(k) is not None:
+                    self._overlay[k].update()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
+        """Nearest coronary-overlay (vid, sample-index) within *tol* px, or
+        (None, None) — sets a Territory target at the clicked point."""
+        spec = self._coro_overlay if self._mode == "3D" else None
+        if not spec:
+            return None, None
+        best = tol
+        best_vid, best_idx = None, None
+        for ves in spec:
+            pts3d = ves.get("points")
+            if pts3d is None or len(pts3d) < 2:
+                continue
+            for i, P in enumerate(pts3d):
+                wx, wy = self._world3d_to_out(which, np.asarray(P, float))
+                mx, my = self._world_to_screen(which, wx, wy)
+                d = ((mx - sx) ** 2 + (my - sy) ** 2) ** 0.5
+                if d < best:
+                    best, best_vid, best_idx = d, ves.get("vid"), i
+        return best_vid, best_idx
+
+    def _coronary_target_click(self, which, sx, sy) -> bool:
+        if not self._coro_target_mode or self._coro_target_cb is None:
+            return False
+        vid, idx = self._coronary_pick_sample(which, sx, sy)
+        if vid is None:
+            return False
+        try:
+            self._coro_target_cb(vid, int(idx))
+        except Exception:                                # noqa: BLE001
+            pass
+        return True
 
     def _coronary_menu(self, which, vid, sx, sy):
         """Deferred menu (out of the pointer handler) to show / hide a coronary
