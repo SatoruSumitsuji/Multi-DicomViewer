@@ -3655,8 +3655,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     # _build_lv_bar above).
     # ==================================================================
     def _lv_current_submode(self):
-        """Which sub-mode is active: 'blood', 'endo', 'epi', or None."""
-        if self._lvv is not None:
+        """Which sub-mode is EDITING now: 'blood', 'endo', 'epi', or None. A
+        Blood/Endo left to its post-Exit OBSERVE display (overlays kept, `_lvv`
+        retained with observe=True) counts as None — the selector is back."""
+        if self._lvv is not None and not self._lvv.get("observe"):
             return "blood"
         if self._lv is not None:
             return self._lv.get("pass")           # 'endo' / 'epi' / None
@@ -3774,16 +3776,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         Wall thickness / EF (which need both borders) are combined later in the
         Tools「心機能」tool from the saved files."""
         cur = self._lv_current_submode()
+        # Resume Blood/Endo from its post-Exit OBSERVE display (overlays kept
+        # live): just re-arm editing — nothing to rebuild.
+        if (sm == "blood" and self._lvv is not None
+                and self._lvv.get("observe")):
+            self._lvv.pop("observe", None)
+            self._lvv_apex_shown = True
+            self._lvv_sync()
+            self._lv_update_submode_ui()
+            self._refresh(reset_cam=False)
+            return
         # Re-click the ACTIVE sub-mode → DEACTIVATE it. Because the selector greys
         # the other two while one is active, this 2nd click is the ONLY way to
         # leave a sub-mode, so the "unsaved data will be lost" warning belongs
         # HERE (the moment it goes inactive) — not later when another button is
-        # picked. On confirm the data is dropped so the sub-mode is fully clear.
+        # picked. Blood/Endo now leaves to OBSERVE (overlays kept), like a contour
+        # pass with a committed border.
         if sm == cur:
             if sm == "blood":
                 if not self._lv_confirm_drop("blood"):
                     return
-                self._lvv_toggle()                    # leave Blood (drops it)
+                self._lvv_observe_exit()              # leave Blood → keep overlays
             elif self._lv is not None:
                 # Re-clicking the active Endo/Epi button EXITS the pass — even
                 # from SAX (leave SAX first so the button always exits, per the
@@ -4033,12 +4046,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         self._lv_epi_armed = False
         if sm == "blood":
-            # Capture the BldLv WHILE the session is still live, so FullLV can be
-            # saved AFTER leaving Blood/Endo (it activates only once you've left).
-            self._full_lv_snapshot()
-            self._lvv_clear_markers()
-            self._lvv = None
-            self._lvv_sync()
+            self._lvv_observe_exit()          # leave to the selector, KEEP overlays
         elif self._lv is not None:
             if self._lv.get("sax") is not None:
                 if getattr(self, "_lv_sax_btn", None) is not None:
@@ -4188,6 +4196,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apply_view_free()         # vol_done → unlock the view
         self._lv_sync_buttons()
         self._redraw_all_lv()
+
+    def _lvv_observe_exit(self) -> None:
+        """Leave Blood/Endo to the selector but KEEP its overlays on screen
+        (observe): _lvv and every show flag / mask are retained, so All-/LV-Blood,
+        Epi-Border, Endo-Border and LVD stay exactly as they were and still track
+        the view. The Blood/Endo control groups hide (submode → None); re-selecting
+        Blood/Endo resumes editing. Mirrors the contour LV _lv_leave_observe."""
+        if self._lvv is None:
+            return
+        self._full_lv_snapshot()           # capture the BldLv for FullLV
+        self._lvv["observe"] = True        # display-only: overlays kept, editing off
+        if self._meas_on:                  # let a drag drive the view, not a trace
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lvv_sync()
+        self._lv_update_submode_ui()
+        self._refresh(reset_cam=False)     # keep the retained overlays on screen
 
     def _lv_reset_contour_empty(self) -> None:
         """Drop the current pass's model + on-screen borders and return to the
@@ -8106,8 +8131,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         FullLV is the step AFTER Blood/Endo: it is offered only once you have
         LEFT the Blood/Endo session (Save + Exit), so it never sits at the same
         level as the Blood/Endo Save."""
-        if self._lvv is not None:                      # still in Blood/Endo mode
-            return [t("Blood/Endo を保存して Exit")]
+        if self._lvv is not None and not self._lvv.get("observe"):
+            return [t("Blood/Endo を保存して Exit")]   # still EDITING Blood/Endo
         miss = []
         # Blood/Endo captured on Exit (or a loaded BldLv) — carries apex / MV /
         # AoV / Endo mask. _full_lv_bld_for_save picks whichever has an Endo mask.
