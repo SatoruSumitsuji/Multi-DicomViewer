@@ -2491,6 +2491,58 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def _coronary_source_viewers(self):
+        """The CT viewer(s) showing the Coronary Tree's SOURCE volume (the ones
+        the VR / overlays belong to). Falls back to every CT viewer when the source
+        UID is unknown (older files)."""
+        w = getattr(self, "_corotree_win", None)
+        ct_uid = getattr(w, "_ct_uid", "") if w is not None else ""
+        base = ct_uid.split("#", 1)[0] if ct_uid else ""
+        out = []
+        for p in self._panes:
+            try:
+                v = p.current_viewer()
+            except Exception:                            # noqa: BLE001
+                v = None
+            if v is None:
+                continue
+            if base:
+                try:
+                    su = p.shown_series_uid() or ""
+                except Exception:                        # noqa: BLE001
+                    su = ""
+                if not (su == ct_uid or su.split("#", 1)[0] == base):
+                    continue
+            out.append(v)
+        return out
+
+    def coronary_vr_visible(self, on: bool) -> None:
+        """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide the VR on the source CT."""
+        for v in self._coronary_source_viewers():
+            if hasattr(v, "set_vr_on"):
+                try:
+                    v.set_vr_on(bool(on))
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def coronary_vr_shell(self, shell: bool) -> None:
+        """Coronary Tree ▸ VR ▸ 内腔VR/シェルVR — switch the VR crop mode."""
+        for v in self._coronary_source_viewers():
+            if hasattr(v, "set_vr_shell"):
+                try:
+                    v.set_vr_shell(bool(shell))
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def coronary_vr_shell_mm(self, mm: float) -> None:
+        """Coronary Tree ▸ VR ▸ シェルVR範囲 — outward shell thickness (mm)."""
+        for v in self._coronary_source_viewers():
+            if hasattr(v, "set_vr_shell_mm"):
+                try:
+                    v.set_vr_shell_mm(float(mm))
+                except Exception:                        # noqa: BLE001
+                    pass
+
     @staticmethod
     def _is_case_presentation_json(path: str) -> bool:
         """True if *path* is a Case Presentation .json (structure heuristic), so a

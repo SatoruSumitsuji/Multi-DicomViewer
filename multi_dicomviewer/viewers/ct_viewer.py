@@ -8687,10 +8687,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")             # overlays only draw in 3-D MPR
+        from PyQt6.QtWidgets import QApplication, QProgressDialog
         try:
             if isinstance(epi, dict):
-                self._lvv_apply_epi_data(epi)
-            self._lvv_apply_data(bld)        # enter Blood/Endo + restore overlays
+                self._lvv_apply_epi_data(epi)  # animated "Loading Epi data…"
+            # Blood/Endo restore touches Qt/VTK (can't run off-thread), but it's a
+            # short wait — show a labelled busy window so it doesn't look frozen.
+            busy = QProgressDialog(t("Applying Blood/Endo…"), "", 0, 0,
+                                   self.window())
+            busy.setWindowTitle(t("Blood/Endo"))
+            busy.setWindowModality(Qt.WindowModality.WindowModal)
+            busy.setCancelButton(None)
+            busy.setMinimumDuration(0)
+            busy.setValue(0)
+            busy.show()
+            QApplication.processEvents()
+            try:
+                self._lvv_apply_data(bld)    # enter Blood/Endo + restore overlays
+            finally:
+                busy.reset()
+                busy.deleteLater()
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -9062,16 +9078,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
-        # Volume Rendering toggle (contrast-CTA preset) on the active pane.
-        self._vr_btn = FitButton("VR")
-        self._vr_btn.setCheckable(True)
-        self._vr_btn.setStyleSheet(
-            "QPushButton:checked { background:#8e44ad; color:white; }")
-        self._vr_btn.setHelpToolTip(t(
-            "Volume Rendering of the CT (contrast-CTA preset) on the active "
-            "pane — left-drag rotates, wheel zooms. Click again for MPR."))
-        self._vr_btn.clicked.connect(self._toggle_vr)
-        row.addWidget(self._vr_btn)
+        # NOTE: the old image-top "VR" button was removed — Volume Rendering is
+        # now driven from the Coronary Tree panel's VR row (表示/非表示・内腔/シェル
+        # ・シェル範囲), via set_vr_on/set_vr_shell/set_vr_shell_mm below.
 
         self._meas_btn = FitButton("📏 Measure")
         self._meas_btn.setCheckable(True)
@@ -10851,7 +10860,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if on:
             self._vr_ensure(p)
             p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
-            mask = self._vr_crop_mask()             # Epi+shell / Epi interior
+            # The crop mask (scipy EDT shell) is the slow part of turning VR on —
+            # build it behind an ANIMATED busy window so it doesn't look hung.
+            mask = self._run_busy(t("VR"), t("Building VR…"),
+                                  self._vr_crop_mask)  # Epi+shell / Epi interior
             if mask is not None:
                 p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
                 p.vr_mapper.SetMaskTypeToBinary()
@@ -10940,10 +10952,63 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
 
-    def _toggle_vr(self) -> None:
-        """VR button → toggle Volume Rendering on the ACTIVE pane."""
-        key = self._active_pane
-        self._vr_set(key, self._vr_btn.isChecked())
+    def _vr_pane_key(self) -> str:
+        """The pane the VR lives on — the one currently rendering VR, else 'B'
+        (the territory review layout's right / VR pane)."""
+        for k in ("B", "A"):
+            if self._vr_on.get(k):
+                return k
+        return "B"
+
+    def _vr_apply_crop(self, key, reset_cam=False) -> None:
+        """Recompute the VR crop (shell/interior + thickness) and feed it to the
+        LIVE VR mapper, KEEPING the current camera (unless reset_cam) — so changing
+        the shell thickness / mode doesn't jump the view. Built off-thread with an
+        animated busy window."""
+        if not self._vr_on.get(key):
+            return
+        p = self.pane[key]
+        mask = self._run_busy(t("VR"), t("Building VR…"), self._vr_crop_mask)
+        if mask is not None:
+            p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
+            p.vr_mapper.SetMaskTypeToBinary()
+            if reset_cam:
+                b = self._mask_world_bounds(mask)
+                if b:
+                    p.ren.ResetCamera(b)
+        else:
+            try:
+                p.vr_mapper.SetMaskInput(None)
+            except Exception:                        # noqa: BLE001
+                pass
+        p.ren.ResetCameraClippingRange()
+        p.render()
+
+    # ---- VR controls driven by the Coronary Tree panel's VR row ---------
+    def vr_control_state(self) -> dict:
+        """Current VR-row state for the Coronary Tree panel to sync its buttons:
+        {on, shell, shell_mm}."""
+        k = self._vr_pane_key()
+        return {"on": bool(self._vr_on.get(k)),
+                "shell": bool(getattr(self, "_vr_shell", True)),
+                "shell_mm": float(getattr(self, "_vr_shell_mm", 10.0))}
+
+    def set_vr_on(self, on: bool) -> None:
+        """Panel VR ▸ 表示/非表示 — turn Volume Rendering on/off on the VR pane."""
+        self._vr_set(self._vr_pane_key(), bool(on))
+
+    def set_vr_shell(self, shell: bool) -> None:
+        """Panel VR ▸ 内腔VR/シェルVR — choose the VR crop: True = Epi surface +
+        outward shell (coronaries on the surface), False = Epi interior (lumen)."""
+        self._vr_shell = bool(shell)
+        self._vr_apply_crop(self._vr_pane_key(), reset_cam=False)
+
+    def set_vr_shell_mm(self, mm: float) -> None:
+        """Panel VR ▸ シェルVR範囲 — outward shell thickness in mm (0–20). Only
+        affects the shell crop; rebuilds the live VR in place."""
+        self._vr_shell_mm = max(0.0, float(mm))
+        if getattr(self, "_vr_shell", True):
+            self._vr_apply_crop(self._vr_pane_key(), reset_cam=False)
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
