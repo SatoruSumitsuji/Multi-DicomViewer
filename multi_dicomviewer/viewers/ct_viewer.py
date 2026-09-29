@@ -8689,6 +8689,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             import traceback
             traceback.print_exc()
             return False
+        # Record the COMMON MV/AoV planes from the bundle, so _lv_valves_ready() is
+        # true and _lvv_sync keeps the (retired, parent-less) MV/AoV buttons hidden
+        # instead of promoting them to stray floating windows.
+        for vk in ("mitral", "aortic"):
+            d = bld.get(vk)
+            if isinstance(d, dict) and d.get("c") is not None:
+                self._lv_valves[vk] = (np.asarray(d["c"], float),
+                                       np.asarray(d["n"], float),
+                                       float(d.get("r", 20.0)))
         self._lvv_lvd_shown = False          # LVD is clutter in a territory review
         # Lay the panes on the LV long axis: LEFT (A) = LV short-axis (⟂ the long
         # axis), RIGHT (B) = long-axis (turned into VR next). Uses the Epi axis.
@@ -8700,10 +8709,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_observe_exit()
         self._refresh(reset_cam=False)
         # Territory review layout: LEFT = LV short-axis, RIGHT = VR (auto). Rotate
-        # / Thick are greyed for the short-axis pane (see _refresh_tool_availability).
+        # / Thick greyed (see _refresh_tool_availability). The VR is turned on
+        # DEFERRED (after this apply + the pane's GL settle) so it renders instead
+        # of coming up black.
         self._territory_display = True
-        self._vr_set("B", True)
         self._refresh_tool_availability()
+        QTimer.singleShot(0, lambda: self._vr_set("B", True))
         return True
 
     def _lvv_clear_markers(self) -> None:
@@ -10722,15 +10733,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.ren.ResetCamera(img.GetBounds())
             # Centre the VR on the centreline crossing (LV mid) rather than the
             # cropped-volume bounding-box centre, so it sits at the same centre as
-            # the short-axis pane.
+            # the short-axis pane. Only when that point is finite AND inside the
+            # volume — a stray centre would push the volume off-screen (black VR).
             ctr = getattr(self, "_center", None)
             if ctr is not None:
-                fp = np.array(cam.GetFocalPoint(), float)
-                pos = np.array(cam.GetPosition(), float)
-                off = pos - fp
                 ctr = np.asarray(ctr, float)
-                cam.SetFocalPoint(*ctr)
-                cam.SetPosition(*(ctr + off))
+                b = img.GetBounds()
+                inside = (np.all(np.isfinite(ctr))
+                          and b[0] - 1 <= ctr[0] <= b[1] + 1
+                          and b[2] - 1 <= ctr[1] <= b[3] + 1
+                          and b[4] - 1 <= ctr[2] <= b[5] + 1)
+                if inside:
+                    fp = np.array(cam.GetFocalPoint(), float)
+                    pos = np.array(cam.GetPosition(), float)
+                    off = pos - fp
+                    cam.SetFocalPoint(*ctr)
+                    cam.SetPosition(*(ctr + off))
             cam.Elevation(-70.0)                    # a cardiac-ish top view
             cam.OrthogonalizeViewUp()
             p.ren.ResetCameraClippingRange()
