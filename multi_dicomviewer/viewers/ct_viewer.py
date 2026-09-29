@@ -4738,7 +4738,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         file with no Epi surface."""
         from multi_dicomviewer.core.lv_measure import LVModel
         model = LVModel.from_dict(data)
-        model.build()
+        # model.build() (surface reconstruction) is the slow, previously-dialogless
+        # step of an Epi load — run it behind an ANIMATED busy window so it doesn't
+        # look hung.
+        self._run_busy(t("Epi"), t("Loading Epi data…"), model.build)
         if model.epi is None:
             raise ValueError("no Epi surface in file")
         self._lvv_epi_surf = model.epi
@@ -10530,6 +10533,37 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._vr_update_territory(k)
                 p.render()
         self._refresh(reset_cam=False)
+
+    def _run_busy(self, title, msg, fn):
+        """Run *fn* off the UI thread behind an ANIMATED indeterminate busy dialog
+        (so the bar keeps moving instead of looking hung), then return its result.
+        Re-raises any exception fn raised. Use only for compute-only fn (no Qt/VTK
+        calls off the main thread)."""
+        from PyQt6.QtWidgets import QProgressDialog
+        box: dict = {}
+
+        class _BusyWorker(QThread):
+            def run(self_) -> None:
+                try:
+                    box["r"] = fn()
+                except Exception as exc:                 # noqa: BLE001
+                    box["err"] = exc
+
+        dlg = QProgressDialog(msg, "", 0, 0, self.window())
+        dlg.setWindowTitle(title)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        w = _BusyWorker()
+        w.finished.connect(dlg.reset)
+        w.start()
+        dlg.exec()
+        w.wait()
+        w.deleteLater()
+        if "err" in box:
+            raise box["err"]
+        return box.get("r")
 
     # ---- Volume Rendering (VR) -----------------------------------------
     def _vr_ensure(self, p) -> None:
