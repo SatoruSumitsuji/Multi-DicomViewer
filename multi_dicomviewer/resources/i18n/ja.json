@@ -801,5 +801,11 @@
   "Add Point": "点を追加",
   "Delete Point": "点を削除",
   "Short-axis": "短軸",
-  "At least 2 edit points are required (cannot delete any more).": "編集点は最低2点必要です（これ以上は削除できません）。"
+  "At least 2 edit points are required (cannot delete any more).": "編集点は最低2点必要です（これ以上は削除できません）。",
+  "Set the apex, or load Apex data. To set it, move the centreline crossing onto the correct apex position and press Set.": "Apex点のセットもしくはデータロードをしてください。Apex点をセットの場合にはCenterlineを正しいApex位置に移動してセットしてください。",
+  "(The MV plane is not set yet. The LV long axis is apex → MV centre, so setting MV first is desirable.)": "（MV面が未設定です。LV長軸は Apex→MV中心 なので、MVを先に設定するのが望ましいです。）",
+  "Save FullLV": "FullLV を保存",
+  "Saved: {p} — load it with a corotree.json in Tools ▸ Territory.": "保存しました: {p}（Tools ▸ Territory で corotree.json と一緒に読み込んでください）",
+  "Cannot build FullLv: {e}": "FullLv を作成できません: {e}",
+  "Blood/Endo build failed": "Blood/Endo データを取得できません"
 }
