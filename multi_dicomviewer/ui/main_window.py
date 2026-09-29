@@ -2428,6 +2428,19 @@ class MainWindow(QMainWindow):
                 v.set_coronary_overlay(this_spec)
             except Exception:                            # noqa: BLE001
                 pass
+            # VR coronary tubes: pushed regardless of the 2-D ツリー表示 toggle so
+            # LAD/LCX/RCA stay colour-coded on the VR from the start.
+            if hasattr(v, "set_vr_coronary"):
+                vr_spec = None
+                if match and w is not None and hasattr(w, "overlay_spec"):
+                    try:
+                        vr_spec = w.overlay_spec(force=True)
+                    except Exception:                    # noqa: BLE001
+                        vr_spec = None
+                try:
+                    v.set_vr_coronary(vr_spec)
+                except Exception:                        # noqa: BLE001
+                    pass
             # Territory Target markers (same source-CT gate as the vessels).
             if hasattr(v, "set_coronary_targets"):
                 tspec = []

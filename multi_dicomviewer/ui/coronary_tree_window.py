@@ -152,7 +152,7 @@ class CoronaryTreeWindow(SnapDock):
         # hide the right-pane VR, switch 内腔 (lumen) ⇔ シェル (Epi surface + shell),
         # and set the outward shell thickness (0–20 mm) when シェル is selected.
         self._vr_shown = True                # matches apply_full_lv's auto-on VR
-        self._vr_shell_mode = True           # True = シェルVR, False = 内腔VR
+        self._vr_shell_mode = False          # default 内腔VR (True = シェルVR)
         vr_row = QHBoxLayout()
         vr_row.setSpacing(3)
         vr_lbl = QLabel(t("VR："))
@@ -586,13 +586,14 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
 
     # --------------------------------------------------------- overlay
-    def overlay_spec(self) -> list:
+    def overlay_spec(self, force: bool = False) -> list:
         """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
         its world-mm centreline, root colour and name — for the CT viewers to
         reproject onto their MPR planes. The currently-selected vessel is
         flagged so the viewer can highlight it. Empty while the ツリー表示 toggle
-        is OFF (so the overlay only shows on demand)."""
-        if not self._overlay_on:
+        is OFF (so the overlay only shows on demand) — unless *force* (the VR
+        pane always shows the colour-coded coronaries)."""
+        if not self._overlay_on and not force:
             return []
         sel = self.selected_vid()
         out = []
