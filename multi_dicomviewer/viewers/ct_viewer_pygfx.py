@@ -2193,6 +2193,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the user turns a polyline trace into a vessel centreline (_enter_cpr);
         # pane A then becomes the cross-section scroller.
         self._cpr = None
+        self._cpr_last_path = None            # last .cpr.json saved/loaded (Overwrite)
         self._cpr_drag = None                # grabbed control-point index
         self._cpr_rot_prev = None            # dial-rotation anchor angle
         #: Coronary MPR: _coronary_mode = the Draw/Load/Save/Exit row is shown;
@@ -14934,6 +14935,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_save_btn.clicked.connect(self._cpr_save)
         self._cpr_save_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_save_btn)
+        self._cpr_overwrite_btn = FitButton(t("Overwrite"))
+        self._cpr_overwrite_btn.setHelpToolTip(
+            t("Overwrite the last saved / loaded .cpr.json (上書き保存) without "
+              "asking for a name. Falls back to Save if there is no file yet."))
+        self._cpr_overwrite_btn.clicked.connect(self._cpr_overwrite)
+        self._cpr_overwrite_btn.setStyleSheet(self._BTN_DIS)  # grey during Draw
+        row.addWidget(self._cpr_overwrite_btn)
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
@@ -15007,6 +15015,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_exit_btn.setEnabled(not pend)
         if getattr(self, "_cpr_save_btn", None) is not None:
             self._cpr_save_btn.setEnabled(cpr and not pend)
+        if getattr(self, "_cpr_overwrite_btn", None) is not None:
+            self._cpr_overwrite_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_fit_btn", None) is not None:
             self._cpr_fit_btn.setEnabled(cpr)        # only once a short-axis exists
         if getattr(self, "_cpr_snap_btn", None) is not None:
@@ -15186,23 +15196,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._refresh(reset_cam=True)
 
     # ---- short-axis (CPR) Save / Load: a .cpr.json sidecar --------------
-    def _cpr_save(self) -> None:
-        """Save the active short-axis to a .cpr.json — the centreline control
-        points (volume mm) + the RMF seed + the display state (rotation / flip /
-        reverse / FOV / position). The user names the file (no vessel binding)."""
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        import json
-        import os
+    def _cpr_build_data(self):
+        """Assemble the .cpr.json payload for the active short-axis (centreline
+        control points + RMF seed + display state), or None (with a message) if
+        there's nothing to save."""
+        from PyQt6.QtWidgets import QMessageBox
         if self._cpr is None:
             QMessageBox.information(self.window(), t("Short-axis"),
                                    t("Open a short-axis (CPR) first."))
-            return
+            return None
         cpr = self._cpr_state_dict()
         if cpr is None:
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("This short-axis has no centreline to save."))
-            return
-        data = {
+            return None
+        return {
             "format": "MDV-CPR", "version": 1, "type": "cpr",
             "series": (self._lv_series_meta()
                        if hasattr(self, "_lv_series_meta") else {}),
@@ -15212,16 +15220,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                         if hasattr(self, "_lv_series_dir") else ""),
             **cpr,
         }
-        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
-        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
-                else "shortaxis")
-        default = os.path.join(d, stem + ".cpr.json") if d \
-            else stem + ".cpr.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save short-axis"), default,
-            "Short-axis (*.cpr.json);;JSON (*.json)")
-        if not path:
-            return
+
+    def _cpr_write(self, path, data) -> bool:
+        """Write *data* to *path* (.cpr.json), remember it as the last CPR file
+        (so Overwrite can reuse it), and confirm. Returns True on success."""
+        from PyQt6.QtWidgets import QMessageBox
+        import json
+        import os
         if not path.endswith(".json"):
             path += ".cpr.json"
         if hasattr(self, "_unlink_case_variant"):
@@ -15232,11 +15237,47 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception as exc:                        # noqa: BLE001
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("Save failed: {err}", err=str(exc)))
-            return
+            return False
+        self._cpr_last_path = path
         if hasattr(self, "_lv_remember_dir"):
             self._lv_remember_dir(path)
         QMessageBox.information(self.window(), t("Short-axis"),
                                t("Saved: {p}", p=os.path.basename(path)))
+        return True
+
+    def _cpr_save(self) -> None:
+        """Save the active short-axis to a NEW .cpr.json — the user names the file
+        (Save As). Use Overwrite to re-save to the same file."""
+        from PyQt6.QtWidgets import QFileDialog
+        import os
+        data = self._cpr_build_data()
+        if data is None:
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "shortaxis")
+        default = os.path.join(d, stem + ".cpr.json") if d \
+            else stem + ".cpr.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save short-axis"), default,
+            "Short-axis (*.cpr.json);;JSON (*.json)")
+        if not path:
+            return
+        self._cpr_write(path, data)
+
+    def _cpr_overwrite(self) -> None:
+        """上書き保存 — re-save the active short-axis to the last saved / loaded
+        .cpr.json without prompting. Falls back to Save (prompt) when there is no
+        known file yet."""
+        import os
+        path = getattr(self, "_cpr_last_path", None)
+        if not path or not os.path.exists(path):
+            self._cpr_save()                 # nothing to overwrite → Save As
+            return
+        data = self._cpr_build_data()
+        if data is None:
+            return
+        self._cpr_write(path, data)
 
     def apply_cpr_data(self, data) -> bool:
         """Headless: rebuild the short-axis (CPR) from a parsed .cpr.json on THIS
@@ -15305,6 +15346,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 raise ValueError(
                     t("This short-axis has no centreline to save."))
             self._refresh(reset_cam=True)
+            self._cpr_last_path = path        # Overwrite targets the loaded file
             if hasattr(self, "_lv_remember_dir"):
                 self._lv_remember_dir(path)
         except Exception as exc:                        # noqa: BLE001
