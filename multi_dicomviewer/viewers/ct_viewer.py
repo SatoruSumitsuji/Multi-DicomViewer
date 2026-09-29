@@ -9400,15 +9400,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         # are DISABLED (re-tilt / long-axis shift); Zoom/Move/Thick/WL stay live.
         lv_lock = self._lv_axis_locked() or self._lv_sax_active()
 
-        # Territory review (L = LV short-axis, R = VR): Rotate would re-tilt the
-        # short-axis and Thick is meaningless here → both greyed (VR still rotates
-        # with the Paging tool / default drag on the right pane).
+        # Territory review — tools differ by the ACTIVE pane:
+        #   LEFT (LV short-axis): Rotate would re-tilt it, Thick is meaningless →
+        #     both greyed; Zoom/Move/Spin/Paging/WL usable.
+        #   RIGHT (VR): Rotate spins the model (natural), Paging/Thick have no VR
+        #     meaning → greyed; Zoom/Move/Spin/Rotate/WL usable.
         terr = getattr(self, "_territory_display", False)
+        vr_here = terr and self._vr_on.get(getattr(self, "_active_pane", "A"),
+                                           False)
 
         def _disabled(n):
-            return ((is2d and n in _MPR_ONLY_TOOLS)
-                    or (lv_lock and n in _LV_LOCK_DISABLED)
-                    or (terr and n in ("ROTATE", "THICK")))
+            base = ((is2d and n in _MPR_ONLY_TOOLS)
+                    or (lv_lock and n in _LV_LOCK_DISABLED))
+            if terr:
+                if vr_here:
+                    return base or n in ("PAGING", "THICK")
+                return base or n in ("ROTATE", "THICK")
+            return base
 
         # If the ACTIVE tool just became unavailable, fall back to Move (this
         # re-enters via _set_tool, which re-runs this refresh with a safe tool).
@@ -17478,6 +17486,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
+        # In the territory review the usable tools differ per pane (LEFT short-axis
+        # vs RIGHT VR), so re-gate them whenever the active pane changes.
+        if getattr(self, "_territory_display", False):
+            self._refresh_tool_availability()
         # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
         # same, so a shared Rt90/Flip/… acts on the matching side in both.
         if (getattr(self, "_sync_view_on", False)
