@@ -10531,6 +10531,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _MaskWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -10628,6 +10629,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _EndoWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -10881,6 +10883,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _ThickWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -11905,6 +11908,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._overlay[k].update()
 
+    @staticmethod
+    def _enlarge_busy(dlg) -> None:
+        """Make a busy QProgressDialog ~2x bigger (easier to notice) with a longer,
+        taller progress bar. Used by every LV busy window."""
+        from PyQt6.QtWidgets import QProgressBar
+        try:
+            f = dlg.font()
+            f.setPointSizeF(max(11.0, f.pointSizeF() + 2.0))
+            dlg.setFont(f)
+            dlg.setMinimumWidth(560)
+            dlg.setMinimumHeight(180)
+            bar = dlg.findChild(QProgressBar)
+            if bar is not None:
+                bar.setMinimumWidth(520)
+                bar.setMinimumHeight(36)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _run_busy(self, title, msg, fn):
         """Run *fn* off the UI thread behind an ANIMATED indeterminate busy dialog
         (so the bar keeps moving instead of looking hung), then return its result.
@@ -11927,6 +11948,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         w = _BusyWorker()
         w.finished.connect(dlg.reset)
         w.start()
@@ -12059,6 +12081,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             busy.setCancelButton(None)
             busy.setMinimumDuration(0)
             busy.setValue(0)
+            self._enlarge_busy(busy)
             busy.show()
             QApplication.processEvents()
             try:

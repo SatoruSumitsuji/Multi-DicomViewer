@@ -1242,6 +1242,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._vr_drag:
             self._vr_drag = False
             self._last = None
+            # Rotation stopped → refresh the VR C-arm readout (LAO/RAO·CRA/CAU).
+            try:
+                self._owner._vr_update_angle(self._which)
+            except Exception:                            # noqa: BLE001
+                pass
             return
         if self._owner._lv_apex_drag is not None:
             self._owner._lv_apex_drag = None
@@ -2706,6 +2711,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Drawn in 3-D MPR
         # only, reprojected onto each pane's plane every redraw.
         self._coro_overlay = None
+        # Coronary tubes for the VR pane, pushed independently of the 2-D overlay
+        # toggle (set_vr_coronary) so LAD/LCX/RCA are colour-coded on the VR from
+        # the start — falls back to _coro_overlay when not set.
+        self._coro_overlay_vr = None
         # CT Territory targets: markers {n, point(world-mm), ml, pct, selected}
         # pushed from the Coronary Tree panel; while target-mode is ON a left-click
         # on a vessel line sets a Target (reported via _coro_target_cb).
@@ -2718,7 +2727,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
         self._territory_display = False              # FullLv review: L=SAX, R=VR
-        self._vr_shell = True                        # VR crop: True=Epi+1cm shell
+        self._vr_shell = False                       # VR crop: False=内腔(default), True=Epi+shell
         self._vr_shell_mm = 10.0                     # outward shell thickness (mm)
         # vids whose NAME label is shown on the image. Empty by default (labels
         # cluttered the view); the user turns a name on per-vessel via the CPR
@@ -5347,6 +5356,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         w = _EpiDispWorker()
         w.finished.connect(dlg.reset)
         w.start()
@@ -7043,6 +7053,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _EndoWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -7228,6 +7239,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _MaskWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -7348,6 +7360,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         worker = _ThickWorker()
         worker.finished.connect(dlg.reset)
         worker.start()
@@ -8700,6 +8713,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             busy.setCancelButton(None)
             busy.setMinimumDuration(0)
             busy.setValue(0)
+            self._enlarge_busy(busy)
             busy.show()
             QApplication.processEvents()
             try:
@@ -10401,6 +10415,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
+    def set_vr_coronary(self, spec) -> None:
+        """Public (shell): coronary tubes for the VR pane, pushed independently of
+        the 2-D ツリー表示 toggle so LAD/LCX/RCA stay colour-coded on the VR from the
+        start. *spec* like set_coronary_overlay's, or None to fall back to it."""
+        self._coro_overlay_vr = spec or None
+        try:
+            for k in ("A", "B"):
+                if self._vr_on.get(k):
+                    self._vr_update_coronary(k)
+                    self.pane[k].render()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _redraw_coronary(self, key):
         """Draw the Coronary Tree overlay on pane *key*'s current plane: every
         visible vessel's world-mm centreline reprojected via _world3d_to_out,
@@ -10543,6 +10570,24 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.render()
         self._refresh(reset_cam=False)
 
+    @staticmethod
+    def _enlarge_busy(dlg) -> None:
+        """Make a busy QProgressDialog ~2x bigger (easier to notice) with a longer,
+        taller progress bar. Used by every LV/VR busy window."""
+        from PyQt6.QtWidgets import QProgressBar
+        try:
+            f = dlg.font()
+            f.setPointSizeF(max(11.0, f.pointSizeF() + 2.0))
+            dlg.setFont(f)
+            dlg.setMinimumWidth(560)
+            dlg.setMinimumHeight(180)
+            bar = dlg.findChild(QProgressBar)
+            if bar is not None:
+                bar.setMinimumWidth(520)
+                bar.setMinimumHeight(36)
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _run_busy(self, title, msg, fn):
         """Run *fn* off the UI thread behind an ANIMATED indeterminate busy dialog
         (so the bar keeps moving instead of looking hung), then return its result.
@@ -10564,6 +10609,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dlg.setCancelButton(None)
         dlg.setMinimumDuration(0)
         dlg.setValue(0)
+        self._enlarge_busy(dlg)
         w = _BusyWorker()
         w.finished.connect(dlg.reset)
         w.start()
@@ -10627,7 +10673,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if getattr(p, "vr_coro_actor", None) is None:
             return
-        spec = self._coro_overlay if self._vr_on.get(key) else None
+        # Prefer the VR-specific spec (pushed regardless of the 2-D tree toggle so
+        # the coloured tubes are always on the VR); fall back to the MPR overlay.
+        src = self._coro_overlay_vr
+        if src is None:
+            src = self._coro_overlay
+        spec = src if self._vr_on.get(key) else None
         if not spec:
             p.vr_coro_tube.SetInputData(vtkPolyData())
             p.vr_coro_actor.SetVisibility(False)
@@ -10879,13 +10930,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             # measure overlays, labels, info) so nothing 2-D lingers, misplaced,
             # over the 3-D volume; restored verbatim on VR off.
             self._vr_hidden[key] = []
+            # Keep the bottom-centre C-arm readout (angle + its halo copies) on the
+            # VR too — everything else 2-D is hidden.
+            keep = {p.vr_volume, getattr(p, "angle", None)}
+            keep.update(getattr(p, "angle_halo", []))
             props = p.ren.GetViewProps()
             props.InitTraversal()
             while True:
                 a = props.GetNextProp()
                 if a is None:
                     break
-                if a is p.vr_volume:
+                if a in keep:
                     continue
                 if a.GetVisibility():
                     self._vr_hidden[key].append(a)
@@ -10920,6 +10975,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             cam.Elevation(-70.0)                    # a cardiac-ish top view
             cam.OrthogonalizeViewUp()
             p.ren.ResetCameraClippingRange()
+            self._vr_update_angle(key)              # initial LAO/CRA readout
         else:
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
@@ -11009,6 +11065,55 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_shell_mm = max(0.0, float(mm))
         if getattr(self, "_vr_shell", True):
             self._vr_apply_crop(self._vr_pane_key(), reset_cam=False)
+
+    # ---- VR C-arm angle readout (LAO/RAO · CRA/CAU), like the MPR panes ----
+    def _vr_angio_angle_vals(self, key):
+        """The VR camera's view direction as (primary, secondary) C-arm angles
+        (LAO + / RAO −, CRA + / CAU −), using the same patient-basis decomposition
+        as the MPR readout. None if degenerate."""
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        pos = np.asarray(cam.GetPosition(), float)
+        fp = np.asarray(cam.GetFocalPoint(), float)
+        dop = pos - fp                                   # toward the observer
+        if float(np.linalg.norm(dop)) < 1e-9:
+            return None
+        n = self._pbasis @ dop                           # -> patient LPS
+        nrm = float(np.linalg.norm(n))
+        if nrm < 1e-9:
+            return None
+        n = n / nrm
+        nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
+        axial = math.hypot(nx, ny)
+        prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
+        sec = math.degrees(math.atan2(nz, axial))
+        return int(round(prim)), int(round(sec))
+
+    def _vr_angio_angle(self, key) -> str:
+        vals = self._vr_angio_angle_vals(key)
+        if vals is None:
+            return ""
+        pi_, si_ = vals
+        lao = f"LAO{pi_}" if pi_ >= 0 else f"RAO{-pi_}"
+        cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
+        return f"{lao} {cra}"
+
+    def _vr_update_angle(self, key) -> None:
+        """Refresh the VR pane's bottom-centre C-arm readout from the camera (call
+        when VR turns on and whenever a VR rotation stops)."""
+        if not self._vr_on.get(key):
+            return
+        p = self.pane[key]
+        if getattr(p, "angle", None) is None:
+            return
+        ang = self._vr_angio_angle(key)
+        p.angle.SetInput(ang)
+        for _ha in getattr(p, "angle_halo", []):
+            _ha.SetInput(ang)
+        p.angle.SetVisibility(True)
+        for _ha in getattr(p, "angle_halo", []):
+            _ha.SetVisibility(True)
+        p.render()
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
