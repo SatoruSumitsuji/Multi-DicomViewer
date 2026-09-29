@@ -12046,10 +12046,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")
+        from PyQt6.QtWidgets import QApplication, QProgressDialog
         try:
             if isinstance(epi, dict):
-                self._lvv_apply_epi_data(epi)
-            self._lvv_apply_data(bld)
+                self._lvv_apply_epi_data(epi)  # animated "Loading Epi data…"
+            # Blood/Endo restore touches Qt/GL (can't run off-thread), but it's a
+            # short wait — show a labelled busy window so it doesn't look frozen.
+            busy = QProgressDialog(t("Applying Blood/Endo…"), "", 0, 0,
+                                   self.window())
+            busy.setWindowTitle(t("Blood/Endo"))
+            busy.setWindowModality(Qt.WindowModality.WindowModal)
+            busy.setCancelButton(None)
+            busy.setMinimumDuration(0)
+            busy.setValue(0)
+            busy.show()
+            QApplication.processEvents()
+            try:
+                self._lvv_apply_data(bld)
+            finally:
+                busy.reset()
+                busy.deleteLater()
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()

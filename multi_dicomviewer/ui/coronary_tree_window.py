@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QSpinBox,
     QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
@@ -147,6 +148,41 @@ class CoronaryTreeWindow(SnapDock):
              self._clear_all, False),
         ])
         self._overlay_btn = tree_btns[0]     # relabelled 表示/非表示
+        # VR row (built by hand — it carries a spin box, not just buttons): show /
+        # hide the right-pane VR, switch 内腔 (lumen) ⇔ シェル (Epi surface + shell),
+        # and set the outward shell thickness (0–20 mm) when シェル is selected.
+        self._vr_shown = True                # matches apply_full_lv's auto-on VR
+        self._vr_shell_mode = True           # True = シェルVR, False = 内腔VR
+        vr_row = QHBoxLayout()
+        vr_row.setSpacing(3)
+        vr_lbl = QLabel(t("VR："))
+        vr_lbl.setStyleSheet("font-weight:bold;")
+        vr_row.addWidget(vr_lbl)
+        self._vr_show_btn = QPushButton(t("表示/非表示"))
+        self._vr_show_btn.setToolTip(t("右画面のVR (立体表示) を表示/非表示"))
+        self._vr_show_btn.setStyleSheet("padding: 2px 6px;")
+        self._vr_show_btn.clicked.connect(self._toggle_vr)
+        vr_row.addWidget(self._vr_show_btn)
+        self._vr_shell_btn = QPushButton(t("シェルVR"))
+        self._vr_shell_btn.setToolTip(
+            t("VRの範囲を切替: 内腔VR (心内腔) ⇔ シェルVR (Epi表面+外側の殻)。"
+              "シェルVR時は右のシェルVR範囲で殻の厚みを調整"))
+        self._vr_shell_btn.setStyleSheet("padding: 2px 6px;")
+        self._vr_shell_btn.clicked.connect(self._toggle_vr_shell)
+        vr_row.addWidget(self._vr_shell_btn)
+        self._vr_shell_lbl = QLabel(t("シェルVR範囲"))
+        vr_row.addWidget(self._vr_shell_lbl)
+        self._vr_shell_spin = QSpinBox()
+        self._vr_shell_spin.setRange(0, 20)
+        self._vr_shell_spin.setSingleStep(1)
+        self._vr_shell_spin.setSuffix(" mm")
+        self._vr_shell_spin.setValue(10)
+        self._vr_shell_spin.setToolTip(t("Epi表面から外側の殻の厚み (0–20mm)"))
+        self._vr_shell_spin.valueChanged.connect(self._on_vr_shell_mm)
+        vr_row.addWidget(self._vr_shell_spin)
+        vr_row.addStretch(1)
+        outer.addLayout(vr_row)
+        self._sync_vr_row()
         # Target row: set / show-hide / delete-last / delete-all.
         tgt_btns = _row(t("ターゲット："), [
             (t("設定"),
@@ -320,6 +356,37 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()             # overlay_spec is now empty → clear
             self._hint.setText(t("ツリー非表示"))
         self._push_territory()               # tint follows the overlay toggle
+
+    # ------------------------------------------------------------- VR row
+    def _sync_vr_row(self) -> None:
+        """Update the VR row's labels / enabled state to the current mode: the
+        シェル/内腔 button shows the ACTIVE mode; the シェルVR範囲 spin is enabled
+        only while シェルVR is selected."""
+        if getattr(self, "_vr_shell_btn", None) is None:
+            return
+        shell = bool(getattr(self, "_vr_shell_mode", True))
+        self._vr_shell_btn.setText(t("シェルVR") if shell else t("内腔VR"))
+        self._vr_shell_lbl.setEnabled(shell)
+        self._vr_shell_spin.setEnabled(shell)
+
+    def _toggle_vr(self) -> None:
+        """VR ▸ 表示/非表示 — show or hide the right-pane Volume Rendering."""
+        self._vr_shown = not bool(getattr(self, "_vr_shown", True))
+        if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):
+            self._shell.coronary_vr_visible(self._vr_shown)
+
+    def _toggle_vr_shell(self) -> None:
+        """VR ▸ 内腔VR/シェルVR — switch the VR crop between the LV lumen and the
+        Epi surface + outward shell."""
+        self._vr_shell_mode = not bool(getattr(self, "_vr_shell_mode", True))
+        self._sync_vr_row()
+        if self._shell is not None and hasattr(self._shell, "coronary_vr_shell"):
+            self._shell.coronary_vr_shell(self._vr_shell_mode)
+
+    def _on_vr_shell_mm(self, mm: int) -> None:
+        """VR ▸ シェルVR範囲 — outward shell thickness (mm) changed."""
+        if self._shell is not None and hasattr(self._shell, "coronary_vr_shell_mm"):
+            self._shell.coronary_vr_shell_mm(float(mm))
 
     def _show_source_ct(self, prompt: bool = True) -> str:
         """Ask the shell to show the tree's source CT (by UID / saved folder / the

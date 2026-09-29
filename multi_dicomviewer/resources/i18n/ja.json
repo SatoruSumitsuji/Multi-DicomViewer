@@ -390,6 +390,8 @@
   "Endo": "心内膜",
   "Epi": "心外膜",
   "Loading Epi data…": "Epiデータを読み込み中…",
+  "Building VR…": "VRを作成中…",
+  "Applying Blood/Endo…": "Blood/Endoを適用中…",
   "Redo axis": "長軸を取り直す",
   "Re-pick the apex + 2 basal points": "心尖部+基部2点を取り直す",
   "Exit LV": "LV終了",
