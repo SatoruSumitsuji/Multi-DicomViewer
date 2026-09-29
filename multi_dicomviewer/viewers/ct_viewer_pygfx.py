@@ -11893,6 +11893,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._full_lv_refresh_btn()
         return applied
 
+    def apply_full_lv(self, full_data) -> bool:
+        """Apply a FullLv bundle (EpiLv + BldLv) as display-only LV overlays for a
+        CT Territory review, then drop to the OBSERVE display (overlays kept on
+        screen, editing off, selector back). Returns True if applied."""
+        if self._vol is None:
+            return False
+        fd = full_data or {}
+        epi, bld = fd.get("epi"), fd.get("bld")
+        if not isinstance(bld, dict):
+            return False
+        if self._mode != "3D" and hasattr(self, "_set_mode"):
+            self._set_mode("3D")
+        try:
+            if isinstance(epi, dict):
+                self._lvv_apply_epi_data(epi)
+            self._lvv_apply_data(bld)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        if self._lvv is not None:
+            self._lvv_observe_exit()
+        self._refresh(reset_cam=False)
+        for k in ("A", "B"):
+            self._overlay[k].update()
+        return True
+
     def _lvv_clear_markers(self) -> None:
         # NOTE: the retained blood/Endo/Epi surfaces and the 壁厚 cache survive
         # leaving the mode — only the on-screen overlays are dropped, so a

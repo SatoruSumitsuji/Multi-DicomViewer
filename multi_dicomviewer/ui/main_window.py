@@ -1612,13 +1612,6 @@ class MainWindow(QMainWindow):
             ".corotree.json. Floats or docks with Studies"))
         self._corotree_act.triggered.connect(self._open_coronary_tree)
         tm.addAction(self._corotree_act)
-        self._territory_act = QAction(t("Territory…"), self)
-        self._territory_act.setToolTip(t(
-            "CT perfusion-territory analysis: load a coronary tree "
-            "(.corotree.json) + an LV bundle (.FullLv.json) and report the "
-            "myocardium each vessel perfuses. Floats or docks with Studies"))
-        self._territory_act.triggered.connect(self._open_territory)
-        tm.addAction(self._territory_act)
 
         tm.addSeparator()
         self._dicomcheck_act = QAction(t("DicomCheck…"), self)
@@ -2313,34 +2306,6 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
-    def _open_territory(self):
-        """Tools ▸ Territory — the two-file CT perfusion-territory panel. One
-        instance is kept; starts floating, drag onto Studies to dock+tab."""
-        from multi_dicomviewer.ui.territory_window import TerritoryWindow
-        w = getattr(self, "_territory_win", None)
-        if w is None:
-            w = TerritoryWindow(self)
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
-            if getattr(self, "_studies_dock", None) is not None:
-                self.tabifyDockWidget(self._studies_dock, w)
-            self._territory_win = w
-            w.setFloating(True)
-            w.resize(480, 560)
-        if not w.isVisible():
-            w.show()
-        if w.isFloating():
-            too_small = w.width() < 240 or w.height() < 180
-            scr = self.screen().availableGeometry() if self.screen() else None
-            off = scr is not None and not scr.intersects(w.frameGeometry())
-            if too_small or off:
-                w.resize(480, 560)
-                c = self.geometry().center()
-                w.move(max(0, c.x() - 240), max(0, c.y() - 280))
-        w.show()
-        w.raise_()
-        w.activateWindow()
-        return w
-
     def coronary_show_ct(self, series_uid: str, src_dir: str = "",
                          cpr_dir: str = "", prompt: bool = True) -> str:
         """Ensure the 3-D CT a coronary CPR was built on is loaded and shown, so
@@ -2625,6 +2590,63 @@ class MainWindow(QMainWindow):
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
                 300, lambda: self._poll_lv_apply(uid, files, attempt + 1))
+
+    # ------------------------------------------------- FullLv (.FullLv.json) drop
+    def _open_full_lv_files(self, paths: list) -> None:
+        """Drop a .FullLv.json → open the Coronary Tree panel with the CT Territory
+        analysis: load the FullLv (report), bring up the source CT, and draw BOTH
+        the coronary overlay and the LV overlays (Epi/Endo/Blood) on it."""
+        import json
+        import os
+        w = self._open_coronary_tree()
+        if w is None:
+            return
+        data = None
+        uid = src_dir = ""
+        for p in paths:
+            try:
+                with open(p, encoding="utf-8") as f:
+                    d = json.load(f)
+            except (OSError, ValueError):                # noqa: PERF203
+                continue
+            if hasattr(w, "load_full_lv") and w.load_full_lv(d):
+                from multi_dicomviewer.core import full_lv
+                data = d
+                uid = full_lv.series_uid(d)
+                src_dir = (d.get("src") or {}).get("src_dir", "") \
+                    or os.path.dirname(p)
+                break                                    # one FullLv per case
+        if data is None:
+            return
+        # Bring up the source CT (by UID / folder / prompt), turning the coronary
+        # overlay ON when a tree is present, then apply the LV overlays.
+        try:
+            self.coronary_show_ct(uid, src_dir, cpr_dir=src_dir, prompt=True)
+        except Exception:                                # noqa: BLE001
+            pass
+        if getattr(w, "_tree", None) is not None and w._tree.vessels \
+                and hasattr(w, "_set_overlay"):
+            w._set_overlay(True)
+        self._poll_full_lv_apply(uid, data, 0)
+
+    def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
+        """Wait for the CT to be shown + decoded, then draw the LV overlays from a
+        FullLv (display-only observe). Mirrors _poll_lv_apply."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid) if uid else True
+        v = self._active.current_viewer() if self._active is not None else None
+        ready = v is not None and (getattr(v, "_image", None) is not None
+                                   or getattr(v, "_vol", None) is not None)
+        if shown and ready and hasattr(v, "apply_full_lv"):
+            try:
+                v.apply_full_lv(data)
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+            return
+        if attempt < 40:                                 # ~12 s
+            QTimer.singleShot(
+                300, lambda: self._poll_full_lv_apply(uid, data, attempt + 1))
 
     # ------------------------------------------------- CPR (.cpr.json) drop
     @staticmethod
@@ -5173,15 +5195,14 @@ class MainWindow(QMainWindow):
         for p in ct_files:
             self._open_coronary_tree_file(p)
         paths = [p for p in paths if p not in ct_files]
-        # Peel off .FullLv.json drops → open Tools ▸ Territory and load them; a
-        # corotree.json in the SAME drop is forwarded there too (so dropping the
-        # two territory inputs together just runs the analysis).
+        # Peel off .FullLv.json drops → the CT Territory analysis is integrated in
+        # the Coronary Tree panel now: open it, feed the FullLv (LV masks) so the
+        # territory report shows, and bring up the source CT with BOTH the coronary
+        # overlay and the LV overlays (Epi/Endo/Blood) drawn on it.
         full_files = [p for p in paths
                       if os.path.isfile(p) and self._is_full_lv_json(p)]
         if full_files:
-            w = self._open_territory()
-            if w is not None:
-                w.add_files(full_files + ct_files)
+            self._open_full_lv_files(full_files)
         paths = [p for p in paths if p not in full_files]
         # Peel off LV-analysis JSON drops (MV / AoV / Apex / Epi / Bld) → open the
         # source CT and overlay all analysis results. Handle them together so a

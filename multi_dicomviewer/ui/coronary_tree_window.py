@@ -18,7 +18,7 @@ import os
 import numpy as np
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QColor
+from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -27,16 +27,20 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMenu,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QSplitter,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
+from multi_dicomviewer.core import full_lv as full_lv_mod
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
-    ROOT_ROLES, CoronaryTree)
+    ROOT_ROLES, CoronaryTree, format_territory_report, short_vessel_name)
+from multi_dicomviewer.core.lv_function import LVFunction
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.ui.snap_dock import SnapDock
 
@@ -83,6 +87,13 @@ class CoronaryTreeWindow(SnapDock):
         self._ct_dir: str = ""              # source-CT folder (re-open fallback)
         self._overlay_on: bool = False      # ツリー表示 toggle (off until pressed)
         self._overlay_btn = None            # the ツリー表示/非表示 toggle button
+        # ---- CT Territory (integrated; the standalone panel is retired) ----
+        self._full_lv_data = None           # loaded FullLv dict (LV masks)
+        self._territory = None              # TerritoryEngine (tree + FullLv)
+        self._myo_ml = None                 # myocardium (Compact) volume mL
+        self._targets: list = []            # [{vid, idx, ml, pct}] set on the CT
+        self._target_mode = False           # click-a-vessel-to-set-a-target toggle
+        self._target_btn = None
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
@@ -119,8 +130,26 @@ class CoronaryTreeWindow(SnapDock):
             bar.addWidget(b)
             if label == t("ツリー表示"):        # keep a handle to relabel it
                 self._overlay_btn = b
+        # Territory target toggle: while ON, clicking a vessel on the CT sets a
+        # Target point (its distal territory mL / % is added to the table).
+        self._target_btn = QPushButton(t("ターゲット設定"))
+        self._target_btn.setToolTip(
+            t("ONの間、CT上の血管の中心線をクリックするとその点を Target に設定。"
+              "その点より遠位の灌流域 (mL・心筋%) を下の表と画像に表示します。"))
+        self._target_btn.setCheckable(True)
+        self._target_btn.setStyleSheet("text-align: left; padding: 3px 8px;")
+        self._target_btn.clicked.connect(self._toggle_target_mode)
+        bar.addWidget(self._target_btn)
+        b_ct = QPushButton(t("Target消去"))
+        b_ct.setToolTip(t("設定した Target を全て消去"))
+        b_ct.setStyleSheet("text-align: left; padding: 3px 8px;")
+        b_ct.clicked.connect(self._clear_targets)
+        bar.addWidget(b_ct)
         bar.addStretch(1)
         outer.addLayout(bar)
+
+        split = QSplitter(Qt.Orientation.Vertical)
+        outer.addWidget(split, 1)
 
         self._tree_w = QTreeWidget()
         self._tree_w.setColumnCount(3)
@@ -132,7 +161,35 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.itemChanged.connect(self._on_item_changed)
         self._tree_w.itemSelectionChanged.connect(self._on_selection)
         self._tree_w.itemDoubleClicked.connect(lambda *_: self._rename())
-        outer.addWidget(self._tree_w, 1)
+        split.addWidget(self._tree_w)
+
+        # ---- Territory results (populated when a FullLv is loaded) ----
+        terr = QWidget()
+        tv = QVBoxLayout(terr)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(2)
+        self._terr_lbl = QLabel(t("Territory: FullLv 未読込"))
+        self._terr_lbl.setStyleSheet("font-weight:bold;")
+        tv.addWidget(self._terr_lbl)
+        self._targets_w = QTreeWidget()
+        self._targets_w.setColumnCount(4)
+        self._targets_w.setHeaderLabels(
+            [t("Target"), t("血管"), t("灌流域 mL"), t("心筋 %")])
+        self._targets_w.setColumnWidth(0, 64)
+        self._targets_w.setColumnWidth(1, 120)
+        self._targets_w.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._targets_w.customContextMenuRequested.connect(self._targets_menu)
+        self._targets_w.itemSelectionChanged.connect(self._push_overlay)
+        tv.addWidget(self._targets_w, 1)
+        self._terr_out = QPlainTextEdit()
+        self._terr_out.setReadOnly(True)
+        self._terr_out.setFont(QFont("Consolas", 9))
+        self._terr_out.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self._terr_out.setMaximumHeight(150)
+        tv.addWidget(self._terr_out)
+        split.addWidget(terr)
+        split.setSizes([320, 260])
 
         self._hint = QLabel("")
         self._hint.setStyleSheet("color:#888;")
@@ -142,6 +199,7 @@ class CoronaryTreeWindow(SnapDock):
         # Push the on-image overlay whenever the tree, selection or a vessel's
         # visibility changes (the shell fans it out to every CT viewer).
         self.treeChanged.connect(self._push_overlay)
+        self.treeChanged.connect(self._compute_territory)   # tree edit → re-assign
         self.vesselSelected.connect(lambda *_: self._push_overlay())
 
     # ------------------------------------------------------------- model
@@ -478,6 +536,176 @@ class CoronaryTreeWindow(SnapDock):
                 self._shell.coronary_overlay_refresh()
             except Exception:                            # noqa: BLE001
                 pass
+
+    # -------------------------------------------------------- territory
+    def load_full_lv(self, data_or_path) -> bool:
+        """Load a FullLv (parsed dict OR a .FullLv.json path) as the LV side of
+        the territory analysis, then compute + show the report. Public — the
+        shell calls it on a .FullLv.json drop."""
+        data = data_or_path
+        if isinstance(data_or_path, str):
+            try:
+                with open(data_or_path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError) as exc:            # noqa: BLE001
+                self._warn(t("FullLv 読込失敗: {e}", e=str(exc)))
+                return False
+        if not full_lv_mod.is_full_lv(data):
+            self._warn(t("FullLv (.FullLv.json) 形式ではありません。"))
+            return False
+        fser = full_lv_mod.series_uid(data)
+        if self._ct_uid and fser and self._ct_uid != fser:
+            if QMessageBox.warning(
+                    self, t("Coronary Tree"),
+                    t("冠動脈ツリーと FullLv の元CT(SeriesUID)が一致しません。"
+                      "結果が正しくない可能性があります。続行しますか？"),
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No) \
+                    != QMessageBox.StandardButton.Yes:
+                return False
+        self._full_lv_data = data
+        if not self._ct_uid and fser:
+            self._ct_uid = fser
+        if not self._ct_dir:
+            self._ct_dir = ((data.get("src") or {}).get("src_dir")) or ""
+        self._targets = []
+        self._compute_territory()
+        return True
+
+    def _compute_territory(self) -> None:
+        """(Re)build the TerritoryEngine from the current tree + loaded FullLv and
+        refresh the report. Called on FullLv load and whenever the tree changes
+        (assignment depends on the centrelines)."""
+        self._territory = None
+        self._myo_ml = None
+        if self._full_lv_data is None:
+            self._terr_lbl.setText(t("Territory: FullLv 未読込"))
+            self._terr_out.setPlainText("")
+            self._refresh_targets_table()
+            return
+        if not self._tree.vessels:
+            self._terr_lbl.setText(t("Territory: 血管なし"))
+            self._terr_out.setPlainText("")
+            return
+        lvf = LVFunction.from_full(self._full_lv_data)
+        if lvf is None:
+            self._terr_lbl.setText(t("Territory: 心筋を構築できません"))
+            self._terr_out.setPlainText("")
+            return
+        try:
+            lines, eng = format_territory_report(self._tree, lvf)
+        except Exception as exc:                            # noqa: BLE001
+            self._terr_out.setPlainText(t("解析失敗: {e}", e=str(exc)))
+            return
+        self._territory = eng
+        self._myo_ml = float(lvf.myocardial_volume_ml())
+        self._terr_lbl.setText(
+            t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
+        self._terr_out.setPlainText("\n".join(lines))
+        self._recompute_targets()
+        self._push_overlay()
+
+    def _recompute_targets(self) -> None:
+        """Recompute each target's mL / % against the current engine, dropping any
+        whose vessel no longer exists; then refill the table."""
+        eng = self._territory
+        good = []
+        for tg in self._targets:
+            vid = tg["vid"]
+            if eng is None or vid not in self._tree.vessels:
+                continue
+            n = self._tree.vessels[vid].n
+            idx = max(0, min(int(tg["idx"]), n - 1))
+            _mask, ml = eng.territory(vid, idx)
+            pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
+            good.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+        self._targets = good
+        self._refresh_targets_table()
+
+    def _refresh_targets_table(self) -> None:
+        self._targets_w.clear()
+        for i, tg in enumerate(self._targets, 1):
+            v = self._tree.vessels.get(tg["vid"])
+            vname = short_vessel_name(v.name) if v is not None else tg["vid"]
+            role = self._root_role(tg["vid"])
+            label = f"{role}:{vname}" if role else vname
+            it = QTreeWidgetItem([f"Target {i}", label,
+                                  f"{tg['ml']:.1f}", f"{tg['pct']:.1f}%"])
+            it.setData(0, _UID_ROLE, i - 1)     # row → index into _targets
+            it.setForeground(0, QColor(TARGET_COLOR))
+            self._targets_w.addTopLevelItem(it)
+
+    def add_target(self, vid: str, idx: int) -> None:
+        """Public (shell): set a Target at (vid, idx) — a click on the CT vessel.
+        Adds it, computes its distal territory, refreshes the table + overlay."""
+        if self._territory is None or vid not in self._tree.vessels:
+            return
+        n = self._tree.vessels[vid].n
+        idx = max(0, min(int(idx), n - 1))
+        _mask, ml = self._territory.territory(vid, idx)
+        pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
+        self._targets.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+        self._refresh_targets_table()
+        self._push_overlay()
+
+    def _toggle_target_mode(self):
+        self._target_mode = self._target_btn.isChecked()
+        if self._target_mode and self._territory is None:
+            self._warn(t("先に FullLv を読み込んでください（Territory 未計算）。"))
+            self._target_btn.setChecked(False)
+            self._target_mode = False
+            return
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_target_mode"):
+            self._shell.coronary_target_mode(self._target_mode)
+
+    def _clear_targets(self):
+        self._targets = []
+        self._refresh_targets_table()
+        self._push_overlay()
+
+    def _targets_menu(self, pos):
+        it = self._targets_w.itemAt(pos)
+        if it is None:
+            return
+        ti = it.data(0, _UID_ROLE)
+        menu = QMenu(self)
+        a_del = menu.addAction(t("この Target を削除"))
+        if menu.exec(self._targets_w.viewport().mapToGlobal(pos)) is a_del \
+                and isinstance(ti, int) and 0 <= ti < len(self._targets):
+            del self._targets[ti]
+            self._refresh_targets_table()
+            self._push_overlay()
+
+    def target_specs(self) -> list:
+        """Target markers/territories for the CT overlay: each = the target 3-D
+        point (on its vessel) + its distal territory volume, for the viewer to
+        draw a marker (and, later, a colour fill). Empty when the overlay is off
+        or nothing is set."""
+        if not self._overlay_on or not self._targets:
+            return []
+        sel = None
+        it = self._targets_w.currentItem()
+        if it is not None:
+            sel = it.data(0, _UID_ROLE)
+        out = []
+        for i, tg in enumerate(self._targets):
+            v = self._tree.vessels.get(tg["vid"])
+            if v is None:
+                continue
+            pts = np.asarray(v.points, float)
+            idx = max(0, min(int(tg["idx"]), len(pts) - 1))
+            out.append({
+                "n": i + 1,
+                "vid": tg["vid"],
+                "idx": idx,
+                "point": pts[idx].tolist(),
+                "ml": tg["ml"],
+                "pct": tg["pct"],
+                "selected": (i == sel),
+            })
+        return out
 
     def _menu(self, pos):
         it = self._tree_w.itemAt(pos)
