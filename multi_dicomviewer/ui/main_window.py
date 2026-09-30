@@ -2441,10 +2441,15 @@ class MainWindow(QMainWindow):
                     v.set_vr_coronary(vr_spec)
                 except Exception:                        # noqa: BLE001
                     pass
-            # Let the VR pane's right-click on a target marker reach the panel.
+            # Let the VR pane's right-click / drag on a target marker reach the panel.
             if hasattr(v, "set_coronary_target_action_cb"):
                 try:
                     v.set_coronary_target_action_cb(self.coronary_target_action)
+                except Exception:                        # noqa: BLE001
+                    pass
+            if hasattr(v, "set_coronary_target_move_cb"):
+                try:
+                    v.set_coronary_target_move_cb(self.coronary_target_move)
                 except Exception:                        # noqa: BLE001
                     pass
             # Territory Target markers (same source-CT gate as the vessels).
@@ -2459,6 +2464,14 @@ class MainWindow(QMainWindow):
                     v.set_coronary_targets(tspec)
                 except Exception:                        # noqa: BLE001
                     pass
+        # Re-push the perfusion-territory colour map too: the panel may have pushed
+        # it before the source CT was shown (gated out then), so it never reached
+        # the VR. This runs after the CT is up, so the VR territory surfaces build.
+        if w is not None and hasattr(w, "_push_territory"):
+            try:
+                w._push_territory()
+            except Exception:                            # noqa: BLE001
+                pass
 
     def coronary_target_mode(self, on: bool) -> None:
         """Coronary Tree ▸ ターゲット設定 toggle: put every CT viewer into (or out
@@ -2530,6 +2543,16 @@ class MainWindow(QMainWindow):
                 w.toggle_target_n(int(n))
         except Exception:                                # noqa: BLE001
             pass
+
+    def coronary_target_move(self, n: int, vid: str, idx: int) -> None:
+        """A VR-pane drag of target #n reported a new (vid, idx) → move it in the
+        Coronary Tree (recomputes its territory)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "move_target_n"):
+            try:
+                w.move_target_n(int(n), vid, int(idx))
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _coronary_source_viewers(self):
         """The CT viewer(s) showing the Coronary Tree's SOURCE volume (the ones

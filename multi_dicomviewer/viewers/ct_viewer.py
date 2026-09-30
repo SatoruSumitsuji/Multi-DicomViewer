@@ -940,6 +940,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._cross = False
         self._meas_drag = False
         self._vr_drag = False             # rotating the VR volume
+        self._vr_tgt_drag = None          # Target number being dragged on the VR
         style = vtkInteractorStyleUser()  # neutralise default VTK style
         self.SetInteractorStyle(style)
         # Track motion with no button down so the crosshair can preview (vivid
@@ -953,11 +954,21 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # display; targets are picked from the coronary overlay in a later phase).
         if (self._owner._vr_on.get(self._which)
                 and e.button() == Qt.MouseButton.LeftButton):
-            # Target-set mode: a click 3-D-picks the nearest vessel (no rotate);
-            # otherwise a left-drag trackball-rotates the volume.
-            if (getattr(self._owner, "_coro_target_mode", False)
-                    and self._owner._vr_pick_target(
-                        self._which, e.position().x(), e.position().y())):
+            alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
+            x, y = e.position().x(), e.position().y()
+            # (no Alt) grab an EXISTING Target marker under the cursor to drag it
+            # along the tree — takes priority over set / rotate.
+            if not alt:
+                n = self._owner._vr_pick_target_marker(self._which, x, y)
+                if n is not None:
+                    self._vr_tgt_drag = n
+                    self._last = e.position()
+                    return
+            # (no Alt) Target-set mode: a click 3-D-picks the nearest vessel.
+            # Hold Alt to skip target-setting and use the selected view tool
+            # (Zoom/Move/Rotate/Spin/WL) via a left-drag instead.
+            if (not alt and getattr(self._owner, "_coro_target_mode", False)
+                    and self._owner._vr_pick_target(self._which, x, y)):
                 return
             self._vr_drag = True
             self._last = e.position()
@@ -1055,8 +1066,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             )
             return
         # Territory target mode: a left-click on a coronary line sets a Target.
+        # Hold Alt to skip target-setting and use the selected view tool instead
+        # (Zoom/Move/Rotate/Spin/Paging/Thick/WL), so the view stays adjustable.
         if (e.button() == Qt.MouseButton.LeftButton
                 and getattr(self._owner, "_coro_target_mode", False)
+                and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)
                 and self._owner._coronary_target_click(
                     self._which, e.position().x(), e.position().y())):
             return
@@ -1156,6 +1170,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
+        # VR: dragging a grabbed Target marker re-picks the nearest vessel point
+        # under the cursor and moves the Target there (along the tree).
+        if self._vr_tgt_drag is not None:
+            self._owner._vr_move_target(
+                self._which, self._vr_tgt_drag,
+                e.position().x(), e.position().y())
+            return
         # Volume Rendering: a left-drag runs the SELECTED tool on the volume
         # (Zoom / Move / Rotate / Spin); default = trackball rotate.
         if self._vr_drag and self._last is not None:
@@ -1263,6 +1284,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if self._vr_tgt_drag is not None:
+            self._vr_tgt_drag = None
+            self._last = None
+            return
         if self._vr_drag:
             self._vr_drag = False
             self._last = None
@@ -2694,6 +2719,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_mask_vol = None       # (legacy MPR tint channel; unused now)
         self._terr_label_np = None       # territory int-label [z,y,x] (VR surfaces)
         self._terr_colors_v = None       # per-label RGBA fills for the VR surfaces
+        self._terr_sig = None            # cheap change-signature (skip redundant rebuilds)
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -2749,6 +2775,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_mode = False
         self._coro_target_cb = None
         self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
+        self._coro_target_move_cb = None     # (n, vid, idx) from a VR marker drag
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
@@ -10587,13 +10614,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         (right pane) as translucent coloured iso-surfaces — NOT on the short-axis
         MPR. *mask* = a full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,
         4=Target) with *colors* the matching RGBA list, or None to clear."""
-        self._terr_label_np = None
-        self._terr_colors_v = colors
         self._terr_mask_vol = None               # (MPR tint channel left cleared)
+        new_np = None
         if mask is not None and getattr(self, "_vol", None) is not None:
             m = np.asarray(mask)
             if m.shape == tuple(self._vol.shape):
-                self._terr_label_np = np.ascontiguousarray(m)
+                new_np = np.ascontiguousarray(m)
+        # Skip the (4× marching-cubes) VR rebuild when the map is UNCHANGED — the
+        # overlay refresh re-pushes it on every selection, so guard by a cheap sig.
+        sig = None if new_np is None else (
+            new_np.shape, int(new_np.sum()), int((new_np == 4).sum()),
+            tuple(tuple(c) for c in colors) if colors else None)
+        if sig is not None and sig == getattr(self, "_terr_sig", None) \
+                and self._terr_label_np is not None:
+            return
+        self._terr_sig = sig
+        self._terr_label_np = new_np
+        self._terr_colors_v = colors
         for k in ("A", "B"):
             p = self.pane[k]
             # Keep the short-axis MPR clean (territory belongs on the VR now).
@@ -10706,6 +10743,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.vr_tgt_actor.GetProperty().SetRenderPointsAsSpheres(True)
         p.vr_tgt_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_tgt_actor)
+        # Depth peeling so the TRANSLUCENT territory surfaces composite correctly
+        # with the GPU volume (plain alpha blending drops translucent geometry
+        # behind the volume — the reason the territory colours didn't appear while
+        # the opaque tubes / target spheres did).
+        try:
+            rw = p.ren.GetRenderWindow()
+            if rw is not None:
+                rw.SetAlphaBitPlanes(1)
+                rw.SetMultiSamples(0)
+            p.ren.SetUseDepthPeeling(True)
+            p.ren.SetMaximumNumberOfPeels(8)
+            p.ren.SetOcclusionRatio(0.0)
+            if hasattr(p.ren, "SetUseDepthPeelingForVolumes"):
+                p.ren.SetUseDepthPeelingForVolumes(True)   # VTK ≥ 8.1
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _vr_update_coronary(self, key) -> None:
         """Rebuild the 3-D coronary tubes on VR pane *key* from the overlay spec."""
@@ -10868,6 +10921,54 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Register cb(n, action) for a VR-pane right-click on a Target marker
         (action = 'toggle' territory show/hide, or 'delete')."""
         self._coro_target_action_cb = cb
+
+    def set_coronary_target_move_cb(self, cb) -> None:
+        """Register cb(n, vid, idx) for a VR-pane drag of a Target marker."""
+        self._coro_target_move_cb = cb
+
+    def _vr_move_target(self, key, n, sx, sy) -> None:
+        """Drag Target #n on VR pane *key*: re-pick the nearest coronary sample
+        under the cursor and report it (n, vid, idx) so the panel moves the Target
+        there along the tree."""
+        if self._coro_target_move_cb is None or not self._coro_overlay_vr:
+            return
+        p = self.pane[key]
+        ren = p.ren
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        size = ren.GetRenderWindow().GetSize()
+        vx = sx * dpr
+        vy = size[1] - sy * dpr
+
+        def world_at(z):
+            ren.SetDisplayPoint(vx, vy, z)
+            ren.DisplayToWorld()
+            w = ren.GetWorldPoint()
+            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
+
+        a = world_at(0.0)
+        d = world_at(1.0) - a
+        dn = float(np.linalg.norm(d))
+        if dn < 1e-6:
+            return
+        d = d / dn
+        best, best_vid, best_idx = 1e18, None, None
+        for ves in self._coro_overlay_vr:
+            p3 = ves.get("points")
+            if p3 is None or len(p3) < 2:
+                continue
+            P = np.asarray(p3, float)
+            t = (P - a) @ d
+            proj = a + np.outer(t, d)
+            dist = np.linalg.norm(P - proj, axis=1)
+            i = int(np.argmin(dist))
+            if dist[i] < best:
+                best, best_vid, best_idx = dist[i], ves.get("vid"), i
+        if best_vid is None or best > 12.0:
+            return
+        try:
+            self._coro_target_move_cb(int(n), best_vid, int(best_idx))
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _vr_pick_target_marker(self, key, sx, sy, tol_mm=10.0):
         """The Target number (1-based, spec 'n') whose 3-D marker is nearest the

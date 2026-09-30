@@ -726,9 +726,10 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_w.clear()
         for i, tg in enumerate(self._targets, 1):
             v = self._tree.vessels.get(tg["vid"])
-            vname = short_vessel_name(v.name) if v is not None else tg["vid"]
-            role = self._root_role(tg["vid"])
-            label = f"{role}:{vname}" if role else vname
+            # Show the vessel's OWN name exactly as the tree does (e.g. S@L… / D@L…)
+            # — short_vessel_name mangles already-short names (S@LAD → LAD) and the
+            # root-role prefix was misleading for a branch.
+            label = v.name if v is not None else tg["vid"]
             # 位置 = arc-length from the vessel's PROXIMAL end as a % of its length
             # (points are uniform arc-length samples, so idx maps linearly).
             n = v.n if v is not None else 1
@@ -939,6 +940,23 @@ class CoronaryTreeWindow(SnapDock):
             self._refresh_targets_table()
             self._push_overlay()
             self._push_territory()
+
+    def move_target_n(self, n: int, vid: str, idx: int) -> None:
+        """Move the n-th (1-based) target to (vid, idx) — a VR marker drag. Recompute
+        its territory and refresh the table + overlays."""
+        i = int(n) - 1
+        if not (0 <= i < len(self._targets)):
+            return
+        if self._territory is None or vid not in self._tree.vessels:
+            return
+        nn = self._tree.vessels[vid].n
+        idx = max(0, min(int(idx), nn - 1))
+        _mask, ml = self._territory.territory(vid, idx)
+        pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
+        self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+        self._refresh_targets_table()
+        self._push_overlay()
+        self._push_territory()
 
     def _targets_menu(self, pos):
         it = self._targets_w.itemAt(pos)
