@@ -2540,6 +2540,16 @@ class MainWindow(QMainWindow):
                 except Exception:                        # noqa: BLE001
                     pass
 
+    def coronary_target_summary(self, text: str) -> None:
+        """Overlay the per-target list (Target-1, Target-2, …) on the source CT's
+        VR pane (bottom-left)."""
+        for v in self._coronary_source_viewers():
+            if hasattr(v, "set_target_summary"):
+                try:
+                    v.set_target_summary(text or "")
+                except Exception:                        # noqa: BLE001
+                    pass
+
     def coronary_target_action(self, n: int, action: str) -> None:
         """A CT/VR viewer reported a right-click on target #n (1-based): 'toggle'
         its territory show/hide, or 'delete' it — applied in the Coronary Tree."""

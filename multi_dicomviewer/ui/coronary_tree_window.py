@@ -60,7 +60,7 @@ ROOT_COLORS = {
 #: (a translucent wash over the myocardium): LAD blue, LCX yellow, RCA green, and
 #: a set Target's distal territory in red on top. Labels 1..4 in that order.
 TERRITORY_FILLS = [
-    (0.16, 0.44, 0.98, 0.62),    # 1 LAD  — strong blue (more visible on the VR)
+    (0.36, 0.58, 0.94, 0.46),    # 1 LAD  — medium blue (visible but not heavy)
     (1.00, 0.85, 0.40, 0.42),    # 2 LCX  — pale yellow
     (0.58, 0.77, 0.49, 0.40),    # 3 RCA  — pale green
     (0.918, 0.60, 0.60, 0.55),   # 4 Target territory — pale red
@@ -905,6 +905,20 @@ class CoronaryTreeWindow(SnapDock):
                 lines.append(f"{role} {pct:.1f}%/{ml:.1f}mL")
         return "\n".join(lines)
 
+    def _target_summary_text(self) -> str:
+        """Per-target list for the VR bottom-left overlay: 'Target-N pct%/mL' for
+        each VISIBLE target, same %/mL style as the per-system summary. Empty when
+        no targets are shown."""
+        if not self._targets_shown or not self._targets:
+            return ""
+        lines = []
+        for i, tg in enumerate(self._targets, 1):
+            if tg.get("hidden"):
+                continue
+            lines.append(f"Target-{i} {tg.get('pct', 0.0):.1f}%/"
+                         f"{tg.get('ml', 0.0):.1f}mL")
+        return "\n".join(lines)
+
     def _push_territory(self):
         """Compute the perfusion-territory colour map (LAD/LCX/RCA + Target) and
         ask the shell to overlay it on the CT (cleared when the overlay is off);
@@ -924,6 +938,12 @@ class CoronaryTreeWindow(SnapDock):
             txt = self._territory_summary_text() if self._overlay_on else ""
             try:
                 self._shell.coronary_territory_summary(txt)
+            except Exception:                            # noqa: BLE001
+                pass
+        if hasattr(self._shell, "coronary_target_summary"):
+            ttxt = self._target_summary_text() if self._overlay_on else ""
+            try:
+                self._shell.coronary_target_summary(ttxt)
             except Exception:                            # noqa: BLE001
                 pass
 
