@@ -2691,8 +2691,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_loaded_bld = None      # last LOADED BldLv dict (FullLV fallback)
         self._full_lv_bld_snapshot = None  # BldLv captured on Blood/Endo Exit
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
-        self._terr_mask_vol = None       # territory colour-map (int-label) vtkImageData
-        self._terr_target_label = 1      # label value of the Target territory (VR iso)
+        self._terr_mask_vol = None       # (legacy MPR tint channel; unused now)
+        self._terr_label_np = None       # territory int-label [z,y,x] (VR surfaces)
+        self._terr_colors_v = None       # per-label RGBA fills for the VR surfaces
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -10582,32 +10583,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             pass
 
     def set_territory_mask(self, mask, colors=None) -> None:
-        """Public (shell): overlay the perfusion-territory colour map on the CT.
-        *mask* = a full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,4=Target)
-        with *colors* the matching RGBA list, or a legacy 0/1 mask (colors=None →
-        single pale red), or None to clear. Target label = the LAST colour."""
-        self._terr_mask_vol = None
-        self._terr_target_label = (len(colors) if colors else 1)
-        if mask is not None and self._image is not None \
-                and getattr(self, "_vol", None) is not None:
+        """Public (shell): the perfusion-territory colour map is shown ON THE VR
+        (right pane) as translucent coloured iso-surfaces — NOT on the short-axis
+        MPR. *mask* = a full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,
+        4=Target) with *colors* the matching RGBA list, or None to clear."""
+        self._terr_label_np = None
+        self._terr_colors_v = colors
+        self._terr_mask_vol = None               # (MPR tint channel left cleared)
+        if mask is not None and getattr(self, "_vol", None) is not None:
             m = np.asarray(mask)
             if m.shape == tuple(self._vol.shape):
-                sx, sy, sz = self._dims
-                self._terr_mask_vol = numpy_to_vtk_image(
-                    np.ascontiguousarray(m, np.float32), sx, sy, sz)
-        on = self._terr_mask_vol is not None
-        lut = (_terr_label_lut(colors) if (on and colors)
-               else _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
+                self._terr_label_np = np.ascontiguousarray(m)
         for k in ("A", "B"):
             p = self.pane[k]
-            p.reslice_terr.SetInputData(
-                self._terr_mask_vol if on else _placeholder_image())
-            p.colors_terr.SetLookupTable(lut)
+            # Keep the short-axis MPR clean (territory belongs on the VR now).
+            p.reslice_terr.SetInputData(_placeholder_image())
             p.colors_terr.Modified()
-            if self._vr_on.get(k):               # VR pane shows a 3-D iso-surface
+            if self._vr_on.get(k):
                 self._vr_update_territory(k)
                 p.render()
-        self._refresh(reset_cam=False)
 
     @staticmethod
     def _enlarge_busy(dlg) -> None:
@@ -10686,15 +10680,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_actor.SetMapper(p.vr_coro_mapper)
         p.vr_coro_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_coro_actor)
-        # Territory as pale-red translucent 3-D iso-surface.
-        p.vr_terr_mapper = vtkPolyDataMapper()
-        p.vr_terr_mapper.SetInputData(vtkPolyData())
-        p.vr_terr_actor = vtkActor()
-        p.vr_terr_actor.SetMapper(p.vr_terr_mapper)
-        p.vr_terr_actor.GetProperty().SetColor(0.918, 0.6, 0.6)
-        p.vr_terr_actor.GetProperty().SetOpacity(0.35)
-        p.vr_terr_actor.SetVisibility(False)
-        p.ren.AddActor(p.vr_terr_actor)
+        # Perfusion territories as translucent 3-D iso-surfaces — a POOL of actors
+        # (one per label: LAD blue / LCX yellow / RCA green / Target red), coloured
+        # + filled per push in _vr_update_territory.
+        p.vr_terr_actors = []
+        p.vr_terr_pipe = []                      # keep contour filters/images alive
+        for _ in range(4):
+            mp = vtkPolyDataMapper()
+            mp.SetInputData(vtkPolyData())
+            mp.ScalarVisibilityOff()
+            ac = vtkActor()
+            ac.SetMapper(mp)
+            ac.GetProperty().SetOpacity(0.4)
+            ac.SetVisibility(False)
+            p.ren.AddActor(ac)
+            p.vr_terr_actors.append(ac)
         # Target points as bright-red spheres at each Target's 3-D location.
         p.vr_tgt_mapper = vtkPolyDataMapper()
         p.vr_tgt_mapper.SetInputData(vtkPolyData())
@@ -10774,29 +10774,50 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_tgt_actor.SetVisibility(pts.GetNumberOfPoints() > 0)
 
     def _vr_update_territory(self, key) -> None:
-        """Rebuild the 3-D territory surface on VR pane *key* from the target
-        territory mask (a pale-red translucent iso-surface)."""
+        """Rebuild the 3-D perfusion-territory iso-surfaces on VR pane *key*: one
+        translucent coloured surface per label (LAD blue / LCX yellow / RCA green /
+        Target red). Each label's binary sub-mask is contoured on the heart bbox
+        only (cheap), so this is a sub-second one-off on load / target change, not a
+        per-frame cost."""
         p = self.pane[key]
-        if getattr(p, "vr_terr_actor", None) is None:
+        pool = getattr(p, "vr_terr_actors", None)
+        if not pool:
             return
-        vol = getattr(self, "_terr_mask_vol", None)
-        if vol is None or not self._vr_on.get(key):
-            p.vr_terr_mapper.SetInputData(vtkPolyData())
-            p.vr_terr_actor.SetVisibility(False)
+        lab = getattr(self, "_terr_label_np", None)
+        colors = getattr(self, "_terr_colors_v", None)
+        for ac in pool:                          # hide all first
+            ac.SetVisibility(False)
+            ac.GetMapper().SetInputData(vtkPolyData())
+        p.vr_terr_pipe = []
+        if lab is None or not colors or not self._vr_on.get(key):
             return
+        nz = np.argwhere(lab > 0)
+        if len(nz) == 0:
+            return
+        (z0, y0, x0), (z1, y1, x1) = nz.min(0), nz.max(0) + 1
+        sub = lab[z0:z1, y0:y1, x0:x1]
+        sx, sy, sz = self._dims
         from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D
-        mc = vtkFlyingEdges3D()
-        mc.SetInputData(vol)
-        # The mask is now an int-label volume; contour just the TARGET label (the
-        # highest) so the VR surface stays the red target territory — the base
-        # LAD/LCX/RCA partition is shown as the coloured tubes + on the MPR, not as
-        # a solid VR shell.
-        tl = int(getattr(self, "_terr_target_label", 1))
-        mc.SetValue(0, tl - 0.5)
-        mc.ComputeNormalsOn()
-        p.vr_terr_mapper.SetInputConnection(mc.GetOutputPort())
-        p._vr_terr_mc = mc                       # keep a ref (pipeline lifetime)
-        p.vr_terr_actor.SetVisibility(True)
+        for i, c in enumerate(colors, 1):
+            if i > len(pool):
+                break
+            binsub = (sub == i)
+            ac = pool[i - 1]
+            if not binsub.any():
+                continue
+            img = numpy_to_vtk_image(
+                np.ascontiguousarray(binsub, np.float32), sx, sy, sz)
+            img.SetOrigin(float(x0) * sx, float(y0) * sy, float(z0) * sz)
+            mc = vtkFlyingEdges3D()
+            mc.SetInputData(img)
+            mc.SetValue(0, 0.5)
+            mc.ComputeNormalsOn()
+            ac.GetMapper().SetInputConnection(mc.GetOutputPort())
+            a = c[3] if len(c) > 3 else 0.4
+            ac.GetProperty().SetColor(float(c[0]), float(c[1]), float(c[2]))
+            ac.GetProperty().SetOpacity(float(a))
+            ac.SetVisibility(True)
+            p.vr_terr_pipe.append((mc, img))     # keep alive (pipeline lifetime)
 
     def _vr_pick_target(self, key, sx, sy) -> bool:
         """3-D target pick on the VR: cast a ray through (sx, sy) and set a Target
@@ -11041,6 +11062,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # VR too — everything else 2-D is hidden.
             keep = {p.vr_volume, getattr(p, "angle", None)}
             keep.update(getattr(p, "angle_halo", []))
+            keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             props = p.ren.GetViewProps()
             props.InitTraversal()
             while True:
@@ -11087,8 +11109,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
-                       getattr(p, "vr_terr_actor", None),
-                       getattr(p, "vr_tgt_actor", None)):
+                       getattr(p, "vr_tgt_actor", None),
+                       *getattr(p, "vr_terr_actors", [])):
                 if _a is not None:
                     _a.SetVisibility(False)
             for a in self._vr_hidden.get(key, []):
