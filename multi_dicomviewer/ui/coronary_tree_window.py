@@ -60,7 +60,7 @@ ROOT_COLORS = {
 #: (a translucent wash over the myocardium): LAD blue, LCX yellow, RCA green, and
 #: a set Target's distal territory in red on top. Labels 1..4 in that order.
 TERRITORY_FILLS = [
-    (0.44, 0.66, 0.86, 0.40),    # 1 LAD  — pale blue
+    (0.16, 0.44, 0.98, 0.62),    # 1 LAD  — strong blue (more visible on the VR)
     (1.00, 0.85, 0.40, 0.42),    # 2 LCX  — pale yellow
     (0.58, 0.77, 0.49, 0.40),    # 3 RCA  — pale green
     (0.918, 0.60, 0.60, 0.55),   # 4 Target territory — pale red
@@ -885,9 +885,30 @@ class CoronaryTreeWindow(SnapDock):
                     full[fz[mv], fy[mv], fx[mv]] = 4
         return full, TERRITORY_FILLS
 
+    def _territory_summary_text(self) -> str:
+        """Compact per-system summary (myocardium + LM/LAD/LCX/RCA %/mL), one line
+        each, for the VR overlay. Empty when nothing is computed."""
+        eng = self._territory
+        if eng is None or self._myo_ml is None:
+            return ""
+        total = eng.myocardium_ml
+        by_role: dict = {}
+        for vid in self._tree.roots():
+            v = self._tree.vessels[vid]
+            _m, ml = eng.territory(vid, 0)
+            by_role[v.role] = by_role.get(v.role, 0.0) + ml
+        lines = [f"Myocardium {self._myo_ml:.1f}mL"]
+        for role in ("LM", "LAD", "LCX", "RCA"):
+            if role in by_role:
+                ml = by_role[role]
+                pct = (100.0 * ml / total) if total > 0 else 0.0
+                lines.append(f"{role} {pct:.1f}%/{ml:.1f}mL")
+        return "\n".join(lines)
+
     def _push_territory(self):
         """Compute the perfusion-territory colour map (LAD/LCX/RCA + Target) and
-        ask the shell to overlay it on the CT (cleared when the overlay is off)."""
+        ask the shell to overlay it on the CT (cleared when the overlay is off);
+        also push the per-system summary text for the VR overlay."""
         if self._shell is None \
                 or not hasattr(self._shell, "coronary_territory_refresh"):
             return
@@ -899,6 +920,12 @@ class CoronaryTreeWindow(SnapDock):
             self._shell.coronary_territory_refresh(mask, colors)
         except Exception:                                # noqa: BLE001
             pass
+        if hasattr(self._shell, "coronary_territory_summary"):
+            txt = self._territory_summary_text() if self._overlay_on else ""
+            try:
+                self._shell.coronary_territory_summary(txt)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _toggle_target_mode(self):
         self._target_mode = self._target_btn.isChecked()

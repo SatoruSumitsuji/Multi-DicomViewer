@@ -2192,6 +2192,22 @@ class _Pane:
         self.resultact, _ = _mk_overlay_text(True, (1.0, 0.851, 0.0))  # top-right
         self.ren.AddViewProp(self.tagact)
         self.ren.AddViewProp(self.resultact)
+        # CT Territory per-system summary — bottom-right of the VR pane, same yellow
+        # + font as the result block (set_territory_summary / _vr_update_summary).
+        self.terract = vtkTextActor()
+        self.terract.SetTextScaleModeToNone()
+        _ttp = self.terract.GetTextProperty()
+        _ttp.SetColor(1.0, 0.851, 0.0)
+        _ttp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_ttp)
+        _ttp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+        _ttp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        _ttp.SetJustificationToRight()
+        _ttp.SetVerticalJustificationToBottom()
+        self.terract.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        self.terract.GetPositionCoordinate().SetValue(0.988, 0.015)
+        self.terract.SetInput("")
+        self.ren.AddViewProp(self.terract)
 
         # Follows the cursor to show the HU under it while the Point probe tool
         # is armed (positioned in display pixels on each hover; see
@@ -2720,6 +2736,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_label_np = None       # territory int-label [z,y,x] (VR surfaces)
         self._terr_colors_v = None       # per-label RGBA fills for the VR surfaces
         self._terr_sig = None            # cheap change-signature (skip redundant rebuilds)
+        self._terr_summary_text = ""     # per-system summary shown on the VR (bottom-right)
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -10743,6 +10760,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.vr_tgt_actor.GetProperty().SetRenderPointsAsSpheres(True)
         p.vr_tgt_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_tgt_actor)
+        p.vr_tgt_labels = []                     # per-target number billboards
         # Depth peeling so the TRANSLUCENT territory surfaces composite correctly
         # with the GPU volume (plain alpha blending drops translucent geometry
         # behind the volume — the reason the territory colours didn't appear while
@@ -10800,22 +10818,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_actor.SetVisibility(True)
 
     def _vr_update_targets(self, key) -> None:
-        """Rebuild the 3-D Target point markers (bright-red spheres) on VR pane
-        *key* from the pushed target specs."""
+        """Rebuild the 3-D Target point markers (bright-red spheres) + their number
+        labels (1,2,3…) on VR pane *key* from the pushed target specs."""
         p = self.pane[key]
         if getattr(p, "vr_tgt_actor", None) is None:
             return
+        # Clear the previous number billboards.
+        for lb in getattr(p, "vr_tgt_labels", []):
+            p.ren.RemoveViewProp(lb)
+        p.vr_tgt_labels = []
         specs = self._coro_targets if self._vr_on.get(key) else []
         if not specs:
             p.vr_tgt_mapper.SetInputData(vtkPolyData())
             p.vr_tgt_actor.SetVisibility(False)
             return
+        try:
+            from vtkmodules.vtkRenderingCore import vtkBillboardTextActor3D
+        except Exception:                                # noqa: BLE001
+            vtkBillboardTextActor3D = None
         pts = vtkPoints()
         for tg in specs:
             P = tg.get("point")
             if P is None:
                 continue
             pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
+            if vtkBillboardTextActor3D is not None:
+                lb = vtkBillboardTextActor3D()
+                lb.SetPosition(float(P[0]), float(P[1]), float(P[2]))
+                lb.SetInput(str(tg.get("n", "")))
+                tp = lb.GetTextProperty()
+                tp.SetFontSize(16)
+                tp.SetColor(1.0, 1.0, 1.0)
+                tp.SetBold(True)
+                tp.SetJustificationToLeft()
+                if hasattr(lb, "SetDisplayOffset"):
+                    lb.SetDisplayOffset(10, 8)       # nudge off the sphere
+                p.ren.AddViewProp(lb)
+                p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
             verts.InsertNextCell(1)
@@ -11161,9 +11200,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_hidden[key] = []
             # Keep the bottom-centre C-arm readout (angle + its halo copies) on the
             # VR too — everything else 2-D is hidden.
-            keep = {p.vr_volume, getattr(p, "angle", None)}
+            keep = {p.vr_volume, getattr(p, "angle", None),
+                    getattr(p, "terract", None)}
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
+            keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
             props = p.ren.GetViewProps()
             props.InitTraversal()
             while True:
@@ -11206,12 +11247,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             cam.OrthogonalizeViewUp()
             p.ren.ResetCameraClippingRange()
             self._vr_update_angle(key)              # initial LAO/CRA readout
+            self._vr_update_summary(key)            # territory summary (bottom-right)
         else:
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
                        getattr(p, "vr_tgt_actor", None),
-                       *getattr(p, "vr_terr_actors", [])):
+                       getattr(p, "terract", None),
+                       *getattr(p, "vr_terr_actors", []),
+                       *getattr(p, "vr_tgt_labels", [])):
                 if _a is not None:
                     _a.SetVisibility(False)
             for a in self._vr_hidden.get(key, []):
@@ -11357,6 +11401,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         for _ha in getattr(p, "angle_halo", []):
             _ha.SetVisibility(True)
         p.render()
+
+    def set_territory_summary(self, text) -> None:
+        """Public (shell): the per-system territory summary shown at the VR pane's
+        bottom-right (same yellow / font as the result block)."""
+        self._terr_summary_text = text or ""
+        for k in ("A", "B"):
+            if self._vr_on.get(k):
+                self._vr_update_summary(k)
+                self.pane[k].render()
+
+    def _vr_update_summary(self, key) -> None:
+        """Refresh the VR pane's bottom-right territory summary text (matches the
+        result block's current font size)."""
+        p = self.pane[key]
+        ta = getattr(p, "terract", None)
+        if ta is None:
+            return
+        txt = getattr(self, "_terr_summary_text", "") if self._vr_on.get(key) else ""
+        try:
+            ta.GetTextProperty().SetFontSize(
+                p.resultact.GetTextProperty().GetFontSize())
+        except Exception:                                # noqa: BLE001
+            pass
+        ta.SetInput(txt or "")
+        ta.SetVisibility(bool(txt))
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
