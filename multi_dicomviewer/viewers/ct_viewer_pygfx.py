@@ -2297,7 +2297,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_cyan_img = {"A": None, "B": None}   # in-range tint RGBA per pane
         self._lvv_red_img = {"A": None, "B": None}    # measured-region RGBA per pane
         self._lvv_thick_img = {"A": None, "B": None}  # 壁厚 heat-map RGBA per pane
-        self._terr_mask_vol = None                    # territory 0/1 volume (numpy)
+        self._terr_mask_vol = None                    # territory int-label volume (numpy)
+        self._terr_colors = None                      # per-label RGBA fills (or None)
         self._terr_img = {"A": None, "B": None}       # territory tint RGBA per pane
         # 壁厚 (wall thickness) state — None/"3d"/"sax"; the field is a full-grid
         # numpy mm volume; cache lets mode re-entry skip the EDT/radial recompute.
@@ -6560,11 +6561,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
-    def set_territory_mask(self, mask) -> None:
-        """Public (shell): tint the Target's distal territory (pale red) on the CT.
-        *mask* = full-volume 0/1 numpy [z,y,x] at the viewer volume shape, or
-        None to clear."""
+    def set_territory_mask(self, mask, colors=None) -> None:
+        """Public (shell): overlay the perfusion-territory colour map on the CT.
+        *mask* = full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,4=Target)
+        with *colors* the matching RGBA list, or a legacy 0/1 mask (colors=None →
+        single pale red), or None to clear."""
         self._terr_mask_vol = None
+        self._terr_colors = colors
         if mask is not None and self._vol is not None:
             m = np.asarray(mask)
             if m.shape == tuple(self._vol.shape):
@@ -10059,6 +10062,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(self, "_terr_mask_vol", None) is None:
                 return None
             mv = _trilinear_sample(self._terr_mask_vol, vx, vy, vz)
+            colors = getattr(self, "_terr_colors", None)
+            if colors:
+                # int-label colour map: nearest label → its fill (LAD/LCX/RCA +
+                # Target). rint of the trilinear sample ≈ nearest for a translucent
+                # overlay (1-voxel boundary blur is acceptable).
+                lab = np.rint(mv).astype(int)
+                rgba = np.zeros((ih, iw, 4), np.uint8)
+                for i, c in enumerate(colors, 1):
+                    sel = (lab == i) & ~oob
+                    if sel.any():
+                        a = c[3] if len(c) > 3 else 0.5
+                        rgba[sel] = (int(c[0] * 255), int(c[1] * 255),
+                                     int(c[2] * 255), int(a * 255))
+                if not (rgba[:, :, 3] > 0).any():
+                    return None
+                rgba = np.ascontiguousarray(rgba)
+                return QImage(rgba.data, iw, ih, 4 * iw,
+                              QImage.Format.Format_RGBA8888).copy()
             inmask = (mv >= 0.5) & ~oob
             col = (234, 153, 153, 128)         # TARGET_COLOR pale red
         elif kind == "cyan":

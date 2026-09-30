@@ -718,6 +718,23 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
     return lut
 
 
+def _terr_label_lut(colors) -> vtkLookupTable:
+    """LUT for the perfusion-territory colour map: label 0 → transparent, labels
+    1..N → the given (r,g,b,a) fills (LAD/LCX/RCA + Target). Integer labels map
+    exactly since the table range is [0, N]."""
+    n = len(colors)
+    lut = vtkLookupTable()
+    lut.SetNumberOfTableValues(n + 1)
+    lut.SetTableRange(0.0, float(n))
+    lut.SetTableValue(0, 0.0, 0.0, 0.0, 0.0)
+    for i, c in enumerate(colors, 1):
+        r, g, b = c[0], c[1], c[2]
+        a = c[3] if len(c) > 3 else 0.5
+        lut.SetTableValue(i, float(r), float(g), float(b), float(a))
+    lut.Build()
+    return lut
+
+
 #: Colour anchors for the clinical wall-thickness ramp (thin→thick =
 #: red→orange→yellow→green). Any band COUNT samples this ramp, so at 4 bands the
 #: sampled colours are exactly these (= the Measure-Compare gap colours).
@@ -945,6 +962,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._vr_drag = True
             self._last = e.position()
             return
+        # VR: a RIGHT-click on a Target marker opens its menu (territory
+        # show/hide, delete) — same actions as the panel's per-target right-click.
+        if (self._owner._vr_on.get(self._which)
+                and e.button() == Qt.MouseButton.RightButton):
+            if self._owner._vr_target_menu(
+                    self._which, e.position().x(), e.position().y()):
+                return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
         if (e.button() == Qt.MouseButton.LeftButton
@@ -2667,7 +2691,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_loaded_bld = None      # last LOADED BldLv dict (FullLV fallback)
         self._full_lv_bld_snapshot = None  # BldLv captured on Blood/Endo Exit
         self._lvv_mask_vol = None        # measured-region 0/1 vtkImageData
-        self._terr_mask_vol = None       # territory tint 0/1 vtkImageData
+        self._terr_mask_vol = None       # territory colour-map (int-label) vtkImageData
+        self._terr_target_label = 1      # label value of the Target territory (VR iso)
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -2722,6 +2747,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_targets: list = []
         self._coro_target_mode = False
         self._coro_target_cb = None
+        self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
@@ -10555,11 +10581,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
-    def set_territory_mask(self, mask) -> None:
-        """Public (shell): tint the Target's distal perfusion territory (pale red)
-        on the CT. *mask* = a full-volume 0/1 numpy [z,y,x] at the viewer volume's
-        shape, or None to clear."""
+    def set_territory_mask(self, mask, colors=None) -> None:
+        """Public (shell): overlay the perfusion-territory colour map on the CT.
+        *mask* = a full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,4=Target)
+        with *colors* the matching RGBA list, or a legacy 0/1 mask (colors=None →
+        single pale red), or None to clear. Target label = the LAST colour."""
         self._terr_mask_vol = None
+        self._terr_target_label = (len(colors) if colors else 1)
         if mask is not None and self._image is not None \
                 and getattr(self, "_vol", None) is not None:
             m = np.asarray(mask)
@@ -10568,12 +10596,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._terr_mask_vol = numpy_to_vtk_image(
                     np.ascontiguousarray(m, np.float32), sx, sy, sz)
         on = self._terr_mask_vol is not None
+        lut = (_terr_label_lut(colors) if (on and colors)
+               else _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
         for k in ("A", "B"):
             p = self.pane[k]
             p.reslice_terr.SetInputData(
                 self._terr_mask_vol if on else _placeholder_image())
-            p.colors_terr.SetLookupTable(
-                _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
+            p.colors_terr.SetLookupTable(lut)
             p.colors_terr.Modified()
             if self._vr_on.get(k):               # VR pane shows a 3-D iso-surface
                 self._vr_update_territory(k)
@@ -10758,7 +10787,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D
         mc = vtkFlyingEdges3D()
         mc.SetInputData(vol)
-        mc.SetValue(0, 0.5)
+        # The mask is now an int-label volume; contour just the TARGET label (the
+        # highest) so the VR surface stays the red target territory — the base
+        # LAD/LCX/RCA partition is shown as the coloured tubes + on the MPR, not as
+        # a solid VR shell.
+        tl = int(getattr(self, "_terr_target_label", 1))
+        mc.SetValue(0, tl - 0.5)
         mc.ComputeNormalsOn()
         p.vr_terr_mapper.SetInputConnection(mc.GetOutputPort())
         p._vr_terr_mc = mc                       # keep a ref (pipeline lifetime)
@@ -10807,6 +10841,69 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._coro_target_cb(best_vid, int(best_idx))
         except Exception:                                # noqa: BLE001
             return False
+        return True
+
+    def set_coronary_target_action_cb(self, cb) -> None:
+        """Register cb(n, action) for a VR-pane right-click on a Target marker
+        (action = 'toggle' territory show/hide, or 'delete')."""
+        self._coro_target_action_cb = cb
+
+    def _vr_pick_target_marker(self, key, sx, sy, tol_mm=10.0):
+        """The Target number (1-based, spec 'n') whose 3-D marker is nearest the
+        click ray on VR pane *key*, or None. Used for the right-click menu."""
+        if not self._vr_on.get(key) or not self._coro_targets:
+            return None
+        p = self.pane[key]
+        ren = p.ren
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        size = ren.GetRenderWindow().GetSize()
+        vx = sx * dpr
+        vy = size[1] - sy * dpr
+
+        def world_at(z):
+            ren.SetDisplayPoint(vx, vy, z)
+            ren.DisplayToWorld()
+            w = ren.GetWorldPoint()
+            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
+
+        a = world_at(0.0)
+        d = world_at(1.0) - a
+        dn = float(np.linalg.norm(d))
+        if dn < 1e-6:
+            return None
+        d = d / dn
+        best, best_n = 1e18, None
+        for spec in self._coro_targets:
+            pt = spec.get("point")
+            if pt is None:
+                continue
+            P = np.asarray(pt, float)
+            t = float((P - a) @ d)
+            dist = float(np.linalg.norm(P - (a + t * d)))
+            if dist < best:
+                best, best_n = dist, spec.get("n")
+        if best_n is None or best > tol_mm:
+            return None
+        return int(best_n)
+
+    def _vr_target_menu(self, key, sx, sy) -> bool:
+        """Right-click on a VR Target marker → menu: territory show/hide, delete.
+        Returns True if a marker was hit (menu shown)."""
+        n = self._vr_pick_target_marker(key, sx, sy)
+        if n is None or self._coro_target_action_cb is None:
+            return False
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
+        a_del = menu.addAction(t("ターゲットを削除"))
+        gp = self.pane[key].canvas.mapToGlobal(
+            self.pane[key].canvas.rect().topLeft())
+        from PyQt6.QtCore import QPoint
+        ch = menu.exec(gp + QPoint(int(sx), int(sy)))
+        if ch is a_vis:
+            self._coro_target_action_cb(n, "toggle")
+        elif ch is a_del:
+            self._coro_target_action_cb(n, "delete")
         return True
 
     def _vr_epi_full_mask(self):
@@ -11060,8 +11157,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "shell_mm": float(getattr(self, "_vr_shell_mm", 10.0))}
 
     def set_vr_on(self, on: bool) -> None:
-        """Panel VR ▸ 表示/非表示 — turn Volume Rendering on/off on the VR pane."""
-        self._vr_set(self._vr_pane_key(), bool(on))
+        """Panel VR ▸ 表示/非表示 — show/hide the VR VOLUME (内腔/シェル) on the VR
+        pane while KEEPING the pane in 3-D with the Coronary Tree, territory and
+        target markers visible (so hiding the volume reveals just the tree). The
+        first turn-on builds the VR pipeline."""
+        key = self._vr_pane_key()
+        on = bool(on)
+        if on and not self._vr_on.get(key):
+            self._vr_set(key, True)              # first time: full build
+            return
+        if not self._vr_on.get(key):
+            return                                # not in VR yet, nothing to hide
+        p = self.pane[key]
+        if getattr(p, "vr_volume", None) is not None:
+            p.vr_volume.SetVisibility(on)        # toggle ONLY the volume
+            p.render()
 
     def set_vr_shell(self, shell: bool) -> None:
         """Panel VR ▸ 内腔VR/シェルVR — choose the VR crop: True = Epi surface +

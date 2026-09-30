@@ -2441,6 +2441,12 @@ class MainWindow(QMainWindow):
                     v.set_vr_coronary(vr_spec)
                 except Exception:                        # noqa: BLE001
                     pass
+            # Let the VR pane's right-click on a target marker reach the panel.
+            if hasattr(v, "set_coronary_target_action_cb"):
+                try:
+                    v.set_coronary_target_action_cb(self.coronary_target_action)
+                except Exception:                        # noqa: BLE001
+                    pass
             # Territory Target markers (same source-CT gate as the vessels).
             if hasattr(v, "set_coronary_targets"):
                 tspec = []
@@ -2478,9 +2484,11 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def coronary_territory_refresh(self, mask=None) -> None:
-        """Tint the Target's distal territory (a full-volume 0/1 mask, or None to
-        clear) on the CT pane showing the tree's source volume."""
+    def coronary_territory_refresh(self, mask=None, colors=None) -> None:
+        """Overlay the perfusion territory colour map on the CT pane showing the
+        tree's source volume. *mask* is a full-volume int-label [z,y,x]
+        (1=LAD,2=LCX,3=RCA,4=Target) with *colors* the matching RGBA list, or a
+        legacy 0/1 mask (colors=None → single pale red), or None to clear."""
         w = getattr(self, "_corotree_win", None)
         ct_uid = getattr(w, "_ct_uid", "") if w is not None else ""
         base = ct_uid.split("#", 1)[0] if ct_uid else ""
@@ -2500,9 +2508,28 @@ class MainWindow(QMainWindow):
                 if not (su == ct_uid or su.split("#", 1)[0] == base):
                     m = None
             try:
-                v.set_territory_mask(m)
+                v.set_territory_mask(m, colors)
+            except TypeError:                            # older viewer (no colors)
+                try:
+                    v.set_territory_mask(m)
+                except Exception:                        # noqa: BLE001
+                    pass
             except Exception:                            # noqa: BLE001
                 pass
+
+    def coronary_target_action(self, n: int, action: str) -> None:
+        """A CT/VR viewer reported a right-click on target #n (1-based): 'toggle'
+        its territory show/hide, or 'delete' it — applied in the Coronary Tree."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None:
+            return
+        try:
+            if action == "delete" and hasattr(w, "delete_target_n"):
+                w.delete_target_n(int(n))
+            elif action == "toggle" and hasattr(w, "toggle_target_n"):
+                w.toggle_target_n(int(n))
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _coronary_source_viewers(self):
         """The CT viewer(s) showing the Coronary Tree's SOURCE volume (the ones
