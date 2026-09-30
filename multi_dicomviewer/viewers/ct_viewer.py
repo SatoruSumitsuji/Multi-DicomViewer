@@ -2202,12 +2202,27 @@ class _Pane:
         _set_vtk_tag_font(_ttp)
         _ttp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _ttp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
-        _ttp.SetJustificationToRight()
+        _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
         _ttp.SetVerticalJustificationToBottom()
         self.terract.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        self.terract.GetPositionCoordinate().SetValue(0.988, 0.015)
+        self.terract.GetPositionCoordinate().SetValue(0.66, 0.015)   # bottom-right
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
+        # CT Territory per-target list — bottom-LEFT of the VR, same style.
+        self.tgtact = vtkTextActor()
+        self.tgtact.SetTextScaleModeToNone()
+        _gtp = self.tgtact.GetTextProperty()
+        _gtp.SetColor(1.0, 0.851, 0.0)
+        _gtp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_gtp)
+        _gtp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+        _gtp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        _gtp.SetJustificationToLeft()
+        _gtp.SetVerticalJustificationToBottom()
+        self.tgtact.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        self.tgtact.GetPositionCoordinate().SetValue(0.012, 0.015)   # bottom-left
+        self.tgtact.SetInput("")
+        self.ren.AddViewProp(self.tgtact)
 
         # Follows the cursor to show the HU under it while the Point probe tool
         # is armed (positioned in display pixels on each hover; see
@@ -2737,6 +2752,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_colors_v = None       # per-label RGBA fills for the VR surfaces
         self._terr_sig = None            # cheap change-signature (skip redundant rebuilds)
         self._terr_summary_text = ""     # per-system summary shown on the VR (bottom-right)
+        self._tgt_summary_text = ""      # per-target list shown on the VR (bottom-left)
         self._lvv_mask_on = False        # red measured-region overlay visible
         self._lvv_mask_alpha = 0.5       # red opacity: Blood 0.8, Epi/Endo 0.5
         self._lvv_thick_vol = None       # wall-thickness scalar (mm) vtkImageData
@@ -11201,7 +11217,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Keep the bottom-centre C-arm readout (angle + its halo copies) on the
             # VR too — everything else 2-D is hidden.
             keep = {p.vr_volume, getattr(p, "angle", None),
-                    getattr(p, "terract", None)}
+                    getattr(p, "terract", None), getattr(p, "tgtact", None)}
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
@@ -11254,6 +11270,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             for _a in (getattr(p, "vr_coro_actor", None),
                        getattr(p, "vr_tgt_actor", None),
                        getattr(p, "terract", None),
+                       getattr(p, "tgtact", None),
                        *getattr(p, "vr_terr_actors", []),
                        *getattr(p, "vr_tgt_labels", [])):
                 if _a is not None:
@@ -11411,21 +11428,37 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._vr_update_summary(k)
                 self.pane[k].render()
 
+    def set_target_summary(self, text) -> None:
+        """Public (shell): the per-target list shown at the VR pane's bottom-left
+        (same style as the per-system summary)."""
+        self._tgt_summary_text = text or ""
+        for k in ("A", "B"):
+            if self._vr_on.get(k):
+                self._vr_update_summary(k)
+                self.pane[k].render()
+
     def _vr_update_summary(self, key) -> None:
-        """Refresh the VR pane's bottom-right territory summary text (matches the
-        result block's current font size)."""
+        """Refresh the VR pane's bottom-right per-system summary + bottom-left
+        per-target list (both match the result block's font size)."""
         p = self.pane[key]
-        ta = getattr(p, "terract", None)
-        if ta is None:
-            return
-        txt = getattr(self, "_terr_summary_text", "") if self._vr_on.get(key) else ""
+        on = self._vr_on.get(key)
         try:
-            ta.GetTextProperty().SetFontSize(
-                p.resultact.GetTextProperty().GetFontSize())
+            fs = p.resultact.GetTextProperty().GetFontSize()
         except Exception:                                # noqa: BLE001
-            pass
-        ta.SetInput(txt or "")
-        ta.SetVisibility(bool(txt))
+            fs = None
+        for ta, txt in ((getattr(p, "terract", None),
+                         getattr(self, "_terr_summary_text", "") if on else ""),
+                        (getattr(p, "tgtact", None),
+                         getattr(self, "_tgt_summary_text", "") if on else "")):
+            if ta is None:
+                continue
+            if fs is not None:
+                try:
+                    ta.GetTextProperty().SetFontSize(fs)
+                except Exception:                        # noqa: BLE001
+                    pass
+            ta.SetInput(txt or "")
+            ta.SetVisibility(bool(txt))
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
