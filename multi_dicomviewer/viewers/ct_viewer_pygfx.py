@@ -2613,9 +2613,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._compare_pick(key, x, y)
             return
         # Territory target mode: a left-click on a coronary line sets a Target.
-        # Hold Alt to skip target-setting and use the selected view tool instead.
+        # Hold Shift to skip target-setting and use the selected view tool instead.
         if (self._drag_btn == 1 and getattr(self, "_coro_target_mode", False)
-                and "Alt" not in (ev.get("modifiers") or ())
+                and "Shift" not in (ev.get("modifiers") or ())
                 and self._coronary_target_click(key, x, y)):
             self._reset_pointer_state()
             return
