@@ -237,13 +237,16 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_lbl.setStyleSheet("font-weight:bold;")
         tv.addWidget(self._terr_lbl)
         self._targets_w = QTreeWidget()
-        self._targets_w.setColumnCount(5)
+        # Column 0 = show/hide CHECKBOX (its own column), 1 = Target number, then
+        # 血管 / 位置 / 心筋% / 灌流域mL.
+        self._targets_w.setColumnCount(6)
         self._targets_w.setHeaderLabels(
-            [t("Target"), t("血管"), t("位置"), t("心筋 %"), t("灌流域 mL")])
-        self._targets_w.setColumnWidth(0, 60)
-        self._targets_w.setColumnWidth(1, 96)
-        self._targets_w.setColumnWidth(2, 52)
-        self._targets_w.setColumnWidth(3, 56)
+            ["", t("Target"), t("血管"), t("位置"), t("心筋 %"), t("灌流域 mL")])
+        self._targets_w.setColumnWidth(0, 28)
+        self._targets_w.setColumnWidth(1, 52)
+        self._targets_w.setColumnWidth(2, 96)
+        self._targets_w.setColumnWidth(3, 52)
+        self._targets_w.setColumnWidth(4, 56)
         self._targets_w.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._targets_w.customContextMenuRequested.connect(self._targets_menu)
@@ -558,6 +561,10 @@ class CoronaryTreeWindow(SnapDock):
         it.setCheckState(0, Qt.CheckState.Checked)          # visible by default
         it.setForeground(0, QColor(ROOT_COLORS.get(
             self._root_role(vid), "#333333")))
+        # Monospace 心筋量 column so the padded % / mL line up vertically.
+        mf = QFont("Consolas")
+        mf.setStyleHint(QFont.StyleHint.Monospace)
+        it.setFont(3, mf)
         return it
 
     def _populate(self):
@@ -737,7 +744,9 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             return ""
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-        return f"{ml:.1f}mL / {pct:.0f}%"
+        # Integer % first, 1-decimal mL after; fixed widths + a monospace column
+        # font (set in _make_item) line the % and mL up vertically across rows.
+        return f"{round(pct):>3d}% /{ml:>7.1f}mL"
 
     def _recompute_targets(self) -> None:
         """Recompute each target's mL / % against the current engine, dropping any
@@ -770,19 +779,19 @@ class CoronaryTreeWindow(SnapDock):
             # (points are uniform arc-length samples, so idx maps linearly).
             n = v.n if v is not None else 1
             pos = (100.0 * int(tg["idx"]) / (n - 1)) if n > 1 else 0.0
-            # Target column = plain, left-aligned number; a column-0 checkbox
-            # (checked = shown) toggles this target's show/hide.
-            it = QTreeWidgetItem([str(i), label, f"{pos:.0f}%",
+            # Col 0 = checkbox only (empty text); col 1 = centred BLACK Target
+            # number; then 血管 / 位置 / 心筋% / 灌流域mL.
+            it = QTreeWidgetItem(["", str(i), label, f"{pos:.0f}%",
                                   f"{tg['pct']:.1f}%", f"{tg['ml']:.1f}"])
             it.setData(0, _UID_ROLE, i - 1)     # row → index into _targets
-            it.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft
+            it.setTextAlignment(1, Qt.AlignmentFlag.AlignHCenter
                                 | Qt.AlignmentFlag.AlignVCenter)
             it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             hidden = tg.get("hidden", False)
             it.setCheckState(0, Qt.CheckState.Unchecked if hidden
                              else Qt.CheckState.Checked)
-            it.setForeground(0, QColor("#999999" if hidden
-                                       else TARGET_COLOR))
+            # Target number black (grey when hidden).
+            it.setForeground(1, QColor("#999999" if hidden else "#000000"))
             if hidden:
                 for c in range(self._targets_w.columnCount()):
                     it.setForeground(c, QColor("#999999"))
@@ -816,8 +825,28 @@ class CoronaryTreeWindow(SnapDock):
         self._targets.append({"vid": vid, "idx": idx, "ml": ml, "pct": pct,
                               "hidden": False})
         self._refresh_targets_table()
-        self._push_overlay()
-        self._push_territory()
+        # The red dot is instant, but the territory colour-fill + VR surfaces take
+        # a moment — show a busy window so it doesn't look stuck.
+        self._run_busy(t("灌流域を計算中…"),
+                       lambda: (self._push_overlay(), self._push_territory()))
+
+    def _run_busy(self, msg, fn):
+        """Run *fn* behind a modal busy window (the territory colour-fill / VR
+        rebuild is a short but visible wait)."""
+        from PyQt6.QtWidgets import QApplication, QProgressDialog
+        dlg = QProgressDialog(msg, "", 0, 0, self)
+        dlg.setWindowTitle(t("Territory"))
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+        try:
+            fn()
+        finally:
+            dlg.reset()
+            dlg.deleteLater()
 
     def _toggle_targets_shown(self):
         self._targets_shown = not self._targets_shown
@@ -1041,8 +1070,8 @@ class CoronaryTreeWindow(SnapDock):
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
         self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
         self._refresh_targets_table()
-        self._push_overlay()
-        self._push_territory()
+        self._run_busy(t("灌流域を再計算中…"),
+                       lambda: (self._push_overlay(), self._push_territory()))
 
     def _targets_menu(self, pos):
         it = self._targets_w.itemAt(pos)

@@ -10917,6 +10917,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.ren.SetUseDepthPeelingForVolumes(True)   # VTK ≥ 8.1
         except Exception:                                # noqa: BLE001
             pass
+        # A layer-1 overlay renderer (shares the main camera) for the Target
+        # NUMBER labels, so they render ON TOP of the tubes/surfaces instead of
+        # being occluded by a vessel in front.
+        try:
+            from vtkmodules.vtkRenderingCore import vtkRenderer
+            rw = p.ren.GetRenderWindow()
+            p.vr_label_ren = vtkRenderer()
+            p.vr_label_ren.SetLayer(1)
+            p.vr_label_ren.InteractiveOff()
+            p.vr_label_ren.SetActiveCamera(p.ren.GetActiveCamera())  # same view
+            if rw is not None:
+                rw.SetNumberOfLayers(2)
+                rw.AddRenderer(p.vr_label_ren)
+        except Exception:                                # noqa: BLE001
+            p.vr_label_ren = None
 
     def _vr_update_coronary(self, key) -> None:
         """Rebuild the 3-D coronary tubes on VR pane *key* from the overlay spec."""
@@ -11003,9 +11018,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if getattr(p, "vr_tgt_actor", None) is None:
             return
+        # Labels live in the layer-1 overlay renderer so they stay on top; fall
+        # back to the main renderer if it wasn't created.
+        lren = getattr(p, "vr_label_ren", None) or p.ren
         # Clear the previous number billboards.
         for lb in getattr(p, "vr_tgt_labels", []):
-            p.ren.RemoveViewProp(lb)
+            lren.RemoveViewProp(lb)
         p.vr_tgt_labels = []
         specs = self._coro_targets if self._vr_on.get(key) else []
         if not specs:
@@ -11027,13 +11045,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 lb.SetPosition(float(P[0]), float(P[1]), float(P[2]))
                 lb.SetInput(str(tg.get("n", "")))
                 tp = lb.GetTextProperty()
-                tp.SetFontSize(16)
+                tp.SetFontSize(18)
                 tp.SetColor(1.0, 1.0, 1.0)
                 tp.SetBold(True)
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
                     lb.SetDisplayOffset(10, 8)       # nudge off the sphere
-                p.ren.AddViewProp(lb)
+                lren.AddViewProp(lb)                 # layer-1 → always on top
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
@@ -11656,15 +11674,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             fs = p.resultact.GetTextProperty().GetFontSize()
         except Exception:                                # noqa: BLE001
             fs = None
-        for ta, txt in ((getattr(p, "terract", None),
-                         getattr(self, "_terr_summary_text", "") if on else ""),
-                        (getattr(p, "tgtact", None),
-                         getattr(self, "_tgt_summary_text", "") if on else "")):
+        # terract (bottom-right) uses the result-block size; tgtact (bottom-left
+        # Target list) is 1.2× larger so it stands out.
+        for ta, txt, scale in (
+                (getattr(p, "terract", None),
+                 getattr(self, "_terr_summary_text", "") if on else "", 1.0),
+                (getattr(p, "tgtact", None),
+                 getattr(self, "_tgt_summary_text", "") if on else "", 1.2)):
             if ta is None:
                 continue
             if fs is not None:
                 try:
-                    ta.GetTextProperty().SetFontSize(fs)
+                    ta.GetTextProperty().SetFontSize(int(round(fs * scale)))
                 except Exception:                        # noqa: BLE001
                     pass
             ta.SetInput(txt or "")
