@@ -718,6 +718,10 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
     return lut
 
 
+#: Base VR coronary-tube radius (mm). LM is drawn ×1.5 (see _vr_update_coronary).
+_VR_CORO_R = 0.765
+
+
 def _terr_label_lut(colors) -> vtkLookupTable:
     """LUT for the perfusion-territory colour map: label 0 → transparent, labels
     1..N → the given (r,g,b,a) fills (LAD/LCX/RCA + Target). Integer labels map
@@ -2205,7 +2209,7 @@ class _Pane:
         _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
         _ttp.SetVerticalJustificationToBottom()
         self.terract.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        self.terract.GetPositionCoordinate().SetValue(0.80, 0.015)   # hug bottom-right
+        self.terract.GetPositionCoordinate().SetValue(0.70, 0.015)   # bottom-right (fits)
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
         # CT Territory per-target list — bottom-LEFT of the VR, same style.
@@ -2217,6 +2221,7 @@ class _Pane:
         _set_vtk_tag_font(_gtp)
         _gtp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _gtp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        _gtp.SetBold(True)                       # Target list stands out
         _gtp.SetJustificationToLeft()
         _gtp.SetVerticalJustificationToBottom()
         self.tgtact.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
@@ -10834,9 +10839,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Coronary tree as 3-D tubes (world-mm, so they sit in the volume and
         # rotate with it). Per-root colour via per-cell RGB scalars.
         p.vr_coro_tube = vtkTubeFilter()
-        p.vr_coro_tube.SetRadius(0.9)            # mm (thicker → easier to see)
-        p.vr_coro_tube.SetNumberOfSides(10)
+        p.vr_coro_tube.SetRadius(_VR_CORO_R)     # mm (per-point radius varies: LM ×1.5)
+        p.vr_coro_tube.SetNumberOfSides(12)
         p.vr_coro_tube.CappingOn()
+        # Per-point radius scalar → LM can be drawn thicker than the other vessels.
+        p.vr_coro_tube.SetVaryRadiusToVaryRadiusByAbsoluteScalar()
         p.vr_coro_tube.SetInputData(vtkPolyData())
         p.vr_coro_mapper = vtkPolyDataMapper()
         p.vr_coro_mapper.SetInputConnection(p.vr_coro_tube.GetOutputPort())
@@ -10852,6 +10859,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         _cp.SetSpecular(0.0)
         p.vr_coro_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_coro_actor)
+        # Rounded tube ends: a sphere (same colour + radius) at every vessel
+        # endpoint, so the 断端 are round, not flat discs.
+        p.vr_coro_cap_mapper = vtkPolyDataMapper()
+        p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
+        p.vr_coro_cap_mapper.ScalarVisibilityOn()
+        p.vr_coro_cap_mapper.SetScalarModeToUseCellData()
+        p.vr_coro_cap_actor = vtkActor()
+        p.vr_coro_cap_actor.SetMapper(p.vr_coro_cap_mapper)
+        _kp = p.vr_coro_cap_actor.GetProperty()
+        _kp.SetAmbient(1.0)
+        _kp.SetDiffuse(0.0)
+        _kp.SetSpecular(0.0)
+        p.vr_coro_cap_actor.SetVisibility(False)
+        p.ren.AddActor(p.vr_coro_cap_actor)
         # Perfusion territories as translucent 3-D iso-surfaces — a POOL of actors
         # (one per label: LAD blue / LCX yellow / RCA green / Target red), coloured
         # + filled per push in _vr_update_territory.
@@ -10910,30 +10931,69 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not spec:
             p.vr_coro_tube.SetInputData(vtkPolyData())
             p.vr_coro_actor.SetVisibility(False)
+            if getattr(p, "vr_coro_cap_actor", None) is not None:
+                p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
+                p.vr_coro_cap_actor.SetVisibility(False)
             return
+        from vtkmodules.vtkFiltersSources import vtkSphereSource
+        from vtkmodules.vtkFiltersCore import vtkAppendPolyData
         pts = vtkPoints()
         lines = vtkCellArray()
         cols = vtkUnsignedCharArray()
         cols.SetNumberOfComponents(3)
+        radii = []                               # per-point tube radius (LM ×1.5)
+        cap_append = vtkAppendPolyData()
+        n_caps = 0
         for ves in spec:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
                 continue
             rgb = _hex_to_rgb(ves.get("color"))
+            r = _VR_CORO_R * (1.5 if ves.get("root") == "LM" else 1.0)
             start = pts.GetNumberOfPoints()
             for P in p3:
                 pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
+                radii.append(r)
             lines.InsertNextCell(len(p3))
             for i in range(len(p3)):
                 lines.InsertCellPoint(start + i)
             cols.InsertNextTuple3(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+            # Round caps: a coloured sphere at each endpoint.
+            for P in (p3[0], p3[-1]):
+                sph = vtkSphereSource()
+                sph.SetCenter(float(P[0]), float(P[1]), float(P[2]))
+                sph.SetRadius(r)
+                sph.SetPhiResolution(12)
+                sph.SetThetaResolution(12)
+                sph.Update()
+                sd = sph.GetOutput()
+                sc = vtkUnsignedCharArray()
+                sc.SetNumberOfComponents(3)
+                for _ in range(sd.GetNumberOfCells()):
+                    sc.InsertNextTuple3(int(rgb[0]), int(rgb[1]), int(rgb[2]))
+                sd.GetCellData().SetScalars(sc)
+                cap_append.AddInputData(sd)
+                n_caps += 1
         pd = vtkPolyData()
         pd.SetPoints(pts)
         pd.SetLines(lines)
         pd.GetCellData().SetScalars(cols)
+        rad = numpy_to_vtk(np.ascontiguousarray(radii, np.float32),
+                           deep=True, array_type=VTK_FLOAT)
+        rad.SetName("radius")
+        pd.GetPointData().SetScalars(rad)        # drives VaryRadiusByAbsoluteScalar
         p.vr_coro_tube.SetInputData(pd)
         p.vr_coro_tube.Modified()
         p.vr_coro_actor.SetVisibility(True)
+        if getattr(p, "vr_coro_cap_actor", None) is not None:
+            if n_caps:
+                cap_append.Update()
+                p.vr_coro_cap_mapper.SetInputData(cap_append.GetOutput())
+                p._vr_coro_cap_keep = cap_append     # pipeline lifetime
+                p.vr_coro_cap_actor.SetVisibility(True)
+            else:
+                p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
+                p.vr_coro_cap_actor.SetVisibility(False)
 
     def _vr_update_targets(self, key) -> None:
         """Rebuild the 3-D Target point markers (bright-red spheres) + their number
@@ -11337,6 +11397,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
+            keep.add(getattr(p, "vr_coro_cap_actor", None))  # tube end caps
             props = p.ren.GetViewProps()
             props.InitTraversal()
             while True:
@@ -11384,6 +11445,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
+                       getattr(p, "vr_coro_cap_actor", None),
                        getattr(p, "vr_tgt_actor", None),
                        getattr(p, "terract", None),
                        getattr(p, "tgtact", None),
@@ -11576,6 +11638,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                     pass
             ta.SetInput(txt or "")
             ta.SetVisibility(bool(txt))
+        # Position the bottom-right summary so its LONGEST line (usually Myocardium)
+        # sits fully on-screen with ~1 char of right margin, while the lines stay
+        # left-aligned. Width is a fraction of the render window, so dpr cancels.
+        ter = getattr(p, "terract", None)
+        if ter is not None and on and getattr(self, "_terr_summary_text", ""):
+            try:
+                w_px = float(p.ren.GetRenderWindow().GetSize()[0]) or 1.0
+                tfs = float(ter.GetTextProperty().GetFontSize())
+                lines = self._terr_summary_text.split("\n")
+                max_chars = max((len(s) for s in lines), default=0)
+                # Arial ≈ 0.58 em average advance; +1 char right margin.
+                frac = (max_chars + 1.0) * 0.58 * tfs / w_px
+                left = min(0.82, max(0.40, 1.0 - frac))
+                ter.GetPositionCoordinate().SetValue(left, 0.015)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),

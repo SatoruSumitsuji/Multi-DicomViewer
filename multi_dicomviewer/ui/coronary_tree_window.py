@@ -627,6 +627,7 @@ class CoronaryTreeWindow(SnapDock):
                 "vid": vid,
                 "name": v.name,
                 "points": pts.tolist(),
+                "root": self._root_role(vid),   # "LM"/"LAD"/… — LM draws thicker
                 "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
                 "selected": (vid == sel),
             })
