@@ -706,7 +706,8 @@ class _Overlay(QWidget):
                     int(Qt.AlignmentFlag.AlignLeft)
                     | int(Qt.AlignmentFlag.AlignVCenter),
                     name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
-        # Territory Target markers: a pale-red dot + "T{n} {ml}/{pct}%" label.
+        # Territory Target markers: a pale-red dot + just the target NUMBER (the
+        # mL/% is shown in the panel table, not beside the short-axis point).
         tcol = QColor(234, 153, 153)
         for tg in v._coro_targets:
             P = tg.get("point")
@@ -719,10 +720,9 @@ class _Overlay(QWidget):
             p.drawEllipse(QPointF(mx, my), 6.0, 6.0)
             _draw_outlined_text(
                 p, QRectF(mx + 8, my - 18,
-                          180, 18), int(Qt.AlignmentFlag.AlignLeft)
+                          60, 18), int(Qt.AlignmentFlag.AlignLeft)
                 | int(Qt.AlignmentFlag.AlignVCenter),
-                f"T{tg.get('n','')}  {tg.get('ml',0):.1f}mL / {tg.get('pct',0):.0f}%",
-                tcol, width=1.2)
+                str(tg.get("n", "")), tcol, width=1.2)
 
     def _paint_wall_legend(self, p, v, w, h):
         """Colour-band legend for the 壁厚 heat map: a vertical bar (green=thick on

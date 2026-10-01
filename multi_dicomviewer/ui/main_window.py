@@ -2480,6 +2480,11 @@ class MainWindow(QMainWindow):
                     v.set_coronary_target_move_cb(self.coronary_target_move)
                 except Exception:                        # noqa: BLE001
                     pass
+            if hasattr(v, "set_coronary_target_pick_cb"):
+                try:
+                    v.set_coronary_target_pick_cb(self.coronary_target_pick)
+                except Exception:                        # noqa: BLE001
+                    pass
             # Territory Target markers (same source-CT gate as the vessels).
             if hasattr(v, "set_coronary_targets"):
                 tspec = []

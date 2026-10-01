@@ -207,15 +207,20 @@ class CoronaryTreeWindow(SnapDock):
              self._clear_targets, False),
         ])
         self._target_btn = tgt_btns[0]
+        self._targets_vis_btn = tgt_btns[1]      # relabelled 表示/非表示
+        self._targets_vis_btn.setText(
+            t("非表示") if self._targets_shown else t("表示"))
 
         split = QSplitter(Qt.Orientation.Vertical)
         outer.addWidget(split, 1)
 
         self._tree_w = QTreeWidget()
-        self._tree_w.setColumnCount(3)
-        self._tree_w.setHeaderLabels([t("血管"), t("役割"), t("分岐")])
+        self._tree_w.setColumnCount(4)
+        self._tree_w.setHeaderLabels(
+            [t("血管"), t("役割"), t("分岐"), t("心筋量")])
         self._tree_w.setColumnWidth(0, 130)
         self._tree_w.setColumnWidth(1, 70)
+        self._tree_w.setColumnWidth(2, 70)
         self._tree_w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree_w.customContextMenuRequested.connect(self._menu)
         self._tree_w.itemChanged.connect(self._on_item_changed)
@@ -380,10 +385,14 @@ class CoronaryTreeWindow(SnapDock):
     # ------------------------------------------------------------- VR row
     def _sync_vr_row(self) -> None:
         """Update the VR row's labels / enabled state to the current mode: the
-        シェル/内腔 button shows the ACTIVE mode; the シェルVR範囲 spin is enabled
-        only while シェルVR is selected."""
+        VR show/hide button shows the ACTION for the current state (shown → 非表示),
+        the シェル/内腔 button shows the ACTIVE mode, and the シェルVR範囲 spin is
+        enabled only while シェルVR is selected."""
         if getattr(self, "_vr_shell_btn", None) is None:
             return
+        if getattr(self, "_vr_show_btn", None) is not None:
+            self._vr_show_btn.setText(
+                t("非表示") if getattr(self, "_vr_shown", True) else t("表示"))
         shell = bool(getattr(self, "_vr_shell_mode", True))
         self._vr_shell_btn.setText(t("シェルVR") if shell else t("内腔VR"))
         self._vr_shell_lbl.setEnabled(shell)
@@ -392,6 +401,7 @@ class CoronaryTreeWindow(SnapDock):
     def _toggle_vr(self) -> None:
         """VR ▸ 表示/非表示 — show or hide the right-pane Volume Rendering."""
         self._vr_shown = not bool(getattr(self, "_vr_shown", True))
+        self._sync_vr_row()                  # relabel 表示 ⇄ 非表示
         if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):
             self._shell.coronary_vr_visible(self._vr_shown)
 
@@ -541,7 +551,8 @@ class CoronaryTreeWindow(SnapDock):
     def _make_item(self, vid: str) -> QTreeWidgetItem:
         v = self._tree.vessels[vid]
         role_txt = v.role if v.role in ROOT_ROLES else t("枝")
-        it = QTreeWidgetItem([v.name, role_txt, self._junction_text(vid)])
+        it = QTreeWidgetItem([v.name, role_txt, self._junction_text(vid),
+                              self._myo_text(vid)])
         it.setData(0, _UID_ROLE, vid)
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         it.setCheckState(0, Qt.CheckState.Checked)          # visible by default
@@ -627,7 +638,8 @@ class CoronaryTreeWindow(SnapDock):
                 "vid": vid,
                 "name": v.name,
                 "points": pts.tolist(),
-                "root": self._root_role(vid),   # "LM"/"LAD"/… — LM draws thicker
+                "root": self._root_role(vid),   # root system "LM"/"LAD"/…
+                "role": v.role,                 # this vessel's OWN role (LM trunk ×1.5)
                 "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
                 "selected": (vid == sel),
             })
@@ -708,9 +720,24 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_lbl.setText(
             t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
         self._terr_out.setPlainText("\n".join(lines))
+        self._populate()                 # fill the 心筋量 column now the engine exists
         self._recompute_targets()
         self._push_overlay()
         self._push_territory()
+
+    def _myo_text(self, vid: str) -> str:
+        """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the
+        ostium, as 'ml mL / pct%'. Empty when no engine. A parent includes its
+        children, so values nest and the sum can exceed 100% (expected)."""
+        eng = self._territory
+        if eng is None or vid not in self._tree.vessels:
+            return ""
+        try:
+            _mask, ml = eng.territory(vid, 0)
+        except Exception:                                # noqa: BLE001
+            return ""
+        pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
+        return f"{ml:.1f}mL / {pct:.0f}%"
 
     def _recompute_targets(self) -> None:
         """Recompute each target's mL / % against the current engine, dropping any
@@ -794,6 +821,9 @@ class CoronaryTreeWindow(SnapDock):
 
     def _toggle_targets_shown(self):
         self._targets_shown = not self._targets_shown
+        if getattr(self, "_targets_vis_btn", None) is not None:
+            self._targets_vis_btn.setText(
+                t("非表示") if self._targets_shown else t("表示"))
         self._push_overlay()
         self._push_territory()
 
