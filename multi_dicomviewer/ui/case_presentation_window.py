@@ -602,22 +602,23 @@ class CasePresentationWindow(SnapDock):
         sc_redo2.activated.connect(self._redo_action)
 
         # Row navigation shortcuts. Plain F/A stay with the main viewer (its
-        # per-image stepping); the panel uses Alt+F / Alt+A = next / prev SERIES,
-        # application-wide but gated to when the panel is visible and a text field
-        # isn't being edited (see _nav_shortcut). Alt (not Shift) for next/prev:
-        # the main window already binds app-wide Shift+F/Shift+A to the active
-        # pane's last/first image, and two app-wide shortcuts on one sequence go
-        # AMBIGUOUS in Qt so neither fires. Alt+F needs the &File menu mnemonic
-        # freed (done: it's Alt+E now). 最初/最後 use Alt+Shift+A / Alt+Shift+F
-        # (not Ctrl+A/Ctrl+F, which clashed with the conventional select-all /
-        # find and Studies' Ctrl+A select-all).
-        for seq, fn in (("Alt+F", lambda: self._nav_shortcut(+1)),
-                        ("Alt+A", lambda: self._nav_shortcut(-1)),
+        # per-image stepping); the panel uses Shift+F / Shift+A = next / prev
+        # SERIES while it is OPEN. The main window ALSO binds app-wide Shift+F/
+        # Shift+A to the active pane's last/first image, and two app-wide shortcuts
+        # on one sequence go AMBIGUOUS in Qt — so the shell DISABLES the viewer's
+        # pair while this panel is visible and DISABLES the panel's pair (below)
+        # when it is hidden, swapping ownership (see MainWindow._sync_casepres_nav).
+        # 最初/最後 use Alt+Shift+A / Alt+Shift+F (no viewer binding → always on).
+        self._series_nav_scs = []        # Shift+F / Shift+A (gated by the shell)
+        for seq, fn in (("Shift+F", lambda: self._nav_shortcut(+1)),
+                        ("Shift+A", lambda: self._nav_shortcut(-1)),
                         ("Alt+Shift+F", lambda: self._nav_shortcut("last")),
                         ("Alt+Shift+A", lambda: self._nav_shortcut("first"))):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
+            if seq in ("Shift+F", "Shift+A"):
+                self._series_nav_scs.append(sc)
 
         # (SnapDock installs the app-wide event filter for the title double-click
         # / floating maximize / edge-snap.)
