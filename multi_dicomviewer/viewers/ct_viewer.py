@@ -16070,17 +16070,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ""
 
     def _lv_save_dir(self) -> str:
-        """Default folder for SAVE / EXPORT / LOAD dialogs = the PARENT of the
-        source-data folder (one level ABOVE where the CT series was read), per
-        user preference. Falls back to the source folder if it has no parent, and
-        to the last folder actually used this session if the source is unknown."""
+        """Default folder for SAVE / EXPORT / LOAD dialogs. Once the user has
+        saved/loaded somewhere THIS session, default THERE (the last-used folder,
+        per user request). Otherwise the PARENT of the source-data folder (one
+        level ABOVE where the CT series was read), falling back to the source
+        folder itself."""
         import os
+        # Prefer the last folder the user actually saved/loaded to this session.
+        last = getattr(self, "_lv_last_dir", "") or ""
+        if last and os.path.isdir(last):
+            return last
         d = self._lv_series_dir()
         if not d:
-            # Source folder unknown → keep the last folder the user saved/loaded
-            # to this session so the default doesn't collapse to the CWD.
-            last = getattr(self, "_lv_last_dir", "") or ""
-            return last if last and os.path.isdir(last) else d
+            return d
         parent = os.path.dirname(d.rstrip("\\/"))
         return parent if parent and os.path.isdir(parent) else d
 
