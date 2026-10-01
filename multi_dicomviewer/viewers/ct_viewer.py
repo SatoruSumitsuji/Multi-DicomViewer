@@ -9629,10 +9629,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         terr = getattr(self, "_territory_display", False)
         vr_here = terr and self._vr_on.get(getattr(self, "_active_pane", "A"),
                                            False)
+        # Epi border setting: the slab is fixed at 0 (both panes are thin), so the
+        # Thick tool is greyed + inactive.
+        epi_edit = (self._lv_current_submode() == "epi")
 
         def _disabled(n):
             base = ((is2d and n in _MPR_ONLY_TOOLS)
-                    or (lv_lock and n in _LV_LOCK_DISABLED))
+                    or (lv_lock and n in _LV_LOCK_DISABLED)
+                    or (epi_edit and n == "THICK"))
             if terr:
                 if vr_here:
                     return base or n in ("PAGING", "THICK")
@@ -9683,7 +9687,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
         # right 5 mm (set on pass entry) but may be changed. Disabled only in 2-D.
         if getattr(self, "_slab_spin", None) is not None:
-            self._slab_spin.setEnabled(self._mode == "3D")
+            # Slab is 0-locked while setting the Epi border.
+            self._slab_spin.setEnabled(self._mode == "3D" and not epi_edit)
 
     # --------------------------------------------------- CenterLine
     def _style_cl(self):

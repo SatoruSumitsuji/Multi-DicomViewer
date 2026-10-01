@@ -3652,10 +3652,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Zoom/Move/Thick/WL AND Spin stay live (via the Alt/Option passthrough).
         lv_lock = (self._lv_axis_locked() or self._lv_sax_active()) \
             if hasattr(self, "_lv") else False
+        # Epi border setting: the slab is fixed at 0, so Thick is greyed + inactive.
+        epi_edit = (self._lv_current_submode() == "epi") \
+            if hasattr(self, "_lv_current_submode") else False
 
         def _disabled(n):
             return ((is2d and n in _MPR_ONLY_TOOLS)
-                    or (lv_lock and n in _LV_LOCK_DISABLED))
+                    or (lv_lock and n in _LV_LOCK_DISABLED)
+                    or (epi_edit and n == "THICK"))
 
         # If the ACTIVE tool just became unavailable, fall back to Move (re-enters
         # _set_tool, which re-runs this refresh with a safe tool).
@@ -3694,7 +3698,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
         # right 5 mm but may be changed. Disabled only in 2-D (VTK parity).
         if getattr(self, "_slab_spin", None) is not None:
-            self._slab_spin.setEnabled(not is2d)
+            self._slab_spin.setEnabled((not is2d) and not epi_edit)
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
