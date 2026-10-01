@@ -2941,13 +2941,23 @@ class MainWindow(QMainWindow):
 
     def _open_cpr_files(self, paths: list) -> None:
         """Drop a .cpr.json onto the shell → open the source 3-D CT and show the
-        short-axis centreline on it. Only ONE short-axis shows at a time, so the
-        FIRST valid file is applied. The CT is found by UID → the CT's saved
-        folder (src_dir) → else the user is ASKED to point at it (the .cpr.json
-        often sits in a collection folder with no DICOM, so we never scan the
-        dropped folder blindly — that produced a 'no DICOM' dead end)."""
+        short-axis centreline on it. Only ONE short-axis shows at a time, so a
+        SINGLE dropped file is applied as a short-axis. MULTIPLE files are instead
+        loaded into the Coronary Tree panel as reference centreline OVERLAYS (all
+        shown at once on the MPR — e.g. to trace a new CPR beside existing ones),
+        de-duplicated by name. The CT is found by UID → the CT's saved folder
+        (src_dir) → else the user is ASKED to point at it."""
         import os
         import json
+        # Multiple .cpr.json → reference overlays via the Coronary Tree panel.
+        cprs = [p for p in paths if self._is_cpr_json(p)]
+        if len(cprs) >= 2:
+            w = self._open_coronary_tree()
+            if w is not None and hasattr(w, "_load_cpr_paths"):
+                w._load_cpr_paths(cprs)
+                if hasattr(w, "_set_overlay"):
+                    w._set_overlay(True)     # draw all centrelines on the CT
+            return
         data = None
         uid, src_dir, drop_dir = "", "", ""
         for p in paths:
