@@ -2217,8 +2217,10 @@ class _Pane:
         self.tgtact.SetTextScaleModeToNone()
         _gtp = self.tgtact.GetTextProperty()
         _gtp.SetColor(1.0, 0.851, 0.0)
+        # NOTE: don't load the Meiryo font FILE here — a file-based font ignores
+        # SetBold. The target list is ASCII ("Target-N …%/…mL"), so Arial-bold is
+        # fine and actually renders bold (the user asked for bold).
         _gtp.SetFontFamilyToArial()
-        _set_vtk_tag_font(_gtp)
         _gtp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _gtp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
         _gtp.SetBold(True)                       # Target list stands out
@@ -10652,8 +10654,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     solid_c.append((rgb[0], rgb[1], rgb[2], seg_a))
             if ves.get("vid") in self._coro_names:   # names off by default
                 labels.append((ves.get("name", ""), out[0], rgb, sel))
-        # Territory Target markers: a filled dot + a "T{n} {ml}mL/{pct}%" label at
-        # each target point (pale red), reprojected onto this plane.
+        # Territory Target markers: a filled dot + just the target NUMBER beside it
+        # (the mL/% is shown on the VR summary / the panel table, not here).
         t_rgb = (234, 153, 153)
         t_pts = []
         for tg in self._coro_targets:
@@ -10662,9 +10664,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 continue
             o = self._world3d_to_out(key, np.asarray(P, float))
             t_pts.append(o)
-            labels.append((
-                f"T{tg.get('n', '')}  {tg.get('ml', 0):.1f}mL / "
-                f"{tg.get('pct', 0):.0f}%", o, t_rgb, bool(tg.get("selected"))))
+            labels.append((str(tg.get("n", "")), o, t_rgb,
+                           bool(tg.get("selected"))))
         p.coro_mapper.SetInputData(_colored_multi_pd(solid, solid_c))
         p.coro_dash_mapper.SetInputData(
             _colored_dashed_rgba_pd(dash, dash_c))
@@ -10949,7 +10950,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if p3 is None or len(p3) < 2:
                 continue
             rgb = _hex_to_rgb(ves.get("color"))
-            r = _VR_CORO_R * (1.5 if ves.get("root") == "LM" else 1.0)
+            # Only the LM TRUNK itself is drawn ×1.5 — its branches are normal.
+            r = _VR_CORO_R * (1.5 if ves.get("role") == "LM" else 1.0)
             start = pts.GetNumberOfPoints()
             for P in p3:
                 pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
@@ -11103,12 +11105,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             ac.SetVisibility(True)
             p.vr_terr_pipe.append((mc, sm, nrm, img))   # keep alive (pipeline)
 
-    def _vr_pick_target(self, key, sx, sy) -> bool:
-        """3-D target pick on the VR: cast a ray through (sx, sy) and set a Target
-        at the nearest coronary sample within tolerance. Returns True if set."""
-        if not self._vr_on.get(key) or self._coro_target_cb is None \
-                or not self._coro_overlay:
-            return False
+    def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
+        """Cast a ray through (sx, sy) on VR pane *key* and return the nearest
+        coronary (vid, sample-idx) within *tol_mm*, or None."""
+        src = self._coro_overlay_vr or self._coro_overlay
+        if not self._vr_on.get(key) or not src:
+            return None
         p = self.pane[key]
         ren = p.ren
         dpr = max(1.0, p.canvas.devicePixelRatioF())
@@ -11126,10 +11128,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = world_at(1.0) - a
         dn = float(np.linalg.norm(d))
         if dn < 1e-6:
-            return False
+            return None
         d = d / dn
         best, best_vid, best_idx = 1e18, None, None
-        for ves in self._coro_overlay:
+        for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
                 continue
@@ -11140,10 +11142,20 @@ class CTViewer(CPRMixin, AbstractViewer):
             i = int(np.argmin(dist))
             if dist[i] < best:
                 best, best_vid, best_idx = dist[i], ves.get("vid"), i
-        if best_vid is None or best > 8.0:       # 8 mm ray tolerance
+        if best_vid is None or best > tol_mm:
+            return None
+        return best_vid, int(best_idx)
+
+    def _vr_pick_target(self, key, sx, sy) -> bool:
+        """3-D target pick on the VR: set a Target at the nearest coronary sample
+        under (sx, sy). Returns True if set."""
+        if self._coro_target_cb is None:
+            return False
+        hit = self._vr_pick_vessel(key, sx, sy)
+        if hit is None:
             return False
         try:
-            self._coro_target_cb(best_vid, int(best_idx))
+            self._coro_target_cb(hit[0], int(hit[1]))
         except Exception:                                # noqa: BLE001
             return False
         return True
@@ -11240,24 +11252,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         return int(best_n)
 
     def _vr_target_menu(self, key, sx, sy) -> bool:
-        """Right-click on a VR Target marker → menu: territory show/hide, delete.
-        Returns True if a marker was hit (menu shown)."""
-        n = self._vr_pick_target_marker(key, sx, sy)
-        if n is None or self._coro_target_action_cb is None:
-            return False
+        """Right-click on the VR: on a Target marker → territory show/hide, delete;
+        else on a coronary vessel → set a Target there. Returns True if a menu was
+        shown."""
         from PyQt6.QtWidgets import QMenu
-        menu = QMenu(self)
-        a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
-        a_del = menu.addAction(t("ターゲットを削除"))
-        gp = self.pane[key].canvas.mapToGlobal(
-            self.pane[key].canvas.rect().topLeft())
         from PyQt6.QtCore import QPoint
-        ch = menu.exec(gp + QPoint(int(sx), int(sy)))
-        if ch is a_vis:
-            self._coro_target_action_cb(n, "toggle")
-        elif ch is a_del:
-            self._coro_target_action_cb(n, "delete")
-        return True
+        gp = (self.pane[key].canvas.mapToGlobal(
+                self.pane[key].canvas.rect().topLeft())
+              + QPoint(int(sx), int(sy)))
+        n = self._vr_pick_target_marker(key, sx, sy)
+        if n is not None and self._coro_target_action_cb is not None:
+            menu = QMenu(self)
+            a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
+            a_del = menu.addAction(t("ターゲットを削除"))
+            ch = menu.exec(gp)
+            if ch is a_vis:
+                self._coro_target_action_cb(n, "toggle")
+            elif ch is a_del:
+                self._coro_target_action_cb(n, "delete")
+            return True
+        # No marker → offer to SET a Target on the nearest vessel under the cursor.
+        hit = self._vr_pick_vessel(key, sx, sy)
+        if hit is not None and self._coro_target_cb is not None:
+            menu = QMenu(self)
+            a_set = menu.addAction(t("ここにターゲット設定"))
+            ch = menu.exec(gp)
+            if ch is a_set:
+                try:
+                    self._coro_target_cb(hit[0], int(hit[1]))
+                except Exception:                        # noqa: BLE001
+                    pass
+            return True
+        return False
+
+    def set_coronary_target_pick_cb(self, cb) -> None:
+        """Register the (vid, idx) target-set callback (so a VR right-click can set
+        a Target even when target-mode was never toggled on)."""
+        self._coro_target_cb = cb
 
     def _vr_epi_full_mask(self):
         """Full-volume bool [z,y,x] Epi-region mask from the loaded EpiLv (so VR
