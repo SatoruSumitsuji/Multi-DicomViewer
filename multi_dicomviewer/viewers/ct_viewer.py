@@ -721,9 +721,9 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
 #: VR coronary-tube radii (mm): branches are 80% of the old 0.765; the LM trunk
 #: keeps its old size (0.765×1.5). A dark halo (inverted hull) is drawn behind for
 #: contrast (see _vr_update_coronary).
-_VR_CORO_R = 0.765 * 0.8          # 0.612 — other vessels
-_VR_CORO_R_LM = 0.765 * 1.5       # 1.1475 — LM trunk (unchanged)
-_VR_CORO_HALO = 0.35             # halo rim width (mm) beyond the tube
+_VR_CORO_R = 0.765 * 0.8 * 0.8          # 0.49 — other vessels (thinner, has an outline)
+_VR_CORO_R_LM = 0.765 * 1.5 * 0.8       # 0.92 — LM trunk (also 80%)
+_VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -11619,10 +11619,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "shell_mm": float(getattr(self, "_vr_shell_mm", 10.0))}
 
     def set_vr_on(self, on: bool) -> None:
-        """Panel VR ▸ 表示/非表示 — show/hide the VR VOLUME (内腔/シェル) on the VR
-        pane while KEEPING the pane in 3-D with the Coronary Tree, territory and
-        target markers visible (so hiding the volume reveals just the tree). The
-        first turn-on builds the VR pipeline."""
+        """Panel VR ▸ 表示/非表示 — show/hide the VR VOLUME *and* the LAD/LCX/RCA +
+        Target colour regions, while KEEPING the Coronary Tree tubes + target
+        markers so the tree still reads. The first turn-on builds the VR pipeline."""
         key = self._vr_pane_key()
         on = bool(on)
         if on and not self._vr_on.get(key):
@@ -11632,8 +11631,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             return                                # not in VR yet, nothing to hide
         p = self.pane[key]
         if getattr(p, "vr_volume", None) is not None:
-            p.vr_volume.SetVisibility(on)        # toggle ONLY the volume
-            p.render()
+            p.vr_volume.SetVisibility(on)        # the volume
+        if on:
+            self._vr_update_territory(key)       # restore the colour regions
+        else:
+            for ac in getattr(p, "vr_terr_actors", []):   # hide the colour regions
+                ac.SetVisibility(False)
+        p.render()
 
     def set_vr_shell(self, shell: bool) -> None:
         """Panel VR ▸ 内腔VR/シェルVR — choose the VR crop: True = Epi surface +

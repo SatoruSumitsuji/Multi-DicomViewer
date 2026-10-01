@@ -118,7 +118,9 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
         self._target_btn = None
-        self._target_color = TERRITORY_FILLS[3]   # Target-territory RGBA (changeable)
+        # Target-territory fill — default 桃色 (changeable via right-click).
+        _tc = QColor("#e78ac3")
+        self._target_color = (_tc.redF(), _tc.greenF(), _tc.blueF(), _TARGET_ALPHA)
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
@@ -730,20 +732,25 @@ class CoronaryTreeWindow(SnapDock):
             self._terr_lbl.setText(t("Territory: 心筋を構築できません"))
             self._terr_out.setPlainText("")
             return
-        try:
+        # The engine build (nearest-centreline assignment of every myocardial
+        # voxel) + the tree/overlay refresh is the slow part — run it behind a busy
+        # window so the tree display doesn't look stuck.
+        def _work():
             lines, eng = format_territory_report(self._tree, lvf)
+            self._territory = eng
+            self._myo_ml = float(lvf.myocardial_volume_ml())
+            self._terr_lbl.setText(
+                t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
+            self._terr_out.setPlainText("\n".join(lines))
+            self._populate()             # fill the 心筋量 column (engine now exists)
+            self._recompute_targets()
+            self._push_overlay()
+            self._push_territory()
+        try:
+            self._run_busy(t("Territory を計算中…"), _work)
         except Exception as exc:                            # noqa: BLE001
             self._terr_out.setPlainText(t("解析失敗: {e}", e=str(exc)))
             return
-        self._territory = eng
-        self._myo_ml = float(lvf.myocardial_volume_ml())
-        self._terr_lbl.setText(
-            t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
-        self._terr_out.setPlainText("\n".join(lines))
-        self._populate()                 # fill the 心筋量 column now the engine exists
-        self._recompute_targets()
-        self._push_overlay()
-        self._push_territory()
 
     def _myo_text(self, vid: str) -> str:
         """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the
@@ -857,7 +864,7 @@ class CoronaryTreeWindow(SnapDock):
         dlg.show()
         QApplication.processEvents()
         try:
-            fn()
+            return fn()
         finally:
             dlg.reset()
             dlg.deleteLater()
