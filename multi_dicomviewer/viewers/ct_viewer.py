@@ -2906,6 +2906,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         below_col.addWidget(self._build_lv_bar())
         # Coronary short-axis row sits BELOW the LV bar (its own 3rd row).
         below_col.addWidget(self._build_cpr_bar())
+        # CT Territory review bar — a minimal replacement for the LV bar shown ONLY
+        # during a FullLv review (Blood / 壁厚3D / 壁厚短軸 toggles).
+        below_col.addWidget(self._build_terr_bar())
         self._below_scroll = self._make_chrome_scroll(self._below_wrap)
         lay.addWidget(self._below_scroll)
 
@@ -3064,6 +3067,74 @@ class CTViewer(CPRMixin, AbstractViewer):
         return self._side
 
     # --------------------------------------------- curved-MPR (coronary) bar
+    def _build_terr_bar(self) -> QWidget:
+        """A minimal control row shown ONLY during a CT Territory (FullLv) review,
+        in place of the (hidden) LV + Coronary bars: LV-Blood show/hide and the
+        壁厚3D / 壁厚短軸 heat-map toggles (the LAD/LCX/RCA + Target colours are
+        always on). Reuses the real LV handlers so the overlays behave identically.
+        Survives 'Max Image'."""
+        self._terr_bar = QWidget()
+        self._terr_bar._mdv_keep_on_max = True
+        row = QHBoxLayout(self._terr_bar)
+        row.setContentsMargins(8, 2, 8, 2)
+        row.setSpacing(4)
+        cap = QLabel(t("Territory:"))
+        cf = cap.font(); cf.setBold(True); cap.setFont(cf)
+        row.addWidget(cap)
+        self._terr_blood_btn = FitButton(t("LV-Blood"))
+        self._terr_blood_btn.setCheckable(True)
+        self._terr_blood_btn.setHelpToolTip(t("LV血流(水色)の表示 / 非表示"))
+        self._terr_blood_btn.clicked.connect(self._terr_toggle_blood)
+        row.addWidget(self._terr_blood_btn)
+        self._terr_thick3d_btn = FitButton(t("壁厚3D"))
+        self._terr_thick3d_btn.setCheckable(True)
+        self._terr_thick3d_btn.setHelpToolTip(t("壁厚ヒートマップ(3D)の表示 / 非表示"))
+        self._terr_thick3d_btn.clicked.connect(lambda: self._terr_toggle_thick("3d"))
+        row.addWidget(self._terr_thick3d_btn)
+        self._terr_thicksax_btn = FitButton(t("壁厚短軸"))
+        self._terr_thicksax_btn.setCheckable(True)
+        self._terr_thicksax_btn.setHelpToolTip(
+            t("壁厚ヒートマップ(短軸)の表示 / 非表示"))
+        self._terr_thicksax_btn.clicked.connect(
+            lambda: self._terr_toggle_thick("sax"))
+        row.addWidget(self._terr_thicksax_btn)
+        row.addStretch(1)
+        self._terr_bar.setVisible(False)
+        return self._terr_bar
+
+    def _terr_toggle_blood(self) -> None:
+        self._lvv_toggle_blood()
+        self._terr_bar_sync()
+
+    def _terr_toggle_thick(self, mode) -> None:
+        self._lvv_set_thick_mode(mode)
+        self._terr_bar_sync()
+
+    def _terr_bar_sync(self) -> None:
+        """Show the Territory bar (and hide the LV + Coronary bars, grey the 2D
+        button) during a FullLv review; restore otherwise. Reflects the current
+        Blood / 壁厚 overlay state on the toggles."""
+        terr = bool(getattr(self, "_territory_display", False))
+        if getattr(self, "_terr_bar", None) is not None:
+            self._terr_bar.setVisible(terr)
+        if getattr(self, "_lv_wrap", None) is not None:
+            self._lv_wrap.setVisible(not terr)
+        if terr and getattr(self, "_cpr_wrap", None) is not None:
+            self._cpr_wrap.setVisible(False)
+        b2d = (self._mode_btns.get("2D")
+               if getattr(self, "_mode_btns", None) else None)
+        if b2d is not None:                          # must stay 3-D in territory
+            b2d.setEnabled(not terr)
+        if terr:
+            if getattr(self, "_terr_blood_btn", None) is not None:
+                self._terr_blood_btn.setChecked(
+                    bool(getattr(self, "_lvv_mask_on", False)))
+            tm = getattr(self, "_lvv_thick_mode", None)
+            if getattr(self, "_terr_thick3d_btn", None) is not None:
+                self._terr_thick3d_btn.setChecked(tm == "3d")
+            if getattr(self, "_terr_thicksax_btn", None) is not None:
+                self._terr_thicksax_btn.setChecked(tm == "sax")
+
     def _build_cpr_bar(self) -> QWidget:
         """The coronary short-axis (CPR) control row, shown once "Coronary: MPR"
         is entered: Draw / Load / Save / Exit at the left, and — once a CPR is
@@ -8847,6 +8918,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # of coming up black.
         self._territory_display = True
         self._refresh_tool_availability()
+        self._terr_bar_sync()                # swap LV/Coronary bars → Territory bar
         QTimer.singleShot(0, lambda: self._vr_set("B", True))
         return True
 
@@ -9102,6 +9174,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         _mode_css = (
             "QPushButton { background:white; color:black; }"
             "QPushButton:checked { background:#edc63a; color:black; }"
+            "QPushButton:disabled { background:#f0f0f0; color:#aaa; }"
         )
         self._mode_btns: dict[str, QPushButton] = {}
         for key, tip in (
@@ -11307,6 +11380,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if not any(self._vr_on.values()):       # left the territory VR layout
                 self._territory_display = False
                 self._refresh_tool_availability()
+                self._terr_bar_sync()               # restore the LV / Coronary bars
 
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
@@ -13418,6 +13492,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._set_play2d_speed(1.0)              # back to 1× for a new series
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
+        self._territory_display = False          # leave any FullLv review layout
+        self._terr_label_np = None               # drop the territory colour map
+        self._terr_colors_v = None
+        self._terr_sig = None
+        self._terr_summary_text = ""
+        self._tgt_summary_text = ""
+        if hasattr(self, "_terr_bar_sync"):
+            self._terr_bar_sync()                # restore the LV / Coronary bars
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi
         self._lvv_epi_model_dict = None

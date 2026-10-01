@@ -2259,6 +2259,15 @@ class MainWindow(QMainWindow):
             self._casepres_win = w
             w.setFloating(True)
             w.resize(760, 520)
+            # While this panel is open it owns Shift+F / Shift+A (次/前シリーズ);
+            # free them from the viewer's last/first-image binding so Qt doesn't go
+            # ambiguous. Restored when the panel is hidden/closed.
+            try:
+                w.visibilityChanged.connect(
+                    lambda *_: self._sync_casepres_nav())
+            except Exception:                            # noqa: BLE001
+                pass
+        self._sync_casepres_nav()
         # Robust restore: a title-bar double-click toggles float/dock and can
         # leave the panel closed, hidden behind the Studies tab, shrunk, or
         # off-screen. Always bring it back visible with a sane geometry.
@@ -2276,6 +2285,25 @@ class MainWindow(QMainWindow):
         w.raise_()
         w.activateWindow()
         return w
+
+    def _sync_casepres_nav(self) -> None:
+        """Disable the viewer's Shift+F / Shift+A (last/first image) while the Case
+        Presentation panel is OPEN (visible) — the panel reuses those keys for
+        次/前シリーズ, and two app-wide shortcuts on one key go ambiguous in Qt.
+        Re-enabled when the panel is hidden / closed / tabbed away."""
+        w = getattr(self, "_casepres_win", None)
+        open_ = w is not None and w.isVisible()
+        for sc in getattr(self, "_nav_shift_scs", []):   # viewer last/first image
+            try:
+                sc.setEnabled(not open_)
+            except Exception:                            # noqa: BLE001
+                pass
+        if w is not None:                                # panel 次/前シリーズ
+            for sc in getattr(w, "_series_nav_scs", []):
+                try:
+                    sc.setEnabled(open_)
+                except Exception:                        # noqa: BLE001
+                    pass
 
     def _open_coronary_tree(self):
         """Tools ▸ Coronary Tree — a dockable branch-tree list of the coronary
@@ -5004,13 +5032,16 @@ class MainWindow(QMainWindow):
         # active pane's kind). F and A are free on CT (its tool keys are
         # Z/V/R/S/G/T/W + C).
         self._nav_shortcuts = []
+        self._nav_shift_scs = []        # Shift+F/Shift+A — disabled while the Case
+        #                                 Presentation panel is open (it reuses them)
         for key, fn in (
             ("F", lambda: self._nav_active("next")),
             ("A", lambda: self._nav_active("prev")),
             # Shift = jump to the END / START of the series list, so F/A step one
             # and Shift+F/Shift+A go to last/first. Everything is on the F/A
-            # family (no Home/End) per user request. No conflict: Shift+F/Shift+A
-            # are otherwise unused (Ctrl+Shift+A is Anonymize).
+            # family (no Home/End) per user request. While Case Presentation is
+            # open these two are DISABLED so the panel's Shift+F/A (次/前シリーズ)
+            # take over without a Qt ambiguity (see _sync_casepres_nav).
             ("Shift+F", lambda: self._nav_active("last")),
             ("Shift+A", lambda: self._nav_active("first")),
         ):
@@ -5018,6 +5049,8 @@ class MainWindow(QMainWindow):
             sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
             sc.activated.connect(fn)
             self._nav_shortcuts.append(sc)
+            if key.startswith("Shift+"):
+                self._nav_shift_scs.append(sc)
         self._xa_shortcuts = []
         for key, fn in (
             # Cine transport layout (user spec):
