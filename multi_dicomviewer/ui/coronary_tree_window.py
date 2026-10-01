@@ -573,7 +573,8 @@ class CoronaryTreeWindow(SnapDock):
                               self._myo_text(vid)])
         it.setData(0, _UID_ROLE, vid)
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-        it.setCheckState(0, Qt.CheckState.Checked)          # visible by default
+        it.setCheckState(0, Qt.CheckState.Unchecked
+                         if vid in self._hidden else Qt.CheckState.Checked)
         it.setForeground(0, QColor(ROOT_COLORS.get(
             self._root_role(vid), "#333333")))
         # Monospace 心筋量 column so the padded % / mL line up vertically.
@@ -624,6 +625,15 @@ class CoronaryTreeWindow(SnapDock):
     # -------------------------------------------------------- edit slots
     def _on_selection(self):
         self.vesselSelected.emit(self.selected_vid() or "")
+
+    def hide_vessel(self, vid: str) -> None:
+        """Hide one vessel's centreline (VR right-click ▸ この血管を非表示). Unchecks
+        it in the tree; the MPR overlay + VR tube then drop it."""
+        if vid not in self._tree.vessels or vid in self._hidden:
+            return
+        self._hidden.add(vid)
+        self._populate()                     # reflect the unchecked state
+        self._push_overlay()
 
     def _on_item_changed(self, item, _col):
         if self._building:
