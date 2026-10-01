@@ -2820,6 +2820,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_cb = None
         self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
         self._coro_target_move_cb = None     # (n, vid, idx) from a VR marker drag
+        self._coro_vessel_hide_cb = None     # (vid) from VR right-click ▸ 非表示
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
@@ -11342,19 +11343,33 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if c.isValid():
                     self._coro_target_action_cb(n, "color:" + c.name())
             return True
-        # No marker → offer to SET a Target on the nearest vessel under the cursor.
+        # No marker → the nearest vessel under the cursor: set a Target here, or
+        # hide this vessel.
         hit = self._vr_pick_vessel(key, sx, sy)
-        if hit is not None and self._coro_target_cb is not None:
+        if hit is not None and (self._coro_target_cb is not None
+                                or self._coro_vessel_hide_cb is not None):
             menu = QMenu(self)
-            a_set = menu.addAction(t("ここにターゲット設定"))
+            a_set = (menu.addAction(t("ここにターゲット設定"))
+                     if self._coro_target_cb is not None else None)
+            a_hide = (menu.addAction(t("この血管を非表示"))
+                      if self._coro_vessel_hide_cb is not None else None)
             ch = menu.exec(gp)
-            if ch is a_set:
+            if a_set is not None and ch is a_set:
                 try:
                     self._coro_target_cb(hit[0], int(hit[1]))
                 except Exception:                        # noqa: BLE001
                     pass
+            elif a_hide is not None and ch is a_hide:
+                try:
+                    self._coro_vessel_hide_cb(hit[0])
+                except Exception:                        # noqa: BLE001
+                    pass
             return True
         return False
+
+    def set_coronary_vessel_hide_cb(self, cb) -> None:
+        """Register cb(vid) for a VR right-click ▸ この血管を非表示."""
+        self._coro_vessel_hide_cb = cb
 
     def set_coronary_target_pick_cb(self, cb) -> None:
         """Register the (vid, idx) target-set callback (so a VR right-click can set

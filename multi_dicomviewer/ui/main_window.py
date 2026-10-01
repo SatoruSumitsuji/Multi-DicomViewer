@@ -2485,6 +2485,11 @@ class MainWindow(QMainWindow):
                     v.set_coronary_target_pick_cb(self.coronary_target_pick)
                 except Exception:                        # noqa: BLE001
                     pass
+            if hasattr(v, "set_coronary_vessel_hide_cb"):
+                try:
+                    v.set_coronary_vessel_hide_cb(self.coronary_vessel_hide)
+                except Exception:                        # noqa: BLE001
+                    pass
             # Territory Target markers (same source-CT gate as the vessels).
             if hasattr(v, "set_coronary_targets"):
                 tspec = []
@@ -2625,6 +2630,16 @@ class MainWindow(QMainWindow):
                 w.set_target_color(action[len("color:"):])
         except Exception:                                # noqa: BLE001
             pass
+
+    def coronary_vessel_hide(self, vid: str) -> None:
+        """A VR right-click asked to hide coronary vessel *vid* → uncheck it in the
+        Coronary Tree (its centreline / tube disappears)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "hide_vessel"):
+            try:
+                w.hide_vessel(vid)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def coronary_target_move(self, n: int, vid: str, idx: int) -> None:
         """A VR-pane drag of target #n reported a new (vid, idx) → move it in the
