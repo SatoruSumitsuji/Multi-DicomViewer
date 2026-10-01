@@ -2558,6 +2558,33 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def on_full_lv_created(self, full) -> bool:
+        """A CT viewer just saved a FullLv bundle. If a Coronary Tree with vessels
+        is already loaded, feed it in and start the territory review on the CURRENT
+        CT (no re-drop). Returns True if the review was started."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or getattr(w, "_tree", None) is None \
+                or not w._tree.vessels:
+            return False                                 # no tree → just save
+        try:
+            if not w.load_full_lv(full):
+                return False
+        except Exception:                                # noqa: BLE001
+            return False
+        if hasattr(w, "_set_overlay"):
+            try:
+                w._set_overlay(True)                     # overlay ON (+ show CT)
+            except Exception:                            # noqa: BLE001
+                pass
+        v = self._active.current_viewer() if self._active is not None else None
+        if v is not None and hasattr(v, "apply_full_lv"):
+            try:
+                v.apply_full_lv(full)
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+        return True
+
     def coronary_territory_summary(self, text: str) -> None:
         """Overlay the per-system territory summary (myocardium + LM/LAD/LCX/RCA)
         on the source CT's VR pane (bottom-right)."""

@@ -11654,10 +11654,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("FullLV"),
                                     t("Cannot build FullLv: {e}", e=err or ""))
             return
-        QMessageBox.information(
-            self.window(), t("FullLV"),
-            t("Saved: {p} — load it with a corotree.json in Tools ▸ Territory.",
-              p=os.path.basename(path)))
+        shell = self.window()
+        started = False
+        if hasattr(shell, "on_full_lv_created"):
+            try:
+                started = bool(shell.on_full_lv_created(full))
+            except Exception:                            # noqa: BLE001
+                started = False
+        if not started:
+            QMessageBox.information(
+                self.window(), t("FullLV"),
+                t("Saved: {p} — load it with a corotree.json in Tools ▸ Territory.",
+                  p=os.path.basename(path)))
 
     def _lvv_restore_blood(self, bd) -> bool:
         """Decode an embedded blood mask (BldLv.json 'blood') into memory and

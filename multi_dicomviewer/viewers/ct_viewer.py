@@ -2205,7 +2205,7 @@ class _Pane:
         _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
         _ttp.SetVerticalJustificationToBottom()
         self.terract.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        self.terract.GetPositionCoordinate().SetValue(0.66, 0.015)   # bottom-right
+        self.terract.GetPositionCoordinate().SetValue(0.80, 0.015)   # hug bottom-right
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
         # CT Territory per-target list — bottom-LEFT of the VR, same style.
@@ -8588,10 +8588,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("FullLV"),
                                     t("Cannot build FullLv: {e}", e=err or ""))
             return
-        QMessageBox.information(
-            self.window(), t("FullLV"),
-            t("Saved: {p} — load it with a corotree.json in Tools ▸ Territory.",
-              p=os.path.basename(path)))
+        # If a Coronary Tree is already loaded, feed this bundle straight in and
+        # start the territory review here (no need to re-drop the file). Otherwise
+        # just confirm the save.
+        shell = self.window()
+        started = False
+        if hasattr(shell, "on_full_lv_created"):
+            try:
+                started = bool(shell.on_full_lv_created(full))
+            except Exception:                            # noqa: BLE001
+                started = False
+        if not started:
+            QMessageBox.information(
+                self.window(), t("FullLV"),
+                t("Saved: {p} — load it with a corotree.json in Tools ▸ Territory.",
+                  p=os.path.basename(path)))
 
     def _lvv_load(self) -> None:
         from PyQt6.QtWidgets import (QApplication, QFileDialog, QMessageBox,
@@ -10823,8 +10834,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Coronary tree as 3-D tubes (world-mm, so they sit in the volume and
         # rotate with it). Per-root colour via per-cell RGB scalars.
         p.vr_coro_tube = vtkTubeFilter()
-        p.vr_coro_tube.SetRadius(0.6)            # mm
-        p.vr_coro_tube.SetNumberOfSides(8)
+        p.vr_coro_tube.SetRadius(0.9)            # mm (thicker → easier to see)
+        p.vr_coro_tube.SetNumberOfSides(10)
         p.vr_coro_tube.CappingOn()
         p.vr_coro_tube.SetInputData(vtkPolyData())
         p.vr_coro_mapper = vtkPolyDataMapper()
@@ -10833,6 +10844,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_mapper.SetScalarModeToUseCellData()
         p.vr_coro_actor = vtkActor()
         p.vr_coro_actor.SetMapper(p.vr_coro_mapper)
+        # Flat-bright shading so the per-root colours (LAD blue / LCX yellow /
+        # RCA green) read at FULL saturation instead of being darkened by lighting.
+        _cp = p.vr_coro_actor.GetProperty()
+        _cp.SetAmbient(1.0)
+        _cp.SetDiffuse(0.0)
+        _cp.SetSpecular(0.0)
         p.vr_coro_actor.SetVisibility(False)
         p.ren.AddActor(p.vr_coro_actor)
         # Perfusion territories as translucent 3-D iso-surfaces — a POOL of actors
@@ -10990,7 +11007,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         (z0, y0, x0), (z1, y1, x1) = nz.min(0), nz.max(0) + 1
         sub = lab[z0:z1, y0:y1, x0:x1]
         sx, sy, sz = self._dims
-        from vtkmodules.vtkFiltersCore import vtkFlyingEdges3D
+        from vtkmodules.vtkFiltersCore import (vtkFlyingEdges3D,
+                                               vtkPolyDataNormals,
+                                               vtkWindowedSincPolyDataFilter)
         for i, c in enumerate(colors, 1):
             if i > len(pool):
                 break
@@ -11004,13 +11023,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             mc = vtkFlyingEdges3D()
             mc.SetInputData(img)
             mc.SetValue(0, 0.5)
-            mc.ComputeNormalsOn()
-            ac.GetMapper().SetInputConnection(mc.GetOutputPort())
+            mc.ComputeNormalsOff()
+            # Smooth the voxel-stepped surface so the territory reads as a clean
+            # wedge, not a striped stack of slabs.
+            sm = vtkWindowedSincPolyDataFilter()
+            sm.SetInputConnection(mc.GetOutputPort())
+            sm.SetNumberOfIterations(20)
+            sm.SetPassBand(0.1)
+            sm.NonManifoldSmoothingOn()
+            sm.NormalizeCoordinatesOn()
+            sm.BoundarySmoothingOff()
+            nrm = vtkPolyDataNormals()
+            nrm.SetInputConnection(sm.GetOutputPort())
+            nrm.SetFeatureAngle(60.0)
+            ac.GetMapper().SetInputConnection(nrm.GetOutputPort())
             a = c[3] if len(c) > 3 else 0.4
             ac.GetProperty().SetColor(float(c[0]), float(c[1]), float(c[2]))
             ac.GetProperty().SetOpacity(float(a))
             ac.SetVisibility(True)
-            p.vr_terr_pipe.append((mc, img))     # keep alive (pipeline lifetime)
+            p.vr_terr_pipe.append((mc, sm, nrm, img))   # keep alive (pipeline)
 
     def _vr_pick_target(self, key, sx, sy) -> bool:
         """3-D target pick on the VR: cast a ray through (sx, sy) and set a Target
