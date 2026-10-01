@@ -60,10 +60,10 @@ ROOT_COLORS = {
 #: (a translucent wash over the myocardium): LAD blue, LCX yellow, RCA green, and
 #: a set Target's distal territory in red on top. Labels 1..4 in that order.
 TERRITORY_FILLS = [
-    (0.36, 0.58, 0.94, 0.46),    # 1 LAD  — medium blue (visible but not heavy)
-    (1.00, 0.85, 0.40, 0.42),    # 2 LCX  — pale yellow
-    (0.58, 0.77, 0.49, 0.40),    # 3 RCA  — pale green
-    (0.918, 0.60, 0.60, 0.55),   # 4 Target territory — pale red
+    (0.36, 0.58, 0.94, 0.30),    # 1 LAD  — blue (light wash so coronaries show)
+    (1.00, 0.85, 0.40, 0.28),    # 2 LCX  — yellow
+    (0.58, 0.77, 0.49, 0.28),    # 3 RCA  — green
+    (0.918, 0.50, 0.50, 0.42),   # 4 Target territory — red
 ]
 _ROLE_TERR_LABEL = {"LAD": 1, "LCX": 2, "RCA": 3}
 #: Reserved for the (future-phase) perfusion-territory overlay — pale red.
@@ -294,7 +294,11 @@ class CoronaryTreeWindow(SnapDock):
     def _load_cpr_paths(self, paths):
         """Load the given .cpr.json paths (shared by the file dialog and drag &
         drop) as unconnected vessels, then bring the source CT into view."""
-        added, errs = 0, []
+        added, errs, skipped = 0, [], 0
+        # Names already in the tree (e.g. a corotree.json was loaded first, or the
+        # same vessel dropped twice) — skip them so we don't create unconnected
+        # DUPLICATES of already-connected vessels (the "（未接続 N）" ghosts).
+        existing = {v.name for v in self._tree.vessels.values()}
         ct_uid, ct_dir = "", ""              # source 3-D CT of the first vessel
         for p in paths:
             try:
@@ -307,13 +311,17 @@ class CoronaryTreeWindow(SnapDock):
                 if not ctrl or len(ctrl) < 2:
                     errs.append(f"{os.path.basename(p)}: " + t("中心点が不足"))
                     continue
-                ctrl = np.asarray(ctrl, float)
-                cl = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM)
                 # strip ".cpr.json" → vessel name
                 name = os.path.splitext(
                     os.path.splitext(os.path.basename(p))[0])[0]
+                if name in existing:         # already in the tree → don't duplicate
+                    skipped += 1
+                    continue
+                ctrl = np.asarray(ctrl, float)
+                cl = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM)
                 self._tree.add_vessel(self._unique_vid(), name or "vessel",
                                       "branch", cl.points, ctrl=ctrl)
+                existing.add(name)
                 added += 1
                 if not ct_uid:               # remember the CT to open the overlay on
                     ct_uid = (data.get("series") or {}).get("series_uid", "")
@@ -1211,6 +1219,20 @@ class CoronaryTreeWindow(SnapDock):
         except OSError as exc:
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
 
+    def _dedupe_tree(self) -> int:
+        """Drop UNCONNECTED branch vessels whose name duplicates a CONNECTED vessel
+        (a root or a parented branch) — the "（未接続 N）" ghosts left when the raw
+        .cpr.json files were loaded alongside a corotree. Returns the count removed."""
+        connected_names = {v.name for v in self._tree.vessels.values()
+                           if v.role in ROOT_ROLES or v.parent is not None}
+        drop = [vid for vid, v in self._tree.vessels.items()
+                if v.role not in ROOT_ROLES and v.parent is None
+                and v.name in connected_names]
+        for vid in drop:
+            self._tree.vessels.pop(vid, None)
+            self._hidden.discard(vid)
+        return len(drop)
+
     def load_file(self, path) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -1222,6 +1244,7 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("冠動脈ツリー形式のファイルではありません。"))
             return False
         self._tree = CoronaryTree.from_json(data)
+        self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         ser = data.get("series") or {}
         self._ct_uid = ser.get("series_uid", "") or ""
