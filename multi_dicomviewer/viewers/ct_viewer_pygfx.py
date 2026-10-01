@@ -14420,14 +14420,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ""
 
     def _lv_save_dir(self) -> str:
-        """Default folder for SAVE / EXPORT / LOAD dialogs = the PARENT of the
-        source-data folder (one level ABOVE where the CT series was read)."""
+        """Default folder for SAVE / EXPORT / LOAD dialogs. Once the user has
+        saved/loaded somewhere this session, default THERE (the last-used folder,
+        per user request); otherwise the PARENT of the source-data folder."""
         import os
+        last = getattr(self, "_lv_last_dir", "") or ""
+        if last and os.path.isdir(last):
+            return last
         d = self._lv_series_dir()
         if not d:
             return d
         parent = os.path.dirname(d.rstrip("\\/"))
         return parent if parent and os.path.isdir(parent) else d
+
+    def _lv_remember_dir(self, path) -> None:
+        """Record the folder of a just-saved/loaded file so later dialogs default
+        there (CPR / LV Save / Load / Export)."""
+        import os
+        try:
+            dd = os.path.dirname(str(path))
+            if dd and os.path.isdir(dd):
+                self._lv_last_dir = dd
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _lv_default_stem(self) -> str:
         """Series-named file stem, e.g. 'ARIFIN;20260629_Se006' — the base for
