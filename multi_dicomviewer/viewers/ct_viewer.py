@@ -718,8 +718,12 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
     return lut
 
 
-#: Base VR coronary-tube radius (mm). LM is drawn ×1.5 (see _vr_update_coronary).
-_VR_CORO_R = 0.765
+#: VR coronary-tube radii (mm): branches are 80% of the old 0.765; the LM trunk
+#: keeps its old size (0.765×1.5). A dark halo (inverted hull) is drawn behind for
+#: contrast (see _vr_update_coronary).
+_VR_CORO_R = 0.765 * 0.8          # 0.612 — other vessels
+_VR_CORO_R_LM = 0.765 * 1.5       # 1.1475 — LM trunk (unchanged)
+_VR_CORO_HALO = 0.35             # halo rim width (mm) beyond the tube
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -10859,7 +10863,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         _cp.SetDiffuse(0.0)
         _cp.SetSpecular(0.0)
         p.vr_coro_actor.SetVisibility(False)
-        p.ren.AddActor(p.vr_coro_actor)
+        # A dark "halo" drawn as an inverted-hull outline (a slightly larger tube,
+        # only its BACK faces shown) behind the coloured tube → a crisp rim so the
+        # vessels stand out against the VR / territory colours.
+        p.vr_coro_halo_tube = vtkTubeFilter()
+        p.vr_coro_halo_tube.SetNumberOfSides(12)
+        p.vr_coro_halo_tube.CappingOn()
+        p.vr_coro_halo_tube.SetVaryRadiusToVaryRadiusByAbsoluteScalar()
+        p.vr_coro_halo_tube.SetInputData(vtkPolyData())
+        p.vr_coro_halo_mapper = vtkPolyDataMapper()
+        p.vr_coro_halo_mapper.SetInputConnection(
+            p.vr_coro_halo_tube.GetOutputPort())
+        p.vr_coro_halo_mapper.ScalarVisibilityOff()
+        p.vr_coro_halo_actor = vtkActor()
+        p.vr_coro_halo_actor.SetMapper(p.vr_coro_halo_mapper)
+        _hp = p.vr_coro_halo_actor.GetProperty()
+        _hp.SetColor(0.05, 0.05, 0.05)
+        _hp.SetAmbient(1.0)
+        _hp.SetDiffuse(0.0)
+        _hp.SetSpecular(0.0)
+        _hp.SetFrontfaceCulling(True)        # show only back faces → silhouette rim
+        p.vr_coro_halo_actor.SetVisibility(False)
+        p.ren.AddActor(p.vr_coro_halo_actor)
+        p.ren.AddActor(p.vr_coro_actor)      # coloured tube in front of its halo
         # Rounded tube ends: a sphere (same colour + radius) at every vessel
         # endpoint, so the 断端 are round, not flat discs.
         p.vr_coro_cap_mapper = vtkPolyDataMapper()
@@ -10917,21 +10943,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.ren.SetUseDepthPeelingForVolumes(True)   # VTK ≥ 8.1
         except Exception:                                # noqa: BLE001
             pass
-        # A layer-1 overlay renderer (shares the main camera) for the Target
-        # NUMBER labels, so they render ON TOP of the tubes/surfaces instead of
-        # being occluded by a vessel in front.
-        try:
-            from vtkmodules.vtkRenderingCore import vtkRenderer
-            rw = p.ren.GetRenderWindow()
-            p.vr_label_ren = vtkRenderer()
-            p.vr_label_ren.SetLayer(1)
-            p.vr_label_ren.InteractiveOff()
-            p.vr_label_ren.SetActiveCamera(p.ren.GetActiveCamera())  # same view
-            if rw is not None:
-                rw.SetNumberOfLayers(2)
-                rw.AddRenderer(p.vr_label_ren)
-        except Exception:                                # noqa: BLE001
-            p.vr_label_ren = None
 
     def _vr_update_coronary(self, key) -> None:
         """Rebuild the 3-D coronary tubes on VR pane *key* from the overlay spec."""
@@ -10947,6 +10958,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not spec:
             p.vr_coro_tube.SetInputData(vtkPolyData())
             p.vr_coro_actor.SetVisibility(False)
+            if getattr(p, "vr_coro_halo_actor", None) is not None:
+                p.vr_coro_halo_tube.SetInputData(vtkPolyData())
+                p.vr_coro_halo_actor.SetVisibility(False)
             if getattr(p, "vr_coro_cap_actor", None) is not None:
                 p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
                 p.vr_coro_cap_actor.SetVisibility(False)
@@ -10965,8 +10979,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if p3 is None or len(p3) < 2:
                 continue
             rgb = _hex_to_rgb(ves.get("color"))
-            # Only the LM TRUNK itself is drawn ×1.5 — its branches are normal.
-            r = _VR_CORO_R * (1.5 if ves.get("role") == "LM" else 1.0)
+            # Only the LM TRUNK itself is thick; its branches use the normal radius.
+            r = _VR_CORO_R_LM if ves.get("role") == "LM" else _VR_CORO_R
             start = pts.GetNumberOfPoints()
             for P in p3:
                 pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
@@ -11002,6 +11016,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_tube.SetInputData(pd)
         p.vr_coro_tube.Modified()
         p.vr_coro_actor.SetVisibility(True)
+        # Halo: same centrelines, radius + rim width (shares points/lines).
+        if getattr(p, "vr_coro_halo_actor", None) is not None:
+            hpd = vtkPolyData()
+            hpd.SetPoints(pts)
+            hpd.SetLines(lines)
+            hrad = numpy_to_vtk(
+                np.ascontiguousarray(np.asarray(radii) + _VR_CORO_HALO,
+                                     np.float32),
+                deep=True, array_type=VTK_FLOAT)
+            hrad.SetName("radius")
+            hpd.GetPointData().SetScalars(hrad)
+            p.vr_coro_halo_tube.SetInputData(hpd)
+            p.vr_coro_halo_tube.Modified()
+            p.vr_coro_halo_actor.SetVisibility(True)
         if getattr(p, "vr_coro_cap_actor", None) is not None:
             if n_caps:
                 cap_append.Update()
@@ -11018,12 +11046,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if getattr(p, "vr_tgt_actor", None) is None:
             return
-        # Labels live in the layer-1 overlay renderer so they stay on top; fall
-        # back to the main renderer if it wasn't created.
-        lren = getattr(p, "vr_label_ren", None) or p.ren
-        # Clear the previous number billboards.
+        # Clear the previous number billboards (in the main renderer).
         for lb in getattr(p, "vr_tgt_labels", []):
-            lren.RemoveViewProp(lb)
+            p.ren.RemoveViewProp(lb)
         p.vr_tgt_labels = []
         specs = self._coro_targets if self._vr_on.get(key) else []
         if not specs:
@@ -11034,15 +11059,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             from vtkmodules.vtkRenderingCore import vtkBillboardTextActor3D
         except Exception:                                # noqa: BLE001
             vtkBillboardTextActor3D = None
+        # LV centre (to push the number toward the EPICARDIUM = outward from the
+        # cavity, so it sits just outside the surface at the target).
+        ctr = getattr(self, "_center", None)
+        ctr = np.asarray(ctr, float) if ctr is not None else None
         pts = vtkPoints()
         for tg in specs:
             P = tg.get("point")
             if P is None:
                 continue
-            pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
+            Pw = np.asarray(P, float)
+            pts.InsertNextPoint(float(Pw[0]), float(Pw[1]), float(Pw[2]))
             if vtkBillboardTextActor3D is not None:
+                lp = Pw
+                if ctr is not None and np.all(np.isfinite(ctr)):
+                    out = Pw - ctr
+                    n = float(np.linalg.norm(out))
+                    if n > 1e-6:
+                        lp = Pw + (out / n) * 6.0     # ~6mm toward the epicardium
                 lb = vtkBillboardTextActor3D()
-                lb.SetPosition(float(P[0]), float(P[1]), float(P[2]))
+                lb.SetPosition(float(lp[0]), float(lp[1]), float(lp[2]))
                 lb.SetInput(str(tg.get("n", "")))
                 tp = lb.GetTextProperty()
                 tp.SetFontSize(18)
@@ -11050,8 +11086,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 tp.SetBold(True)
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
-                    lb.SetDisplayOffset(10, 8)       # nudge off the sphere
-                lren.AddViewProp(lb)                 # layer-1 → always on top
+                    lb.SetDisplayOffset(6, 4)        # small nudge off the sphere
+                p.ren.AddViewProp(lb)
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
@@ -11283,11 +11319,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             menu = QMenu(self)
             a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
             a_del = menu.addAction(t("ターゲットを削除"))
+            col_menu = menu.addMenu(t("領域の色変更"))
+            choices = [("赤", "#e06666"), ("橙", "#f6b26b"), ("桃", "#e78ac3"),
+                       ("紫", "#9b59b6"), ("白", "#f2f2f2")]
+            col_acts = {col_menu.addAction(t(nm)): hx for nm, hx in choices}
+            a_custom = col_menu.addAction(t("その他…"))
             ch = menu.exec(gp)
             if ch is a_vis:
                 self._coro_target_action_cb(n, "toggle")
             elif ch is a_del:
                 self._coro_target_action_cb(n, "delete")
+            elif ch in col_acts:
+                self._coro_target_action_cb(n, "color:" + col_acts[ch])
+            elif ch is a_custom:
+                from PyQt6.QtWidgets import QColorDialog
+                c = QColorDialog.getColor(parent=self.window())
+                if c.isValid():
+                    self._coro_target_action_cb(n, "color:" + c.name())
             return True
         # No marker → offer to SET a Target on the nearest vessel under the cursor.
         hit = self._vr_pick_vessel(key, sx, sy)
@@ -11447,6 +11495,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
             keep.add(getattr(p, "vr_coro_cap_actor", None))  # tube end caps
+            keep.add(getattr(p, "vr_coro_halo_actor", None))  # tube halo outline
             props = p.ren.GetViewProps()
             props.InitTraversal()
             while True:
@@ -11494,6 +11543,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
+                       getattr(p, "vr_coro_halo_actor", None),
                        getattr(p, "vr_coro_cap_actor", None),
                        getattr(p, "vr_tgt_actor", None),
                        getattr(p, "terract", None),

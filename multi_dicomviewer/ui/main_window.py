@@ -2621,6 +2621,8 @@ class MainWindow(QMainWindow):
                 w.delete_target_n(int(n))
             elif action == "toggle" and hasattr(w, "toggle_target_n"):
                 w.toggle_target_n(int(n))
+            elif action.startswith("color:") and hasattr(w, "set_target_color"):
+                w.set_target_color(action[len("color:"):])
         except Exception:                                # noqa: BLE001
             pass
 

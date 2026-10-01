@@ -66,6 +66,18 @@ TERRITORY_FILLS = [
     (0.918, 0.50, 0.50, 0.42),   # 4 Target territory — red
 ]
 _ROLE_TERR_LABEL = {"LAD": 1, "LCX": 2, "RCA": 3}
+#: Target-territory fill alpha (kept when the user changes the colour).
+_TARGET_ALPHA = 0.42
+#: A small palette for the Target-territory colour — distinct from the base
+#: LAD-blue / LCX-yellow / RCA-green so a target still stands out. "その他…" opens
+#: a full colour picker.
+TARGET_COLOR_CHOICES = [
+    ("赤", "#e06666"),
+    ("橙", "#f6b26b"),
+    ("桃", "#e78ac3"),
+    ("紫", "#9b59b6"),
+    ("白", "#f2f2f2"),
+]
 #: Reserved for the (future-phase) perfusion-territory overlay — pale red.
 TARGET_COLOR = "#ea9999"
 _UID_ROLE = Qt.ItemDataRole.UserRole
@@ -106,6 +118,7 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
         self._target_btn = None
+        self._target_color = TERRITORY_FILLS[3]   # Target-territory RGBA (changeable)
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
@@ -744,9 +757,10 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             return ""
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-        # Integer % first, 1-decimal mL after; fixed widths + a monospace column
-        # font (set in _make_item) line the % and mL up vertically across rows.
-        return f"{round(pct):>3d}% /{ml:>7.1f}mL"
+        # Integer % first (right-aligned 3 wide so the % sign lines up), then the
+        # mL starts right after "/ " (monospace column → the mL start lines up too,
+        # with only a single space after the slash).
+        return f"{round(pct):>3d}% / {ml:.1f}mL"
 
     def _recompute_targets(self) -> None:
         """Recompute each target's mL / % against the current engine, dropping any
@@ -951,7 +965,9 @@ class CoronaryTreeWindow(SnapDock):
                 mv, _ml = eng.territory(tg["vid"], tg["idx"])
                 if mv.any():
                     full[fz[mv], fy[mv], fx[mv]] = 4
-        return full, TERRITORY_FILLS
+        # Base LAD/LCX/RCA fills are fixed; the Target fill is user-changeable.
+        return full, [TERRITORY_FILLS[0], TERRITORY_FILLS[1],
+                      TERRITORY_FILLS[2], self._target_color]
 
     def _territory_summary_text(self) -> str:
         """Compact per-system summary (myocardium + LM/LAD/LCX/RCA %/mL), one line
@@ -1084,6 +1100,11 @@ class CoronaryTreeWindow(SnapDock):
         menu = QMenu(self)
         a_vis = menu.addAction(t("表示") if hidden else t("非表示"))
         a_del = menu.addAction(t("削除"))
+        col_menu = menu.addMenu(t("領域の色変更"))
+        col_acts = {}
+        for name, hexv in TARGET_COLOR_CHOICES:
+            col_acts[col_menu.addAction(t(name))] = hexv
+        a_custom = col_menu.addAction(t("その他…"))
         ch = menu.exec(self._targets_w.viewport().mapToGlobal(pos))
         if ch is a_vis:
             self._targets[ti]["hidden"] = not hidden
@@ -1095,6 +1116,29 @@ class CoronaryTreeWindow(SnapDock):
             self._refresh_targets_table()
             self._push_overlay()
             self._push_territory()
+        elif ch in col_acts:
+            self.set_target_color(col_acts[ch])
+        elif ch is a_custom:
+            self._pick_target_color()
+
+    def _pick_target_color(self) -> None:
+        """Open a full colour picker for the Target territory fill."""
+        from PyQt6.QtWidgets import QColorDialog
+        r, g, b, _a = self._target_color
+        cur = QColor(int(r * 255), int(g * 255), int(b * 255))
+        c = QColorDialog.getColor(cur, self, t("ターゲット領域の色"))
+        if c.isValid():
+            self.set_target_color(c.name())
+
+    def set_target_color(self, hex_or_color) -> None:
+        """Set the Target-territory fill colour (applies to ALL targets) and
+        refresh the overlay. Accepts a '#rrggbb' string."""
+        c = QColor(hex_or_color)
+        if not c.isValid():
+            return
+        self._target_color = (c.redF(), c.greenF(), c.blueF(), _TARGET_ALPHA)
+        self._run_busy(t("灌流域を再描画中…"),
+                       lambda: (self._push_overlay(), self._push_territory()))
 
     def target_specs(self) -> list:
         """Target markers/territories for the CT overlay: each = the target 3-D
