@@ -954,20 +954,20 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # display; targets are picked from the coronary overlay in a later phase).
         if (self._owner._vr_on.get(self._which)
                 and e.button() == Qt.MouseButton.LeftButton):
-            alt = bool(e.modifiers() & Qt.KeyboardModifier.AltModifier)
+            bypass = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             x, y = e.position().x(), e.position().y()
-            # (no Alt) grab an EXISTING Target marker under the cursor to drag it
+            # (no Shift) grab an EXISTING Target marker under the cursor to drag it
             # along the tree — takes priority over set / rotate.
-            if not alt:
+            if not bypass:
                 n = self._owner._vr_pick_target_marker(self._which, x, y)
                 if n is not None:
                     self._vr_tgt_drag = n
                     self._last = e.position()
                     return
-            # (no Alt) Target-set mode: a click 3-D-picks the nearest vessel.
-            # Hold Alt to skip target-setting and use the selected view tool
-            # (Zoom/Move/Rotate/Spin/WL) via a left-drag instead.
-            if (not alt and getattr(self._owner, "_coro_target_mode", False)
+            # (no Shift) Target-set mode: a click 3-D-picks the nearest vessel.
+            # Hold Shift to skip target-setting and ROTATE / use the selected view
+            # tool (Zoom/Move/Spin/WL) via a left-drag instead.
+            if (not bypass and getattr(self._owner, "_coro_target_mode", False)
                     and self._owner._vr_pick_target(self._which, x, y)):
                 return
             self._vr_drag = True
@@ -1066,11 +1066,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             )
             return
         # Territory target mode: a left-click on a coronary line sets a Target.
-        # Hold Alt to skip target-setting and use the selected view tool instead
+        # Hold Shift to skip target-setting and use the selected view tool instead
         # (Zoom/Move/Rotate/Spin/Paging/Thick/WL), so the view stays adjustable.
         if (e.button() == Qt.MouseButton.LeftButton
                 and getattr(self._owner, "_coro_target_mode", False)
-                and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)
+                and not (e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
                 and self._owner._coronary_target_click(
                     self._which, e.position().x(), e.position().y())):
             return
@@ -10643,11 +10643,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             pass
 
     def set_territory_mask(self, mask, colors=None) -> None:
-        """Public (shell): the perfusion-territory colour map is shown ON THE VR
-        (right pane) as translucent coloured iso-surfaces — NOT on the short-axis
-        MPR. *mask* = a full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,
-        4=Target) with *colors* the matching RGBA list, or None to clear."""
-        self._terr_mask_vol = None               # (MPR tint channel left cleared)
+        """Public (shell): the perfusion-territory colour map — shown BOTH as a
+        colour wash on the short-axis MPR (left) AND as translucent coloured iso-
+        surfaces on the VR (right). *mask* = a full-volume int-label numpy [z,y,x]
+        (1=LAD,2=LCX,3=RCA,4=Target) with *colors* the matching RGBA list, or a
+        legacy 0/1 mask (colors=None → pale red), or None to clear."""
         new_np = None
         if mask is not None and getattr(self, "_vol", None) is not None:
             m = np.asarray(mask)
@@ -10664,14 +10664,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_sig = sig
         self._terr_label_np = new_np
         self._terr_colors_v = colors
+        # MPR colour wash: an int-label vtkImageData resliced per plane (nearest) +
+        # a label LUT (see _refresh's territory reslice).
+        self._terr_mask_vol = None
+        if new_np is not None:
+            sx, sy, sz = self._dims
+            self._terr_mask_vol = numpy_to_vtk_image(
+                np.ascontiguousarray(new_np, np.float32), sx, sy, sz)
+        on = self._terr_mask_vol is not None
+        lut = (_terr_label_lut(colors) if (on and colors)
+               else _lvv_mask_lut(on, rgb=(0.918, 0.6, 0.6), alpha=0.5))
         for k in ("A", "B"):
             p = self.pane[k]
-            # Keep the short-axis MPR clean (territory belongs on the VR now).
-            p.reslice_terr.SetInputData(_placeholder_image())
+            p.reslice_terr.SetInputData(
+                self._terr_mask_vol if on else _placeholder_image())
+            p.colors_terr.SetLookupTable(lut)
             p.colors_terr.Modified()
             if self._vr_on.get(k):
                 self._vr_update_territory(k)
                 p.render()
+        self._refresh(reset_cam=False)
 
     @staticmethod
     def _enlarge_busy(dlg) -> None:
