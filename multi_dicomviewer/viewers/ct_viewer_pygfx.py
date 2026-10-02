@@ -666,6 +666,9 @@ class _Overlay(QWidget):
         only (mirrors the VTK viewer's _redraw_coronary)."""
         v = self._v
         spec = v._coro_overlay if v._mode == "3D" else None
+        # During CPR, pane A is the cross-section disc — no reference centrelines.
+        if v._cpr is not None and key == "A":
+            spec = None
         if not spec:
             return
         _pu, _pv, _pn = v._axes_for(key)
@@ -15186,12 +15189,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         relative to)."""
         # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
         self._cpr_prev_view = self._view_snapshot()
+        u, v, nrm = self._axes_for(which)        # RMF seed = the drawn plane
+        # Cross-section is ALWAYS pane A, MAP (route) is pane B. If drawn on A, move
+        # the trace to B so the route stays visible after A becomes the cross-section.
+        if which == "A" and self._measures["A"][mi].get("pts3d"):
+            _mv = self._measures["A"].pop(mi)
+            self._measures["B"].append(_mv)
+            which, mi = "B", len(self._measures["B"]) - 1
         m = self._measures[which][mi]
         # A confirmed CPR is ALWAYS splined: the centreline itself is a Catmull-Rom
         # spline through the control points (CenterLine.from_points), so smooth the
         # on-map trace too — the drawn line then matches the actual vessel curve.
         m["smooth"] = True
-        u, v, nrm = self._axes_for(which)
         if ref_up is not None:
             nrm = np.asarray(ref_up, float)
         p3 = m.get("pts3d")
