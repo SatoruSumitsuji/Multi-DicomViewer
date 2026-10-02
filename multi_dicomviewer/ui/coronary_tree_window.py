@@ -20,6 +20,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -160,6 +161,10 @@ class CoronaryTreeWindow(SnapDock):
              self._load_cpr, False),
             (t("接続"), t("読み込んだ枝を最近接端点で接続 (5mm以内)"),
              self._connect, False),
+            (t("消去"),
+             t("下の血管リストで選択した血管（下流の枝を含む）を一覧から消去。"
+               "Ctrlで複数選択・Shiftで範囲選択（元のCPRファイルは残る）"),
+             self._delete_selected, False),
         ])
         # Tree row: overlay toggle / save / load / clear.
         tree_btns = _row(t("ツリー："), [
@@ -236,6 +241,9 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.setColumnWidth(0, 130)
         self._tree_w.setColumnWidth(1, 70)
         self._tree_w.setColumnWidth(2, 70)
+        # Ctrl = arbitrary multi-select, Shift = contiguous range (for 消去).
+        self._tree_w.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self._tree_w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree_w.customContextMenuRequested.connect(self._menu)
         self._tree_w.itemChanged.connect(self._on_item_changed)
@@ -1292,6 +1300,33 @@ class CoronaryTreeWindow(SnapDock):
             return
         for k in victims:
             self._tree.vessels.pop(k, None)
+        self._populate()
+        self.treeChanged.emit()
+
+    def _delete_selected(self):
+        """消去 button — remove the vessels SELECTED in the list (each + its
+        downstream branches) from the tree. Multi-selection via Ctrl / Shift."""
+        vids = []
+        for it in self._tree_w.selectedItems():
+            vid = it.data(0, _UID_ROLE)
+            if vid and vid in self._tree.vessels and vid not in vids:
+                vids.append(vid)
+        if not vids:
+            self._warn(t("血管リストで消去する血管を選択してください。"))
+            return
+        victims = set()
+        for vid in vids:
+            victims.add(vid)
+            victims.update(self._tree.descendants(vid))
+        if QMessageBox.question(
+                self, t("消去"),
+                t("選択した {n} 本（下流の枝を含め計 {k} 本）を消去しますか? "
+                  "(元のCPRファイルは残ります)", n=len(vids), k=len(victims))) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for v in victims:
+            self._tree.vessels.pop(v, None)
+            self._hidden.discard(v)
         self._populate()
         self.treeChanged.emit()
 
