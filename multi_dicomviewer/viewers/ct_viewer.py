@@ -17583,6 +17583,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.information(self.window(), t("Short-axis"),
                                    t("Open a short-axis (CPR) first."))
             return None
+        # Auto-Fit before saving: rebuild the centreline from the current (possibly
+        # edited) control points so the saved .cpr.json reflects any Measure edits.
+        self._cpr_fit()
         cpr = self._cpr_state_dict()
         if cpr is None:
             QMessageBox.warning(self.window(), t("Short-axis"),
