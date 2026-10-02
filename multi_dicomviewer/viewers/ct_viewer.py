@@ -18120,7 +18120,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if p3:
             o, u, vv, _n = self._cpr_frame()
             k = self._cpr_at_ctrl()
-            if k is not None:
+            if k is not None and 0 <= k < len(p3):
                 P = np.asarray(p3[k], float)
                 du = float(np.dot(P - o, u))
                 dv = float(np.dot(P - o, vv))

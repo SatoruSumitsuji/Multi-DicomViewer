@@ -176,10 +176,14 @@ class CPRMixin:
         c = self._cpr
         if c is None:
             return []
-        cached = c.get("_ctrl_idx")
-        if cached is not None:
-            return cached
         p3 = self._cpr_ctrl_pts3d()
+        n = len(p3) if p3 else 0
+        cached = c.get("_ctrl_idx")
+        # Use the cache only when it still matches the control-point COUNT — an
+        # edit/move that changed pts3d without invalidating it would otherwise
+        # leave a too-long cache (→ IndexError on p3[k]).
+        if cached is not None and len(cached) == n:
+            return cached
         out = []
         if p3:
             pts = np.asarray(c["cl"].points, float)
