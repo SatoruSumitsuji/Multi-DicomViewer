@@ -15529,7 +15529,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not p3:
             return self._cpr_marker_pts
         k = self._cpr_at_ctrl()
-        if k is None:
+        if k is None or not (0 <= k < len(p3)):
             return self._cpr_marker_pts
         o, u, vv, _n = self._cpr_frame()
         P = np.asarray(p3[k], float)
