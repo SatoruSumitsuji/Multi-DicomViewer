@@ -10633,6 +10633,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         at the proximal end. 3-D MPR only."""
         p = self.pane[key]
         spec = self._coro_overlay if self._mode == "3D" else None
+        # During CPR, pane A is the cross-section disc — keep the (grey) reference
+        # centrelines off it so they don't clutter the short-axis.
+        if self._cpr is not None and key == "A":
+            spec = None
         if not spec:
             p.coro_mapper.SetInputData(vtkPolyData())
             p.coro_dash_mapper.SetInputData(vtkPolyData())
@@ -17485,12 +17489,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Remember the MPR view we're tracing on so re-Draw (see _coronary_draw)
         # can return to THIS exact image instead of a reset MPR.
         self._cpr_prev_view = self._view_snapshot()
+        # Capture the frame of the pane the route was drawn on (the RMF seed).
+        u, v, nrm = self._axes_for(which)
+        # The cross-section is ALWAYS pane A, the MAP (with the drawn route) is pane
+        # B. If the route was traced on A, move its measure to B so it stays visible
+        # as the map after A switches to the cross-section (its 2-D is re-derived
+        # from pts3d for B's plane in _redraw_geom).
+        if which == "A" and self._measures["A"][mi].get("pts3d"):
+            _mv = self._measures["A"].pop(mi)
+            self._measures["B"].append(_mv)
+            which, mi = "B", len(self._measures["B"]) - 1
         m = self._measures[which][mi]
         # A confirmed CPR is ALWAYS splined: the centreline itself is a Catmull-Rom
         # spline through the control points (CenterLine.from_points), so smooth the
         # on-map trace too — the drawn line then matches the actual vessel curve.
         m["smooth"] = True
-        u, v, nrm = self._axes_for(which)
         if ref_up is not None:
             nrm = np.asarray(ref_up, float)
         p3 = m.get("pts3d")
