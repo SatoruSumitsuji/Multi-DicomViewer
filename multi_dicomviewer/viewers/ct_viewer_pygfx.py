@@ -14996,12 +14996,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_save_btn.clicked.connect(self._cpr_save)
         self._cpr_save_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_save_btn)
-        # 登録: add THIS short-axis straight into the Coronary Tree panel (in-memory,
-        # no file), routed to its source CT — one-click vs Save→drag the .cpr.json.
-        self._cpr_register_btn = FitButton(t("登録"))
+        # 保存登録: SAVE this short-axis to a .cpr.json, THEN register it into the
+        # Coronary Tree (routed to its source CT), with the file name as the vessel
+        # name — 保存後登録 in one click. ("Save" saves only.)
+        self._cpr_register_btn = FitButton(t("保存登録"))
         self._cpr_register_btn.setHelpToolTip(
-            t("この短軸CPRを Coronary Tree に登録（元の3DCTごとに振り分け）。"
-              "ファイル保存せずワンクリックでツリーへ追加します。"))
+            t("この短軸CPRを .cpr.json に保存し、続けて Coronary Tree に登録"
+              "（元の3DCTごとに振り分け）。ファイル名が血管名になります。"))
         self._cpr_register_btn.clicked.connect(self._cpr_register_to_tree)
         self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
         row.addWidget(self._cpr_register_btn)
@@ -15338,14 +15339,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                                t("Saved: {p}", p=os.path.basename(path)))
         return True
 
-    def _cpr_save(self) -> None:
+    def _cpr_save(self):
         """Save the active short-axis to a NEW .cpr.json — the user names the file
-        (Save As). Use Overwrite to re-save to the same file."""
+        (Save As). Use Overwrite to re-save to the same file. Returns the written
+        path on success, else None (cancelled / failed) — 保存登録 uses the path."""
         from PyQt6.QtWidgets import QFileDialog
         import os
         data = self._cpr_build_data()
         if data is None:
-            return
+            return None
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "shortaxis")
@@ -15355,8 +15357,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.window(), t("Save short-axis"), default,
             "Short-axis (*.cpr.json);;JSON (*.json)")
         if not path:
-            return
-        self._cpr_write(path, data)
+            return None
+        if not self._cpr_write(path, data):
+            return None
+        return self._cpr_last_path               # the real path (.cpr.json appended)
 
     def _cpr_overwrite(self) -> None:
         """上書き保存 — re-save the active short-axis to the last saved / loaded
