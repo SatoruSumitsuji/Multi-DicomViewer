@@ -9788,8 +9788,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._hideall_btn.setMinimumWidth(
             min(self._hideall_btn.sizeHint().width(), 64))
         self._hideall_btn.setHelpToolTip(
-            t("Hide / Show every measurement line, region colour and result "
-              "text"))
+            t("計測線・領域色・結果テキストの一括表示切替（2段階）: 1回目=既存の線を"
+              "非表示（その後に引いた線は見えたまま）、2回目=その線も非表示、"
+              "3回目=全て再表示"))
         self._hideall_btn.setStyleSheet("background:#bdbdbd;color:#101010;")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
         row.addWidget(self._hideall_btn)
@@ -9809,16 +9810,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._update_hideall_btn()
         return bar
 
+    def _hideall_items(self):
+        """Every bulk-hideable result (measures on both panes + compares)."""
+        return [m for k in ("A", "B") for m in self._measures[k]] \
+            + list(self._compares)
+
     def _toggle_hide_all(self):
-        """Hide / Show ALL results at once. Show reveals EVERYTHING, including
-        individually-hidden results (clears their per-item Hide too)."""
-        self._results_hidden = not self._results_hidden
+        """Two-stage Hide / Show of ALL results:
+          press 1 (showing)  → hide everything that exists NOW; anything drawn
+                               AFTERWARDS (e.g. the CPR you just confirmed) stays
+                               visible, so you can declutter yet still see it;
+          press 2 (still something showing) → hide those later-added lines too;
+          press 3 (nothing left showing)    → Show All (reveal everything,
+                               including individually right-click-Hidden results).
+        Implemented with a per-item _bulk_hidden flag set at press time."""
+        items = self._hideall_items()
         if not self._results_hidden:
-            for k in ("A", "B"):
-                for m in self._measures[k]:
-                    m.pop("hidden", None)
-            for c in self._compares:
-                c.pop("hidden", None)
+            for x in items:
+                x["_bulk_hidden"] = True
+            self._results_hidden = True
+        else:
+            newly = [x for x in items
+                     if not x.get("_bulk_hidden") and not x.get("hidden")]
+            if newly:
+                for x in newly:
+                    x["_bulk_hidden"] = True
+            else:                                    # nothing showing → Show All
+                for x in items:
+                    x.pop("_bulk_hidden", None)
+                    x.pop("hidden", None)
+                self._results_hidden = False
         for k in ("A", "B"):
             self._redraw_meas(k)
             self._redraw_compare(k)
@@ -9828,10 +9849,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         btn = getattr(self, "_hideall_btn", None)
         if btn is None:
             return
-        has = (any(self._measures[k] for k in ("A", "B"))
-               or bool(self._compares))
-        btn.setEnabled(has)
-        btn.setText(t("Show All Result") if self._results_hidden
+        items = self._hideall_items()
+        btn.setEnabled(bool(items))
+        # Label shows what the NEXT press does: once in hidden mode with nothing
+        # still showing, the next press reveals all → "Show All Result"; otherwise
+        # the next press hides (more) → "Hide All Result".
+        any_visible = any(not x.get("_bulk_hidden") and not x.get("hidden")
+                          for x in items)
+        show_all_next = self._results_hidden and not any_visible
+        btn.setText(t("Show All Result") if show_all_next
                     else t("Hide All Result"))
 
     _JP = {"line": "Line", "polyline": "Polyline",
@@ -10070,9 +10096,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # All persisted results on this pane, drawn as a translucent (65%) annulus
         # FILL: Thickness colours each angular sector by its gap band (heatmap);
         # %PA fills with the outer shape's single colour. No radial lines.
-        # "Hide/Show All Result" (global) suppresses everything here.
-        cmps = ([] if self._results_hidden
-                else [c for c in self._compares if c["key"] == key])
+        # "Hide/Show All Result" suppresses results per-item via _bulk_hidden
+        # (set when Hide All is pressed); a result drawn AFTER that stays visible.
+        cmps = [c for c in self._compares
+                if c["key"] == key and not c.get("_bulk_hidden")]
         fill_tris, fill_cols = [], []
         for c in cmps:
             if c.get("hidden"):                      # Hidden → no fill
@@ -10435,9 +10462,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv_observe = (self._lv is not None and self._lv.get("sax") is None
                       and getattr(self, "_lv_view_free", False))
         for mi, m in enumerate(self._measures[key]):
-            # Hidden by "Hide/Show All Result" (global) or this measure's own
-            # right-click Hide → skip its line, handles, axes and id label.
-            if self._results_hidden or m.get("hidden"):
+            # Hidden by "Hide/Show All Result" (_bulk_hidden, set at press time)
+            # or this measure's own right-click Hide → skip line/handles/axes/label.
+            if m.get("_bulk_hidden") or m.get("hidden"):
                 continue
             # Epi境界表示 OFF hides the traced Endo/Epi border on the long-axis
             # pane too (this is the border shown there in SAX), so the toggle
@@ -11939,10 +11966,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # result — the polygon/ellipse measurement metrics are clutter there, so
         # they are hidden; outside LV they show as usual.
         in_lv = (self._lv is not None or self._lvv is not None)
-        meas_lines = ([] if (self._results_hidden or in_lv)
+        meas_lines = ([] if in_lv
                       else [self._metrics_text(key, m)
                             for m in self._measures[key]
-                            if m.get("_lv") is None])
+                            if m.get("_lv") is None
+                            and not m.get("_bulk_hidden")
+                            and not m.get("hidden")])
         lines = self._lv_status_lines() + meas_lines
         self._metric_lines[key] = lines        # keep unwrapped for re-wrapping
         # Confine the result block to ~40% width (right) by word-wrapping it to
@@ -11977,7 +12006,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # would grab an invisible point (another pass/plane's border
             # reprojected here) and shadow the visible point you meant to edit.
             # MV/AoV valve rings are LOCKED (no handles drawn) → never pickable.
-            if self._results_hidden or m.get("hidden") or m.get("_lv_valve"):
+            if m.get("_bulk_hidden") or m.get("hidden") or m.get("_lv_valve"):
                 continue
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_qt(which, q[0], q[1])
