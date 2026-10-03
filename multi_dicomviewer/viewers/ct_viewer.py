@@ -3225,6 +3225,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_save_btn.clicked.connect(self._cpr_save)
         self._cpr_save_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_save_btn)
+        # 登録: add THIS short-axis straight into the Coronary Tree panel (in-memory,
+        # no file), routed to its source CT — one-click vs Save→drag the .cpr.json.
+        self._cpr_register_btn = FitButton(t("登録"))
+        self._cpr_register_btn.setHelpToolTip(
+            t("この短軸CPRを Coronary Tree に登録（元の3DCTごとに振り分け）。"
+              "ファイル保存せずワンクリックでツリーへ追加します。"))
+        self._cpr_register_btn.clicked.connect(self._cpr_register_to_tree)
+        self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
+        row.addWidget(self._cpr_register_btn)
         self._cpr_overwrite_btn = FitButton(t("Overwrite"))
         self._cpr_overwrite_btn.setHelpToolTip(
             t("Overwrite the last saved / loaded .cpr.json (上書き保存) without "
@@ -3260,6 +3269,19 @@ class CTViewer(CPRMixin, AbstractViewer):
               "pull-back). Cross-section content is unchanged."))
         self._cpr_rev_btn.clicked.connect(self._cpr_toggle_reverse)
         srow.addWidget(self._cpr_rev_btn)
+        # ◀ ▶ : step the cross-section to the PREVIOUS / NEXT control (edit) point
+        # so a just-placed CPR point can be checked & adjusted (same as Alt+A/Alt+F),
+        # placed between Reverse and the scrubber.
+        self._cpr_prev_ctrl_btn = FitButton("◀")
+        self._cpr_prev_ctrl_btn.setHelpToolTip(
+            t("前のCPR編集点へ移動（調整用、Alt+A と同じ）"))
+        self._cpr_prev_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(-1))
+        srow.addWidget(self._cpr_prev_ctrl_btn)
+        self._cpr_next_ctrl_btn = FitButton("▶")
+        self._cpr_next_ctrl_btn.setHelpToolTip(
+            t("次のCPR編集点へ移動（調整用、Alt+F と同じ）"))
+        self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(+1))
+        srow.addWidget(self._cpr_next_ctrl_btn)
         self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
         self._cpr_slider.setMinimum(0)
         self._cpr_slider.setMaximum(0)
@@ -3273,6 +3295,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         srow.addWidget(self._cpr_lbl)
         row.addWidget(self._cpr_scrub, 1)
         self._cpr_scrub_widgets = (self._cpr_cap, self._cpr_rev_btn,
+                                   self._cpr_prev_ctrl_btn,
+                                   self._cpr_next_ctrl_btn,
                                    self._cpr_slider, self._cpr_lbl)
         for w in self._cpr_scrub_widgets:
             w.setVisible(False)
@@ -3299,6 +3323,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_exit_btn.setEnabled(not pend)
         if getattr(self, "_cpr_save_btn", None) is not None:
             self._cpr_save_btn.setEnabled(cpr and not pend)
+        if getattr(self, "_cpr_register_btn", None) is not None:
+            self._cpr_register_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_overwrite_btn", None) is not None:
             self._cpr_overwrite_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_fit_btn", None) is not None:

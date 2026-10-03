@@ -481,6 +481,44 @@ class CoronaryTreeWindow(SnapDock):
         if errs:
             self._warn("\n".join(errs[:8]))
 
+    def register_cpr(self, data, name=None) -> bool:
+        """Register an in-memory CPR (a viewer's 登録 button) as an unconnected
+        vessel — same routing as loading its .cpr.json (to the source-CT bundle by
+        series UID) but without a file. A duplicate name is auto-uniquified rather
+        than skipped, since 登録 is a deliberate single action. Returns True on add."""
+        if not isinstance(data, dict) or data.get("format") != "MDV-CPR":
+            self._warn(t("CPR形式ではありません。"))
+            return False
+        ctrl = data.get("ctrl")
+        if not ctrl or len(ctrl) < 2:
+            self._warn(t("中心点が不足しています。"))
+            return False
+        ser = data.get("series") or {}
+        uid = ser.get("series_uid", "") or ""
+        src_dir = data.get("src_dir", "") or ""
+        self._use_uid(uid, ct_dir=src_dir, label=self._uid_label(uid, ser))
+        nm = (str(name).strip() if name else "") or "vessel"
+        existing = {v.name for v in self._tree.vessels.values()}
+        if nm in existing:                       # uniquify: "LAD" → "LAD (2)"
+            base, k = nm, 2
+            while f"{base} ({k})" in existing:
+                k += 1
+            nm = f"{base} ({k})"
+        ctrl_arr = np.asarray(ctrl, float)
+        cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
+        self._tree.add_vessel(self._unique_vid(), nm, "branch", cl.points,
+                              ctrl=ctrl_arr)
+        self._populate()
+        self.treeChanged.emit()
+        if self._overlay_on:
+            self._push_overlay()
+        self._hint.setText(t("「{n}」を登録しました（役割を設定して「接続」→"
+                             "「ツリー表示」）。", n=nm))
+        # Surface the panel so the just-added vessel is visible.
+        self.show()
+        self.raise_()
+        return True
+
     def _toggle_overlay(self):
         """ツリー表示 / ツリー非表示 button: toggle the whole coronary overlay on
         the 3-D CT. Turning it ON also (re)opens the source CT if it isn't
