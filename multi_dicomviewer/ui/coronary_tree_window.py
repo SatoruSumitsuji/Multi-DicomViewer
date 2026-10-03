@@ -124,20 +124,30 @@ class CoronaryTreeWindow(SnapDock):
             b["label"] = label
         return b
 
+    @staticmethod
+    def _fmt_date(dt) -> str:
+        """DICOM StudyDate (YYYYMMDD) → YYYY-MM-DD for the CT-group label; passes
+        anything else through unchanged."""
+        s = str(dt or "").strip()
+        if len(s) == 8 and s.isdigit():
+            return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+        return s
+
     def _uid_label(self, uid, series=None):
-        """Readable CT-group label from the series meta (patient / Se# / date),
-        falling back to a short UID."""
+        """Readable CT-group label from the series meta — 症例 / 検査日 / シリーズ番号
+        (patient / study date / Se#) so the source 3-D CT is identifiable at a
+        glance; falls back to a short UID when the meta is absent."""
         series = series or {}
         parts = []
         pid = series.get("patient") or series.get("patient_id")
         if pid:
             parts.append(str(pid))
+        dt = self._fmt_date(series.get("date"))
+        if dt:
+            parts.append(dt)
         sn = series.get("series_number")
         if sn:
             parts.append(f"Se{sn}")
-        dt = series.get("date")
-        if dt:
-            parts.append(str(dt))
         if parts:
             return "CT: " + " ".join(parts)
         short = (uid[:12] + "…") if uid and len(uid) > 12 else (uid or t("(未指定)"))
@@ -689,29 +699,26 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.blockSignals(True)
         self._tree_w.clear()
         saved_active = self._active_uid
-        # One top-level group per source CT (collapsible, with a show/hide-all
-        # checkbox); a SINGLE CT stays flat (no group header) like before.
-        uids = [u for u, b in self._by_uid.items()
-                if b["tree"].vessels or u == saved_active]
-        single = len(uids) <= 1
+        # One top-level group per source CT — collapsible (▲▼) with a show/hide-all
+        # checkbox and a 症例/検査日/Se# label — shown even for a SINGLE CT so the
+        # source 3-D CT is always identified. Only CTs that actually hold vessels
+        # get a header (no empty placeholder when nothing is loaded).
+        uids = [u for u, b in self._by_uid.items() if b["tree"].vessels]
         for uid in uids:
             self._active_uid = uid           # route self._tree/_hidden/… to this CT
             b = self._bundle()
             tree = b["tree"]
-            if single:
-                parent = None
-            else:
-                grp = QTreeWidgetItem(
-                    [b.get("label") or self._uid_label(uid), "", "", ""])
-                grp.setData(0, _GRP_ROLE, uid)
-                grp.setData(0, _CTUID_ROLE, uid)
-                grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                grp.setCheckState(0, Qt.CheckState.Checked if b.get("visible", True)
-                                  else Qt.CheckState.Unchecked)
-                gf = grp.font(0); gf.setBold(True); grp.setFont(0, gf)
-                grp.setForeground(0, QColor("#1a3a6b"))
-                self._tree_w.addTopLevelItem(grp)
-                parent = grp
+            grp = QTreeWidgetItem(
+                [b.get("label") or self._uid_label(uid), "", "", ""])
+            grp.setData(0, _GRP_ROLE, uid)
+            grp.setData(0, _CTUID_ROLE, uid)
+            grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            grp.setCheckState(0, Qt.CheckState.Checked if b.get("visible", True)
+                              else Qt.CheckState.Unchecked)
+            gf = grp.font(0); gf.setBold(True); grp.setFont(0, gf)
+            grp.setForeground(0, QColor("#1a3a6b"))
+            self._tree_w.addTopLevelItem(grp)
+            parent = grp
             loose = set(tree.unconnected())
 
             def add_recursive(vid, parent_item, _tree=tree):
