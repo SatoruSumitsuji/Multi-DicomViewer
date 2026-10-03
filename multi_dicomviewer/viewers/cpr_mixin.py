@@ -101,29 +101,32 @@ class CPRMixin:
                 pts.round(4).tolist())
 
     def _cpr_register_to_tree(self) -> None:
-        """「登録」button: register the current short-axis CPR into the Coronary
-        Tree panel in-memory (no file), routed to its source CT by series UID —
-        the user names the vessel. Equivalent to saving a .cpr.json and dropping
-        it onto the panel, in one click. Shared by both viewers (VTK + pygfx)."""
-        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        """「保存登録」button: SAVE the current short-axis to a .cpr.json first
+        (the user names the file), THEN register that CPR into the Coronary Tree —
+        routed to its source CT by series UID, with the file name as the vessel
+        name (保存後登録 in one click). Cancelling the save cancels the registration.
+        Shared by both viewers (VTK + pygfx)."""
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+        path = self._cpr_save()                  # Save As prompt → path, or None
+        if not path:                             # cancelled / nothing to save
+            return
         data = self._cpr_build_data()            # includes series / src_dir / ctrl
-        if data is None:                         # no short-axis → already warned
+        if data is None:
             return
-        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
-                else "vessel")
-        name, ok = QInputDialog.getText(
-            self.window(), t("Coronary Tree"),
-            t("血管名（Coronary Tree に登録）:"), text=stem)
-        if not ok:
-            return
+        name = os.path.basename(path)            # file name → vessel name
+        for suf in (".cpr.json", ".json"):
+            if name.lower().endswith(suf):
+                name = name[:-len(suf)]
+                break
         shell = self.window()
         if shell is None or not hasattr(shell, "coronary_register_cpr"):
             QMessageBox.information(
                 self.window(), t("Coronary Tree"),
-                t("Coronary Tree パネルを開けませんでした。"))
+                t("保存しました。Coronary Tree パネルを開けませんでした。"))
             return
         try:
-            shell.coronary_register_cpr(data, (name or "").strip() or stem)
+            shell.coronary_register_cpr(data, name or "vessel")
         except Exception as exc:                 # noqa: BLE001
             QMessageBox.warning(self.window(), t("Coronary Tree"),
                                 t("登録に失敗しました: {e}", e=str(exc)))
