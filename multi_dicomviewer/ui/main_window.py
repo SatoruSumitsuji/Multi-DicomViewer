@@ -2425,17 +2425,11 @@ class MainWindow(QMainWindow):
         so the vessel centrelines redraw. Called by the panel on any tree /
         selection / visibility change, and after the source CT is shown."""
         w = getattr(self, "_corotree_win", None)
-        spec = None
-        if w is not None and hasattr(w, "overlay_spec"):
-            try:
-                spec = w.overlay_spec()
-            except Exception:                            # noqa: BLE001
-                spec = None
-        # Only draw on the pane showing the tree's SOURCE CT (world-mm points
-        # belong to that one volume); clear any other CT pane. If the source UID
-        # is unknown (older files), fall back to drawing on every CT viewer.
-        ct_uid = getattr(w, "_ct_uid", "") if w is not None else ""
-        base = ct_uid.split("#", 1)[0] if ct_uid else ""
+        # 案A: each loaded CT owns its own vessel tree. Push every pane the overlay
+        # of the CT IT is showing (match its SeriesUID to a tree bundle), so a 2nd
+        # CT's coronaries never bleed onto the 1st. Falls back to the active tree
+        # when the panel can't map series→bundle (older single-CT path).
+        has_map = w is not None and hasattr(w, "uid_for_series")
         for p in self._panes:
             try:
                 v = p.current_viewer()
@@ -2443,15 +2437,19 @@ class MainWindow(QMainWindow):
                 v = None
             if v is None or not hasattr(v, "set_coronary_overlay"):
                 continue
-            this_spec = spec
-            match = True
-            if base:
+            try:
+                su = p.shown_series_uid() or ""
+            except Exception:                            # noqa: BLE001
+                su = ""
+            pane_uid = w.uid_for_series(su) if has_map else ""
+            match = bool(pane_uid)
+            this_spec = None
+            if w is not None and hasattr(w, "overlay_spec"):
                 try:
-                    su = p.shown_series_uid() or ""
+                    this_spec = w.overlay_spec(uid=pane_uid or None) if match \
+                        else None
                 except Exception:                        # noqa: BLE001
-                    su = ""
-                match = (su == ct_uid or su.split("#", 1)[0] == base)
-                this_spec = spec if match else None
+                    this_spec = None
             try:
                 v.set_coronary_overlay(this_spec)
             except Exception:                            # noqa: BLE001
@@ -2462,7 +2460,7 @@ class MainWindow(QMainWindow):
                 vr_spec = None
                 if match and w is not None and hasattr(w, "overlay_spec"):
                     try:
-                        vr_spec = w.overlay_spec(force=True)
+                        vr_spec = w.overlay_spec(force=True, uid=pane_uid or None)
                     except Exception:                    # noqa: BLE001
                         vr_spec = None
                 try:
@@ -2495,7 +2493,7 @@ class MainWindow(QMainWindow):
                 tspec = []
                 if match and w is not None and hasattr(w, "target_specs"):
                     try:
-                        tspec = w.target_specs()
+                        tspec = w.target_specs(uid=pane_uid or None)
                     except Exception:                    # noqa: BLE001
                         tspec = []
                 try:
@@ -2573,8 +2571,18 @@ class MainWindow(QMainWindow):
         is already loaded, feed it in and start the territory review on the CURRENT
         CT (no re-drop). Returns True if the review was started."""
         w = getattr(self, "_corotree_win", None)
-        if w is None or getattr(w, "_tree", None) is None \
-                or not w._tree.vessels:
+        if w is None or not hasattr(w, "load_full_lv"):
+            return False
+        # 案A: make the panel's active CT follow the pane that created this FullLv
+        # so the territory attaches to THAT CT's vessel tree, not whichever was
+        # last active in the panel.
+        pane = self._active
+        su = pane.shown_series_uid() if pane is not None else ""
+        if su and hasattr(w, "uid_for_series") and hasattr(w, "_use_uid"):
+            u = w.uid_for_series(su)
+            if u:
+                w._use_uid(u)
+        if getattr(w, "_tree", None) is None or not w._tree.vessels:
             return False                                 # no tree → just save
         try:
             if not w.load_full_lv(full):

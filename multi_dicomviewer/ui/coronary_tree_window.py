@@ -81,7 +81,9 @@ TARGET_COLOR_CHOICES = [
 ]
 #: Reserved for the (future-phase) perfusion-territory overlay — pale red.
 TARGET_COLOR = "#ea9999"
-_UID_ROLE = Qt.ItemDataRole.UserRole
+_UID_ROLE = Qt.ItemDataRole.UserRole          # vessel vid on an item (None on a group)
+_CTUID_ROLE = Qt.ItemDataRole.UserRole + 1    # source-CT UID on every item
+_GRP_ROLE = Qt.ItemDataRole.UserRole + 2      # CT-group header → its UID
 #: Centreline resample step (mm) when rebuilding a .cpr.json's control points —
 #: dense enough for a coronary vessel; territory granularity, not correctness.
 _CPR_STEP_MM = 0.5
@@ -100,22 +102,106 @@ class CoronaryTreeWindow(SnapDock):
     #: the tree changed (add / delete / re-parent / load / clear / connect)
     treeChanged = pyqtSignal()
 
+    # ---- per-source-CT bundle plumbing --------------------------------------
+    def _bundle(self, uid=None):
+        """State bundle for a CT UID (the ACTIVE one by default); created lazily."""
+        uid = self._active_uid if uid is None else (uid or "")
+        b = self._by_uid.get(uid)
+        if b is None:
+            b = {"tree": CoronaryTree(), "hidden": set(), "targets": [],
+                 "full_lv": None, "territory": None, "myo_ml": None,
+                 "ct_dir": "", "last_path": None, "label": "", "visible": True}
+            self._by_uid[uid] = b
+        return b
+
+    def _use_uid(self, uid, ct_dir=None, label=None):
+        """Make *uid* the ACTIVE CT (its bundle then backs _tree/_hidden/…)."""
+        self._active_uid = uid or ""
+        b = self._bundle()
+        if ct_dir:
+            b["ct_dir"] = ct_dir
+        if label:
+            b["label"] = label
+        return b
+
+    def _uid_label(self, uid, series=None):
+        """Readable CT-group label from the series meta (patient / Se# / date),
+        falling back to a short UID."""
+        series = series or {}
+        parts = []
+        pid = series.get("patient") or series.get("patient_id")
+        if pid:
+            parts.append(str(pid))
+        sn = series.get("series_number")
+        if sn:
+            parts.append(f"Se{sn}")
+        dt = series.get("date")
+        if dt:
+            parts.append(str(dt))
+        if parts:
+            return "CT: " + " ".join(parts)
+        short = (uid[:12] + "…") if uid and len(uid) > 12 else (uid or t("(未指定)"))
+        return "CT: " + short
+
+    # The rest of the panel keeps its single-tree code; these properties point it
+    # at the ACTIVE CT's bundle. _populate / overlay iterate self._by_uid directly.
+    @property
+    def _tree(self): return self._bundle()["tree"]
+    @_tree.setter
+    def _tree(self, v): self._bundle()["tree"] = v
+
+    @property
+    def _hidden(self): return self._bundle()["hidden"]
+    @_hidden.setter
+    def _hidden(self, v): self._bundle()["hidden"] = v
+
+    @property
+    def _targets(self): return self._bundle()["targets"]
+    @_targets.setter
+    def _targets(self, v): self._bundle()["targets"] = v
+
+    @property
+    def _full_lv_data(self): return self._bundle()["full_lv"]
+    @_full_lv_data.setter
+    def _full_lv_data(self, v): self._bundle()["full_lv"] = v
+
+    @property
+    def _territory(self): return self._bundle()["territory"]
+    @_territory.setter
+    def _territory(self, v): self._bundle()["territory"] = v
+
+    @property
+    def _myo_ml(self): return self._bundle()["myo_ml"]
+    @_myo_ml.setter
+    def _myo_ml(self, v): self._bundle()["myo_ml"] = v
+
+    @property
+    def _ct_dir(self): return self._bundle()["ct_dir"]
+    @_ct_dir.setter
+    def _ct_dir(self, v): self._bundle()["ct_dir"] = v
+
+    @property
+    def _last_path(self): return self._bundle()["last_path"]
+    @_last_path.setter
+    def _last_path(self, v): self._bundle()["last_path"] = v
+
+    @property
+    def _ct_uid(self): return self._active_uid
+    @_ct_uid.setter
+    def _ct_uid(self, v): self._use_uid(v)
+
     def __init__(self, shell):
         super().__init__(t("Coronary Tree"))
         self._shell = shell
-        self._tree = CoronaryTree()
-        self._last_path: str | None = None
+        # Per-source-CT state: each 3-D CT gets its OWN CoronaryTree + Territory,
+        # keyed by its series UID, so two CTs' CPRs never merge. `_tree`, `_hidden`,
+        # `_targets`, `_full_lv_data`, `_territory`, `_myo_ml`, `_ct_dir`,
+        # `_last_path` are PROPERTIES onto the ACTIVE CT's bundle (see below).
+        self._by_uid: dict[str, dict] = {}
+        self._active_uid: str = ""          # the CT currently being worked on
         self._building = False
-        self._hidden: set[str] = set()      # vids the user unchecked (overlay off)
-        self._ct_uid: str = ""              # source-CT series UID (overlay target)
-        self._ct_dir: str = ""              # source-CT folder (re-open fallback)
         self._overlay_on: bool = False      # ツリー表示 toggle (off until pressed)
         self._overlay_btn = None            # the ツリー表示/非表示 toggle button
-        # ---- CT Territory (integrated; the standalone panel is retired) ----
-        self._full_lv_data = None           # loaded FullLv dict (LV masks)
-        self._territory = None              # TerritoryEngine (tree + FullLv)
-        self._myo_ml = None                 # myocardium (Compact) volume mL
-        self._targets: list = []            # [{vid, idx, ml, pct, hidden}] set on CT
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
         self._target_btn = None
@@ -303,9 +389,14 @@ class CoronaryTreeWindow(SnapDock):
         return self._tree
 
     def _unique_vid(self) -> str:
-        n = len(self._tree.vessels) + 1
+        # Unique across EVERY loaded CT (案A), not just the active tree, so a
+        # vessel id resolves to one CT when a viewer reports it (VR hide / target).
+        used = set()
+        for b in self._by_uid.values():
+            used.update(b["tree"].vessels)
+        n = len(used) + 1
         vid = f"v{n}"
-        while vid in self._tree.vessels:
+        while vid in used:
             n += 1
             vid = f"v{n}"
         return vid
@@ -323,14 +414,13 @@ class CoronaryTreeWindow(SnapDock):
             self._load_cpr_paths(paths)
 
     def _load_cpr_paths(self, paths):
-        """Load the given .cpr.json paths (shared by the file dialog and drag &
-        drop) as unconnected vessels, then bring the source CT into view."""
+        """Load the given .cpr.json paths (file dialog or drag & drop) as
+        unconnected vessels — each routed to the tree of ITS OWN source CT (by
+        series UID), so CPRs from different 3-D CTs stay in separate CoronaryTrees
+        rather than merging. The LAST CT loaded becomes the active one."""
         added, errs, skipped = 0, [], 0
-        # Names already in the tree (e.g. a corotree.json was loaded first, or the
-        # same vessel dropped twice) — skip them so we don't create unconnected
-        # DUPLICATES of already-connected vessels (the "（未接続 N）" ghosts).
-        existing = {v.name for v in self._tree.vessels.values()}
-        ct_uid, ct_dir = "", ""              # source 3-D CT of the first vessel
+        first_uid = None
+        last_uid = None
         for p in paths:
             try:
                 with open(p, "r", encoding="utf-8") as f:
@@ -342,29 +432,31 @@ class CoronaryTreeWindow(SnapDock):
                 if not ctrl or len(ctrl) < 2:
                     errs.append(f"{os.path.basename(p)}: " + t("中心点が不足"))
                     continue
+                ser = data.get("series") or {}
+                uid = ser.get("series_uid", "") or ""
+                src_dir = data.get("src_dir", "") or ""
+                # Route to THIS CT's tree (create it on first sight).
+                self._use_uid(uid, ct_dir=src_dir, label=self._uid_label(uid, ser))
+                last_uid = uid
+                if first_uid is None:
+                    first_uid = uid
                 # strip ".cpr.json" → vessel name
                 name = os.path.splitext(
                     os.path.splitext(os.path.basename(p))[0])[0]
-                if name in existing:         # already in the tree → don't duplicate
+                # Skip a name already in THIS CT's tree (dup drop / corotree + cpr).
+                if name in {v.name for v in self._tree.vessels.values()}:
                     skipped += 1
                     continue
                 ctrl = np.asarray(ctrl, float)
                 cl = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM)
                 self._tree.add_vessel(self._unique_vid(), name or "vessel",
                                       "branch", cl.points, ctrl=ctrl)
-                existing.add(name)
                 added += 1
-                if not ct_uid:               # remember the CT to open the overlay on
-                    ct_uid = (data.get("series") or {}).get("series_uid", "")
-                    ct_dir = data.get("src_dir", "") or ""
+                self._last_path = p
             except (OSError, ValueError) as exc:            # noqa: BLE001
                 errs.append(f"{os.path.basename(p)}: {exc}")
-        if paths:
-            self._last_path = paths[0]
-        if ct_uid:                           # overlay target for the shell
-            self._ct_uid = ct_uid
-        if ct_dir:
-            self._ct_dir = ct_dir
+        if last_uid is not None:             # active = the last CT loaded
+            self._use_uid(last_uid)
         self._populate()
         self.treeChanged.emit()
         # CPR読込 just loads the vessels; the 3-D CT + overlay come up only when
@@ -580,6 +672,7 @@ class CoronaryTreeWindow(SnapDock):
         it = QTreeWidgetItem([v.name, role_txt, self._junction_text(vid),
                               self._myo_text(vid)])
         it.setData(0, _UID_ROLE, vid)
+        it.setData(0, _CTUID_ROLE, self._active_uid)   # which CT this vessel is in
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
@@ -595,29 +688,55 @@ class CoronaryTreeWindow(SnapDock):
         self._building = True
         self._tree_w.blockSignals(True)
         self._tree_w.clear()
-        loose = set(self._tree.unconnected())
-
-        # Connected tree — traverse from the roots so nesting is correct
-        # regardless of the order vessels were loaded.
-        def add_recursive(vid, parent_item):
-            it = self._make_item(vid)
-            if parent_item is None:
-                self._tree_w.addTopLevelItem(it)
+        saved_active = self._active_uid
+        # One top-level group per source CT (collapsible, with a show/hide-all
+        # checkbox); a SINGLE CT stays flat (no group header) like before.
+        uids = [u for u, b in self._by_uid.items()
+                if b["tree"].vessels or u == saved_active]
+        single = len(uids) <= 1
+        for uid in uids:
+            self._active_uid = uid           # route self._tree/_hidden/… to this CT
+            b = self._bundle()
+            tree = b["tree"]
+            if single:
+                parent = None
             else:
-                parent_item.addChild(it)
-            for c in self._tree.children(vid):
-                add_recursive(c, it)
+                grp = QTreeWidgetItem(
+                    [b.get("label") or self._uid_label(uid), "", "", ""])
+                grp.setData(0, _GRP_ROLE, uid)
+                grp.setData(0, _CTUID_ROLE, uid)
+                grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                grp.setCheckState(0, Qt.CheckState.Checked if b.get("visible", True)
+                                  else Qt.CheckState.Unchecked)
+                gf = grp.font(0); gf.setBold(True); grp.setFont(0, gf)
+                grp.setForeground(0, QColor("#1a3a6b"))
+                self._tree_w.addTopLevelItem(grp)
+                parent = grp
+            loose = set(tree.unconnected())
 
-        for r in self._tree.roots():
-            add_recursive(r, None)
-        # Unconnected branches → a red "（未接続）" group.
-        if loose:
-            grp = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose)), "", ""])
-            grp.setForeground(0, QColor("#b00000"))
-            self._tree_w.addTopLevelItem(grp)
-            for vid in self._tree.vessels:
-                if vid in loose:
-                    grp.addChild(self._make_item(vid))
+            def add_recursive(vid, parent_item, _tree=tree):
+                it = self._make_item(vid)
+                if parent_item is None:
+                    self._tree_w.addTopLevelItem(it)
+                else:
+                    parent_item.addChild(it)
+                for c in _tree.children(vid):
+                    add_recursive(c, it, _tree)
+
+            for r in tree.roots():
+                add_recursive(r, parent)
+            if loose:
+                lg = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose)), "", "", ""])
+                lg.setData(0, _CTUID_ROLE, uid)
+                lg.setForeground(0, QColor("#b00000"))
+                if parent is None:
+                    self._tree_w.addTopLevelItem(lg)
+                else:
+                    parent.addChild(lg)
+                for vid in tree.vessels:
+                    if vid in loose:
+                        lg.addChild(self._make_item(vid))
+        self._active_uid = saved_active
         self._tree_w.expandAll()
         self._tree_w.blockSignals(False)
         self._building = False
@@ -631,23 +750,53 @@ class CoronaryTreeWindow(SnapDock):
             t("{n} 本 / ルート {r} / 未接続 {u}", n=n, r=roots, u=loose))
 
     # -------------------------------------------------------- edit slots
+    def _activate_item_ct(self, item) -> None:
+        """Switch the active CT bundle to the one the given tree item belongs to
+        (案A: each item carries its source-CT UID). No-op for a None item or one
+        whose CT is already active."""
+        if item is None:
+            return
+        uid = item.data(0, _CTUID_ROLE)
+        if uid and uid != self._active_uid and uid in self._by_uid:
+            self._active_uid = uid
+
     def _on_selection(self):
+        self._activate_item_ct(self._tree_w.currentItem())
         self.vesselSelected.emit(self.selected_vid() or "")
+
+    def _ct_of_vessel(self, vid: str) -> str:
+        """Which CT bundle owns a vid (first match); "" if none."""
+        for uid, b in self._by_uid.items():
+            if vid in b["tree"].vessels:
+                return uid
+        return ""
 
     def hide_vessel(self, vid: str) -> None:
         """Hide one vessel's centreline (VR right-click ▸ この血管を非表示). Unchecks
         it in the tree; the MPR overlay + VR tube then drop it."""
-        if vid not in self._tree.vessels or vid in self._hidden:
+        uid = self._ct_of_vessel(vid)
+        if not uid:
             return
-        self._hidden.add(vid)
+        b = self._by_uid[uid]
+        if vid in b["hidden"]:
+            return
+        b["hidden"].add(vid)
         self._populate()                     # reflect the unchecked state
         self._push_overlay()
 
     def _on_item_changed(self, item, _col):
         if self._building:
             return
+        grp_uid = item.data(0, _GRP_ROLE)
+        if grp_uid and grp_uid in self._by_uid:
+            # CT group header checkbox → show/hide ALL of that CT's coronaries.
+            on = item.checkState(0) == Qt.CheckState.Checked
+            self._by_uid[grp_uid]["visible"] = on
+            self._push_overlay()
+            return
         vid = item.data(0, _UID_ROLE)
         if vid:
+            self._activate_item_ct(item)
             on = item.checkState(0) == Qt.CheckState.Checked
             if on:
                 self._hidden.discard(vid)
@@ -657,33 +806,57 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
 
     # --------------------------------------------------------- overlay
-    def overlay_spec(self, force: bool = False) -> list:
+    def uid_for_series(self, series_uid: str) -> str:
+        """Which loaded-CT bundle a pane's shown SeriesUID belongs to (base match,
+        tolerating the "#…" suffix); "" if none. Lets the shell push each pane the
+        overlay of the CT it is actually displaying (per-CT trees, 案A)."""
+        if not series_uid:
+            return ""
+        base = series_uid.split("#", 1)[0]
+        for uid in self._by_uid:
+            if uid == series_uid or uid.split("#", 1)[0] == base:
+                return uid
+        return ""
+
+    def overlay_spec(self, force: bool = False, uid: str | None = None) -> list:
         """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
         its world-mm centreline, root colour and name — for the CT viewers to
         reproject onto their MPR planes. The currently-selected vessel is
         flagged so the viewer can highlight it. Empty while the ツリー表示 toggle
         is OFF (so the overlay only shows on demand) — unless *force* (the VR
-        pane always shows the colour-coded coronaries)."""
+        pane always shows the colour-coded coronaries). *uid* selects which
+        source-CT's tree to emit (default: the active one); a hidden CT group
+        (visible=False) emits nothing."""
         if not self._overlay_on and not force:
             return []
-        sel = self.selected_vid()
-        out = []
-        for vid, v in self._tree.vessels.items():
-            if vid in self._hidden:
-                continue
-            pts = np.asarray(v.points, float)
-            if pts.ndim != 2 or pts.shape[0] < 2:
-                continue
-            out.append({
-                "vid": vid,
-                "name": v.name,
-                "points": pts.tolist(),
-                "root": self._root_role(vid),   # root system "LM"/"LAD"/…
-                "role": v.role,                 # this vessel's OWN role (LM trunk ×1.5)
-                "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
-                "selected": (vid == sel),
-            })
-        return out
+        if uid is None:
+            uid = self._active_uid
+        b = self._by_uid.get(uid)
+        if b is None or not b.get("visible", True):
+            return []
+        saved = self._active_uid
+        self._active_uid = uid
+        try:
+            sel = self.selected_vid()
+            out = []
+            for vid, v in b["tree"].vessels.items():
+                if vid in b["hidden"]:
+                    continue
+                pts = np.asarray(v.points, float)
+                if pts.ndim != 2 or pts.shape[0] < 2:
+                    continue
+                out.append({
+                    "vid": vid,
+                    "name": v.name,
+                    "points": pts.tolist(),
+                    "root": self._root_role(vid),   # root system "LM"/"LAD"/…
+                    "role": v.role,                 # OWN role (LM trunk ×1.5)
+                    "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
+                    "selected": (vid == sel),
+                })
+            return out
+        finally:
+            self._active_uid = saved
 
     def _push_overlay(self):
         """Ask the shell to fan the current overlay out to every CT viewer."""
@@ -711,7 +884,14 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("FullLv (.FullLv.json) 形式ではありません。"))
             return False
         fser = full_lv_mod.series_uid(data)
-        if self._ct_uid and fser and self._ct_uid != fser:
+        # 案A: attach the FullLv to the CT bundle it belongs to (by series UID).
+        # If that CT is loaded, switch to it FIRST so territory lands on the right
+        # tree; otherwise keep the active CT and warn on a UID mismatch.
+        match_uid = self.uid_for_series(fser) if fser else ""
+        if match_uid:
+            self._use_uid(match_uid)
+        elif self._active_uid and fser \
+                and self._active_uid.split("#", 1)[0] != fser.split("#", 1)[0]:
             if QMessageBox.warning(
                     self, t("Coronary Tree"),
                     t("冠動脈ツリーと FullLv の元CT(SeriesUID)が一致しません。"
@@ -721,9 +901,9 @@ class CoronaryTreeWindow(SnapDock):
                     QMessageBox.StandardButton.No) \
                     != QMessageBox.StandardButton.Yes:
                 return False
+        if not self._active_uid and fser:
+            self._use_uid(fser)
         self._full_lv_data = data
-        if not self._ct_uid and fser:
-            self._ct_uid = fser
         if not self._ct_dir:
             self._ct_dir = ((data.get("src") or {}).get("src_dir")) or ""
         self._targets = []
@@ -1165,11 +1345,14 @@ class CoronaryTreeWindow(SnapDock):
         self._run_busy(t("灌流域を再描画中…"),
                        lambda: (self._push_overlay(), self._push_territory()))
 
-    def target_specs(self) -> list:
+    def target_specs(self, uid: str | None = None) -> list:
         """Target markers/territories for the CT overlay: each = the target 3-D
         point (on its vessel) + its distal territory volume, for the viewer to
         draw a marker (and, later, a colour fill). Empty when the overlay is off
-        or nothing is set."""
+        or nothing is set. Territory/Target analysis is single-CT (the active
+        one), so a pane showing a DIFFERENT source CT gets nothing (*uid*)."""
+        if uid is not None and uid != self._active_uid:
+            return []
         if not self._overlay_on or not self._targets or not self._targets_shown:
             return []
         sel = None
@@ -1198,6 +1381,7 @@ class CoronaryTreeWindow(SnapDock):
 
     def _menu(self, pos):
         it = self._tree_w.itemAt(pos)
+        self._activate_item_ct(it)      # 案A: operate on the clicked item's CT
         vid = it.data(0, _UID_ROLE) if it is not None else None
         menu = QMenu(self)
         role_menu = menu.addMenu(t("役割"))
@@ -1306,37 +1490,55 @@ class CoronaryTreeWindow(SnapDock):
     def _delete_selected(self):
         """消去 button — remove the vessels SELECTED in the list (each + its
         downstream branches) from the tree. Multi-selection via Ctrl / Shift."""
-        vids = []
+        # 案A: a selection can span CTs — group the chosen vids by their source
+        # CT so each is removed from its OWN tree.
+        by_ct: dict[str, list] = {}
         for it in self._tree_w.selectedItems():
             vid = it.data(0, _UID_ROLE)
-            if vid and vid in self._tree.vessels and vid not in vids:
-                vids.append(vid)
-        if not vids:
+            uid = it.data(0, _CTUID_ROLE)
+            if not vid or not uid or uid not in self._by_uid:
+                continue
+            if vid in self._by_uid[uid]["tree"].vessels \
+                    and vid not in by_ct.get(uid, ()):
+                by_ct.setdefault(uid, []).append(vid)
+        if not by_ct:
             self._warn(t("血管リストで消去する血管を選択してください。"))
             return
-        victims = set()
-        for vid in vids:
-            victims.add(vid)
-            victims.update(self._tree.descendants(vid))
+        victims: dict[str, set] = {}
+        total_sel = total_vic = 0
+        for uid, vids in by_ct.items():
+            tree = self._by_uid[uid]["tree"]
+            vic = set()
+            for vid in vids:
+                vic.add(vid)
+                vic.update(tree.descendants(vid))
+            victims[uid] = vic
+            total_sel += len(vids)
+            total_vic += len(vic)
         if QMessageBox.question(
                 self, t("消去"),
                 t("選択した {n} 本（下流の枝を含め計 {k} 本）を消去しますか? "
-                  "(元のCPRファイルは残ります)", n=len(vids), k=len(victims))) \
+                  "(元のCPRファイルは残ります)", n=total_sel, k=total_vic)) \
                 != QMessageBox.StandardButton.Yes:
             return
-        for v in victims:
-            self._tree.vessels.pop(v, None)
-            self._hidden.discard(v)
+        for uid, vic in victims.items():
+            b = self._by_uid[uid]
+            for v in vic:
+                b["tree"].vessels.pop(v, None)
+                b["hidden"].discard(v)
         self._populate()
         self.treeChanged.emit()
 
     def _clear_all(self):
-        if not self._tree.vessels:
+        # 案A: clears EVERY loaded CT's vessels.
+        if not any(b["tree"].vessels for b in self._by_uid.values()):
             return
         if QMessageBox.question(
                 self, t("全消去"),
                 t("全ての血管を消去しますか?")) == QMessageBox.StandardButton.Yes:
-            self._tree = CoronaryTree()
+            for b in self._by_uid.values():
+                b["tree"] = CoronaryTree()
+                b["hidden"] = set()
             self._populate()
             self.treeChanged.emit()
 
@@ -1399,12 +1601,15 @@ class CoronaryTreeWindow(SnapDock):
         if data.get("format") != "MDV-CoroTree":
             self._warn(t("冠動脈ツリー形式のファイルではありません。"))
             return False
+        # 案A: select (or create) THIS tree's source-CT bundle FIRST, so the
+        # loaded vessels land in the right CT and don't overwrite another's.
+        ser = data.get("series") or {}
+        uid = ser.get("series_uid", "") or ""
+        self._use_uid(uid, ct_dir=ser.get("src_dir", "") or "",
+                      label=self._uid_label(uid, ser))
         self._tree = CoronaryTree.from_json(data)
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
-        ser = data.get("series") or {}
-        self._ct_uid = ser.get("series_uid", "") or ""
-        self._ct_dir = ser.get("src_dir", "") or ""
         self._last_path = path
         self._populate()
         self.treeChanged.emit()
