@@ -100,6 +100,34 @@ class CPRMixin:
         return ([list(map(float, np.asarray(P, float))) for P in ctrl],
                 pts.round(4).tolist())
 
+    def _cpr_register_to_tree(self) -> None:
+        """「登録」button: register the current short-axis CPR into the Coronary
+        Tree panel in-memory (no file), routed to its source CT by series UID —
+        the user names the vessel. Equivalent to saving a .cpr.json and dropping
+        it onto the panel, in one click. Shared by both viewers (VTK + pygfx)."""
+        from PyQt6.QtWidgets import QInputDialog, QMessageBox
+        data = self._cpr_build_data()            # includes series / src_dir / ctrl
+        if data is None:                         # no short-axis → already warned
+            return
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "vessel")
+        name, ok = QInputDialog.getText(
+            self.window(), t("Coronary Tree"),
+            t("血管名（Coronary Tree に登録）:"), text=stem)
+        if not ok:
+            return
+        shell = self.window()
+        if shell is None or not hasattr(shell, "coronary_register_cpr"):
+            QMessageBox.information(
+                self.window(), t("Coronary Tree"),
+                t("Coronary Tree パネルを開けませんでした。"))
+            return
+        try:
+            shell.coronary_register_cpr(data, (name or "").strip() or stem)
+        except Exception as exc:                 # noqa: BLE001
+            QMessageBox.warning(self.window(), t("Coronary Tree"),
+                                t("登録に失敗しました: {e}", e=str(exc)))
+
     def _coronary_trace_ctrl(self):
         """3-D control points of the drawn coronary centreline polyline when no
         short-axis is built yet — the most recent polyline trace with pts3d

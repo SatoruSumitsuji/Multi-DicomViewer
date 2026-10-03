@@ -2334,6 +2334,23 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
+    def coronary_register_cpr(self, data, name=None) -> bool:
+        """A CT viewer's 登録 button: register an in-memory CPR into the Coronary
+        Tree panel (opening it if needed), routed to its source CT by series UID,
+        then refresh the overlay. Returns True if it was added."""
+        w = self._open_coronary_tree()          # ensure the panel exists + visible
+        if w is None or not hasattr(w, "register_cpr"):
+            return False
+        try:
+            ok = bool(w.register_cpr(data, name))
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        if ok:
+            self.coronary_overlay_refresh()
+        return ok
+
     def coronary_show_ct(self, series_uid: str, src_dir: str = "",
                          cpr_dir: str = "", prompt: bool = True) -> str:
         """Ensure the 3-D CT a coronary CPR was built on is loaded and shown, so
