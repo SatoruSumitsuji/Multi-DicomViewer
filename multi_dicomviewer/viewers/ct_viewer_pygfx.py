@@ -1427,9 +1427,9 @@ class _Overlay(QWidget):
         hov_out_mi = ho[1] if (ho and ho[0] == key) else -1
 
         for mi, m in enumerate(v._measures[key]):
-            # Hidden by "Hide/Show All Result" (global) or this measure's own
-            # right-click Hide → skip its line, handles and id label entirely.
-            if v._results_hidden or m.get("hidden"):
+            # Hidden by "Hide/Show All Result" (_bulk_hidden, set at press time)
+            # or this measure's own right-click Hide → skip line/handles/label.
+            if m.get("_bulk_hidden") or m.get("hidden"):
                 continue
             # Epi-Border OFF hides the traced Endo/Epi border on the long-axis
             # pane too (the green border shown there), so the toggle governs the
@@ -1604,7 +1604,7 @@ class _Overlay(QWidget):
         lines = list(v._metrics.get(key, []))
         if v._lv is not None:
             lines = v._lv_status_lines() + lines
-        if lines and not v._results_hidden:
+        if lines:                            # _metrics is already per-item filtered
             p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
             p.setFont(QFont("monospace", v._overlay_font_pt))
             rx = w * 0.60
@@ -1631,8 +1631,8 @@ class _Overlay(QWidget):
                        | int(Qt.AlignmentFlag.AlignTop),
                        t("Click to select 2 Ellipse/Polygon data to compare"
                          "  ({n_sel}/2)", n_sel=n_sel))
-        cmps = [] if v._results_hidden else [c for c in v._compares
-                                             if c["key"] == key]
+        cmps = [c for c in v._compares
+                if c["key"] == key and not c.get("_bulk_hidden")]
         for c in cmps:
             if c.get("hidden"):                          # Hidden → no fill
                 continue
@@ -6070,7 +6070,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._hideall_btn.setMinimumWidth(
             min(self._hideall_btn.sizeHint().width(), 64))
         self._hideall_btn.setHelpToolTip(t(
-            "Hide / Show every measurement line, region colour and result text"))
+            "計測線・領域色・結果テキストの一括表示切替（2段階）: 1回目=既存の線を"
+            "非表示（その後に引いた線は見えたまま）、2回目=その線も非表示、"
+            "3回目=全て再表示"))
         self._hideall_btn.setStyleSheet(                     # light grey, black text
             "QPushButton { background:#bdbdbd; color:#101010; }")
         self._hideall_btn.clicked.connect(self._toggle_hide_all)
@@ -6089,31 +6091,58 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._update_hideall_btn()
         return bar
 
+    def _hideall_items(self):
+        """Every bulk-hideable result (measures on both panes + compares)."""
+        return [m for k in ("A", "B") for m in self._measures[k]] \
+            + list(self._compares)
+
+    def _enter_hidden_mode(self):
+        """Hide everything that exists NOW (per-item _bulk_hidden); later-added
+        results stay visible until the next Hide All press."""
+        for x in self._hideall_items():
+            x["_bulk_hidden"] = True
+        self._results_hidden = True
+
     def _toggle_hide_all(self):
-        """Hide / Show ALL results (every measurement line, region colour and
-        result text) at once. Show reveals EVERYTHING, including results that
-        were individually hidden, regardless of their per-item Hide."""
-        self._results_hidden = not self._results_hidden
+        """Two-stage Hide / Show of ALL results:
+          press 1 (showing)  → hide everything that exists NOW; anything drawn
+                               AFTERWARDS (e.g. the CPR you just confirmed) stays
+                               visible, so you can declutter yet still see it;
+          press 2 (still something showing) → hide those later-added lines too;
+          press 3 (nothing left showing)    → Show All (reveal everything,
+                               including individually right-click-Hidden results).
+        Implemented with a per-item _bulk_hidden flag set at press time."""
         if not self._results_hidden:
-            for k in ("A", "B"):
-                for m in self._measures[k]:
-                    m.pop("hidden", None)
-            for c in self._compares:
-                c.pop("hidden", None)
+            self._enter_hidden_mode()
+        else:
+            newly = [x for x in self._hideall_items()
+                     if not x.get("_bulk_hidden") and not x.get("hidden")]
+            if newly:
+                for x in newly:
+                    x["_bulk_hidden"] = True
+            else:                                    # nothing showing → Show All
+                for x in self._hideall_items():
+                    x.pop("_bulk_hidden", None)
+                    x.pop("hidden", None)
+                self._results_hidden = False
         for k in ("A", "B"):
-            self._overlay[k].update()
+            self._redraw_meas(k)                     # rebuilds _metrics + repaints
         self._update_hideall_btn()
 
     def _update_hideall_btn(self):
-        """Sync the Hide/Show-All button: greyed when there is nothing to hide,
-        else labelled Hide (results visible) or Show (results hidden)."""
+        """Sync the Hide/Show-All button: greyed when there is nothing to hide;
+        the label shows what the NEXT press does — once in hidden mode with nothing
+        still showing, the next press reveals all → Show All Result; otherwise the
+        next press hides (more) → Hide All Result."""
         btn = getattr(self, "_hideall_btn", None)
         if btn is None:
             return
-        has = (any(self._measures[k] for k in ("A", "B"))
-               or bool(self._compares))
-        btn.setEnabled(has)
-        btn.setText(t("Show All Result") if self._results_hidden
+        items = self._hideall_items()
+        btn.setEnabled(bool(items))
+        any_visible = any(not x.get("_bulk_hidden") and not x.get("hidden")
+                          for x in items)
+        show_all_next = self._results_hidden and not any_visible
+        btn.setText(t("Show All Result") if show_all_next
                     else t("Hide All Result"))
 
     def _toggle_measure(self):
@@ -6650,7 +6679,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._recompute_compares(key)      # keep comparisons in sync on edit/delete
         self._metrics[key] = [self._metrics_text(key, m)
                               for m in self._measures[key]
-                              if m.get("_lv") is None]   # LV borders aren't results
+                              if m.get("_lv") is None          # LV borders ≠ results
+                              and not m.get("_bulk_hidden")
+                              and not m.get("hidden")]
         self._overlay[key].update()
         self._update_hideall_btn()
 
@@ -9806,8 +9837,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lvv_mask_btn.setChecked(False)
                 # Measure Result defaults to HIDDEN in Blood/Endo (only the
                 # measure-figure results; the LV volume readout is a separate
-                # block and still shows).
-                self._results_hidden = True
+                # block and still shows). Mark existing results bulk-hidden so the
+                # two-stage Hide All model treats this as "press 1".
+                if hasattr(self, "_enter_hidden_mode"):
+                    self._enter_hidden_mode()
+                else:
+                    self._results_hidden = True
                 if hasattr(self, "_update_hideall_btn"):
                     self._update_hideall_btn()
                 self._lvv_sync()
