@@ -14989,31 +14989,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_load_btn.clicked.connect(self._cpr_load)
         self._cpr_load_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
         row.addWidget(self._cpr_load_btn)
-        self._cpr_save_btn = FitButton(t("Save"))
-        self._cpr_save_btn.setHelpToolTip(
-            t("Save this short-axis (centreline + rotation / flip / reverse / "
-              "FOV / position) to a .cpr.json for reuse (name it yourself, e.g. "
-              "by vessel / analysis)."))
-        self._cpr_save_btn.clicked.connect(self._cpr_save)
-        self._cpr_save_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
-        row.addWidget(self._cpr_save_btn)
-        # 保存登録: SAVE this short-axis to a .cpr.json, THEN register it into the
-        # Coronary Tree (routed to its source CT), with the file name as the vessel
-        # name — 保存後登録 in one click. ("Save" saves only.)
-        self._cpr_register_btn = FitButton(t("保存登録"))
+        # Save = the single "save & register" action: save the short-axis to a
+        # .cpr.json AND register it into the Coronary Tree (routed to its source
+        # CT), the file name becoming the vessel name. The former save-only "Save"
+        # and "Overwrite" buttons were removed as redundant; their logic lives on
+        # in _cpr_save / _cpr_overwrite so the buttons can be revived if ever
+        # needed (the save-only path is still used internally by Save).
+        self._cpr_save_btn = None             # (save-only button retired)
+        self._cpr_overwrite_btn = None        # (Overwrite button retired)
+        self._cpr_register_btn = FitButton(t("Save"))
         self._cpr_register_btn.setHelpToolTip(
             t("この短軸CPRを .cpr.json に保存し、続けて Coronary Tree に登録"
               "（元の3DCTごとに振り分け）。ファイル名が血管名になります。"))
         self._cpr_register_btn.clicked.connect(self._cpr_register_to_tree)
         self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
         row.addWidget(self._cpr_register_btn)
-        self._cpr_overwrite_btn = FitButton(t("Overwrite"))
-        self._cpr_overwrite_btn.setHelpToolTip(
-            t("Overwrite the last saved / loaded .cpr.json (上書き保存) without "
-              "asking for a name. Falls back to Save if there is no file yet."))
-        self._cpr_overwrite_btn.clicked.connect(self._cpr_overwrite)
-        self._cpr_overwrite_btn.setStyleSheet(self._BTN_DIS)  # grey during Draw
-        row.addWidget(self._cpr_overwrite_btn)
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
