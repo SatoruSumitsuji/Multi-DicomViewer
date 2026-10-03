@@ -719,8 +719,8 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
 
 
 #: VR coronary-tube radii (mm): branches are 80% of the old 0.765; the LM trunk
-#: keeps its old size (0.765×1.5). A white halo (inverted hull) is drawn behind for
-#: contrast (see _vr_update_coronary).
+#: keeps its old size (0.765×1.5). A soft halo (inverted hull, black @ 50%) is
+#: drawn behind for contrast (see _vr_update_coronary).
 _VR_CORO_R = 0.765 * 0.8 * 0.8          # 0.49 — other vessels (thinner, has an outline)
 _VR_CORO_R_LM = 0.765 * 1.5 * 0.8       # 0.92 — LM trunk (also 80%)
 _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
@@ -10947,7 +10947,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_coro_halo_actor = vtkActor()
         p.vr_coro_halo_actor.SetMapper(p.vr_coro_halo_mapper)
         _hp = p.vr_coro_halo_actor.GetProperty()
-        _hp.SetColor(1.0, 1.0, 1.0)          # white rim (softer than the old black)
+        # Soft rim: black at 50% opacity (solid black read too strong, solid white
+        # too bright). Alt: white at 25% → SetColor(1,1,1) + SetOpacity(0.25).
+        _hp.SetColor(0.0, 0.0, 0.0)
+        _hp.SetOpacity(0.5)
         _hp.SetAmbient(1.0)
         _hp.SetDiffuse(0.0)
         _hp.SetSpecular(0.0)
