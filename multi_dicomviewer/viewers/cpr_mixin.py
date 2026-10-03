@@ -116,12 +116,82 @@ class CPRMixin:
                             return p3        # the canonical CPR-source trace
         return best
 
+    #: Fit lumen-snap parameters (contrast CTA): a control point is moved to the
+    #: HU-weighted centroid of voxels in [LO, HI] HU within a RADIUS-mm disc of the
+    #: vessel's SHORT-AXIS cross-section; if there is NO in-range voxel within the
+    #: disc the point is left where it is.
+    _CPR_FIT_HU_LO = 200.0
+    _CPR_FIT_HU_HI = 700.0
+    _CPR_FIT_RADIUS_MM = 2.5
+
+    def _cpr_fit_tangent(self, p3, i):
+        """Local vessel tangent at control point i (finite difference of the
+        neighbours; the adjacent segment at the ends)."""
+        n = len(p3)
+        if n < 2:
+            return np.array([0.0, 0.0, 1.0])
+        if i <= 0:
+            d = np.asarray(p3[1], float) - np.asarray(p3[0], float)
+        elif i >= n - 1:
+            d = np.asarray(p3[-1], float) - np.asarray(p3[-2], float)
+        else:
+            d = np.asarray(p3[i + 1], float) - np.asarray(p3[i - 1], float)
+        nd = float(np.linalg.norm(d))
+        return d / nd if nd > 1e-9 else np.array([0.0, 0.0, 1.0])
+
+    def _cpr_snap_ctrl_to_lumen(self, P, tangent):
+        """Move control point *P* (world mm) to the HU-weighted centroid of the
+        contrast lumen in its SHORT-AXIS cross-section (⟂ *tangent*): sample a
+        RADIUS-mm disc, keep voxels in [HU_LO, HU_HI], return their HU-weighted
+        centroid — or P unchanged when no in-range voxel is within the disc."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return np.asarray(P, float)
+        tn = np.asarray(tangent, float)
+        tl = float(np.linalg.norm(tn))
+        if tl < 1e-9:
+            return np.asarray(P, float)
+        tn = tn / tl
+        # Two orthonormal in-plane axes ⟂ the tangent.
+        ref = np.array([0.0, 0.0, 1.0]) if abs(tn[2]) < 0.9 \
+            else np.array([1.0, 0.0, 0.0])
+        u = np.cross(tn, ref)
+        u /= (np.linalg.norm(u) or 1.0)
+        v = np.cross(tn, u)
+        sx, sy, sz = self._dims
+        zmax, ymax, xmax = vol.shape
+        r = float(self._CPR_FIT_RADIUS_MM)
+        step = max(0.25, min(sx, sy, sz) * 0.5)
+        lo, hi = self._CPR_FIT_HU_LO, self._CPR_FIT_HU_HI
+        P0 = np.asarray(P, float)
+        acc = np.zeros(3)
+        wsum = 0.0
+        a = -r
+        while a <= r + 1e-9:
+            b = -r
+            while b <= r + 1e-9:
+                if a * a + b * b <= r * r:
+                    Q = P0 + a * u + b * v
+                    vx = int(round(Q[0] / sx))
+                    vy = int(round(Q[1] / sy))
+                    vz = int(round(Q[2] / sz))
+                    if 0 <= vz < zmax and 0 <= vy < ymax and 0 <= vx < xmax:
+                        huv = float(vol[vz, vy, vx])
+                        if lo <= huv <= hi:
+                            acc += huv * Q
+                            wsum += huv
+                b += step
+            a += step
+        if wsum <= 1e-9:                 # no contrast lumen within the disc
+            return P0
+        return acc / wsum
+
     def _cpr_fit(self):
-        """Rebuild the short-axis centreline from the CURRENT (possibly edited)
-        source-polyline control points, KEEPING the display state (rotation /
-        flip / reverse / FOV / arc-length position). The one-shot equivalent of
-        Save→Exit→Load — press it after nudging CPR control points in Measure
-        mode so the cross-section follows the edit. Shared by both viewers."""
+        """Fit: snap EVERY editable control point to the contrast-lumen centre in
+        its short-axis cross-section (HU 200–700, 2.5 mm radius; a point with no
+        in-range voxel is left alone), then rebuild the short-axis centreline from
+        the snapped points KEEPING the display state (rotation / flip / reverse /
+        FOV / arc-length position). Shared by both viewers."""
         from PyQt6.QtWidgets import QMessageBox
         c = self._cpr
         if c is None:
@@ -134,11 +204,18 @@ class CPRMixin:
             QMessageBox.information(self, t("Short-axis"),
                                    t("中心線トレースが見つかりません。"))
             return
-        p3 = self._measures[src][mi].get("pts3d")
+        m = self._measures[src][mi]
+        p3 = m.get("pts3d")
         if not p3 or len(p3) < 2:
             QMessageBox.information(self, t("Short-axis"),
                                    t("中心線の点が不足しています。"))
             return
+        # Snap every control point to the lumen centre in its cross-section.
+        p3f = [np.asarray(q, float) for q in p3]
+        snapped = [self._cpr_snap_ctrl_to_lumen(P, self._cpr_fit_tangent(p3f, i))
+                   for i, P in enumerate(p3f)]
+        m["pts3d"] = [list(map(float, q)) for q in snapped]
+        m["pts"] = [self._world3d_to_out(src, q) for q in snapped]
         old_n = c["cl"].n
         frac = (c["idx"] / (old_n - 1)) if old_n > 1 else 0.0
         saved = {"T": np.asarray(c["T"], float).copy(),
