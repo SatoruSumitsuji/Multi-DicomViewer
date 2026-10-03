@@ -5541,6 +5541,8 @@ class MainWindow(QMainWindow):
         # (a cpr-only folder has no DICOM, which otherwise dead-ends in the
         # "no DICOM files" warning).
         cpr_dirs = []
+        loaded_cpr = False
+        w = None
         for d in list(dirs):
             cprs = self._folder_cpr_files(d)
             if cprs:
@@ -5548,6 +5550,12 @@ class MainWindow(QMainWindow):
                 w = self._open_coronary_tree()
                 if w is not None and hasattr(w, "_load_cpr_paths"):
                     w._load_cpr_paths(cprs)
+                    loaded_cpr = True
+        # A dropped CPR folder should also bring up its source 3-D CT (like a
+        # .corotree.json / multi-.cpr.json drop): turn the overlay ON, which
+        # (re)opens the source CT by UID / saved folder and draws the centrelines.
+        if loaded_cpr and w is not None and hasattr(w, "_set_overlay"):
+            w._set_overlay(True)
         dirs = [d for d in dirs if d not in cpr_dirs]
         if not dirs and not files:
             return
