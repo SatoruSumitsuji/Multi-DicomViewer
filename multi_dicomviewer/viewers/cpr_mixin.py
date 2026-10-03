@@ -331,6 +331,37 @@ class CPRMixin:
         self._cpr_sync_bar()
         self._refresh()
 
+    def _cpr_jump_ctrl_end(self, to_last: bool) -> None:
+        """|◀ / ▶| : jump the cross-section to the FIRST (一番手前 / proximal) or
+        LAST (一番奥 / distal) control (edit) point in one click."""
+        c = self._cpr
+        if c is None:
+            return
+        idxs = sorted(set(self._cpr_ctrl_indices()))
+        if not idxs:
+            return
+        c["idx"] = int(idxs[-1] if to_last else idxs[0])
+        self._cpr_sync_bar()
+        self._refresh()
+
+    def _style_measure_btn(self, on: bool) -> None:
+        """Make the Measure toolbar button unmistakable while ON — the interaction
+        model changes (view ops then need Alt), so plain blue isn't enough. ON =
+        bold white on amber with a border and a label that spells out the Alt
+        change; OFF restores the plain look. Shared by both viewers (VTK + pygfx)."""
+        b = getattr(self, "_meas_btn", None)
+        if b is None:
+            return
+        if on:
+            b.setText(t("📏 計測中（視点操作は Alt）"))
+            b.setStyleSheet(
+                "QPushButton{background:#ff8c00;color:white;font-weight:bold;"
+                "border:2px solid #b35900;border-radius:4px;padding:2px 10px;}")
+        else:
+            b.setText("📏 Measure")
+            b.setStyleSheet(
+                "QPushButton:checked{background:#1f77b4;color:white;}")
+
     def _cpr_set_ctrl(self, m, src, p3) -> None:
         """Write a new control-point list back onto the trace measure (both the
         3-D points and their 2-D projection on the src/map pane)."""

@@ -6131,6 +6131,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(self, "_coronary_mpr_pending", False):
                 self._coronary_mpr_pending = False
                 self._coronary_sync_ui()
+        self._style_measure_btn(self._meas_on)   # prominent ON look (+Alt hint)
         self._refresh_tool_availability()   # grey/restore the interaction tools
         for k in ("A", "B"):
             self._overlay[k].update()
@@ -15035,9 +15036,15 @@ class CTViewer(CPRMixin, AbstractViewer):
               "pull-back). Cross-section content is unchanged."))
         self._cpr_rev_btn.clicked.connect(self._cpr_toggle_reverse)
         srow.addWidget(self._cpr_rev_btn)
-        # ◀ ▶ : step the cross-section to the PREVIOUS / NEXT control (edit) point
-        # so a just-placed CPR point can be checked & adjusted (same as Alt+A/Alt+F),
-        # placed between Reverse and the scrubber.
+        # |◀ ◀ ▶ ▶| : step / jump the cross-section between control (edit) points
+        # so a just-placed CPR point can be checked & adjusted. |◀ / ▶| jump to the
+        # first (一番手前) / last (一番奥) point; ◀ / ▶ step one (= Alt+A / Alt+F).
+        self._cpr_first_ctrl_btn = FitButton("|◀")
+        self._cpr_first_ctrl_btn.setHelpToolTip(
+            t("一番手前のCPR編集点へジャンプ"))
+        self._cpr_first_ctrl_btn.clicked.connect(
+            lambda: self._cpr_jump_ctrl_end(False))
+        srow.addWidget(self._cpr_first_ctrl_btn)
         self._cpr_prev_ctrl_btn = FitButton("◀")
         self._cpr_prev_ctrl_btn.setHelpToolTip(
             t("前のCPR編集点へ移動（調整用、Alt+A と同じ）"))
@@ -15048,6 +15055,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("次のCPR編集点へ移動（調整用、Alt+F と同じ）"))
         self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(+1))
         srow.addWidget(self._cpr_next_ctrl_btn)
+        self._cpr_last_ctrl_btn = FitButton("▶|")
+        self._cpr_last_ctrl_btn.setHelpToolTip(
+            t("一番奥のCPR編集点へジャンプ"))
+        self._cpr_last_ctrl_btn.clicked.connect(
+            lambda: self._cpr_jump_ctrl_end(True))
+        srow.addWidget(self._cpr_last_ctrl_btn)
         self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
         self._cpr_slider.setMinimum(0)
         self._cpr_slider.setMaximum(0)
@@ -15061,8 +15074,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         srow.addWidget(self._cpr_lbl)
         row.addWidget(self._cpr_scrub, 1)
         self._cpr_scrub_widgets = (self._cpr_cap, self._cpr_rev_btn,
+                                   self._cpr_first_ctrl_btn,
                                    self._cpr_prev_ctrl_btn,
                                    self._cpr_next_ctrl_btn,
+                                   self._cpr_last_ctrl_btn,
                                    self._cpr_slider, self._cpr_lbl)
         for w in self._cpr_scrub_widgets:
             w.setVisible(False)
