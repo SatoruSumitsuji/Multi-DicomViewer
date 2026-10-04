@@ -10,12 +10,16 @@ Gathers the app-wide display preferences in one place:
 """
 from __future__ import annotations
 
+from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -23,12 +27,40 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from multi_dicomviewer.core import image_quality, settings
 from multi_dicomviewer.i18n import t
+
+
+class _ColorButton(QPushButton):
+    """A small swatch button that opens a colour picker and remembers the pick
+    as a '#rrggbb' string (`.hex`)."""
+
+    def __init__(self, hex_color: str, title: str, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self.hex = hex_color
+        self.setFixedSize(46, 22)
+        self.clicked.connect(self._pick)
+        self._apply()
+
+    def _apply(self):
+        c = QColor(self.hex)
+        txt = "#000000" if c.lightnessF() > 0.6 else "#ffffff"
+        self.setStyleSheet(
+            f"background:{self.hex}; color:{txt}; border:1px solid #888;")
+        self.setText(self.hex)
+
+    def _pick(self):
+        c = QColorDialog.getColor(QColor(self.hex), self, self._title)
+        if c.isValid():
+            self.hex = c.name()
+            self._apply()
 
 
 class SettingsDialog(QDialog):
@@ -36,12 +68,22 @@ class SettingsDialog(QDialog):
     display-quality dict; *on_ct_color* opens the CT colour-map editor."""
 
     def __init__(self, caps: dict, quality: dict, on_ct_color,
-                 on_advanced=None, parent=None, lv_endo=None, lv_wall=None):
+                 on_advanced=None, parent=None, lv_endo=None, lv_wall=None,
+                 coronary=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         self._on_ct_color = on_ct_color
         self._on_advanced = on_advanced
-        root = QVBoxLayout(self)
+        # Wider + scrollable: the sections stack vertically and there are now many,
+        # so the content scrolls inside a fixed-size, comfortably wide dialog.
+        self.setMinimumWidth(560)
+        outer = QVBoxLayout(self)
+        _scroll = QScrollArea()
+        _scroll.setWidgetResizable(True)
+        _content = QWidget()
+        _scroll.setWidget(_content)
+        outer.addWidget(_scroll, 1)
+        root = QVBoxLayout(_content)
 
         # ---- Display count -------------------------------------------------
         gb_count = QGroupBox(t("Display count"))
@@ -203,12 +245,82 @@ class SettingsDialog(QDialog):
         wform.addRow(t("しきい値 (mm)"), self._wall_edit)
         root.addWidget(gb_wall)
 
+        # ---- Coronary Tree / Territory ------------------------------------
+        cp = coronary or settings.load_coronary_params()
+        gb_coro = QGroupBox(t("Coronary Tree / Territory"))
+        coform = QFormLayout(gb_coro)
+        cnote2 = QLabel(t(
+            "冠動脈の見た目を設定します（アプリ修正不要）。太さ・LM比・境界(ハロー)の"
+            "色/透過度・各系統/ターゲットの色。VRの太さ/ハローはWindowsのみ有効。"))
+        cnote2.setWordWrap(True)
+        coform.addRow(cnote2)
+        # 太さ (直径)
+        self._coro_dia = QDoubleSpinBox()
+        self._coro_dia.setRange(settings.CORONARY_TUBE_MIN,
+                                settings.CORONARY_TUBE_MAX)
+        self._coro_dia.setSingleStep(settings.CORONARY_TUBE_STEP)
+        self._coro_dia.setDecimals(1)
+        self._coro_dia.setSuffix(" mm")
+        self._coro_dia.setValue(float(cp.get("tube_diameter_mm", 1.0)))
+        coform.addRow(t("冠動脈の太さ（直径）"), self._coro_dia)
+        # LM 太さ比
+        self._coro_lm = QDoubleSpinBox()
+        self._coro_lm.setRange(settings.CORONARY_LM_MIN, settings.CORONARY_LM_MAX)
+        self._coro_lm.setSingleStep(settings.CORONARY_LM_STEP)
+        self._coro_lm.setDecimals(1)
+        self._coro_lm.setSuffix(" ×")
+        self._coro_lm.setValue(float(cp.get("lm_ratio", 1.5)))
+        coform.addRow(t("LMの太さ比（他の枝に対して）"), self._coro_lm)
+        # 境界(ハロー)色 + 透過度
+        halo_row = QHBoxLayout()
+        self._coro_halo_btn = _ColorButton(
+            cp.get("halo_color", "#000000"), t("冠動脈境界(ハロー)の色"))
+        halo_row.addWidget(self._coro_halo_btn)
+        halo_row.addWidget(QLabel(t("透過度")))
+        self._coro_halo_op = QComboBox()
+        for pct in range(10, 91, 10):
+            self._coro_halo_op.addItem(f"{pct}%", pct / 100.0)
+        cur_op = int(round(float(cp.get("halo_opacity", 0.5)) * 10)) * 10
+        idx = max(0, min(8, (cur_op - 10) // 10))
+        self._coro_halo_op.setCurrentIndex(idx)
+        halo_row.addWidget(self._coro_halo_op)
+        halo_row.addStretch(1)
+        _halo_w = QWidget()
+        _halo_w.setLayout(halo_row)
+        coform.addRow(t("冠動脈境界（ハロー）"), _halo_w)
+        # 領域色: LM / LAD / LCX / RCA + Target1..6
+        lc = cp.get("line_colors") or {}
+        grid = QGridLayout()
+        self._coro_line_btns: dict[str, _ColorButton] = {}
+        sys_defaults = settings.CORONARY_PARAMS_DEFAULT["line_colors"]
+        for i, role in enumerate(("LM", "LAD", "LCX", "RCA")):
+            grid.addWidget(QLabel(role), 0, i * 2)
+            b = _ColorButton(lc.get(role) or sys_defaults[role],
+                             t("{r} の色", r=role))
+            self._coro_line_btns[role] = b
+            grid.addWidget(b, 0, i * 2 + 1)
+        tcs = cp.get("target_colors") \
+            or settings.CORONARY_PARAMS_DEFAULT["target_colors"]
+        self._coro_target_btns: list[_ColorButton] = []
+        for i in range(6):
+            r, cstart = divmod(i, 3)
+            grid.addWidget(QLabel(f"Target{i + 1}"), 1 + r, cstart * 2)
+            hexv = tcs[i] if i < len(tcs) \
+                else settings.CORONARY_PARAMS_DEFAULT["target_colors"][i]
+            b = _ColorButton(hexv, t("Target{n} の色", n=i + 1))
+            self._coro_target_btns.append(b)
+            grid.addWidget(b, 1 + r, cstart * 2 + 1)
+        _grid_w = QWidget()
+        _grid_w.setLayout(grid)
+        coform.addRow(t("領域色（系統 / ターゲット）"), _grid_w)
+        root.addWidget(gb_coro)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        root.addWidget(btns)
+        outer.addWidget(btns)
 
     def _on_ct_count_changed(self, val: int) -> None:
         """Confirm before enabling multiple live CT panes — the memory/GPU load
@@ -263,6 +375,18 @@ class SettingsDialog(QDialog):
             v = sb.value()
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
         return out
+
+    def coronary(self) -> dict:
+        """Chosen Coronary Tree / Territory appearance params (sanitising/clamping
+        happens in settings.save_coronary_params)."""
+        return {
+            "tube_diameter_mm": float(self._coro_dia.value()),
+            "lm_ratio": float(self._coro_lm.value()),
+            "halo_color": self._coro_halo_btn.hex,
+            "halo_opacity": float(self._coro_halo_op.currentData()),
+            "line_colors": {r: b.hex for r, b in self._coro_line_btns.items()},
+            "target_colors": [b.hex for b in self._coro_target_btns],
+        }
 
     def lv_wall(self) -> dict:
         """Chosen wall-thickness colour thresholds (mm), parsed from the text —

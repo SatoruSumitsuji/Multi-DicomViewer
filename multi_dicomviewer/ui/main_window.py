@@ -2683,7 +2683,7 @@ class MainWindow(QMainWindow):
             elif action == "toggle" and hasattr(w, "toggle_target_n"):
                 w.toggle_target_n(int(n))
             elif action.startswith("color:") and hasattr(w, "set_target_color"):
-                w.set_target_color(action[len("color:"):])
+                w.set_target_color(action[len("color:"):], int(n))
         except Exception:                                # noqa: BLE001
             pass
 
@@ -6952,9 +6952,11 @@ class MainWindow(QMainWindow):
         quality = settings.load_display_quality()
         lv_endo = settings.load_lv_endo_params()
         lv_wall = settings.load_lv_wall_bands()
+        coronary = settings.load_coronary_params()
         dlg = SettingsDialog(caps, quality, self._open_ct_color,
                              on_advanced=self._open_advanced_quality,
-                             parent=self, lv_endo=lv_endo, lv_wall=lv_wall)
+                             parent=self, lv_endo=lv_endo, lv_wall=lv_wall,
+                             coronary=coronary)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Display count: persist + apply (over-cap panes sleep now; keep=active
@@ -6985,6 +6987,15 @@ class MainWindow(QMainWindow):
         for v in self._all_loaded_viewers():
             if hasattr(v, "_lv_wall_bands_refresh"):
                 v._lv_wall_bands_refresh()
+        # Coronary Tree / Territory appearance: persist + apply live (VR tube /
+        # LM ratio / halo on the viewers, colours on the panel's overlay/territory).
+        settings.save_coronary_params(dlg.coronary())
+        for v in self._all_loaded_viewers():
+            if hasattr(v, "coronary_params_refresh"):
+                v.coronary_params_refresh()
+        cw = getattr(self, "_corotree_win", None)
+        if cw is not None and hasattr(cw, "coronary_params_refresh"):
+            cw.coronary_params_refresh()
         self.statusBar().showMessage(
             t("Settings saved (CT {ct} / Angio {xa} live)",
               ct=vals["CT"], xa=vals["XA"]))

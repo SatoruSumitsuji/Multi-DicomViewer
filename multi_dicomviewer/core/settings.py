@@ -23,7 +23,31 @@ LANGUAGE_PATH = SETTINGS_DIR / "language.json"
 DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
 DICOMFOLDER_OPTIONS_PATH = SETTINGS_DIR / "dicomfolder_options.json"
 LIVE_CAPS_PATH = SETTINGS_DIR / "live_caps.json"
+CORONARY_PARAMS_PATH = SETTINGS_DIR / "coronary_params.json"
 _SCHEMA_VERSION = 2
+
+#: Coronary Tree / Territory appearance — user-editable in Settings so the look
+#: can change without a code edit. Defaults reproduce the shipped appearance.
+#:  - tube_diameter_mm : VR coronary tube DIAMETER (0.5–4.0, 0.5 steps)
+#:  - lm_ratio         : LM-trunk thickness vs other branches (1.0–2.0, 0.1)
+#:  - halo_color / halo_opacity : VR tube silhouette rim (opacity 0.1–0.9)
+#:  - line_colors      : vessel line / tube colour per root system (also the
+#:                       LAD/LCX/RCA territory wash hue)
+#:  - target_colors    : Target 1..6 territory/marker colours (by target number)
+CORONARY_PARAMS_DEFAULT = {
+    "version": 1,
+    "tube_diameter_mm": 1.0,
+    "lm_ratio": 1.5,
+    "halo_color": "#000000",
+    "halo_opacity": 0.5,
+    "line_colors": {
+        "LM": "#b4a7d6", "LAD": "#6fa8dc", "LCX": "#bf9000", "RCA": "#93c47d",
+    },
+    "target_colors": ["#e06666", "#f6b26b", "#e78ac3",
+                      "#9b59b6", "#3d85c6", "#6aa84f"],
+}
+CORONARY_TUBE_MIN, CORONARY_TUBE_MAX, CORONARY_TUBE_STEP = 0.5, 4.0, 0.5
+CORONARY_LM_MIN, CORONARY_LM_MAX, CORONARY_LM_STEP = 1.0, 2.0, 0.1
 
 #: How many panes of a modality may hold their full data (volume / clip) live
 #: at once before the least-recently-used one is frozen to a memory-light still.
@@ -683,6 +707,102 @@ def load_anon_profile():
         return tags, bool(data.get("emptify_private", True))
     except Exception:
         return None
+
+
+def _clean_hex(v, fallback: str) -> str:
+    """A '#rrggbb' string (lower-cased) or *fallback* when *v* is not one."""
+    s = str(v or "").strip()
+    if len(s) == 7 and s[0] == "#":
+        try:
+            int(s[1:], 16)
+            return s.lower()
+        except ValueError:
+            pass
+    return fallback
+
+
+def load_coronary_params() -> dict:
+    """Coronary Tree / Territory appearance params, merged over the defaults so a
+    missing / partial / corrupt file still yields a complete, valid dict."""
+    out = {
+        "version": 1,
+        "tube_diameter_mm": CORONARY_PARAMS_DEFAULT["tube_diameter_mm"],
+        "lm_ratio": CORONARY_PARAMS_DEFAULT["lm_ratio"],
+        "halo_color": CORONARY_PARAMS_DEFAULT["halo_color"],
+        "halo_opacity": CORONARY_PARAMS_DEFAULT["halo_opacity"],
+        "line_colors": dict(CORONARY_PARAMS_DEFAULT["line_colors"]),
+        "target_colors": list(CORONARY_PARAMS_DEFAULT["target_colors"]),
+    }
+    try:
+        data = json.loads(CORONARY_PARAMS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        try:
+            d = float(data.get("tube_diameter_mm", out["tube_diameter_mm"]))
+            out["tube_diameter_mm"] = max(CORONARY_TUBE_MIN,
+                                          min(CORONARY_TUBE_MAX, d))
+        except (TypeError, ValueError):
+            pass
+        try:
+            r = float(data.get("lm_ratio", out["lm_ratio"]))
+            out["lm_ratio"] = max(CORONARY_LM_MIN, min(CORONARY_LM_MAX, r))
+        except (TypeError, ValueError):
+            pass
+        out["halo_color"] = _clean_hex(data.get("halo_color"), out["halo_color"])
+        try:
+            o = float(data.get("halo_opacity", out["halo_opacity"]))
+            out["halo_opacity"] = max(0.1, min(0.9, o))
+        except (TypeError, ValueError):
+            pass
+        lc = data.get("line_colors")
+        if isinstance(lc, dict):
+            for k in out["line_colors"]:
+                out["line_colors"][k] = _clean_hex(
+                    lc.get(k), out["line_colors"][k])
+        tc = data.get("target_colors")
+        if isinstance(tc, list):
+            for i in range(6):
+                if i < len(tc):
+                    out["target_colors"][i] = _clean_hex(
+                        tc[i], out["target_colors"][i])
+    return out
+
+
+def save_coronary_params(params: dict) -> None:
+    """Best-effort persist of the coronary appearance params (sanitised)."""
+    try:
+        p = params or {}
+        merged = load_coronary_params()          # start from a clean/clamped base
+        for k in ("tube_diameter_mm", "lm_ratio", "halo_color",
+                  "halo_opacity", "line_colors", "target_colors"):
+            if k in p:
+                merged[k] = p[k]
+        # Re-sanitise through load-shaped clamping by round-tripping the fields.
+        clean = {
+            "version": 1,
+            "tube_diameter_mm": max(CORONARY_TUBE_MIN, min(
+                CORONARY_TUBE_MAX, float(merged["tube_diameter_mm"]))),
+            "lm_ratio": max(CORONARY_LM_MIN, min(
+                CORONARY_LM_MAX, float(merged["lm_ratio"]))),
+            "halo_color": _clean_hex(merged["halo_color"],
+                                     CORONARY_PARAMS_DEFAULT["halo_color"]),
+            "halo_opacity": max(0.1, min(0.9, float(merged["halo_opacity"]))),
+            "line_colors": {
+                k: _clean_hex((merged.get("line_colors") or {}).get(k),
+                              CORONARY_PARAMS_DEFAULT["line_colors"][k])
+                for k in CORONARY_PARAMS_DEFAULT["line_colors"]},
+            "target_colors": [
+                _clean_hex((merged.get("target_colors") or [None] * 6)[i]
+                           if i < len(merged.get("target_colors") or []) else None,
+                           CORONARY_PARAMS_DEFAULT["target_colors"][i])
+                for i in range(6)],
+        }
+        CORONARY_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CORONARY_PARAMS_PATH.write_text(
+            json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
 
 
 def save_anon_profile(tags, emptify_private: bool) -> None:
