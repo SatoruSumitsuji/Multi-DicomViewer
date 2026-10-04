@@ -2334,6 +2334,30 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
+    def coronary_series_meta(self, uid: str) -> dict:
+        """Live metadata (patient / study date / series number) of a LOADED CT
+        series, looked up by UID (base-UID match tolerating a '#…' suffix), for
+        the Coronary Tree's CT-group label. Empty dict if the CT isn't loaded."""
+        if not uid:
+            return {}
+        se = self._series_by_uid.get(uid)
+        if se is None:
+            base = uid.split("#", 1)[0]
+            for k, s in self._series_by_uid.items():
+                if k == uid or k.split("#", 1)[0] == base:
+                    se = s
+                    break
+        hdr = getattr(se, "header", None) if se is not None else None
+        if hdr is None:
+            return {}
+        pn = str(getattr(hdr, "PatientName", "") or "")
+        return {
+            "patient": pn.split("^")[0].strip() or pn.strip(),
+            "date": str(getattr(hdr, "StudyDate", "")
+                        or getattr(hdr, "AcquisitionDate", "") or ""),
+            "series_number": str(getattr(hdr, "SeriesNumber", "") or ""),
+        }
+
     def coronary_register_cpr(self, data, name=None) -> bool:
         """A CT viewer's 登録 button: register an in-memory CPR into the Coronary
         Tree panel (opening it if needed), routed to its source CT by series UID,
@@ -2523,6 +2547,13 @@ class MainWindow(QMainWindow):
         if w is not None and hasattr(w, "_push_territory"):
             try:
                 w._push_territory()
+            except Exception:                            # noqa: BLE001
+                pass
+        # Now that CTs are shown, refresh the CT-group labels from their live
+        # metadata (name / date / Se#), replacing any UID-only placeholder.
+        if w is not None and hasattr(w, "refresh_ct_labels"):
+            try:
+                w.refresh_ct_labels()
             except Exception:                            # noqa: BLE001
                 pass
 

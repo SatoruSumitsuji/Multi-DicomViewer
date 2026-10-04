@@ -110,48 +110,62 @@ class CoronaryTreeWindow(SnapDock):
         if b is None:
             b = {"tree": CoronaryTree(), "hidden": set(), "targets": [],
                  "full_lv": None, "territory": None, "myo_ml": None,
-                 "ct_dir": "", "last_path": None, "label": "", "visible": True}
+                 "ct_dir": "", "last_path": None, "label": "", "visible": True,
+                 "series": {}}
             self._by_uid[uid] = b
         return b
 
-    def _use_uid(self, uid, ct_dir=None, label=None):
-        """Make *uid* the ACTIVE CT (its bundle then backs _tree/_hidden/…)."""
+    def _use_uid(self, uid, ct_dir=None, label=None, series=None):
+        """Make *uid* the ACTIVE CT (its bundle then backs _tree/_hidden/…).
+        *series* = the .cpr.json's embedded meta (patient/date/series_number) kept
+        for the group label when the CT isn't loaded for a live lookup."""
         self._active_uid = uid or ""
         b = self._bundle()
         if ct_dir:
             b["ct_dir"] = ct_dir
         if label:
             b["label"] = label
+        if series:
+            # keep any non-empty fields (don't let a later meta-less load wipe them)
+            for k, v in series.items():
+                if v not in (None, ""):
+                    b["series"][k] = v
         return b
 
-    @staticmethod
-    def _fmt_date(dt) -> str:
-        """DICOM StudyDate (YYYYMMDD) → YYYY-MM-DD for the CT-group label; passes
-        anything else through unchanged."""
-        s = str(dt or "").strip()
-        if len(s) == 8 and s.isdigit():
-            return f"{s[:4]}-{s[4:6]}-{s[6:]}"
-        return s
-
     def _uid_label(self, uid, series=None):
-        """Readable CT-group label from the series meta — 症例 / 検査日 / シリーズ番号
-        (patient / study date / Se#) so the source 3-D CT is identifiable at a
-        glance; falls back to a short UID when the meta is absent."""
-        series = series or {}
-        parts = []
-        pid = series.get("patient") or series.get("patient_id")
-        if pid:
-            parts.append(str(pid))
-        dt = self._fmt_date(series.get("date"))
-        if dt:
-            parts.append(dt)
-        sn = series.get("series_number")
-        if sn:
-            parts.append(f"Se{sn}")
-        if parts:
+        """CT-group label = 症例 / 検査日(8桁) / シリーズ番号 (patient / study date /
+        Se#). The LIVE loaded-CT metadata is preferred (always correct once the CT
+        is up), then the .cpr.json's embedded *series*. If ALL three are present →
+        just those; if ANY is missing → append the source UID after whatever
+        exists; if none → the UID alone."""
+        emb = series or {}
+        live = {}
+        if self._shell is not None and hasattr(self._shell, "coronary_series_meta"):
+            try:
+                live = self._shell.coronary_series_meta(uid) or {}
+            except Exception:                               # noqa: BLE001
+                live = {}
+
+        def pick(*keys):
+            for src in (live, emb):                         # live wins
+                for k in keys:
+                    v = src.get(k)
+                    if v not in (None, ""):
+                        return str(v).strip()
+            return ""
+
+        name = pick("patient", "patient_id")
+        date = pick("date", "study_date")                   # 8-digit, no dashes
+        sn = pick("series_number")
+        se = f"Se{sn}" if sn else ""
+        parts = [p for p in (name, date, se) if p]
+        short = (uid[:16] + "…") if uid and len(uid) > 16 else uid
+        if len(parts) == 3:                                 # all present → no ID
             return "CT: " + " ".join(parts)
-        short = (uid[:12] + "…") if uid and len(uid) > 12 else (uid or t("(未指定)"))
-        return "CT: " + short
+        if parts:                                           # some missing → + ID
+            return "CT: " + " ".join(parts) + " / " \
+                + (short or t("(ID不明)"))
+        return "CT: " + (short or t("(未指定)"))             # nothing → ID only
 
     # The rest of the panel keeps its single-tree code; these properties point it
     # at the ACTIVE CT's bundle. _populate / overlay iterate self._by_uid directly.
@@ -446,7 +460,7 @@ class CoronaryTreeWindow(SnapDock):
                 uid = ser.get("series_uid", "") or ""
                 src_dir = data.get("src_dir", "") or ""
                 # Route to THIS CT's tree (create it on first sight).
-                self._use_uid(uid, ct_dir=src_dir, label=self._uid_label(uid, ser))
+                self._use_uid(uid, ct_dir=src_dir, series=ser)
                 last_uid = uid
                 if first_uid is None:
                     first_uid = uid
@@ -496,7 +510,7 @@ class CoronaryTreeWindow(SnapDock):
         ser = data.get("series") or {}
         uid = ser.get("series_uid", "") or ""
         src_dir = data.get("src_dir", "") or ""
-        self._use_uid(uid, ct_dir=src_dir, label=self._uid_label(uid, ser))
+        self._use_uid(uid, ct_dir=src_dir, series=ser)
         nm = (str(name).strip() if name else "") or "vessel"
         existing = {v.name for v in self._tree.vessels.values()}
         if nm in existing:                       # uniquify: "LAD" → "LAD (2)"
@@ -746,8 +760,9 @@ class CoronaryTreeWindow(SnapDock):
             self._active_uid = uid           # route self._tree/_hidden/… to this CT
             b = self._bundle()
             tree = b["tree"]
-            grp = QTreeWidgetItem(
-                [b.get("label") or self._uid_label(uid), "", "", ""])
+            lbl = self._uid_label(uid, b.get("series"))   # live meta + embedded
+            b["label"] = lbl                               # cache for relabel diff
+            grp = QTreeWidgetItem([lbl, "", "", ""])
             grp.setData(0, _GRP_ROLE, uid)
             grp.setData(0, _CTUID_ROLE, uid)
             grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -902,6 +917,21 @@ class CoronaryTreeWindow(SnapDock):
             return out
         finally:
             self._active_uid = saved
+
+    def refresh_ct_labels(self) -> None:
+        """Re-derive each CT group's label from the now-loaded CT's live metadata
+        (the shell calls this after a source CT is shown); repopulate only if a
+        label actually changed, so it doesn't fight the user's interaction."""
+        changed = False
+        for uid, b in self._by_uid.items():
+            if not b["tree"].vessels:
+                continue
+            new = self._uid_label(uid, b.get("series"))
+            if new != b.get("label"):
+                b["label"] = new
+                changed = True
+        if changed and not self._building:
+            self._populate()
 
     def _push_overlay(self):
         """Ask the shell to fan the current overlay out to every CT viewer."""
@@ -1650,8 +1680,7 @@ class CoronaryTreeWindow(SnapDock):
         # loaded vessels land in the right CT and don't overwrite another's.
         ser = data.get("series") or {}
         uid = ser.get("series_uid", "") or ""
-        self._use_uid(uid, ct_dir=ser.get("src_dir", "") or "",
-                      label=self._uid_label(uid, ser))
+        self._use_uid(uid, ct_dir=ser.get("src_dir", "") or "", series=ser)
         self._tree = CoronaryTree.from_json(data)
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
