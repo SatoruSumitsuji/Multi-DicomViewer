@@ -67,6 +67,8 @@ TERRITORY_FILLS = [
     (0.58, 0.77, 0.49, 0.28),    # 3 RCA  — green
     (0.918, 0.50, 0.50, 0.42),   # 4 Target territory — red
 ]
+#: Clinical display order for root trunks — LM first (not alphabetical).
+_ROOT_ORDER = {"LM": 0, "LAD": 1, "LCX": 2, "RCA": 3}
 _ROLE_TERR_LABEL = {"LAD": 1, "LCX": 2, "RCA": 3}
 #: Target-territory fill alpha (kept when the user changes the colour).
 _TARGET_ALPHA = 0.42
@@ -818,7 +820,14 @@ class CoronaryTreeWindow(SnapDock):
                 for c in _tree.children(vid):
                     add_recursive(c, it, _tree)
 
-            for r in tree.roots():
+            # Clinical order LM → LAD → LCX → RCA (LM on top), not alphabetical;
+            # any other root role sorts after, then by name for stability.
+            def _root_key(r):
+                role = tree.vessels[r].role if r in tree.vessels else ""
+                return (_ROOT_ORDER.get(role, 99), tree.vessels[r].name
+                        if r in tree.vessels else "")
+
+            for r in sorted(tree.roots(), key=_root_key):
                 add_recursive(r, parent)
             if loose:
                 lg = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose)), "", "", ""])
