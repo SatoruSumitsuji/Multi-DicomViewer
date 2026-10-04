@@ -2816,6 +2816,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # pushed from the Coronary Tree panel; while target-mode is ON a left-click
         # on a vessel line sets a Target (reported via _coro_target_cb).
         self._coro_targets: list = []
+        # VR appearance params (tube diameter / LM ratio / halo) from Settings ▸
+        # Coronary Tree / Territory; reloaded live via coronary_params_refresh.
+        self._coro_params = settings.load_coronary_params()
         self._coro_target_mode = False
         self._coro_target_cb = None
         self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
@@ -10672,6 +10675,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
+    def coronary_params_refresh(self) -> None:
+        """Re-read the coronary appearance params (Settings ▸ Coronary Tree /
+        Territory) and rebuild the VR tubes/halo (tube diameter / LM ratio / halo
+        colour+opacity live here); colours of lines/territory/targets arrive
+        separately via the panel's re-push."""
+        self._coro_params = settings.load_coronary_params()
+        try:
+            for k in ("A", "B"):
+                if self._vr_on.get(k):
+                    self._vr_update_coronary(k)
+                    self.pane[k].render()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def set_vr_coronary(self, spec) -> None:
         """Public (shell): coronary tubes for the VR pane, pushed independently of
         the 2-D ツリー表示 toggle so LAD/LCX/RCA stay colour-coded on the VR from the
@@ -10728,8 +10745,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if ves.get("vid") in self._coro_names:   # names off by default
                 labels.append((ves.get("name", ""), out[0], rgb, sel))
         # Territory Target markers: a filled dot + just the target NUMBER beside it
-        # (the mL/% is shown on the VR summary / the panel table, not here).
-        t_rgb = (234, 153, 153)
+        # (the mL/% is shown on the VR summary / the panel table, not here). The
+        # number is drawn in that target's own colour (Target1..6).
         t_pts = []
         for tg in self._coro_targets:
             P = tg.get("point")
@@ -10737,7 +10754,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 continue
             o = self._world3d_to_out(key, np.asarray(P, float))
             t_pts.append(o)
-            labels.append((str(tg.get("n", "")), o, t_rgb,
+            labels.append((str(tg.get("n", "")), o,
+                           _hex_to_rgb(tg.get("color") or "#ea9999"),
                            bool(tg.get("selected"))))
         p.coro_mapper.SetInputData(_colored_multi_pd(solid, solid_c))
         p.coro_dash_mapper.SetInputData(
@@ -10977,7 +10995,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # + filled per push in _vr_update_territory.
         p.vr_terr_actors = []
         p.vr_terr_pipe = []                      # keep contour filters/images alive
-        for _ in range(4):
+        # 3 systems (LAD/LCX/RCA) + up to 6 Target territories (labels 4..9).
+        for _ in range(9):
             mp = vtkPolyDataMapper()
             mp.SetInputData(vtkPolyData())
             mp.ScalarVisibilityOff()
@@ -11051,8 +11070,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             if p3 is None or len(p3) < 2:
                 continue
             rgb = _hex_to_rgb(ves.get("color"))
-            # Only the LM TRUNK itself is thick; its branches use the normal radius.
-            r = _VR_CORO_R_LM if ves.get("role") == "LM" else _VR_CORO_R
+            # Tube radius from Settings (太さ = diameter → radius); only the LM
+            # TRUNK itself is scaled by the LM ratio, its branches use the base.
+            cp = getattr(self, "_coro_params", None) or {}
+            base_r = max(0.05, float(cp.get("tube_diameter_mm", 1.0)) / 2.0)
+            lm_ratio = float(cp.get("lm_ratio", 1.5))
+            r = base_r * lm_ratio if ves.get("role") == "LM" else base_r
             start = pts.GetNumberOfPoints()
             for P in p3:
                 pts.InsertNextPoint(float(P[0]), float(P[1]), float(P[2]))
@@ -11101,6 +11124,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             hpd.GetPointData().SetScalars(hrad)
             p.vr_coro_halo_tube.SetInputData(hpd)
             p.vr_coro_halo_tube.Modified()
+            # Halo colour + opacity from Settings (default black @ 50%).
+            cp = getattr(self, "_coro_params", None) or {}
+            hc = _hex_to_rgb(cp.get("halo_color", "#000000"))
+            hprop = p.vr_coro_halo_actor.GetProperty()
+            hprop.SetColor(hc[0] / 255.0, hc[1] / 255.0, hc[2] / 255.0)
+            hprop.SetOpacity(float(cp.get("halo_opacity", 0.5)))
             p.vr_coro_halo_actor.SetVisibility(True)
         if getattr(p, "vr_coro_cap_actor", None) is not None:
             if n_caps:
@@ -11136,12 +11165,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         ctr = getattr(self, "_center", None)
         ctr = np.asarray(ctr, float) if ctr is not None else None
         pts = vtkPoints()
+        tcols = vtkUnsignedCharArray()           # per-point colour (per target)
+        tcols.SetNumberOfComponents(3)
         for tg in specs:
             P = tg.get("point")
             if P is None:
                 continue
             Pw = np.asarray(P, float)
             pts.InsertNextPoint(float(Pw[0]), float(Pw[1]), float(Pw[2]))
+            crgb = _hex_to_rgb(tg.get("color") or "#f22626")
+            tcols.InsertNextTuple3(int(crgb[0]), int(crgb[1]), int(crgb[2]))
             if vtkBillboardTextActor3D is not None:
                 lp = Pw
                 if ctr is not None and np.all(np.isfinite(ctr)):
@@ -11154,7 +11187,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 lb.SetInput(str(tg.get("n", "")))
                 tp = lb.GetTextProperty()
                 tp.SetFontSize(18)
-                tp.SetColor(1.0, 1.0, 1.0)
+                tp.SetColor(1.0, 1.0, 1.0)       # white number (reads on any fill)
                 tp.SetBold(True)
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
@@ -11168,7 +11201,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         pd = vtkPolyData()
         pd.SetPoints(pts)
         pd.SetVerts(verts)
+        pd.GetPointData().SetScalars(tcols)      # colour each sphere per target
         p.vr_tgt_mapper.SetInputData(pd)
+        p.vr_tgt_mapper.ScalarVisibilityOn()
+        p.vr_tgt_mapper.SetScalarModeToUsePointData()
+        p.vr_tgt_mapper.SetColorModeToDirectScalars()
         p.vr_tgt_actor.SetVisibility(pts.GetNumberOfPoints() > 0)
 
     def _vr_update_territory(self, key) -> None:

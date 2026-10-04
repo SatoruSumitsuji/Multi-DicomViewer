@@ -709,13 +709,14 @@ class _Overlay(QWidget):
                     int(Qt.AlignmentFlag.AlignLeft)
                     | int(Qt.AlignmentFlag.AlignVCenter),
                     name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
-        # Territory Target markers: a pale-red dot + just the target NUMBER (the
-        # mL/% is shown in the panel table, not beside the short-axis point).
-        tcol = QColor(234, 153, 153)
+        # Territory Target markers: a dot + the target NUMBER, in that target's
+        # own colour (Target1..6; the mL/% is shown in the panel table).
         for tg in v._coro_targets:
             P = tg.get("point")
             if P is None:
                 continue
+            crgb = _hex_to_rgb(tg.get("color") or "#ea9999")
+            tcol = QColor(int(crgb[0]), int(crgb[1]), int(crgb[2]))
             ox, oy = v._world3d_to_out(key, np.asarray(P, float))
             mx, my = v._world_to_screen(key, ox, oy)
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))

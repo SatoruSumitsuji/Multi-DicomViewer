@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 )
 
 from multi_dicomviewer.core import full_lv as full_lv_mod
+from multi_dicomviewer.core import settings as settings_mod
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
     ROOT_ROLES, CoronaryTree, format_territory_report, short_vessel_name)
@@ -229,9 +230,9 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
         self._target_btn = None
-        # Target-territory fill — default 桃色 (changeable via right-click).
-        _tc = QColor("#e78ac3")
-        self._target_color = (_tc.redF(), _tc.greenF(), _tc.blueF(), _TARGET_ALPHA)
+        # Appearance params (line / territory / target colours) from Settings ▸
+        # Coronary Tree / Territory. Target colour is now PER target number (1..6).
+        self._coro_params = settings_mod.load_coronary_params()
         self.setAcceptDrops(True)           # drag .cpr.json onto the panel
 
         central = QWidget()
@@ -705,6 +706,41 @@ class CoronaryTreeWindow(SnapDock):
             self.treeChanged.emit()
 
     # ----------------------------------------------------------- display
+    # --- configurable colours (Settings ▸ Coronary Tree / Territory) ---------
+    def _root_color(self, role: str) -> str:
+        """Line / tube colour for a root system — user-set in Settings, falling
+        back to the shipped ROOT_COLORS (and to grey for an unknown role)."""
+        lc = (self._coro_params or {}).get("line_colors") or {}
+        base = role.split("-")[-1] if role else role     # LM-LAD → LAD (legacy)
+        return lc.get(role) or lc.get(base) \
+            or ROOT_COLORS.get(role) or ROOT_COLORS.get(base) or "#888888"
+
+    def _target_hex(self, n: int) -> str:
+        """Territory/marker colour for Target number *n* (1-based), by 6-slot
+        palette from Settings (wraps past 6)."""
+        tc = (self._coro_params or {}).get("target_colors") \
+            or settings_mod.CORONARY_PARAMS_DEFAULT["target_colors"]
+        try:
+            return tc[(int(n) - 1) % 6]
+        except (TypeError, ValueError, IndexError):
+            return tc[0]
+
+    def _target_rgba(self, n: int):
+        """Target *n* fill as an (r,g,b,a) 0-1 tuple (alpha = _TARGET_ALPHA)."""
+        c = QColor(self._target_hex(n))
+        if not c.isValid():
+            c = QColor("#e06666")
+        return (c.redF(), c.greenF(), c.blueF(), _TARGET_ALPHA)
+
+    def coronary_params_refresh(self) -> None:
+        """Re-read the appearance params (after a Settings change) and redraw the
+        tree + overlay + territory with the new colours / sizes."""
+        self._coro_params = settings_mod.load_coronary_params()
+        if not self._building:
+            self._populate()                     # line colours in the list
+        self._push_overlay()                     # line colours on MPR/VR
+        self._push_territory()                    # territory + target colours
+
     def _root_role(self, vid: str) -> str:
         v = self._tree.vessels.get(vid)
         while v is not None and v.parent is not None:
@@ -738,8 +774,7 @@ class CoronaryTreeWindow(SnapDock):
         it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
-        it.setForeground(0, QColor(ROOT_COLORS.get(
-            self._root_role(vid), "#333333")))
+        it.setForeground(0, QColor(self._root_color(self._root_role(vid))))
         # Monospace 心筋量 column so the padded % / mL line up vertically.
         mf = QFont("Consolas")
         mf.setStyleHint(QFont.StyleHint.Monospace)
@@ -911,7 +946,7 @@ class CoronaryTreeWindow(SnapDock):
                     "points": pts.tolist(),
                     "root": self._root_role(vid),   # root system "LM"/"LAD"/…
                     "role": v.role,                 # OWN role (LM trunk ×1.5)
-                    "color": ROOT_COLORS.get(self._root_role(vid), "#888888"),
+                    "color": self._root_color(self._root_role(vid)),
                     "selected": (vid == sel),
                 })
             return out
@@ -1229,8 +1264,8 @@ class CoronaryTreeWindow(SnapDock):
         labels_v = np.where(code >= 0, clabel[safe], 0).astype(np.uint8)
         full = np.zeros(vs, np.uint8)
         full[fz, fy, fx] = labels_v
-        # Target territories → label 4 (honours the per-target hidden + selection,
-        # like the old single-mask path).
+        # Target territories → labels 4..9 by target NUMBER (Target1..6), each its
+        # own colour, ON TOP of the base (honours per-target hidden + selection).
         if self._targets_shown and self._targets:
             sel = None
             it = self._targets_w.currentItem()
@@ -1238,16 +1273,28 @@ class CoronaryTreeWindow(SnapDock):
                 sel = it.data(0, _UID_ROLE)
             if isinstance(sel, int) and 0 <= sel < len(self._targets) \
                     and not self._targets[sel].get("hidden"):
-                tgs = [self._targets[sel]]
+                picks = [sel]
             else:
-                tgs = [tg for tg in self._targets if not tg.get("hidden")]
-            for tg in tgs:
+                picks = [i for i in range(len(self._targets))
+                         if not self._targets[i].get("hidden")]
+            for i in picks:
+                tg = self._targets[i]
                 mv, _ml = eng.territory(tg["vid"], tg["idx"])
                 if mv.any():
-                    full[fz[mv], fy[mv], fx[mv]] = 4
-        # Base LAD/LCX/RCA fills are fixed; the Target fill is user-changeable.
-        return full, [TERRITORY_FILLS[0], TERRITORY_FILLS[1],
-                      TERRITORY_FILLS[2], self._target_color]
+                    full[fz[mv], fy[mv], fx[mv]] = 4 + (i % 6)   # Target(i+1)
+        # Colours: LAD/LCX/RCA systems (configurable hue, shipped alpha) then the
+        # six Target fills (labels 4..9), so index = label-1.
+        line = (self._coro_params or {}).get("line_colors") or {}
+
+        def _fill(role, alpha):
+            c = QColor(line.get(role) or ROOT_COLORS.get(role) or "#888888")
+            return (c.redF(), c.greenF(), c.blueF(), alpha)
+
+        colors = [_fill("LAD", TERRITORY_FILLS[0][3]),
+                  _fill("LCX", TERRITORY_FILLS[1][3]),
+                  _fill("RCA", TERRITORY_FILLS[2][3])]
+        colors += [self._target_rgba(n) for n in range(1, 7)]   # T1..T6
+        return full, colors
 
     def _territory_summary_text(self) -> str:
         """Compact per-system summary (myocardium + LM/LAD/LCX/RCA %/mL), one line
@@ -1397,28 +1444,36 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
             self._push_territory()
         elif ch in col_acts:
-            self.set_target_color(col_acts[ch])
+            self.set_target_color(col_acts[ch], ti + 1)
         elif ch is a_custom:
-            self._pick_target_color()
+            self._pick_target_color(ti + 1)
 
-    def _pick_target_color(self) -> None:
-        """Open a full colour picker for the Target territory fill."""
+    def _pick_target_color(self, n: int = 1) -> None:
+        """Open a full colour picker for Target *n*'s territory/marker colour."""
         from PyQt6.QtWidgets import QColorDialog
-        r, g, b, _a = self._target_color
-        cur = QColor(int(r * 255), int(g * 255), int(b * 255))
-        c = QColorDialog.getColor(cur, self, t("ターゲット領域の色"))
+        cur = QColor(self._target_hex(n))
+        c = QColorDialog.getColor(cur, self, t("ターゲット{n}の色", n=n))
         if c.isValid():
-            self.set_target_color(c.name())
+            self.set_target_color(c.name(), n)
 
-    def set_target_color(self, hex_or_color) -> None:
-        """Set the Target-territory fill colour (applies to ALL targets) and
-        refresh the overlay. Accepts a '#rrggbb' string."""
+    def set_target_color(self, hex_or_color, n: int = 1) -> None:
+        """Set Target *n*'s colour (its 6-slot palette entry, persisted to
+        Settings so it stays), then refresh. Accepts a '#rrggbb' string. *n* comes
+        from the panel's target table or the VR right-click (both 1-based)."""
         c = QColor(hex_or_color)
         if not c.isValid():
             return
-        self._target_color = (c.redF(), c.greenF(), c.blueF(), _TARGET_ALPHA)
+        slot = (int(n) - 1) % 6
+        tc = list((self._coro_params or {}).get("target_colors")
+                  or settings_mod.CORONARY_PARAMS_DEFAULT["target_colors"])
+        while len(tc) < 6:
+            tc.append(settings_mod.CORONARY_PARAMS_DEFAULT["target_colors"][len(tc)])
+        tc[slot] = c.name()
+        self._coro_params["target_colors"] = tc
+        settings_mod.save_coronary_params(self._coro_params)   # persist the slot
         self._run_busy(t("灌流域を再描画中…"),
-                       lambda: (self._push_overlay(), self._push_territory()))
+                       lambda: (self._refresh_targets_table(),
+                                self._push_overlay(), self._push_territory()))
 
     def target_specs(self, uid: str | None = None) -> list:
         """Target markers/territories for the CT overlay: each = the target 3-D
@@ -1451,6 +1506,7 @@ class CoronaryTreeWindow(SnapDock):
                 "ml": tg["ml"],
                 "pct": tg["pct"],
                 "selected": (i == sel),
+                "color": self._target_hex(i + 1),   # per-target colour (1..6)
             })
         return out
 
