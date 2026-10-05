@@ -281,7 +281,9 @@ class CoronaryTreeWindow(SnapDock):
         ])
         # Tree row: overlay toggle / save / load / clear.
         tree_btns = _row(t("ツリー："), [
-            (t("非表示"),
+            # Default state is OFF (overlay hidden), so the button shows the ACTION
+            # it performs: 表示 (= click to show). _set_overlay flips it to 非表示.
+            (t("表示"),
              t("冠動脈ツリーを3DCTに重畳 (再クリックで非表示)。未読込なら自動読込"),
              self._toggle_overlay, False),
             (t("保存"), t("冠動脈ツリーを .corotree.json に保存"),
@@ -527,8 +529,9 @@ class CoronaryTreeWindow(SnapDock):
                               ctrl=ctrl_arr)
         self._populate()
         self.treeChanged.emit()
-        if self._overlay_on:
-            self._push_overlay()
+        # Always push: even with the 2-D ツリー表示 toggle OFF, the VR coronary tubes
+        # are drawn (force=True), so a just-Saved CPR shows on the VR immediately.
+        self._push_overlay()
         self._hint.setText(t("「{n}」を登録しました（役割を設定して「接続」→"
                              "「ツリー表示」）。", n=nm))
         # Surface the panel so the just-added vessel is visible.
