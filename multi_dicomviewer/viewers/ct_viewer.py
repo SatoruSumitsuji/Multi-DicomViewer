@@ -1381,6 +1381,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._owner._meas_on and not (_shift or _alt):
             self._owner._measure_finish_draft()
             return
+        # CPR short-axis (pane A): the centreline point already moves on a SINGLE
+        # click (crosshair-centre grab → recentre on release), so a double-click
+        # must NOT recentre again — a habitual double-click would otherwise move
+        # the point TWICE (the 2nd click lands on the already-recentred image).
+        if self._which == "A" and self._owner._cpr is not None:
+            return
         self._owner._recenter(self._which, e.position().x(), e.position().y())
 
     def wheelEvent(self, e):
