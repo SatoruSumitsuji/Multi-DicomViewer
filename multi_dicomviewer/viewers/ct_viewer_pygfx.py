@@ -2218,6 +2218,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_targets: list = []
         self._coro_target_mode = False
         self._coro_target_cb = None
+        self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
+        self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
         # vids whose NAME label is painted. Empty by default (labels cluttered
         # the view); turned on per-vessel via the CPR line's right-click menu.
         self._coro_names: set[str] = set()
@@ -2994,6 +2996,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
             self._measure_finish_draft()       # LV capture handled inside now
             return
+        # Double-click ON a saved CPR overlay line → edit it (Resume), not recentre.
+        if (self._coro_resume_cb is not None
+                and "Shift" not in _mods and "Alt" not in _mods):
+            _vid, _idx = self._coronary_pick_sample(key, ev["x"], ev["y"])
+            if _vid is not None:
+                self._coro_resume_cb(_vid)
+                return
         if self._cpr is not None and key == "A":
             return                                # no recenter on the section
         self._recenter(key, ev["x"], ev["y"])
@@ -6601,6 +6610,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
+    def set_coronary_resume_cb(self, cb) -> None:
+        """Register cb(vid) for a CPR-overlay-line right-click ▸ 編集 (Resume)."""
+        self._coro_resume_cb = cb
+
+    def set_coronary_overwrite_cb(self, cb) -> None:
+        """Register cb(vid) for a CPR-overlay-line right-click ▸ 上書き保存."""
+        self._coro_overwrite_cb = cb
+
     def set_territory_mask(self, mask, colors=None) -> None:
         """Public (shell): overlay the perfusion-territory colour map on the CT.
         *mask* = full-volume int-label numpy [z,y,x] (1=LAD,2=LCX,3=RCA,4=Target)
@@ -6655,6 +6672,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         vessel's NAME on the image. Names are off by default."""
         names = self._coro_names
         menu = QMenu(self)
+        edit_act = menu.addAction(t("この血管を編集 (Resume)")) \
+            if self._coro_resume_cb is not None else None
+        over_act = menu.addAction(t("この血管に上書き保存")) \
+            if self._coro_overwrite_cb is not None else None
+        if edit_act is not None or over_act is not None:
+            menu.addSeparator()
         show_act = menu.addAction(
             t("名前を非表示") if vid in names else t("名前を表示"))
         hide_all = menu.addAction(t("すべての名前を非表示")) if names else None
@@ -6663,6 +6686,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QPoint(int(sx), int(sy))))
         finally:
             self._reset_pointer_state()
+        if edit_act is not None and chosen is edit_act:
+            self._coro_resume_cb(vid)
+            return
+        if over_act is not None and chosen is over_act:
+            self._coro_overwrite_cb(vid)
+            return
         if chosen is show_act:
             names.discard(vid) if vid in names else names.add(vid)
         elif hide_all is not None and chosen is hide_all:
