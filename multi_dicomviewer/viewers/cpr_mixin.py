@@ -126,7 +126,7 @@ class CPRMixin:
                 t("保存しました。Coronary Tree パネルを開けませんでした。"))
             return
         try:
-            shell.coronary_register_cpr(data, name or "vessel")
+            shell.coronary_register_cpr(data, name or "vessel", path)
         except Exception as exc:                 # noqa: BLE001
             QMessageBox.warning(self.window(), t("Coronary Tree"),
                                 t("登録に失敗しました: {e}", e=str(exc)))

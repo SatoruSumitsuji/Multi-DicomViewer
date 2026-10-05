@@ -1381,6 +1381,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._owner._meas_on and not (_shift or _alt):
             self._owner._measure_finish_draft()
             return
+        # Double-click ON a saved CPR overlay line → edit it (Resume), not recentre.
+        if (self._owner._coro_resume_cb is not None and not (_shift or _alt)):
+            _vid = self._owner._coronary_pick(
+                self._which, e.position().x(), e.position().y())
+            if _vid is not None:
+                self._owner._coro_resume_cb(_vid)
+                return
         # CPR short-axis (pane A): the centreline point already moves on a SINGLE
         # click (crosshair-centre grab → recentre on release), so a double-click
         # must NOT recentre again — a habitual double-click would otherwise move
@@ -2830,6 +2837,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
         self._coro_target_move_cb = None     # (n, vid, idx) from a VR marker drag
         self._coro_vessel_hide_cb = None     # (vid) from VR right-click ▸ 非表示
+        self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
+        self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
@@ -11480,6 +11489,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Register cb(vid) for a VR right-click ▸ この血管を非表示."""
         self._coro_vessel_hide_cb = cb
 
+    def set_coronary_resume_cb(self, cb) -> None:
+        """Register cb(vid) for a CPR-overlay-line right-click ▸ 編集 (Resume)."""
+        self._coro_resume_cb = cb
+
+    def set_coronary_overwrite_cb(self, cb) -> None:
+        """Register cb(vid) for a CPR-overlay-line right-click ▸ 上書き保存."""
+        self._coro_overwrite_cb = cb
+
     def set_coronary_target_pick_cb(self, cb) -> None:
         """Register the (vid, idx) target-set callback (so a VR right-click can set
         a Target even when target-mode was never toggled on)."""
@@ -11988,12 +12005,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         if vid is None:
             return False
         menu = QMenu(self)
+        # Edit this saved CPR: 編集(Resume) rebuilds its short-axis so points can be
+        # added / deleted / adjusted; 上書き保存 writes the edits back (file + tree).
+        edit_act = menu.addAction(t("この血管を編集 (Resume)")) \
+            if self._coro_resume_cb is not None else None
+        over_act = menu.addAction(t("この血管に上書き保存")) \
+            if self._coro_overwrite_cb is not None else None
+        if edit_act is not None or over_act is not None:
+            menu.addSeparator()
         names = self._coro_names
         show_act = menu.addAction(
             t("名前を非表示") if vid in names else t("名前を表示"))
         hide_all = menu.addAction(t("すべての名前を非表示")) if names else None
         chosen = menu.exec(
             self.pane[which].canvas.mapToGlobal(QtPoint(int(sx), int(sy))))
+        if edit_act is not None and chosen is edit_act:
+            self._coro_resume_cb(vid)
+            return True
+        if over_act is not None and chosen is over_act:
+            self._coro_overwrite_cb(vid)
+            return True
         if chosen is show_act:
             names.discard(vid) if vid in names else names.add(vid)
         elif hide_all is not None and chosen is hide_all:

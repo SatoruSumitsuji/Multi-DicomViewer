@@ -2358,15 +2358,16 @@ class MainWindow(QMainWindow):
             "series_number": str(getattr(hdr, "SeriesNumber", "") or ""),
         }
 
-    def coronary_register_cpr(self, data, name=None) -> bool:
+    def coronary_register_cpr(self, data, name=None, path=None) -> bool:
         """A CT viewer's 登録 button: register an in-memory CPR into the Coronary
         Tree panel (opening it if needed), routed to its source CT by series UID,
-        then refresh the overlay. Returns True if it was added."""
+        then refresh the overlay. *path* = the .cpr.json it was saved to (kept for
+        in-place overwrite). Returns True if it was added."""
         w = self._open_coronary_tree()          # ensure the panel exists + visible
         if w is None or not hasattr(w, "register_cpr"):
             return False
         try:
-            ok = bool(w.register_cpr(data, name))
+            ok = bool(w.register_cpr(data, name, path))
         except Exception:                        # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -2527,6 +2528,16 @@ class MainWindow(QMainWindow):
             if hasattr(v, "set_coronary_vessel_hide_cb"):
                 try:
                     v.set_coronary_vessel_hide_cb(self.coronary_vessel_hide)
+                except Exception:                        # noqa: BLE001
+                    pass
+            if hasattr(v, "set_coronary_resume_cb"):
+                try:
+                    v.set_coronary_resume_cb(self.coronary_resume_edit)
+                except Exception:                        # noqa: BLE001
+                    pass
+            if hasattr(v, "set_coronary_overwrite_cb"):
+                try:
+                    v.set_coronary_overwrite_cb(self.coronary_overwrite_edit)
                 except Exception:                        # noqa: BLE001
                     pass
             # Territory Target markers (same source-CT gate as the vessels).
@@ -2706,6 +2717,89 @@ class MainWindow(QMainWindow):
                 w.move_target_n(int(n), vid, int(idx))
             except Exception:                            # noqa: BLE001
                 pass
+
+    def _viewer_for_series(self, uid: str):
+        """The CT viewer currently showing series *uid* (base-UID match), or None."""
+        if not uid:
+            return None
+        base = uid.split("#", 1)[0]
+        for p in self._panes:
+            try:
+                su = p.shown_series_uid() or ""
+            except Exception:                            # noqa: BLE001
+                su = ""
+            if su == uid or su.split("#", 1)[0] == base:
+                try:
+                    return p.current_viewer()
+                except Exception:                        # noqa: BLE001
+                    return None
+        return None
+
+    def coronary_resume_edit(self, vid: str) -> None:
+        """Right-click a saved CPR overlay line ▸ 編集(Resume): rebuild that vessel's
+        short-axis from its control points on the CT it belongs to, so the user can
+        Add / Delete / adjust points, then 上書き保存. Remembers the vid being edited."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "cpr_resume_data"):
+            return
+        data = w.cpr_resume_data(vid)
+        if not data:
+            return
+        v = self._viewer_for_series(data["uid"])
+        if v is None or not hasattr(v, "apply_cpr_data"):
+            return
+        try:
+            if v.apply_cpr_data({"ctrl": data["ctrl"]}):
+                self._coro_editing_vid = vid
+                # Point Overwrite at the vessel's own .cpr.json (if known) so the
+                # viewer's own save writes the same file.
+                if data.get("path"):
+                    try:
+                        v._cpr_last_path = data["path"]
+                    except Exception:                    # noqa: BLE001
+                        pass
+                self.coronary_overlay_refresh()
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
+    def coronary_overwrite_edit(self, vid: str) -> None:
+        """Right-click a saved CPR overlay line ▸ 上書き保存: write the (edited)
+        short-axis back to the vessel IN PLACE (tree) and, when its .cpr.json path is
+        known, overwrite that file too."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "cpr_resume_data"):
+            return
+        data = w.cpr_resume_data(vid)
+        if not data:
+            return
+        v = self._viewer_for_series(data["uid"])
+        if v is None or not hasattr(v, "get_current_cpr"):
+            return
+        try:
+            cur = v.get_current_cpr()              # (ctrl, points) of the live CPR
+        except Exception:                                # noqa: BLE001
+            cur = None
+        if not cur or not cur[0]:
+            self.statusBar().showMessage(
+                t("編集中の短軸がありません（先に『編集』してください）。"))
+            return
+        ctrl = cur[0]
+        path = data.get("path") or getattr(v, "_cpr_last_path", "") or ""
+        # Overwrite the .cpr.json file too, when we know it.
+        if path and hasattr(v, "_cpr_build_data") and hasattr(v, "_cpr_write"):
+            try:
+                payload = v._cpr_build_data()
+                if payload is not None:
+                    v._cpr_write(path, payload)
+            except Exception:                            # noqa: BLE001
+                pass
+        if hasattr(w, "update_vessel_cpr"):
+            try:
+                w.update_vessel_cpr(vid, ctrl, path)
+            except Exception:                            # noqa: BLE001
+                pass
+        self.coronary_overlay_refresh()
 
     def _coronary_source_viewers(self):
         """The CT viewer(s) showing the Coronary Tree's SOURCE volume (the ones

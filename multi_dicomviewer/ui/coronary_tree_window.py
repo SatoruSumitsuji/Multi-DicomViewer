@@ -114,7 +114,7 @@ class CoronaryTreeWindow(SnapDock):
             b = {"tree": CoronaryTree(), "hidden": set(), "targets": [],
                  "full_lv": None, "territory": None, "myo_ml": None,
                  "ct_dir": "", "last_path": None, "label": "", "visible": True,
-                 "series": {}}
+                 "series": {}, "paths": {}}   # paths: vid → its .cpr.json file
             self._by_uid[uid] = b
         return b
 
@@ -478,8 +478,10 @@ class CoronaryTreeWindow(SnapDock):
                     continue
                 ctrl = np.asarray(ctrl, float)
                 cl = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM)
-                self._tree.add_vessel(self._unique_vid(), name or "vessel",
+                new_vid = self._unique_vid()
+                self._tree.add_vessel(new_vid, name or "vessel",
                                       "branch", cl.points, ctrl=ctrl)
+                self._bundle()["paths"][new_vid] = p   # for in-place overwrite
                 added += 1
                 self._last_path = p
             except (OSError, ValueError) as exc:            # noqa: BLE001
@@ -500,11 +502,12 @@ class CoronaryTreeWindow(SnapDock):
         if errs:
             self._warn("\n".join(errs[:8]))
 
-    def register_cpr(self, data, name=None) -> bool:
+    def register_cpr(self, data, name=None, path=None) -> bool:
         """Register an in-memory CPR (a viewer's 登録 button) as an unconnected
         vessel — same routing as loading its .cpr.json (to the source-CT bundle by
         series UID) but without a file. A duplicate name is auto-uniquified rather
-        than skipped, since 登録 is a deliberate single action. Returns True on add."""
+        than skipped, since 登録 is a deliberate single action. *path* = the .cpr.json
+        it was saved to (kept for in-place overwrite). Returns True on add."""
         if not isinstance(data, dict) or data.get("format") != "MDV-CPR":
             self._warn(t("CPR形式ではありません。"))
             return False
@@ -525,8 +528,10 @@ class CoronaryTreeWindow(SnapDock):
             nm = f"{base} ({k})"
         ctrl_arr = np.asarray(ctrl, float)
         cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
-        self._tree.add_vessel(self._unique_vid(), nm, "branch", cl.points,
-                              ctrl=ctrl_arr)
+        new_vid = self._unique_vid()
+        self._tree.add_vessel(new_vid, nm, "branch", cl.points, ctrl=ctrl_arr)
+        if path:
+            self._bundle()["paths"][new_vid] = path   # enable in-place overwrite
         self._populate()
         self.treeChanged.emit()
         # Always push: even with the 2-D ツリー表示 toggle OFF, the VR coronary tubes
@@ -537,6 +542,52 @@ class CoronaryTreeWindow(SnapDock):
         # Surface the panel so the just-added vessel is visible.
         self.show()
         self.raise_()
+        return True
+
+    # ---- edit an already-saved CPR line (Resume / overwrite) --------------
+    def cpr_resume_data(self, vid: str) -> dict | None:
+        """The data needed to RE-EDIT vessel *vid*: its control points, source-CT
+        UID and the .cpr.json path (if known). None if the vid isn't found."""
+        uid = self._ct_of_vessel(vid)
+        if not uid:
+            return None
+        b = self._by_uid[uid]
+        v = b["tree"].vessels.get(vid)
+        if v is None:
+            return None
+        ctrl = getattr(v, "ctrl", None)
+        if ctrl is None or len(ctrl) < 2:        # fall back to the sampled line
+            ctrl = v.points
+        return {
+            "uid": uid,
+            "name": v.name,
+            "ctrl": [list(map(float, np.asarray(q, float))) for q in ctrl],
+            "path": b["paths"].get(vid, "") or "",
+            "series": dict(b.get("series") or {}),
+            "src_dir": b.get("ct_dir", "") or "",
+        }
+
+    def update_vessel_cpr(self, vid: str, ctrl, path: str = "") -> bool:
+        """Overwrite vessel *vid*'s centreline IN PLACE from edited control points
+        (keeps its name / role / parent), refresh the overlay, and remember the
+        saved .cpr.json *path*. Used by the CPR-line right-click ▸ 上書き保存."""
+        uid = self._ct_of_vessel(vid)
+        if not uid:
+            return False
+        b = self._by_uid[uid]
+        v = b["tree"].vessels.get(vid)
+        if v is None or ctrl is None or len(ctrl) < 2:
+            return False
+        ctrl_arr = np.asarray(ctrl, float)
+        cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
+        v.points = cl.points
+        v.ctrl = ctrl_arr
+        if path:
+            b["paths"][vid] = path
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(t("「{n}」を上書き保存しました。", n=v.name))
         return True
 
     def _toggle_overlay(self):
