@@ -1740,11 +1740,32 @@ class CoronaryTreeWindow(SnapDock):
     def _warn(self, msg):
         QMessageBox.information(self, t("Coronary Tree"), msg)
 
+    def _tree_save_dir(self) -> str:
+        """Default folder for ツリー保存 / 読込 dialogs: the folder of the LAST tree
+        saved/loaded this session for THIS CT (直前の保存先), else the SOURCE 3-D CT's
+        own folder, else a registered vessel's .cpr.json folder; '' if unknown."""
+        b = self._bundle()
+        lp = b.get("last_path")
+        if lp:
+            d = os.path.dirname(lp)
+            if d and os.path.isdir(d):
+                return d
+        cd = b.get("ct_dir") or ""
+        if cd and os.path.isdir(cd):
+            return cd
+        for p in (b.get("paths") or {}).values():
+            d = os.path.dirname(p) if p else ""
+            if d and os.path.isdir(d):
+                return d
+        return ""
+
     def _save_as(self):
         if not self._tree.vessels:
             self._warn(t("保存する血管がありません。"))
             return
-        d = os.path.dirname(self._last_path) if self._last_path else ""
+        # Default to the source 3-D CT's folder (then the last-saved folder once a
+        # save/load has happened this session for this dataset).
+        d = self._tree_save_dir()
         default = os.path.join(d, "coronary.corotree.json") if d \
             else "coronary.corotree.json"
         path, _ = QFileDialog.getSaveFileName(
@@ -1810,7 +1831,7 @@ class CoronaryTreeWindow(SnapDock):
         return True
 
     def _load(self):
-        d = os.path.dirname(self._last_path) if self._last_path else ""
+        d = self._tree_save_dir()            # source CT folder, else last-used
         path, _ = QFileDialog.getOpenFileName(
             self, t("冠動脈ツリーを読込"), d, t("CoroTree (*.corotree.json)"))
         if path and self.load_file(path):
