@@ -5823,6 +5823,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._view_initial = False
         self._refresh(lod=True)                # coarse slab while dragging
 
+    def _cpr_recenter_map_pane(self, mapkey, P) -> None:
+        """CPR: centre the MAP pane *mapkey* on world point *P* (the current edit
+        point), keeping zoom — the camera recentre for _cpr_center_map_on_current.
+        Reslice centre = P, pan reset so P lands at the pane middle."""
+        self._pc[mapkey] = np.asarray(P, float).copy()
+        if hasattr(self, "_pan"):
+            self._pan[mapkey] = np.zeros(2)
+
     def _recenter(self, which, sx, sy):
         """Double-click: clicked point becomes the CrossLine centre AND the
         image centre in both panes."""

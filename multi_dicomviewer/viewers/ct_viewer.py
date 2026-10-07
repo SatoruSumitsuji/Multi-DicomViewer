@@ -19282,6 +19282,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._refresh()
             return
 
+    def _cpr_recenter_map_pane(self, mapkey, P) -> None:
+        """CPR: centre the MAP pane *mapkey* on world point *P* (the current edit
+        point), keeping zoom — the camera recentre for _cpr_center_map_on_current."""
+        self._pc[mapkey] = np.asarray(P, float).copy()
+        self._center_camera(mapkey)
+
     def _center_camera(self, key):
         """Put world (0,0) (the crosshair/center) at the pane middle,
         keeping the current zoom."""
