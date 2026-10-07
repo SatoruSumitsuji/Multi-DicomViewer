@@ -7518,7 +7518,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Curved-MPR: build a centreline from this trace and scroll the
             # short-axis cross-sections in pane A. 3-D MPR only, >=2 points.
             if self._mode == "3D" and len(m["pts"]) >= 2:
-                cpr_act = menu.addAction(t("Short-axis MPR (CPR)"))
+                # Same feature as the Coronary: CPR row's Draw — converting a drawn
+                # line enters the identical short-axis workflow (no redraw needed).
+                cpr_act = menu.addAction(t("この線で短軸CPRを作成 (Coronary)"))
         # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
         # checkable auto-snap toggle for future clicks.
         snap_now_act = snap_auto_act = None
