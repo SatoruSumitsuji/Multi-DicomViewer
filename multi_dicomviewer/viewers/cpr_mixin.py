@@ -329,6 +329,7 @@ class CPRMixin:
             nxt = next((i for i in reversed(idxs) if i < cur), idxs[0])
         c["idx"] = int(nxt)
         self._cpr_sync_bar()
+        self._cpr_center_map_on_current()        # map pane follows the edit point
         self._refresh()
 
     def _cpr_jump_ctrl_end(self, to_last: bool) -> None:
@@ -342,7 +343,27 @@ class CPRMixin:
             return
         c["idx"] = int(idxs[-1] if to_last else idxs[0])
         self._cpr_sync_bar()
+        self._cpr_center_map_on_current()        # map pane follows the edit point
         self._refresh()
+
+    def _cpr_center_map_on_current(self) -> None:
+        """Pan the MAP (long-axis) pane so the CURRENT control/scroll point sits at
+        the view centre — so stepping edit points moves BOTH panes (short-axis +
+        map), making the selected point obvious. Per-viewer camera recentre is done
+        by _cpr_recenter_map_pane (VTK / pygfx); no-op if the map pane is unknown."""
+        c = self._cpr
+        if c is None:
+            return
+        mapkey = c.get("src")
+        if mapkey not in ("A", "B") or mapkey == "A":
+            return                                # map is pane B; A = cross-section
+        pts = getattr(c.get("cl"), "points", None)
+        if pts is None or len(pts) == 0:
+            return
+        i = int(min(max(int(c["idx"]), 0), len(pts) - 1))
+        P = np.asarray(pts[i], float)
+        if hasattr(self, "_cpr_recenter_map_pane"):
+            self._cpr_recenter_map_pane(mapkey, P)
 
     def _style_measure_btn(self, on: bool) -> None:
         """Make the Measure toolbar button unmistakable while ON — the interaction
