@@ -4414,6 +4414,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr = None
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._reset_coronary_territory_display()   # don't inherit a prev CT's analysis
         self._coronary_sync_ui()
         for key in ("A", "B"):
             p = self.pane[key]
@@ -4422,6 +4423,31 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.mesh = None
             p.render()
             self._overlay[key].update()
+
+    def _reset_coronary_territory_display(self) -> None:
+        """Drop the coronary overlay + perfusion-territory display so a NEW series
+        loaded into this (reused) pane viewer doesn't inherit the previous CT's
+        analysis (Mac/pygfx has no VR; MPR overlays only)."""
+        self._coro_overlay = None
+        self._coro_targets = []
+        self._coro_target_mode = False
+        if hasattr(self, "_coro_names"):
+            try:
+                self._coro_names.clear()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._terr_mask_vol = None
+        self._terr_colors = None
+        if hasattr(self, "_terr_img"):
+            for _k in ("A", "B"):
+                self._terr_img[_k] = None
+        for _fn in (lambda: self.set_coronary_overlay(None),
+                    lambda: self.set_coronary_targets([]),
+                    lambda: self.set_territory_mask(None, None)):
+            try:
+                _fn()
+            except Exception:                            # noqa: BLE001
+                pass
 
     def current_header(self):
         return self._header
