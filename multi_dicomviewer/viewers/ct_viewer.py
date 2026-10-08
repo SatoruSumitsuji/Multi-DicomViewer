@@ -2841,6 +2841,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on = {"A": False, "B": False}
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
+        # VR orientation transform (Rt90/Lt90 roll, Flip-H/V mirror) applied to ALL
+        # VR actors so they turn/mirror together; the camera stays free for the
+        # Rotate/Move/Zoom/Spin drags. 4×4, reset each fresh VR build.
+        self._vr_xform = {"A": np.eye(4), "B": np.eye(4)}
         self._territory_display = False              # FullLv review: L=SAX, R=VR
         self._vr_shell = False                       # VR crop: False=内腔(default), True=Epi+shell
         self._vr_shell_mm = 10.0                     # outward shell thickness (mm)
@@ -11240,6 +11244,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_tgt_mapper.SetScalarModeToUsePointData()
         p.vr_tgt_mapper.SetColorModeToDirectScalars()
         p.vr_tgt_actor.SetVisibility(pts.GetNumberOfPoints() > 0)
+        self._vr_apply_xform(key)      # the number billboards are recreated here
 
     def _vr_update_territory(self, key) -> None:
         """Rebuild the 3-D perfusion-territory iso-surfaces on VR pane *key*: one
@@ -11672,9 +11677,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._vr_hidden[key].append(a)
                     a.SetVisibility(False)
             p.vr_volume.SetVisibility(True)
+            self._vr_xform[key] = np.eye(4)         # a fresh VR starts un-oriented
             self._vr_update_coronary(key)           # 3-D coronary tubes
             self._vr_update_territory(key)          # 3-D territory surface
             self._vr_update_targets(key)            # 3-D target spheres
+            self._vr_apply_xform(key)               # (identity here) ready for flips
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
@@ -11755,6 +11762,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._vr_set(k, False)
             except Exception:                            # noqa: BLE001
                 pass
+        self._vr_xform = {"A": np.eye(4), "B": np.eye(4)}   # drop VR orientation
         # Drop the overlay / territory / target DATA + summaries.
         self._coro_overlay = None
         self._coro_overlay_vr = None
@@ -11869,6 +11877,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         dop = pos - fp                                   # toward the observer
         if float(np.linalg.norm(dop)) < 1e-9:
             return None
+        # The VR props are turned/mirrored by _vr_xform (Rt90/Flip), not the camera,
+        # so map the view direction BACK through its inverse to read the C-arm angle
+        # of the anatomy as SEEN (rotations rotate it; a mirror flips LAO↔RAO).
+        X = self._vr_xform.get(key)
+        if X is not None:
+            try:
+                dop = np.linalg.inv(np.asarray(X[:3, :3], float)) @ dop
+            except np.linalg.LinAlgError:
+                pass
         n = self._pbasis @ dop                           # -> patient LPS
         nrm = float(np.linalg.norm(n))
         if nrm < 1e-9:
@@ -11888,6 +11905,88 @@ class CTViewer(CPRMixin, AbstractViewer):
         lao = f"LAO{pi_}" if pi_ >= 0 else f"RAO{-pi_}"
         cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
         return f"{lao} {cra}"
+
+    def _vr_actors(self, key):
+        """Every orientable VR prop on pane *key* (volume + coronary tubes/halo/caps
+        + territory surfaces + target spheres + target-number billboards)."""
+        p = self.pane[key]
+        out = [getattr(p, "vr_volume", None),
+               getattr(p, "vr_coro_actor", None),
+               getattr(p, "vr_coro_halo_actor", None),
+               getattr(p, "vr_coro_cap_actor", None),
+               getattr(p, "vr_tgt_actor", None)]
+        out += list(getattr(p, "vr_terr_actors", []))
+        out += list(getattr(p, "vr_tgt_labels", []))
+        return [a for a in out if a is not None]
+
+    def _vr_apply_xform(self, key) -> None:
+        """Push the accumulated VR orientation matrix onto every VR prop so the
+        volume + tubes + territory + targets all turn / mirror together. Re-called
+        after any actor rebuild (billboards/territory are recreated per update)."""
+        M = self._vr_xform.get(key)
+        if M is None:
+            return
+        vm = vtkMatrix4x4()
+        for i in range(4):
+            for j in range(4):
+                vm.SetElement(i, j, float(M[i, j]))
+        for a in self._vr_actors(key):
+            if hasattr(a, "SetUserMatrix"):
+                try:
+                    a.SetUserMatrix(vm)
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def _vr_orient(self, key, kind) -> None:
+        """VR Rt90/Lt90 (roll about the view axis) / Flip-H/Flip-V (mirror across
+        the vertical / horizontal screen axis), composed into _vr_xform and applied
+        to all VR props. The camera is untouched, so Rotate/Move/Zoom/Spin keep
+        working on top of the new orientation."""
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        pos = np.asarray(cam.GetPosition(), float)
+        fp = np.asarray(cam.GetFocalPoint(), float)
+        up = np.asarray(cam.GetViewUp(), float)
+        dop = fp - pos                                   # into the screen
+        dn = float(np.linalg.norm(dop))
+        if dn < 1e-9:
+            return
+        dop = dop / dn
+        un = float(np.linalg.norm(up))
+        up = up / un if un > 1e-9 else np.array([0.0, 1.0, 0.0])
+        right = np.cross(dop, up)
+        rn = float(np.linalg.norm(right))
+        if rn < 1e-9:
+            return
+        right = right / rn
+        trueup = np.cross(right, dop)                    # orthonormal screen up
+        if kind in ("rt90", "lt90"):
+            ax = -dop                                    # axis toward the viewer
+            ang = math.radians(-90.0 if kind == "rt90" else 90.0)
+            c, s = math.cos(ang), math.sin(ang)
+            x, y, z = ax
+            L = np.array([
+                [c + x * x * (1 - c), x * y * (1 - c) - z * s,
+                 x * z * (1 - c) + y * s],
+                [y * x * (1 - c) + z * s, c + y * y * (1 - c),
+                 y * z * (1 - c) - x * s],
+                [z * x * (1 - c) - y * s, z * y * (1 - c) + x * s,
+                 c + z * z * (1 - c)]])
+        elif kind == "fliph":
+            L = np.eye(3) - 2.0 * np.outer(right, right)     # mirror L↔R
+        elif kind == "flipv":
+            L = np.eye(3) - 2.0 * np.outer(trueup, trueup)   # mirror top↕bottom
+        else:
+            return
+        C = fp                                           # pivot the centred point
+        M = np.eye(4)
+        M[:3, :3] = L
+        M[:3, 3] = C - L @ C
+        self._vr_xform[key] = M @ self._vr_xform[key]
+        self._vr_apply_xform(key)
+        p.ren.ResetCameraClippingRange()
+        self._vr_update_angle(key)
+        p.render()
 
     def _vr_update_angle(self, key) -> None:
         """Refresh the VR pane's bottom-centre C-arm readout from the camera (call
@@ -19157,6 +19256,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._undo_view(before, self._view_snapshot())
             return
         if self._image is None:
+            return
+        # VR pane: Rt90/Lt90 roll and Flip-H/Flip-V mirror the whole 3-D scene via
+        # _vr_xform (NOT the reslice frame — that path blanked the VR). The camera
+        # stays free so Rotate/Move/Zoom/Spin keep working on the oriented view.
+        if self._vr_on.get(self._active_pane):
+            self._vr_orient(self._active_pane, kind)
             return
         if self._mode != "2D":
             # 3-D MPR: rotate / mirror the ACTIVE pane by transforming its reslice
