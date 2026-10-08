@@ -10639,9 +10639,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.meas_arc_mapper.SetInputData(
             _colored_multi_pd(arc_lines, [(255, 140, 0)] * len(arc_lines))
         )
-        # (The green CPR cut-position marker on the map pane was removed — users
-        # found it an eyesore, and a stale one could linger after leaving the
-        # short-axis until the next map-pane redraw.)
+        # CPR: mark the CURRENT edit (control) point GREEN on the MAP pane too, so
+        # it's obvious which point the short-axis is showing. Only when the section
+        # sits exactly ON a control point (not during interpolated scrubbing) so the
+        # marker doesn't constantly move; cleared on the next redraw after Exit.
+        c = self._cpr
+        if c is not None and key == c.get("src") and self._mode == "3D":
+            _k = self._cpr_at_ctrl()
+            _p3 = self._cpr_ctrl_pts3d()
+            if _k is not None and _p3 and 0 <= _k < len(_p3):
+                edit_pts.append(
+                    self._world3d_to_out(key, np.asarray(_p3[_k], float)))
         p.meas_ca_pts_mapper.SetInputData(_points_pd(ca_pts))
         p.meas_pts_mapper.SetInputData(_points_pd(handles))
         p.meas_pts_edit_mapper.SetInputData(_points_pd(edit_pts))

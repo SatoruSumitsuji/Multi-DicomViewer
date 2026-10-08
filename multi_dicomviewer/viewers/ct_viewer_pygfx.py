@@ -1548,8 +1548,17 @@ class _Overlay(QWidget):
             ax, ay = v._world_to_screen(key, *v._anchor(m))
             p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
 
-        # (The green CPR cut-position marker on the map pane was removed to match
-        # the VTK viewer — users found it an eyesore.)
+        # CPR: mark the CURRENT edit (control) point GREEN on the MAP pane so it's
+        # clear which point the short-axis shows. Only when the section sits ON a
+        # control point (not during interpolated scrubbing) so it doesn't constantly
+        # move; cleared on the next redraw after Exit.
+        c = v._cpr
+        if c is not None and key == c.get("src") and v._mode == "3D":
+            _k = v._cpr_at_ctrl()
+            _p3 = v._cpr_ctrl_pts3d()
+            if _k is not None and _p3 and 0 <= _k < len(_p3):
+                _ox, _oy = v._world3d_to_out(key, np.asarray(_p3[_k], float))
+                dots([(_ox, _oy)], QColor(64, 220, 64), 7.0)
 
         d = v._draft
         if d and d["pane"] == key and d["pts"]:
