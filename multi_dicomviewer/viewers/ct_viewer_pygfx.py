@@ -637,7 +637,7 @@ class _Overlay(QWidget):
         centred on the vessel) plus the nearest control-point marker as a
         draggable dot."""
         v = self._v
-        cx, cy = v._world_to_screen("A", 0.0, 0.0)   # section centre = output 0,0
+        cx, cy = v._cpr_offset_to_screen(0.0, 0.0)    # section centre (camera, not MPR)
         if v._cl_on:
             pen = QPen(QColor(255, 217, 0, 128), 1.0)
             p.setPen(pen)
@@ -650,7 +650,7 @@ class _Overlay(QWidget):
         markers = v._cpr_marker_geom()
         if markers:
             for _ci, (du, dv) in markers:
-                mx, my = v._world_to_screen("A", du, dv)
+                mx, my = v._cpr_offset_to_screen(du, dv)
                 p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
                 p.setBrush(QColor(255, 235, 0))
                 p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
@@ -15674,6 +15674,33 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.cam.width = 2.0 * ps * (pw / ph)
         p.cam.depth_range = (0.1, 4.0 * self._cam_off + self._diag)
 
+    def _cpr_section_scale(self) -> float:
+        """Pixels-per-mm of pane A's short-axis cross-section — matches the camera
+        set in _config_cpr_cam (height = 2·half mm over the canvas height). The
+        generic _world_to_screen/_disp_to_world use the MPR pan/scale, which do NOT
+        match this section camera, so CPR marker/drag mapping must use THIS."""
+        p = self.pane["A"]
+        ph = max(1, p.canvas.height())
+        half = max(1e-3, float((self._cpr or {}).get("half", 25.0)))
+        return ph / (2.0 * half)
+
+    def _cpr_offset_to_screen(self, du, dv):
+        """Cross-section in-plane offset (du,dv mm along u,v) → pane-A widget px
+        (section centre o is the screen centre; no pan/roll)."""
+        p = self.pane["A"]
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        s = self._cpr_section_scale()
+        return pw / 2.0 + du * s, ph / 2.0 - dv * s
+
+    def _cpr_screen_to_offset(self, sx, sy):
+        """Pane-A widget px → cross-section in-plane offset (du,dv mm along u,v)."""
+        p = self.pane["A"]
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        s = self._cpr_section_scale()
+        return (sx - pw / 2.0) / s, (ph / 2.0 - sy) / s
+
     # ---- control-point markers (edit the pseudo-centres in the section) ----
     def _cpr_marker_geom(self):
         """Edit-point marker for the CURRENT section: the control point this
@@ -15700,7 +15727,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._cpr is None:
             return False
         for ci, (du, dv) in self._cpr_marker_geom():
-            mx, my = self._world_to_screen("A", du, dv)
+            mx, my = self._cpr_offset_to_screen(du, dv)
             if (mx - sx) ** 2 + (my - sy) ** 2 <= 14.0 ** 2:
                 self._cpr_drag = ci
                 return True
@@ -15716,7 +15743,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not p3 or not (0 <= ci < len(p3)):
             return
         o, u, vv, n = self._cpr_frame()
-        du, dv = self._disp_to_world("A", sx, sy)
+        du, dv = self._cpr_screen_to_offset(sx, sy)   # section camera, not MPR
         dn = float(np.dot(np.asarray(p3[ci], float) - o, n))     # keep depth
         p3[ci] = np.asarray(o, float) + du * u + dv * vv + dn * n
         self._overlay["A"].update()
@@ -15737,7 +15764,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         act = menu.exec(QCursor.pos())
         if act is a_add:
             o, u, vv, _n = self._cpr_frame()
-            du, dv = self._disp_to_world("A", sx, sy)
+            du, dv = self._cpr_screen_to_offset(sx, sy)   # section camera, not MPR
             self._cpr_add_ctrl_at(o + du * u + dv * vv)
         elif act is a_del:
             self._cpr_delete_ctrl_near()
