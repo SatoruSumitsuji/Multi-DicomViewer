@@ -11720,6 +11720,47 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
 
+    def _reset_coronary_vr_display(self) -> None:
+        """Drop ALL coronary / VR / perfusion-territory DISPLAY state so a NEW series
+        loaded into this (reused) pane viewer doesn't inherit the previous analysis
+        (stale VR tubes / territory surfaces + summary, coronary overlay, territory
+        wash). Called from load_series after the new frames are set up."""
+        # Exit VR on any pane still in it — _vr_set(False) restores the hidden MPR
+        # props and hides every VR volume / tube / halo / cap / territory / target /
+        # summary actor, and clears the territory-review layout flag.
+        for k in ("A", "B"):
+            try:
+                if self._vr_on.get(k):
+                    self._vr_set(k, False)
+            except Exception:                            # noqa: BLE001
+                pass
+        # Drop the overlay / territory / target DATA + summaries.
+        self._coro_overlay = None
+        self._coro_overlay_vr = None
+        self._coro_targets = []
+        self._coro_target_mode = False
+        if hasattr(self, "_coro_names"):
+            try:
+                self._coro_names.clear()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._terr_mask_vol = None
+        self._terr_label_np = None
+        self._terr_colors_v = None
+        self._terr_sig = None
+        self._terr_summary_text = ""
+        self._tgt_summary_text = ""
+        # Clear the MPR coronary / territory / target / summary ACTORS.
+        for _fn in (lambda: self.set_coronary_overlay(None),
+                    lambda: self.set_coronary_targets([]),
+                    lambda: self.set_territory_mask(None, None),
+                    lambda: self.set_territory_summary(""),
+                    lambda: self.set_target_summary("")):
+            try:
+                _fn()
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _vr_pane_key(self) -> str:
         """The pane the VR lives on — the one currently rendering VR, else 'B'
         (the territory review layout's right / VR pane)."""
@@ -13964,6 +14005,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             p = self.pane[key]
             p.reslice.SetInputData(self._image)
             p.colors.SetLookupTable(self._lut())
+        # A reused pane viewer must NOT inherit a previous CT's coronary / VR /
+        # perfusion-territory display (frames are set now, so VR teardown + overlay
+        # clears are safe); _set_mode below then redraws clean MPR.
+        self._reset_coronary_vr_display()
         # Default 3-D MPR for thin-slice volumes (≥201 slices), 2-D native
         # paging for ordinary (≤200-slice) series. _set_mode also fits & draws
         # (into the still-hidden stack page, so nothing paints on screen yet).
