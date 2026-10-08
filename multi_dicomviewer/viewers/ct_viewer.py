@@ -9899,6 +9899,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._view_initial = False
         self._style_measure_btn(self._meas_on)   # prominent ON look (+Alt hint)
         self._refresh_tool_availability()   # grey/restore the interaction tools
+        # Toggling Measure shows/hides the CPR source line's edit handles (and the
+        # green edit-point), so redraw both panes to apply the select/deselect now.
+        for _k in ("A", "B"):
+            self._redraw_meas(_k)
 
     def _set_measure_type(self, key):
         self._meas_type = key
@@ -10506,6 +10510,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 labels.append((f"#{m['id']}", (wx, wy)))
                 continue
             rgb = _hex_to_rgb(m.get("color"))
+            # A deselected CPR source line (Measure OFF) reads as a plain GREY
+            # reference line instead of its bright edit colour.
+            if m.get("_cpr_src") and not self._meas_on:
+                rgb = (170, 170, 170)
             # Hover-highlight the whole outline green (movable shape under cursor).
             if mi == hov_out_mi:
                 rgb = (80, 220, 80)
@@ -10555,9 +10563,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             # no id label (they'd read as editable). To change a valve, redraw an
             # Ellipse and press MV/AoV plane again, then Save.
             is_valve = bool(m.get("_lv_valve"))
+            # The CPR source centreline shows its EDIT handles only while Measure is
+            # ON (= being edited); with Measure OFF it deselects to just the line,
+            # so the drawn route reads as a plain reference.
+            cpr_idle = bool(m.get("_cpr_src")) and not self._meas_on
             # Off-plane point dots: a trace vertex > 1 mm off this plane is
             # drawn faint (50%) via the separate off-plane points actor.
-            if not is_valve:
+            if not is_valve and not cpr_idle:
                 for vi, q in enumerate(self._handles(m)):
                     if mi == edit_mi and not edit_ca and vi == edit_vi:
                         edit_pts.append(q)
@@ -10644,7 +10656,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # sits exactly ON a control point (not during interpolated scrubbing) so the
         # marker doesn't constantly move; cleared on the next redraw after Exit.
         c = self._cpr
-        if c is not None and key == c.get("src") and self._mode == "3D":
+        if (c is not None and self._meas_on and key == c.get("src")
+                and self._mode == "3D"):
             _k = self._cpr_at_ctrl()
             _p3 = self._cpr_ctrl_pts3d()
             if _k is not None and _p3 and 0 <= _k < len(_p3):

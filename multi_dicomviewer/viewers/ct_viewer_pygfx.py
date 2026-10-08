@@ -1441,6 +1441,10 @@ class _Overlay(QWidget):
             # handles, no long/short-diameter lines) — to change, redraw + Save.
             locked = bool(m.get("_lv_valve"))
             rgb = _hex_to_rgb(m.get("color"))
+            # A deselected CPR source line (Measure OFF) reads as a plain GREY
+            # reference line instead of its bright edit colour.
+            if m.get("_cpr_src") and not v._meas_on:
+                rgb = (170, 170, 170)
             if mi == hov_out_mi and not locked:  # outline hover → green
                 rgb = (80, 220, 80)
             a4 = transp_to_alpha(m.get("transp", 0))
@@ -1521,7 +1525,10 @@ class _Overlay(QWidget):
             # as solid yellow dots, off-plane ones as 50% hollow yellow rings so
             # the user sees which pseudo-centres sit in the shown cross-section.
             idle_on, idle_off, hov_pts = [], [], []
-            if not locked:                          # valve ring = no handles
+            # The CPR source centreline shows its edit handles only while Measure is
+            # ON; with Measure OFF it deselects to just the line (plain reference).
+            cpr_idle = bool(m.get("_cpr_src")) and not v._meas_on
+            if not locked and not cpr_idle:         # valve ring = no handles
                 for vi, q in enumerate(v._handles(m)):
                     if mi == edit_mi and not edit_ca and vi == edit_vi:
                         continue                      # the dragged one → green
@@ -1540,20 +1547,22 @@ class _Overlay(QWidget):
             if (not locked and mi == edit_mi and not edit_ca
                     and edit_vi is not None and 0 <= edit_vi < len(m["pts"])):
                 dots([m["pts"][edit_vi]], QColor(59, 219, 90), 7.0)  # green
-            # numeric id label at the anchor
-            p.setPen(QColor(255, 217, 0))
-            fb = QFont("monospace", v._overlay_font_pt)
-            fb.setBold(True)
-            p.setFont(fb)
-            ax, ay = v._world_to_screen(key, *v._anchor(m))
-            p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
+            # numeric id label at the anchor (hidden for a deselected CPR line)
+            if not cpr_idle:
+                p.setPen(QColor(255, 217, 0))
+                fb = QFont("monospace", v._overlay_font_pt)
+                fb.setBold(True)
+                p.setFont(fb)
+                ax, ay = v._world_to_screen(key, *v._anchor(m))
+                p.drawText(QPointF(ax + 6, ay - 6), str(m["id"]))
 
         # CPR: mark the CURRENT edit (control) point GREEN on the MAP pane so it's
         # clear which point the short-axis shows. Only when the section sits ON a
         # control point (not during interpolated scrubbing) so it doesn't constantly
         # move; cleared on the next redraw after Exit.
         c = v._cpr
-        if c is not None and key == c.get("src") and v._mode == "3D":
+        if (c is not None and v._meas_on and key == c.get("src")
+                and v._mode == "3D"):
             _k = v._cpr_at_ctrl()
             _p3 = v._cpr_ctrl_pts3d()
             if _k is not None and _p3 and 0 <= _k < len(_p3):
