@@ -13310,10 +13310,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if (self._coronary_mpr_pending and d["type"] == "polyline"
                 and self._lv is None and self._mode == "3D" and len(pts) >= 2):
             self._coronary_mpr_pending = False
-            if self._meas_on:                        # clean short-axis view
-                self._meas_btn.setChecked(False)
-                self._toggle_measure()
-            # _enter_cpr shows the scrub + keeps the coronary row (syncs UI).
+            # Measure stays ON but IDLE through the CPR build (set in _enter_cpr),
+            # so the drawn line can be right-click-Hidden without re-enabling it —
+            # matching the Polyline→CPR route.
             self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
 
     def _measure_finish_draft(self):
@@ -17730,6 +17729,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_rev_btn.setChecked(False)         # fresh: proximal→distal
         self._coronary_mode = True                  # keep the coronary row shown
         self._coronary_mpr_pending = False          # trace consumed
+        # Keep Measure ON but IDLE (no draw type) for every CPR-creation route
+        # (Draw / Polyline-convert / Load) so the drawn/loaded CPR line can be
+        # right-click-Hidden without re-enabling Measure; a cross-section left-click
+        # still edits the short-axis (pane A claims left-clicks before Measure).
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        self._set_measure_type(None)
         self._cpr_sync_bar()
         self._coronary_sync_ui()                     # show scrub, enable Save
         self._refresh(reset_cam=True)
