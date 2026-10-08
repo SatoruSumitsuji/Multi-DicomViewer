@@ -363,7 +363,7 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.customContextMenuRequested.connect(self._menu)
         self._tree_w.itemChanged.connect(self._on_item_changed)
         self._tree_w.itemSelectionChanged.connect(self._on_selection)
-        self._tree_w.itemDoubleClicked.connect(lambda *_: self._rename())
+        self._tree_w.itemDoubleClicked.connect(self._on_item_double_clicked)
         split.addWidget(self._tree_w)
 
         # ---- Territory results (populated when a FullLv is loaded) ----
@@ -921,6 +921,19 @@ class CoronaryTreeWindow(SnapDock):
     def _on_selection(self):
         self._activate_item_ct(self._tree_w.currentItem())
         self.vesselSelected.emit(self.selected_vid() or "")
+
+    def _on_item_double_clicked(self, item, _col=0):
+        """Double-click a vessel row → SELECT + highlight it on the image (rename is
+        on the right-click menu now). Further editing is via the IMAGE line's
+        right-click (Resume / 上書き保存). A CT-group header double-click is ignored."""
+        if item is None or item.data(0, _GRP_ROLE):
+            return
+        vid = item.data(0, _UID_ROLE)
+        if not vid:
+            return
+        self._activate_item_ct(item)
+        self.vesselSelected.emit(vid)        # re-highlight the selected vessel
+        self._push_overlay()
 
     def _ct_of_vessel(self, vid: str) -> str:
         """Which CT bundle owns a vid (first match); "" if none."""

@@ -2996,13 +2996,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
             self._measure_finish_draft()       # LV capture handled inside now
             return
-        # Double-click ON a saved CPR overlay line → edit it (Resume), not recentre.
-        if (self._coro_resume_cb is not None
-                and "Shift" not in _mods and "Alt" not in _mods):
-            _vid, _idx = self._coronary_pick_sample(key, ev["x"], ev["y"])
-            if _vid is not None:
-                self._coro_resume_cb(_vid)
-                return
+        # NOTE: a double-click near a CPR overlay line is a plain RECENTRE (below),
+        # NOT "edit this CPR" — editing a saved CPR is on the image line's
+        # right-click menu (この血管を編集 / 上書き保存) and the Coronary Tree row.
         if self._cpr is not None and key == "A":
             return                                # no recenter on the section
         self._recenter(key, ev["x"], ev["y"])

@@ -1381,13 +1381,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._owner._meas_on and not (_shift or _alt):
             self._owner._measure_finish_draft()
             return
-        # Double-click ON a saved CPR overlay line → edit it (Resume), not recentre.
-        if (self._owner._coro_resume_cb is not None and not (_shift or _alt)):
-            _vid = self._owner._coronary_pick(
-                self._which, e.position().x(), e.position().y())
-            if _vid is not None:
-                self._owner._coro_resume_cb(_vid)
-                return
+        # NOTE: a double-click near a CPR overlay line is a plain RECENTRE (below),
+        # NOT "edit this CPR" — with Measure off, double-click must keep its normal
+        # recentre meaning. Editing a saved CPR is on the image line's right-click
+        # menu (この血管を編集 / 上書き保存) and the Coronary Tree row.
         # CPR short-axis (pane A): the centreline point already moves on a SINGLE
         # click (crosshair-centre grab → recentre on release), so a double-click
         # must NOT recentre again — a habitual double-click would otherwise move
