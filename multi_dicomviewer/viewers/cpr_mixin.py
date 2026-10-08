@@ -346,6 +346,25 @@ class CPRMixin:
         self._cpr_center_map_on_current()        # map pane follows the edit point
         self._refresh()
 
+    def cpr_key_nav(self, where: str) -> bool:
+        """Shell nav keys while a CPR short-axis is open: A / F step the PREVIOUS /
+        NEXT edit point, Shift+A / Shift+F jump to the FIRST / LAST — instead of
+        changing the series. *where* ∈ prev/next/first/last. Returns True if claimed
+        (i.e. a CPR is open), so the shell skips series navigation."""
+        if self._cpr is None:
+            return False
+        if where == "prev":
+            self._cpr_jump_ctrl(-1)
+        elif where == "next":
+            self._cpr_jump_ctrl(+1)
+        elif where == "first":
+            self._cpr_jump_ctrl_end(False)
+        elif where == "last":
+            self._cpr_jump_ctrl_end(True)
+        else:
+            return False
+        return True
+
     def _cpr_center_map_on_current(self) -> None:
         """Pan the MAP (long-axis) pane so the CURRENT control/scroll point sits at
         the view centre — so stepping edit points moves BOTH panes (short-axis +

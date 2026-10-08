@@ -5451,6 +5451,10 @@ class MainWindow(QMainWindow):
         claims the key and we stop here."""
         v = self._active.current_viewer()
         if _is_ct(v):
+            # In CPR mode, A/F step the edit points and Shift+A/F jump to first/last
+            # (not the series) — the viewer claims the key.
+            if hasattr(v, "cpr_key_nav") and v.cpr_key_nav(where):
+                return
             if hasattr(v, "lv_nav_key") and v.lv_nav_key(where):
                 return
             self._nav_ct(where)
