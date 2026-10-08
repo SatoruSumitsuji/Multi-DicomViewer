@@ -3280,23 +3280,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         # first (一番手前) / last (一番奥) point; ◀ / ▶ step one (= Alt+A / Alt+F).
         self._cpr_first_ctrl_btn = FitButton("|◀")
         self._cpr_first_ctrl_btn.setHelpToolTip(
-            t("一番手前のCPR編集点へジャンプ"))
+            t("一番手前のCPR編集点へジャンプ（Shift+A）"))
         self._cpr_first_ctrl_btn.clicked.connect(
             lambda: self._cpr_jump_ctrl_end(False))
         srow.addWidget(self._cpr_first_ctrl_btn)
         self._cpr_prev_ctrl_btn = FitButton("◀")
         self._cpr_prev_ctrl_btn.setHelpToolTip(
-            t("前のCPR編集点へ移動（調整用、Alt+A と同じ）"))
+            t("前のCPR編集点へ移動（調整用、A）"))
         self._cpr_prev_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(-1))
         srow.addWidget(self._cpr_prev_ctrl_btn)
         self._cpr_next_ctrl_btn = FitButton("▶")
         self._cpr_next_ctrl_btn.setHelpToolTip(
-            t("次のCPR編集点へ移動（調整用、Alt+F と同じ）"))
+            t("次のCPR編集点へ移動（調整用、F）"))
         self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(+1))
         srow.addWidget(self._cpr_next_ctrl_btn)
         self._cpr_last_ctrl_btn = FitButton("▶|")
         self._cpr_last_ctrl_btn.setHelpToolTip(
-            t("一番奥のCPR編集点へジャンプ"))
+            t("一番奥のCPR編集点へジャンプ（Shift+F）"))
         self._cpr_last_ctrl_btn.clicked.connect(
             lambda: self._cpr_jump_ctrl_end(True))
         srow.addWidget(self._cpr_last_ctrl_btn)
@@ -20183,12 +20183,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 and (e.modifiers() & Qt.KeyboardModifier.ControlModifier)):
             self._paste_measure()                 # paste a copied measure (new #)
             return
-        # CPR short-axis: Alt+F / Alt+A step to the next / previous EDIT point.
-        if (self._cpr is not None
-                and (e.modifiers() & Qt.KeyboardModifier.AltModifier)
-                and e.key() in (Qt.Key.Key_F, Qt.Key.Key_A)):
-            self._cpr_jump_ctrl(+1 if e.key() == Qt.Key.Key_F else -1)
-            return
+        # CPR short-axis edit-point navigation is on the shell's nav keys now:
+        # A / F = prev / next edit point, Shift+A / Shift+F = first / last (see
+        # main_window._nav_active → cpr_key_nav), so nothing to handle here.
         if e.key() == Qt.Key.Key_C:               # C = toggle ColorMap
             self._cmap_btn.setChecked(not self._cmap_btn.isChecked())
             self._toggle_color()
