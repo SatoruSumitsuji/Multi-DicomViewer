@@ -7051,10 +7051,11 @@ class MainWindow(QMainWindow):
         lv_endo = settings.load_lv_endo_params()
         lv_wall = settings.load_lv_wall_bands()
         coronary = settings.load_coronary_params()
+        mouse_grid = settings.load_mouse_grid()
         dlg = SettingsDialog(caps, quality, self._open_ct_color,
                              on_advanced=self._open_advanced_quality,
                              parent=self, lv_endo=lv_endo, lv_wall=lv_wall,
-                             coronary=coronary)
+                             coronary=coronary, mouse_grid=mouse_grid)
         if dlg.exec() != dlg.DialogCode.Accepted:
             return
         # Display count: persist + apply (over-cap panes sleep now; keep=active
@@ -7094,6 +7095,19 @@ class MainWindow(QMainWindow):
         cw = getattr(self, "_corotree_win", None)
         if cw is not None and hasattr(cw, "coronary_params_refresh"):
             cw.coronary_params_refresh()
+        # Mouse-operation grid layout: persist (keep the toggle state) + live-apply.
+        new_layout = dlg.mouse_grid_layout()
+        if sorted(new_layout) == sorted(settings.MOUSE_GRID_ACTIONS):
+            mouse_grid["layout"] = new_layout
+            settings.save_mouse_grid(mouse_grid)
+            for v in self._all_loaded_viewers():
+                if hasattr(v, "reload_mouse_grid"):
+                    v.reload_mouse_grid()
+        else:
+            QMessageBox.information(
+                self, t("マウス操作グリッド"),
+                t("各アクションを1回ずつ割り当ててください（重複/欠落のため配置は"
+                  "保存しませんでした）。"))
         self.statusBar().showMessage(
             t("Settings saved (CT {ct} / Angio {xa} live)",
               ct=vals["CT"], xa=vals["XA"]))

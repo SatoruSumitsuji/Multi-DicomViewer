@@ -24,7 +24,23 @@ DICOMFOLDER_SORT_PATH = SETTINGS_DIR / "dicomfolder_sort.json"
 DICOMFOLDER_OPTIONS_PATH = SETTINGS_DIR / "dicomfolder_options.json"
 LIVE_CAPS_PATH = SETTINGS_DIR / "live_caps.json"
 CORONARY_PARAMS_PATH = SETTINGS_DIR / "coronary_params.json"
+MOUSE_GRID_PATH = SETTINGS_DIR / "mouse_grid.json"
 _SCHEMA_VERSION = 2
+
+#: Mouse-only operation grid for the cine (XA / IVUS) panes: a 3×3 overlay whose
+#: cells each run one cine/view action, so the whole viewer can be driven with the
+#: mouse. Persisted so the toggle survives a restart. `on` = the toggle state;
+#: `layout` = the 9 cell actions, row-major (index 0 = top-left … 8 = bottom-right).
+MOUSE_GRID_ACTIONS = (
+    "prev_series", "next_series", "prev_frame", "next_frame",
+    "play", "seek", "pan", "zoom", "wl",
+)
+MOUSE_GRID_DEFAULT = {
+    "on": False,
+    "layout": ["prev_series", "play", "next_series",
+               "prev_frame", "zoom", "next_frame",
+               "pan", "seek", "wl"],
+}
 
 #: Coronary Tree / Territory appearance — user-editable in Settings so the look
 #: can change without a code edit. Defaults reproduce the shipped appearance.
@@ -801,6 +817,44 @@ def save_coronary_params(params: dict) -> None:
         CORONARY_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
         CORONARY_PARAMS_PATH.write_text(
             json.dumps(clean, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def load_mouse_grid() -> dict:
+    """Mouse-operation grid prefs {'on': bool, 'layout': [9 action keys]}, merged
+    over the defaults so a missing / partial / corrupt file is still valid. The
+    layout must contain each of the 9 actions exactly once; a bad layout falls
+    back to the default order."""
+    out = {"on": bool(MOUSE_GRID_DEFAULT["on"]),
+           "layout": list(MOUSE_GRID_DEFAULT["layout"])}
+    try:
+        data = json.loads(MOUSE_GRID_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = {}
+    if isinstance(data, dict):
+        out["on"] = bool(data.get("on", out["on"]))
+        lay = data.get("layout")
+        if (isinstance(lay, list) and len(lay) == 9
+                and sorted(lay) == sorted(MOUSE_GRID_ACTIONS)):
+            out["layout"] = [str(k) for k in lay]
+    return out
+
+
+def save_mouse_grid(prefs: dict) -> None:
+    """Best-effort persist of the mouse-grid prefs (sanitised: a bad layout is
+    replaced by the default order)."""
+    try:
+        p = prefs or {}
+        lay = p.get("layout")
+        if not (isinstance(lay, list) and len(lay) == 9
+                and sorted(lay) == sorted(MOUSE_GRID_ACTIONS)):
+            lay = list(MOUSE_GRID_DEFAULT["layout"])
+        MOUSE_GRID_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MOUSE_GRID_PATH.write_text(
+            json.dumps({"on": bool(p.get("on", False)),
+                        "layout": [str(k) for k in lay], "version": 1},
+                       ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, TypeError, ValueError):
         pass
 

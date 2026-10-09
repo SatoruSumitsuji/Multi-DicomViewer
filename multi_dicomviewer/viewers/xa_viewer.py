@@ -695,6 +695,65 @@ class XAViewer(AbstractViewer):
         self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
         self.canvas2.arrow_pressed.connect(self._on_canvas_arrow)
 
+        # Mouse-operation grid (3×3): load persisted state, push the layout + the
+        # click-action dispatcher onto both canvases, and reflect the toggle.
+        self._mouse_grid = settings.load_mouse_grid()
+        for _c in (self.canvas, self.canvas2):
+            _c._grid.set_layout(self._mouse_grid["layout"])
+            _c._grid_dispatch_cb = self._on_grid_action
+        self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
+        self._sync_mouse_grid()
+
+    # ----------------------------------------------- mouse-operation grid
+    def _toggle_mouse_grid(self) -> None:
+        self._on_user_interaction()
+        self._mouse_grid["on"] = self._grid_btn.isChecked()
+        settings.save_mouse_grid(self._mouse_grid)     # persist across restarts
+        self._sync_mouse_grid()
+
+    def _sync_mouse_grid(self) -> None:
+        """Grid is active only when its toggle is ON and Measure is OFF (Measure
+        needs free drawing, so it suspends the grid)."""
+        on = self._grid_btn.isChecked() and not self._meas_btn.isChecked()
+        for _c in (self.canvas, self.canvas2):
+            _c._grid.set_enabled(on)
+
+    def reload_mouse_grid(self) -> None:
+        """Re-read the grid prefs (Settings ▸ layout change); keep the persisted
+        toggle state."""
+        self._mouse_grid = settings.load_mouse_grid()
+        for _c in (self.canvas, self.canvas2):
+            _c._grid.set_layout(self._mouse_grid["layout"])
+        self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
+        self._sync_mouse_grid()
+
+    def _on_grid_action(self, action, arg=None) -> None:
+        """A grid cell was clicked / dragged (series / frame / play / seek).
+        Pan / Zoom / W-L are applied on the canvas itself."""
+        if action == "prev_series":
+            self.series_nav.emit("prev")
+        elif action == "next_series":
+            self.series_nav.emit("next")
+        elif action == "prev_frame":
+            self.step_frame(-1)
+        elif action == "next_frame":
+            self.step_frame(+1)
+        elif action == "play":
+            self._grid_play_cycle()
+        elif action == "seek":
+            mx = self.frame_slider.maximum()
+            self.frame_slider.setValue(int(round(float(arg or 0.0) * mx)))
+
+    def _grid_play_cycle(self) -> None:
+        """Play zone: not playing → play 1×, 1× → 2×, 2× → stop."""
+        if not self.play_btn.isChecked():
+            self._play_speed = 1.0
+            self.play_btn.setChecked(True)        # toggled → _toggle_play(True)
+        elif float(getattr(self, "_play_speed", 1.0)) < 1.5:
+            self.toggle_play_speed()              # 1× → 2×
+        else:
+            self.play_btn.setChecked(False)       # toggled → _toggle_play(False)
+
     def _on_canvas_arrow(self, direction: str) -> None:
         """Arrow key on a focused cine image: Up/Down step Prev/Next series,
         Left/Right step one frame back/forward. Left/Right are a no-op on a
@@ -800,6 +859,18 @@ class XAViewer(AbstractViewer):
         )
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
+
+        # Mouse-operation grid toggle (3×3 click/drag zones = mouse-only control).
+        # Off by default, persisted across restarts; Measure-ON suspends it.
+        self._grid_btn = QPushButton(t("マウス操作グリッド"))
+        self._grid_btn.setCheckable(True)
+        self._grid_btn.setToolTip(
+            t("画像を3×3のゾーンに分けてマウスだけで操作（シリーズ/フレーム/再生/"
+              "シーク/Pan/Zoom/WL）。Measure中は自動で解除。配置は Settings で変更可。"))
+        self._grid_btn.setStyleSheet(
+            "QPushButton:checked{background:#ff8c00;color:white;font-weight:bold;}")
+        self._grid_btn.clicked.connect(self._toggle_mouse_grid)
+        row.addWidget(self._grid_btn)
 
         # Magnifier (click-to-zoom) buttons, right of Measure. 🔍+ / 🔍−
         # are sticky modes: after pressing one, each click on the image
@@ -2496,6 +2567,8 @@ class XAViewer(AbstractViewer):
         self._on_user_interaction()
         on = self._meas_btn.isChecked()
         self._measure_bar.setVisible(on)
+        if hasattr(self, "_grid_btn"):
+            self._sync_mouse_grid()     # Measure-ON suspends the grid (and back)
         if on:
             self._clear_zoom_click()
             self._clear_zoom_rect()
