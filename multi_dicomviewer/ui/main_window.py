@@ -866,7 +866,7 @@ class ViewerPane(QFrame):
             mod = loaded.modality.value
             self._show_message(
                 t("{mod} viewer is not implemented.\n"
-                  "(Supported: XA, CT, IVUS. OCT/OFDI/NM planned.)", mod=mod)
+                  "(Supported: XA, CT, IVUS/OCT/OFDI.)", mod=mod)
             )
             self._cur_viewer = None
             self._set_pane_title(t("{mod} (unsupported)", mod=mod))
@@ -5470,11 +5470,11 @@ class MainWindow(QMainWindow):
     def _nav_pane_series(self, xp, where: str) -> None:
         # Step within the SAME modality as the pane (XA among XA, IVUS
         # among IVUS, CT among CT, NM among NM, …), inside that pane.
-        # The navigation key comes from the SERIES currently shown — not
-        # the viewer's handles_modality, because non-canonical modalities
-        # (NM/OCT/OFD) all fall back to the XAViewer with
-        # handles_modality="XA" and would otherwise step through XA series
-        # instead of their own kind.
+        # The navigation key comes from the SERIES currently shown (its raw
+        # kind) — not the viewer's handles_modality — so kinds that SHARE a
+        # viewer still step through their own kind only: OCT/OFDI use the IVUS
+        # viewer (handles_modality="IVUS") yet navigate among OCT / OFDI
+        # respectively, and NM/… on the XA fallback stay within their kind.
         if xp is None:
             return
         cur_series = self._series_by_uid.get(xp.shown_series_uid())
@@ -6712,8 +6712,9 @@ class MainWindow(QMainWindow):
         # Remember the last series per modality and per study so the
         # cine viewers' First/Prev/Next/Last nav and the Study-row
         # click both resume from here after the user moves away and
-        # comes back. Key by raw DICOM Modality (series.kind) so the
-        # OTHER bucket (NM/OCT/OFD/…) keeps each kind's own resume.
+        # comes back. Key by raw DICOM Modality (series.kind) so every kind
+        # keeps its own resume — including the ones that share one viewer
+        # (IVUS/OCT/OFDI all use the IVUS viewer) or the OTHER bucket (NM/…).
         self._last_by_modality[series.kind] = series
         study_uid_log = self._study_by_series_uid.get(series.series_uid, "")
         if study_uid_log:
