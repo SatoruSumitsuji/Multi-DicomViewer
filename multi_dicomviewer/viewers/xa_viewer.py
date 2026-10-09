@@ -716,7 +716,7 @@ class XAViewer(AbstractViewer):
         needs free drawing, so it suspends the grid)."""
         on = self._grid_btn.isChecked() and not self._meas_btn.isChecked()
         for _c in (self.canvas, self.canvas2):
-            _c._grid.set_enabled(on)
+            _c.set_grid_enabled(on)
 
     def reload_mouse_grid(self) -> None:
         """Re-read the grid prefs (Settings ▸ layout change); keep the persisted

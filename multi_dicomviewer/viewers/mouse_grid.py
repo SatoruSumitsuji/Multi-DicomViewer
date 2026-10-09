@@ -28,7 +28,7 @@ _LABELS = {
     "next_series": "シリーズ ▶",
     "prev_frame":  "◀ フレーム",
     "next_frame":  "フレーム ▶",
-    "play":        "▶/⏸ 再生",
+    "play":        "▶  ⏩  ■",
     "seek":        "⇔ シーク",
     "pan":         "✥ 移動",
     "zoom":        "🔍 拡大",
@@ -43,9 +43,13 @@ class MouseGrid:
     def __init__(self, canvas):
         self.canvas = canvas
         self.enabled = False
-        self.layout = ["prev_series", "play", "next_series",
-                       "prev_frame", "zoom", "next_frame",
-                       "pan", "seek", "wl"]
+        # Overlay visibility is auto-managed by the canvas (shown after the mouse
+        # is still for ~1 s, hidden on any move/action) so it never obscures the
+        # image; interaction stays live whenever `enabled`, regardless.
+        self.show_overlay = False
+        self.layout = ["prev_frame", "play", "next_frame",
+                       "prev_series", "seek", "next_series",
+                       "pan", "zoom", "wl"]
         self._drag_action = None          # action key of an in-progress drag
         self._press_cell = None           # cell pressed (for click-on-release)
         self._press_xy = None
@@ -119,7 +123,7 @@ class MouseGrid:
             self.canvas._pan[1] += dy
             self.canvas.update()
         elif a == "zoom":
-            factor = 1.0 + (ly - sy) * 0.006          # drag up = zoom in
+            factor = 1.0 + (sy - ly) * 0.006          # drag DOWN = zoom in (CT)
             if abs(factor - 1.0) > 1e-4:
                 self.canvas._apply_zoom(
                     factor, self.canvas.width() / 2.0, self.canvas.height() / 2.0)

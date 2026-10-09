@@ -37,10 +37,15 @@ MOUSE_GRID_ACTIONS = (
 )
 MOUSE_GRID_DEFAULT = {
     "on": False,
-    "layout": ["prev_series", "play", "next_series",
-               "prev_frame", "zoom", "next_frame",
-               "pan", "seek", "wl"],
+    "layout": ["prev_frame", "play", "next_frame",
+               "prev_series", "seek", "next_series",
+               "pan", "zoom", "wl"],
 }
+#: The first shipped default order — a saved file still carrying it (a tester who
+#: never customised the layout) is migrated to the current default on load.
+_MOUSE_GRID_OLD_DEFAULT = ["prev_series", "play", "next_series",
+                          "prev_frame", "zoom", "next_frame",
+                          "pan", "seek", "wl"]
 
 #: Coronary Tree / Territory appearance — user-editable in Settings so the look
 #: can change without a code edit. Defaults reproduce the shipped appearance.
@@ -837,7 +842,10 @@ def load_mouse_grid() -> dict:
         lay = data.get("layout")
         if (isinstance(lay, list) and len(lay) == 9
                 and sorted(lay) == sorted(MOUSE_GRID_ACTIONS)):
-            out["layout"] = [str(k) for k in lay]
+            lay = [str(k) for k in lay]
+            # Migrate the first-shipped default order to the current default.
+            out["layout"] = (list(MOUSE_GRID_DEFAULT["layout"])
+                             if lay == _MOUSE_GRID_OLD_DEFAULT else lay)
     return out
 
 
