@@ -215,6 +215,12 @@ class ImageCanvas(QWidget):
         # Zoom (Z = zoom in / Shift+Z = zoom out / mouse wheel also).
         # Wheel zooms toward the cursor; Z/Shift+Z toward the view centre.
         self._zoom: float = 1.0
+        # Mouse-only operation grid (XA/IVUS): a 3×3 overlay whose cells drive
+        # series/frame/play/seek/pan/zoom/W-L. When enabled it owns the mouse at
+        # the top of the handlers; dispatch of click actions goes to the viewer.
+        from multi_dicomviewer.viewers.mouse_grid import MouseGrid
+        self._grid = MouseGrid(self)
+        self._grid_dispatch_cb = None
         # Pan offset in widget pixels, added on top of the centred fit so
         # the user can bring a specific region into view. Middle-button OR
         # Ctrl+left drag pans; reset_zoom clears both zoom and pan.
@@ -1379,6 +1385,12 @@ class ImageCanvas(QWidget):
         self.setFocus(Qt.FocusReason.MouseFocusReason)
         pos = e.position()
         sx, sy = pos.x(), pos.y()
+        # Mouse-operation grid (if enabled): owns the LEFT button at the very top —
+        # the whole image is control zones, so normal tool/measure handling is
+        # bypassed. Other buttons fall through.
+        if (self._grid.active() and e.button() == Qt.MouseButton.LeftButton
+                and self._grid.press(sx, sy)):
+            return
         # Middle-button drag pans the (zoomed) image — independent of the
         # active measurement tool, so panning never competes with drawing.
         # Ctrl + left-drag pans too, so a mouse without a middle button (or
@@ -1622,6 +1634,8 @@ class ImageCanvas(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position()
         sx, sy = pos.x(), pos.y()
+        if self._grid.move(sx, sy):          # in-progress grid drag owns the move
+            return
         if self._panning and self._pan_anchor is not None:
             self._pan[0] += sx - self._pan_anchor[0]
             self._pan[1] += sy - self._pan_anchor[1]
@@ -1720,6 +1734,11 @@ class ImageCanvas(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, _e):
+        if self._grid.active() or self._grid._drag_action is not None \
+                or self._grid._press_cell is not None:
+            _p = _e.position()
+            if self._grid.release(_p.x(), _p.y()):
+                return
         if self._panning:
             self._panning = False
             self._pan_anchor = None
@@ -2100,6 +2119,18 @@ class ImageCanvas(QWidget):
             p.drawRect(rb)
             p.setPen(QPen(QColor(30, 111, 208), 1, Qt.PenStyle.DashLine))
             p.drawRect(rb.adjusted(1, 1, -1, -1))
+
+        # Mouse-operation grid overlay — drawn LAST so the control zones sit on
+        # top of the image / annotations while the mode is on.
+        if self._grid.active():
+            self._grid.paint(p, self.width(), self.height())
+
+    def _grid_dispatch(self, action, arg=None) -> None:
+        """Forward a grid CLICK/seek action to the owning viewer (pan/zoom/W-L are
+        applied on the canvas itself). The viewer sets _grid_dispatch_cb."""
+        cb = self._grid_dispatch_cb
+        if callable(cb):
+            cb(action, arg)
 
     def _paint_ivus_long_axis(self, p: QPainter) -> None:
         """Draw the IVUS long-axis guide on the cross-section, MPR-style:

@@ -69,7 +69,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, caps: dict, quality: dict, on_ct_color,
                  on_advanced=None, parent=None, lv_endo=None, lv_wall=None,
-                 coronary=None):
+                 coronary=None, mouse_grid=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         self._on_ct_color = on_ct_color
@@ -315,6 +315,37 @@ class SettingsDialog(QDialog):
         coform.addRow(t("領域色（系統 / ターゲット）"), _grid_w)
         root.addWidget(gb_coro)
 
+        # ---- マウス操作グリッド（XA/IVUS）の配置 --------------------------
+        from multi_dicomviewer.viewers.mouse_grid import _LABELS as _MG_LABELS
+        mg = mouse_grid or settings.load_mouse_grid()
+        gb_mg = QGroupBox(t("マウス操作グリッド（XA/IVUS）の配置"))
+        mgv = QVBoxLayout(gb_mg)
+        mgnote = QLabel(t(
+            "3×3の各セルに割り当てる操作（9種を1回ずつ）。アクティブなXA/IVUS画面を"
+            "マウスだけで操作します。トグルはビューアの「マウス操作グリッド」ボタン、"
+            "Measure中は自動で解除。"))
+        mgnote.setWordWrap(True)
+        mgv.addWidget(mgnote)
+        self._mg_actions = list(settings.MOUSE_GRID_ACTIONS)
+        self._mg_labels = {k: t(_MG_LABELS.get(k, k)) for k in self._mg_actions}
+        g2 = QGridLayout()
+        self._mg_combos = []
+        cur = (mg or {}).get("layout") or list(settings.MOUSE_GRID_DEFAULT["layout"])
+        for i in range(9):
+            cb = QComboBox()
+            for k in self._mg_actions:
+                cb.addItem(self._mg_labels[k], k)
+            key = cur[i] if i < len(cur) else self._mg_actions[i]
+            idx = max(0, self._mg_actions.index(key)
+                      if key in self._mg_actions else i)
+            cb.setCurrentIndex(idx)
+            self._mg_combos.append(cb)
+            g2.addWidget(cb, i // 3, i % 3)
+        _mg_w = QWidget()
+        _mg_w.setLayout(g2)
+        mgv.addWidget(_mg_w)
+        root.addWidget(gb_mg)
+
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
@@ -375,6 +406,12 @@ class SettingsDialog(QDialog):
             v = sb.value()
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
         return out
+
+    def mouse_grid_layout(self) -> list:
+        """The 9 chosen cell actions (row-major). May contain duplicates — the
+        caller validates (settings.save_mouse_grid falls back to default if the
+        layout isn't a valid permutation)."""
+        return [cb.currentData() for cb in self._mg_combos]
 
     def coronary(self) -> dict:
         """Chosen Coronary Tree / Territory appearance params (sanitising/clamping
