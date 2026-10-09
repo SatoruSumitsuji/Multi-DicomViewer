@@ -198,6 +198,9 @@ jobs:
           if-no-files-found: ignore
 
       # ----- On a v* tag: also attach the zips to a GitHub Release -----
+      # A semver PRE-RELEASE tag (one with a hyphen, e.g. v4.4.0-beta.1 /
+      # v4.4.0-rc.1) is published as a GitHub pre-release, so it never takes
+      # the stable "Latest" badge; a plain vX.Y.Z tag becomes the full release.
       - name: Attach to Release (tagged builds only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
@@ -206,6 +209,42 @@ jobs:
             dist/Multi-DicomViewer-windows.zip
             dist/Multi-DicomViewer-macos.zip
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ----- Beta channel: roll the newest beta into a FIXED-tag release -----
+      # On a pre-release tag (hyphen in the tag name) also overwrite the single
+      # asset on the permanent `beta` release, so this URL always serves the
+      # newest beta without ever changing:
+      #   .../releases/download/beta/Multi-DicomViewer-windows.zip   (and -macos)
+      # Each runner uploads only the zip it built (distinct filenames), so the
+      # two matrix jobs never collide. The `beta` release is created on first
+      # use and stays a pre-release (it must not become "Latest"). Only the
+      # Windows job rewrites the notes, so the two jobs don't race on them.
+      - name: Publish to rolling beta channel (Windows)
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') && runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $notes = "テスター向けの最新ベータ版（Windows / macOS）。このリリースのZipは新しいベータタグのたびに自動で差し替えられ、下記URLは常に最新ベータを返します（URLは不変）。  Win: https://github.com/$env:GITHUB_REPOSITORY/releases/download/beta/Multi-DicomViewer-windows.zip  /  Mac: https://github.com/$env:GITHUB_REPOSITORY/releases/download/beta/Multi-DicomViewer-macos.zip  現在の中身はタグ $env:GITHUB_REF_NAME のビルドです。安定版は Releases 一覧の「Latest」を参照してください。"
+          gh release view beta --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create beta --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title "Beta (rolling latest)" --notes $notes
+          }
+          gh release upload beta dist/Multi-DicomViewer-windows.zip --repo $env:GITHUB_REPOSITORY --clobber
+          gh release edit beta --repo $env:GITHUB_REPOSITORY --prerelease --notes $notes
+
+      - name: Publish to rolling beta channel (macOS)
+        if: startsWith(github.ref, 'refs/tags/v') && contains(github.ref_name, '-') && runner.os == 'macOS'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view beta --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create beta --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --prerelease --title "Beta (rolling latest)" --notes "placeholder"
+          fi
+          gh release upload beta dist/Multi-DicomViewer-macos.zip --repo "$GITHUB_REPOSITORY" --clobber
