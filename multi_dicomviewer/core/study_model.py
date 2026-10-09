@@ -11,10 +11,24 @@ from enum import Enum
 from typing import Optional
 
 
+#: Intravascular OCT / OFDI DICOM Modality codes that are handled exactly like
+#: IVUS. They are intravascular pull-back cines (single-plane multi-frame, loaded
+#: via the same load_xa path), so Modality.from_dicom maps them to Modality.IVUS
+#: and the shell ROUTES them to the IVUS viewer — inheriting its whole operation
+#: set (long-axis, rotation-centre/angle keyframes, colour toggle, free rotation,
+#: mouse-operation grid). The raw code stays in Series.dicom_modality, so the
+#: browser still shows "OCT"/"OFDI"/"IVOCT" and First/Prev/Next/Last still groups
+#: each kind on its own (navigation keys off kind, not the enum). "IVOCT" is the
+#: DICOM defined term; "OCT"/"OFDI" cover the vendor codes seen in cath-lab
+#: exports (this is a coronary viewer, so OCT here is always intravascular, never
+#: ophthalmic).
+IVUS_LIKE_MODALITIES = frozenset({"IVUS", "IVOCT", "OCT", "OFDI"})
+
+
 class Modality(str, Enum):
     XA = "XA"          # X-ray angiography (invasive cath cine)
     CT = "CT"          # cardiac CT (CCTA)
-    IVUS = "IVUS"      # intravascular ultrasound (pull-back cine)
+    IVUS = "IVUS"      # intravascular ultrasound / OCT / OFDI (pull-back cine)
     SR = "SR"          # structured report (dose report etc. — no pixels)
     OTHER = "OTHER"
 
@@ -25,7 +39,7 @@ class Modality(str, Enum):
             return cls.XA
         if v == "CT":
             return cls.CT
-        if v == "IVUS":
+        if v in IVUS_LIKE_MODALITIES:
             return cls.IVUS
         if v == "SR":
             return cls.SR
