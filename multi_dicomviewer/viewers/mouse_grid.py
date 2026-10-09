@@ -13,7 +13,7 @@ pan / zoom / W-L are applied straight on the canvas (it already owns those).
 """
 from __future__ import annotations
 
-from PyQt6.QtCore import QRectF, Qt
+from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 
 from multi_dicomviewer.i18n import t
@@ -21,6 +21,16 @@ from multi_dicomviewer.i18n import t
 #: Which actions are click-fired vs drag-driven.
 _CLICK = {"prev_series", "next_series", "prev_frame", "next_frame", "play"}
 _DRAG = {"seek", "pan", "zoom", "wl"}
+
+#: Click cells that also auto-repeat while the button is held down, so a long
+#: press steps through frames continuously (one step per interval) on top of the
+#: single step a quick tap gives. Only the frame-step cells repeat — series /
+#: play must fire exactly once per press.
+_REPEAT = {"prev_frame", "next_frame"}
+#: Hold this long after the press before continuous stepping kicks in (so a quick
+#: tap stays a single step), then step every _REPEAT_INTERVAL_MS.
+_REPEAT_DELAY_MS = 350
+_REPEAT_INTERVAL_MS = 90
 
 #: Short on-cell labels (kept terse so they read in a quarter-pane 2×2 layout).
 _LABELS = {
@@ -54,12 +64,27 @@ class MouseGrid:
         self._press_cell = None           # cell pressed (for click-on-release)
         self._press_xy = None
         self._last_xy = None
+        self._press_fired = False         # True once a press already dispatched
+        #                                   its action (repeat cells fire on press,
+        #                                   so release must NOT fire it again).
+        self._repeat_action = None        # action being auto-repeated on hold
+        # Hold-to-repeat timers (owned by the canvas QWidget so they live/die
+        # with it). The delay timer gates the start of continuous stepping; the
+        # repeat timer then fires the step every _REPEAT_INTERVAL_MS.
+        self._repeat_delay = QTimer(canvas)
+        self._repeat_delay.setSingleShot(True)
+        self._repeat_delay.setInterval(_REPEAT_DELAY_MS)
+        self._repeat_delay.timeout.connect(self._start_repeat)
+        self._repeat_timer = QTimer(canvas)
+        self._repeat_timer.setInterval(_REPEAT_INTERVAL_MS)
+        self._repeat_timer.timeout.connect(self._on_repeat_tick)
 
     # -------------------------------------------------- geometry / layout
     def set_enabled(self, on: bool) -> None:
         was = self.enabled
         self.enabled = bool(on)
         if was != self.enabled:
+            self._stop_repeat()
             self._drag_action = self._press_cell = None
             self.canvas.update()
 
@@ -101,6 +126,7 @@ class MouseGrid:
             return True                   # inside the grid but no action → eat it
         self._press_xy = (sx, sy)
         self._last_xy = (sx, sy)
+        self._press_fired = False
         if act in _DRAG:
             self._drag_action = act
             self._press_cell = None
@@ -109,6 +135,14 @@ class MouseGrid:
         else:
             self._drag_action = None
             self._press_cell = act
+            if act in _REPEAT:
+                # Frame step: fire once immediately (responsive tap) and arm the
+                # hold-to-repeat delay. release() then skips its own click since
+                # _press_fired is set, so a tap = exactly one step.
+                self._dispatch(act)
+                self._press_fired = True
+                self._repeat_action = act
+                self._repeat_delay.start()
         return True
 
     def move(self, sx, sy) -> bool:
@@ -137,10 +171,14 @@ class MouseGrid:
     def release(self, sx, sy) -> bool:
         if not self.enabled:
             return False
+        self._stop_repeat()
         handled = (self._drag_action is not None) or (self._press_cell is not None)
-        if self._press_cell is not None and self._drag_action is None:
+        if (self._press_cell is not None and self._drag_action is None
+                and not self._press_fired):
             # A click (no drag) on a click-cell fires its action, but only if the
             # release is still on the same cell and the pointer barely moved.
+            # (Repeat cells already fired on press — _press_fired — so they skip
+            # this, otherwise a tap would step twice.)
             px, py = self._press_xy or (sx, sy)
             if abs(sx - px) < 12 and abs(sy - py) < 12:
                 w, h = self.canvas.width(), self.canvas.height()
@@ -148,7 +186,26 @@ class MouseGrid:
                     self._dispatch(self._press_cell)
         self._drag_action = self._press_cell = None
         self._press_xy = self._last_xy = None
+        self._press_fired = False
         return handled
+
+    # -------------------------------------------------- hold-to-repeat
+    def _start_repeat(self) -> None:
+        """Delay elapsed with the button still held → begin continuous stepping."""
+        if self.enabled and self._repeat_action is not None:
+            self._repeat_timer.start()
+
+    def _on_repeat_tick(self) -> None:
+        """Fire one more frame step while the button is held on a frame cell."""
+        if self.enabled and self._repeat_action is not None:
+            self._dispatch(self._repeat_action)
+        else:
+            self._stop_repeat()
+
+    def _stop_repeat(self) -> None:
+        self._repeat_delay.stop()
+        self._repeat_timer.stop()
+        self._repeat_action = None
 
     def _apply_seek(self, sx, w) -> None:
         frac = max(0.0, min(1.0, sx / float(max(1, w))))
@@ -186,12 +243,27 @@ class MouseGrid:
             drag = act in _DRAG
             p.fillRect(cell, QColor(40, 90, 160, 40) if drag
                        else QColor(20, 20, 20, 36))
-            p.setPen(QColor(255, 230, 120) if drag else QColor(235, 235, 235))
-            p.drawText(cell, int(Qt.AlignmentFlag.AlignCenter),
-                       t(_LABELS.get(act, act)))
+            self._outlined_text(
+                p, cell, int(Qt.AlignmentFlag.AlignCenter),
+                t(_LABELS.get(act, act)),
+                QColor(255, 230, 120) if drag else QColor(235, 235, 235))
         # A small corner hint that mouse-grid mode is ON.
-        p.setPen(QColor(255, 196, 0, 220))
-        p.drawText(QRectF(4, 2, w - 8, 16),
-                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
-                   t("マウス操作グリッド ON"))
+        self._outlined_text(
+            p, QRectF(4, 2, w - 8, 16),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+            t("マウス操作グリッド ON"), QColor(255, 196, 0, 220))
         p.restore()
+
+    @staticmethod
+    def _outlined_text(p, rect, align, text, color) -> None:
+        """Draw *text* with a subtle 1-px dark outline so it stays legible over a
+        bright background (ECG grids etc.) without the heavy look of a full
+        stroke — the halo is semi-transparent black drawn in the 8 surrounding
+        offsets, the foreground colour on top."""
+        halo = QColor(0, 0, 0, 170)
+        p.setPen(halo)
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1),
+                       (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            p.drawText(rect.translated(dx, dy), align, text)
+        p.setPen(color)
+        p.drawText(rect, align, text)
