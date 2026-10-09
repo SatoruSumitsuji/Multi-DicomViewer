@@ -221,6 +221,12 @@ class ImageCanvas(QWidget):
         from multi_dicomviewer.viewers.mouse_grid import MouseGrid
         self._grid = MouseGrid(self)
         self._grid_dispatch_cb = None
+        # Auto-reveal: the grid overlay appears after the pointer is still for ~1 s
+        # on the image and hides on any move/click so the image stays unobscured.
+        self._grid_hover_timer = QTimer(self)
+        self._grid_hover_timer.setSingleShot(True)
+        self._grid_hover_timer.setInterval(1000)
+        self._grid_hover_timer.timeout.connect(self._grid_hover_show)
         # Pan offset in widget pixels, added on top of the centred fit so
         # the user can bring a specific region into view. Middle-button OR
         # Ctrl+left drag pans; reset_zoom clears both zoom and pan.
@@ -1390,6 +1396,12 @@ class ImageCanvas(QWidget):
         # bypassed. Other buttons fall through.
         if (self._grid.active() and e.button() == Qt.MouseButton.LeftButton
                 and self._grid.press(sx, sy)):
+            # A control was pressed → hide the overlay while it acts; it reappears
+            # after the pointer rests for ~1 s (re-armed on release).
+            self._grid_hover_timer.stop()
+            if self._grid.show_overlay:
+                self._grid.show_overlay = False
+            self.update()
             return
         # Middle-button drag pans the (zoomed) image — independent of the
         # active measurement tool, so panning never competes with drawing.
@@ -1634,6 +1646,10 @@ class ImageCanvas(QWidget):
     def mouseMoveEvent(self, e):
         pos = e.position()
         sx, sy = pos.x(), pos.y()
+        if self._grid.enabled:
+            # Any movement hides the overlay and restarts the still-timer, so the
+            # grid re-appears only once the pointer has rested for ~1 s.
+            self._grid_hover_bump()
         if self._grid.move(sx, sy):          # in-progress grid drag owns the move
             return
         if self._panning and self._pan_anchor is not None:
@@ -1738,6 +1754,9 @@ class ImageCanvas(QWidget):
                 or self._grid._press_cell is not None:
             _p = _e.position()
             if self._grid.release(_p.x(), _p.y()):
+                # Re-arm the still-timer: overlay returns after ~1 s at rest.
+                if self._grid.enabled:
+                    self._grid_hover_timer.start()
                 return
         if self._panning:
             self._panning = False
@@ -2121,8 +2140,9 @@ class ImageCanvas(QWidget):
             p.drawRect(rb.adjusted(1, 1, -1, -1))
 
         # Mouse-operation grid overlay — drawn LAST so the control zones sit on
-        # top of the image / annotations while the mode is on.
-        if self._grid.active():
+        # top of the image / annotations. Shown only after the pointer has been
+        # still for ~1 s (auto-reveal), so it never obscures a frame being viewed.
+        if self._grid.active() and self._grid.show_overlay:
             self._grid.paint(p, self.width(), self.height())
 
     def _grid_dispatch(self, action, arg=None) -> None:
@@ -2131,6 +2151,49 @@ class ImageCanvas(QWidget):
         cb = self._grid_dispatch_cb
         if callable(cb):
             cb(action, arg)
+
+    def set_grid_enabled(self, on: bool) -> None:
+        """Enable/disable the mouse-operation grid (the viewer gates this on its
+        toggle + Measure state). Enabling turns on hover tracking so the overlay
+        can auto-reveal; the overlay itself starts hidden."""
+        on = bool(on)
+        self._grid.set_enabled(on)
+        self._grid.show_overlay = False
+        # Hover moves must fire even with no button down so the still-timer runs.
+        self.setMouseTracking(on or bool(self.meas_type))
+        if on:
+            self._grid_hover_timer.start()
+        else:
+            self._grid_hover_timer.stop()
+        self.update()
+
+    def _grid_hover_show(self) -> None:
+        """Still for ~1 s → reveal the overlay (only while the grid is enabled)."""
+        if self._grid.enabled and not self._grid.show_overlay:
+            self._grid.show_overlay = True
+            self.update()
+
+    def _grid_hover_bump(self) -> None:
+        """Any pointer move/action: hide the overlay and (re)arm the still-timer."""
+        if not self._grid.enabled:
+            return
+        if self._grid.show_overlay:
+            self._grid.show_overlay = False
+            self.update()
+        self._grid_hover_timer.start()
+
+    def enterEvent(self, e):
+        if self._grid.enabled:
+            self._grid_hover_timer.start()
+        super().enterEvent(e)
+
+    def leaveEvent(self, e):
+        if self._grid.enabled:
+            self._grid_hover_timer.stop()
+            if self._grid.show_overlay:
+                self._grid.show_overlay = False
+                self.update()
+        super().leaveEvent(e)
 
     def _paint_ivus_long_axis(self, p: QPainter) -> None:
         """Draw the IVUS long-axis guide on the cross-section, MPR-style:

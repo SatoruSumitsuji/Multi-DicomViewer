@@ -10,6 +10,7 @@ Gathers the app-wide display preferences in one place:
 """
 from __future__ import annotations
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -72,6 +73,15 @@ class SettingsDialog(QDialog):
                  coronary=None, mouse_grid=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
+        # Native min / max / close buttons top-right (this also gives, for free,
+        # double-click-titlebar-to-maximize and drag-to-screen-edge snap/vertical-
+        # maximize from the OS). The many sections scroll, so maximizing helps.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint)
         self._on_ct_color = on_ct_color
         self._on_advanced = on_advanced
         # Wider + scrollable: the sections stack vertically and there are now many,
