@@ -3141,6 +3141,19 @@ class MainWindow(QMainWindow):
             break
         if data is None or not uid:
             return
+        # A SINGLE short-axis drop shows just THAT vessel cleanly. If a Coronary
+        # Tree panel is open with its overlay on (e.g. a .corotree.json / .FullLv
+        # was loaded onto this CT earlier), turn it off so the full centreline
+        # tree and the perfusion-territory tint don't bleed onto this view. The
+        # tree is one click away again via the panel's 表示 button. (The multi-
+        # file / folder paths above deliberately keep the tree overlay ON.)
+        w = getattr(self, "_corotree_win", None)
+        if (w is not None and getattr(w, "_overlay_on", False)
+                and hasattr(w, "_set_overlay")):
+            try:
+                w._set_overlay(False)
+            except Exception:                            # noqa: BLE001
+                pass
         if self.case_series_loaded(uid):
             self._poll_cpr_apply(uid, data, 0)
             return
@@ -3177,12 +3190,37 @@ class MainWindow(QMainWindow):
                 v.apply_cpr_data(data)
             except Exception:                            # noqa: BLE001
                 pass
+            # Isolate the short-axis: a single dropped .cpr.json shows only its own
+            # vessel, so clear any coronary tree / VR tubes / territory tint / target
+            # markers that an earlier .corotree.json / .FullLv load left on this CT.
+            self._isolate_cpr_view(v)
             return
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
                 300, lambda: self._poll_cpr_apply(uid, data, attempt + 1))
         elif not self.case_series_loaded(uid):
             self._prompt_cpr_ct(uid, data, "")           # CT never showed → ask
+
+    @staticmethod
+    def _isolate_cpr_view(v) -> None:
+        """Strip every coronary-tree / LV overlay off CT viewer *v* so a single
+        dropped short-axis shows only its own centreline + the bare CT. Clears the
+        2-D centreline overlay, the VR coronary tubes (force-shown regardless of
+        the 2-D toggle), the perfusion-territory tint, and the target markers.
+        Each is optional (guarded) so it works on both the VTK and pygfx CT
+        viewers (VR is VTK-only)."""
+        if v is None:
+            return
+        for meth, arg in (("set_coronary_overlay", None),
+                          ("set_vr_coronary", None),
+                          ("set_coronary_targets", []),
+                          ("set_territory_mask", None)):
+            fn = getattr(v, meth, None)
+            if callable(fn):
+                try:
+                    fn(arg)
+                except Exception:                        # noqa: BLE001
+                    pass
 
     @staticmethod
     def _case_extract_dt(hdr) -> tuple:
