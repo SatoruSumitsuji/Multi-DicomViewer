@@ -54,3 +54,6 @@ Sample/
 
 # Clip exports (MP4 — may be PHI-derived; never commit)
 *.mp4
+
+# CI-written build stamp (git hash in title bar); never committed
+multi_dicomviewer/_build.py
