@@ -228,6 +228,12 @@ class CoronaryTreeWindow(SnapDock):
         self._active_uid: str = ""          # the CT currently being worked on
         self._building = False
         self._overlay_on: bool = False      # ツリー表示 toggle (off until pressed)
+        # FullLv display toggles — INDEPENDENT of the tree overlay and of each
+        # other, so the loaded .FullLv data stays put while its two visuals are
+        # shown/hidden on demand. Default ON: loading a FullLv is a request to see
+        # it (territory auto-shows on compute; the viewer draws Epi/Endo borders).
+        self._territory_on: bool = True     # 領域色 (perfusion-territory tint)
+        self._lv_borders_on: bool = True    # 境界線 (Epi/Endo boundary traces)
         self._overlay_btn = None            # the ツリー表示/非表示 toggle button
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
@@ -345,6 +351,27 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_vis_btn = tgt_btns[1]      # relabelled 表示/非表示
         self._targets_vis_btn.setText(
             t("非表示") if self._targets_shown else t("表示"))
+
+        # LV row: independent show/hide of the two FullLv visuals — the perfusion
+        # territory tint (領域色) and the Epi/Endo boundary traces (境界線). Both
+        # leave the loaded FullLv data untouched; they are pure display switches
+        # (decoupled from the coronary ツリー表示 toggle above).
+        lv_btns = _row(t("LV："), [
+            (t("領域色"),
+             t("心筋の灌流領域の色 (LAD/LCX/RCA) を表示/非表示。"
+               "FullLv データは読み込んだまま保持"),
+             self._toggle_territory_color, False),
+            (t("境界線"),
+             t("Epi/Endo の境界線を表示/非表示。"
+               "FullLv データは読み込んだまま保持"),
+             self._toggle_lv_borders, False),
+        ])
+        self._terr_vis_btn = lv_btns[0]
+        self._lv_border_vis_btn = lv_btns[1]
+        self._terr_vis_btn.setText(
+            t("非表示") if self._territory_on else t("表示"))
+        self._lv_border_vis_btn.setText(
+            t("非表示") if self._lv_borders_on else t("表示"))
 
         split = QSplitter(Qt.Orientation.Vertical)
         outer.addWidget(split, 1)
@@ -617,7 +644,32 @@ class CoronaryTreeWindow(SnapDock):
         else:
             self._push_overlay()             # overlay_spec is now empty → clear
             self._hint.setText(t("ツリー非表示"))
-        self._push_territory()               # tint follows the overlay toggle
+        self._push_territory()               # re-assert the (independent) tint state
+
+    def _toggle_territory_color(self) -> None:
+        """LV ▸ 領域色: show/hide the perfusion-territory tint, independent of the
+        coronary tree overlay. The FullLv data stays loaded; only the tint draws
+        or clears."""
+        self._territory_on = not self._territory_on
+        if getattr(self, "_terr_vis_btn", None) is not None:
+            self._terr_vis_btn.setText(
+                t("非表示") if self._territory_on else t("表示"))
+        self._push_territory()
+
+    def _toggle_lv_borders(self) -> None:
+        """LV ▸ 境界線: show/hide the Epi/Endo boundary traces on the source CT,
+        independent of everything else. The FullLv data stays loaded; the viewer
+        just draws or hides the border lines (no-op viewers are skipped)."""
+        self._lv_borders_on = not self._lv_borders_on
+        if getattr(self, "_lv_border_vis_btn", None) is not None:
+            self._lv_border_vis_btn.setText(
+                t("非表示") if self._lv_borders_on else t("表示"))
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_lv_borders"):
+            try:
+                self._shell.coronary_lv_borders(self._lv_borders_on)
+            except Exception:                            # noqa: BLE001
+                pass
 
     # ------------------------------------------------------------- VR row
     def _sync_vr_row(self) -> None:
@@ -1312,7 +1364,7 @@ class CoronaryTreeWindow(SnapDock):
         nearest-coronary system), and 4=a set Target's distal territory ON TOP of
         the base. Returns (label_mask uint8, TERRITORY_FILLS) or (None, None)."""
         eng = self._territory
-        if eng is None or not self._overlay_on:
+        if eng is None or not self._territory_on:
             return None, None
         fd = self._full_lv_data or {}
         bld = fd.get("bld") or {}
@@ -1408,12 +1460,13 @@ class CoronaryTreeWindow(SnapDock):
 
     def _push_territory(self):
         """Compute the perfusion-territory colour map (LAD/LCX/RCA + Target) and
-        ask the shell to overlay it on the CT (cleared when the overlay is off);
-        also push the per-system summary text for the VR overlay."""
+        ask the shell to overlay it on the CT (cleared when the 領域色 toggle is
+        off); also push the per-system summary text for the VR overlay. Gated on
+        the independent 領域色 (_territory_on) flag, NOT the tree overlay."""
         if self._shell is None \
                 or not hasattr(self._shell, "coronary_territory_refresh"):
             return
-        if self._overlay_on:
+        if self._territory_on:
             mask, colors = self._territory_systems_full()
         else:
             mask, colors = None, None
@@ -1422,7 +1475,7 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             pass
         if hasattr(self._shell, "coronary_territory_summary"):
-            txt = self._territory_summary_text() if self._overlay_on else ""
+            txt = self._territory_summary_text() if self._territory_on else ""
             try:
                 self._shell.coronary_territory_summary(txt)
             except Exception:                            # noqa: BLE001
