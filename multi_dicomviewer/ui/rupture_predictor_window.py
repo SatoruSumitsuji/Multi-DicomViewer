@@ -62,7 +62,9 @@ _WORKFLOW = [
            + " " + _STEP_TAIL, "point"),
     ("AC", t("Specify the midpoint of the stretching adventitia (arc center), "
              "AC.") + " " + _STEP_TAIL, "point"),
-    ("B", t("Specify the most vessel-side point of balloon expansion, B.")
+    ("B", t("Specify the most vessel-side point of balloon expansion, B. "
+            "The yellow pre-expansion arc is already shown — you can drag "
+            "A1/AC/A2 to optimise it first, then click an empty spot to place B.")
           + " " + _STEP_TAIL, "point"),
 ]
 
@@ -241,6 +243,17 @@ class RuptureCanvas(QWidget):
 
         # Placing the current workflow point.
         if self.workflow_active is not None:
+            # Once the three adventitia points exist (so B is the pending point),
+            # a click that lands ON an already-placed point GRABS it to drag —
+            # letting the user optimise the pre-expansion arc by moving A1/AC/A2
+            # before placing B. A click on empty space still places B as usual.
+            if self._adventitia_placed():
+                hit = self._pick_point(sx, sy)
+                if hit is not None and hit != self.workflow_active:
+                    self._drag = hit
+                    self._selected = hit
+                    self.update()
+                    return
             pt = self._widget_to_image(QPoint(int(sx), int(sy)))
             if pt is None:
                 return
@@ -360,6 +373,11 @@ class RuptureCanvas(QWidget):
         self._draw_calibration_lines(p)
         if self.viz is not None:
             self._draw_overlay(p, self.viz)
+        elif self._adventitia_placed():
+            # Before the balloon point B is set: preview the pre-expansion
+            # adventitia arc from A1/AC/A2 so it can be judged / optimised by
+            # dragging the three points (live — viz is None during a drag).
+            self._draw_original_preview(p)
         self._draw_points(p)
         self._draw_hint(p)
 
@@ -372,6 +390,40 @@ class RuptureCanvas(QWidget):
             pa, pb = self.points[a], self.points[b]
             if pa is not None and pb is not None:
                 p.drawLine(self._image_to_widget(pa), self._image_to_widget(pb))
+
+    def _adventitia_placed(self) -> bool:
+        """All three adventitia points (A1, AC, A2) are set — enough to show the
+        pre-expansion arc, without the balloon point B."""
+        return all(self.points[n] is not None for n in ("A1", "A2", "AC"))
+
+    def _draw_original_preview(self, p: QPainter) -> None:
+        """Draw just the pre-expansion adventitia arc (yellow A1->AC->A2) plus the
+        orange A1-A2 chord, from the circle through the three adventitia points —
+        no balloon needed. Mirrors the yellow-arc part of _draw_overlay so the
+        preview and the final overlay look identical; lets the user optimise the
+        three points before placing B."""
+        a1, a2, ac = self.points["A1"], self.points["A2"], self.points["AC"]
+        if None in (a1, a2, ac):
+            return
+        circle = rm.circle_from_3points(a1, ac, a2)
+        if circle is None:
+            return
+        w = self._image_to_widget
+        # Orange A1-A2 chord.
+        p.setPen(QPen(QColor("#FFA500"), 2))
+        p.drawLine(w(a1), w(a2))
+        # Yellow original arc A1 -> AC -> A2 (short path each side).
+        c = circle.center
+        rr = circle.r
+        ang_a1 = math.atan2(a1[1] - c[1], a1[0] - c[0])
+        ang_ac = math.atan2(ac[1] - c[1], ac[0] - c[0])
+        ang_a2 = math.atan2(a2[1] - c[1], a2[0] - c[0])
+        d1 = rm._normalize_pi(ang_ac - ang_a1)
+        d2 = rm._normalize_pi(ang_a2 - ang_ac)
+        arc_pts = (self._arc_image_points(c, rr, ang_a1, d1, 48)
+                   + self._arc_image_points(c, rr, ang_ac, d2, 48))
+        p.setPen(QPen(QColor("#FFD700"), 3))
+        p.drawPolyline(self._polyline_widget(arc_pts))
 
     def _draw_overlay(self, p: QPainter, v: rm.BalloonResult) -> None:
         a1, a2 = self.points["A1"], self.points["A2"]
