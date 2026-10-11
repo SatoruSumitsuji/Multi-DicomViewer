@@ -15517,6 +15517,34 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_all_lv()        # SAX splines + observe section outline
         self._lv_sync_buttons()
 
+    def set_lv_border_visible(self, on: bool) -> None:
+        """Public show/hide for the Epi/Endo boundary traces — the same single
+        flag (_lv_border_show) the Epi境界表示 button drives — so the Coronary Tree
+        panel's 境界線 toggle can switch the boundary lines on a FullLv-reviewed CT
+        without touching the loaded data. Keeps the in-mode button in sync; a no-op
+        when no LV model is present (nothing to draw)."""
+        on = bool(on)
+        self._lv_border_show = on
+        btn = getattr(self, "_lv_border_btn", None)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+        for k in ("A", "B"):
+            try:
+                self._redraw_meas(k)
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            self._redraw_all_lv()
+        except Exception:                                # noqa: BLE001
+            pass
+        if hasattr(self, "_lv_sync_buttons"):
+            try:
+                self._lv_sync_buttons()
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _lv_region_reset(self) -> None:
         """Reset ONLY the free-view state (Trace⇄View + the vol_done unlock) on a
         pass change / SAX / exit. It must NOT touch the region/border SHOW flags
