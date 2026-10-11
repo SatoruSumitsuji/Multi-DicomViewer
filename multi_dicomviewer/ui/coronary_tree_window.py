@@ -1847,6 +1847,19 @@ class CoronaryTreeWindow(SnapDock):
 
     def _write_to(self, path):
         try:
+            # Refresh the saved source folder from the LIVE loaded CT (dirname of
+            # its first file) when that CT is up, so a renamed / moved source
+            # folder updates the auto-open shortcut on overwrite — consistent with
+            # the .cpr.json / FullLv saves. Falls back to the stored ct_dir.
+            if self._shell is not None \
+                    and hasattr(self._shell, "coronary_series_meta"):
+                try:
+                    live = (self._shell.coronary_series_meta(self._ct_uid)
+                            or {}).get("src_dir", "") or ""
+                except Exception:                        # noqa: BLE001
+                    live = ""
+                if live and os.path.isdir(live):
+                    self._ct_dir = live                  # persist on the bundle too
             # Embed the source-CT identity so a later load (or a drag&drop of
             # the .corotree.json onto the shell) can re-open the same 3-D CT.
             series = {"series_uid": self._ct_uid, "src_dir": self._ct_dir}

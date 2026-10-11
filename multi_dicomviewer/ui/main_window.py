@@ -2351,11 +2351,23 @@ class MainWindow(QMainWindow):
         if hdr is None:
             return {}
         pn = str(getattr(hdr, "PatientName", "") or "")
+        # The LIVE folder this CT was actually loaded from (dirname of its first
+        # file) — so a saved overlay can refresh its auto-open shortcut to the
+        # current folder even after the source folder was renamed / moved.
+        import os
+        src = ""
+        try:
+            files = list(getattr(se, "files", []) or [])
+            if files:
+                src = os.path.dirname(os.path.abspath(files[0]))
+        except Exception:                                # noqa: BLE001
+            src = ""
         return {
             "patient": pn.split("^")[0].strip() or pn.strip(),
             "date": str(getattr(hdr, "StudyDate", "")
                         or getattr(hdr, "AcquisitionDate", "") or ""),
             "series_number": str(getattr(hdr, "SeriesNumber", "") or ""),
+            "src_dir": src,
         }
 
     def coronary_register_cpr(self, data, name=None, path=None) -> bool:
