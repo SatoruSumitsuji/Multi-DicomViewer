@@ -13610,6 +13610,27 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._lv_border_show else "")
         self._lv_redraw_all()
 
+    def set_lv_border_visible(self, on: bool) -> None:
+        """Public show/hide for the Epi/Endo boundary traces — the same single
+        flag (_lv_border_show) the Epi-Border button drives — so the Coronary Tree
+        panel's 境界線 toggle can switch the boundary lines on a FullLv-reviewed CT
+        without touching the loaded data. Keeps the in-mode button in sync; a
+        no-op when no LV model is present. Mirrors the VTK viewer's method so the
+        shell's coronary_lv_borders() bridge works identically on both."""
+        on = bool(on)
+        self._lv_border_show = on
+        btn = getattr(self, "_lv_border_btn", None)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(on)
+            btn.blockSignals(False)
+            btn.setStyleSheet(
+                "QPushButton{background:#40c040;color:black;}" if on else "")
+        try:
+            self._lv_redraw_all()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _lv_region_reset(self) -> None:
         if self._lv is not None:
             self._lv["trace_view"] = False
