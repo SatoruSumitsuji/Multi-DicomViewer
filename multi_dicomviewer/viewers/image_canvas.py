@@ -2152,6 +2152,17 @@ class ImageCanvas(QWidget):
         if callable(cb):
             cb(action, arg)
 
+    def set_grid_hover_delay(self, ms) -> None:
+        """Set how long the pointer must rest on the image before the grid overlay
+        appears (Settings ▸ マウス操作グリッド ▸ 割り当て操作起動時間). Clamped to a
+        sane range; takes effect on the next still-period."""
+        try:
+            ms = int(ms)
+        except (TypeError, ValueError):
+            ms = 1000
+        ms = max(100, min(2000, ms))
+        self._grid_hover_timer.setInterval(ms)
+
     def set_grid_enabled(self, on: bool) -> None:
         """Enable/disable the mouse-operation grid (the viewer gates this on its
         toggle + Measure state). Enabling turns on hover tracking so the overlay
