@@ -325,10 +325,10 @@ class SettingsDialog(QDialog):
         coform.addRow(t("領域色（系統 / ターゲット）"), _grid_w)
         root.addWidget(gb_coro)
 
-        # ---- マウス操作グリッド（XA/IVUS）の配置 --------------------------
+        # ---- マウス操作グリッド（XA/IVUS） --------------------------------
         from multi_dicomviewer.viewers.mouse_grid import _LABELS as _MG_LABELS
         mg = mouse_grid or settings.load_mouse_grid()
-        gb_mg = QGroupBox(t("マウス操作グリッド（XA/IVUS）の配置"))
+        gb_mg = QGroupBox(t("マウス操作グリッド（XA/IVUS）"))
         mgv = QVBoxLayout(gb_mg)
         mgnote = QLabel(t(
             "3×3の各セルに割り当てる操作（9種を1回ずつ）。アクティブなXA/IVUS画面を"
@@ -354,6 +354,29 @@ class SettingsDialog(QDialog):
         _mg_w = QWidget()
         _mg_w.setLayout(g2)
         mgv.addWidget(_mg_w)
+
+        # 割り当て操作起動時間 — how long the pointer must rest on the image before
+        # the grid menu / cells appear (the grid stays interactive meanwhile).
+        # 0.1–2.0 s in 0.1 s steps.
+        _rev_row = QHBoxLayout()
+        _rev_lbl = QLabel(t("割り当て操作起動時間"))
+        _rev_row.addWidget(_rev_lbl)
+        self._mg_reveal_spin = QDoubleSpinBox()
+        self._mg_reveal_spin.setRange(
+            settings.MOUSE_GRID_REVEAL_MS_MIN / 1000.0,
+            settings.MOUSE_GRID_REVEAL_MS_MAX / 1000.0)
+        self._mg_reveal_spin.setSingleStep(0.1)
+        self._mg_reveal_spin.setDecimals(1)
+        self._mg_reveal_spin.setSuffix(t(" 秒"))
+        self._mg_reveal_spin.setToolTip(t(
+            "画像上でマウスが静止してからグリッド（メニュー・格子）が表示される"
+            "までの時間。短いほどすぐ出ます（操作自体は常に有効）。"))
+        _rev_ms = (mg or {}).get(
+            "reveal_ms", settings.MOUSE_GRID_REVEAL_MS_DEFAULT)
+        self._mg_reveal_spin.setValue(float(_rev_ms) / 1000.0)
+        _rev_row.addWidget(self._mg_reveal_spin)
+        _rev_row.addStretch(1)
+        mgv.addLayout(_rev_row)
         root.addWidget(gb_mg)
 
         btns = QDialogButtonBox(
@@ -422,6 +445,10 @@ class SettingsDialog(QDialog):
         caller validates (settings.save_mouse_grid falls back to default if the
         layout isn't a valid permutation)."""
         return [cb.currentData() for cb in self._mg_combos]
+
+    def mouse_grid_reveal_ms(self) -> int:
+        """The chosen grid reveal delay in milliseconds (spin is in seconds)."""
+        return int(round(self._mg_reveal_spin.value() * 1000.0))
 
     def coronary(self) -> dict:
         """Chosen Coronary Tree / Territory appearance params (sanitising/clamping

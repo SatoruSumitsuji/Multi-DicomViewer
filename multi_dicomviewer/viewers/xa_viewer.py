@@ -701,6 +701,7 @@ class XAViewer(AbstractViewer):
         for _c in (self.canvas, self.canvas2):
             _c._grid.set_layout(self._mouse_grid["layout"])
             _c._grid_dispatch_cb = self._on_grid_action
+            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 1000))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 
@@ -724,6 +725,7 @@ class XAViewer(AbstractViewer):
         self._mouse_grid = settings.load_mouse_grid()
         for _c in (self.canvas, self.canvas2):
             _c._grid.set_layout(self._mouse_grid["layout"])
+            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 1000))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 

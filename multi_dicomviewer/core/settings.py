@@ -35,12 +35,29 @@ MOUSE_GRID_ACTIONS = (
     "prev_series", "next_series", "prev_frame", "next_frame",
     "play", "seek", "pan", "zoom", "wl",
 )
+#: Overlay reveal delay: the grid stays interactive whenever enabled, but its
+#: menu/cells only APPEAR after the pointer rests this long on the image (and hide
+#: again on any move/action). User-configurable 100–2000 ms in 100 ms steps.
+MOUSE_GRID_REVEAL_MS_DEFAULT = 1000
+MOUSE_GRID_REVEAL_MS_MIN = 100
+MOUSE_GRID_REVEAL_MS_MAX = 2000
 MOUSE_GRID_DEFAULT = {
     "on": False,
     "layout": ["prev_frame", "play", "next_frame",
                "prev_series", "seek", "next_series",
                "pan", "zoom", "wl"],
+    "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
 }
+
+
+def _clamp_reveal_ms(v) -> int:
+    """Clamp a reveal-delay value to the valid 100–2000 ms range, snapped to the
+    nearest 100 ms step; falls back to the default on anything non-numeric."""
+    try:
+        ms = int(round(float(v) / 100.0)) * 100
+    except (TypeError, ValueError):
+        return MOUSE_GRID_REVEAL_MS_DEFAULT
+    return max(MOUSE_GRID_REVEAL_MS_MIN, min(MOUSE_GRID_REVEAL_MS_MAX, ms))
 #: The first shipped default order — a saved file still carrying it (a tester who
 #: never customised the layout) is migrated to the current default on load.
 _MOUSE_GRID_OLD_DEFAULT = ["prev_series", "play", "next_series",
@@ -832,7 +849,8 @@ def load_mouse_grid() -> dict:
     layout must contain each of the 9 actions exactly once; a bad layout falls
     back to the default order."""
     out = {"on": bool(MOUSE_GRID_DEFAULT["on"]),
-           "layout": list(MOUSE_GRID_DEFAULT["layout"])}
+           "layout": list(MOUSE_GRID_DEFAULT["layout"]),
+           "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT}
     try:
         data = json.loads(MOUSE_GRID_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -846,6 +864,8 @@ def load_mouse_grid() -> dict:
             # Migrate the first-shipped default order to the current default.
             out["layout"] = (list(MOUSE_GRID_DEFAULT["layout"])
                              if lay == _MOUSE_GRID_OLD_DEFAULT else lay)
+        if "reveal_ms" in data:
+            out["reveal_ms"] = _clamp_reveal_ms(data.get("reveal_ms"))
     return out
 
 
@@ -861,7 +881,10 @@ def save_mouse_grid(prefs: dict) -> None:
         MOUSE_GRID_PATH.parent.mkdir(parents=True, exist_ok=True)
         MOUSE_GRID_PATH.write_text(
             json.dumps({"on": bool(p.get("on", False)),
-                        "layout": [str(k) for k in lay], "version": 1},
+                        "layout": [str(k) for k in lay],
+                        "reveal_ms": _clamp_reveal_ms(
+                            p.get("reveal_ms", MOUSE_GRID_REVEAL_MS_DEFAULT)),
+                        "version": 1},
                        ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, TypeError, ValueError):
         pass
