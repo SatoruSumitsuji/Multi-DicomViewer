@@ -2169,7 +2169,10 @@ class ImageCanvas(QWidget):
         can auto-reveal; the overlay itself starts hidden."""
         on = bool(on)
         self._grid.set_enabled(on)
-        self._grid.show_overlay = False
+        # Show the overlay IMMEDIATELY on enable so turning the grid on always
+        # gives visible feedback (it then hides on the first move and re-appears
+        # after the still-delay, as before). Hidden at once on disable.
+        self._grid.show_overlay = on
         # Hover moves must fire even with no button down so the still-timer runs.
         self.setMouseTracking(on or bool(self.meas_type))
         if on:
