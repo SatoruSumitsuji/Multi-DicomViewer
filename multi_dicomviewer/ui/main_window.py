@@ -5204,6 +5204,27 @@ class MainWindow(QMainWindow):
             while others and _live_total() > budget and _demote_oldest():
                 pass
 
+    def _free_pane_ct_for_reload(self, pane: ViewerPane) -> None:
+        """Free *pane*'s own CT viewer volume + GPU before it rebuilds a new CT
+        in the same pane, so the build never holds the old + new volume at once
+        (the same-pane black-CT bug). Clears the pane's cached CT viewer; the
+        following load_series rebuilds it — the same clear-then-rebuild a
+        demote→promote already does safely. No-op if the pane has no CT viewer."""
+        try:
+            v = pane._viewers.get(Modality.CT)
+        except Exception:                                # noqa: BLE001
+            v = None
+        if v is None or not hasattr(v, "clear"):
+            return
+        try:
+            v.clear()
+            try:
+                v._loaded_uid = ""       # don't let a stale UID take a fast-path
+            except Exception:            # noqa: BLE001
+                pass
+        except Exception:                # noqa: BLE001
+            pass
+
     def _warn_ct_over_cap_with_lv(self, incoming_pane: ViewerPane,
                                   modality) -> None:
         """When a new 3DCT would push the live-CT count past the cap AND the
@@ -6719,6 +6740,14 @@ class MainWindow(QMainWindow):
         incoming_bytes = int(getattr(getattr(loaded, "volume", None),
                                      "nbytes", 0) or 0)
         self._free_live_for_incoming(pane, loaded.modality, incoming_bytes)
+        # Same-pane CT reload: _free_live_for_incoming only demotes OTHER panes,
+        # so replacing a CT in THIS pane would build the new ~0.7 GB volume while
+        # the pane's own old CT volume is still resident → the peak holds both,
+        # exhausts GPU/RAM and renders the new CT BLACK (worked only in a fresh
+        # pane, which demoted the old one). Free this pane's CT viewer volume
+        # FIRST so the rebuild has the memory it needs.
+        if loaded.modality == Modality.CT:
+            self._free_pane_ct_for_reload(pane)
         self._warn_ct_over_cap_with_lv(pane, loaded.modality)
         try:
             pane.show_series(loaded, series.label, self._pane_bar(series))
