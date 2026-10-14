@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
     QSlider,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
@@ -1204,6 +1205,10 @@ class MainWindow(QMainWindow):
         )
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, dock)
         self._studies_dock = dock
+        # Tabs for the LEFT dock (Studies / Case Presentation / Coronary Tree)
+        # sit at the BOTTOM so they read as a row of tabs under the panel.
+        self.setTabPosition(Qt.DockWidgetArea.LeftDockWidgetArea,
+                            QTabWidget.TabPosition.South)
 
         # Dock separator (the drag handle between the Studies dock and the
         # central viewer grid). Qt's default 4 px is hard to grab; 8 px is a
@@ -2249,15 +2254,14 @@ class MainWindow(QMainWindow):
         w = getattr(self, "_casepres_win", None)
         if w is None:
             # Dockable panel: registered in the LEFT area and tabbed with the
-            # Studies dock, but starts FLOATING (a separate window). Drag it onto
-            # the Studies area to show the list there; drag it back out to float
-            # again (Studies reappears).
+            # Studies dock by DEFAULT (bottom tabs switch Studies / Case
+            # Presentation / Coronary Tree). Floating is still available — drag
+            # the tab out, or double-click its title bar, to float it.
             w = CasePresentationWindow(self)
             self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
             if getattr(self, "_studies_dock", None) is not None:
                 self.tabifyDockWidget(self._studies_dock, w)
             self._casepres_win = w
-            w.setFloating(True)
             w.resize(760, 520)
             # While this panel is open it owns Shift+F / Shift+A (次/前シリーズ);
             # free them from the viewer's last/first-image binding so Qt doesn't go
@@ -2307,8 +2311,9 @@ class MainWindow(QMainWindow):
 
     def _open_coronary_tree(self):
         """Tools ▸ Coronary Tree — a dockable branch-tree list of the coronary
-        centrelines for a CT Territory analysis. One instance is kept. Starts
-        floating; drag it onto the Studies area to dock+tab it there."""
+        centrelines for a CT Territory analysis. One instance is kept. Docks +
+        tabs with Studies in the LEFT area by default; drag the tab out (or
+        double-click its title bar) to float it."""
         from multi_dicomviewer.ui.coronary_tree_window import CoronaryTreeWindow
         w = getattr(self, "_corotree_win", None)
         if w is None:
@@ -2317,7 +2322,6 @@ class MainWindow(QMainWindow):
             if getattr(self, "_studies_dock", None) is not None:
                 self.tabifyDockWidget(self._studies_dock, w)
             self._corotree_win = w
-            w.setFloating(True)
             w.resize(360, 520)
         if not w.isVisible():
             w.show()
