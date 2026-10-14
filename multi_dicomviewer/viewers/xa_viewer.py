@@ -758,6 +758,8 @@ class XAViewer(AbstractViewer):
             else:
                 mx = self.frame_slider.maximum()
                 self.frame_slider.setValue(int(round(float(arg) * mx)))
+        elif action == "reset_wl":              # 階調セルの左ダブルクリック
+            self._reset_wl()
 
     def _grid_play_toggle(self) -> None:
         """Combined play/seek cell click: toggle play ⇄ stop (1× only — the 2×
