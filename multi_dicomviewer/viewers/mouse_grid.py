@@ -13,10 +13,27 @@ pan / zoom / W-L are applied straight on the canvas (it already owns those).
 """
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import QApplication
 
 from multi_dicomviewer.i18n import t
+
+
+def _shift_held() -> bool:
+    """True if Shift is down right now (read live so no event plumbing needed)."""
+    return bool(QApplication.keyboardModifiers()
+                & Qt.KeyboardModifier.ShiftModifier)
+
+
+#: Shift+click on a frame / series step cell jumps to the first / last instead of
+#: stepping by one.
+_SHIFT_JUMP = {
+    "prev_frame": "first_frame", "next_frame": "last_frame",
+    "prev_series": "first_series", "next_series": "last_series",
+}
 
 #: Which actions are click-fired vs drag-driven. `playseek` is BOTH: a click
 #: toggles play/stop, a drag (past _SEEK_DRAG_PX) scrubs the seek bar — so it is
@@ -74,6 +91,7 @@ class MouseGrid:
         self._press_xy = None
         self._last_xy = None
         self._rot_last = None             # last pointer angle during a rotate drag
+        self._rot_raw = 0.0               # unsnapped rotation accumulator (Shift=15°)
         self._press_fired = False         # True once a press already dispatched
         #                                   its action (repeat cells fire on press,
         #                                   so release must NOT fire it again).
@@ -143,21 +161,27 @@ class MouseGrid:
             if act == "seek":
                 self._apply_seek(sx, w)   # jump on the initial press too
             elif act == "rotate":
-                # Seed the rotate drag with the pointer's angle so the first move
-                # applies a delta, not an absolute jump.
+                # Seed the rotate drag with the pointer's angle + the current
+                # rotation so moves apply a delta (and Shift can snap to 15°).
                 fn = getattr(self.canvas, "_free_rot_angle", None)
                 self._rot_last = fn(sx, sy) if callable(fn) else None
+                self._rot_raw = float(getattr(self.canvas, "_free_rot", 0.0))
         else:
             self._drag_action = None
             self._press_cell = act
             if act in _REPEAT:
-                # Frame step: fire once immediately (responsive tap) and arm the
-                # hold-to-repeat delay. release() then skips its own click since
-                # _press_fired is set, so a tap = exactly one step.
-                self._dispatch(act)
-                self._press_fired = True
-                self._repeat_action = act
-                self._repeat_delay.start()
+                # Frame step: fire once immediately (responsive tap). With Shift it
+                # JUMPS to the first/last frame instead (no auto-repeat); otherwise
+                # it arms the hold-to-repeat. release() skips its own click since
+                # _press_fired is set, so a tap = exactly one action.
+                if _shift_held():
+                    self._dispatch(_SHIFT_JUMP[act])
+                    self._press_fired = True
+                else:
+                    self._dispatch(act)
+                    self._press_fired = True
+                    self._repeat_action = act
+                    self._repeat_delay.start()
         return True
 
     def move(self, sx, sy) -> bool:
@@ -200,8 +224,10 @@ class MouseGrid:
 
     def _apply_rotate(self, sx, sy) -> None:
         """Spin the displayed image by the angular delta the pointer swept about
-        the canvas centre (mirrors the viewer's MultiSync-style drag-rotate):
-        update canvas._free_rot, which the paint applies."""
+        the canvas centre, SCALED by how far the pointer is from the centre so a
+        drag near the rim turns much faster / bigger than one near the hub. Holding
+        Shift snaps the result to 15° steps. Updates canvas._free_rot (paint
+        applies it)."""
         c = self.canvas
         fn = getattr(c, "_free_rot_angle", None)
         if not callable(fn) or not hasattr(c, "_free_rot"):
@@ -209,9 +235,33 @@ class MouseGrid:
         now = fn(sx, sy)
         prev = self._rot_last if self._rot_last is not None else now
         d = (now - prev + 180.0) % 360.0 - 180.0      # shortest signed delta
-        c._free_rot = (float(c._free_rot) + d) % 360.0
         self._rot_last = now
+        # Distance-based gain: calm near the centre, faster the farther out.
+        w, h = c.width(), c.height()
+        dist = math.hypot(sx - w / 2.0, sy - h / 2.0)
+        ref = max(1.0, 0.22 * min(w, h))
+        gain = max(0.5, min(5.0, dist / ref))
+        self._rot_raw = (self._rot_raw + d * gain) % 360.0
+        c._free_rot = (round(self._rot_raw / 15.0) * 15.0) % 360.0 \
+            if _shift_held() else self._rot_raw
         c.update()
+
+    def double_click(self, sx, sy) -> bool:
+        """Left double-click handling. On the 回転 cell → reset the rotation to 0°.
+        Returns True if the grid consumed it."""
+        if not self.enabled:
+            return False
+        w, h = self.canvas.width(), self.canvas.height()
+        if self._action(sx, sy, w, h) == "rotate":
+            c = self.canvas
+            if hasattr(c, "set_free_rotation"):
+                c.set_free_rotation(0.0)
+            elif hasattr(c, "_free_rot"):
+                c._free_rot = 0.0
+            self._rot_raw = 0.0
+            c.update()
+            return True
+        return False
 
     def release(self, sx, sy) -> bool:
         if not self.enabled:
@@ -227,8 +277,13 @@ class MouseGrid:
             px, py = self._press_xy or (sx, sy)
             if abs(sx - px) < 12 and abs(sy - py) < 12:
                 w, h = self.canvas.width(), self.canvas.height()
-                if self._action(sx, sy, w, h) == self._press_cell:
-                    self._dispatch(self._press_cell)
+                cell = self._press_cell
+                if self._action(sx, sy, w, h) == cell:
+                    # Shift+click on a series step cell jumps to first / last.
+                    if cell in _SHIFT_JUMP and _shift_held():
+                        self._dispatch(_SHIFT_JUMP[cell])
+                    else:
+                        self._dispatch(cell)
         self._drag_action = self._press_cell = None
         self._press_xy = self._last_xy = None
         self._press_fired = False
