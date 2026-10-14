@@ -31,22 +31,32 @@ _SCHEMA_VERSION = 2
 #: cells each run one cine/view action, so the whole viewer can be driven with the
 #: mouse. Persisted so the toggle survives a restart. `on` = the toggle state;
 #: `layout` = the 9 cell actions, row-major (index 0 = top-left … 8 = bottom-right).
+#: The 8 cell actions. `playseek` is the combined play/stop (click) + seek (drag)
+#: cell — it replaced the separate `play` and `seek`. A layout is 9 cells, each
+#: one of these; duplicates are allowed (the default uses `playseek` twice).
 MOUSE_GRID_ACTIONS = (
     "prev_series", "next_series", "prev_frame", "next_frame",
-    "play", "seek", "pan", "zoom", "wl",
+    "playseek", "pan", "zoom", "wl",
 )
-#: Overlay reveal delay: the grid stays interactive whenever enabled, but its
-#: menu/cells only APPEAR after the pointer rests this long on the image (and hide
-#: again on any move/action). User-configurable 100–2000 ms in 100 ms steps.
-MOUSE_GRID_REVEAL_MS_DEFAULT = 1000
+#: Map a legacy action key (pre-merge saved layout) to the current one.
+_MOUSE_GRID_ACTION_MIGRATE = {"play": "playseek", "seek": "playseek"}
+#: 起動時間 (reveal delay): the grid stays interactive whenever enabled, but its
+#: menu/cells only APPEAR after the pointer rests this long on the image.
+#: 100–2000 ms in 100 ms steps.
+MOUSE_GRID_REVEAL_MS_DEFAULT = 200
 MOUSE_GRID_REVEAL_MS_MIN = 100
 MOUSE_GRID_REVEAL_MS_MAX = 2000
+#: 表示時間 (display duration): once shown, the menu auto-hides after this long.
+#: 100–2000 ms in 100 ms steps, OR the sentinel 0 = 継続 (stay shown, no auto-hide).
+MOUSE_GRID_DISPLAY_MS_DEFAULT = 1000
+MOUSE_GRID_DISPLAY_CONTINUOUS = 0
 MOUSE_GRID_DEFAULT = {
     "on": False,
-    "layout": ["prev_frame", "play", "next_frame",
-               "prev_series", "seek", "next_series",
+    "layout": ["prev_frame", "playseek", "next_frame",
+               "prev_series", "playseek", "next_series",
                "pan", "zoom", "wl"],
     "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
+    "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT,
 }
 
 
@@ -58,11 +68,31 @@ def _clamp_reveal_ms(v) -> int:
     except (TypeError, ValueError):
         return MOUSE_GRID_REVEAL_MS_DEFAULT
     return max(MOUSE_GRID_REVEAL_MS_MIN, min(MOUSE_GRID_REVEAL_MS_MAX, ms))
-#: The first shipped default order — a saved file still carrying it (a tester who
-#: never customised the layout) is migrated to the current default on load.
-_MOUSE_GRID_OLD_DEFAULT = ["prev_series", "play", "next_series",
-                          "prev_frame", "zoom", "next_frame",
-                          "pan", "seek", "wl"]
+
+
+def _clamp_display_ms(v) -> int:
+    """Display duration: a value ≤ 0 means 継続 (stay shown); any positive value is
+    snapped to the nearest 100 ms and clamped to 100–2000 ms. Non-numeric →
+    default."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return MOUSE_GRID_DISPLAY_MS_DEFAULT
+    if f <= 0:
+        return MOUSE_GRID_DISPLAY_CONTINUOUS
+    ms = int(round(f / 100.0)) * 100
+    return max(MOUSE_GRID_REVEAL_MS_MIN, min(MOUSE_GRID_REVEAL_MS_MAX, ms))
+
+
+def _migrate_grid_layout(lay):
+    """Map any legacy action keys (play/seek → playseek) in a loaded layout."""
+    return [_MOUSE_GRID_ACTION_MIGRATE.get(str(k), str(k)) for k in lay]
+
+
+def _valid_grid_layout(lay) -> bool:
+    """9 cells, each one of the current actions (duplicates allowed)."""
+    return (isinstance(lay, (list, tuple)) and len(lay) == 9
+            and all(k in MOUSE_GRID_ACTIONS for k in lay))
 
 #: Coronary Tree / Territory appearance — user-editable in Settings so the look
 #: can change without a code edit. Defaults reproduce the shipped appearance.
@@ -844,13 +874,14 @@ def save_coronary_params(params: dict) -> None:
 
 
 def load_mouse_grid() -> dict:
-    """Mouse-operation grid prefs {'on': bool, 'layout': [9 action keys]}, merged
-    over the defaults so a missing / partial / corrupt file is still valid. The
-    layout must contain each of the 9 actions exactly once; a bad layout falls
-    back to the default order."""
+    """Mouse-operation grid prefs {'on', 'layout'[9], 'reveal_ms', 'display_ms'},
+    merged over the defaults so a missing / partial / corrupt file is still valid.
+    Legacy play/seek layouts are migrated to playseek; an invalid layout falls
+    back to the default."""
     out = {"on": bool(MOUSE_GRID_DEFAULT["on"]),
            "layout": list(MOUSE_GRID_DEFAULT["layout"]),
-           "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT}
+           "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
+           "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT}
     try:
         data = json.loads(MOUSE_GRID_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -858,25 +889,24 @@ def load_mouse_grid() -> dict:
     if isinstance(data, dict):
         out["on"] = bool(data.get("on", out["on"]))
         lay = data.get("layout")
-        if (isinstance(lay, list) and len(lay) == 9
-                and sorted(lay) == sorted(MOUSE_GRID_ACTIONS)):
-            lay = [str(k) for k in lay]
-            # Migrate the first-shipped default order to the current default.
-            out["layout"] = (list(MOUSE_GRID_DEFAULT["layout"])
-                             if lay == _MOUSE_GRID_OLD_DEFAULT else lay)
+        if isinstance(lay, (list, tuple)):
+            lay = _migrate_grid_layout(lay)          # play/seek → playseek
+            if _valid_grid_layout(lay):
+                out["layout"] = list(lay)
         if "reveal_ms" in data:
             out["reveal_ms"] = _clamp_reveal_ms(data.get("reveal_ms"))
+        if "display_ms" in data:
+            out["display_ms"] = _clamp_display_ms(data.get("display_ms"))
     return out
 
 
 def save_mouse_grid(prefs: dict) -> None:
     """Best-effort persist of the mouse-grid prefs (sanitised: a bad layout is
-    replaced by the default order)."""
+    replaced by the default)."""
     try:
         p = prefs or {}
-        lay = p.get("layout")
-        if not (isinstance(lay, list) and len(lay) == 9
-                and sorted(lay) == sorted(MOUSE_GRID_ACTIONS)):
+        lay = _migrate_grid_layout(p.get("layout") or [])
+        if not _valid_grid_layout(lay):
             lay = list(MOUSE_GRID_DEFAULT["layout"])
         MOUSE_GRID_PATH.parent.mkdir(parents=True, exist_ok=True)
         MOUSE_GRID_PATH.write_text(
@@ -884,6 +914,8 @@ def save_mouse_grid(prefs: dict) -> None:
                         "layout": [str(k) for k in lay],
                         "reveal_ms": _clamp_reveal_ms(
                             p.get("reveal_ms", MOUSE_GRID_REVEAL_MS_DEFAULT)),
+                        "display_ms": _clamp_display_ms(
+                            p.get("display_ms", MOUSE_GRID_DISPLAY_MS_DEFAULT)),
                         "version": 1},
                        ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, TypeError, ValueError):

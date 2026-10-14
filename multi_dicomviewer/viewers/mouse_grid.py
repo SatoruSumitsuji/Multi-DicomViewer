@@ -18,9 +18,11 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 
 from multi_dicomviewer.i18n import t
 
-#: Which actions are click-fired vs drag-driven.
-_CLICK = {"prev_series", "next_series", "prev_frame", "next_frame", "play"}
-_DRAG = {"seek", "pan", "zoom", "wl"}
+#: Which actions are click-fired vs drag-driven. `playseek` is BOTH: a click
+#: toggles play/stop, a drag (past _SEEK_DRAG_PX) scrubs the seek bar — so it is
+#: handled specially and belongs to neither set.
+_CLICK = {"prev_series", "next_series", "prev_frame", "next_frame"}
+_DRAG = {"pan", "zoom", "wl"}
 
 #: Click cells that also auto-repeat while the button is held down, so a long
 #: press steps through frames continuously (one step per interval) on top of the
@@ -31,6 +33,9 @@ _REPEAT = {"prev_frame", "next_frame"}
 #: tap stays a single step), then step every _REPEAT_INTERVAL_MS.
 _REPEAT_DELAY_MS = 350
 _REPEAT_INTERVAL_MS = 90
+#: Pointer travel (px) that turns a press on the combined play/seek cell from a
+#: play/stop CLICK into a seek DRAG.
+_SEEK_DRAG_PX = 8
 
 #: Short on-cell labels (kept terse so they read in a quarter-pane 2×2 layout).
 _LABELS = {
@@ -38,11 +43,14 @@ _LABELS = {
     "next_series": "シリーズ ▶",
     "prev_frame":  "◀ フレーム",
     "next_frame":  "フレーム ▶",
-    "play":        "▶  ⏩  ■",
-    "seek":        "⇔ シーク",
+    "playseek":    "▶ ■  ↔ シーク",
     "pan":         "✥ 移動",
     "zoom":        "🔍 拡大",
     "wl":          "◐ 階調",
+    # Legacy keys (pre-merge) kept so an old saved layout still labels sanely
+    # until it is migrated to `playseek`.
+    "play":        "▶ ■",
+    "seek":        "↔ シーク",
 }
 
 
@@ -57,8 +65,8 @@ class MouseGrid:
         # is still for ~1 s, hidden on any move/action) so it never obscures the
         # image; interaction stays live whenever `enabled`, regardless.
         self.show_overlay = False
-        self.layout = ["prev_frame", "play", "next_frame",
-                       "prev_series", "seek", "next_series",
+        self.layout = ["prev_frame", "playseek", "next_frame",
+                       "prev_series", "playseek", "next_series",
                        "pan", "zoom", "wl"]
         self._drag_action = None          # action key of an in-progress drag
         self._press_cell = None           # cell pressed (for click-on-release)
@@ -146,7 +154,20 @@ class MouseGrid:
         return True
 
     def move(self, sx, sy) -> bool:
-        if not self.enabled or self._drag_action is None:
+        if not self.enabled:
+            return False
+        # Combined play/seek cell: a press that travels past the threshold turns
+        # into a seek drag (so it no longer fires the play/stop click on release);
+        # within the threshold it stays a pending click and the move is eaten.
+        if self._drag_action is None and self._press_cell == "playseek":
+            px, py = self._press_xy or (sx, sy)
+            if (abs(sx - px) >= _SEEK_DRAG_PX or abs(sy - py) >= _SEEK_DRAG_PX):
+                self._drag_action = "playseek"
+                self._press_cell = None
+                self._last_xy = (sx, sy)
+                self._apply_seek(sx, self.canvas.width())
+            return True
+        if self._drag_action is None:
             return False
         lx, ly = self._last_xy or (sx, sy)
         dx, dy = sx - lx, sy - ly
@@ -164,7 +185,7 @@ class MouseGrid:
         elif a == "wl":
             if dx or dy:
                 self.canvas.wl_dragged.emit(float(dx), float(dy))
-        elif a == "seek":
+        elif a == "playseek":
             self._apply_seek(sx, self.canvas.width())
         return True
 
@@ -208,8 +229,10 @@ class MouseGrid:
         self._repeat_action = None
 
     def _apply_seek(self, sx, w) -> None:
+        # Seek is part of the combined play/seek action: a non-None arg (the
+        # fraction) tells the viewer to scrub; a None arg is the play/stop click.
         frac = max(0.0, min(1.0, sx / float(max(1, w))))
-        self._dispatch("seek", frac)
+        self._dispatch("playseek", frac)
 
     def _dispatch(self, action, arg=None) -> None:
         cb = getattr(self.canvas, "_grid_dispatch", None)
@@ -240,7 +263,7 @@ class MouseGrid:
         for idx, act in enumerate(self.layout[:9]):
             r, c = divmod(idx, 3)
             cell = QRectF(c * cw, r * ch, cw, ch)
-            drag = act in _DRAG
+            drag = act in _DRAG or act == "playseek"   # playseek has a seek drag
             p.fillRect(cell, QColor(40, 90, 160, 40) if drag
                        else QColor(20, 20, 20, 36))
             self._outlined_text(
