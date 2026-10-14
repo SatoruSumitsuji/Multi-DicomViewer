@@ -701,8 +701,7 @@ class XAViewer(AbstractViewer):
         for _c in (self.canvas, self.canvas2):
             _c._grid.set_layout(self._mouse_grid["layout"])
             _c._grid_dispatch_cb = self._on_grid_action
-            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 200))
-            _c.set_grid_display_time(self._mouse_grid.get("display_ms", 1000))
+            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 1000))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 
@@ -726,16 +725,13 @@ class XAViewer(AbstractViewer):
         self._mouse_grid = settings.load_mouse_grid()
         for _c in (self.canvas, self.canvas2):
             _c._grid.set_layout(self._mouse_grid["layout"])
-            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 200))
-            _c.set_grid_display_time(self._mouse_grid.get("display_ms", 1000))
+            _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 1000))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 
     def _on_grid_action(self, action, arg=None) -> None:
-        """A grid cell was clicked / dragged (series / frame / play-seek).
-        Pan / Zoom / W-L are applied on the canvas itself. `playseek` is the
-        combined cell: a CLICK (arg is None) toggles play/stop; a DRAG (arg = a
-        0..1 fraction) scrubs the seek bar."""
+        """A grid cell was clicked / dragged (series / frame / play / seek).
+        Pan / Zoom / W-L are applied on the canvas itself."""
         if action == "prev_series":
             self.series_nav.emit("prev")
         elif action == "next_series":
@@ -744,18 +740,21 @@ class XAViewer(AbstractViewer):
             self.step_frame(-1)
         elif action == "next_frame":
             self.step_frame(+1)
-        elif action == "playseek":
-            if arg is None:
-                self._grid_play_toggle()
-            else:
-                mx = self.frame_slider.maximum()
-                self.frame_slider.setValue(int(round(float(arg) * mx)))
+        elif action == "play":
+            self._grid_play_cycle()
+        elif action == "seek":
+            mx = self.frame_slider.maximum()
+            self.frame_slider.setValue(int(round(float(arg or 0.0) * mx)))
 
-    def _grid_play_toggle(self) -> None:
-        """Combined play/seek cell click: toggle play ⇄ stop (1× only — the 2×
-        step was removed)."""
-        self._play_speed = 1.0
-        self.play_btn.setChecked(not self.play_btn.isChecked())   # toggled → play/stop
+    def _grid_play_cycle(self) -> None:
+        """Play zone: not playing → play 1×, 1× → 2×, 2× → stop."""
+        if not self.play_btn.isChecked():
+            self._play_speed = 1.0
+            self.play_btn.setChecked(True)        # toggled → _toggle_play(True)
+        elif float(getattr(self, "_play_speed", 1.0)) < 1.5:
+            self.toggle_play_speed()              # 1× → 2×
+        else:
+            self.play_btn.setChecked(False)       # toggled → _toggle_play(False)
 
     def _on_canvas_arrow(self, direction: str) -> None:
         """Arrow key on a focused cine image: Up/Down step Prev/Next series,
