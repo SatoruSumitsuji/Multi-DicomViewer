@@ -31,12 +31,12 @@ _SCHEMA_VERSION = 2
 #: cells each run one cine/view action, so the whole viewer can be driven with the
 #: mouse. Persisted so the toggle survives a restart. `on` = the toggle state;
 #: `layout` = the 9 cell actions, row-major (index 0 = top-left … 8 = bottom-right).
-#: The 8 cell actions. `playseek` is the combined play/stop (click) + seek (drag)
-#: cell — it replaced the separate `play` and `seek`. A layout is 9 cells, each
-#: one of these; duplicates are allowed (the default uses `playseek` twice).
+#: The 9 cell actions. `playseek` is the combined play/stop (click) + seek (drag)
+#: cell; `rotate` is a drag that spins the displayed image. A layout is 9 cells,
+#: each one of these; duplicates are allowed.
 MOUSE_GRID_ACTIONS = (
     "prev_series", "next_series", "prev_frame", "next_frame",
-    "playseek", "pan", "zoom", "wl",
+    "playseek", "rotate", "pan", "zoom", "wl",
 )
 #: Map a legacy action key (pre-merge saved layout) to the current one.
 _MOUSE_GRID_ACTION_MIGRATE = {"play": "playseek", "seek": "playseek"}
@@ -52,12 +52,18 @@ MOUSE_GRID_DISPLAY_MS_DEFAULT = 1000
 MOUSE_GRID_DISPLAY_CONTINUOUS = 0
 MOUSE_GRID_DEFAULT = {
     "on": False,
-    "layout": ["prev_frame", "playseek", "next_frame",
+    "layout": ["prev_frame", "rotate", "next_frame",
                "prev_series", "playseek", "next_series",
                "pan", "zoom", "wl"],
     "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
     "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT,
 }
+#: The previous shipped default (playseek in both the top-middle and centre). A
+#: saved file still carrying it (a user who never customised the layout) is
+#: bumped to the current default so the new 回転 cell appears top-middle.
+_MOUSE_GRID_PREV_DEFAULT = ["prev_frame", "playseek", "next_frame",
+                           "prev_series", "playseek", "next_series",
+                           "pan", "zoom", "wl"]
 
 
 def _clamp_reveal_ms(v) -> int:
@@ -891,6 +897,10 @@ def load_mouse_grid() -> dict:
         lay = data.get("layout")
         if isinstance(lay, (list, tuple)):
             lay = _migrate_grid_layout(lay)          # play/seek → playseek
+            # An un-customised previous default is bumped to the current default
+            # (so the new 回転 cell lands top-middle for existing users).
+            if list(lay) == _MOUSE_GRID_PREV_DEFAULT:
+                lay = list(MOUSE_GRID_DEFAULT["layout"])
             if _valid_grid_layout(lay):
                 out["layout"] = list(lay)
         if "reveal_ms" in data:

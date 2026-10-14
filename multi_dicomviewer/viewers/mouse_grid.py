@@ -22,7 +22,7 @@ from multi_dicomviewer.i18n import t
 #: toggles play/stop, a drag (past _SEEK_DRAG_PX) scrubs the seek bar — so it is
 #: handled specially and belongs to neither set.
 _CLICK = {"prev_series", "next_series", "prev_frame", "next_frame"}
-_DRAG = {"pan", "zoom", "wl"}
+_DRAG = {"pan", "zoom", "wl", "rotate"}
 
 #: Click cells that also auto-repeat while the button is held down, so a long
 #: press steps through frames continuously (one step per interval) on top of the
@@ -44,6 +44,7 @@ _LABELS = {
     "prev_frame":  "◀ フレーム",
     "next_frame":  "フレーム ▶",
     "playseek":    "▶ ■  ↔ シーク",
+    "rotate":      "⟳ 回転",
     "pan":         "✥ 移動",
     "zoom":        "🔍 拡大",
     "wl":          "◐ 階調",
@@ -65,13 +66,14 @@ class MouseGrid:
         # is still for ~1 s, hidden on any move/action) so it never obscures the
         # image; interaction stays live whenever `enabled`, regardless.
         self.show_overlay = False
-        self.layout = ["prev_frame", "playseek", "next_frame",
+        self.layout = ["prev_frame", "rotate", "next_frame",
                        "prev_series", "playseek", "next_series",
                        "pan", "zoom", "wl"]
         self._drag_action = None          # action key of an in-progress drag
         self._press_cell = None           # cell pressed (for click-on-release)
         self._press_xy = None
         self._last_xy = None
+        self._rot_last = None             # last pointer angle during a rotate drag
         self._press_fired = False         # True once a press already dispatched
         #                                   its action (repeat cells fire on press,
         #                                   so release must NOT fire it again).
@@ -140,6 +142,11 @@ class MouseGrid:
             self._press_cell = None
             if act == "seek":
                 self._apply_seek(sx, w)   # jump on the initial press too
+            elif act == "rotate":
+                # Seed the rotate drag with the pointer's angle so the first move
+                # applies a delta, not an absolute jump.
+                fn = getattr(self.canvas, "_free_rot_angle", None)
+                self._rot_last = fn(sx, sy) if callable(fn) else None
         else:
             self._drag_action = None
             self._press_cell = act
@@ -187,7 +194,24 @@ class MouseGrid:
                 self.canvas.wl_dragged.emit(float(dx), float(dy))
         elif a == "playseek":
             self._apply_seek(sx, self.canvas.width())
+        elif a == "rotate":
+            self._apply_rotate(sx, sy)
         return True
+
+    def _apply_rotate(self, sx, sy) -> None:
+        """Spin the displayed image by the angular delta the pointer swept about
+        the canvas centre (mirrors the viewer's MultiSync-style drag-rotate):
+        update canvas._free_rot, which the paint applies."""
+        c = self.canvas
+        fn = getattr(c, "_free_rot_angle", None)
+        if not callable(fn) or not hasattr(c, "_free_rot"):
+            return
+        now = fn(sx, sy)
+        prev = self._rot_last if self._rot_last is not None else now
+        d = (now - prev + 180.0) % 360.0 - 180.0      # shortest signed delta
+        c._free_rot = (float(c._free_rot) + d) % 360.0
+        self._rot_last = now
+        c.update()
 
     def release(self, sx, sy) -> bool:
         if not self.enabled:
@@ -208,6 +232,7 @@ class MouseGrid:
         self._drag_action = self._press_cell = None
         self._press_xy = self._last_xy = None
         self._press_fired = False
+        self._rot_last = None
         return handled
 
     # -------------------------------------------------- hold-to-repeat
