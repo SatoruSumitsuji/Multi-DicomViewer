@@ -355,12 +355,12 @@ class SettingsDialog(QDialog):
         _mg_w.setLayout(g2)
         mgv.addWidget(_mg_w)
 
-        # 割り当て操作：起動時間 / 表示時間 — 起動時間 = how long the pointer must
-        # rest before the grid menu appears; 表示時間 = how long it then stays
-        # before auto-hiding (0.1–2.0 s), or 継続 (stay shown). Both 0.1 s steps.
+        # 割り当て操作起動時間 — how long the pointer must rest on the image before
+        # the grid menu / cells appear (the grid stays interactive meanwhile).
+        # 0.1–2.0 s in 0.1 s steps.
         _rev_row = QHBoxLayout()
-        _rev_row.addWidget(QLabel(t("割り当て操作：")))
-        _rev_row.addWidget(QLabel(t("起動時間")))
+        _rev_lbl = QLabel(t("割り当て操作起動時間"))
+        _rev_row.addWidget(_rev_lbl)
         self._mg_reveal_spin = QDoubleSpinBox()
         self._mg_reveal_spin.setRange(
             settings.MOUSE_GRID_REVEAL_MS_MIN / 1000.0,
@@ -369,29 +369,12 @@ class SettingsDialog(QDialog):
         self._mg_reveal_spin.setDecimals(1)
         self._mg_reveal_spin.setSuffix(t(" 秒"))
         self._mg_reveal_spin.setToolTip(t(
-            "画像上でマウスが静止してからグリッドが表示されるまでの時間"
-            "（操作自体は常に有効）。"))
+            "画像上でマウスが静止してからグリッド（メニュー・格子）が表示される"
+            "までの時間。短いほどすぐ出ます（操作自体は常に有効）。"))
         _rev_ms = (mg or {}).get(
             "reveal_ms", settings.MOUSE_GRID_REVEAL_MS_DEFAULT)
         self._mg_reveal_spin.setValue(float(_rev_ms) / 1000.0)
         _rev_row.addWidget(self._mg_reveal_spin)
-        _rev_row.addSpacing(12)
-        _rev_row.addWidget(QLabel(t("表示時間")))
-        # 表示時間: a combo of 0.1–2.0 s plus "継続". Data = ms (0 = 継続).
-        self._mg_display_combo = QComboBox()
-        self._mg_display_combo.setToolTip(t(
-            "グリッドが表示されてから自動で消えるまでの時間。"
-            "「継続」でずっと表示したままになります。"))
-        for _ms in range(settings.MOUSE_GRID_REVEAL_MS_MIN,
-                         settings.MOUSE_GRID_REVEAL_MS_MAX + 1, 100):
-            self._mg_display_combo.addItem(t("{s:.1f} 秒", s=_ms / 1000.0), _ms)
-        self._mg_display_combo.addItem(
-            t("継続"), settings.MOUSE_GRID_DISPLAY_CONTINUOUS)
-        _disp_ms = (mg or {}).get(
-            "display_ms", settings.MOUSE_GRID_DISPLAY_MS_DEFAULT)
-        _di = self._mg_display_combo.findData(int(_disp_ms))
-        self._mg_display_combo.setCurrentIndex(_di if _di >= 0 else 0)
-        _rev_row.addWidget(self._mg_display_combo)
         _rev_row.addStretch(1)
         mgv.addLayout(_rev_row)
         root.addWidget(gb_mg)
@@ -464,13 +447,8 @@ class SettingsDialog(QDialog):
         return [cb.currentData() for cb in self._mg_combos]
 
     def mouse_grid_reveal_ms(self) -> int:
-        """起動時間 in milliseconds (the spin is in seconds)."""
+        """The chosen grid reveal delay in milliseconds (spin is in seconds)."""
         return int(round(self._mg_reveal_spin.value() * 1000.0))
-
-    def mouse_grid_display_ms(self) -> int:
-        """表示時間 in milliseconds; 0 = 継続 (stay shown). From the combo's data."""
-        v = self._mg_display_combo.currentData()
-        return int(v) if v is not None else settings.MOUSE_GRID_DISPLAY_MS_DEFAULT
 
     def coronary(self) -> dict:
         """Chosen Coronary Tree / Territory appearance params (sanitising/clamping

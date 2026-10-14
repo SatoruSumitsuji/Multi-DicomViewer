@@ -7137,14 +7137,11 @@ class MainWindow(QMainWindow):
         if cw is not None and hasattr(cw, "coronary_params_refresh"):
             cw.coronary_params_refresh()
         # Mouse-operation grid: persist (keep the toggle state) + live-apply. The
-        # timing values are saved regardless of layout validity; the layout is
-        # saved when every cell is a valid action (duplicates allowed, e.g. the
-        # combined play/seek cell can appear more than once).
+        # reveal delay is saved regardless of the layout's validity; the layout is
+        # only saved when it's a valid 9-action permutation.
         mouse_grid["reveal_ms"] = dlg.mouse_grid_reveal_ms()
-        mouse_grid["display_ms"] = dlg.mouse_grid_display_ms()
         new_layout = dlg.mouse_grid_layout()
-        layout_ok = (len(new_layout) == 9
-                     and all(a in settings.MOUSE_GRID_ACTIONS for a in new_layout))
+        layout_ok = sorted(new_layout) == sorted(settings.MOUSE_GRID_ACTIONS)
         if layout_ok:
             mouse_grid["layout"] = new_layout
         settings.save_mouse_grid(mouse_grid)
@@ -7154,7 +7151,8 @@ class MainWindow(QMainWindow):
         if not layout_ok:
             QMessageBox.information(
                 self, t("マウス操作グリッド"),
-                t("各セルに操作を割り当ててください（配置は保存しませんでした）。"))
+                t("各アクションを1回ずつ割り当ててください（重複/欠落のため配置は"
+                  "保存しませんでした）。"))
         self.statusBar().showMessage(
             t("Settings saved (CT {ct} / Angio {xa} live)",
               ct=vals["CT"], xa=vals["XA"]))
