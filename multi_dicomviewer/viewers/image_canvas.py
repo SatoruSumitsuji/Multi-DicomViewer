@@ -1837,6 +1837,12 @@ class ImageCanvas(QWidget):
             self.ivus_center_reset.emit("all")
 
     def mouseDoubleClickEvent(self, _e):
+        # Mouse-operation grid owns a LEFT double-click (e.g. on the 回転 cell →
+        # reset rotation to 0°) before any normal double-click handling.
+        if (self._grid.active() and _e.button() == Qt.MouseButton.LeftButton):
+            _p = _e.position()
+            if self._grid.double_click(_p.x(), _p.y()):
+                return
         if (self.coreg_show and self.coreg_edit
                 and self.coreg_mode == "trace"
                 and len(self.coreg_vertices) >= 2):

@@ -740,10 +740,18 @@ class XAViewer(AbstractViewer):
             self.series_nav.emit("prev")
         elif action == "next_series":
             self.series_nav.emit("next")
+        elif action == "first_series":          # Shift+click on ◀ シリーズ
+            self.series_nav.emit("first")
+        elif action == "last_series":           # Shift+click on シリーズ ▶
+            self.series_nav.emit("last")
         elif action == "prev_frame":
             self.step_frame(-1)
         elif action == "next_frame":
             self.step_frame(+1)
+        elif action == "first_frame":           # Shift+click on ◀ フレーム
+            self.frame_slider.setValue(0)
+        elif action == "last_frame":            # Shift+click on フレーム ▶
+            self.frame_slider.setValue(self.frame_slider.maximum())
         elif action == "playseek":
             if arg is None:
                 self._grid_play_toggle()
