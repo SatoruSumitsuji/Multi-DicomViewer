@@ -247,19 +247,32 @@ class MouseGrid:
         c.update()
 
     def double_click(self, sx, sy) -> bool:
-        """Left double-click handling. On the 回転 cell → reset the rotation to 0°.
-        Returns True if the grid consumed it."""
+        """Left double-click on a transform cell resets it to its initial state:
+        回転 → 0°, 拡大 → original fit (zoom+centre), 移動 → re-centre (pan 0),
+        階調 → the series' baseline W/L. Returns True if the grid consumed it."""
         if not self.enabled:
             return False
-        w, h = self.canvas.width(), self.canvas.height()
-        if self._action(sx, sy, w, h) == "rotate":
-            c = self.canvas
+        c = self.canvas
+        cell = self._action(sx, sy, c.width(), c.height())
+        if cell == "rotate":
             if hasattr(c, "set_free_rotation"):
                 c.set_free_rotation(0.0)
             elif hasattr(c, "_free_rot"):
                 c._free_rot = 0.0
             self._rot_raw = 0.0
             c.update()
+            return True
+        if cell == "zoom":
+            if hasattr(c, "reset_zoom"):       # zoom back to 1.0 AND pan to centre
+                c.reset_zoom()
+            return True
+        if cell == "pan":
+            if hasattr(c, "_pan"):             # re-centre, keep the current zoom
+                c._pan = [0.0, 0.0]
+                c.update()
+            return True
+        if cell == "wl":
+            self._dispatch("reset_wl")          # viewer restores baseline W/L
             return True
         return False
 
