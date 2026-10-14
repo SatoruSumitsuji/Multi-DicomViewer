@@ -11,9 +11,23 @@ import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QColor, QFont, QPainter, QPixmap
-from PyQt6.QtWidgets import QApplication, QSplashScreen
+from PyQt6.QtWidgets import (
+    QApplication, QProxyStyle, QSplashScreen, QStyle,
+)
 
 from multi_dicomviewer.config import APP_NAME, APP_VERSION
+
+
+class _LeftDockTabsStyle(QProxyStyle):
+    """macOS centres the QMainWindow dock-area tab bar (Studies / Case
+    Presentation / Coronary Tree); force it LEFT-aligned like Windows. Only the
+    one tab-bar-alignment style hint is overridden — everything else delegates to
+    the native style, so the look is unchanged otherwise."""
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        if hint == QStyle.StyleHint.SH_TabBar_Alignment:
+            return int(Qt.AlignmentFlag.AlignLeft)
+        return super().styleHint(hint, option, widget, returnData)
 
 #: Minimum time (s) the start-up splash stays up — so the version/contact is
 #: readable even when the heavy import finished sooner. Same on every platform.
@@ -167,6 +181,15 @@ def main(argv: list[str]) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+
+    # macOS centres dock tab bars; left-align them to match Windows. The proxy
+    # (no explicit base) lazily recreates a fresh instance of the current native
+    # style, so only the tab alignment changes and nothing is double-owned.
+    if sys.platform == "darwin":
+        try:
+            app.setStyle(_LeftDockTabsStyle())
+        except Exception:                                # noqa: BLE001
+            pass
 
     # Windows: give the process an explicit AppUserModelID so every top-level
     # window it opens (main + CoSync + the other tool windows) is grouped under
