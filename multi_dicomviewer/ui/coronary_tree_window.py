@@ -1149,6 +1149,20 @@ class CoronaryTreeWindow(SnapDock):
         return True
 
     def _compute_territory(self) -> None:
+        """Re-entrancy guard around the actual compute. _run_busy pumps the event
+        loop (QApplication.processEvents) while the busy dialog is up, which can
+        deliver an event that calls _compute_territory again mid-run — re-opening
+        the dialog in an endless show/hide loop (the Mac hang on a corotree +
+        FullLv drop). Coalesce to the in-flight compute instead."""
+        if getattr(self, "_computing_territory", False):
+            return
+        self._computing_territory = True
+        try:
+            self._compute_territory_impl()
+        finally:
+            self._computing_territory = False
+
+    def _compute_territory_impl(self) -> None:
         """(Re)build the TerritoryEngine from the current tree + loaded FullLv and
         refresh the report. Called on FullLv load and whenever the tree changes
         (assignment depends on the centrelines)."""
