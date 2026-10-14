@@ -221,12 +221,17 @@ class ImageCanvas(QWidget):
         from multi_dicomviewer.viewers.mouse_grid import MouseGrid
         self._grid = MouseGrid(self)
         self._grid_dispatch_cb = None
-        # Auto-reveal: the grid overlay appears after the pointer is still for ~1 s
-        # on the image and hides on any move/click so the image stays unobscured.
+        # Auto-reveal: the grid overlay appears after the pointer is still for
+        # 起動時間 (reveal) on the image; once shown it auto-hides after 表示時間
+        # (display), unless 表示時間 is 継続 (display_ms == 0 → stays shown).
         self._grid_hover_timer = QTimer(self)
         self._grid_hover_timer.setSingleShot(True)
-        self._grid_hover_timer.setInterval(1000)
+        self._grid_hover_timer.setInterval(200)
         self._grid_hover_timer.timeout.connect(self._grid_hover_show)
+        self._grid_display_ms = 1000          # 0 = 継続 (no auto-hide)
+        self._grid_display_timer = QTimer(self)
+        self._grid_display_timer.setSingleShot(True)
+        self._grid_display_timer.timeout.connect(self._grid_display_hide)
         # Pan offset in widget pixels, added on top of the centred fit so
         # the user can bring a specific region into view. Middle-button OR
         # Ctrl+left drag pans; reset_zoom clears both zoom and pan.
@@ -1396,9 +1401,11 @@ class ImageCanvas(QWidget):
         # bypassed. Other buttons fall through.
         if (self._grid.active() and e.button() == Qt.MouseButton.LeftButton
                 and self._grid.press(sx, sy)):
-            # A control was pressed → hide the overlay while it acts; it reappears
-            # after the pointer rests for ~1 s (re-armed on release).
+            # A control was pressed → hide the overlay while it acts (so a drag
+            # sees the image); it re-appears after the pointer rests for 起動時間
+            # (re-armed on release).
             self._grid_hover_timer.stop()
+            self._grid_display_timer.stop()
             if self._grid.show_overlay:
                 self._grid.show_overlay = False
             self.update()
@@ -1647,8 +1654,9 @@ class ImageCanvas(QWidget):
         pos = e.position()
         sx, sy = pos.x(), pos.y()
         if self._grid.enabled:
-            # Any movement hides the overlay and restarts the still-timer, so the
-            # grid re-appears only once the pointer has rested for ~1 s.
+            # While hidden, movement re-arms the still-timer so the grid reveals
+            # after 起動時間 of rest; while shown it is left alone (its 表示時間
+            # timer / 継続 governs hiding), so moving to a cell never flickers it.
             self._grid_hover_bump()
         if self._grid.move(sx, sy):          # in-progress grid drag owns the move
             return
@@ -2153,57 +2161,79 @@ class ImageCanvas(QWidget):
             cb(action, arg)
 
     def set_grid_hover_delay(self, ms) -> None:
-        """Set how long the pointer must rest on the image before the grid overlay
-        appears (Settings ▸ マウス操作グリッド ▸ 割り当て操作起動時間). Clamped to a
-        sane range; takes effect on the next still-period."""
+        """起動時間: how long the pointer must rest on the image before the grid
+        overlay appears. Clamped 100–2000 ms; takes effect on the next still."""
+        try:
+            ms = int(ms)
+        except (TypeError, ValueError):
+            ms = 200
+        self._grid_hover_timer.setInterval(max(100, min(2000, ms)))
+
+    def set_grid_display_time(self, ms) -> None:
+        """表示時間: how long the overlay stays once shown, then auto-hides.
+        0 = 継続 (stay shown, no auto-hide). Numeric is clamped 100–2000 ms."""
         try:
             ms = int(ms)
         except (TypeError, ValueError):
             ms = 1000
-        ms = max(100, min(2000, ms))
-        self._grid_hover_timer.setInterval(ms)
+        self._grid_display_ms = 0 if ms <= 0 else max(100, min(2000, ms))
+
+    def _grid_arm_display(self) -> None:
+        """Start (or clear) the auto-hide timer for the now-shown overlay: run it
+        for 表示時間, or leave the overlay up when 継続 (display_ms == 0)."""
+        if self._grid_display_ms > 0:
+            self._grid_display_timer.start(self._grid_display_ms)
+        else:
+            self._grid_display_timer.stop()          # 継続 — never auto-hide
 
     def set_grid_enabled(self, on: bool) -> None:
         """Enable/disable the mouse-operation grid (the viewer gates this on its
-        toggle + Measure state). Enabling turns on hover tracking so the overlay
-        can auto-reveal; the overlay itself starts hidden."""
+        toggle + Measure state). Enabling shows the overlay at once (feedback)
+        then lets it auto-hide after 表示時間; disabling hides it immediately."""
         on = bool(on)
         self._grid.set_enabled(on)
-        # Show the overlay IMMEDIATELY on enable so turning the grid on always
-        # gives visible feedback (it then hides on the first move and re-appears
-        # after the still-delay, as before). Hidden at once on disable.
         self._grid.show_overlay = on
         # Hover moves must fire even with no button down so the still-timer runs.
         self.setMouseTracking(on or bool(self.meas_type))
         if on:
             self._grid_hover_timer.start()
+            self._grid_arm_display()                 # auto-hide the feedback flash
         else:
             self._grid_hover_timer.stop()
+            self._grid_display_timer.stop()
         self.update()
 
     def _grid_hover_show(self) -> None:
-        """Still for ~1 s → reveal the overlay (only while the grid is enabled)."""
+        """Reveal the overlay after 起動時間 of stillness, then arm its 表示時間
+        auto-hide (unless 継続)."""
         if self._grid.enabled and not self._grid.show_overlay:
             self._grid.show_overlay = True
+            self._grid_arm_display()
             self.update()
 
-    def _grid_hover_bump(self) -> None:
-        """Any pointer move/action: hide the overlay and (re)arm the still-timer."""
-        if not self._grid.enabled:
-            return
+    def _grid_display_hide(self) -> None:
+        """表示時間 elapsed → hide the overlay (it re-appears on the next still)."""
         if self._grid.show_overlay:
             self._grid.show_overlay = False
             self.update()
+
+    def _grid_hover_bump(self) -> None:
+        """Pointer moved. While the overlay is HIDDEN, (re)arm the still-timer so
+        it reveals after 起動時間 of rest. While it is SHOWN, leave it — the 表示
+        時間 timer (or 継続) governs hiding, so moving to a cell never flickers it."""
+        if not self._grid.enabled or self._grid.show_overlay:
+            return
         self._grid_hover_timer.start()
 
     def enterEvent(self, e):
-        if self._grid.enabled:
+        if self._grid.enabled and not self._grid.show_overlay:
             self._grid_hover_timer.start()
         super().enterEvent(e)
 
     def leaveEvent(self, e):
         if self._grid.enabled:
             self._grid_hover_timer.stop()
+            self._grid_display_timer.stop()
             if self._grid.show_overlay:
                 self._grid.show_overlay = False
                 self.update()
