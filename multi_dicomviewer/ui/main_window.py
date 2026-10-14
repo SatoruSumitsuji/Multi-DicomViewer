@@ -5205,23 +5205,30 @@ class MainWindow(QMainWindow):
                 pass
 
     def _free_pane_ct_for_reload(self, pane: ViewerPane) -> None:
-        """Free *pane*'s own CT viewer volume + GPU before it rebuilds a new CT
-        in the same pane, so the build never holds the old + new volume at once
-        (the same-pane black-CT bug). Clears the pane's cached CT viewer; the
-        following load_series rebuilds it — the same clear-then-rebuild a
-        demote→promote already does safely. No-op if the pane has no CT viewer."""
+        """DISPOSE *pane*'s cached CT viewer before it loads a new CT in the same
+        pane, so the load gets a FRESH viewer — exactly like a never-used pane,
+        which is the only case that worked. Reusing a CT viewer that was cleared
+        (by the ✕ / reset, or a previous load) left its GL/GPU render surface in a
+        state that rendered the next CT BLACK; rebuilding sidesteps that AND frees
+        the old ~0.7 GB volume. Scoped to CT (XA/IVUS render via QPainter, no GL
+        surface, so they stay cached). No-op if the pane has no CT viewer yet
+        (a genuinely first load already gets a fresh one)."""
         try:
-            v = pane._viewers.get(Modality.CT)
+            v = pane._viewers.pop(Modality.CT, None)
         except Exception:                                # noqa: BLE001
             v = None
-        if v is None or not hasattr(v, "clear"):
+        if v is None:
             return
         try:
-            v.clear()
-            try:
-                v._loaded_uid = ""       # don't let a stale UID take a fast-path
-            except Exception:            # noqa: BLE001
-                pass
+            v.clear()                    # free the volume/GPU before teardown
+        except Exception:                # noqa: BLE001
+            pass
+        if pane._cur_viewer is v:
+            pane._cur_viewer = None
+        try:
+            pane._stack.removeWidget(v)
+            v.setParent(None)
+            v.deleteLater()
         except Exception:                # noqa: BLE001
             pass
 
@@ -6740,12 +6747,11 @@ class MainWindow(QMainWindow):
         incoming_bytes = int(getattr(getattr(loaded, "volume", None),
                                      "nbytes", 0) or 0)
         self._free_live_for_incoming(pane, loaded.modality, incoming_bytes)
-        # Same-pane CT reload: _free_live_for_incoming only demotes OTHER panes,
-        # so replacing a CT in THIS pane would build the new ~0.7 GB volume while
-        # the pane's own old CT volume is still resident → the peak holds both,
-        # exhausts GPU/RAM and renders the new CT BLACK (worked only in a fresh
-        # pane, which demoted the old one). Free this pane's CT viewer volume
-        # FIRST so the rebuild has the memory it needs.
+        # Same-pane CT reload rendered BLACK (only a fresh pane worked): reusing a
+        # CT viewer that was cleared by the ✕/reset or a prior load left its GL
+        # render surface unable to show the next CT. Dispose this pane's cached CT
+        # viewer so the load builds a FRESH one (like a never-used pane) — which
+        # also frees the old volume. Fresh / non-CT loads are unaffected.
         if loaded.modality == Modality.CT:
             self._free_pane_ct_for_reload(pane)
         self._warn_ct_over_cap_with_lv(pane, loaded.modality)
