@@ -602,6 +602,7 @@ class _Overlay(QWidget):
                 p.drawImage(self.rect(), img)
             else:
                 p.fillRect(self.rect(), QColor(0, 0, 0))
+            self._paint_vr_coronary(p, key, w, h)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -659,6 +660,51 @@ class _Overlay(QWidget):
         p.setPen(QColor(255, 210, 90))
         p.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
                    txt)
+
+    def _paint_vr_coronary(self, p, key, w, h) -> None:
+        """Coronary Tree centrelines + Territory target markers projected through
+        the VR camera onto the rendered volume. The far side (behind the centre)
+        is faded as a depth cue. Same data as the MPR coronary overlay."""
+        v = self._v
+        spec = getattr(v, "_coro_overlay", None)
+        if spec:
+            for ves in spec:
+                pts = ves.get("points")
+                if pts is None or len(pts) < 2:
+                    continue
+                rgb = _hex_to_rgb(ves.get("color"))
+                sel = bool(ves.get("selected"))
+                width = 3.0 if sel else 2.2
+                sx, sy, d = v._vr_project_pts(key, pts)
+                for i in range(len(sx) - 1):
+                    near = (d[i] >= 0.0) or (d[i + 1] >= 0.0)
+                    a = (255 if sel else 220) if near else (85 if sel else 55)
+                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], a), width))
+                    p.drawLine(QPointF(sx[i], sy[i]),
+                               QPointF(sx[i + 1], sy[i + 1]))
+                name = ves.get("name", "")
+                if name and ves.get("vid") in getattr(v, "_coro_names", ()):
+                    _draw_outlined_text(
+                        p, QRectF(sx[0] + 6, sy[0] - 16, 160, 18),
+                        int(Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignVCenter),
+                        name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
+        for tg in getattr(v, "_coro_targets", ()):
+            P = tg.get("point")
+            if P is None:
+                continue
+            crgb = _hex_to_rgb(tg.get("color") or "#ea9999")
+            tcol = QColor(int(crgb[0]), int(crgb[1]), int(crgb[2]))
+            sx, sy, _d = v._vr_project_pts(key, [P])
+            mx, my = float(sx[0]), float(sy[0])
+            p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+            p.setBrush(tcol)
+            p.drawEllipse(QPointF(mx, my), 6.0, 6.0)
+            _draw_outlined_text(
+                p, QRectF(mx + 8, my - 18, 60, 18),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                str(tg.get("n", "")), tcol, width=1.2)
+        p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_cpr(self, p, w, h):
         """Short-axis overlay: a centred amber crosshair (the cross-section is
@@ -4981,15 +5027,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return wb
         return self._bounds
 
-    def _vr_cpu_image(self, key, lod: bool = False):
-        """Ray-cast the volume on the CPU from the current orbit (az/el) into a
-        QImage: MIP (max HU) or composite DVR (front-to-back CTA transfer func).
-        Reuses _trilinear_sample — the exact slab-MIP sampling that works on Mac."""
-        vol = self._vol
-        if vol is None:
-            return None
-        sx, sy, sz = (float(d) for d in self._dims)
-        fb = self._vr_frame_bounds()            # heart crop (or whole volume)
+    def _vr_basis(self, key):
+        """Shared VR view geometry so the ray-cast image AND the coronary/target
+        overlay projection use the exact same camera: (centre, right, up, back,
+        halfW, halfH [world mm], pane px width/height). back points centre→camera;
+        the image plane spans ±halfW·right × ±halfH·up about centre."""
+        fb = self._vr_frame_bounds()
         ctr = np.array([(fb[0] + fb[1]) * 0.5, (fb[2] + fb[3]) * 0.5,
                         (fb[4] + fb[5]) * 0.5], float)
         diag = math.sqrt((fb[1] - fb[0]) ** 2 + (fb[3] - fb[2]) ** 2
@@ -4997,7 +5040,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         az, el = self._vr_az[key], self._vr_el[key]
         ce, se = math.cos(el), math.sin(el)
         ca, sa = math.cos(az), math.sin(az)
-        back = _norm(np.array([ce * sa, se, ce * ca], float))    # centre → camera
+        back = _norm(np.array([ce * sa, se, ce * ca], float))
         up0 = np.array([0.0, 0.0, 1.0], float)
         if abs(float(np.dot(back, up0))) > 0.98:
             up0 = np.array([0.0, 1.0, 0.0], float)
@@ -5006,14 +5049,38 @@ class CTViewer(CPRMixin, AbstractViewer):
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
+        halfH = 0.62 * diag
+        halfW = halfH * (pw / ph)
+        return ctr, right, up, back, halfW, halfH, pw, ph
+
+    def _vr_project_pts(self, key, pts3d):
+        """Project world-mm points to VR pane pixels. Returns (sx[], sy[], depth[])
+        where depth>0 is toward the camera (nearer). Same mapping as the ray-cast
+        image, so overlays line up with the rendered volume."""
+        ctr, right, up, back, halfW, halfH, pw, ph = self._vr_basis(key)
+        rel = np.asarray(pts3d, float) - ctr
+        u = rel @ right
+        vv = rel @ up
+        d = rel @ back
+        sx = (u / halfW * 0.5 + 0.5) * pw
+        sy = (0.5 - vv / halfH * 0.5) * ph
+        return sx, sy, d
+
+    def _vr_cpu_image(self, key, lod: bool = False):
+        """Ray-cast the volume on the CPU from the current orbit (az/el) into a
+        QImage: MIP (max HU) or composite DVR (front-to-back CTA transfer func).
+        Reuses _trilinear_sample — the exact slab-MIP sampling that works on Mac."""
+        vol = self._vol
+        if vol is None:
+            return None
+        sx, sy, sz = (float(d) for d in self._dims)
+        ctr, right, up, back, halfW, halfH, pw, ph = self._vr_basis(key)
         aspect = pw / ph
         # While dragging, render a small all-heart preview for a smooth frame
         # rate (the crop zooms onto the heart, so even a small image spends every
         # pixel on the heart); the still frame tracks the pane's full resolution.
         ih = int(min(max(120, ph), 140 if lod else 320))
         iw = max(1, int(round(ih * aspect)))
-        halfH = 0.62 * diag
-        halfW = halfH * aspect
         SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
                              np.linspace(halfH, -halfH, ih))     # screen y down
         # Base world position per pixel, pre-divided into voxel coords so the
@@ -5024,7 +5091,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         bvz = (ctr[2] + SX * right[2] + SY * up[2]) / sz
         dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
         nz, ny, nx = vol.shape
-        R = 0.62 * diag
+        R = halfH                               # = 0.62 * frame diagonal
         # Size the depth samples by a TARGET STEP (mm), not a fixed count: the
         # heart crop shrinks R, so far fewer planes keep the same ~2 mm density
         # (dense = no speckle). The cap bounds the cost when uncropped (large R).
@@ -5048,7 +5115,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             hu = vol[vz, vy, vx]
             if mask is not None:                # voxels outside the heart → air
                 hu = np.where(mask[vz, vy, vx], hu, _HU_LO)
-            return hu, oob
+            return hu, oob, vz, vy, vx
 
         win = max(1e-6, self._win)
         lvl = self._lvl
@@ -5063,18 +5130,40 @@ class CTViewer(CPRMixin, AbstractViewer):
             glut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_G)
             blut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_B)
             inv = 511.0 / (_HU_HI - _HU_LO)
+            # Perfusion-territory tint: where a voxel carries a territory label,
+            # use that territory's colour instead of the CTA brown (opacity still
+            # from HU) — so the heart renders coloured per LAD/LCX/RCA + Target.
+            tvol = getattr(self, "_terr_mask_vol", None)
+            tcols = getattr(self, "_terr_colors", None)
+            tr = tg = tb = ton = None
+            if tvol is not None and tcols:
+                n = len(tcols)
+                tr = np.zeros(n + 1, np.float32)
+                tg = np.zeros(n + 1, np.float32)
+                tb = np.zeros(n + 1, np.float32)
+                ton = np.zeros(n + 1, bool)
+                for i, c in enumerate(tcols, 1):
+                    tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
             acc = np.zeros((ih, iw, 3), np.float32)
             aca = np.zeros((ih, iw), np.float32)
             for t in ts:
-                hu, oob = sample(t)
+                hu, oob, vz, vy, vx = sample(t)
                 idx = ((hu - _HU_LO) * inv).astype(np.intp)
                 np.clip(idx, 0, 511, out=idx)
                 a = alut[idx]
                 a[oob] = 0.0
                 w = a * (1.0 - aca)
-                acc[..., 0] += w * rlut[idx]
-                acc[..., 1] += w * glut[idx]
-                acc[..., 2] += w * blut[idx]
+                cr, cg, cb = rlut[idx], glut[idx], blut[idx]
+                if ton is not None:
+                    lab = np.rint(tvol[vz, vy, vx]).astype(np.intp)
+                    np.clip(lab, 0, len(ton) - 1, out=lab)
+                    hit = ton[lab]
+                    cr = np.where(hit, tr[lab], cr)
+                    cg = np.where(hit, tg[lab], cg)
+                    cb = np.where(hit, tb[lab], cb)
+                acc[..., 0] += w * cr
+                acc[..., 1] += w * cg
+                acc[..., 2] += w * cb
                 aca += w
                 if float(aca.min()) > 0.97:     # early-ray termination
                     break
@@ -5082,7 +5171,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         else:                                   # MIP
             mip = np.full((ih, iw), _HU_LO, np.float32)
             for t in ts:
-                hu, oob = sample(t)
+                hu, oob, _vz, _vy, _vx = sample(t)
                 hu = np.where(oob, _HU_LO, hu)
                 np.maximum(mip, hu, out=mip)
             g = np.clip((mip - (lvl - win / 2.0)) / win, 0.0, 1.0)
@@ -7063,6 +7152,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if self._terr_mask_vol is not None else None)
             if self._overlay.get(k) is not None:
                 self._overlay[k].update()
+        # Territory is composited INTO the VR image (not a live overlay), so an
+        # active VR must re-render to pick up the new colours.
+        if self.vr_active():
+            for k in ("A", "B"):
+                if self._vr_on.get(k):
+                    self._vr_refresh(k, lod=False)
 
     def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
         """Nearest coronary-overlay (vid, sample-index) within *tol* px, or
