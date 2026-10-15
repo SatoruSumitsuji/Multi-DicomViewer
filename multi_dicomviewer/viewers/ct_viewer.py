@@ -3363,17 +3363,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             # so it's obvious Draw is active / a CPR is being created.
             self._cpr_draw_btn.setStyleSheet(
                 self._LV_STY["trace"] if pend else self._LV_STY["off"])
-        if getattr(self, "_coronary_mpr_btn", None) is not None:
-            self._coronary_mpr_btn.setChecked(on)
-        # LV valve/apex entries are disabled while in coronary MPR mode (they
-        # share pane A / the axis, which the short-axis repurposes).
-        for attr in ("_lv_mv_btn", "_lv_aov_btn", "_lv_apex_sel_btn"):
-            b = getattr(self, attr, None)
-            if b is not None:
-                b.setEnabled(not on)
-        # Force a synchronous relayout so showing/hiding this row doesn't leave
-        # stale vertical padding until the next click (see _lv_relayout_bar).
-        if hasattr(self, "_lv_relayout_bar"):
+        # One selected mode at a time across CPR + the LV mode buttons: sync the
+        # CPR button, then (CPR-aware) restyle the whole LV mode row so entering
+        # CPR greys out MV/AoV/Apex/Epi/Blood/FullLV — not just MV/AoV/Apex as
+        # before (user request: 'どれが選択状態か分かりづらい'). The LV refresh
+        # itself relays out the bar; _lv_sync_cpr_btn is called explicitly too in
+        # case the LV bar is not built yet (it guards internally).
+        self._lv_sync_cpr_btn()
+        if hasattr(self, "_lv_grp_trace"):
+            self._lv_update_submode_ui()
+        elif hasattr(self, "_lv_relayout_bar"):
+            # Force a synchronous relayout so showing/hiding this row doesn't
+            # leave stale vertical padding until the next click.
             self._lv_relayout_bar()
 
     def _build_lv_bar(self) -> QWidget:
@@ -3407,6 +3408,11 @@ class CTViewer(CPRMixin, AbstractViewer):
               "then opens automatically), or Load a saved .cpr.json. "
               "(Only in 3-D MPR view.)"))
         self._coronary_mpr_btn.clicked.connect(self._toggle_coronary_mpr)
+        # Selected = dark-amber highlight (reads as THE active mode); greyed when
+        # an LV mode owns the bar; plain/black when idle+available — so it's
+        # always clear which single mode is selected (see _lv_sync_cpr_btn).
+        self._coronary_mpr_btn.setStyleSheet(
+            "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
         row1.addWidget(self._coronary_mpr_btn)
         row1.addSpacing(12)
 
@@ -4029,6 +4035,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         """The three common prerequisites (MV + AoV + apex) are all set — the
         gate for the Epi / Blood-Endo sub-modes."""
         return self._lv_valves_ready() and self._lv_apex is not None
+
+    # ---- CPR ⇄ LV mutual exclusivity (one selected mode at a time) ----------
+    def _lv_cpr_active(self) -> bool:
+        """CPR (coronary short-axis) mode owns the bar — mutually exclusive with
+        every LV mode button (MV/AoV/Apex/Epi/Blood/FullLV). True while the CPR
+        row is open, a CPR exists, or a Draw is armed."""
+        return bool(getattr(self, "_coronary_mode", False)
+                    or self._cpr is not None
+                    or getattr(self, "_coronary_mpr_pending", False))
+
+    def _lv_mode_active(self) -> bool:
+        """An LV mode is actively selected (a valve/apex edit step, or a sub-mode
+        being edited) → CPR greys out. Merely having MV/AoV/Apex SET (data, no
+        active edit) does not count — those are prerequisites, not a mode."""
+        return (getattr(self, "_lv_valve_edit", None) is not None
+                or bool(getattr(self, "_lv_apex_edit", False))
+                or self._lv_current_submode() is not None)
+
+    def _lv_sync_cpr_btn(self) -> None:
+        """CPR button state: checked + highlighted while CPR is active; greyed
+        (non-selectable) while an LV mode owns the bar; plain otherwise — so
+        exactly one of {CPR, MV, AoV, Apex, Epi, Blood/Endo, FullLV} reads as
+        selected at a time (user request). Mirror of the LV-row grey-out in
+        _lv_update_submode_ui."""
+        btn = getattr(self, "_coronary_mpr_btn", None)
+        if btn is None:
+            return
+        cpr = self._lv_cpr_active()
+        if btn.isChecked() != cpr:
+            btn.setChecked(cpr)
+        btn.setEnabled(cpr or not self._lv_mode_active())
 
     def _lv_pass_sig(self, pas):
         """Content signature of ONE contour pass (its axis + apex + border
@@ -4768,6 +4805,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         # FullLV export: live only when an Epi (region) + a Blood/Endo analysis
         # are both present (i.e. the myocardium can be bundled for territory).
         self._full_lv_refresh_btn()
+        # CPR owns the bar: while a coronary short-axis mode is active, the WHOLE
+        # LV mode row (MV/AoV/Apex/Epi/Blood-Endo/FullLV) is greyed, so only CPR
+        # reads as the selected mode. Runs LAST so it overrides every enable above
+        # (disabled buttons show their stylesheet's :disabled grey). The CPR
+        # button itself is kept in step here too (greys when an LV mode is active).
+        if self._lv_cpr_active():
+            for b in (getattr(self, "_lv_mv_btn", None),
+                      getattr(self, "_lv_aov_btn", None),
+                      getattr(self, "_lv_apex_sel_btn", None),
+                      getattr(self, "_lv_epi_btn", None),
+                      getattr(self, "_lvv_start_btn", None),
+                      getattr(self, "_lv_endo_btn", None),
+                      getattr(self, "_full_lv_btn", None)):
+                if b is not None:
+                    b.setEnabled(False)
+        self._lv_sync_cpr_btn()
 
     def _lv_relayout_bar(self) -> None:
         """Force a SYNCHRONOUS relayout of the LV bar up its whole parent chain
