@@ -590,10 +590,15 @@ class _PygfxPane:
         self.cam.maintain_aspect = False     # we set width/height to the aspect
         self.mesh = None
         self.material = None
+        #: GPU Volume Rendering (real-time): a dedicated perspective camera + a
+        #: gfx.Volume with a Metal-friendly uint8 texture, used only while VR is
+        #: on. None → the normal MPR ortho camera / slice mesh.
+        self.vr_cam = None
+        self.vr_volume = None
         self.canvas.request_draw(self._draw)
 
     def _draw(self):
-        self.renderer.render(self.scene, self.cam)
+        self.renderer.render(self.scene, self.vr_cam or self.cam)
 
     def set_volume(self, vol: np.ndarray, scale) -> None:
         if self.mesh is not None:
@@ -704,19 +709,15 @@ class _Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
-        # Volume Rendering: the VR is ray-cast on the CPU into a QImage (the GPU
-        # volume-ray shader renders black on Metal); draw it opaque over the pane
-        # and suppress the 2-D MPR overlay, then label the mode.
+        # Volume Rendering: the GPU draws the volume on the canvas UNDERNEATH, so
+        # the overlay stays transparent (just the mode label). A CPU fallback
+        # image is only drawn if the GPU volume isn't up (e.g. Metal black).
         if v._vr_on.get(key):
-            img = v._vr_img.get(key)
-            if img is not None:
-                p.drawImage(self.rect(), img)
-            else:
-                p.fillRect(self.rect(), QColor(0, 0, 0))
-            # Keep the coronary/target overlay DURING drag too — the vessels
-            # rotating are the main orientation cue. The render is off-thread now,
-            # so the per-frame projection cost is bounded by the frame rate.
-            self._paint_vr_coronary(p, key, w, h)
+            if v.pane[key].vr_volume is None:
+                img = v._vr_img.get(key)
+                if img is not None:
+                    p.drawImage(self.rect(), img)
+                self._paint_vr_coronary(p, key, w, h)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -762,8 +763,10 @@ class _Overlay(QWidget):
         """Small corner caption for the VR pane: the active mode + how to drive
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
-        mode = "MIP" if v._vr_mode == "mip" else "DVR"
-        txt = t("VR {mode}  （ドラッグ=回転）", mode=mode)
+        gpu = v.pane[key].vr_volume is not None
+        txt = (t("VR GPU-MIP  （ドラッグ=回転）") if gpu
+               else t("VR {mode}（CPU）  （ドラッグ=回転）",
+                      mode=("MIP" if v._vr_mode == "mip" else "DVR")))
         p.setFont(QFont("", 10, QFont.Weight.Bold))
         rect = QRectF(6, 4, max(10, w - 12), 18)
         p.setPen(QColor(0, 0, 0, 180))
@@ -3164,13 +3167,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
-        # End a VR orbit → recompute the full-quality image for the final angle.
+        # End a VR orbit. GPU VR is already full-quality every frame, so nothing
+        # to refine; the CPU fallback (no GPU volume) renders its sharp still.
         if self._vr_drag is not None:
             k = self._vr_drag
             self._vr_drag = None
             self._drag_btn = None
             self._last = None
-            self._vr_refresh(k, lod=False)
+            if self.pane[k].vr_volume is None:
+                self._vr_refresh(k, lod=False)
             return
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
@@ -5260,14 +5265,120 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_gen += 1
         self._vr_dirty = None
 
+    # ================= GPU Volume Rendering (real-time, Metal) =================
+    # A dedicated gfx.Volume with a Metal-friendly uint8 3-D texture (the earlier
+    # black VR was a float32/r32float texture the volume-ray shader can't sample
+    # on wgpu-Metal). The heart crop is baked into the texture (non-heart → air);
+    # rotation just moves the GPU camera, so it is real-time. Grayscale MIP first
+    # (Step 1 — confirm it renders on Metal); colour + coronary overlay follow.
+    def _vr_u8_padded(self):
+        """HU volume → uint8 (−1000..2000 HU ↦ 0..255), heart-cropped (non-mask →
+        0 = air), padded by one air voxel (matches set_volume's geometry)."""
+        vol = self._vol
+        u8 = np.clip((vol - _HU_LO) / (_HU_HI - _HU_LO) * 255.0,
+                     0, 255).astype(np.uint8)
+        if self._vr_mask is not None:
+            u8 = np.where(self._vr_mask, u8, 0).astype(np.uint8)
+        return np.pad(u8, 1, mode="constant", constant_values=0)
+
+    def _vr_clim_u8(self):
+        """Current W/L window expressed in the uint8 texture's value space."""
+        lo = self._lvl - self._win * 0.5
+        hi = self._lvl + self._win * 0.5
+
+        def u8(h):
+            return (h - _HU_LO) / (_HU_HI - _HU_LO) * 255.0
+        a, b = u8(lo), u8(hi)
+        if b - a < 1.0:
+            b = a + 1.0
+        return (a, b)
+
+    def _vr_config_cam_gpu(self, key) -> None:
+        """Aim the GPU VR perspective camera from the orbit (az/el), framed on the
+        heart volume with show_object (distance / aspect / clip handled for us)."""
+        p = self.pane[key]
+        if p.vr_cam is None or p.vr_volume is None:
+            return
+        az, el = self._vr_az[key], self._vr_el[key]
+        ce, se = math.cos(el), math.sin(el)
+        ca, sa = math.cos(az), math.sin(az)
+        back = _norm(np.array([ce * sa, se, ce * ca], float))
+        up = np.array([0.0, 0.0, 1.0], float)
+        if abs(float(np.dot(back, up))) > 0.98:
+            up = np.array([0.0, 1.0, 0.0], float)
+        try:
+            p.vr_cam.show_object(
+                p.vr_volume, view_dir=tuple(float(c) for c in (-back)),
+                up=tuple(float(c) for c in up), scale=1.3)
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _vr_gpu_enable(self, key) -> None:
+        p = self.pane[key]
+        self._vr_gpu_disable(key, restore=False)     # clear any previous VR vol
+        vp = self._vr_u8_padded()
+        tex = gfx.Texture(np.ascontiguousarray(vp), dim=3)
+        geom = gfx.Geometry(grid=tex)
+        mat = gfx.VolumeMipMaterial(clim=self._vr_clim_u8(),
+                                    interpolation="nearest")
+        vmesh = gfx.Volume(geom, mat)
+        sx, sy, sz = self._dims
+        vmesh.local.scale = (float(sx), float(sy), float(sz))
+        vmesh.local.position = (-float(sx), -float(sy), -float(sz))
+        if p.mesh is not None:
+            p.mesh.visible = False                   # hide the MPR slice
+        p.vr_volume = vmesh
+        p.scene.add(vmesh)
+        if p.vr_cam is None:
+            p.vr_cam = gfx.PerspectiveCamera(40)
+        self._vr_config_cam_gpu(key)
+        p.render()
+        try:
+            p.canvas.request_draw()                  # ensure a clean async draw
+        except Exception:                            # noqa: BLE001
+            pass
+
+    def _vr_gpu_disable(self, key, restore: bool = True) -> None:
+        p = self.pane[key]
+        if p.vr_volume is not None:
+            try:
+                p.scene.remove(p.vr_volume)
+            except Exception:                        # noqa: BLE001
+                pass
+            p.vr_volume = None
+        p.vr_cam = None
+        if restore:
+            if p.mesh is not None:
+                p.mesh.visible = True
+            self._config_cam(key)
+            p.render()
+
     def _vr_rotate(self, key, dx, dy) -> None:
-        # Update the angle IMMEDIATELY (cheap) so the drag is tracked with no lag;
-        # the frame is rendered asynchronously to the latest angle.
+        # Orbit the GPU camera — the volume is already on the GPU, so this is a
+        # cheap camera move + GPU redraw (real-time, no CPU ray-cast).
         self._vr_az[key] -= dx * 0.01
         self._vr_el[key] += dy * 0.01
         self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
-        self._vr_async(key)
+        self._vr_config_cam_gpu(key)
+        self.pane[key].render()
+        self._overlay[key].update()
 
+    def _vr_refresh(self, key, lod: bool = False) -> None:
+        """Re-apply VR after a state change (W/L, crop, territory). For the GPU
+        volume: update clim / rebuild the cropped texture, reframe, redraw."""
+        p = self.pane[key]
+        if p.vr_volume is not None:
+            if p.vr_volume.material is not None:
+                p.vr_volume.material.clim = self._vr_clim_u8()
+            self._vr_config_cam_gpu(key)
+            p.render()
+            self._overlay[key].update()
+            return
+        # CPU fallback (unused while the GPU path is active).
+        if not lod:
+            self._vr_bump()
+        self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
+        self._overlay[key].update()
 
     def _vr_pane_key(self) -> str:
         for k in ("B", "A"):
@@ -5280,15 +5391,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         on = bool(on)
         self._vr_on[key] = on
-        p = self.pane[key]
         if on:
             self._vr_mask = self._vr_crop_mask()  # heart crop (None if no Epi)
-            self._vr_refresh(key, lod=False)    # CPU image, drawn by the overlay
+            self._vr_gpu_enable(key)              # GPU volume (real-time)
         else:
             self._vr_img.pop(key, None)
             self._vr_mask = None
-            self._config_cam(key)               # restore the MPR camera
-            p.render()
+            self._vr_gpu_disable(key)             # restore the MPR slice + camera
         self._overlay[key].update()
 
     # ---- VR API called by the shell / Coronary Tree VR row ----
@@ -5311,11 +5420,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_set(key, on)
 
     def _vr_recrop(self) -> None:
-        """Rebuild the heart crop + repaint every active VR pane."""
+        """Rebuild the heart crop + rebuild the GPU texture for each active VR
+        pane (the crop is baked into the uint8 texture, so it must be remade)."""
         self._vr_mask = self._vr_crop_mask()
         for k in ("A", "B"):
             if self._vr_on.get(k):
-                self._vr_refresh(k, lod=False)
+                if self.pane[k].vr_volume is not None:
+                    self._vr_gpu_enable(k)        # remake texture with new crop
+                else:
+                    self._vr_refresh(k, lod=False)
 
     def set_vr_shell(self, shell: bool) -> None:
         """内腔VR / シェルVR — Epi interior (lumen) vs Epi surface + outward shell."""
