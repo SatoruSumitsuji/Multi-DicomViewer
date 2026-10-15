@@ -663,7 +663,13 @@ class ViewerPane(QFrame):
         self._cur_viewer = None
         self._shown_uid: str | None = None  # series currently displayed
         self.setAcceptDrops(True)
-        self.setFrameShape(QFrame.Shape.Box)
+        # No native QFrame frame: the pane border is painted in paintEvent so it
+        # renders IDENTICALLY on Windows and macOS. (A QSS `border` on a QFrame
+        # is honoured by the Windows style but NOT reliably by the macOS native
+        # style, which is why Mac showed no pane frame — user report.)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        #: Border colour, updated by _refresh_border (None while full-bleed).
+        self._border_color = QColor("#444")
         # Let the grid divide width / height EQUALLY in 1×2 / 2×2 even
         # when a loaded viewer's toolbar would otherwise demand a large
         # minimum (series-nav row + Measure + DICOM Tags ≈ 700 px).
@@ -728,7 +734,9 @@ class ViewerPane(QFrame):
         self._volume_bytes = 0         # est. live volume size (bytes), mem budget
 
         self._box = QVBoxLayout(self)
-        self._box.setContentsMargins(1, 1, 1, 1)
+        # 2 px all round so the painted 2 px border is never overpainted by the
+        # title bar / viewer stack (keeps the frame fully visible on both OSes).
+        self._box.setContentsMargins(2, 2, 2, 2)
         self._box.setSpacing(0)
         self._box.addWidget(self._title_bar)
         self._box.addWidget(self._stack, 1)
@@ -828,13 +836,32 @@ class ViewerPane(QFrame):
             viewer.set_compact(self._compact)
 
     def _refresh_border(self) -> None:
+        # Border is painted in paintEvent (reliable on Windows AND macOS); here
+        # we just pick the colour (blue = active pane, grey = inactive) or clear
+        # it for full-bleed, then repaint.
         if self._full_bleed:
-            self.setStyleSheet("ViewerPane { border:0; }")
+            self._border_color = None
         else:
-            self.setStyleSheet(
-                "ViewerPane { border:2px solid %s; }"
-                % ("#3b82f6" if self._active_on else "#444")
-            )
+            self._border_color = QColor("#3b82f6" if self._active_on else "#444")
+        self.update()
+
+    def paintEvent(self, ev) -> None:
+        """Draw the pane's own 2 px border. QFrame's native/QSS frame is NOT used
+        (macOS doesn't render a QSS border on a QFrame), so the frame is drawn
+        here to look the same on every platform. Children paint on top; the 2 px
+        content margin keeps this edge clear."""
+        super().paintEvent(ev)
+        col = self._border_color
+        if col is None:
+            return
+        p = QPainter(self)
+        pen = QPen(col)
+        pen.setWidth(2)
+        p.setPen(pen)
+        # Inset by 1 px so a 2 px stroke sits fully inside the widget rect.
+        r = self.rect().adjusted(1, 1, -1, -1)
+        p.drawRect(r)
+        p.end()
 
     # ------------------------------------------------------------- viewers
     def _viewer_for(self, modality: Modality):
@@ -7181,6 +7208,7 @@ class MainWindow(QMainWindow):
         # combined play/seek cell can appear more than once).
         mouse_grid["reveal_ms"] = dlg.mouse_grid_reveal_ms()
         mouse_grid["display_ms"] = dlg.mouse_grid_display_ms()
+        mouse_grid["lines"] = dlg.mouse_grid_lines()
         new_layout = dlg.mouse_grid_layout()
         layout_ok = (len(new_layout) == 9
                      and all(a in settings.MOUSE_GRID_ACTIONS for a in new_layout))
