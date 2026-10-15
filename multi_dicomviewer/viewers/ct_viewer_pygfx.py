@@ -4919,11 +4919,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         aspect = pw / ph
-        # Image resolution is the ONLY cause of the visible blockiness, so track
-        # the pane's own pixel height (capped) for BOTH the drag and still frames
-        # — no upscaling pixelation during rotation. Rotation speed is bought back
-        # from DEPTH samples (nmax) instead, which barely affects sharpness.
-        ih = int(min(max(160, ph), 360))
+        # Speed is bought back from IMAGE resolution, NOT depth samples: too few
+        # depth samples make thin bright structures (bone / contrast) drop out as
+        # speckle/holes during rotation. So keep the depth dense (below) and just
+        # render the drag frame a bit smaller (mild softness, no speckle); the
+        # still frame tracks the pane's full resolution.
+        ih = int(min(max(140, ph), 210 if lod else 340))
         iw = max(1, int(round(ih * aspect)))
         halfH = 0.62 * diag
         halfW = halfH * aspect
@@ -4938,7 +4939,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
         nz, ny, nx = vol.shape
         R = 0.62 * diag
-        nmax = 48 if lod else 130
+        # Dense depth sampling (step ≈ 2-3 mm) so bright thin structures aren't
+        # skipped — the cause of the rotation speckle. Kept high even while
+        # dragging; the drag frame is sped up by its smaller image size instead.
+        nmax = 120 if lod else 150
         nplanes = int(max(16, min(nmax, round(2.0 * R / max(min(sx, sy, sz),
                                                             2.0 * R / nmax)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
