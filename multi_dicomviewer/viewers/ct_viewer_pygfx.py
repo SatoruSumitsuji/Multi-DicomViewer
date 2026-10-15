@@ -4919,7 +4919,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         aspect = pw / ph
-        ih = 120 if lod else 260
+        # Keep the WHILE-DRAGGING image fairly high-res so rotation doesn't look
+        # blocky (the main visible cost is image resolution, not depth samples);
+        # the still (release / toggle) frame is full quality.
+        ih = 200 if lod else 280
         iw = max(1, int(round(ih * aspect)))
         halfH = 0.62 * diag
         halfW = halfH * aspect
@@ -4934,7 +4937,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
         nz, ny, nx = vol.shape
         R = 0.62 * diag
-        nmax = 70 if lod else 150
+        nmax = 72 if lod else 160
         nplanes = int(max(16, min(nmax, round(2.0 * R / max(min(sx, sy, sz),
                                                             2.0 * R / nmax)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
