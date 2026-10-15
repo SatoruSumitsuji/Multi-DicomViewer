@@ -5007,12 +5007,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         aspect = pw / ph
-        # Speed is bought back from IMAGE resolution, NOT depth samples: too few
-        # depth samples make thin bright structures (bone / contrast) drop out as
-        # speckle/holes during rotation. So keep the depth dense (below) and just
-        # render the drag frame a bit smaller (mild softness, no speckle); the
-        # still frame tracks the pane's full resolution.
-        ih = int(min(max(140, ph), 210 if lod else 340))
+        # While dragging, render a small all-heart preview for a smooth frame
+        # rate (the crop zooms onto the heart, so even a small image spends every
+        # pixel on the heart); the still frame tracks the pane's full resolution.
+        ih = int(min(max(120, ph), 140 if lod else 320))
         iw = max(1, int(round(ih * aspect)))
         halfH = 0.62 * diag
         halfW = halfH * aspect
@@ -5027,12 +5025,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
         nz, ny, nx = vol.shape
         R = 0.62 * diag
-        # Dense depth sampling (step ≈ 2-3 mm) so bright thin structures aren't
-        # skipped — the cause of the rotation speckle. Kept high even while
-        # dragging; the drag frame is sped up by its smaller image size instead.
-        nmax = 120 if lod else 150
-        nplanes = int(max(16, min(nmax, round(2.0 * R / max(min(sx, sy, sz),
-                                                            2.0 * R / nmax)))))
+        # Size the depth samples by a TARGET STEP (mm), not a fixed count: the
+        # heart crop shrinks R, so far fewer planes keep the same ~2 mm density
+        # (dense = no speckle). The cap bounds the cost when uncropped (large R).
+        step_mm = 2.2 if lod else 1.3
+        cap = 64 if lod else 200
+        nplanes = int(min(cap, max(24, round(2.0 * R / max(0.3, step_mm)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
         ds = 2.0 * R / max(1, nplanes - 1)
 
