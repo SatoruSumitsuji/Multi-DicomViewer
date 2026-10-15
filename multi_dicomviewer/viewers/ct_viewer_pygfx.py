@@ -4919,10 +4919,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         aspect = pw / ph
-        # Keep the WHILE-DRAGGING image fairly high-res so rotation doesn't look
-        # blocky (the main visible cost is image resolution, not depth samples);
-        # the still (release / toggle) frame is full quality.
-        ih = 200 if lod else 280
+        # Image resolution is the ONLY cause of the visible blockiness, so track
+        # the pane's own pixel height (capped) for BOTH the drag and still frames
+        # — no upscaling pixelation during rotation. Rotation speed is bought back
+        # from DEPTH samples (nmax) instead, which barely affects sharpness.
+        ih = int(min(max(160, ph), 360))
         iw = max(1, int(round(ih * aspect)))
         halfH = 0.62 * diag
         halfW = halfH * aspect
@@ -4937,7 +4938,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
         nz, ny, nx = vol.shape
         R = 0.62 * diag
-        nmax = 72 if lod else 160
+        nmax = 48 if lod else 130
         nplanes = int(max(16, min(nmax, round(2.0 * R / max(min(sx, sy, sz),
                                                             2.0 * R / nmax)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
