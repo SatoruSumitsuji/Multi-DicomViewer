@@ -2188,6 +2188,10 @@ class ImageCanvas(QWidget):
             ms = 1000
         self._grid_display_ms = 0 if ms <= 0 else max(100, min(2000, ms))
 
+    def set_grid_lines(self, on: bool) -> None:
+        """グリッド線: show/hide the 3×3 divider lines (cell labels/tints stay)."""
+        self._grid.set_lines(on)
+
     def _grid_arm_display(self) -> None:
         """Start (or clear) the auto-hide timer for the now-shown overlay: run it
         for 表示時間, or leave the overlay up when 継続 (display_ms == 0)."""

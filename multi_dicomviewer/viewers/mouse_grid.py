@@ -83,6 +83,9 @@ class MouseGrid:
         # is still for ~1 s, hidden on any move/action) so it never obscures the
         # image; interaction stays live whenever `enabled`, regardless.
         self.show_overlay = False
+        #: Draw the 3×3 divider lines (user toggle). Cell labels/tints are
+        #: independent — only the grid lines are suppressed when this is False.
+        self.show_lines = True
         self.layout = ["prev_frame", "rotate", "next_frame",
                        "prev_series", "playseek", "next_series",
                        "pan", "zoom", "wl"]
@@ -120,6 +123,14 @@ class MouseGrid:
         if isinstance(layout, (list, tuple)) and len(layout) == 9:
             self.layout = [str(k) for k in layout]
             if self.enabled:
+                self.canvas.update()
+
+    def set_lines(self, on: bool) -> None:
+        """Show/hide the 3×3 divider lines (cell labels/tints stay)."""
+        on = bool(on)
+        if on != self.show_lines:
+            self.show_lines = on
+            if self.enabled and self.show_overlay:
                 self.canvas.update()
 
     def _cell(self, sx, sy, w, h):
@@ -249,11 +260,22 @@ class MouseGrid:
     def double_click(self, sx, sy) -> bool:
         """Left double-click on a transform cell resets it to its initial state:
         回転 → 0°, 拡大 → original fit (zoom+centre), 移動 → re-centre (pan 0),
-        階調 → the series' baseline W/L. Returns True if the grid consumed it."""
+        階調 → the series' baseline W/L. On a ◀シリーズ / シリーズ▶ cell it
+        ENSURES the next/prev series plays (the preceding single click already
+        switched it, carrying the prior play/stop state; this forces play), so a
+        double-click from a STOPPED image starts the new series playing while a
+        double-click from a PLAYING image is just == a single click (stays
+        playing). Returns True if the grid consumed it."""
         if not self.enabled:
             return False
         c = self.canvas
         cell = self._action(sx, sy, c.width(), c.height())
+        if cell in ("prev_series", "next_series"):
+            # The first click of the double already fired the series switch on
+            # release (synchronous), carrying the play/stop state; now make sure
+            # the now-current series is playing.
+            self._dispatch("ensure_play")
+            return True
         if cell == "rotate":
             if hasattr(c, "set_free_rotation"):
                 c.set_free_rotation(0.0)
@@ -343,11 +365,12 @@ class MouseGrid:
         p.save()
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         cw, ch = w / 3.0, h / 3.0
-        # Grid lines.
-        p.setPen(QPen(QColor(255, 196, 0, 150), 1.4))
-        for i in (1, 2):
-            p.drawLine(int(i * cw), 0, int(i * cw), h)
-            p.drawLine(0, int(i * ch), w, int(i * ch))
+        # Grid lines (user-toggleable; labels/tints below are drawn regardless).
+        if self.show_lines:
+            p.setPen(QPen(QColor(255, 196, 0, 150), 1.4))
+            for i in (1, 2):
+                p.drawLine(int(i * cw), 0, int(i * cw), h)
+                p.drawLine(0, int(i * ch), w, int(i * ch))
         # Cell tint + label.
         fnt = QFont()
         fnt.setBold(True)

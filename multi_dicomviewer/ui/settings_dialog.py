@@ -394,6 +394,22 @@ class SettingsDialog(QDialog):
         _rev_row.addWidget(self._mg_display_combo)
         _rev_row.addStretch(1)
         mgv.addLayout(_rev_row)
+
+        # グリッド線: show / hide the 3×3 divider lines (labels/tints stay). A
+        # 表示 / 非表示 toggle, matching the 表示時間 combo's style.
+        _lines_row = QHBoxLayout()
+        _lines_row.addWidget(QLabel(t("グリッド線：")))
+        self._mg_lines_combo = QComboBox()
+        self._mg_lines_combo.setToolTip(t(
+            "9分割のグリッド線（区切り線）の表示／非表示。非表示にしても各セルの"
+            "操作ラベルと当たり判定はそのまま有効です。"))
+        self._mg_lines_combo.addItem(t("表示"), True)
+        self._mg_lines_combo.addItem(t("非表示"), False)
+        _lines_on = bool((mg or {}).get("lines", settings.MOUSE_GRID_LINES_DEFAULT))
+        self._mg_lines_combo.setCurrentIndex(0 if _lines_on else 1)
+        _lines_row.addWidget(self._mg_lines_combo)
+        _lines_row.addStretch(1)
+        mgv.addLayout(_lines_row)
         root.addWidget(gb_mg)
 
         btns = QDialogButtonBox(
@@ -471,6 +487,11 @@ class SettingsDialog(QDialog):
         """表示時間 in milliseconds; 0 = 継続 (stay shown). From the combo's data."""
         v = self._mg_display_combo.currentData()
         return int(v) if v is not None else settings.MOUSE_GRID_DISPLAY_MS_DEFAULT
+
+    def mouse_grid_lines(self) -> bool:
+        """グリッド線 表示/非表示 toggle (True = show the divider lines)."""
+        v = self._mg_lines_combo.currentData()
+        return bool(v) if v is not None else settings.MOUSE_GRID_LINES_DEFAULT
 
     def coronary(self) -> dict:
         """Chosen Coronary Tree / Territory appearance params (sanitising/clamping

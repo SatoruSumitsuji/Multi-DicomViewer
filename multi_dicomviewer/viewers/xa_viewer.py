@@ -703,6 +703,7 @@ class XAViewer(AbstractViewer):
             _c._grid_dispatch_cb = self._on_grid_action
             _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 200))
             _c.set_grid_display_time(self._mouse_grid.get("display_ms", 1000))
+            _c.set_grid_lines(self._mouse_grid.get("lines", True))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 
@@ -728,6 +729,7 @@ class XAViewer(AbstractViewer):
             _c._grid.set_layout(self._mouse_grid["layout"])
             _c.set_grid_hover_delay(self._mouse_grid.get("reveal_ms", 200))
             _c.set_grid_display_time(self._mouse_grid.get("display_ms", 1000))
+            _c.set_grid_lines(self._mouse_grid.get("lines", True))
         self._grid_btn.setChecked(bool(self._mouse_grid["on"]))
         self._sync_mouse_grid()
 
@@ -758,6 +760,8 @@ class XAViewer(AbstractViewer):
             else:
                 mx = self.frame_slider.maximum()
                 self.frame_slider.setValue(int(round(float(arg) * mx)))
+        elif action == "ensure_play":           # ◀/▶シリーズ セルのダブルクリック
+            self._grid_play_ensure()
         elif action == "reset_wl":              # 階調セルの左ダブルクリック
             self._reset_wl()
 
@@ -766,6 +770,17 @@ class XAViewer(AbstractViewer):
         step was removed)."""
         self._play_speed = 1.0
         self.play_btn.setChecked(not self.play_btn.isChecked())   # toggled → play/stop
+
+    def _grid_play_ensure(self) -> None:
+        """Double-click on ◀シリーズ / シリーズ▶: ENSURE playback (never a
+        toggle). The series switch already happened on the first click's release,
+        carrying the prior play/stop state; this starts it playing if it is not
+        already — so a double-click from a stopped image plays the new series,
+        while from a playing image it stays playing. No-op on an unplayable
+        (single-frame) series, whose Play button is disabled."""
+        self._play_speed = 1.0
+        if self.play_btn.isEnabled() and not self.play_btn.isChecked():
+            self.play_btn.setChecked(True)
 
     def _on_canvas_arrow(self, direction: str) -> None:
         """Arrow key on a focused cine image: Up/Down step Prev/Next series,

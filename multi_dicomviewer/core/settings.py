@@ -50,6 +50,9 @@ MOUSE_GRID_REVEAL_MS_MAX = 2000
 #: 100–2000 ms in 100 ms steps, OR the sentinel 0 = 継続 (stay shown, no auto-hide).
 MOUSE_GRID_DISPLAY_MS_DEFAULT = 1000
 MOUSE_GRID_DISPLAY_CONTINUOUS = 0
+#: グリッド線 (the 3×3 divider lines) — show by default. Cell labels/tints are
+#: unaffected; only the lines toggle.
+MOUSE_GRID_LINES_DEFAULT = True
 MOUSE_GRID_DEFAULT = {
     "on": False,
     "layout": ["prev_frame", "rotate", "next_frame",
@@ -57,6 +60,7 @@ MOUSE_GRID_DEFAULT = {
                "pan", "zoom", "wl"],
     "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
     "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT,
+    "lines": MOUSE_GRID_LINES_DEFAULT,
 }
 #: The previous shipped default (playseek in both the top-middle and centre). A
 #: saved file still carrying it (a user who never customised the layout) is
@@ -887,7 +891,8 @@ def load_mouse_grid() -> dict:
     out = {"on": bool(MOUSE_GRID_DEFAULT["on"]),
            "layout": list(MOUSE_GRID_DEFAULT["layout"]),
            "reveal_ms": MOUSE_GRID_REVEAL_MS_DEFAULT,
-           "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT}
+           "display_ms": MOUSE_GRID_DISPLAY_MS_DEFAULT,
+           "lines": MOUSE_GRID_LINES_DEFAULT}
     try:
         data = json.loads(MOUSE_GRID_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -907,6 +912,8 @@ def load_mouse_grid() -> dict:
             out["reveal_ms"] = _clamp_reveal_ms(data.get("reveal_ms"))
         if "display_ms" in data:
             out["display_ms"] = _clamp_display_ms(data.get("display_ms"))
+        if "lines" in data:
+            out["lines"] = bool(data.get("lines"))
     return out
 
 
@@ -926,6 +933,7 @@ def save_mouse_grid(prefs: dict) -> None:
                             p.get("reveal_ms", MOUSE_GRID_REVEAL_MS_DEFAULT)),
                         "display_ms": _clamp_display_ms(
                             p.get("display_ms", MOUSE_GRID_DISPLAY_MS_DEFAULT)),
+                        "lines": bool(p.get("lines", MOUSE_GRID_LINES_DEFAULT)),
                         "version": 1},
                        ensure_ascii=False, indent=2), encoding="utf-8")
     except (OSError, TypeError, ValueError):
