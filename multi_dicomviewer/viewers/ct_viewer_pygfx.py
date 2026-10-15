@@ -477,12 +477,16 @@ class _PygfxPane:
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))))
         self.cam = gfx.OrthographicCamera()
         self.cam.maintain_aspect = False     # we set width/height to the aspect
+        #: A PERSPECTIVE camera used only while Volume Rendering (the pygfx
+        #: volume-ray shader's ray-setup is perspective-oriented; an ortho camera
+        #: renders black on wgpu-Metal). None → use the ortho MPR camera.
+        self.vr_cam = None
         self.mesh = None
         self.material = None
         self.canvas.request_draw(self._draw)
 
     def _draw(self):
-        self.renderer.render(self.scene, self.cam)
+        self.renderer.render(self.scene, self.vr_cam or self.cam)
 
     def set_volume(self, vol: np.ndarray, scale) -> None:
         if self.mesh is not None:
@@ -4916,32 +4920,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             shininess=16.0, emissive="#0a0a0a")
 
     def _vr_config_cam(self, key) -> None:
-        """Orbit camera around the volume centre by (azimuth, elevation),
-        orthographic and framed to the whole volume."""
+        """Orbit a PERSPECTIVE camera around the volume by (azimuth, elevation)
+        and frame it with show_object (handles distance / aspect / clip range).
+        Perspective is required: the volume-ray shader's ray-setup is written for
+        a perspective projection and renders black under an ortho camera on Metal."""
         p = self.pane[key]
-        ctr = self._vr_center()
+        if p.vr_cam is None or p.mesh is None:
+            return
         az, el = self._vr_az[key], self._vr_el[key]
         ce, se = math.cos(el), math.sin(el)
         ca, sa = math.cos(az), math.sin(az)
-        back = np.array([ce * sa, se, ce * ca], float)   # centre → camera
-        back = _norm(back)
-        up0 = np.array([0.0, 0.0, 1.0], float)           # patient Z up (refine)
-        if abs(float(np.dot(back, up0))) > 0.98:
-            up0 = np.array([0.0, 1.0, 0.0], float)
-        right = _norm(np.cross(up0, back))
-        up = _norm(np.cross(back, right))
-        R = np.column_stack([right, up, back]).astype(np.float64)
-        p.cam.local.rotation = la.quat_from_mat(R)
-        dist = 2.0 * self._diag
-        p.cam.local.position = ctr + back * dist
-        pw = max(1, p.canvas.width())
-        ph = max(1, p.canvas.height())
-        half = 0.58 * self._diag
-        p.cam.height = 2.0 * half
-        p.cam.width = 2.0 * half * (pw / ph)
-        # Generous near/far so the whole volume stays inside the clip range at
-        # any orbit angle (ortho → no z-precision penalty for a wide range).
-        p.cam.depth_range = (0.1, 2.0 * dist + self._diag)
+        back = _norm(np.array([ce * sa, se, ce * ca], float))   # centre → camera
+        up = np.array([0.0, 0.0, 1.0], float)                   # patient Z up
+        if abs(float(np.dot(back, up))) > 0.98:
+            up = np.array([0.0, 1.0, 0.0], float)
+        try:
+            p.vr_cam.show_object(
+                p.mesh, view_dir=tuple(float(c) for c in (-back)),
+                up=tuple(float(c) for c in up), scale=1.25)
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _vr_rotate(self, key, dx, dy) -> None:
         self._vr_az[key] -= dx * 0.01
@@ -4977,9 +4975,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # no-op and the VR renders black.
             if getattr(p, "mesh", None) is None:
                 p.set_volume(self._vol, self._dims)
+            if p.vr_cam is None:
+                p.vr_cam = gfx.PerspectiveCamera(40)   # perspective for VR
             p.show_vr(self._vr_make_material())
             self._vr_config_cam(key)
         else:
+            p.vr_cam = None                  # back to the ortho MPR camera
             p.show_vr(None)                  # restore the MPR slice material
             self._config_cam(key)            # restore the MPR camera
         p.render()
