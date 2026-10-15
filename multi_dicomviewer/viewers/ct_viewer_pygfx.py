@@ -649,7 +649,7 @@ class _Overlay(QWidget):
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
         mode = "MIP" if v._vr_mode == "mip" else "DVR"
-        txt = t("VR {mode}  （ドラッグ=回転 / 右クリック=DVR⇔MIP）", mode=mode)
+        txt = t("VR {mode}  （ドラッグ=回転）", mode=mode)
         p.setFont(QFont("", 10, QFont.Weight.Bold))
         rect = QRectF(6, 4, max(10, w - 12), 18)
         p.setPen(QColor(0, 0, 0, 180))
@@ -2714,16 +2714,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
-        # Volume Rendering owns the pane while active: left-drag ORBITS the
-        # volume, right-click switches iso ⇄ MIP. (Everything else is bypassed —
-        # the overlays / MPR tools don't apply to the 3-D view.)
-        if self._vr_on.get(key):
-            if self._drag_btn == 2:
-                self._vr_toggle_mode()
-                self._reset_pointer_state()
-                return
-            if self._drag_btn == 1:
-                self._vr_drag = key
+        # Volume Rendering: a LEFT-drag orbits the volume. A right-click falls
+        # through to the normal handlers below (still-image export / target /
+        # context menu) so target points etc. still work on the VR pane.
+        if self._vr_on.get(key) and self._drag_btn == 1:
+            self._vr_drag = key
             return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
@@ -5079,7 +5074,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # While dragging, render a small all-heart preview for a smooth frame
         # rate (the crop zooms onto the heart, so even a small image spends every
         # pixel on the heart); the still frame tracks the pane's full resolution.
-        ih = int(min(max(120, ph), 140 if lod else 320))
+        ih = int(min(max(110, ph), 120 if lod else 280))
         iw = max(1, int(round(ih * aspect)))
         SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
                              np.linspace(halfH, -halfH, ih))     # screen y down
@@ -5095,8 +5090,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Size the depth samples by a TARGET STEP (mm), not a fixed count: the
         # heart crop shrinks R, so far fewer planes keep the same ~2 mm density
         # (dense = no speckle). The cap bounds the cost when uncropped (large R).
-        step_mm = 2.2 if lod else 1.3
-        cap = 64 if lod else 200
+        step_mm = 2.4 if lod else 1.5
+        cap = 56 if lod else 170
         nplanes = int(min(cap, max(24, round(2.0 * R / max(0.3, step_mm)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
         ds = 2.0 * R / max(1, nplanes - 1)
@@ -5132,11 +5127,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             inv = 511.0 / (_HU_HI - _HU_LO)
             # Perfusion-territory tint: where a voxel carries a territory label,
             # use that territory's colour instead of the CTA brown (opacity still
-            # from HU) — so the heart renders coloured per LAD/LCX/RCA + Target.
+            # from HU). Skipped WHILE DRAGGING (lod) — it ~doubles the cost — so
+            # rotation stays responsive; the colours reappear on the still frame.
             tvol = getattr(self, "_terr_mask_vol", None)
             tcols = getattr(self, "_terr_colors", None)
             tr = tg = tb = ton = None
-            if tvol is not None and tcols:
+            if tvol is not None and tcols and not lod:
                 n = len(tcols)
                 tr = np.zeros(n + 1, np.float32)
                 tg = np.zeros(n + 1, np.float32)
@@ -5190,13 +5186,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_el[key] += dy * 0.01
         self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
         self._vr_refresh(key, lod=True)         # fast while dragging
-
-    def _vr_toggle_mode(self) -> None:
-        """Right-click on a VR pane: switch DVR ⇄ MIP (compare the two)."""
-        self._vr_mode = "mip" if self._vr_mode == "dvr" else "dvr"
-        for k in ("A", "B"):
-            if self._vr_on.get(k):
-                self._vr_refresh(k, lod=False)
 
     def _vr_pane_key(self) -> str:
         for k in ("B", "A"):
