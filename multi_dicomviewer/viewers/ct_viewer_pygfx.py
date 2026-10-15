@@ -13704,12 +13704,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         return float(px) * (2.0 * ps / max(1, self.pane[which].canvas.height()))
 
     def _lv_line_press(self, which, sx, sy):
-        # Grab the SAX line ONLY near its ○ handle (out at the view edge, clear
-        # of the heart) — NOT along its whole length, which crosses the trace and
-        # would otherwise steal clicks meant to place / edit a border point (a
-        # near-miss moved the level instead, dropping the point onto a different
-        # cross-section). Also yield outright while a trace is in progress or the
-        # cursor is on a border point, so tracing / editing always wins.
+        # Grab the SAX LEVEL line (long-axis pane) anywhere along its length —
+        # the horizontal line with the ↕ move-arrows, not just the ○ handle — so
+        # the level is easy to scrub (user request). Tracing and border-point
+        # editing still win: yield outright while a trace is in progress, and
+        # yield when the cursor is on a border point (_pick_handle), so a press
+        # only moves the level on an otherwise-idle click near the line. The
+        # MERIDIAN line (short-axis pane) crosses the heart, so it stays grabbable
+        # only near its ○ handle (out at the edge, clear of the border points).
         if not self._lv_sax_active() or self._lv["model"].axis is None:
             return None
         if self._draft is not None and self._draft.get("pane") == which:
@@ -13719,8 +13721,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         hs = self._lv_handle_screen(which)    # the visible ○ (pinned to the edge)
         if hs is None:
             return None
+        is_level = which == self._lv.get("pane")
+        kind = "level" if is_level else "meridian"
+        # Generous circular target right at the ○ handle (both panes).
         if math.hypot(sx - hs[0], sy - hs[1]) <= 22.0:
-            return "level" if which == self._lv.get("pane") else "meridian"
+            return kind
+        # Level line: also grab within a few px of the line itself (its whole
+        # width). The line spans the pane, so the perpendicular distance alone
+        # is the test — a click at the line's level, anywhere across, scrubs it.
+        if is_level:
+            geom = self._lv_line_axis(which)
+            if geom is not None:
+                cx, cy, dx, dy = geom
+                if abs((sx - cx) * dy - (sy - cy) * dx) <= 8.0:
+                    return kind
         return None
 
     def _lv_line_move(self, which, sx, sy) -> None:
@@ -15012,11 +15026,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         d = frac * min(tx, ty)
         return ux * d, uy * d
 
-    def _lv_handle_screen(self, key):
-        """Screen px (hx, hy) of the SAX line's ○ grab handle for *key* — the
-        + end of the line, always pinned JUST INSIDE the pane edge so it stays
-        on-screen and reachable at any zoom / pan (a world-fixed position drifts
-        off when the pane is panned/zoomed). None if this pane has no SAX line."""
+    def _lv_line_axis(self, key):
+        """Screen-space (cx, cy, dx, dy): the SAX line's CENTRE and unit
+        direction for *key* (dx,dy point toward the ○ handle). None if this pane
+        has no SAX line. Shared by the ○ handle position AND the whole-line grab
+        hit-test, so both sit on the exact line the overlay draws."""
         lv = self._lv
         if (lv is None or lv.get("model") is None
                 or lv["model"].axis is None or lv.get("sax") is None):
@@ -15038,7 +15052,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         dx, dy = ex - cx, ey - cy
         L = math.hypot(dx, dy) or 1.0
-        dx, dy = dx / L, dy / L
+        return cx, cy, dx / L, dy / L
+
+    def _lv_handle_screen(self, key):
+        """Screen px (hx, hy) of the SAX line's ○ grab handle for *key* — the
+        + end of the line, always pinned JUST INSIDE the pane edge so it stays
+        on-screen and reachable at any zoom / pan (a world-fixed position drifts
+        off when the pane is panned/zoomed). None if this pane has no SAX line."""
+        geom = self._lv_line_axis(key)
+        if geom is None:
+            return None
+        cx, cy, dx, dy = geom
         W = max(1, self.pane[key].canvas.width())
         H = max(1, self.pane[key].canvas.height())
         m = 14.0                                    # inset = handle radius + pad
