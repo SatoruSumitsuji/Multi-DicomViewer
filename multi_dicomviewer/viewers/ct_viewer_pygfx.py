@@ -2429,8 +2429,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_dirty = None                # pane needing a re-render when free
         self._vr_gen = 0                     # token: discards stale async frames
         self._vr_mode = "dvr"                # 'dvr' (CTA transfer func) | 'mip'
-        self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad)
-        self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad)
+        self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad) — CPU fallback
+        self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad) — CPU fallback
+        #: GPU VR camera orientation as a quaternion (x,y,z,w) — a TRACKBALL so
+        #: the drag always matches the cursor regardless of the current view.
+        self._vr_rot = {"A": np.array([0.0, 0.0, 0.0, 1.0], float),
+                        "B": np.array([0.0, 0.0, 0.0, 1.0], float)}
         self._vr_drag = None                 # pane key of an in-progress VR orbit
         self._vr_shell = True                # stored for Phase 2 (crop); unused
         self._vr_shell_mm = 10.0
@@ -5294,21 +5298,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         return (a, b)
 
     def _vr_config_cam_gpu(self, key) -> None:
-        """Aim the GPU VR perspective camera from the orbit (az/el), framed on the
-        heart volume with show_object (distance / aspect / clip handled for us)."""
+        """Aim the GPU VR camera from the trackball quaternion, framed on the
+        heart volume with show_object (distance / aspect / clip handled for us).
+        back = camera-local +Z in world (camera looks down -Z), up = local +Y."""
         p = self.pane[key]
         if p.vr_cam is None or p.vr_volume is None:
             return
-        az, el = self._vr_az[key], self._vr_el[key]
-        ce, se = math.cos(el), math.sin(el)
-        ca, sa = math.cos(az), math.sin(az)
-        back = _norm(np.array([ce * sa, se, ce * ca], float))
-        up = np.array([0.0, 0.0, 1.0], float)
-        if abs(float(np.dot(back, up))) > 0.98:
-            up = np.array([0.0, 1.0, 0.0], float)
+        q = self._vr_rot[key]
+        back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
+        up = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
         try:
             p.vr_cam.show_object(
-                p.vr_volume, view_dir=tuple(float(c) for c in (-back)),
+                p.vr_volume, view_dir=tuple(float(-c) for c in back),
                 up=tuple(float(c) for c in up), scale=1.3)
         except Exception:                                # noqa: BLE001
             pass
@@ -5354,13 +5355,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.render()
 
     def _vr_rotate(self, key, dx, dy) -> None:
-        # Orbit the GPU camera — the volume is already on the GPU, so this is a
-        # cheap camera move + GPU redraw (real-time, no CPU ray-cast).
-        self._vr_az[key] -= dx * 0.01
-        self._vr_el[key] += dy * 0.01
-        self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
+        # TRACKBALL: rotate about the camera's CURRENT up / right axes so the drag
+        # always matches the cursor at any orientation (no turntable gimbal). The
+        # volume is already on the GPU → just a camera move + redraw (real-time).
+        p = self.pane[key]
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        q = self._vr_rot[key]
+        right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
+        up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
+        # A full pane width / height of drag = ~180° (direct 1:1 grab feel).
+        ax = (dx / pw) * math.pi          # horizontal drag → spin about up
+        ay = (dy / ph) * math.pi          # vertical drag → tilt about right
+        dq = la.quat_mul(la.quat_from_axis_angle(up_w, ax),
+                         la.quat_from_axis_angle(right_w, ay))
+        q = la.quat_mul(dq, q)
+        self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
         self._vr_config_cam_gpu(key)
-        self.pane[key].render()
+        p.render()
         self._overlay[key].update()
 
     def _vr_refresh(self, key, lod: bool = False) -> None:
