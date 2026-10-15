@@ -602,7 +602,11 @@ class _Overlay(QWidget):
                 p.drawImage(self.rect(), img)
             else:
                 p.fillRect(self.rect(), QColor(0, 0, 0))
-            self._paint_vr_coronary(p, key, w, h)
+            # Skip the coronary/target overlay WHILE dragging (projecting +
+            # drawing every vessel each frame is costly over a remote link); it
+            # reappears on the still frame.
+            if v._vr_drag is None:
+                self._paint_vr_coronary(p, key, w, h)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -5074,7 +5078,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # While dragging, render a small all-heart preview for a smooth frame
         # rate (the crop zooms onto the heart, so even a small image spends every
         # pixel on the heart); the still frame tracks the pane's full resolution.
-        ih = int(min(max(110, ph), 120 if lod else 280))
+        ih = int(min(max(80, ph), 100 if lod else 280))
         iw = max(1, int(round(ih * aspect)))
         SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
                              np.linspace(halfH, -halfH, ih))     # screen y down
@@ -5090,8 +5094,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Size the depth samples by a TARGET STEP (mm), not a fixed count: the
         # heart crop shrinks R, so far fewer planes keep the same ~2 mm density
         # (dense = no speckle). The cap bounds the cost when uncropped (large R).
-        step_mm = 2.4 if lod else 1.5
-        cap = 56 if lod else 170
+        step_mm = 2.8 if lod else 1.5
+        cap = 44 if lod else 170
         nplanes = int(min(cap, max(24, round(2.0 * R / max(0.3, step_mm)))))
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
         ds = 2.0 * R / max(1, nplanes - 1)
