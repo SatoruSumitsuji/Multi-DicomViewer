@@ -4966,12 +4966,25 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on[key] = on
         p = self.pane[key]
         if on:
+            # Make sure the pane actually holds the GPU volume (a reused pane in
+            # some review layouts can have no mesh) — else the material swap is a
+            # no-op and the VR renders black.
+            if getattr(p, "mesh", None) is None:
+                p.set_volume(self._vol, self._dims)
             p.show_vr(self._vr_make_material())
             self._vr_config_cam(key)
         else:
             p.show_vr(None)                  # restore the MPR slice material
             self._config_cam(key)            # restore the MPR camera
         p.render()
+        # Belt-and-suspenders: the synchronous force_draw above can be dropped by
+        # the re-entrancy guard when VR is toggled from the Coronary Tree window
+        # mid-draw (the macOS force_draw → processEvents path), leaving no painted
+        # frame. Schedule a clean async draw so the VR always appears.
+        try:
+            p.canvas.request_draw()
+        except Exception:                        # noqa: BLE001
+            pass
         self._overlay[key].update()
 
     # ---- VR API called by the shell / Coronary Tree VR row ----
