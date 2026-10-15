@@ -15654,13 +15654,14 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_line_press(self, which, sx, sy):
         """Hit-test the SAX lines: returns "level" if the press lands on the
-        long-axis pane's level-line ○ handle, "meridian" if on the short-axis
-        pane's centreline ○ handle, else None. Grabs ONLY near the ○ handle (out
-        at the view edge, clear of the heart) — NOT along the whole line, which
-        crosses the trace and would steal clicks meant to place / edit a border
-        point (a near-miss moved the level, dropping the point onto a different
-        cross-section). Yields while a trace is in progress or a border point is
-        under the cursor, so tracing / editing always wins."""
+        long-axis pane's level line, "meridian" if on the short-axis pane's
+        centreline ○ handle, else None. The LEVEL line is grabbable anywhere
+        along its length (the horizontal line with the ↕ move-arrows, not just
+        the ○ handle) so the level is easy to scrub (user request). The MERIDIAN
+        line crosses the heart, so it stays grabbable only near its ○ handle (out
+        at the view edge, clear of the border points). Yields while a trace is in
+        progress or a border point is under the cursor, so tracing / editing
+        always wins."""
         if not self._lv_sax_active() or self._lv["model"].axis is None:
             return None
         if self._draft is not None and self._draft.get("pane") == which:
@@ -15676,6 +15677,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 which, ax.apex + float(lv["sax"]) * ax.axis)
             hx, hy = self._lv_ring_pos(which, 0.0, y, 1.0, 0.0)
             if math.hypot(wx - hx, wy - hy) <= rgrab:
+                return "level"
+            # Anywhere along the horizontal level line (its whole width): the
+            # line sits at constant output-y, so the ⟂ distance is just
+            # |wy - y|. Tracing / border-point edit already won above.
+            if abs(wy - y) <= self._lv_px_to_mm(which, 8.0):
                 return "level"
         elif which == lv.get("sax_pane"):
             angs = lv["model"].plane_angles()
@@ -15746,8 +15752,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lv_line_hover(self, which, sx, sy) -> None:
         """Cursor moved with no button down: thicken the level/centre line while
-        the cursor is inside its (unchanged) grab band, so 'click here to grab'
-        is visible; restore it otherwise. Only re-renders on a state change."""
+        the cursor is inside its grab band (the whole level line, or the ○ handle
+        of the meridian), so 'click here to grab' is visible; restore it
+        otherwise. Only re-renders on a state change."""
         if self._lv_line_drag is not None:
             return                                # a drag owns the thickness
         on = bool(self._lv_sax_active()
