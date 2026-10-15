@@ -2258,6 +2258,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # hasattr-guarded, so the extra set_vr_* are safe no-ops for now).
         self._vr_on = {"A": False, "B": False}
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
+        self._vr_mask = None                 # bool crop (heart) or None (full CT)
         self._vr_mode = "dvr"                # 'dvr' (CTA transfer func) | 'mip'
         self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad)
         self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad)
@@ -4892,9 +4893,93 @@ class CTViewer(CPRMixin, AbstractViewer):
     _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
 
     def _vr_center(self) -> np.ndarray:
-        b = self._bounds
+        b = self._vr_frame_bounds()
         return np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
                          (b[4] + b[5]) * 0.5], float)
+
+    # ---- heart crop (内腔VR / シェルVR) — pure numpy/scipy, ported from VTK ----
+    def _vr_epi_full_mask(self):
+        """Full-volume bool [z,y,x] Epi-region mask from the loaded EpiLv, so VR
+        can be cropped to the heart. None when no Epi region is available."""
+        epi = getattr(self, "_lvv_epi_model_dict", None)
+        reg = epi.get("region") if isinstance(epi, dict) else None
+        if not isinstance(reg, dict) or self._vol is None:
+            return None
+        try:
+            import base64
+            import zlib
+            vs = [int(s) for s in reg.get("vol_shape", [])]
+            if vs != [int(s) for s in self._vol.shape]:
+                return None
+            shape = tuple(int(s) for s in reg["shape"])
+            z0, z1, y0, y1, x0, x1 = (int(x) for x in reg["bbox"])
+            raw = zlib.decompress(base64.b64decode(reg["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+            full = np.zeros(self._vol.shape, bool)
+            full[z0:z1, y0:y1, x0:x1] = comp
+            return full
+        except Exception:                                # noqa: BLE001
+            return None
+
+    def _vr_shell_mask(self):
+        """Epi surface + an outward shell (~_vr_shell_mm) where the coronaries sit
+        — the reference coronary-CTA surface look. None if no Epi / no scipy."""
+        epi = self._vr_epi_full_mask()
+        if epi is None:
+            return None
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except Exception:                                # noqa: BLE001
+            return epi
+        sx, sy, sz = self._dims
+        sampling = (sz, sy, sx)
+        out_mm = float(getattr(self, "_vr_shell_mm", 10.0))
+        in_mm = 4.0
+        zs, ys, xs = np.where(epi)
+        if len(zs) == 0:
+            return epi
+        mz = int(np.ceil(out_mm / sz)) + 2
+        my = int(np.ceil(out_mm / sy)) + 2
+        mx = int(np.ceil(out_mm / sx)) + 2
+        z0, z1 = max(0, zs.min() - mz), min(epi.shape[0], zs.max() + mz + 1)
+        y0, y1 = max(0, ys.min() - my), min(epi.shape[1], ys.max() + my + 1)
+        x0, x1 = max(0, xs.min() - mx), min(epi.shape[2], xs.max() + mx + 1)
+        sub = epi[z0:z1, y0:y1, x0:x1]
+        d_out = distance_transform_edt(~sub, sampling=sampling)
+        d_in = distance_transform_edt(sub, sampling=sampling)
+        shell = ((~sub) & (d_out <= out_mm)) | (sub & (d_in <= in_mm))
+        full = np.zeros(epi.shape, bool)
+        full[z0:z1, y0:y1, x0:x1] = shell
+        return full
+
+    def _vr_crop_mask(self):
+        """The bool crop for the VR: Epi+shell (default) or Epi interior; None →
+        no crop (full CT)."""
+        if self._vol is None:
+            return None
+        return (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
+                else self._vr_epi_full_mask())
+
+    def _mask_world_bounds(self, mask):
+        """World-mm bounds of a bool crop, to frame the VR on the heart."""
+        zs, ys, xs = np.where(mask)
+        if len(zs) == 0:
+            return None
+        sx, sy, sz = self._dims
+        return (float(xs.min() * sx), float(xs.max() * sx),
+                float(ys.min() * sy), float(ys.max() * sy),
+                float(zs.min() * sz), float(zs.max() * sz))
+
+    def _vr_frame_bounds(self):
+        """World bounds to frame the VR: the crop (heart) when cropped, else the
+        whole volume."""
+        m = self._vr_mask
+        if m is not None:
+            wb = self._mask_world_bounds(m)
+            if wb is not None:
+                return wb
+        return self._bounds
 
     def _vr_cpu_image(self, key, lod: bool = False):
         """Ray-cast the volume on the CPU from the current orbit (az/el) into a
@@ -4904,8 +4989,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if vol is None:
             return None
         sx, sy, sz = (float(d) for d in self._dims)
-        ctr = self._vr_center()
-        diag = float(self._diag) or 1.0
+        fb = self._vr_frame_bounds()            # heart crop (or whole volume)
+        ctr = np.array([(fb[0] + fb[1]) * 0.5, (fb[2] + fb[3]) * 0.5,
+                        (fb[4] + fb[5]) * 0.5], float)
+        diag = math.sqrt((fb[1] - fb[0]) ** 2 + (fb[3] - fb[2]) ** 2
+                         + (fb[5] - fb[4]) ** 2) or 1.0
         az, el = self._vr_az[key], self._vr_el[key]
         ce, se = math.cos(el), math.sin(el)
         ca, sa = math.cos(az), math.sin(az)
@@ -4948,6 +5036,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
         ds = 2.0 * R / max(1, nplanes - 1)
 
+        mask = self._vr_mask                    # heart crop (None → full CT)
+
         def sample(t):
             vx = np.rint(bvx + t * dvx).astype(np.intp)
             vy = np.rint(bvy + t * dvy).astype(np.intp)
@@ -4957,7 +5047,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             np.clip(vx, 0, nx - 1, out=vx)
             np.clip(vy, 0, ny - 1, out=vy)
             np.clip(vz, 0, nz - 1, out=vz)
-            return vol[vz, vy, vx], oob
+            hu = vol[vz, vy, vx]
+            if mask is not None:                # voxels outside the heart → air
+                hu = np.where(mask[vz, vy, vx], hu, _HU_LO)
+            return hu, oob
 
         win = max(1e-6, self._win)
         lvl = self._lvl
@@ -5031,9 +5124,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on[key] = on
         p = self.pane[key]
         if on:
+            self._vr_mask = self._vr_crop_mask()  # heart crop (None if no Epi)
             self._vr_refresh(key, lod=False)    # CPU image, drawn by the overlay
         else:
             self._vr_img.pop(key, None)
+            self._vr_mask = None
             self._config_cam(key)               # restore the MPR camera
             p.render()
         self._overlay[key].update()
@@ -5057,14 +5152,27 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._vr_set(key, on)
 
+    def _vr_recrop(self) -> None:
+        """Rebuild the heart crop + repaint every active VR pane."""
+        self._vr_mask = self._vr_crop_mask()
+        for k in ("A", "B"):
+            if self._vr_on.get(k):
+                self._vr_refresh(k, lod=False)
+
     def set_vr_shell(self, shell: bool) -> None:
-        self._vr_shell = bool(shell)         # Phase 2: heart-crop; no-op for now
+        """内腔VR / シェルVR — Epi interior (lumen) vs Epi surface + outward shell."""
+        self._vr_shell = bool(shell)
+        if self.vr_active():
+            self._vr_recrop()
 
     def set_vr_shell_mm(self, mm: float) -> None:
-        self._vr_shell_mm = max(0.0, float(mm))   # Phase 2: shell thickness
+        """シェルVR範囲 — outward shell thickness (mm); only affects shell mode."""
+        self._vr_shell_mm = max(0.0, float(mm))
+        if self.vr_active() and getattr(self, "_vr_shell", True):
+            self._vr_recrop()
 
     def set_vr_coronary(self, spec) -> None:
-        self._vr_coro_spec = spec            # Phase 2: 3-D coronary tubes
+        self._vr_coro_spec = spec            # Phase 2b: 3-D coronary tubes
 
     # --------------------------------------------------- world<->screen
     def _scale_px(self, key):
