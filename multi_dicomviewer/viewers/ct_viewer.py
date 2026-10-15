@@ -1007,6 +1007,30 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
+        # Short-axis (CPR) pane in EDIT mode (Measure on, no draw type selected):
+        # a plain left-click MOVES the current section's edit (control) point to
+        # the clicked in-plane spot — "click where you want it", no need to grab
+        # the marker and no Alt (the short-axis left pane has already left Draw,
+        # so a click here never draws). Only when the section sits ON a control
+        # point (the filled yellow dot); interpolated sections stay non-editable
+        # (step to one with Alt+F/A). Alt — or an active draw type — falls
+        # through to the view tool / draw so the cross-section can still be
+        # rotated/zoomed and diameters still measured.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and self._owner._cpr is not None and self._which == "A"
+                and self._owner._meas_on
+                and not self._owner._meas_type
+                and self._owner._center_angle_target is None
+                and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)):
+            k = self._owner._cpr_at_ctrl()
+            if k is not None:
+                self._owner._cpr_drag = k
+                self._owner._cpr_drag_move(
+                    e.position().x(), e.position().y())   # jump to the click
+                self._last = e.position()
+                self._cross = False
+                self._meas_drag = False
+                return
         # Otherwise a left-drag on the short-axis is dispatched by the SELECTED
         # tool so the toolbar works here too: Rotate/Spin turn the cross-section
         # (feeds the CoSync rotation), Paging scrolls the pull-back, and

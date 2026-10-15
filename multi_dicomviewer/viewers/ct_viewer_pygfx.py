@@ -2797,6 +2797,21 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._drag_btn == 1:
                 if self._cpr_grab(x, y):
                     return
+                # EDIT mode: reaching here means idle Measure (no draw type /
+                # handle grabbed — the measure block above fell through) and no
+                # Alt. A plain left-click MOVES the current section's edit
+                # (control) point to the clicked spot ("click where you want
+                # it"), so dragging the marker is no longer required. Only on a
+                # control-point section (filled dot); Alt falls through to the
+                # view tool so the cross-section stays rotatable/zoomable.
+                if self._meas_on and not _alt:
+                    k = self._cpr_at_ctrl()
+                    if k is not None:
+                        self._cpr_drag = k
+                        self._cpr_drag_move(x, y)         # jump to the click
+                        self._last = (x, y)
+                        self._meas_drag = False
+                        return
                 if self._tool in ("ROTATE", "SPIN"):
                     self._cpr_rot_start(x, y)
             return
