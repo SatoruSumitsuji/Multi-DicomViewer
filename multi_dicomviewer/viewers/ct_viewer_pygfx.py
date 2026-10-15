@@ -420,6 +420,117 @@ def _compute_slab_qimage(p):
     return QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
 
 
+# CTA transfer function for the CPU VR (HU → opacity, HU → RGB) — mirrors the
+# VTK _vr_cta_property look. Module-level so the pure render runs on a thread.
+_VR_OP_HU = np.array([-1000, 80, 150, 250, 400, 600, 1000, 2000], float)
+_VR_OP_A = np.array([0.0, 0.0, 0.03, 0.12, 0.35, 0.60, 0.85, 0.95], float)
+_VR_COL_HU = np.array([-1000, 100, 250, 450, 1000, 2000], float)
+_VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
+_VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
+_VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
+
+
+def _vr_render_image(p):
+    """Pure CPU VR ray-cast → QImage from a param snapshot (NO self / Qt-widget),
+    so it can run on a worker thread — the GUI thread captures the camera basis +
+    state in _vr_params(). DVR (front-to-back CTA transfer func) or MIP."""
+    vol = p["vol"]
+    if vol is None:
+        return None
+    sx, sy, sz = p["dims"]
+    ctr, right, up, back = p["ctr"], p["right"], p["up"], p["back"]
+    halfW, halfH, pw, ph = p["halfW"], p["halfH"], p["pw"], p["ph"]
+    lod = p["lod"]
+    aspect = pw / ph
+    ih = int(min(max(80, ph), p["ih_drag"] if lod else 280))
+    iw = max(1, int(round(ih * aspect)))
+    SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
+                         np.linspace(halfH, -halfH, ih))
+    bvx = (ctr[0] + SX * right[0] + SY * up[0]) / sx
+    bvy = (ctr[1] + SX * right[1] + SY * up[1]) / sy
+    bvz = (ctr[2] + SX * right[2] + SY * up[2]) / sz
+    dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
+    nz, ny, nx = vol.shape
+    R = halfH
+    step_mm = 2.2 if lod else 1.5
+    cap = 72 if lod else 170
+    nplanes = int(min(cap, max(24, round(2.0 * R / max(0.3, step_mm)))))
+    ts = np.linspace(R, -R, nplanes)
+    ds = 2.0 * R / max(1, nplanes - 1)
+    mask = p["mask"]
+
+    def sample(t):
+        vx = np.rint(bvx + t * dvx).astype(np.intp)
+        vy = np.rint(bvy + t * dvy).astype(np.intp)
+        vz = np.rint(bvz + t * dvz).astype(np.intp)
+        oob = ((vx < 0) | (vx >= nx) | (vy < 0) | (vy >= ny)
+               | (vz < 0) | (vz >= nz))
+        np.clip(vx, 0, nx - 1, out=vx)
+        np.clip(vy, 0, ny - 1, out=vy)
+        np.clip(vz, 0, nz - 1, out=vz)
+        hu = vol[vz, vy, vx]
+        if mask is not None:
+            hu = np.where(mask[vz, vy, vx], hu, _HU_LO)
+        return hu, oob, vz, vy, vx
+
+    win = max(1e-6, p["win"])
+    lvl = p["lvl"]
+    if p["mode"] == "dvr":
+        shift = lvl - 300.0
+        hus = np.linspace(_HU_LO, _HU_HI, 512)
+        alut = (np.interp(hus, _VR_OP_HU + shift, _VR_OP_A)
+                * (ds / 0.8)).astype(np.float32)
+        rlut = np.interp(hus, _VR_COL_HU + shift, _VR_COL_R)
+        glut = np.interp(hus, _VR_COL_HU + shift, _VR_COL_G)
+        blut = np.interp(hus, _VR_COL_HU + shift, _VR_COL_B)
+        inv = 511.0 / (_HU_HI - _HU_LO)
+        tvol, tcols = p["tvol"], p["tcols"]
+        tr = tg = tb = ton = None
+        if tvol is not None and tcols:
+            n = len(tcols)
+            tr = np.zeros(n + 1, np.float32)
+            tg = np.zeros(n + 1, np.float32)
+            tb = np.zeros(n + 1, np.float32)
+            ton = np.zeros(n + 1, bool)
+            for i, c in enumerate(tcols, 1):
+                tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
+        acc = np.zeros((ih, iw, 3), np.float32)
+        aca = np.zeros((ih, iw), np.float32)
+        for t in ts:
+            hu, oob, vz, vy, vx = sample(t)
+            idx = ((hu - _HU_LO) * inv).astype(np.intp)
+            np.clip(idx, 0, 511, out=idx)
+            a = alut[idx]
+            a[oob] = 0.0
+            w = a * (1.0 - aca)
+            cr, cg, cb = rlut[idx], glut[idx], blut[idx]
+            if ton is not None:
+                lab = np.rint(tvol[vz, vy, vx]).astype(np.intp)
+                np.clip(lab, 0, len(ton) - 1, out=lab)
+                hit = ton[lab]
+                cr = np.where(hit, tr[lab], cr)
+                cg = np.where(hit, tg[lab], cg)
+                cb = np.where(hit, tb[lab], cb)
+            acc[..., 0] += w * cr
+            acc[..., 1] += w * cg
+            acc[..., 2] += w * cb
+            aca += w
+            if float(aca.min()) > 0.97:
+                break
+        rgb = (np.clip(acc, 0.0, 1.0) * 255.0).astype(np.uint8)
+    else:
+        mip = np.full((ih, iw), _HU_LO, np.float32)
+        for t in ts:
+            hu, oob, _z, _y, _x = sample(t)
+            hu = np.where(oob, _HU_LO, hu)
+            np.maximum(mip, hu, out=mip)
+        g = np.clip((mip - (lvl - win / 2.0)) / win, 0.0, 1.0)
+        gg = (g * 255.0).astype(np.uint8)
+        rgb = np.stack([gg, gg, gg], axis=2)
+    rgb = np.ascontiguousarray(rgb)
+    return QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
+
+
 class _LvvWorker(QThread):
     """Runs the (few-second) LV blood-pool volume computation off the UI thread
     so a busy progress bar can animate; emits the result dict. Ported verbatim
@@ -602,11 +713,10 @@ class _Overlay(QWidget):
                 p.drawImage(self.rect(), img)
             else:
                 p.fillRect(self.rect(), QColor(0, 0, 0))
-            # Skip the coronary/target overlay WHILE dragging (projecting +
-            # drawing every vessel each frame is costly over a remote link); it
-            # reappears on the still frame.
-            if v._vr_drag is None:
-                self._paint_vr_coronary(p, key, w, h)
+            # Keep the coronary/target overlay DURING drag too — the vessels
+            # rotating are the main orientation cue. The render is off-thread now,
+            # so the per-frame projection cost is bounded by the frame rate.
+            self._paint_vr_coronary(p, key, w, h)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -2204,6 +2314,9 @@ class CTViewer(CPRMixin, AbstractViewer):
     #: Carries a finished high-res slab rebuild (gen, {key: QImage}) from the
     #: compute worker back to the GUI thread (see _lod_settle / _on_slab_done).
     _slab_done = pyqtSignal(object)
+    #: Carries a finished async VR drag frame (key, QImage) back to the GUI
+    #: thread (see _vr_async / _vr_worker / _on_vr_done).
+    _vr_done = pyqtSignal(object)
 
     #: SyncView: a view operation (pan / rotate / zoom / W-L / paging / thick)
     #: happened here — the shell mirrors it to the paired CT as an identical
@@ -2309,6 +2422,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on = {"A": False, "B": False}
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
         self._vr_mask = None                 # bool crop (heart) or None (full CT)
+        self._vr_busy = False                # an async VR drag render is running
+        self._vr_dirty = None                # pane needing a re-render when free
+        self._vr_gen = 0                     # token: discards stale async frames
         self._vr_mode = "dvr"                # 'dvr' (CTA transfer func) | 'mip'
         self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad)
         self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad)
@@ -2483,6 +2599,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._slab_gen = 0               # generation token for async slab builds
         self._lod_wake.connect(self._lod_settle)
         self._slab_done.connect(self._on_slab_done)
+        self._vr_done.connect(self._on_vr_done)
         disp = QApplication.instance().eventDispatcher() if \
             QApplication.instance() is not None else None
         if disp is not None:
@@ -4928,15 +5045,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     # Mac). DVR = the Windows-style transfer-function look; MIP = max projection.
     # Right-click a VR pane to switch. Heart-crop / coronary tubes / territory
     # surfaces are later phases.
+    # The CTA transfer function + the ray-cast itself live at module level
+    # (_VR_OP_*/_VR_COL_* and _vr_render_image) so the render can run on a worker
+    # thread; the drag frame renders ASYNC so input never blocks (see _vr_async).
     # ============================================================
-    #: CTA transfer function (HU → opacity, HU → RGB) — mirrors _vr_cta_property.
-    _VR_OP_HU = np.array([-1000, 80, 150, 250, 400, 600, 1000, 2000], float)
-    _VR_OP_A = np.array([0.0, 0.0, 0.03, 0.12, 0.35, 0.60, 0.85, 0.95], float)
-    _VR_COL_HU = np.array([-1000, 100, 250, 450, 1000, 2000], float)
-    _VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
-    _VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
-    _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
-
     def _vr_center(self) -> np.ndarray:
         b = self._vr_frame_bounds()
         return np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
@@ -5065,131 +5177,97 @@ class CTViewer(CPRMixin, AbstractViewer):
         sy = (0.5 - vv / halfH * 0.5) * ph
         return sx, sy, d
 
-    def _vr_cpu_image(self, key, lod: bool = False):
-        """Ray-cast the volume on the CPU from the current orbit (az/el) into a
-        QImage: MIP (max HU) or composite DVR (front-to-back CTA transfer func).
-        Reuses _trilinear_sample — the exact slab-MIP sampling that works on Mac."""
-        vol = self._vol
-        if vol is None:
-            return None
-        sx, sy, sz = (float(d) for d in self._dims)
+    def _vr_params(self, key, lod):
+        """Snapshot (on the GUI thread) everything the pure _vr_render_image
+        needs — the camera basis (reads Qt widget sizes), volume + mask refs,
+        mode and W/L — so the ray-cast can run on a worker thread. Territory is
+        skipped while dragging (lod) to keep the preview fast."""
         ctr, right, up, back, halfW, halfH, pw, ph = self._vr_basis(key)
-        aspect = pw / ph
-        # While dragging, render a small all-heart preview for a smooth frame
-        # rate (the crop zooms onto the heart, so even a small image spends every
-        # pixel on the heart); the still frame tracks the pane's full resolution.
-        ih = int(min(max(80, ph), 100 if lod else 280))
-        iw = max(1, int(round(ih * aspect)))
-        SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
-                             np.linspace(halfH, -halfH, ih))     # screen y down
-        # Base world position per pixel, pre-divided into voxel coords so the
-        # per-plane step is a cheap add (nearest-neighbour sampling — fast, and
-        # plenty for a VR review; trilinear would ~3× the cost).
-        bvx = (ctr[0] + SX * right[0] + SY * up[0]) / sx
-        bvy = (ctr[1] + SX * right[1] + SY * up[1]) / sy
-        bvz = (ctr[2] + SX * right[2] + SY * up[2]) / sz
-        dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
-        nz, ny, nx = vol.shape
-        R = halfH                               # = 0.62 * frame diagonal
-        # Size the depth samples by a TARGET STEP (mm), not a fixed count: the
-        # heart crop shrinks R, so far fewer planes keep the same ~2 mm density
-        # (dense = no speckle). The cap bounds the cost when uncropped (large R).
-        step_mm = 2.8 if lod else 1.5
-        cap = 44 if lod else 170
-        nplanes = int(min(cap, max(24, round(2.0 * R / max(0.3, step_mm)))))
-        ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
-        ds = 2.0 * R / max(1, nplanes - 1)
+        return {
+            "vol": self._vol,
+            "dims": tuple(float(d) for d in self._dims),
+            "ctr": ctr, "right": right, "up": up, "back": back,
+            "halfW": halfW, "halfH": halfH, "pw": pw, "ph": ph,
+            "lod": bool(lod), "ih_drag": 150,
+            "mode": self._vr_mode,
+            "win": float(self._win), "lvl": float(self._lvl),
+            "mask": self._vr_mask,
+            "tvol": (None if lod else getattr(self, "_terr_mask_vol", None)),
+            "tcols": getattr(self, "_terr_colors", None),
+        }
 
-        mask = self._vr_mask                    # heart crop (None → full CT)
-
-        def sample(t):
-            vx = np.rint(bvx + t * dvx).astype(np.intp)
-            vy = np.rint(bvy + t * dvy).astype(np.intp)
-            vz = np.rint(bvz + t * dvz).astype(np.intp)
-            oob = ((vx < 0) | (vx >= nx) | (vy < 0) | (vy >= ny)
-                   | (vz < 0) | (vz >= nz))
-            np.clip(vx, 0, nx - 1, out=vx)
-            np.clip(vy, 0, ny - 1, out=vy)
-            np.clip(vz, 0, nz - 1, out=vz)
-            hu = vol[vz, vy, vx]
-            if mask is not None:                # voxels outside the heart → air
-                hu = np.where(mask[vz, vy, vx], hu, _HU_LO)
-            return hu, oob, vz, vy, vx
-
-        win = max(1e-6, self._win)
-        lvl = self._lvl
-        if self._vr_mode == "dvr":
-            # Precompute HU→opacity / HU→RGB LUTs (W/L shifts the ramp) and index
-            # into them per plane — far cheaper than np.interp every step.
-            shift = lvl - 300.0
-            hus = np.linspace(_HU_LO, _HU_HI, 512)
-            alut = (np.interp(hus, self._VR_OP_HU + shift, self._VR_OP_A)
-                    * (ds / 0.8)).astype(np.float32)
-            rlut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_R)
-            glut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_G)
-            blut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_B)
-            inv = 511.0 / (_HU_HI - _HU_LO)
-            # Perfusion-territory tint: where a voxel carries a territory label,
-            # use that territory's colour instead of the CTA brown (opacity still
-            # from HU). Skipped WHILE DRAGGING (lod) — it ~doubles the cost — so
-            # rotation stays responsive; the colours reappear on the still frame.
-            tvol = getattr(self, "_terr_mask_vol", None)
-            tcols = getattr(self, "_terr_colors", None)
-            tr = tg = tb = ton = None
-            if tvol is not None and tcols and not lod:
-                n = len(tcols)
-                tr = np.zeros(n + 1, np.float32)
-                tg = np.zeros(n + 1, np.float32)
-                tb = np.zeros(n + 1, np.float32)
-                ton = np.zeros(n + 1, bool)
-                for i, c in enumerate(tcols, 1):
-                    tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
-            acc = np.zeros((ih, iw, 3), np.float32)
-            aca = np.zeros((ih, iw), np.float32)
-            for t in ts:
-                hu, oob, vz, vy, vx = sample(t)
-                idx = ((hu - _HU_LO) * inv).astype(np.intp)
-                np.clip(idx, 0, 511, out=idx)
-                a = alut[idx]
-                a[oob] = 0.0
-                w = a * (1.0 - aca)
-                cr, cg, cb = rlut[idx], glut[idx], blut[idx]
-                if ton is not None:
-                    lab = np.rint(tvol[vz, vy, vx]).astype(np.intp)
-                    np.clip(lab, 0, len(ton) - 1, out=lab)
-                    hit = ton[lab]
-                    cr = np.where(hit, tr[lab], cr)
-                    cg = np.where(hit, tg[lab], cg)
-                    cb = np.where(hit, tb[lab], cb)
-                acc[..., 0] += w * cr
-                acc[..., 1] += w * cg
-                acc[..., 2] += w * cb
-                aca += w
-                if float(aca.min()) > 0.97:     # early-ray termination
-                    break
-            rgb = (np.clip(acc, 0.0, 1.0) * 255.0).astype(np.uint8)
-        else:                                   # MIP
-            mip = np.full((ih, iw), _HU_LO, np.float32)
-            for t in ts:
-                hu, oob, _vz, _vy, _vx = sample(t)
-                hu = np.where(oob, _HU_LO, hu)
-                np.maximum(mip, hu, out=mip)
-            g = np.clip((mip - (lvl - win / 2.0)) / win, 0.0, 1.0)
-            gg = (g * 255.0).astype(np.uint8)
-            rgb = np.stack([gg, gg, gg], axis=2)
-        rgb = np.ascontiguousarray(rgb)
-        return QImage(rgb.data, iw, ih, 3 * iw,
-                      QImage.Format.Format_RGB888).copy()
+    def _vr_cpu_image(self, key, lod: bool = False):
+        """Synchronous VR render (used for the still / toggle / territory frames,
+        where a one-off ~1 s block is fine). The DRAG frame goes through the async
+        worker (_vr_async) so input never blocks."""
+        if self._vol is None:
+            return None
+        return _vr_render_image(self._vr_params(key, lod))
 
     def _vr_refresh(self, key, lod: bool = False) -> None:
+        if not lod:
+            self._vr_bump()      # a synchronous still invalidates in-flight async
         self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
         self._overlay[key].update()
 
+    def _vr_async(self, key) -> None:
+        """Render the drag frame on a WORKER thread so the mouse never blocks on
+        the ~0.1-0.2 s ray-cast. Only one render runs at a time; a request that
+        arrives while busy is remembered and re-run (with the latest angle) when
+        the worker finishes — so the view always converges to the current angle
+        without the lag pile-up that a synchronous per-move render causes."""
+        if self._vr_busy:
+            self._vr_dirty = key
+            return
+        self._vr_busy = True
+        self._vr_gen += 1
+        gen = self._vr_gen
+        try:
+            params = self._vr_params(key, lod=True)
+        except Exception:                                # noqa: BLE001
+            self._vr_busy = False
+            return
+        threading.Thread(target=self._vr_worker, args=(key, gen, params),
+                         daemon=True).start()
+
+    def _vr_worker(self, key, gen, params) -> None:
+        try:
+            img = _vr_render_image(params)
+        except Exception:                                # noqa: BLE001
+            img = None
+        self._vr_done.emit((key, gen, img))
+
+    def _on_vr_done(self, payload) -> None:
+        key, gen, img = payload
+        self._vr_busy = False
+        # Discard a stale frame: a newer drag frame, or the full still rendered
+        # on release, has bumped the generation (see _vr_bump).
+        if gen != self._vr_gen:
+            return
+        if img is not None and self._vr_on.get(key):
+            self._vr_img[key] = img
+            self._overlay[key].update()
+        if self._vr_dirty is not None:
+            k = self._vr_dirty
+            self._vr_dirty = None
+            if self._vr_on.get(k):
+                self._vr_async(k)
+
+    def _vr_bump(self) -> None:
+        """Invalidate any in-flight async drag frame + drop a pending one (called
+        before a synchronous still render on release, so a late drag frame can't
+        overwrite the sharp still)."""
+        self._vr_gen += 1
+        self._vr_dirty = None
+
     def _vr_rotate(self, key, dx, dy) -> None:
+        # Update the angle IMMEDIATELY (cheap) so the drag is tracked with no lag;
+        # the frame is rendered asynchronously to the latest angle.
         self._vr_az[key] -= dx * 0.01
         self._vr_el[key] += dy * 0.01
         self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
-        self._vr_refresh(key, lod=True)         # fast while dragging
+        self._vr_async(key)
+
 
     def _vr_pane_key(self) -> str:
         for k in ("B", "A"):
