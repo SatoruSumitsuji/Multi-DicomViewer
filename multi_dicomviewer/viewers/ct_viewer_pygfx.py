@@ -532,6 +532,14 @@ class _PygfxPane:
         finally:
             _PygfxPane._RENDERING = False
 
+    def show_vr(self, material) -> None:
+        """Swap the shared gfx.Volume onto a ray-cast VR material (iso / MIP), or
+        restore the MPR slice material when *material* is None. Same geometry (the
+        3-D texture is already on the GPU), so this is a cheap material swap."""
+        if self.mesh is None:
+            return
+        self.mesh.material = material if material is not None else self.material
+
 
 _BORDER = 3  # px; matches the active-pane QFrame border so children inset
 
@@ -593,6 +601,12 @@ class _Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
+        # Volume Rendering: the GPU canvas underneath draws the 3-D ray-cast
+        # volume; the 2-D MPR overlay (crosshair / measures / tints) would be
+        # misplaced over it, so suppress all of it and just label the mode.
+        if v._vr_on.get(key):
+            self._paint_vr_label(p, key, w, h)
+            return
         # slab-MIP base image (GPU slice is hidden in slab mode)
         mip = v._mip_img.get(key)
         if mip is not None:
@@ -631,6 +645,23 @@ class _Overlay(QWidget):
         if v._lvv is not None:
             self._paint_lvv(p, key, w, h)
         self._paint_info(p, key, w, h)
+
+    def _paint_vr_label(self, p, key, w, h) -> None:
+        """Small corner caption for the VR pane: the active mode + how to drive
+        it (drag rotates, right-click switches iso ⇄ MIP)."""
+        v = self._v
+        mode = "ISO" if v._vr_mode == "iso" else "MIP"
+        txt = t("VR {mode}  （ドラッグ=回転 / 右クリック=iso⇔MIP）", mode=mode)
+        p.setFont(QFont("", 10, QFont.Weight.Bold))
+        rect = QRectF(6, 4, max(10, w - 12), 18)
+        p.setPen(QColor(0, 0, 0, 180))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            p.drawText(rect.translated(dx, dy),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                       txt)
+        p.setPen(QColor(255, 210, 90))
+        p.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                   txt)
 
     def _paint_cpr(self, p, w, h):
         """Short-axis overlay: a centred amber crosshair (the cross-section is
@@ -2224,6 +2255,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coronary_mode = False
         self._coronary_mpr_pending = False
         self._cpr_marker_pts = []            # [(ctrl_idx, (du,dv))] for hit-test
+        # Volume Rendering (Mac/pygfx) — Phase 1: iso/MIP ray-cast display + an
+        # orbit drag. The heart-crop / coronary-tube / territory overlays that
+        # the VTK VR adds are later phases (the shell's VR calls are all
+        # hasattr-guarded, so the extra set_vr_* are safe no-ops for now).
+        self._vr_on = {"A": False, "B": False}
+        self._vr_mode = "iso"                # 'iso' (shaded surface) | 'mip'
+        self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad)
+        self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad)
+        self._vr_drag = None                 # pane key of an in-progress VR orbit
+        self._vr_shell = True                # stored for Phase 2 (crop); unused
+        self._vr_shell_mm = 10.0
+        self._vr_coro_spec = None            # stored for Phase 2 (3-D tubes)
         # measurements
         self._meas_on = False
         self._meas_type = None               # line|polyline|ellipse|polygon|angle
@@ -2626,6 +2669,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
+        # Volume Rendering owns the pane while active: left-drag ORBITS the
+        # volume, right-click switches iso ⇄ MIP. (Everything else is bypassed —
+        # the overlays / MPR tools don't apply to the 3-D view.)
+        if self._vr_on.get(key):
+            if self._drag_btn == 2:
+                self._vr_toggle_mode()
+                self._reset_pointer_state()
+                return
+            if self._drag_btn == 1:
+                self._vr_drag = key
+            return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
         if getattr(self, "_cpr_exclude_seeding", False) and self._drag_btn == 1:
@@ -2847,6 +2901,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                     stuck = False
             if stuck:
                 self._reset_pointer_state()
+        # VR orbit: a left-drag spins the volume around its centre.
+        if self._vr_drag is not None:
+            if self._drag_btn == 1 and ev.get("buttons"):
+                lx, ly = self._last or (ev["x"], ev["y"])
+                self._vr_rotate(self._vr_drag, ev["x"] - lx, ev["y"] - ly)
+            self._last = (ev["x"], ev["y"])
+            return
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
             return
         # LV apex drag: slide the grabbed apex along its long axis (border points
@@ -2942,6 +3003,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
+        # End a VR orbit.
+        if self._vr_drag is not None:
+            self._vr_drag = None
+            self._drag_btn = None
+            self._last = None
+            return
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
             self._lv_apex_drag = None
@@ -3003,6 +3070,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag_btn = None
         self._cross_grab = False
         self._meas_drag = False
+        self._vr_drag = None
         self._alt_tool = False
         self._meas_edit_before = None
         self._meas_edit_moved = False
@@ -4781,6 +4849,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         produce a bad orientation (pane B rendered blank). cross(U,V) is always
         the proper right-handed third axis (= ±N); both give the same plane and
         the same U-right/V-up image, matching the VTK reslice output."""
+        # Volume Rendering owns the camera while active (an orbit around the
+        # volume centre) — keep it stable through any MPR refresh that reaches
+        # here, so W/L / paging don't snap the VR back to a slice view.
+        if self._vr_on.get(key):
+            self._vr_config_cam(key)
+            return
         p = self.pane[key]
         ur, vr, w, focal = self._cam_basis(key)
         R = np.column_stack([ur, vr, w]).astype(np.float64)
@@ -4805,6 +4879,128 @@ class CTViewer(CPRMixin, AbstractViewer):
         px, py = self._pan[key]
         focal = self._pc[key] + px * u + py * v
         return ur, vr, w, focal
+
+    # ============================================================
+    # Volume Rendering (Phase 1: iso/MIP ray-cast + orbit drag).
+    # The VTK (Windows) viewer uses a composite DVR transfer function which
+    # pygfx 0.16 has no equivalent for, so Mac offers the two modes pygfx DOES
+    # provide: a shaded ISO surface (closest to the DVR look) and MIP. Right-
+    # click a VR pane to switch modes. Heart-crop / coronary tubes / territory
+    # surfaces are later phases.
+    # ============================================================
+    def _vr_center(self) -> np.ndarray:
+        b = self._bounds
+        return np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
+                         (b[4] + b[5]) * 0.5], float)
+
+    def _vr_make_material(self):
+        """Build the ray-cast material for the current mode, windowed by W/L."""
+        lo = self._lvl - self._win * 0.5
+        hi = self._lvl + self._win * 0.5
+        if hi - lo < 1.0:
+            hi = lo + 1.0
+        if self._vr_mode == "mip":
+            return gfx.VolumeMipMaterial(clim=(lo, hi), interpolation="linear")
+        # ISO: pygfx's threshold is a fraction of clim; pick the contrast/bone
+        # knee (~250 HU) mapped into [0,1] so the vessels + bone form the surface.
+        thr = (250.0 - lo) / max(1.0, hi - lo)
+        thr = min(0.95, max(0.05, thr))
+        return gfx.VolumeIsoMaterial(
+            threshold=float(thr), clim=(lo, hi), interpolation="linear",
+            shininess=16.0, emissive="#0a0a0a")
+
+    def _vr_config_cam(self, key) -> None:
+        """Orbit camera around the volume centre by (azimuth, elevation),
+        orthographic and framed to the whole volume."""
+        p = self.pane[key]
+        ctr = self._vr_center()
+        az, el = self._vr_az[key], self._vr_el[key]
+        ce, se = math.cos(el), math.sin(el)
+        ca, sa = math.cos(az), math.sin(az)
+        back = np.array([ce * sa, se, ce * ca], float)   # centre → camera
+        back = _norm(back)
+        up0 = np.array([0.0, 0.0, 1.0], float)           # patient Z up (refine)
+        if abs(float(np.dot(back, up0))) > 0.98:
+            up0 = np.array([0.0, 1.0, 0.0], float)
+        right = _norm(np.cross(up0, back))
+        up = _norm(np.cross(back, right))
+        R = np.column_stack([right, up, back]).astype(np.float64)
+        p.cam.local.rotation = la.quat_from_mat(R)
+        dist = 2.0 * self._diag
+        p.cam.local.position = ctr + back * dist
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        half = 0.58 * self._diag
+        p.cam.height = 2.0 * half
+        p.cam.width = 2.0 * half * (pw / ph)
+        # Generous near/far so the whole volume stays inside the clip range at
+        # any orbit angle (ortho → no z-precision penalty for a wide range).
+        p.cam.depth_range = (0.1, 2.0 * dist + self._diag)
+
+    def _vr_rotate(self, key, dx, dy) -> None:
+        self._vr_az[key] -= dx * 0.01
+        self._vr_el[key] += dy * 0.01
+        self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
+        self._vr_config_cam(key)
+        self.pane[key].render()
+
+    def _vr_toggle_mode(self) -> None:
+        """Right-click on a VR pane: switch iso ⇄ MIP (compare the two)."""
+        self._vr_mode = "mip" if self._vr_mode == "iso" else "iso"
+        for k in ("A", "B"):
+            if self._vr_on.get(k):
+                self.pane[k].show_vr(self._vr_make_material())
+                self.pane[k].render()
+                self._overlay[k].update()
+
+    def _vr_pane_key(self) -> str:
+        for k in ("B", "A"):
+            if self._vr_on.get(k):
+                return k
+        return "B"
+
+    def _vr_set(self, key, on: bool) -> None:
+        if self._vol is None:
+            return
+        on = bool(on)
+        self._vr_on[key] = on
+        p = self.pane[key]
+        if on:
+            p.show_vr(self._vr_make_material())
+            self._vr_config_cam(key)
+        else:
+            p.show_vr(None)                  # restore the MPR slice material
+            self._config_cam(key)            # restore the MPR camera
+        p.render()
+        self._overlay[key].update()
+
+    # ---- VR API called by the shell / Coronary Tree VR row ----
+    def vr_active(self, key=None) -> bool:
+        if key is None:
+            return any(self._vr_on.values())
+        return bool(self._vr_on.get(key))
+
+    def vr_control_state(self) -> dict:
+        k = self._vr_pane_key()
+        return {"on": bool(self._vr_on.get(k)),
+                "shell": bool(getattr(self, "_vr_shell", True)),
+                "shell_mm": float(getattr(self, "_vr_shell_mm", 10.0))}
+
+    def set_vr_on(self, on: bool) -> None:
+        key = self._vr_pane_key()
+        on = bool(on)
+        if on == bool(self._vr_on.get(key)):
+            return
+        self._vr_set(key, on)
+
+    def set_vr_shell(self, shell: bool) -> None:
+        self._vr_shell = bool(shell)         # Phase 2: heart-crop; no-op for now
+
+    def set_vr_shell_mm(self, mm: float) -> None:
+        self._vr_shell_mm = max(0.0, float(mm))   # Phase 2: shell thickness
+
+    def set_vr_coronary(self, spec) -> None:
+        self._vr_coro_spec = spec            # Phase 2: 3-D coronary tubes
 
     # --------------------------------------------------- world<->screen
     def _scale_px(self, key):
