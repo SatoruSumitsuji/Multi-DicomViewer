@@ -4973,7 +4973,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.set_volume(self._vol, self._dims)
             p.show_vr(self._vr_make_material())
             self._vr_config_cam(key)
+            self._vr_add_probe(p)            # DIAGNOSTIC (temporary)
         else:
+            self._vr_remove_probe(p)
             p.show_vr(None)                  # restore the MPR slice material
             self._config_cam(key)            # restore the MPR camera
         p.render()
@@ -4986,6 +4988,35 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                        # noqa: BLE001
             pass
         self._overlay[key].update()
+
+    def _vr_add_probe(self, p) -> None:
+        """DIAGNOSTIC (temporary): a magenta box at the volume centre, ~40% of the
+        volume. It uses a plain unlit mesh shader (no 3-D-texture ray loop), so it
+        renders on Metal whenever the camera + canvas are working. If this box
+        shows but the volume doesn't → the volume-ray shader is the problem; if
+        NOTHING shows → the camera/canvas aren't presenting the VR scene."""
+        try:
+            if getattr(p, "_vr_probe", None) is not None:
+                return
+            b = self._bounds
+            g = gfx.box_geometry((b[1] - b[0]) * 0.4,
+                                 (b[3] - b[2]) * 0.4,
+                                 (b[5] - b[4]) * 0.4)
+            box = gfx.Mesh(g, gfx.MeshBasicMaterial(color="#ff00ff"))
+            box.local.position = tuple(float(c) for c in self._vr_center())
+            p.scene.add(box)
+            p._vr_probe = box
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def _vr_remove_probe(self, p) -> None:
+        box = getattr(p, "_vr_probe", None)
+        if box is not None:
+            try:
+                p.scene.remove(box)
+            except Exception:                    # noqa: BLE001
+                pass
+            p._vr_probe = None
 
     # ---- VR API called by the shell / Coronary Tree VR row ----
     def vr_active(self, key=None) -> bool:
