@@ -136,6 +136,8 @@ class ImageCanvas(QWidget):
     #: arrow control back to that control, and the Tree / CT panes keep their own
     #: arrow behaviour when THEY are focused.
     arrow_pressed = pyqtSignal(str)
+    #: Space on a focused cine image → toggle play/stop (the viewer connects it).
+    play_toggle_requested = pyqtSignal()
 
     #: Emitted when a Compare gesture ends (computed or cancelled) so the host
     #: viewer can un-check its "Compare" button.
@@ -1379,7 +1381,15 @@ class ImageCanvas(QWidget):
     def keyPressEvent(self, e):
         """Arrow keys drive cine navigation when the image is the focused
         widget. Up/Down → Prev/Next series, Left/Right → prev/next frame (via
-        arrow_pressed → the viewer). Anything else bubbles up unchanged."""
+        arrow_pressed → the viewer). Space toggles play/stop (play_toggle_
+        requested → the viewer). Anything else bubbles up unchanged."""
+        if e.key() == Qt.Key.Key_Space:
+            # Play/stop toggle for the focused cine (XA/IVUS/OCT/OFDI). Scoped to
+            # the focused image like the arrow keys, so it never competes with a
+            # focused button's own Space activation.
+            self.play_toggle_requested.emit()
+            e.accept()
+            return
         direction = {
             Qt.Key.Key_Up: "up",
             Qt.Key.Key_Down: "down",

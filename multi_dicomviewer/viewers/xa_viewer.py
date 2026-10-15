@@ -694,6 +694,9 @@ class XAViewer(AbstractViewer):
         self.canvas2.export_requested.connect(self._on_export_image)
         self.canvas.arrow_pressed.connect(self._on_canvas_arrow)
         self.canvas2.arrow_pressed.connect(self._on_canvas_arrow)
+        # Space on a focused cine image toggles play/stop (XA/IVUS/OCT/OFDI).
+        self.canvas.play_toggle_requested.connect(self._toggle_play_key)
+        self.canvas2.play_toggle_requested.connect(self._toggle_play_key)
 
         # Mouse-operation grid (3×3): load persisted state, push the layout + the
         # click-action dispatcher onto both canvases, and reflect the toggle.
@@ -781,6 +784,12 @@ class XAViewer(AbstractViewer):
         self._play_speed = 1.0
         if self.play_btn.isEnabled() and not self.play_btn.isChecked():
             self.play_btn.setChecked(True)
+
+    def _toggle_play_key(self) -> None:
+        """Space on a focused cine image: toggle play ⇄ stop (XA/IVUS/OCT/OFDI).
+        No-op on an unplayable single-frame series (Play is disabled)."""
+        if self.play_btn.isEnabled():
+            self.play_btn.setChecked(not self.play_btn.isChecked())
 
     def _on_canvas_arrow(self, direction: str) -> None:
         """Arrow key on a focused cine image: Up/Down step Prev/Next series,
