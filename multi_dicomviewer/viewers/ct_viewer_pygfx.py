@@ -477,16 +477,12 @@ class _PygfxPane:
             (0.0, 0.0, 0.0), (0.0, 0.0, 0.0))))
         self.cam = gfx.OrthographicCamera()
         self.cam.maintain_aspect = False     # we set width/height to the aspect
-        #: A PERSPECTIVE camera used only while Volume Rendering (the pygfx
-        #: volume-ray shader's ray-setup is perspective-oriented; an ortho camera
-        #: renders black on wgpu-Metal). None → use the ortho MPR camera.
-        self.vr_cam = None
         self.mesh = None
         self.material = None
         self.canvas.request_draw(self._draw)
 
     def _draw(self):
-        self.renderer.render(self.scene, self.vr_cam or self.cam)
+        self.renderer.render(self.scene, self.cam)
 
     def set_volume(self, vol: np.ndarray, scale) -> None:
         if self.mesh is not None:
@@ -535,14 +531,6 @@ class _PygfxPane:
                 pass
         finally:
             _PygfxPane._RENDERING = False
-
-    def show_vr(self, material) -> None:
-        """Swap the shared gfx.Volume onto a ray-cast VR material (iso / MIP), or
-        restore the MPR slice material when *material* is None. Same geometry (the
-        3-D texture is already on the GPU), so this is a cheap material swap."""
-        if self.mesh is None:
-            return
-        self.mesh.material = material if material is not None else self.material
 
 
 _BORDER = 3  # px; matches the active-pane QFrame border so children inset
@@ -605,10 +593,15 @@ class _Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
-        # Volume Rendering: the GPU canvas underneath draws the 3-D ray-cast
-        # volume; the 2-D MPR overlay (crosshair / measures / tints) would be
-        # misplaced over it, so suppress all of it and just label the mode.
+        # Volume Rendering: the VR is ray-cast on the CPU into a QImage (the GPU
+        # volume-ray shader renders black on Metal); draw it opaque over the pane
+        # and suppress the 2-D MPR overlay, then label the mode.
         if v._vr_on.get(key):
+            img = v._vr_img.get(key)
+            if img is not None:
+                p.drawImage(self.rect(), img)
+            else:
+                p.fillRect(self.rect(), QColor(0, 0, 0))
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -654,8 +647,8 @@ class _Overlay(QWidget):
         """Small corner caption for the VR pane: the active mode + how to drive
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
-        mode = "ISO" if v._vr_mode == "iso" else "MIP"
-        txt = t("VR {mode}  （ドラッグ=回転 / 右クリック=iso⇔MIP）", mode=mode)
+        mode = "MIP" if v._vr_mode == "mip" else "DVR"
+        txt = t("VR {mode}  （ドラッグ=回転 / 右クリック=DVR⇔MIP）", mode=mode)
         p.setFont(QFont("", 10, QFont.Weight.Bold))
         rect = QRectF(6, 4, max(10, w - 12), 18)
         p.setPen(QColor(0, 0, 0, 180))
@@ -2264,7 +2257,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the VTK VR adds are later phases (the shell's VR calls are all
         # hasattr-guarded, so the extra set_vr_* are safe no-ops for now).
         self._vr_on = {"A": False, "B": False}
-        self._vr_mode = "iso"                # 'iso' (shaded surface) | 'mip'
+        self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
+        self._vr_mode = "dvr"                # 'dvr' (CTA transfer func) | 'mip'
         self._vr_az = {"A": 0.0, "B": 0.0}   # orbit azimuth (rad)
         self._vr_el = {"A": 0.0, "B": 0.0}   # orbit elevation (rad)
         self._vr_drag = None                 # pane key of an in-progress VR orbit
@@ -3007,11 +3001,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
-        # End a VR orbit.
+        # End a VR orbit → recompute the full-quality image for the final angle.
         if self._vr_drag is not None:
+            k = self._vr_drag
             self._vr_drag = None
             self._drag_btn = None
             self._last = None
+            self._vr_refresh(k, lod=False)
             return
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
@@ -4853,12 +4849,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         produce a bad orientation (pane B rendered blank). cross(U,V) is always
         the proper right-handed third axis (= ±N); both give the same plane and
         the same U-right/V-up image, matching the VTK reslice output."""
-        # Volume Rendering owns the camera while active (an orbit around the
-        # volume centre) — keep it stable through any MPR refresh that reaches
-        # here, so W/L / paging don't snap the VR back to a slice view.
-        if self._vr_on.get(key):
-            self._vr_config_cam(key)
-            return
         p = self.pane[key]
         ur, vr, w, focal = self._cam_basis(key)
         R = np.column_stack([ur, vr, w]).astype(np.float64)
@@ -4885,77 +4875,140 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ur, vr, w, focal
 
     # ============================================================
-    # Volume Rendering (Phase 1: iso/MIP ray-cast + orbit drag).
-    # The VTK (Windows) viewer uses a composite DVR transfer function which
-    # pygfx 0.16 has no equivalent for, so Mac offers the two modes pygfx DOES
-    # provide: a shaded ISO surface (closest to the DVR look) and MIP. Right-
-    # click a VR pane to switch modes. Heart-crop / coronary tubes / territory
+    # Volume Rendering — CPU ray-cast (MIP / composite DVR), drawn as a QImage
+    # in the overlay. The GPU volume-ray shader (iso/MIP) renders black on
+    # wgpu-Metal regardless of camera / interpolation, so VR is computed on the
+    # CPU with the SAME proven machinery as the slab-MIP (which does display on
+    # Mac). DVR = the Windows-style transfer-function look; MIP = max projection.
+    # Right-click a VR pane to switch. Heart-crop / coronary tubes / territory
     # surfaces are later phases.
     # ============================================================
+    #: CTA transfer function (HU → opacity, HU → RGB) — mirrors _vr_cta_property.
+    _VR_OP_HU = np.array([-1000, 80, 150, 250, 400, 600, 1000, 2000], float)
+    _VR_OP_A = np.array([0.0, 0.0, 0.03, 0.12, 0.35, 0.60, 0.85, 0.95], float)
+    _VR_COL_HU = np.array([-1000, 100, 250, 450, 1000, 2000], float)
+    _VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
+    _VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
+    _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
+
     def _vr_center(self) -> np.ndarray:
         b = self._bounds
         return np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
                          (b[4] + b[5]) * 0.5], float)
 
-    def _vr_make_material(self):
-        """Build the ray-cast material for the current mode, windowed by W/L."""
-        lo = self._lvl - self._win * 0.5
-        hi = self._lvl + self._win * 0.5
-        if hi - lo < 1.0:
-            hi = lo + 1.0
-        # interpolation MUST be "nearest": the volume-ray shader samples inside a
-        # ray-march loop, and pygfx's "linear" path uses textureSample() (implicit
-        # LOD), which is INVALID in non-uniform control flow on wgpu-Metal → the
-        # whole shader renders nothing on Mac (black VR). "nearest" uses
-        # textureLoad() (no implicit LOD), valid on Metal. Vulkan/D3D tolerate
-        # either, so this is safe cross-platform.
-        if self._vr_mode == "mip":
-            return gfx.VolumeMipMaterial(clim=(lo, hi), interpolation="nearest")
-        # ISO: pygfx's threshold is a fraction of clim; pick the contrast/bone
-        # knee (~250 HU) mapped into [0,1] so the vessels + bone form the surface.
-        thr = (250.0 - lo) / max(1.0, hi - lo)
-        thr = min(0.95, max(0.05, thr))
-        return gfx.VolumeIsoMaterial(
-            threshold=float(thr), clim=(lo, hi), interpolation="nearest",
-            shininess=16.0, emissive="#0a0a0a")
-
-    def _vr_config_cam(self, key) -> None:
-        """Orbit a PERSPECTIVE camera around the volume by (azimuth, elevation)
-        and frame it with show_object (handles distance / aspect / clip range).
-        Perspective is required: the volume-ray shader's ray-setup is written for
-        a perspective projection and renders black under an ortho camera on Metal."""
-        p = self.pane[key]
-        if p.vr_cam is None or p.mesh is None:
-            return
+    def _vr_cpu_image(self, key, lod: bool = False):
+        """Ray-cast the volume on the CPU from the current orbit (az/el) into a
+        QImage: MIP (max HU) or composite DVR (front-to-back CTA transfer func).
+        Reuses _trilinear_sample — the exact slab-MIP sampling that works on Mac."""
+        vol = self._vol
+        if vol is None:
+            return None
+        sx, sy, sz = (float(d) for d in self._dims)
+        ctr = self._vr_center()
+        diag = float(self._diag) or 1.0
         az, el = self._vr_az[key], self._vr_el[key]
         ce, se = math.cos(el), math.sin(el)
         ca, sa = math.cos(az), math.sin(az)
-        back = _norm(np.array([ce * sa, se, ce * ca], float))   # centre → camera
-        up = np.array([0.0, 0.0, 1.0], float)                   # patient Z up
-        if abs(float(np.dot(back, up))) > 0.98:
-            up = np.array([0.0, 1.0, 0.0], float)
-        try:
-            p.vr_cam.show_object(
-                p.mesh, view_dir=tuple(float(c) for c in (-back)),
-                up=tuple(float(c) for c in up), scale=1.25)
-        except Exception:                                # noqa: BLE001
-            pass
+        back = _norm(np.array([ce * sa, se, ce * ca], float))    # centre → camera
+        up0 = np.array([0.0, 0.0, 1.0], float)
+        if abs(float(np.dot(back, up0))) > 0.98:
+            up0 = np.array([0.0, 1.0, 0.0], float)
+        right = _norm(np.cross(up0, back))
+        up = _norm(np.cross(back, right))
+        pane = self.pane[key]
+        pw = max(1, pane.canvas.width())
+        ph = max(1, pane.canvas.height())
+        aspect = pw / ph
+        ih = 120 if lod else 260
+        iw = max(1, int(round(ih * aspect)))
+        halfH = 0.62 * diag
+        halfW = halfH * aspect
+        SX, SY = np.meshgrid(np.linspace(-halfW, halfW, iw),
+                             np.linspace(halfH, -halfH, ih))     # screen y down
+        # Base world position per pixel, pre-divided into voxel coords so the
+        # per-plane step is a cheap add (nearest-neighbour sampling — fast, and
+        # plenty for a VR review; trilinear would ~3× the cost).
+        bvx = (ctr[0] + SX * right[0] + SY * up[0]) / sx
+        bvy = (ctr[1] + SX * right[1] + SY * up[1]) / sy
+        bvz = (ctr[2] + SX * right[2] + SY * up[2]) / sz
+        dvx, dvy, dvz = back[0] / sx, back[1] / sy, back[2] / sz
+        nz, ny, nx = vol.shape
+        R = 0.62 * diag
+        nmax = 70 if lod else 150
+        nplanes = int(max(16, min(nmax, round(2.0 * R / max(min(sx, sy, sz),
+                                                            2.0 * R / nmax)))))
+        ts = np.linspace(R, -R, nplanes)        # near → far (front-to-back)
+        ds = 2.0 * R / max(1, nplanes - 1)
+
+        def sample(t):
+            vx = np.rint(bvx + t * dvx).astype(np.intp)
+            vy = np.rint(bvy + t * dvy).astype(np.intp)
+            vz = np.rint(bvz + t * dvz).astype(np.intp)
+            oob = ((vx < 0) | (vx >= nx) | (vy < 0) | (vy >= ny)
+                   | (vz < 0) | (vz >= nz))
+            np.clip(vx, 0, nx - 1, out=vx)
+            np.clip(vy, 0, ny - 1, out=vy)
+            np.clip(vz, 0, nz - 1, out=vz)
+            return vol[vz, vy, vx], oob
+
+        win = max(1e-6, self._win)
+        lvl = self._lvl
+        if self._vr_mode == "dvr":
+            # Precompute HU→opacity / HU→RGB LUTs (W/L shifts the ramp) and index
+            # into them per plane — far cheaper than np.interp every step.
+            shift = lvl - 300.0
+            hus = np.linspace(_HU_LO, _HU_HI, 512)
+            alut = (np.interp(hus, self._VR_OP_HU + shift, self._VR_OP_A)
+                    * (ds / 0.8)).astype(np.float32)
+            rlut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_R)
+            glut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_G)
+            blut = np.interp(hus, self._VR_COL_HU + shift, self._VR_COL_B)
+            inv = 511.0 / (_HU_HI - _HU_LO)
+            acc = np.zeros((ih, iw, 3), np.float32)
+            aca = np.zeros((ih, iw), np.float32)
+            for t in ts:
+                hu, oob = sample(t)
+                idx = ((hu - _HU_LO) * inv).astype(np.intp)
+                np.clip(idx, 0, 511, out=idx)
+                a = alut[idx]
+                a[oob] = 0.0
+                w = a * (1.0 - aca)
+                acc[..., 0] += w * rlut[idx]
+                acc[..., 1] += w * glut[idx]
+                acc[..., 2] += w * blut[idx]
+                aca += w
+                if float(aca.min()) > 0.97:     # early-ray termination
+                    break
+            rgb = (np.clip(acc, 0.0, 1.0) * 255.0).astype(np.uint8)
+        else:                                   # MIP
+            mip = np.full((ih, iw), _HU_LO, np.float32)
+            for t in ts:
+                hu, oob = sample(t)
+                hu = np.where(oob, _HU_LO, hu)
+                np.maximum(mip, hu, out=mip)
+            g = np.clip((mip - (lvl - win / 2.0)) / win, 0.0, 1.0)
+            gg = (g * 255.0).astype(np.uint8)
+            rgb = np.stack([gg, gg, gg], axis=2)
+        rgb = np.ascontiguousarray(rgb)
+        return QImage(rgb.data, iw, ih, 3 * iw,
+                      QImage.Format.Format_RGB888).copy()
+
+    def _vr_refresh(self, key, lod: bool = False) -> None:
+        self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
+        self._overlay[key].update()
 
     def _vr_rotate(self, key, dx, dy) -> None:
         self._vr_az[key] -= dx * 0.01
         self._vr_el[key] += dy * 0.01
         self._vr_el[key] = max(-1.45, min(1.45, self._vr_el[key]))
-        self._vr_config_cam(key)
-        self.pane[key].render()
+        self._vr_refresh(key, lod=True)         # fast while dragging
 
     def _vr_toggle_mode(self) -> None:
-        """Right-click on a VR pane: switch iso ⇄ MIP (compare the two)."""
-        self._vr_mode = "mip" if self._vr_mode == "iso" else "iso"
+        """Right-click on a VR pane: switch DVR ⇄ MIP (compare the two)."""
+        self._vr_mode = "mip" if self._vr_mode == "dvr" else "dvr"
         for k in ("A", "B"):
             if self._vr_on.get(k):
-                self.pane[k].show_vr(self._vr_make_material())
-                self.pane[k].render()
-                self._overlay[k].update()
+                self._vr_refresh(k, lod=False)
 
     def _vr_pane_key(self) -> str:
         for k in ("B", "A"):
@@ -4970,28 +5023,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_on[key] = on
         p = self.pane[key]
         if on:
-            # Make sure the pane actually holds the GPU volume (a reused pane in
-            # some review layouts can have no mesh) — else the material swap is a
-            # no-op and the VR renders black.
-            if getattr(p, "mesh", None) is None:
-                p.set_volume(self._vol, self._dims)
-            if p.vr_cam is None:
-                p.vr_cam = gfx.PerspectiveCamera(40)   # perspective for VR
-            p.show_vr(self._vr_make_material())
-            self._vr_config_cam(key)
+            self._vr_refresh(key, lod=False)    # CPU image, drawn by the overlay
         else:
-            p.vr_cam = None                  # back to the ortho MPR camera
-            p.show_vr(None)                  # restore the MPR slice material
-            self._config_cam(key)            # restore the MPR camera
-        p.render()
-        # Belt-and-suspenders: the synchronous force_draw above can be dropped by
-        # the re-entrancy guard when VR is toggled from the Coronary Tree window
-        # mid-draw (the macOS force_draw → processEvents path), leaving no painted
-        # frame. Schedule a clean async draw so the VR always appears.
-        try:
-            p.canvas.request_draw()
-        except Exception:                        # noqa: BLE001
-            pass
+            self._vr_img.pop(key, None)
+            self._config_cam(key)               # restore the MPR camera
+            p.render()
         self._overlay[key].update()
 
     # ---- VR API called by the shell / Coronary Tree VR row ----
