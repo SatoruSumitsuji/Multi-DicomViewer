@@ -766,7 +766,8 @@ class _Overlay(QWidget):
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
         gpu = v.pane[key].vr_volume is not None
-        txt = (t("VR GPU-MIP  （ドラッグ=回転）") if gpu
+        txt = (t("VR  （ドラッグ=回転 / Alt+ドラッグ=拡大・回旋 / Wクリック=初期化）")
+               if gpu
                else t("VR {mode}（CPU）  （ドラッグ=回転）",
                       mode=("MIP" if v._vr_mode == "mip" else "DVR")))
         p.setFont(QFont("", 10, QFont.Weight.Bold))
@@ -793,6 +794,18 @@ class _Overlay(QWidget):
                 if r is not None:
                     return r
             return v._vr_project_pts(key, pts)
+        # Depth of the volume centre, so vessels on the FAR side (behind centre)
+        # can be hidden — the near-side tree alone reads the orientation clearly.
+        cdepth = None
+        if gpu:
+            cr = v._vr_project_pts_gpu(key, [v._vr_center()])
+            if cr is not None:
+                cdepth = float(cr[2][0])
+
+        def is_far(d0, d1):
+            if gpu and cdepth is not None:
+                return (d0 > cdepth) and (d1 > cdepth)   # both beyond centre
+            return not ((d0 > 0.0) or (d1 > 0.0))        # CPU: behind centre
         spec = getattr(v, "_coro_overlay", None)
         if spec:
             for ves in spec:
@@ -804,8 +817,10 @@ class _Overlay(QWidget):
                 width = 3.0 if sel else 2.2
                 sx, sy, d = project(pts)
                 for i in range(len(sx) - 1):
-                    near = (d[i] > 0.0) or (d[i + 1] > 0.0)
-                    a = (255 if sel else 220) if near else (85 if sel else 55)
+                    far = is_far(d[i], d[i + 1])
+                    if far:
+                        continue                 # far side hidden (user request)
+                    a = 255 if sel else 220
                     p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], a), width))
                     p.drawLine(QPointF(sx[i], sy[i]),
                                QPointF(sx[i + 1], sy[i + 1]))
@@ -2445,6 +2460,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: the drag always matches the cursor regardless of the current view.
         self._vr_rot = {"A": np.array([0.0, 0.0, 0.0, 1.0], float),
                         "B": np.array([0.0, 0.0, 0.0, 1.0], float)}
+        self._vr_zoom = {"A": 1.0, "B": 1.0}   # Alt+drag zoom factor (>1 = in)
         self._vr_drag = None                 # pane key of an in-progress VR orbit
         self._vr_shell = True                # stored for Phase 2 (crop); unused
         self._vr_shell_mm = 10.0
@@ -3083,7 +3099,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._vr_drag is not None:
             if self._drag_btn == 1 and ev.get("buttons"):
                 lx, ly = self._last or (ev["x"], ev["y"])
-                self._vr_rotate(self._vr_drag, ev["x"] - lx, ev["y"] - ly)
+                alt = "Alt" in (ev.get("modifiers") or ())
+                self._vr_rotate(self._vr_drag, ev["x"] - lx, ev["y"] - ly,
+                                alt=alt)
             self._last = (ev["x"], ev["y"])
             return
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
@@ -3190,6 +3208,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._last = None
             if self.pane[k].vr_volume is None:
                 self._vr_refresh(k, lod=False)
+            else:
+                # A deferred redraw settles the occasional dropped/blank present
+                # at the end of a fast drag (the rare black frame).
+                try:
+                    self.pane[k].canvas.request_draw()
+                    QTimer.singleShot(16, lambda kk=k:
+                                      self.pane[kk].canvas.request_draw())
+                except Exception:                        # noqa: BLE001
+                    pass
             return
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
@@ -3270,6 +3297,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Right double-click is the high-res ("force crisp") gesture, detected
         # from consecutive right-downs in _on_down — never recenter on it.
         if ev.get("button") == 2:
+            return
+        # VR: a left double-click resets to the initial view (orientation + zoom).
+        if self._vr_on.get(key) and self.pane[key].vr_volume is not None:
+            self._vr_rot[key] = np.array([0.0, 0.0, 0.0, 1.0], float)
+            self._vr_zoom[key] = 1.0
+            self._vr_config_cam_gpu(key)
+            try:
+                self.pane[key].canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                self.pane[key].render()
+            self._overlay[key].update()
             return
         # Alt OR Shift + double-click recentres (moves the centreline
         # intersection to the clicked point) even while Measuring — Alt matches
@@ -5324,10 +5362,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         q = self._vr_rot[key]
         back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
         up = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
+        scale = 1.3 / max(0.3, min(6.0, self._vr_zoom[key]))   # Alt+drag zoom
         try:
             p.vr_cam.show_object(
                 p.vr_volume, view_dir=tuple(float(-c) for c in back),
-                up=tuple(float(c) for c in up), scale=1.3)
+                up=tuple(float(c) for c in up), scale=scale)
         except Exception:                                # noqa: BLE001
             pass
 
@@ -5338,9 +5377,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         tex = gfx.Texture(np.ascontiguousarray(vp), dim=3)
         geom = gfx.Geometry(grid=tex)
         vmesh = gfx.Volume(geom, self._vr_make_gpu_material())
-        sx, sy, sz = self._dims
-        vmesh.local.scale = (float(sx), float(sy), float(sz))
-        vmesh.local.position = (-float(sx), -float(sy), -float(sz))
+        sx, sy, sz = (float(d) for d in self._dims)
+        # Mirror the volume about world X so the VR matches the MPR / anatomy
+        # (the GPU render was left-right flipped). The coronary overlay negates X
+        # to stay aligned (see _vr_project_pts_gpu).
+        vmesh.local.scale = (-sx, sy, sz)
+        vmesh.local.position = (sx, -sy, -sz)
         if p.mesh is not None:
             p.mesh.visible = False                   # hide the MPR slice
         p.vr_volume = vmesh
@@ -5378,7 +5420,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam = p.vr_cam
         if cam is None or p.vr_volume is None:
             return None
-        pts = np.asarray(pts3d, float).reshape(-1, 3)
+        pts = np.asarray(pts3d, float).reshape(-1, 3).copy()
+        pts[:, 0] = -pts[:, 0]           # match the X-mirrored volume geometry
         homo = np.hstack([pts, np.ones((len(pts), 1))])
         ndc = homo @ np.asarray(cam.camera_matrix, float).T
         w = ndc[:, 3]
@@ -5391,23 +5434,32 @@ class CTViewer(CPRMixin, AbstractViewer):
         sy = (0.5 - ny * 0.5) * ph      # NDC y-up → screen y-down
         return sx, sy, w
 
-    def _vr_rotate(self, key, dx, dy) -> None:
-        # TRACKBALL: rotate about the camera's CURRENT up / right axes so the drag
-        # always matches the cursor at any orientation (no turntable gimbal). The
-        # volume is already on the GPU → just a camera move + redraw (real-time).
+    def _vr_rotate(self, key, dx, dy, alt: bool = False) -> None:
+        # Default: TRACKBALL — rotate about the camera's CURRENT up / right axes
+        # so the drag matches the cursor at any orientation (no gimbal). With
+        # Alt: horizontal drag = SPIN (roll about the view axis), vertical drag =
+        # ZOOM (dolly). The volume is on the GPU → just a camera move + redraw.
         p = self.pane[key]
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
         q = self._vr_rot[key]
-        right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
-        up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
-        # A full pane width / height of drag = ~180° (direct 1:1 grab feel).
-        ax = (dx / pw) * math.pi          # horizontal drag → spin about up
-        ay = (dy / ph) * math.pi          # vertical drag → tilt about right
-        dq = la.quat_mul(la.quat_from_axis_angle(up_w, ax),
-                         la.quat_from_axis_angle(right_w, ay))
-        q = la.quat_mul(dq, q)
-        self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
+        if alt:
+            back_w = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
+            roll = (dx / pw) * math.pi                 # horizontal → spin (roll)
+            q = la.quat_mul(la.quat_from_axis_angle(back_w, roll), q)
+            self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
+            self._vr_zoom[key] = float(min(6.0, max(0.3,
+                self._vr_zoom[key] * math.exp(-dy * 0.006))))   # vertical → zoom
+        else:
+            right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
+            up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
+            # A full pane width / height of drag = ~180° (direct 1:1 grab feel).
+            ax = (dx / pw) * math.pi          # horizontal drag → spin about up
+            ay = (dy / ph) * math.pi          # vertical drag → tilt about right
+            dq = la.quat_mul(la.quat_from_axis_angle(up_w, ax),
+                             la.quat_from_axis_angle(right_w, ay))
+            q = la.quat_mul(dq, q)
+            self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
         self._vr_config_cam_gpu(key)
         # ASYNC draw (ondemand) — NOT the synchronous force_draw, whose macOS
         # re-entrancy guard dropped frames during a fast drag (the black flashes).
