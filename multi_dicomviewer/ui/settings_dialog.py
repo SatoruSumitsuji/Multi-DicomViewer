@@ -261,7 +261,7 @@ class SettingsDialog(QDialog):
         coform = QFormLayout(gb_coro)
         cnote2 = QLabel(t(
             "冠動脈の見た目を設定します（アプリ修正不要）。太さ・LM比・境界(ハロー)の"
-            "色/透過度・各系統/ターゲットの色。VRの太さ/ハローはWindowsのみ有効。"))
+            "色/透過度・各系統/ターゲットの色。VRの太さ/ハローはWindows・Mac両方で有効。"))
         cnote2.setWordWrap(True)
         coform.addRow(cnote2)
         # 太さ (直径)
