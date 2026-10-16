@@ -2477,8 +2477,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_rot = {"A": np.array([0.0, 0.0, 0.0, 1.0], float),
                         "B": np.array([0.0, 0.0, 0.0, 1.0], float)}
         self._vr_zoom = {"A": 1.0, "B": 1.0}   # Alt+drag zoom factor (>1 = in)
-        self._vr_pan = {"A": [0.0, 0.0], "B": [0.0, 0.0]}   # Alt+L pan (world mm)
-        self._vr_drag_mode = None              # rotate | move | zoomspin
+        self._vr_pan = {"A": [0.0, 0.0], "B": [0.0, 0.0]}   # pan (world mm)
+        self._vr_drag_mode = None              # rotate | move | zoom | spin
+        self._vr_flip = {"A": [False, False], "B": [False, False]}  # [H, V]
         self._vr_drag = None                 # pane key of an in-progress VR orbit
         self._vr_shell = True                # stored for Phase 2 (crop); unused
         self._vr_shell_mm = 10.0
@@ -2886,15 +2887,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
-        # Volume Rendering gestures: a plain Left-drag rotates (trackball). An
-        # Alt+Left-drag applies the ACTIVE toolbar tool (Zoom / Move / Spin). A
-        # plain right-click still falls through to the normal menu below.
+        # Volume Rendering gestures (Windows parity): a plain Left-drag applies
+        # the ACTIVE toolbar tool — Rotate (trackball) / Zoom / Move / Spin — no
+        # Alt needed. A plain right-click still falls through to the normal menu.
         if self._vr_on.get(key) and self._drag_btn == 1:
-            _alt = "Alt" in (ev.get("modifiers") or ())
             self._vr_drag = key
-            self._vr_drag_mode = (
-                {"ZOOM": "zoom", "MOVE": "move", "SPIN": "spin"}.get(
-                    self._tool, "move") if _alt else "rotate")
+            self._vr_drag_mode = {
+                "ZOOM": "zoom", "MOVE": "move", "SPIN": "spin",
+                "ROTATE": "rotate"}.get(self._tool, "rotate")
             return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
@@ -3325,6 +3325,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_rot[key] = np.array([0.0, 0.0, 0.0, 1.0], float)
             self._vr_zoom[key] = 1.0
             self._vr_pan[key] = [0.0, 0.0]
+            if any(self._vr_flip[key]):
+                self._vr_flip[key] = [False, False]
+                self._vr_gpu_enable(key)         # rebuild un-flipped texture
             self._vr_config_cam_gpu(key)
             try:
                 self.pane[key].canvas.request_draw()
@@ -4432,6 +4435,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         Applied incrementally to the current display axes (composable).
         In short-axis (CPR) mode the same buttons transform the cross-section
         via the CPR display transform T instead of the 2-D axes."""
+        # VR: Rt90/Lt90 roll the camera; Flip-H/V mirror the volume.
+        vk = self._vr_pane_key()
+        if self._vr_on.get(vk) and self.pane[vk].vr_volume is not None:
+            self._vr_transform(vk, kind)
+            return
         if self._cpr is not None:
             M = self._XFORM_2X2.get(kind)
             if M is None:
@@ -5346,15 +5354,21 @@ class CTViewer(CPRMixin, AbstractViewer):
     # on wgpu-Metal). The heart crop is baked into the texture (non-heart → air);
     # rotation just moves the GPU camera, so it is real-time. Grayscale MIP first
     # (Step 1 — confirm it renders on Metal); colour + coronary overlay follow.
-    def _vr_u8_padded(self):
+    def _vr_u8_padded(self, key="B"):
         """HU volume → uint8 (−1000..2000 HU ↦ 0..255), heart-cropped (non-mask →
-        0 = air), padded by one air voxel (matches set_volume's geometry)."""
+        0 = air), padded by one air voxel (matches set_volume's geometry). Flip-H
+        / Flip-V mirror the TEXTURE DATA (not the geometry — a negative scale
+        flips winding and renders black on Metal); the overlay mirrors to match."""
         vol = self._vol
         u8 = np.clip((vol - _HU_LO) / (_HU_HI - _HU_LO) * 255.0,
                      0, 255).astype(np.uint8)
         if self._vr_mask is not None:
             u8 = np.where(self._vr_mask, u8, 0).astype(np.uint8)
-        # (Left-right orientation: no texture flip — the overlay matches.)
+        fh, fv = self._vr_flip.get(key, [False, False])
+        if fh:
+            u8 = u8[:, :, ::-1]                 # mirror X (left-right)
+        if fv:
+            u8 = u8[:, ::-1, :]                 # mirror Y (top-bottom)
         return np.ascontiguousarray(np.pad(u8, 1, mode="constant",
                                            constant_values=0))
 
@@ -5406,7 +5420,7 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _vr_gpu_enable(self, key) -> None:
         p = self.pane[key]
         self._vr_gpu_disable(key, restore=False)     # clear any previous VR vol
-        vp = self._vr_u8_padded()
+        vp = self._vr_u8_padded(key)
         tex = gfx.Texture(np.ascontiguousarray(vp), dim=3)
         geom = gfx.Geometry(grid=tex)
         vmesh = gfx.Volume(geom, self._vr_make_gpu_material())
@@ -5455,6 +5469,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if cam is None or p.vr_volume is None:
             return None
         pts = np.asarray(pts3d, float).reshape(-1, 3)
+        # Mirror the overlay to match any Flip-H / Flip-V applied to the texture
+        # (reflect about the volume's X / Y centre).
+        fh, fv = self._vr_flip.get(key, [False, False])
+        if fh or fv:
+            pts = pts.copy()
+            if fh:
+                pts[:, 0] = (self._vol.shape[2] - 1) * float(self._dims[0]) \
+                    - pts[:, 0]
+            if fv:
+                pts[:, 1] = (self._vol.shape[1] - 1) * float(self._dims[1]) \
+                    - pts[:, 1]
         homo = np.hstack([pts, np.ones((len(pts), 1))])
         ndc = homo @ np.asarray(cam.camera_matrix, float).T
         w = ndc[:, 3]
@@ -5511,6 +5536,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.render()
         self._overlay[key].update()
 
+    def _vr_transform(self, key, kind) -> None:
+        """Rt90/Lt90/Flip-H/Flip-V on the VR. Rt90/Lt90 roll the camera ±90°;
+        Flip-H/V mirror the volume (rebuild the flipped texture)."""
+        if kind in ("rt90", "lt90"):
+            q = self._vr_rot[key]
+            back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
+            ang = -math.pi / 2 if kind == "rt90" else math.pi / 2
+            q = la.quat_mul(la.quat_from_axis_angle(back, ang), q)
+            self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
+            self._vr_config_cam_gpu(key)
+            try:
+                self.pane[key].canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                self.pane[key].render()
+            self._overlay[key].update()
+        elif kind in ("fliph", "flipv"):
+            fl = self._vr_flip[key]
+            if kind == "fliph":
+                fl[0] = not fl[0]
+            else:
+                fl[1] = not fl[1]
+            self._vr_gpu_enable(key)                     # rebuild flipped texture
+            self._overlay[key].update()
+
     def _vr_refresh(self, key, lod: bool = False) -> None:
         """Re-apply VR after a state change (W/L, crop, territory). For the GPU
         volume: update clim / rebuild the cropped texture, reframe, redraw."""
@@ -5543,9 +5592,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             # The heart crop (scipy EDT shell) is the slow part of turning VR on —
             # compute it behind an animated busy/progress window so it doesn't
             # look hung, then build the GPU volume.
+            self._vr_flip[key] = [False, False]
             self._vr_mask = self._run_busy(
                 t("VR"), t("VR構築中…"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
+            if self._tool not in ("ROTATE", "ZOOM", "MOVE", "SPIN"):
+                self._set_tool("ROTATE")          # sensible default VR tool
         else:
             self._vr_img.pop(key, None)
             self._vr_mask = None
