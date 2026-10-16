@@ -12033,6 +12033,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if M is None:
             return
         p = self.pane[key]
+        reflected = float(np.linalg.det(M[:3, :3])) < 0.0
+        # The halo tube shows its SILHOUETTE by culling front faces (so only the
+        # back-facing rim draws). A reflection flips winding, which would make it
+        # cull the back and draw the WHOLE tube as a black 50% overlay — the
+        # "coronary lines go dark after Flip" the user saw. Flip the cull to match
+        # so the rim stays a thin outline and the colour reads at full brightness.
+        halo = getattr(p, "vr_coro_halo_actor", None)
+        if halo is not None:
+            hp = halo.GetProperty()
+            hp.SetFrontfaceCulling(not reflected)
+            hp.SetBackfaceCulling(reflected)
         vm = self._np_to_vtkmatrix(M)
         vol = getattr(p, "vr_volume", None)
         for a in self._vr_actors(key):
