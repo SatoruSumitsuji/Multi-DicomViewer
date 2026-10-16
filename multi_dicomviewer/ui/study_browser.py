@@ -359,13 +359,14 @@ class StudyBrowser(QTreeWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setColumnCount(7)
+        self.setColumnCount(8)
         self.setHeaderLabels([
             t("Date/Time"),
             t("Series No"),
             t("Instance No"),
             t("Type"),
             t("Images"),
+            t("File Size"),
             t("Description"),
             t("File Path"),
         ])
@@ -376,7 +377,7 @@ class StudyBrowser(QTreeWidget):
         hdr.setMinimumSectionSize(56)
         # Col 0 is the tree column (holds the Patient/Study hierarchy too),
         # so it needs to be wide enough not to crowd "Series No".
-        for col, w in enumerate((210, 90, 70, 70, 80, 240, 600)):
+        for col, w in enumerate((210, 90, 70, 70, 80, 90, 240, 600)):
             self.setColumnWidth(col, w)
         # "Type" (col 3 = series.kind) is hidden: it's redundant with the
         # modality kind already shown on each Study group row, and not useful
@@ -451,6 +452,7 @@ class StudyBrowser(QTreeWidget):
             t("Instance No"),
             t("Type"),
             t("Images"),
+            t("File Size"),
             t("Description"),
             t("File Path"),
         ])
@@ -559,6 +561,7 @@ class StudyBrowser(QTreeWidget):
                     ino,
                     series.kind,
                     f"{series.image_count} img",
+                    series.size_mb_str,
                     series.description or "",
                     " ; ".join(series.files),
                 ])

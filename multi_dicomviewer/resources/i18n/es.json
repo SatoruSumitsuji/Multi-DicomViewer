@@ -240,6 +240,7 @@
   "Exporting MP4…": "Exportando MP4…",
   "Failed to identify the arc from points A1, AC, A2": "No se pudo identificar el arco a partir de los puntos A1, AC, A2",
   "File Path": "Ruta del archivo",
+  "File Size": "Tamaño del archivo",
   "Filename components (joined with '_')": "Componentes del nombre de archivo (unidos con '_')",
   "Files": "Archivos",
   "Files are not deleted; just removed from the list so they can no longer be viewed.": "Los archivos no se eliminan; solo se quitan de la lista para que ya no puedan visualizarse.",
