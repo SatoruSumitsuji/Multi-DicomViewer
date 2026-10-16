@@ -5491,9 +5491,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_pan[key][0] -= dx * g
             self._vr_pan[key][1] += dy * g
         elif mode == "zoom":
-            # Vertical drag dollies (drag up = zoom in).
+            # Vertical drag dollies: drag DOWN = zoom in, UP = zoom out (user).
             self._vr_zoom[key] = float(min(6.0, max(0.3,
-                self._vr_zoom[key] * math.exp(-dy * 0.006))))
+                self._vr_zoom[key] * math.exp(dy * 0.006))))
         elif mode == "spin":
             back_w = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
             roll = (dx / pw) * math.pi                 # horizontal → roll
