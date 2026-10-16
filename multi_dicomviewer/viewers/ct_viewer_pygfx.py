@@ -429,12 +429,15 @@ _VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
 _VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
 _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
 
-#: VR coronary line thickness (mm), matching the Windows VTK 3-D tube diameter
-#: (_VR_CORO_R = 0.765*0.8*0.8 mm radius → ×2 diameter). Windows renders real
-#: mm-wide tubes that grow with zoom; the Mac overlay is a flat 2-D line, so we
-#: convert this mm width to pixels at the current VR scale each frame instead of
-#: using a fixed pixel width (which looked far thinner/constant vs Windows).
-_VR_CORO_DIAM_MM = 0.765 * 0.8 * 0.8 * 2.0          # ≈0.98 mm
+#: VR coronary line thickness (mm), matching the Windows VTK 3-D tube DIAMETERS
+#: (_VR_CORO_R / _VR_CORO_R_LM radii → ×2). Windows renders real mm-wide tubes
+#: (with a dark halo rim) that grow with zoom; the Mac overlay is a flat 2-D
+#: line, so we convert these mm widths to pixels at the current VR scale each
+#: frame (a fixed pixel width looked far thinner than Windows) AND draw a dark
+#: rim under the coloured core so the line reads as bold like the Windows tube.
+_VR_CORO_DIAM_MM = 0.765 * 0.8 * 0.8 * 2.0          # ≈0.98 mm — branches
+_VR_CORO_DIAM_MM_LM = 0.765 * 1.5 * 0.8 * 2.0       # ≈1.84 mm — LM trunk (~1.9×)
+_VR_CORO_HALO_MM = 0.30                             # dark rim beyond the tube
 
 
 def _vr_render_image(p):
@@ -850,24 +853,41 @@ class _Overlay(QWidget):
                         pts = ves.get("points")
                 rgb = _hex_to_rgb(ves.get("color"))
                 sel = bool(ves.get("selected"))
-                # mm width → px at the current VR scale (matches Windows tubes);
-                # fall back to the old fixed px if the probe failed. Selected
-                # vessels get a modest bump for emphasis.
+                is_lm = (ves.get("role") == "LM")
+                # mm diameter → px at the current VR scale (matches the Windows
+                # tube, which grows with zoom), with the LM trunk ~1.9× thicker.
+                # A fixed-px fallback is used only if the scale probe failed.
+                diam_mm = _VR_CORO_DIAM_MM_LM if is_lm else _VR_CORO_DIAM_MM
                 if pxmm and pxmm > 1e-6:
-                    width = max(1.0, _VR_CORO_DIAM_MM * pxmm
-                                * (1.3 if sel else 1.0))
+                    core = max(1.5, diam_mm * pxmm)
+                    halo = core + 2.0 * _VR_CORO_HALO_MM * pxmm
                 else:
-                    width = 3.0 if sel else 2.2
+                    core = 3.2 if is_lm else 2.2
+                    halo = core + 2.0
+                if sel:
+                    core *= 1.25
+                    halo *= 1.15
                 sx, sy, d = project(pts)
                 # Draw the WHOLE vessel (far-side cull disabled). Still batched as
                 # ONE polyline per vessel — far fewer QPainter calls than a
-                # per-segment drawLine, which is what made rotation lag.
-                p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
-                                     255 if sel else 220), width))
+                # per-segment drawLine, which is what made rotation lag. A dark
+                # rim is drawn first, then the coloured core on top (round caps /
+                # joins → a smooth tube look), mirroring the Windows tube+halo.
                 if len(sx) >= 2:
-                    p.drawPolyline(QPolygonF([
+                    poly = QPolygonF([
                         QPointF(float(sx[k]), float(sy[k]))
-                        for k in range(len(sx))]))
+                        for k in range(len(sx))])
+                    p.setPen(QPen(QColor(0, 0, 0, 170), halo,
+                                  Qt.PenStyle.SolidLine,
+                                  Qt.PenCapStyle.RoundCap,
+                                  Qt.PenJoinStyle.RoundJoin))
+                    p.drawPolyline(poly)
+                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
+                                         255 if sel else 235), core,
+                                  Qt.PenStyle.SolidLine,
+                                  Qt.PenCapStyle.RoundCap,
+                                  Qt.PenJoinStyle.RoundJoin))
+                    p.drawPolyline(poly)
                 name = ves.get("name", "")
                 if name and ves.get("vid") in getattr(v, "_coro_names", ()):
                     _draw_outlined_text(
@@ -2927,7 +2947,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_drag = key
             self._vr_drag_mode = {
                 "ZOOM": "zoom", "MOVE": "move", "SPIN": "spin",
-                "ROTATE": "rotate"}.get(self._tool, "rotate")
+                "WL": "wl", "ROTATE": "rotate"}.get(self._tool, "rotate")
             return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
@@ -5434,7 +5454,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         q = self._vr_rot[key]
         back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
         up = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
-        scale = 1.3 / max(0.3, min(6.0, self._vr_zoom[key]))   # Alt+drag zoom
+        # Base framing 1.3, divided by 1.5 so the initial VR model is 1.5×
+        # bigger (smaller show_object scale = object fills more of the view).
+        scale = (1.3 / 1.5) / max(0.3, min(6.0, self._vr_zoom[key]))
         try:
             p.vr_cam.show_object(
                 p.vr_volume, view_dir=tuple(float(-c) for c in back),
@@ -5553,6 +5575,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             roll = (dx / pw) * math.pi                 # horizontal → roll
             q = la.quat_mul(la.quat_from_axis_angle(back_w, roll), q)
             self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
+        elif mode == "wl":
+            # Window/Level, same feel as the MPR WL drag (→ widen window,
+            # ↑ brighter). Retune the volume material's clim (no camera change).
+            self._win = max(1.0, self._win + dx * 2.0)
+            self._lvl = self._lvl - dy * 2.0
+            clim = self._vr_clim_u8()
+            for k2 in ("A", "B"):
+                vol = self.pane[k2].vr_volume
+                if vol is not None and vol.material is not None:
+                    vol.material.clim = clim
         else:                                          # trackball rotate
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
@@ -6092,6 +6124,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if t == "WL":
             self._win = max(1.0, self._win + dx * 2.0)
             self._lvl = self._lvl - dy * 2.0
+            # Keep any active VR volume's window in step (arrow-key WL etc.).
+            if self._vr_on.get(which):
+                vol = self.pane[which].vr_volume
+                if vol is not None and vol.material is not None:
+                    vol.material.clim = self._vr_clim_u8()
         elif t == "PAGING":
             if self._mode == "2D":
                 # 2-D: page integer native slices, ~6 px of drag per slice.
