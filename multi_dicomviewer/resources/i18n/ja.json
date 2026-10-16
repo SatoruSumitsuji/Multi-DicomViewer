@@ -278,6 +278,7 @@
   "Exporting MP4…": "MP4 をエクスポート中…",
   "Failed to identify the arc from points A1, AC, A2": "点 A1, AC, A2 から円弧を特定できませんでした",
   "File Path": "ファイルパス",
+  "File Size": "ファイルサイズ",
   "Filename components (joined with '_')": "ファイル名の構成要素（'_'で連結）",
   "Files": "ファイル数",
   "Files are not deleted; just removed from the list so they can no longer be viewed.": "ファイルは削除されません。一覧から除去され、表示できなくなるだけです。",

@@ -6,6 +6,7 @@ side by side and keep them in sync.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
@@ -82,10 +83,39 @@ class Series:
     #: (PowerPoint "hide slide" style). Not persisted — a folder reload
     #: clears it. Survives in-session repopulates (same Series object reused).
     hidden: bool = False
+    #: Lazily-computed cache of the total on-disk size (bytes) of `files`.
+    #: Not an init arg and excluded from equality/repr; filled on first
+    #: access to size_bytes and reused across in-session repopulates
+    #: (the same Series object is kept), so the per-file stat runs once.
+    _size_cache: Optional[int] = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def kind(self) -> str:
         return self.dicom_modality or self.modality.value
+
+    @property
+    def size_bytes(self) -> int:
+        """Total on-disk size of every file in the series, in bytes (cached).
+        Files that are missing or unreadable count as 0."""
+        if self._size_cache is None:
+            total = 0
+            for f in self.files:
+                try:
+                    total += os.path.getsize(f)
+                except OSError:
+                    pass
+            self._size_cache = total
+        return self._size_cache
+
+    @property
+    def size_mb_str(self) -> str:
+        """Series size as 'X.Y MB' (1 decimal place) for the Studies list,
+        or '' when the series has no files on disk."""
+        if not self.files:
+            return ""
+        return f"{self.size_bytes / (1024.0 * 1024.0):.1f} MB"
 
     @property
     def image_count(self) -> int:
