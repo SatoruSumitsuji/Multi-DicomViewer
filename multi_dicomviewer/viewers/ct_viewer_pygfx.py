@@ -720,6 +720,18 @@ class _Overlay(QWidget):
             # Coronary tree + targets: projected through the GPU camera (or the
             # CPU basis in fallback). The rotating tree is the orientation cue.
             self._paint_vr_coronary(p, key, w, h)
+            # C-arm angle readout (LAO/CRA, bottom-centre) — right-click it to
+            # type a target angle, like the MPR panes.
+            ang = v._angio_angle(key)
+            if ang:
+                fb = QFont("monospace", 18)
+                fb.setBold(True)
+                p.setFont(fb)
+                _draw_outlined_text(
+                    p, QRectF(0, h - 42, w, 36),
+                    int(Qt.AlignmentFlag.AlignHCenter
+                        | Qt.AlignmentFlag.AlignBottom),
+                    ang, QColor(255, 230, 0), width=2.0)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -5560,6 +5572,50 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_gpu_enable(key)                     # rebuild flipped texture
             self._overlay[key].update()
 
+    def _vr_angio_vals(self, key):
+        """The VR view's (primary, secondary) C-arm angles from the camera's
+        viewing normal (toward the camera = local +Z), decomposed in patient
+        space the same way as the MPR readout. (prim: LAO+/RAO−, sec: CRA+/CAU−.)"""
+        back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]),
+                                     self._vr_rot[key])
+        n = self._pbasis @ np.asarray(back, float)
+        nrm = float(np.linalg.norm(n))
+        if nrm < 1e-9:
+            return None
+        n = n / nrm
+        nx, ny, nz = float(n[0]), float(n[1]), float(n[2])
+        axial = math.hypot(nx, ny)
+        prim = 0.0 if axial < 1e-9 else math.degrees(math.atan2(nx, -ny))
+        sec = math.degrees(math.atan2(nz, axial))
+        return int(round(prim)), int(round(sec))
+
+    def _vr_set_angio(self, key, prim_deg, sec_deg) -> None:
+        """Orient the VR camera to the given C-arm angle (inverse of
+        _vr_angio_vals), patient-superior as the up reference."""
+        pr, sr = math.radians(prim_deg), math.radians(sec_deg)
+        axial = math.cos(sr)
+        n_pat = np.array([axial * math.sin(pr), -axial * math.cos(pr),
+                          math.sin(sr)], float)
+        back = self._pbasis.T @ n_pat                 # patient → world
+        back = _norm(back)
+        sup = _norm(self._pbasis.T @ np.array([0.0, 0.0, 1.0]))
+        up0 = sup - back * float(np.dot(sup, back))
+        up = _norm(up0) if np.linalg.norm(up0) > 1e-6 else \
+            _norm(np.cross(back, np.array([1.0, 0.0, 0.0])))
+        right = _norm(np.cross(up, back))
+        up = _norm(np.cross(back, right))
+        R = np.column_stack([right, up, back]).astype(np.float64)
+        if np.linalg.det(R) < 0:
+            right = -right
+            R = np.column_stack([right, up, back]).astype(np.float64)
+        self._vr_rot[key] = la.quat_from_mat(R)
+        self._vr_config_cam_gpu(key)
+        try:
+            self.pane[key].canvas.request_draw()
+        except Exception:                                # noqa: BLE001
+            self.pane[key].render()
+        self._overlay[key].update()
+
     def _vr_refresh(self, key, lod: bool = False) -> None:
         """Re-apply VR after a state change (W/L, crop, territory). For the GPU
         volume: update clim / rebuild the cropped texture, reframe, redraw."""
@@ -6771,6 +6827,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         """The readout's (primary, secondary) C-arm angles as signed ints
         (LAO + / RAO −, CRA + / CAU −), or None when the frame is degenerate.
         Shared by the readout text and the right-click angle dialog."""
+        if self._vr_on.get(key) and self.pane[key].vr_volume is not None:
+            return self._vr_angio_vals(key)
         u = np.asarray(self._frame[key][0], dtype=np.float64)
         v = np.asarray(self._frame[key][1], dtype=np.float64)
         # Patient-space viewing normal = cross of the MAPPED in-plane axes.
@@ -6821,6 +6879,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         pane re-derives as the coupled orthogonal section — same linkage as
         the ROTATE tool."""
         if self._vol is None or self._mode != "3D":
+            return
+        if self._vr_on.get(which) and self.pane[which].vr_volume is not None:
+            self._vr_set_angio(which, prim_deg, sec_deg)
             return
         before = self._view_snapshot()
         self._frame[which] = self._frame_from_angio(prim_deg, sec_deg)
