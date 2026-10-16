@@ -741,7 +741,6 @@ class _Overlay(QWidget):
                     int(Qt.AlignmentFlag.AlignHCenter
                         | Qt.AlignmentFlag.AlignBottom),
                     ang, QColor(255, 230, 0), width=2.0)
-            self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
         mip = v._mip_img.get(key)
@@ -781,27 +780,6 @@ class _Overlay(QWidget):
         if v._lvv is not None:
             self._paint_lvv(p, key, w, h)
         self._paint_info(p, key, w, h)
-
-    def _paint_vr_label(self, p, key, w, h) -> None:
-        """Small corner caption for the VR pane: the active mode + how to drive
-        it (drag rotates, right-click switches iso ⇄ MIP)."""
-        v = self._v
-        gpu = v.pane[key].vr_volume is not None
-        txt = (t("VR  （ドラッグ=回転 / Alt+ドラッグ=選択ツール(Zoom/Move/Spin) / "
-                 "Wクリック=初期化）")
-               if gpu
-               else t("VR {mode}（CPU）  （ドラッグ=回転）",
-                      mode=("MIP" if v._vr_mode == "mip" else "DVR")))
-        p.setFont(QFont("", 10, QFont.Weight.Bold))
-        rect = QRectF(6, 4, max(10, w - 12), 18)
-        p.setPen(QColor(0, 0, 0, 180))
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            p.drawText(rect.translated(dx, dy),
-                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
-                       txt)
-        p.setPen(QColor(255, 210, 90))
-        p.drawText(rect, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
-                   txt)
 
     def _paint_vr_coronary(self, p, key, w, h) -> None:
         """Coronary Tree centrelines + Territory target markers projected through
