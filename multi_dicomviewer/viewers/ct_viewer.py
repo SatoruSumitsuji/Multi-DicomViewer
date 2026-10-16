@@ -61,7 +61,8 @@ from vtkmodules.vtkCommonDataModel import (
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
 from vtkmodules.vtkFiltersCore import vtkTubeFilter
 from vtkmodules.vtkFiltersSources import vtkLineSource
-from vtkmodules.vtkImagingCore import vtkImageMapToColors, vtkImageReslice
+from vtkmodules.vtkImagingCore import (
+    vtkImageFlip, vtkImageMapToColors, vtkImageReslice)
 from vtkmodules.vtkImagingGeneral import vtkImageGaussianSmooth
 from vtkmodules.vtkRenderingAnnotation import (
     vtkCornerAnnotation, vtkScalarBarActor)
@@ -2863,6 +2864,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
+        self._vr_mask_arr = {}               # current VR crop (bool) per pane, for
+        #                                      the Flip-H/V data-flip (reflection
+        #                                      user-matrix blanks the GPU volume)
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
         # VR orientation transform (Rt90/Lt90 roll, Flip-H/V mirror) applied to ALL
@@ -11722,6 +11726,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # build it behind an ANIMATED busy window so it doesn't look hung.
             mask = self._run_busy(t("VR"), t("Building VR…"),
                                   self._vr_crop_mask)  # Epi+shell / Epi interior
+            self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
             if mask is not None:
                 p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
                 p.vr_mapper.SetMaskTypeToBinary()
@@ -11888,6 +11893,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         p = self.pane[key]
         mask = self._run_busy(t("VR"), t("Building VR…"), self._vr_crop_mask)
+        self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
         if mask is not None:
             p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
             p.vr_mapper.SetMaskTypeToBinary()
@@ -11900,6 +11906,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.vr_mapper.SetMaskInput(None)
             except Exception:                        # noqa: BLE001
                 pass
+        # Re-sync the volume input/mask/matrix with the current Flip-H/V state
+        # (the mask was just set unflipped; if the VR is mirrored it must use the
+        # flipped data + U = M·F).
+        self._vr_apply_xform(key)
         p.ren.ResetCameraClippingRange()
         p.render()
 
@@ -12000,23 +12010,79 @@ class CTViewer(CPRMixin, AbstractViewer):
         out += list(getattr(p, "vr_tgt_labels", []))
         return [a for a in out if a is not None]
 
-    def _vr_apply_xform(self, key) -> None:
-        """Push the accumulated VR orientation matrix onto every VR prop so the
-        volume + tubes + territory + targets all turn / mirror together. Re-called
-        after any actor rebuild (billboards/territory are recreated per update)."""
-        M = self._vr_xform.get(key)
-        if M is None:
-            return
+    @staticmethod
+    def _np_to_vtkmatrix(M):
         vm = vtkMatrix4x4()
         for i in range(4):
             for j in range(4):
                 vm.SetElement(i, j, float(M[i, j]))
+        return vm
+
+    def _vr_apply_xform(self, key) -> None:
+        """Push the accumulated VR orientation matrix onto every VR prop so the
+        volume + tubes + territory + targets all turn / mirror together. Re-called
+        after any actor rebuild (billboards/territory are recreated per update).
+
+        The tube/territory/target ACTORS take the matrix directly (meshes handle a
+        reflection fine). The VOLUME can NOT: a reflection (det<0) user matrix
+        blanks the GPU ray-cast. So when the net orientation is a reflection (odd
+        number of Flip-H/V), the volume is fed X-FLIPPED image data with the
+        proper-rotation matrix U = M·F (F = the data-flip's world reflection) —
+        mathematically identical to M·image, but det(U)>0 so it renders."""
+        M = self._vr_xform.get(key)
+        if M is None:
+            return
+        p = self.pane[key]
+        vm = self._np_to_vtkmatrix(M)
+        vol = getattr(p, "vr_volume", None)
         for a in self._vr_actors(key):
+            if a is vol:
+                continue                                 # volume handled below
             if hasattr(a, "SetUserMatrix"):
                 try:
                     a.SetUserMatrix(vm)
                 except Exception:                        # noqa: BLE001
                     pass
+        if vol is not None and getattr(p, "vr_mapper", None) is not None:
+            self._vr_apply_volume_xform(key, M)
+
+    def _vr_apply_volume_xform(self, key, M) -> None:
+        p = self.pane[key]
+        reflected = float(np.linalg.det(M[:3, :3])) < 0.0
+        mask = self._vr_mask_arr.get(key)
+        if reflected:
+            b = self._image.GetBounds()
+            cx = 0.5 * (b[0] + b[1])                      # image X centre (world)
+            F = np.eye(4)
+            F[0, 0] = -1.0
+            F[0, 3] = 2.0 * cx                            # reflect about x = cx
+            U = M @ F
+            p.vr_mapper.SetInputData(self._vr_flipx_image())
+            p.vr_mapper.SetMaskInput(
+                self._mask_to_vtk_binary(mask[:, :, ::-1])
+                if mask is not None else None)
+            p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(U))
+        else:
+            p.vr_mapper.SetInputData(self._image)
+            p.vr_mapper.SetMaskInput(
+                self._mask_to_vtk_binary(mask) if mask is not None else None)
+            p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(M))
+        if mask is not None:
+            p.vr_mapper.SetMaskTypeToBinary()
+
+    def _vr_flipx_image(self):
+        """X-flipped copy of the CT (cached) — the render-safe way to mirror the
+        GPU volume (a reflection user matrix blanks it)."""
+        cache = getattr(self, "_vr_flipx_cache", None)
+        if cache is not None and cache[0] is self._image:
+            return cache[1]
+        fl = vtkImageFlip()
+        fl.SetInputData(self._image)
+        fl.SetFilteredAxis(0)
+        fl.Update()
+        out = fl.GetOutput()
+        self._vr_flipx_cache = (self._image, out)
+        return out
 
     def _vr_orient(self, key, kind) -> None:
         """VR Rt90/Lt90 (roll about the view axis) / Flip-H/Flip-V (mirror across
