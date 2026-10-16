@@ -5354,10 +5354,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                      0, 255).astype(np.uint8)
         if self._vr_mask is not None:
             u8 = np.where(self._vr_mask, u8, 0).astype(np.uint8)
-        # Left-right mirror DONE HERE (flip the data along X), so the geometry
-        # keeps a POSITIVE scale (a negative scale flips winding → the Metal
-        # volume ray-cast renders black). The overlay mirrors X to match.
-        u8 = u8[:, :, ::-1]
+        # (Left-right orientation: no texture flip — the overlay matches.)
         return np.ascontiguousarray(np.pad(u8, 1, mode="constant",
                                            constant_values=0))
 
@@ -5457,11 +5454,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         cam = p.vr_cam
         if cam is None or p.vr_volume is None:
             return None
-        pts = np.asarray(pts3d, float).reshape(-1, 3).copy()
-        # Match the X-flipped texture: anatomy at world x appears at
-        # (nx-1)*sx − x (reflection about the volume's X centre).
-        nxw = (self._vol.shape[2] - 1) * float(self._dims[0])
-        pts[:, 0] = nxw - pts[:, 0]
+        pts = np.asarray(pts3d, float).reshape(-1, 3)
         homo = np.hstack([pts, np.ones((len(pts), 1))])
         ndc = homo @ np.asarray(cam.camera_matrix, float).T
         w = ndc[:, 3]
