@@ -11793,6 +11793,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                     cam.SetPosition(*(ctr + off))
             cam.Elevation(-70.0)                    # a cardiac-ish top view
             cam.OrthogonalizeViewUp()
+            # Start the VR at 80% of the fit size (per request) — in perspective,
+            # Zoom(<1) widens the view angle so the heart renders a bit smaller,
+            # leaving margin around it.
+            cam.Zoom(0.8)
             p.ren.ResetCameraClippingRange()
             self._vr_update_angle(key)              # initial LAO/CRA readout
             self._vr_update_summary(key)            # territory summary (bottom-right)
