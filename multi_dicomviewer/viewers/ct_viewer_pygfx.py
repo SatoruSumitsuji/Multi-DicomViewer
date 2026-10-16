@@ -766,7 +766,7 @@ class _Overlay(QWidget):
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
         gpu = v.pane[key].vr_volume is not None
-        txt = (t("VR  （ドラッグ=回転 / Alt+左=移動 / Alt+右=拡大・回旋 / "
+        txt = (t("VR  （ドラッグ=回転 / Alt+ドラッグ=選択ツール(Zoom/Move/Spin) / "
                  "Wクリック=初期化）")
                if gpu
                else t("VR {mode}（CPU）  （ドラッグ=回転）",
@@ -2871,19 +2871,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
-        # Volume Rendering gestures: Left-drag = rotate; Alt+Left-drag = Move
-        # (pan); Alt+Right-drag = Zoom(縦)/Spin(横). A PLAIN right-click still
-        # falls through to the normal menu (target / export) below.
-        if self._vr_on.get(key):
+        # Volume Rendering gestures: a plain Left-drag rotates (trackball). An
+        # Alt+Left-drag applies the ACTIVE toolbar tool (Zoom / Move / Spin). A
+        # plain right-click still falls through to the normal menu below.
+        if self._vr_on.get(key) and self._drag_btn == 1:
             _alt = "Alt" in (ev.get("modifiers") or ())
-            if self._drag_btn == 1:
-                self._vr_drag = key
-                self._vr_drag_mode = "move" if _alt else "rotate"
-                return
-            if self._drag_btn == 2 and _alt:
-                self._vr_drag = key
-                self._vr_drag_mode = "zoomspin"
-                return
+            self._vr_drag = key
+            self._vr_drag_mode = (
+                {"ZOOM": "zoom", "MOVE": "move", "SPIN": "spin"}.get(
+                    self._tool, "move") if _alt else "rotate")
+            return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
         if getattr(self, "_cpr_exclude_seeding", False) and self._drag_btn == 1:
@@ -5463,9 +5460,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         return sx, sy, w
 
     def _vr_gesture(self, key, dx, dy, mode) -> None:
-        """One VR drag step. mode: 'rotate' (trackball), 'move' (Alt+Left pan),
-        'zoomspin' (Alt+Right: vertical=zoom, horizontal=spin/roll). The volume is
-        on the GPU → just a camera move + async redraw (real-time)."""
+        """One VR drag step. mode: 'rotate' (trackball, plain drag) or — when
+        Alt+Left-drag applies the SELECTED toolbar tool — 'move' (pan), 'zoom'
+        (dolly), 'spin' (roll). The volume is on the GPU → camera move + async
+        redraw (real-time)."""
         p = self.pane[key]
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
@@ -5477,13 +5475,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 0.3, self._vr_zoom[key])
             self._vr_pan[key][0] -= dx * g
             self._vr_pan[key][1] += dy * g
-        elif mode == "zoomspin":
+        elif mode == "zoom":
+            # Vertical drag dollies (drag up = zoom in).
+            self._vr_zoom[key] = float(min(6.0, max(0.3,
+                self._vr_zoom[key] * math.exp(-dy * 0.006))))
+        elif mode == "spin":
             back_w = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
-            roll = (dx / pw) * math.pi                 # horizontal → spin (roll)
+            roll = (dx / pw) * math.pi                 # horizontal → roll
             q = la.quat_mul(la.quat_from_axis_angle(back_w, roll), q)
             self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
-            self._vr_zoom[key] = float(min(6.0, max(0.3,
-                self._vr_zoom[key] * math.exp(-dy * 0.006))))   # vertical → zoom
         else:                                          # trackball rotate
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
