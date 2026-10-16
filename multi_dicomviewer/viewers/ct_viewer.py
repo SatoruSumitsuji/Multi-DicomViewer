@@ -11997,6 +11997,52 @@ class CTViewer(CPRMixin, AbstractViewer):
         cra = f"CRA{si_}" if si_ >= 0 else f"CAU{-si_}"
         return f"{lao} {cra}"
 
+    def _vr_set_angio(self, key, prim_deg, sec_deg):
+        """Orient the VR *camera* of pane *key* to the given C-arm angle — the
+        exact inverse of _vr_angio_angle_vals, so the readout round-trips. Only
+        the camera moves; the companion MPR pane is left untouched (unlike the
+        MPR _set_angio_angle, which re-couples the pair)."""
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        fp = np.asarray(cam.GetFocalPoint(), float)
+        pos = np.asarray(cam.GetPosition(), float)
+        dist = float(np.linalg.norm(pos - fp))
+        if dist < 1e-6:
+            dist = 1.0
+        pr = math.radians(float(prim_deg))
+        sr = math.radians(float(sec_deg))
+        axial = math.cos(sr)
+        # Rebuild the patient-LPS observer normal that the readout decodes:
+        #   prim = atan2(nx, -ny), sec = atan2(nz, axial), axial = hypot(nx, ny)
+        n_pat = np.array([axial * math.sin(pr),
+                          -axial * math.cos(pr),
+                          math.sin(sr)], float)
+        # patient-LPS -> world (pbasis is orthonormal: world = pbasis.T @ patient)
+        dop = self._pbasis.T @ n_pat
+        # The readout maps the camera dir BACK through inv(_vr_xform); invert that
+        # here so a Flip/Rt90'd volume is set to the angle the user actually reads.
+        X = self._vr_xform.get(key)
+        if X is not None:
+            dop = np.asarray(X[:3, :3], float) @ dop
+        nrm = float(np.linalg.norm(dop))
+        if nrm < 1e-9:
+            return
+        dop = dop / nrm
+        # View-up: patient superior (S = +Z in LPS), mapped the same way, then
+        # orthogonalised against the view dir so the volume isn't tilted.
+        up = self._pbasis.T @ np.array([0.0, 0.0, 1.0], float)
+        if X is not None:
+            up = np.asarray(X[:3, :3], float) @ up
+        up = up - dop * float(np.dot(up, dop))
+        if float(np.linalg.norm(up)) < 1e-6:
+            up = self._pbasis.T @ np.array([0.0, -1.0, 0.0], float)
+            up = up - dop * float(np.dot(up, dop))
+        up = up / (float(np.linalg.norm(up)) or 1.0)
+        cam.SetPosition(*(fp + dop * dist))
+        cam.SetViewUp(*up)
+        p.ren.ResetCameraClippingRange()
+        p.render()
+
     def _vr_actors(self, key):
         """Every orientable VR prop on pane *key* (volume + coronary tubes/halo/caps
         + territory surfaces + target spheres + target-number billboards)."""
@@ -19003,6 +19049,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         the ROTATE tool — so the pair stays consistent."""
         if self._image is None or self._mode != "3D":
             return
+        # On a VR pane the picture comes from the camera, not the MPR frame —
+        # move the camera so the RIGHT (VR) view changes and the companion MPR
+        # pane is left alone. (Setting the frame here would re-couple the pair
+        # and swing the LEFT pane instead — the bug the user hit.)
+        if self._vr_on.get(which):
+            self._vr_set_angio(which, prim_deg, sec_deg)
+            return
         before = self._view_snapshot()
         self._frame[which] = self._frame_from_angio(prim_deg, sec_deg)
         uw, _vw, nw = self._frame[which]
@@ -19033,7 +19086,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _open_angio_dialog(self, which):
         """Right-click on the readout → pick LAO/RAO + CRA/CAU and rotate the
         pane to that C-arm angle (to line the slice up with an angio view)."""
-        vals = self._angio_angle_vals(which) or (0, 0)
+        if self._vr_on.get(which):
+            vals = self._vr_angio_angle_vals(which) or (0, 0)
+        else:
+            vals = self._angio_angle_vals(which) or (0, 0)
         dlg = _AngioAngleDialog(vals[0], vals[1], self.window())
         if dlg.exec():
             prim, sec = dlg.values()
