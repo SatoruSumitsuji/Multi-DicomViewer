@@ -2463,12 +2463,31 @@ class MainWindow(QMainWindow):
         # Deliberate action (画像表示 / ツリー読込 / .corotree.json drop): try the
         # folder the tree file came from before asking, so the CT is found itself.
         if cpr_dir and os.path.isdir(cpr_dir):
-            self.case_open_folders([cpr_dir])
+            scan = [cpr_dir]
+            # Cross-OS case: the saved src_dir exists in the file but is NOT a
+            # real folder here (e.g. a Windows path opened on a Mac). The analysis
+            # JSONs are usually in a SUBFOLDER beside the CT folder, so also scan
+            # one level up to catch a SIBLING CT the recursive cpr_dir scan would
+            # miss. Only broaden on this clear cross-OS signal (an invalid saved
+            # src_dir), so same-OS drops keep their tight single-folder scan.
+            if src_dir and not os.path.isdir(src_dir):
+                parent = os.path.dirname(os.path.normpath(cpr_dir))
+                if (parent and os.path.isdir(parent)
+                        and parent != os.path.normpath(cpr_dir)):
+                    scan.append(parent)
+            self.case_open_folders(scan)
             QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
+        # Last resort: ask. Default to a folder that EXISTS on this machine (the
+        # drop folder) rather than the saved src_dir (which may be a dead
+        # cross-OS path that opens the picker at the volume root).
+        start = ""
+        for cand in (cpr_dir, src_dir):
+            if cand and os.path.isdir(cand):
+                start = cand
+                break
         folder = QFileDialog.getExistingDirectory(
-            self, t("この冠動脈の元となった3DCTフォルダを選択してください"),
-            src_dir if src_dir else "")
+            self, t("この冠動脈の元となった3DCTフォルダを選択してください"), start)
         if folder:
             self.case_open_folders([folder])
             QTimer.singleShot(300, lambda: _poll_show(0))
@@ -3105,7 +3124,7 @@ class MainWindow(QMainWindow):
         if w is None:
             return
         data = None
-        uid = src_dir = ""
+        uid = src_dir = drop_dir = ""
         for p in paths:
             try:
                 with open(p, encoding="utf-8") as f:
@@ -3116,15 +3135,20 @@ class MainWindow(QMainWindow):
                 from multi_dicomviewer.core import full_lv
                 data = d
                 uid = full_lv.series_uid(d)
-                src_dir = (d.get("src") or {}).get("src_dir", "") \
-                    or os.path.dirname(p)
+                # src_dir = the CT's OWN folder as SAVED (may be a Windows path
+                # that doesn't resolve on this Mac); drop_dir = the folder the
+                # FullLv was actually dropped from (always a valid local path).
+                # Keep them SEPARATE so coronary_show_ct can scan the local drop
+                # folder even when the saved src_dir is from another OS.
+                src_dir = (d.get("src") or {}).get("src_dir", "") or ""
+                drop_dir = os.path.dirname(p)
                 break                                    # one FullLv per case
         if data is None:
             return
         # Bring up the source CT (by UID / folder / prompt), turning the coronary
         # overlay ON when a tree is present, then apply the LV overlays.
         try:
-            self.coronary_show_ct(uid, src_dir, cpr_dir=src_dir, prompt=True)
+            self.coronary_show_ct(uid, src_dir, cpr_dir=drop_dir, prompt=True)
         except Exception:                                # noqa: BLE001
             pass
         if getattr(w, "_tree", None) is not None and w._tree.vessels \
