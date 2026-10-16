@@ -766,7 +766,8 @@ class _Overlay(QWidget):
         it (drag rotates, right-click switches iso ⇄ MIP)."""
         v = self._v
         gpu = v.pane[key].vr_volume is not None
-        txt = (t("VR  （ドラッグ=回転 / Alt+ドラッグ=拡大・回旋 / Wクリック=初期化）")
+        txt = (t("VR  （ドラッグ=回転 / Alt+左=移動 / Alt+右=拡大・回旋 / "
+                 "Wクリック=初期化）")
                if gpu
                else t("VR {mode}（CPU）  （ドラッグ=回転）",
                       mode=("MIP" if v._vr_mode == "mip" else "DVR")))
@@ -2461,6 +2462,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_rot = {"A": np.array([0.0, 0.0, 0.0, 1.0], float),
                         "B": np.array([0.0, 0.0, 0.0, 1.0], float)}
         self._vr_zoom = {"A": 1.0, "B": 1.0}   # Alt+drag zoom factor (>1 = in)
+        self._vr_pan = {"A": [0.0, 0.0], "B": [0.0, 0.0]}   # Alt+L pan (world mm)
+        self._vr_drag_mode = None              # rotate | move | zoomspin
         self._vr_drag = None                 # pane key of an in-progress VR orbit
         self._vr_shell = True                # stored for Phase 2 (crop); unused
         self._vr_shell_mm = 10.0
@@ -2868,12 +2871,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
-        # Volume Rendering: a LEFT-drag orbits the volume. A right-click falls
-        # through to the normal handlers below (still-image export / target /
-        # context menu) so target points etc. still work on the VR pane.
-        if self._vr_on.get(key) and self._drag_btn == 1:
-            self._vr_drag = key
-            return
+        # Volume Rendering gestures: Left-drag = rotate; Alt+Left-drag = Move
+        # (pan); Alt+Right-drag = Zoom(縦)/Spin(横). A PLAIN right-click still
+        # falls through to the normal menu (target / export) below.
+        if self._vr_on.get(key):
+            _alt = "Alt" in (ev.get("modifiers") or ())
+            if self._drag_btn == 1:
+                self._vr_drag = key
+                self._vr_drag_mode = "move" if _alt else "rotate"
+                return
+            if self._drag_btn == 2 and _alt:
+                self._vr_drag = key
+                self._vr_drag_mode = "zoomspin"
+                return
         # 腔除外 seeding: a left-click flood-fills the chamber under the cursor
         # and excludes it from the lumen snap (consumes the click; no trace).
         if getattr(self, "_cpr_exclude_seeding", False) and self._drag_btn == 1:
@@ -3097,11 +3107,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._reset_pointer_state()
         # VR orbit: a left-drag spins the volume around its centre.
         if self._vr_drag is not None:
-            if self._drag_btn == 1 and ev.get("buttons"):
+            if ev.get("buttons"):
                 lx, ly = self._last or (ev["x"], ev["y"])
-                alt = "Alt" in (ev.get("modifiers") or ())
-                self._vr_rotate(self._vr_drag, ev["x"] - lx, ev["y"] - ly,
-                                alt=alt)
+                self._vr_gesture(self._vr_drag, ev["x"] - lx, ev["y"] - ly,
+                                 self._vr_drag_mode or "rotate")
             self._last = (ev["x"], ev["y"])
             return
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
@@ -3298,10 +3307,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # from consecutive right-downs in _on_down — never recenter on it.
         if ev.get("button") == 2:
             return
-        # VR: a left double-click resets to the initial view (orientation + zoom).
+        # VR: a left double-click resets to the initial view (orientation, zoom,
+        # pan).
         if self._vr_on.get(key) and self.pane[key].vr_volume is not None:
             self._vr_rot[key] = np.array([0.0, 0.0, 0.0, 1.0], float)
             self._vr_zoom[key] = 1.0
+            self._vr_pan[key] = [0.0, 0.0]
             self._vr_config_cam_gpu(key)
             try:
                 self.pane[key].canvas.request_draw()
@@ -5331,7 +5342,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                      0, 255).astype(np.uint8)
         if self._vr_mask is not None:
             u8 = np.where(self._vr_mask, u8, 0).astype(np.uint8)
-        return np.pad(u8, 1, mode="constant", constant_values=0)
+        # Left-right mirror DONE HERE (flip the data along X), so the geometry
+        # keeps a POSITIVE scale (a negative scale flips winding → the Metal
+        # volume ray-cast renders black). The overlay mirrors X to match.
+        u8 = u8[:, :, ::-1]
+        return np.ascontiguousarray(np.pad(u8, 1, mode="constant",
+                                           constant_values=0))
 
     def _vr_clim_u8(self):
         """Current W/L window expressed in the uint8 texture's value space."""
@@ -5367,6 +5383,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.vr_cam.show_object(
                 p.vr_volume, view_dir=tuple(float(-c) for c in back),
                 up=tuple(float(c) for c in up), scale=scale)
+            # Pan (Alt+Left): slide the camera laterally in its own right/up so
+            # the framed volume shifts on screen.
+            px, py = self._vr_pan[key]
+            if px or py:
+                right = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
+                off = right * px + up * py
+                pos = np.asarray(p.vr_cam.local.position, float) + off
+                p.vr_cam.local.position = tuple(float(c) for c in pos)
         except Exception:                                # noqa: BLE001
             pass
 
@@ -5378,11 +5402,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         geom = gfx.Geometry(grid=tex)
         vmesh = gfx.Volume(geom, self._vr_make_gpu_material())
         sx, sy, sz = (float(d) for d in self._dims)
-        # Mirror the volume about world X so the VR matches the MPR / anatomy
-        # (the GPU render was left-right flipped). The coronary overlay negates X
-        # to stay aligned (see _vr_project_pts_gpu).
-        vmesh.local.scale = (-sx, sy, sz)
-        vmesh.local.position = (sx, -sy, -sz)
+        # POSITIVE scale only: a negative (mirror) scale flips face winding and
+        # breaks the volume ray-cast on wgpu-Metal (front-face culling → black /
+        # stuttering). The left-right mirror is done by flipping the TEXTURE data
+        # in _vr_u8_padded instead; the overlay mirrors X to match.
+        vmesh.local.scale = (sx, sy, sz)
+        vmesh.local.position = (-sx, -sy, -sz)
         if p.mesh is not None:
             p.mesh.visible = False                   # hide the MPR slice
         p.vr_volume = vmesh
@@ -5421,7 +5446,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         if cam is None or p.vr_volume is None:
             return None
         pts = np.asarray(pts3d, float).reshape(-1, 3).copy()
-        pts[:, 0] = -pts[:, 0]           # match the X-mirrored volume geometry
+        # Match the X-flipped texture: anatomy at world x appears at
+        # (nx-1)*sx − x (reflection about the volume's X centre).
+        nxw = (self._vol.shape[2] - 1) * float(self._dims[0])
+        pts[:, 0] = nxw - pts[:, 0]
         homo = np.hstack([pts, np.ones((len(pts), 1))])
         ndc = homo @ np.asarray(cam.camera_matrix, float).T
         w = ndc[:, 3]
@@ -5434,23 +5462,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         sy = (0.5 - ny * 0.5) * ph      # NDC y-up → screen y-down
         return sx, sy, w
 
-    def _vr_rotate(self, key, dx, dy, alt: bool = False) -> None:
-        # Default: TRACKBALL — rotate about the camera's CURRENT up / right axes
-        # so the drag matches the cursor at any orientation (no gimbal). With
-        # Alt: horizontal drag = SPIN (roll about the view axis), vertical drag =
-        # ZOOM (dolly). The volume is on the GPU → just a camera move + redraw.
+    def _vr_gesture(self, key, dx, dy, mode) -> None:
+        """One VR drag step. mode: 'rotate' (trackball), 'move' (Alt+Left pan),
+        'zoomspin' (Alt+Right: vertical=zoom, horizontal=spin/roll). The volume is
+        on the GPU → just a camera move + async redraw (real-time)."""
         p = self.pane[key]
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
         q = self._vr_rot[key]
-        if alt:
+        if mode == "move":
+            # Pan in world mm (screen px × world-per-px); drag moves the volume
+            # with the cursor (y-down screen → y-up world).
+            g = (2.0 * 0.62 * float(self._diag or 1.0)) / ph / max(
+                0.3, self._vr_zoom[key])
+            self._vr_pan[key][0] -= dx * g
+            self._vr_pan[key][1] += dy * g
+        elif mode == "zoomspin":
             back_w = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
             roll = (dx / pw) * math.pi                 # horizontal → spin (roll)
             q = la.quat_mul(la.quat_from_axis_angle(back_w, roll), q)
             self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
             self._vr_zoom[key] = float(min(6.0, max(0.3,
                 self._vr_zoom[key] * math.exp(-dy * 0.006))))   # vertical → zoom
-        else:
+        else:                                          # trackball rotate
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
             # A full pane width / height of drag = ~180° (direct 1:1 grab feel).
