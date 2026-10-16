@@ -815,9 +815,16 @@ class _Overlay(QWidget):
         except Exception:                                # noqa: BLE001
             pxmm = None
 
-        # While actively dragging, decimate the centreline points so the per-frame
-        # overlay stays cheap (full detail returns the moment the drag stops).
-        stride = 3 if v._vr_drag is not None else 1
+        # While actively dragging, keep the per-frame overlay cheap so the volume
+        # rotation stays smooth (full quality returns the moment the drag stops):
+        #  - decimate the centreline points harder (stride 6 vs 1),
+        #  - skip the dark halo (one stroke/vessel instead of two),
+        #  - use flat caps / bevel joins (round joins are QPainter's costliest),
+        #  - skip the vessel name labels (glyph rasterisation per frame).
+        dragging = v._vr_drag is not None
+        stride = 6 if dragging else 1
+        cap = Qt.PenCapStyle.FlatCap if dragging else Qt.PenCapStyle.RoundCap
+        join = Qt.PenJoinStyle.BevelJoin if dragging else Qt.PenJoinStyle.RoundJoin
         # Appearance from Settings (same values the Windows VTK tubes use): tube
         # DIAMETER (mm), LM-trunk ratio, halo colour + opacity.
         cp = getattr(v, "_coro_params", None) or {}
@@ -865,7 +872,7 @@ class _Overlay(QWidget):
                     poly = QPolygonF([
                         QPointF(float(sx[k]), float(sy[k]))
                         for k in range(len(sx))])
-                    if halo_a > 0:
+                    if halo_a > 0 and not dragging:
                         p.setPen(QPen(QColor(hrgb[0], hrgb[1], hrgb[2], halo_a),
                                       halo, Qt.PenStyle.SolidLine,
                                       Qt.PenCapStyle.RoundCap,
@@ -873,12 +880,11 @@ class _Overlay(QWidget):
                         p.drawPolyline(poly)
                     p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
                                          255 if sel else 235), core,
-                                  Qt.PenStyle.SolidLine,
-                                  Qt.PenCapStyle.RoundCap,
-                                  Qt.PenJoinStyle.RoundJoin))
+                                  Qt.PenStyle.SolidLine, cap, join))
                     p.drawPolyline(poly)
                 name = ves.get("name", "")
-                if name and ves.get("vid") in getattr(v, "_coro_names", ()):
+                if (not dragging and name
+                        and ves.get("vid") in getattr(v, "_coro_names", ())):
                     _draw_outlined_text(
                         p, QRectF(sx[0] + 6, sy[0] - 16, 160, 18),
                         int(Qt.AlignmentFlag.AlignLeft
@@ -5267,13 +5273,21 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _vr_frame_bounds(self):
         """World bounds to frame the VR: the crop (heart) when cropped, else the
-        whole volume."""
+        whole volume. Cached — _mask_world_bounds does a FULL-volume np.where,
+        and this is hit every frame by the overlay's pxmm probe during a rotate
+        drag; the bounds are static while orbiting, so recomputing them per frame
+        was the main cause of the choppy rotation. Invalidated (cache set to
+        None) wherever _vr_mask is reassigned."""
         m = self._vr_mask
-        if m is not None:
-            wb = self._mask_world_bounds(m)
-            if wb is not None:
-                return wb
-        return self._bounds
+        if m is None:                       # cheap path, no np.where
+            return self._bounds
+        cache = getattr(self, "_vr_fb_cache", None)
+        if cache is not None and cache[0] is m:   # same mask object → reuse
+            return cache[1]
+        wb = self._mask_world_bounds(m)
+        bounds = wb if wb is not None else self._bounds
+        self._vr_fb_cache = (m, bounds)
+        return bounds
 
     def _vr_basis(self, key):
         """Shared VR view geometry so the ray-cast image AND the coronary/target
