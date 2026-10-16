@@ -270,6 +270,8 @@ def _series_sort_key(mode: str):
         return lambda s: (s.image_count, s.number or 0)
     if mode == "instance":  # DICOM InstanceNumber (None sorts last)
         return lambda s: (s.instance_number is None, s.instance_number or 0)
+    if mode == "size":  # total on-disk size (bytes; number breaks ties)
+        return lambda s: (s.size_bytes, s.number or 0)
     return lambda s: (s.number is None, s.number or 0)  # Series Number
 
 
@@ -384,15 +386,15 @@ class StudyBrowser(QTreeWidget):
         # per-series in the list. Column data is still populated (kept simple),
         # just not displayed.
         self.setColumnHidden(3, True)
-        # Click Date/Time / Series No / Instance No / Images headers to
-        # sort (a ▲/▼ indicator shows the active column). Type /
+        # Click Date/Time / Series No / Instance No / Images / File Size
+        # headers to sort (a ▲/▼ indicator shows the active column). Type /
         # Description / File Path are not sortable. We rebuild the
         # (grouped) tree ourselves, so Qt's own item sorting stays off.
         hdr.setSortIndicatorShown(True)
         hdr.setSectionsClickable(True)
         hdr.sectionClicked.connect(self._on_header_clicked)
         self._sort_cols = {
-            0: "acq", 1: "number", 2: "instance", 4: "images",
+            0: "acq", 1: "number", 2: "instance", 4: "images", 5: "size",
         }
         # Show full text and let a horizontal scrollbar reach the right.
         self.setTextElideMode(Qt.TextElideMode.ElideNone)
