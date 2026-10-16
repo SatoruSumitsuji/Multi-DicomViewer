@@ -2898,13 +2898,20 @@ class MainWindow(QMainWindow):
         return out
 
     def coronary_vr_visible(self, on: bool) -> None:
-        """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide the VR on the source CT."""
+        """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide the VR on the source CT.
+
+        Prefer set_vr_image_visible where the viewer offers it (Mac/pygfx): that
+        hides ONLY the rendered volume while staying in VR mode and keeping the
+        coronary tree drawn. Viewers without it (Windows/VTK) fall back to the
+        full set_vr_on toggle."""
         for v in self._coronary_source_viewers():
-            if hasattr(v, "set_vr_on"):
-                try:
+            try:
+                if hasattr(v, "set_vr_image_visible"):
+                    v.set_vr_image_visible(bool(on))
+                elif hasattr(v, "set_vr_on"):
                     v.set_vr_on(bool(on))
-                except Exception:                        # noqa: BLE001
-                    pass
+            except Exception:                            # noqa: BLE001
+                pass
 
     def coronary_vr_shell(self, shell: bool) -> None:
         """Coronary Tree ▸ VR ▸ 内腔VR/シェルVR — switch the VR crop mode."""

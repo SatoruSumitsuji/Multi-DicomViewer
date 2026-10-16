@@ -429,6 +429,13 @@ _VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
 _VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
 _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
 
+#: VR coronary line thickness (mm), matching the Windows VTK 3-D tube diameter
+#: (_VR_CORO_R = 0.765*0.8*0.8 mm radius → ×2 diameter). Windows renders real
+#: mm-wide tubes that grow with zoom; the Mac overlay is a flat 2-D line, so we
+#: convert this mm width to pixels at the current VR scale each frame instead of
+#: using a fixed pixel width (which looked far thinner/constant vs Windows).
+_VR_CORO_DIAM_MM = 0.765 * 0.8 * 0.8 * 2.0          # ≈0.98 mm
+
 
 def _vr_render_image(p):
     """Pure CPU VR ray-cast → QImage from a param snapshot (NO self / Qt-widget),
@@ -807,13 +814,26 @@ class _Overlay(QWidget):
                 if r is not None:
                     return r
             return v._vr_project_pts(key, pts)
-        # Depth of the volume centre, so vessels on the FAR side (behind centre)
-        # can be hidden — the near-side tree alone reads the orientation clearly.
-        cdepth = None
-        if gpu:
-            cr = v._vr_project_pts_gpu(key, [v._vr_center()])
-            if cr is not None:
-                cdepth = float(cr[2][0])
+        # NOTE: far-side culling is intentionally OFF — the user wants the WHOLE
+        # tree drawn (near + far), matching Windows. (The old depth-vs-centre
+        # fade lived here.)
+        #
+        # Windows draws the tree as real mm-wide 3-D tubes that scale with zoom;
+        # the Mac overlay is a flat 2-D line, so derive a pixels-per-mm factor
+        # from the current VR projection and size the pen in mm to match. Probe
+        # one 1 mm step along each axis at the volume centre and take the largest
+        # screen displacement (the axis most in the view plane).
+        pxmm = None
+        try:
+            c = np.asarray(v._vr_center(), float).reshape(3)
+            pr = project([c, c + [1.0, 0, 0], c + [0, 1.0, 0], c + [0, 0, 1.0]])
+            if pr is not None:
+                pxs, pys, _d = pr
+                pxmm = max(
+                    float(np.hypot(pxs[i] - pxs[0], pys[i] - pys[0]))
+                    for i in (1, 2, 3))
+        except Exception:                                # noqa: BLE001
+            pxmm = None
 
         # While actively dragging, decimate the centreline points so the per-frame
         # overlay stays cheap (full detail returns the moment the drag stops).
@@ -830,28 +850,24 @@ class _Overlay(QWidget):
                         pts = ves.get("points")
                 rgb = _hex_to_rgb(ves.get("color"))
                 sel = bool(ves.get("selected"))
-                width = 3.0 if sel else 2.2
+                # mm width → px at the current VR scale (matches Windows tubes);
+                # fall back to the old fixed px if the probe failed. Selected
+                # vessels get a modest bump for emphasis.
+                if pxmm and pxmm > 1e-6:
+                    width = max(1.0, _VR_CORO_DIAM_MM * pxmm
+                                * (1.3 if sel else 1.0))
+                else:
+                    width = 3.0 if sel else 2.2
                 sx, sy, d = project(pts)
-                # NEAR mask per point (far side hidden). Draw contiguous near
-                # runs as ONE polyline each — far fewer QPainter calls than a
+                # Draw the WHOLE vessel (far-side cull disabled). Still batched as
+                # ONE polyline per vessel — far fewer QPainter calls than a
                 # per-segment drawLine, which is what made rotation lag.
-                near = (d <= cdepth) if (gpu and cdepth is not None) else (d > 0.0)
                 p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
                                      255 if sel else 220), width))
-                n = len(sx)
-                i = 0
-                while i < n:
-                    if not near[i]:
-                        i += 1
-                        continue
-                    j = i
-                    while j + 1 < n and near[j + 1]:
-                        j += 1
-                    if j > i:
-                        p.drawPolyline(QPolygonF([
-                            QPointF(float(sx[k]), float(sy[k]))
-                            for k in range(i, j + 1)]))
-                    i = j + 1
+                if len(sx) >= 2:
+                    p.drawPolyline(QPolygonF([
+                        QPointF(float(sx[k]), float(sy[k]))
+                        for k in range(len(sx))]))
                 name = ves.get("name", "")
                 if name and ves.get("vid") in getattr(v, "_coro_names", ()):
                     _draw_outlined_text(
@@ -2476,6 +2492,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the VTK VR adds are later phases (the shell's VR calls are all
         # hasattr-guarded, so the extra set_vr_* are safe no-ops for now).
         self._vr_on = {"A": False, "B": False}
+        #: "VR非表示" hides ONLY the rendered volume image while STAYING in VR
+        #: mode — the coronary tree overlay keeps drawing and the MPR slice is
+        #: NOT restored (so no SlabMIP appears behind it). Separate from _vr_on
+        #: (which is the mode itself).
+        self._vr_img_hidden = {"A": False, "B": False}
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
         self._vr_mask = None                 # bool crop (heart) or None (full CT)
         self._vr_busy = False                # an async VR drag render is running
@@ -5445,6 +5466,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         vmesh.local.position = (-sx, -sy, -sz)
         if p.mesh is not None:
             p.mesh.visible = False                   # hide the MPR slice
+        # Honour a standing "VR非表示" (image hidden, still in VR mode): keep the
+        # volume node built for projection but not drawn.
+        vmesh.visible = not self._vr_img_hidden.get(key, False)
         p.vr_volume = vmesh
         p.scene.add(vmesh)
         if p.vr_cam is None:
@@ -5649,6 +5673,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             # compute it behind an animated busy/progress window so it doesn't
             # look hung, then build the GPU volume.
             self._vr_flip[key] = [False, False]
+            self._vr_img_hidden[key] = False      # a fresh VR starts visible
             self._vr_mask = self._run_busy(
                 t("VR"), t("VR構築中…"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
@@ -5678,6 +5703,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         if on == bool(self._vr_on.get(key)):
             return
         self._vr_set(key, on)
+
+    def set_vr_image_visible(self, on: bool) -> None:
+        """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide ONLY the rendered volume
+        image, staying in VR mode. Hiding leaves the coronary-tree overlay drawn
+        and does NOT restore the MPR slice (so the SlabMIP doesn't reappear);
+        showing brings the volume back. If VR mode isn't up yet, 表示 turns it on
+        for the first time."""
+        key = self._vr_pane_key()
+        on = bool(on)
+        if not self._vr_on.get(key):
+            if on:
+                self._vr_set(key, True)       # first show → enter VR mode
+            return
+        self._vr_img_hidden[key] = not on
+        vol = self.pane[key].vr_volume
+        if vol is not None:
+            vol.visible = on                  # keep the node for projection
+        p = self.pane[key]
+        p.render()
+        try:
+            p.canvas.request_draw()
+        except Exception:                     # noqa: BLE001
+            pass
+        self._overlay[key].update()           # keep the coronary overlay on top
 
     def _vr_recrop(self) -> None:
         """Rebuild the heart crop + rebuild the GPU texture for each active VR
