@@ -4928,8 +4928,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # are set — HIDE them. Only when no common valves exist does Blood fall
         # back to capturing its own.
         common_valves = self._lv_valves_ready()
-        self._lvv_mv_btn.setVisible(on and not common_valves)
-        self._lvv_aov_btn.setVisible(on and not common_valves)
+        # These two are LEGACY (Blood's own MV/AoV capture is retired) and are
+        # never added to any layout, so setVisible(True) made them pop up as
+        # floating top-level windows (the "AoV plane" / "MV plane" small windows
+        # that flashed during a FullLv apply). Keep them permanently hidden.
+        self._lvv_mv_btn.setVisible(False)
+        self._lvv_aov_btn.setVisible(False)
         # Ready to compute LV-Blood: apex + valves + an Epi surface. (No ROI now —
         # the seed is auto = the largest in-range component inside the Epi.)
         valves_ok = common_valves or aov_done
