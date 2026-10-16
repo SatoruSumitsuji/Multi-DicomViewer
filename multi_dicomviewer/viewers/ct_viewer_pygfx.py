@@ -429,14 +429,13 @@ _VR_COL_R = np.array([0.0, 0.40, 0.85, 1.00, 1.00, 1.00], float)
 _VR_COL_G = np.array([0.0, 0.20, 0.50, 0.85, 0.98, 1.00], float)
 _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
 
-#: VR coronary line thickness (mm), matching the Windows VTK 3-D tube DIAMETERS
-#: (_VR_CORO_R / _VR_CORO_R_LM radii → ×2). Windows renders real mm-wide tubes
-#: (with a dark halo rim) that grow with zoom; the Mac overlay is a flat 2-D
-#: line, so we convert these mm widths to pixels at the current VR scale each
-#: frame (a fixed pixel width looked far thinner than Windows) AND draw a dark
-#: rim under the coloured core so the line reads as bold like the Windows tube.
-_VR_CORO_DIAM_MM = 0.765 * 0.8 * 0.8 * 2.0          # ≈0.98 mm — branches
-_VR_CORO_DIAM_MM_LM = 0.765 * 1.5 * 0.8 * 2.0       # ≈1.84 mm — LM trunk (~1.9×)
+#: VR coronary line look. The tube DIAMETER (mm) and LM-trunk ratio come from
+#: Settings (the same values the Windows VTK tubes use); Windows renders real
+#: mm-wide tubes (with a dark halo rim) that grow with zoom, so the Mac overlay
+#: converts those mm widths to pixels at the current VR scale each frame (a
+#: fixed pixel width looked far thinner than Windows) and draws the halo rim
+#: under the coloured core so the line reads as bold like the Windows tube.
+#: Only the rim OVERHANG is a constant here (the Windows _VR_CORO_HALO).
 _VR_CORO_HALO_MM = 0.30                             # dark rim beyond the tube
 
 
@@ -841,6 +840,15 @@ class _Overlay(QWidget):
         # While actively dragging, decimate the centreline points so the per-frame
         # overlay stays cheap (full detail returns the moment the drag stops).
         stride = 3 if v._vr_drag is not None else 1
+        # Appearance from Settings (same values the Windows VTK tubes use): tube
+        # DIAMETER (mm), LM-trunk ratio, halo colour + opacity.
+        cp = getattr(v, "_coro_params", None) or {}
+        base_diam_mm = max(0.1, float(cp.get("tube_diameter_mm", 1.0)))
+        lm_ratio = float(cp.get("lm_ratio", 1.5))
+        halo_hex = cp.get("halo_color", "#000000")
+        halo_a = int(round(max(0.0, min(1.0, float(cp.get("halo_opacity", 0.5))))
+                           * 255))
+        hrgb = _hex_to_rgb(halo_hex)
         spec = getattr(v, "_coro_overlay", None)
         if spec:
             for ves in spec:
@@ -854,15 +862,16 @@ class _Overlay(QWidget):
                 rgb = _hex_to_rgb(ves.get("color"))
                 sel = bool(ves.get("selected"))
                 is_lm = (ves.get("role") == "LM")
-                # mm diameter → px at the current VR scale (matches the Windows
-                # tube, which grows with zoom), with the LM trunk ~1.9× thicker.
-                # A fixed-px fallback is used only if the scale probe failed.
-                diam_mm = _VR_CORO_DIAM_MM_LM if is_lm else _VR_CORO_DIAM_MM
+                # Settings tube DIAMETER (mm) → px at the current VR scale (like
+                # the Windows tube, which grows with zoom); the LM TRUNK itself
+                # is scaled by the Settings lm_ratio. Fixed-px fallback only if
+                # the scale probe failed.
+                diam_mm = base_diam_mm * (lm_ratio if is_lm else 1.0)
                 if pxmm and pxmm > 1e-6:
-                    core = max(1.5, diam_mm * pxmm)
+                    core = max(1.0, diam_mm * pxmm)
                     halo = core + 2.0 * _VR_CORO_HALO_MM * pxmm
                 else:
-                    core = 3.2 if is_lm else 2.2
+                    core = max(1.0, 2.2 * (lm_ratio if is_lm else 1.0))
                     halo = core + 2.0
                 if sel:
                     core *= 1.25
@@ -870,18 +879,20 @@ class _Overlay(QWidget):
                 sx, sy, d = project(pts)
                 # Draw the WHOLE vessel (far-side cull disabled). Still batched as
                 # ONE polyline per vessel — far fewer QPainter calls than a
-                # per-segment drawLine, which is what made rotation lag. A dark
-                # rim is drawn first, then the coloured core on top (round caps /
-                # joins → a smooth tube look), mirroring the Windows tube+halo.
+                # per-segment drawLine, which is what made rotation lag. The
+                # Settings halo colour/opacity is drawn first as a rim, then the
+                # coloured core on top (round caps / joins → a smooth tube look),
+                # mirroring the Windows tube+halo.
                 if len(sx) >= 2:
                     poly = QPolygonF([
                         QPointF(float(sx[k]), float(sy[k]))
                         for k in range(len(sx))])
-                    p.setPen(QPen(QColor(0, 0, 0, 170), halo,
-                                  Qt.PenStyle.SolidLine,
-                                  Qt.PenCapStyle.RoundCap,
-                                  Qt.PenJoinStyle.RoundJoin))
-                    p.drawPolyline(poly)
+                    if halo_a > 0:
+                        p.setPen(QPen(QColor(hrgb[0], hrgb[1], hrgb[2], halo_a),
+                                      halo, Qt.PenStyle.SolidLine,
+                                      Qt.PenCapStyle.RoundCap,
+                                      Qt.PenJoinStyle.RoundJoin))
+                        p.drawPolyline(poly)
                     p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
                                          255 if sel else 235), core,
                                   Qt.PenStyle.SolidLine,
@@ -2537,6 +2548,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_shell = True                # stored for Phase 2 (crop); unused
         self._vr_shell_mm = 10.0
         self._vr_coro_spec = None            # stored for Phase 2 (3-D tubes)
+        # Coronary appearance from Settings ▸ Coronary Tree / Territory — tube
+        # diameter (mm), LM-trunk ratio, halo colour/opacity — reloaded live via
+        # coronary_params_refresh. Same source as the Windows VTK viewer.
+        try:
+            self._coro_params = settings.load_coronary_params()
+        except Exception:                        # noqa: BLE001
+            self._coro_params = dict(settings.CORONARY_PARAMS_DEFAULT)
         # measurements
         self._meas_on = False
         self._meas_type = None               # line|polyline|ellipse|polygon|angle
@@ -5785,6 +5803,22 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def set_vr_coronary(self, spec) -> None:
         self._vr_coro_spec = spec            # Phase 2b: 3-D coronary tubes
+
+    def coronary_params_refresh(self) -> None:
+        """Re-read Settings ▸ Coronary Tree / Territory (tube diameter, LM ratio,
+        halo colour/opacity) and repaint the VR coronary overlay so the new
+        thickness/look takes effect live — same hook the shell calls on the
+        Windows VTK viewer."""
+        try:
+            self._coro_params = settings.load_coronary_params()
+        except Exception:                        # noqa: BLE001
+            return
+        for k in ("A", "B"):
+            if self._vr_on.get(k):
+                try:
+                    self._overlay[k].update()
+                except Exception:                # noqa: BLE001
+                    pass
 
     # --------------------------------------------------- world<->screen
     def _scale_px(self, key):
