@@ -717,7 +717,9 @@ class _Overlay(QWidget):
                 img = v._vr_img.get(key)
                 if img is not None:
                     p.drawImage(self.rect(), img)
-                self._paint_vr_coronary(p, key, w, h)
+            # Coronary tree + targets: projected through the GPU camera (or the
+            # CPU basis in fallback). The rotating tree is the orientation cue.
+            self._paint_vr_coronary(p, key, w, h)
             self._paint_vr_label(p, key, w, h)
             return
         # slab-MIP base image (GPU slice is hidden in slab mode)
@@ -783,6 +785,14 @@ class _Overlay(QWidget):
         the VR camera onto the rendered volume. The far side (behind the centre)
         is faded as a depth cue. Same data as the MPR coronary overlay."""
         v = self._v
+        gpu = v.pane[key].vr_volume is not None
+
+        def project(pts):
+            if gpu:
+                r = v._vr_project_pts_gpu(key, pts)
+                if r is not None:
+                    return r
+            return v._vr_project_pts(key, pts)
         spec = getattr(v, "_coro_overlay", None)
         if spec:
             for ves in spec:
@@ -792,9 +802,9 @@ class _Overlay(QWidget):
                 rgb = _hex_to_rgb(ves.get("color"))
                 sel = bool(ves.get("selected"))
                 width = 3.0 if sel else 2.2
-                sx, sy, d = v._vr_project_pts(key, pts)
+                sx, sy, d = project(pts)
                 for i in range(len(sx) - 1):
-                    near = (d[i] >= 0.0) or (d[i + 1] >= 0.0)
+                    near = (d[i] > 0.0) or (d[i + 1] > 0.0)
                     a = (255 if sel else 220) if near else (85 if sel else 55)
                     p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], a), width))
                     p.drawLine(QPointF(sx[i], sy[i]),
@@ -812,7 +822,7 @@ class _Overlay(QWidget):
                 continue
             crgb = _hex_to_rgb(tg.get("color") or "#ea9999")
             tcol = QColor(int(crgb[0]), int(crgb[1]), int(crgb[2]))
-            sx, sy, _d = v._vr_project_pts(key, [P])
+            sx, sy, _d = project([P])
             mx, my = float(sx[0]), float(sy[0])
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
             p.setBrush(tcol)
@@ -5297,6 +5307,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             b = a + 1.0
         return (a, b)
 
+    def _vr_make_gpu_material(self):
+        """MIP material (uint8 texture + nearest — the Metal-safe path confirmed
+        on real hardware). Depth / rotation direction is read from the coronary
+        tree projected on top, which rotates with the volume."""
+        return gfx.VolumeMipMaterial(clim=self._vr_clim_u8(),
+                                     interpolation="nearest")
+
     def _vr_config_cam_gpu(self, key) -> None:
         """Aim the GPU VR camera from the trackball quaternion, framed on the
         heart volume with show_object (distance / aspect / clip handled for us).
@@ -5320,9 +5337,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         vp = self._vr_u8_padded()
         tex = gfx.Texture(np.ascontiguousarray(vp), dim=3)
         geom = gfx.Geometry(grid=tex)
-        mat = gfx.VolumeMipMaterial(clim=self._vr_clim_u8(),
-                                    interpolation="nearest")
-        vmesh = gfx.Volume(geom, mat)
+        vmesh = gfx.Volume(geom, self._vr_make_gpu_material())
         sx, sy, sz = self._dims
         vmesh.local.scale = (float(sx), float(sy), float(sz))
         vmesh.local.position = (-float(sx), -float(sy), -float(sz))
@@ -5354,6 +5369,28 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._config_cam(key)
             p.render()
 
+    def _vr_project_pts_gpu(self, key, pts3d):
+        """Project world-mm points through the GPU VR camera to pane pixels:
+        (sx[], sy[], infront[]) where infront>0 is toward the camera. Used to draw
+        the coronary tree / targets on top of the GPU volume (the rotating tree is
+        the orientation cue for the flat MIP). None if the GPU VR isn't up."""
+        p = self.pane[key]
+        cam = p.vr_cam
+        if cam is None or p.vr_volume is None:
+            return None
+        pts = np.asarray(pts3d, float).reshape(-1, 3)
+        homo = np.hstack([pts, np.ones((len(pts), 1))])
+        ndc = homo @ np.asarray(cam.camera_matrix, float).T
+        w = ndc[:, 3]
+        wsafe = np.where(np.abs(w) < 1e-6, 1e-6, w)
+        nx = ndc[:, 0] / wsafe
+        ny = ndc[:, 1] / wsafe
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        sx = (nx * 0.5 + 0.5) * pw
+        sy = (0.5 - ny * 0.5) * ph      # NDC y-up → screen y-down
+        return sx, sy, w
+
     def _vr_rotate(self, key, dx, dy) -> None:
         # TRACKBALL: rotate about the camera's CURRENT up / right axes so the drag
         # always matches the cursor at any orientation (no turntable gimbal). The
@@ -5372,7 +5409,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         q = la.quat_mul(dq, q)
         self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
         self._vr_config_cam_gpu(key)
-        p.render()
+        # ASYNC draw (ondemand) — NOT the synchronous force_draw, whose macOS
+        # re-entrancy guard dropped frames during a fast drag (the black flashes).
+        try:
+            p.canvas.request_draw()
+        except Exception:                                # noqa: BLE001
+            p.render()
         self._overlay[key].update()
 
     def _vr_refresh(self, key, lod: bool = False) -> None:
@@ -5404,7 +5446,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         on = bool(on)
         self._vr_on[key] = on
         if on:
-            self._vr_mask = self._vr_crop_mask()  # heart crop (None if no Epi)
+            # The heart crop (scipy EDT shell) is the slow part of turning VR on —
+            # compute it behind an animated busy/progress window so it doesn't
+            # look hung, then build the GPU volume.
+            self._vr_mask = self._run_busy(
+                t("VR"), t("VR構築中…"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
         else:
             self._vr_img.pop(key, None)
@@ -12985,6 +13031,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh(reset_cam=False)
         for k in ("A", "B"):
             self._overlay[k].update()
+        # Auto-advance to VR on the right pane (parity with Windows: dropping the
+        # corotree + FullLv goes straight to the VR review). Deferred so it runs
+        # after this apply + the pane's GL settle.
+        QTimer.singleShot(0, lambda: self._vr_set("B", True))
         return True
 
     def _lvv_clear_markers(self) -> None:
