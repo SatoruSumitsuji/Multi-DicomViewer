@@ -803,28 +803,43 @@ class _Overlay(QWidget):
             if cr is not None:
                 cdepth = float(cr[2][0])
 
-        def is_far(d0, d1):
-            if gpu and cdepth is not None:
-                return (d0 > cdepth) and (d1 > cdepth)   # both beyond centre
-            return not ((d0 > 0.0) or (d1 > 0.0))        # CPU: behind centre
+        # While actively dragging, decimate the centreline points so the per-frame
+        # overlay stays cheap (full detail returns the moment the drag stops).
+        stride = 3 if v._vr_drag is not None else 1
         spec = getattr(v, "_coro_overlay", None)
         if spec:
             for ves in spec:
                 pts = ves.get("points")
                 if pts is None or len(pts) < 2:
                     continue
+                if stride > 1:
+                    pts = np.asarray(pts, float)[::stride]
+                    if len(pts) < 2:
+                        pts = ves.get("points")
                 rgb = _hex_to_rgb(ves.get("color"))
                 sel = bool(ves.get("selected"))
                 width = 3.0 if sel else 2.2
                 sx, sy, d = project(pts)
-                for i in range(len(sx) - 1):
-                    far = is_far(d[i], d[i + 1])
-                    if far:
-                        continue                 # far side hidden (user request)
-                    a = 255 if sel else 220
-                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2], a), width))
-                    p.drawLine(QPointF(sx[i], sy[i]),
-                               QPointF(sx[i + 1], sy[i + 1]))
+                # NEAR mask per point (far side hidden). Draw contiguous near
+                # runs as ONE polyline each — far fewer QPainter calls than a
+                # per-segment drawLine, which is what made rotation lag.
+                near = (d <= cdepth) if (gpu and cdepth is not None) else (d > 0.0)
+                p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
+                                     255 if sel else 220), width))
+                n = len(sx)
+                i = 0
+                while i < n:
+                    if not near[i]:
+                        i += 1
+                        continue
+                    j = i
+                    while j + 1 < n and near[j + 1]:
+                        j += 1
+                    if j > i:
+                        p.drawPolyline(QPolygonF([
+                            QPointF(float(sx[k]), float(sy[k]))
+                            for k in range(i, j + 1)]))
+                    i = j + 1
                 name = ves.get("name", "")
                 if name and ves.get("vid") in getattr(v, "_coro_names", ()):
                     _draw_outlined_text(
