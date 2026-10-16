@@ -11649,6 +11649,45 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_endo_adv_cache = adv
         return adv
 
+    def _lv_endo_adv_refresh(self) -> None:
+        """Settings ▸ LV Auto-Endo changed: drop the cached params so the next
+        Auto-Endo re-reads them, and invalidate any built Auto-Endo (mask / model
+        / 壁厚) so a re-press rebuilds with the new values. Blood and the
+        hand-edited Manual Endo are untouched. Parity with the Windows VTK
+        _lv_endo_adv_refresh — the hook the shell calls on every viewer."""
+        self._lv_endo_adv_cache = None
+        try:
+            if (getattr(self, "_lvv_thick_mode", None) is not None
+                    or getattr(self, "_lvv_thick_cache", None)):
+                self._lvv_thick_clear()        # 壁厚 depends on the Endo mask
+        except Exception:                        # noqa: BLE001
+            pass
+        self._lv_endo_auto_model = None
+        self._lv_endo_auto_surf = None
+        self._lv_endo_auto_sig = None
+        self._lv_endo_mask_comp = None
+        self._lv_endo_mask_bbox = None
+        self._lv_endo_mask_sig = None
+        if getattr(self, "_lvv_endo_show", False):
+            self._lvv_endo_show = False
+            btn = getattr(self, "_lvv_auto_endo_btn", None)
+            if btn is not None:
+                try:
+                    btn.setChecked(False)
+                    self._lvv_style_toggle(btn, "#ff8c28", "black")
+                except Exception:                # noqa: BLE001
+                    pass
+        try:
+            if self._lvv is not None:
+                self._lvv_redraw()
+        except Exception:                        # noqa: BLE001
+            pass
+        for k in ("A", "B"):
+            try:
+                self._overlay[k].update()
+            except Exception:                    # noqa: BLE001
+                pass
+
     def _lv_outline_step(self, fine=0.45) -> float:
         """Outline sampling step (mm) for region_outline_on_plane — finer when
         zoomed in. Mirrors the VTK viewer."""
