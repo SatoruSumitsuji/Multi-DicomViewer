@@ -794,10 +794,6 @@ class _Overlay(QWidget):
                 if r is not None:
                     return r
             return v._vr_project_pts(key, pts)
-        # NOTE: far-side culling is intentionally OFF — the user wants the WHOLE
-        # tree drawn (near + far), matching Windows. (The old depth-vs-centre
-        # fade lived here.)
-        #
         # Windows draws the tree as real mm-wide 3-D tubes that scale with zoom;
         # the Mac overlay is a flat 2-D line, so derive a pixels-per-mm factor
         # from the current VR projection and size the pen in mm to match. Probe
@@ -834,6 +830,44 @@ class _Overlay(QWidget):
         halo_a = int(round(max(0.0, min(1.0, float(cp.get("halo_opacity", 0.5))))
                            * 255))
         hrgb = _hex_to_rgb(halo_hex)
+        # Front/back depth ordering (like the Windows 3-D tubes): build a coarse
+        # depth buffer from the heart-surface voxels. Smaller projected depth
+        # (w) = nearer the camera; each grid cell keeps the NEAREST surface
+        # depth, i.e. the heart's FRONT surface. A coronary point is hidden when
+        # it sits well BEHIND that front surface (the far side of the heart);
+        # a small relative margin lets the near-surface vessels through.
+        GB = 48 if dragging else 72
+        depthbuf = None
+        occ = v._vr_occ_points()
+        if occ is not None and len(occ):
+            try:
+                ostep = 3 if dragging else 1
+                ox, oy, ow = project(occ[::ostep])
+                ox = np.asarray(ox, float)
+                oy = np.asarray(oy, float)
+                ow = np.asarray(ow, float)
+                good = ((ow > 1e-6) & np.isfinite(ox) & np.isfinite(oy)
+                        & (ox >= 0) & (ox < w) & (oy >= 0) & (oy < h))
+                if good.any():
+                    gi = np.clip((ox[good] / w * GB).astype(int), 0, GB - 1)
+                    gj = np.clip((oy[good] / h * GB).astype(int), 0, GB - 1)
+                    depthbuf = np.full((GB, GB), np.inf)
+                    np.minimum.at(depthbuf, (gj, gi), ow[good])
+            except Exception:                            # noqa: BLE001
+                depthbuf = None
+
+        def _visible(sx_a, sy_a, d_a):
+            """Per-point visibility vs the heart front-surface depth buffer."""
+            d_a = np.asarray(d_a, float)
+            if depthbuf is None:
+                return d_a > 1e-6
+            gi = np.clip((np.asarray(sx_a, float) / w * GB).astype(int),
+                         0, GB - 1)
+            gj = np.clip((np.asarray(sy_a, float) / h * GB).astype(int),
+                         0, GB - 1)
+            front = depthbuf[gj, gi]
+            return (d_a > 1e-6) & (d_a <= front * 1.05)
+
         spec = getattr(v, "_coro_overlay", None)
         if spec:
             for ves in spec:
@@ -862,34 +896,45 @@ class _Overlay(QWidget):
                     core *= 1.25
                     halo *= 1.15
                 sx, sy, d = project(pts)
-                # Draw the WHOLE vessel (far-side cull disabled). Still batched as
-                # ONE polyline per vessel — far fewer QPainter calls than a
-                # per-segment drawLine, which is what made rotation lag. The
-                # Settings halo colour/opacity is drawn first as a rim, then the
-                # coloured core on top (round caps / joins → a smooth tube look),
-                # mirroring the Windows tube+halo.
-                if len(sx) >= 2:
-                    poly = QPolygonF([
-                        QPointF(float(sx[k]), float(sy[k]))
-                        for k in range(len(sx))])
-                    if halo_a > 0 and not dragging:
-                        p.setPen(QPen(QColor(hrgb[0], hrgb[1], hrgb[2], halo_a),
-                                      halo, Qt.PenStyle.SolidLine,
-                                      Qt.PenCapStyle.RoundCap,
-                                      Qt.PenJoinStyle.RoundJoin))
-                        p.drawPolyline(poly)
-                    p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
-                                         255 if sel else 235), core,
-                                  Qt.PenStyle.SolidLine, cap, join))
-                    p.drawPolyline(poly)
-                name = ves.get("name", "")
-                if (not dragging and name
-                        and ves.get("vid") in getattr(v, "_coro_names", ())):
-                    _draw_outlined_text(
-                        p, QRectF(sx[0] + 6, sy[0] - 16, 160, 18),
-                        int(Qt.AlignmentFlag.AlignLeft
-                            | Qt.AlignmentFlag.AlignVCenter),
-                        name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
+                # Hide the segments that are BEHIND the heart (far side) and draw
+                # each contiguous VISIBLE (near-side) run as one polyline — the
+                # correct front/back ordering, plus far fewer QPainter calls than
+                # a per-segment drawLine. Halo rim first, coloured core on top.
+                n = len(sx)
+                if n >= 2:
+                    vis = _visible(sx, sy, d)
+                    i = 0
+                    while i < n:
+                        if not vis[i]:
+                            i += 1
+                            continue
+                        j = i
+                        while j + 1 < n and vis[j + 1]:
+                            j += 1
+                        if j > i:
+                            run = QPolygonF([
+                                QPointF(float(sx[k]), float(sy[k]))
+                                for k in range(i, j + 1)])
+                            if halo_a > 0 and not dragging:
+                                p.setPen(QPen(
+                                    QColor(hrgb[0], hrgb[1], hrgb[2], halo_a),
+                                    halo, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap,
+                                    Qt.PenJoinStyle.RoundJoin))
+                                p.drawPolyline(run)
+                            p.setPen(QPen(QColor(rgb[0], rgb[1], rgb[2],
+                                                 255 if sel else 235), core,
+                                          Qt.PenStyle.SolidLine, cap, join))
+                            p.drawPolyline(run)
+                        i = j + 1
+                    name = ves.get("name", "")
+                    if (not dragging and name and vis[0]
+                            and ves.get("vid") in getattr(v, "_coro_names", ())):
+                        _draw_outlined_text(
+                            p, QRectF(sx[0] + 6, sy[0] - 16, 160, 18),
+                            int(Qt.AlignmentFlag.AlignLeft
+                                | Qt.AlignmentFlag.AlignVCenter),
+                            name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
         for tg in getattr(v, "_coro_targets", ()):
             P = tg.get("point")
             if P is None:
@@ -897,6 +942,8 @@ class _Overlay(QWidget):
             crgb = _hex_to_rgb(tg.get("color") or "#ea9999")
             tcol = QColor(int(crgb[0]), int(crgb[1]), int(crgb[2]))
             sx, sy, _d = project([P])
+            if not bool(_visible(sx, sy, _d)[0]):   # hide a target behind the heart
+                continue
             mx, my = float(sx[0]), float(sy[0])
             p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
             p.setBrush(tcol)
@@ -5197,6 +5244,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         return np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
                          (b[4] + b[5]) * 0.5], float)
 
+    def _vr_occ_points(self):
+        """Heart-surface voxels (boundary of the VR crop mask) in the unpadded
+        voxel×spacing world frame — the SAME frame the coronary overlay projects
+        into. Used as a depth occluder so coronary segments BEHIND the heart are
+        hidden and the near side stays visible (correct front/back, like the
+        Windows 3-D tubes). Cached on the mask object; None when there's no crop
+        (no heart surface to occlude against)."""
+        m = self._vr_mask
+        if m is None:
+            return None
+        cache = getattr(self, "_vr_occ_cache", None)
+        if cache is not None and cache[0] is m:
+            return cache[1]
+        try:
+            from scipy.ndimage import binary_erosion
+            shell = m & ~binary_erosion(m)
+        except Exception:                                # noqa: BLE001
+            shell = m
+        zs, ys, xs = np.where(shell)
+        pts = None
+        if len(zs):
+            cap = 7000
+            if len(zs) > cap:
+                step = int(np.ceil(len(zs) / cap))
+                zs, ys, xs = zs[::step], ys[::step], xs[::step]
+            sx, sy, sz = (float(d) for d in self._dims)
+            pts = np.column_stack(
+                [xs * sx, ys * sy, zs * sz]).astype(float)
+        self._vr_occ_cache = (m, pts)
+        return pts
+
     # ---- heart crop (内腔VR / シェルVR) — pure numpy/scipy, ported from VTK ----
     def _vr_epi_full_mask(self):
         """Full-volume bool [z,y,x] Epi-region mask from the loaded EpiLv, so VR
@@ -5604,7 +5682,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             a = float(c[3]) if len(c) > 3 else 0.5
             try:
                 geo = gfx.Geometry(positions=pos)
-                mat = gfx.PointsMaterial(size=4.0, color=(r, g, b, a))
+                # Larger points → the colour reads as a filled surface, not a
+                # sparse speckle (the "色乗りが悪い" the user saw).
+                mat = gfx.PointsMaterial(size=7.0, color=(r, g, b, a))
                 node = gfx.Points(geo, mat)
                 p.scene.add(node)
                 nodes.append(node)
