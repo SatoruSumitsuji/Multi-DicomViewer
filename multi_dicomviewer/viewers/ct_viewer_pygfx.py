@@ -505,21 +505,26 @@ def _vr_render_image(p):
                 tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
         acc = np.zeros((ih, iw, 3), np.float32)
         aca = np.zeros((ih, iw), np.float32)
+        terr_floor = 0.22 * (ds / 0.8)        # min per-step opacity for territory
         for t in ts:
             hu, oob, vz, vy, vx = sample(t)
             idx = ((hu - _HU_LO) * inv).astype(np.intp)
             np.clip(idx, 0, 511, out=idx)
             a = alut[idx]
             a[oob] = 0.0
-            w = a * (1.0 - aca)
             cr, cg, cb = rlut[idx], glut[idx], blut[idx]
             if ton is not None:
                 lab = np.rint(tvol[vz, vy, vx]).astype(np.intp)
                 np.clip(lab, 0, len(ton) - 1, out=lab)
-                hit = ton[lab]
+                hit = ton[lab] & ~oob
+                # Replace the tissue colour AND lift its opacity where territory
+                # is: the myocardium's own CTA opacity is low, so without this the
+                # territory colour barely shows (the "薄すぎて見えない" the user saw).
+                a = np.where(hit, np.maximum(a, terr_floor), a)
                 cr = np.where(hit, tr[lab], cr)
                 cg = np.where(hit, tg[lab], cg)
                 cb = np.where(hit, tb[lab], cb)
+            w = a * (1.0 - aca)
             acc[..., 0] += w * cr
             acc[..., 1] += w * cg
             acc[..., 2] += w * cb
@@ -860,7 +865,9 @@ class _Overlay(QWidget):
             dd = np.asarray(dd, float)
             return dd if gpu else -dd
 
-        GB = 48 if dragging else 72
+        # Finer grid when still → the depth buffer tracks the curved epicardial
+        # surface closely, so on-surface vessels aren't falsely culled into gaps.
+        GB = 48 if dragging else 112
         depthbuf = None
         occ_margin = 0.0
         occ = v._vr_occ_points()
@@ -882,7 +889,9 @@ class _Overlay(QWidget):
                     np.minimum.at(depthbuf, (gj, gi), od[good])
                     fin = depthbuf[np.isfinite(depthbuf)]
                     if fin.size:
-                        occ_margin = 0.08 * (float(fin.max() - fin.min()) or 1.0)
+                        # Looser margin → keep the vessels CONTINUOUS (the user
+                        # saw them break up); still hides the clearly far side.
+                        occ_margin = 0.16 * (float(fin.max() - fin.min()) or 1.0)
             except Exception:                            # noqa: BLE001
                 depthbuf = None
 
@@ -5446,6 +5455,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         back = _norm(la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q))
         up = _norm(la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q))
         right = _norm(la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q))
+        # Flip-H / Flip-V: the GPU mirrors the texture data; for the parallel CPU
+        # view, mirror the image axis instead (negate right / up) — about the same
+        # centre, so the DVR AND the coronary (both use this basis) mirror together
+        # and match the GPU MIP.
+        fh, fv = self._vr_flip.get(key, [False, False])
+        if fh:
+            right = -right
+        if fv:
+            up = -up
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
