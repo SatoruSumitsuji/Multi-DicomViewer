@@ -4242,20 +4242,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         epi_edit = (self._lv_current_submode() == "epi") \
             if hasattr(self, "_lv_current_submode") else False
 
-        # Territory/VR review — tools differ by the ACTIVE pane (Windows parity):
-        #   LEFT (LV short-axis): ROTATE would re-tilt the short-axis → disabled;
-        #     Zoom/Move/Spin/Paging/Thick(SL)/Rt90/Lt90/Flip-H/Flip-V/Spin+/WL live.
-        #   RIGHT (VR): Paging/Thick have no VR meaning → greyed; the rest live.
-        vr = self.vr_active() if hasattr(self, "vr_active") else False
-        vr_here = vr and self._vr_on.get(getattr(self, "_active_pane", "A"), False)
-
         def _disabled(n):
-            base = (is2d and n in _MPR_ONLY_TOOLS) or (epi_edit and n == "THICK")
-            if vr:
-                if vr_here:
-                    return base or n in ("PAGING", "THICK")
-                return base or n == "ROTATE"      # LEFT short-axis: only Rotate off
-            return base or (lv_lock and n in _LV_LOCK_DISABLED)
+            return ((is2d and n in _MPR_ONLY_TOOLS)
+                    or (lv_lock and n in _LV_LOCK_DISABLED)
+                    or (epi_edit and n == "THICK"))
 
         # If the ACTIVE tool just became unavailable, fall back to Move (re-enters
         # _set_tool, which re-runs this refresh with a safe tool).
@@ -4301,11 +4291,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
-        # In the VR/territory review the usable tools differ per pane (LEFT
-        # short-axis vs RIGHT VR), so re-gate them whenever the active pane
-        # changes (Windows parity).
-        if hasattr(self, "vr_active") and self.vr_active():
-            self._refresh_tool_availability()
         # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
         # same, so a shared Rt90/Flip/… acts on the matching side in both.
         if (getattr(self, "_sync_view_on", False)
@@ -6163,7 +6148,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
         self._overlay[key].update()
         self._sync_vr_btn()
-        self._refresh_tool_availability()         # re-gate tools for the VR/SAX panes
 
     def _toggle_vr_mode(self) -> None:
         """Top-level VR button: toggle VR for the VR pane. OFF returns the pane to
@@ -6589,6 +6573,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # (re-tilt the frame / shift the long-axis level) are blocked. Zoom/Move/
         # WL/Thick/Spin still work (they don't change the axis relationship).
         if self._lv_axis_locked() and t in ("ROTATE", "PAGING"):
+            return
+        # VR/territory review: the LEFT pane is the LV short-axis, so block ROTATE
+        # there (it would re-tilt the short-axis). The VR pane keeps Rotate via
+        # _vr_gesture, so the toolbar button stays usable for the VR.
+        if (t == "ROTATE" and not self._vr_on.get(which, False)
+                and hasattr(self, "vr_active") and self.vr_active()):
             return
         # Epi: the LEFT (non-trace) pane is a fixed reference — disable MOVE there
         # so it can't be panned away (user request). The trace pane still pans.
