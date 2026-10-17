@@ -2642,6 +2642,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: rendered on a worker and shown instead. True = the DVR stop-frame is
         #: currently displayed for that pane (opaque QImage over the canvas).
         self._vr_dvr_shown = {"A": False, "B": False}
+        #: Persistent LV-myocardium region (from the territory mask) used to crop
+        #: the VR to the LV, excluding the RV / blood cavities (choice A). Kept
+        #: across the 領域色 show/hide toggle. _sig guards redundant recrops.
+        self._vr_lv_region = None
+        self._vr_lv_region_sig = None
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
         #: Per-pixel front-surface depth (world mm along the view dir) of the DVR
         #: stop-frame, so the coronary overlay occludes against the EXACT rendered
@@ -5444,11 +5449,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         full[z0:z1, y0:y1, x0:x1] = shell
         return full
 
+    def _vr_lv_myo_mask(self):
+        """VR crop = the LV MYOCARDIUM (perfusion-territory region) + a thin
+        outward shell for the epicardial coronaries. Excludes the RV and the
+        blood cavities so the septal territory + coronary aren't hidden behind
+        them (user choice A). None until an LV region is known."""
+        reg = getattr(self, "_vr_lv_region", None)
+        if reg is None or self._vol is None:
+            return None
+        reg = np.asarray(reg)
+        if tuple(reg.shape) != tuple(self._vol.shape) or not reg.any():
+            return None
+        try:
+            from scipy.ndimage import distance_transform_edt
+            sx, sy, sz = (float(d) for d in self._dims)
+            zz, yy, xx = np.where(reg)
+            m = 8
+            z0, z1 = max(0, zz.min() - m), min(reg.shape[0], zz.max() + m + 1)
+            y0, y1 = max(0, yy.min() - m), min(reg.shape[1], yy.max() + m + 1)
+            x0, x1 = max(0, xx.min() - m), min(reg.shape[2], xx.max() + m + 1)
+            sub = reg[z0:z1, y0:y1, x0:x1]
+            d = distance_transform_edt(~sub, sampling=(sz, sy, sx))
+            shell = sub | (d <= 4.0)             # ~4 mm outward for the coronaries
+            out = np.zeros(reg.shape, bool)
+            out[z0:z1, y0:y1, x0:x1] = shell
+            return out
+        except Exception:                                # noqa: BLE001
+            return np.ascontiguousarray(reg.astype(bool))
+
     def _vr_crop_mask(self):
-        """The bool crop for the VR: Epi+shell (default) or Epi interior; None →
-        no crop (full CT)."""
+        """The bool crop for the VR. When an LV territory region is known, crop
+        to the LV MYOCARDIUM (+thin shell) so the RV / blood cavities don't hide
+        the septal territory + coronary (A); else Epi+shell / Epi interior."""
         if self._vol is None:
             return None
+        lv = self._vr_lv_myo_mask()
+        if lv is not None:
+            return lv
         return (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
                 else self._vr_epi_full_mask())
 
@@ -5567,6 +5604,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         img, depth = res if res else (None, None)
         self._vr_img[key] = img
         self._vr_depth[key] = depth
+        # A synchronous DVR render (depth present) over a GPU pane IS the stop
+        # frame — reveal it (unless the user is mid-drag).
+        if (depth is not None and self._vr_drag is None
+                and self.pane[key].vr_volume is not None):
+            self._vr_dvr_shown[key] = True
         self._overlay[key].update()
 
     def _vr_async(self, key, lod: bool = True) -> None:
@@ -8097,6 +8139,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             m = np.asarray(mask)
             if m.shape == tuple(self._vol.shape):
                 self._terr_mask_vol = np.ascontiguousarray(m, np.float32)
+        # Persist the LV MYOCARDIUM region (independent of the colour show/hide
+        # toggle, which clears _terr_mask_vol) to crop the VR to the LV, excluding
+        # the RV / blood cavities (A). Recrop only when the region actually
+        # changes — a colour re-show of the same region must not rebuild the VR.
+        if self._terr_mask_vol is not None:
+            region = np.rint(self._terr_mask_vol) > 0
+            sig = (int(region.sum()), tuple(region.shape))
+            if sig != getattr(self, "_vr_lv_region_sig", None):
+                self._vr_lv_region = region
+                self._vr_lv_region_sig = sig
+                if self.vr_active():
+                    self._vr_recrop()            # rebuild the VR crop to the LV
         for k in ("A", "B"):
             self._terr_img[k] = (self._lvv_plane_rgba(k, "terr")
                                  if self._terr_mask_vol is not None else None)
