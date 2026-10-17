@@ -5706,12 +5706,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                 Y = (ny - 1) * sy - Y
             pos = np.ascontiguousarray(np.column_stack([X, Y, Z]), np.float32)
             r, g, b = float(c[0]), float(c[1]), float(c[2])
-            a = float(c[3]) if len(c) > 3 else 0.5
+            # Keep the territory SUBTLE so it doesn't turn the heart into a solid
+            # colour blob — the VR image/shape stays visible underneath (per the
+            # user: 控えめにしてVR像を優先). Small, translucent points read as a
+            # light wash rather than an opaque shell.
+            a = min(0.33, float(c[3]) if len(c) > 3 else 0.5)
             try:
                 geo = gfx.Geometry(positions=pos)
-                # Larger points → the colour reads as a filled surface, not a
-                # sparse speckle (the "色乗りが悪い" the user saw).
-                mat = gfx.PointsMaterial(size=7.0, color=(r, g, b, a))
+                mat = gfx.PointsMaterial(size=4.0, color=(r, g, b, a))
                 node = gfx.Points(geo, mat)
                 p.scene.add(node)
                 nodes.append(node)
