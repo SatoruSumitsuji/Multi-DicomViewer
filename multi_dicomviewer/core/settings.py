@@ -118,6 +118,9 @@ CORONARY_PARAMS_DEFAULT = {
     "lm_ratio": 1.5,
     "halo_color": "#000000",
     "halo_opacity": 0.5,
+    #: Perfusion-territory fill opacity (領域色透過度), 0.1–0.9. Adjustable from the
+    #: Coronary Tree panel; drives the MPR tint + the Mac/Windows VR territory.
+    "territory_opacity": 0.45,
     "line_colors": {
         "LM": "#b4a7d6", "LAD": "#6fa8dc", "LCX": "#bf9000", "RCA": "#93c47d",
     },
@@ -808,6 +811,7 @@ def load_coronary_params() -> dict:
         "lm_ratio": CORONARY_PARAMS_DEFAULT["lm_ratio"],
         "halo_color": CORONARY_PARAMS_DEFAULT["halo_color"],
         "halo_opacity": CORONARY_PARAMS_DEFAULT["halo_opacity"],
+        "territory_opacity": CORONARY_PARAMS_DEFAULT["territory_opacity"],
         "line_colors": dict(CORONARY_PARAMS_DEFAULT["line_colors"]),
         "target_colors": list(CORONARY_PARAMS_DEFAULT["target_colors"]),
     }
@@ -833,6 +837,11 @@ def load_coronary_params() -> dict:
             out["halo_opacity"] = max(0.1, min(0.9, o))
         except (TypeError, ValueError):
             pass
+        try:
+            to = float(data.get("territory_opacity", out["territory_opacity"]))
+            out["territory_opacity"] = max(0.1, min(0.9, to))
+        except (TypeError, ValueError):
+            pass
         lc = data.get("line_colors")
         if isinstance(lc, dict):
             for k in out["line_colors"]:
@@ -853,7 +862,8 @@ def save_coronary_params(params: dict) -> None:
         p = params or {}
         merged = load_coronary_params()          # start from a clean/clamped base
         for k in ("tube_diameter_mm", "lm_ratio", "halo_color",
-                  "halo_opacity", "line_colors", "target_colors"):
+                  "halo_opacity", "territory_opacity", "line_colors",
+                  "target_colors"):
             if k in p:
                 merged[k] = p[k]
         # Re-sanitise through load-shaped clamping by round-tripping the fields.
@@ -866,6 +876,8 @@ def save_coronary_params(params: dict) -> None:
             "halo_color": _clean_hex(merged["halo_color"],
                                      CORONARY_PARAMS_DEFAULT["halo_color"]),
             "halo_opacity": max(0.1, min(0.9, float(merged["halo_opacity"]))),
+            "territory_opacity": max(0.1, min(0.9,
+                                             float(merged["territory_opacity"]))),
             "line_colors": {
                 k: _clean_hex((merged.get("line_colors") or {}).get(k),
                               CORONARY_PARAMS_DEFAULT["line_colors"][k])

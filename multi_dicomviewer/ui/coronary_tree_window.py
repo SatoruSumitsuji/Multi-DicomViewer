@@ -69,7 +69,10 @@ TERRITORY_FILLS = [
 ]
 #: Clinical display order for root trunks — LM first (not alphabetical).
 _ROOT_ORDER = {"LM": 0, "LAD": 1, "LCX": 2, "RCA": 3}
-_ROLE_TERR_LABEL = {"LAD": 1, "LCX": 2, "RCA": 3}
+#: Root role → territory label. LM now has its OWN label/colour (was 0 = the
+#: transparent "LM stub / unassigned", so the LM-supplied septal base showed
+#: uncoloured). Targets shift to 5..10 to make room (see _territory_systems_full).
+_ROLE_TERR_LABEL = {"LAD": 1, "LCX": 2, "RCA": 3, "LM": 4}
 #: Target-territory fill alpha (kept when the user changes the colour).
 _TARGET_ALPHA = 0.42
 #: A small palette for the Target-territory colour — distinct from the base
@@ -234,6 +237,15 @@ class CoronaryTreeWindow(SnapDock):
         # it (territory auto-shows on compute; the viewer draws Epi/Endo borders).
         self._territory_on: bool = True     # 領域色 (perfusion-territory tint)
         self._lv_borders_on: bool = True    # 境界線 (Epi/Endo boundary traces)
+        #: Territory fill opacity (領域色透過度), adjustable from the panel so the
+        #: colours can be made vivid without opening Settings. Persisted in the
+        #: coronary params; higher = more opaque (also drives the Windows VR
+        #: surfaces so they match the Mac's stronger colour).
+        try:
+            self._terr_alpha = float((settings_mod.load_coronary_params()
+                                      or {}).get("territory_opacity", 0.45))
+        except Exception:                                # noqa: BLE001
+            self._terr_alpha = 0.45
         self._overlay_btn = None            # the ツリー表示/非表示 toggle button
         self._targets_shown = True          # global show/hide of all Target overlays
         self._target_mode = False           # click-a-vessel-to-set-a-target toggle
@@ -314,23 +326,12 @@ class CoronaryTreeWindow(SnapDock):
         self._vr_show_btn.setStyleSheet("padding: 2px 6px;")
         self._vr_show_btn.clicked.connect(self._toggle_vr)
         vr_row.addWidget(self._vr_show_btn)
-        self._vr_shell_btn = QPushButton(t("シェルVR"))
-        self._vr_shell_btn.setToolTip(
-            t("VRの範囲を切替: 内腔VR (心内腔) ⇔ シェルVR (Epi表面+外側の殻)。"
-              "シェルVR時は右のシェルVR範囲で殻の厚みを調整"))
-        self._vr_shell_btn.setStyleSheet("padding: 2px 6px;")
-        self._vr_shell_btn.clicked.connect(self._toggle_vr_shell)
-        vr_row.addWidget(self._vr_shell_btn)
-        self._vr_shell_lbl = QLabel(t("シェルVR範囲"))
-        vr_row.addWidget(self._vr_shell_lbl)
-        self._vr_shell_spin = QSpinBox()
-        self._vr_shell_spin.setRange(0, 20)
-        self._vr_shell_spin.setSingleStep(1)
-        self._vr_shell_spin.setSuffix(" mm")
-        self._vr_shell_spin.setValue(10)
-        self._vr_shell_spin.setToolTip(t("Epi表面から外側の殻の厚み (0–20mm)"))
-        self._vr_shell_spin.valueChanged.connect(self._on_vr_shell_mm)
-        vr_row.addWidget(self._vr_shell_spin)
+        # シェルVR removed: the VR now always crops to the solid LV (Epi region),
+        # so the 内腔/シェル toggle + range had no effect. Attributes kept as None
+        # so the sync / toggle helpers stay safe no-ops.
+        self._vr_shell_btn = None
+        self._vr_shell_lbl = None
+        self._vr_shell_spin = None
         vr_row.addStretch(1)
         outer.addLayout(vr_row)
         self._sync_vr_row()
@@ -352,26 +353,35 @@ class CoronaryTreeWindow(SnapDock):
         self._targets_vis_btn.setText(
             t("非表示") if self._targets_shown else t("表示"))
 
-        # LV row: independent show/hide of the two FullLv visuals — the perfusion
-        # territory tint (領域色) and the Epi/Endo boundary traces (境界線). Both
-        # leave the loaded FullLv data untouched; they are pure display switches
-        # (decoupled from the coronary ツリー表示 toggle above).
-        lv_btns = _row(t("LV："), [
-            (t("領域色"),
-             t("心筋の灌流領域の色 (LAD/LCX/RCA) を表示/非表示。"
-               "FullLv データは読み込んだまま保持"),
-             self._toggle_territory_color, False),
-            (t("境界線"),
-             t("Epi/Endo の境界線を表示/非表示。"
-               "FullLv データは読み込んだまま保持"),
-             self._toggle_lv_borders, False),
-        ])
-        self._terr_vis_btn = lv_btns[0]
-        self._lv_border_vis_btn = lv_btns[1]
-        self._terr_vis_btn.setText(
+        # 領域色 row: show/hide the perfusion-territory tint + an opacity (透過度)
+        # spin so the colour can be made vivid without opening Settings. The 境界線
+        # toggle was removed (it had no visible effect in coronary/territory review
+        # — the Epi/Endo traces only draw in LV edit mode).
+        lv_row = QHBoxLayout()
+        lv_row.setSpacing(3)
+        terr_lbl = QLabel(t("領域色："))
+        terr_lbl.setStyleSheet("font-weight:bold;")
+        lv_row.addWidget(terr_lbl)
+        self._terr_vis_btn = QPushButton(
             t("非表示") if self._territory_on else t("表示"))
-        self._lv_border_vis_btn.setText(
-            t("非表示") if self._lv_borders_on else t("表示"))
+        self._terr_vis_btn.setToolTip(
+            t("心筋の灌流領域色 (LM/LAD/LCX/RCA) を表示/非表示"))
+        self._terr_vis_btn.setStyleSheet("padding: 2px 6px;")
+        self._terr_vis_btn.clicked.connect(self._toggle_territory_color)
+        lv_row.addWidget(self._terr_vis_btn)
+        lv_row.addWidget(QLabel(t("透過度")))
+        self._terr_alpha_spin = QSpinBox()
+        self._terr_alpha_spin.setRange(10, 90)
+        self._terr_alpha_spin.setSingleStep(5)
+        self._terr_alpha_spin.setSuffix(" %")
+        self._terr_alpha_spin.setValue(int(round(self._terr_alpha * 100)))
+        self._terr_alpha_spin.setToolTip(
+            t("領域色の不透明度 (10–90%)。Mac・Windows 共通、設定不要で変更"))
+        self._terr_alpha_spin.valueChanged.connect(self._on_terr_alpha)
+        lv_row.addWidget(self._terr_alpha_spin)
+        lv_row.addStretch(1)
+        outer.addLayout(lv_row)
+        self._lv_border_vis_btn = None       # 境界線 removed (guarded elsewhere)
 
         split = QSplitter(Qt.Orientation.Vertical)
         outer.addWidget(split, 1)
@@ -656,6 +666,19 @@ class CoronaryTreeWindow(SnapDock):
                 t("非表示") if self._territory_on else t("表示"))
         self._push_territory()
 
+    def _on_terr_alpha(self, pct: int) -> None:
+        """領域色透過度 changed → recolour the territory (both the MPR tint and the
+        Mac/Windows VR) at the new opacity and persist it in the coronary params."""
+        self._terr_alpha = max(0.1, min(0.9, int(pct) / 100.0))
+        try:
+            cp = settings_mod.load_coronary_params()
+            cp["territory_opacity"] = self._terr_alpha
+            settings_mod.save_coronary_params(cp)
+        except Exception:                                # noqa: BLE001
+            pass
+        if self._territory_on:
+            self._push_territory()
+
     def _toggle_lv_borders(self) -> None:
         """LV ▸ 境界線: show/hide the Epi/Endo boundary traces on the source CT,
         independent of everything else. The FullLv data stays loaded; the viewer
@@ -673,19 +696,16 @@ class CoronaryTreeWindow(SnapDock):
 
     # ------------------------------------------------------------- VR row
     def _sync_vr_row(self) -> None:
-        """Update the VR row's labels / enabled state to the current mode: the
-        VR show/hide button shows the ACTION for the current state (shown → 非表示),
-        the シェル/内腔 button shows the ACTIVE mode, and the シェルVR範囲 spin is
-        enabled only while シェルVR is selected."""
-        if getattr(self, "_vr_shell_btn", None) is None:
-            return
+        """Update the VR show/hide button's label to the current state. (シェルVR
+        removed — the VR always crops to the solid LV; legacy widgets guarded.)"""
         if getattr(self, "_vr_show_btn", None) is not None:
             self._vr_show_btn.setText(
                 t("非表示") if getattr(self, "_vr_shown", True) else t("表示"))
-        shell = bool(getattr(self, "_vr_shell_mode", True))
-        self._vr_shell_btn.setText(t("シェルVR") if shell else t("内腔VR"))
-        self._vr_shell_lbl.setEnabled(shell)
-        self._vr_shell_spin.setEnabled(shell)
+        if getattr(self, "_vr_shell_btn", None) is not None:
+            shell = bool(getattr(self, "_vr_shell_mode", True))
+            self._vr_shell_btn.setText(t("シェルVR") if shell else t("内腔VR"))
+            self._vr_shell_lbl.setEnabled(shell)
+            self._vr_shell_spin.setEnabled(shell)
 
     def _toggle_vr(self) -> None:
         """VR ▸ 表示/非表示 — show or hide the right-pane Volume Rendering."""
@@ -1475,18 +1495,17 @@ class CoronaryTreeWindow(SnapDock):
                 tg = self._targets[i]
                 mv, _ml = eng.territory(tg["vid"], tg["idx"])
                 if mv.any():
-                    full[fz[mv], fy[mv], fx[mv]] = 4 + (i % 6)   # Target(i+1)
-        # Colours: LAD/LCX/RCA systems (configurable hue, shipped alpha) then the
-        # six Target fills (labels 4..9), so index = label-1.
+                    full[fz[mv], fy[mv], fx[mv]] = 5 + (i % 6)   # Target(i+1): 5..10
+        # Colours: LAD/LCX/RCA/LM systems (configurable hue, user opacity) then the
+        # six Target fills (labels 5..10), so index = label-1.
         line = (self._coro_params or {}).get("line_colors") or {}
+        alpha = float(getattr(self, "_terr_alpha", 0.45))
 
-        def _fill(role, alpha):
+        def _fill(role, a=alpha):
             c = QColor(line.get(role) or ROOT_COLORS.get(role) or "#888888")
-            return (c.redF(), c.greenF(), c.blueF(), alpha)
+            return (c.redF(), c.greenF(), c.blueF(), a)
 
-        colors = [_fill("LAD", TERRITORY_FILLS[0][3]),
-                  _fill("LCX", TERRITORY_FILLS[1][3]),
-                  _fill("RCA", TERRITORY_FILLS[2][3])]
+        colors = [_fill("LAD"), _fill("LCX"), _fill("RCA"), _fill("LM")]
         colors += [self._target_rgba(n) for n in range(1, 7)]   # T1..T6
         return full, colors
 

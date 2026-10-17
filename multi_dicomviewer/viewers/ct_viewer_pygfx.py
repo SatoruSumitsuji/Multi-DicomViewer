@@ -500,6 +500,7 @@ def _vr_render_image(p):
         inv = 511.0 / (_HU_HI - _HU_LO)
         tvol, tcols = p["tvol"], p["tcols"]
         tr = tg = tb = ton = None
+        t_alpha = 0.45
         if tvol is not None and tcols:
             n = len(tcols)
             tr = np.zeros(n + 1, np.float32)
@@ -508,6 +509,8 @@ def _vr_render_image(p):
             ton = np.zeros(n + 1, bool)
             for i, c in enumerate(tcols, 1):
                 tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
+                if len(c) > 3:
+                    t_alpha = float(c[3])
         acc = np.zeros((ih, iw, 3), np.float32)
         aca = np.zeros((ih, iw), np.float32)
         # Per-pixel FRONT-surface depth (the t, in world mm along `back`, where the
@@ -516,7 +519,9 @@ def _vr_render_image(p):
         # points centre→camera, so larger t = nearer; a vessel is hidden where its
         # own depth is well behind this.
         front_t = np.full((ih, iw), np.nan, np.float32)
-        terr_floor = 0.22 * (ds / 0.8)        # min per-step opacity for territory
+        # Per-step territory opacity floor follows the 領域色透過度 (the tcols alpha),
+        # so the panel's opacity spin changes the Mac VR territory too.
+        terr_floor = 0.5 * t_alpha * (ds / 0.8)
         for t in ts:
             hu, oob, vz, vy, vx = sample(t)
             idx = ((hu - _HU_LO) * inv).astype(np.intp)
