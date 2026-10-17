@@ -438,6 +438,11 @@ _VR_COL_B = np.array([0.0, 0.15, 0.40, 0.70, 0.92, 1.00], float)
 #: Only the rim OVERHANG is a constant here (the Windows _VR_CORO_HALO).
 _VR_CORO_HALO_MM = 0.30                             # dark rim beyond the tube
 
+#: Initial VR framing factor, shared by the GPU show_object scale AND the CPU DVR
+#: halfH so the MIP and the DVR stop-frame are the SAME size. Larger = heart
+#: smaller. 1.3/1.5 was the earlier size; /0.8 shrinks the initial model to 80%.
+_VR_VIEW_SCALE = (1.3 / 1.5) / 0.8
+
 
 def _vr_render_image(p):
     """Pure CPU VR ray-cast → QImage from a param snapshot (NO self / Qt-widget),
@@ -5550,7 +5555,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Match the GPU show_object framing (extent = radius*2*(1.3/1.5)/zoom;
         # radius ≈ diag/2) so the heart is the SAME size across the MIP↔DVR swap.
         zoom = max(0.3, min(6.0, self._vr_zoom.get(key, 1.0)))
-        halfH = (diag * 0.5) * (1.3 / 1.5) / zoom
+        halfH = (diag * 0.5) * _VR_VIEW_SCALE / zoom
         halfW = halfH * (pw / ph)
         # Pan: the GPU slides the camera by right*px + up*py; shift the image
         # centre the opposite way so the parallel view pans to match.
@@ -5740,9 +5745,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         q = self._vr_rot[key]
         back = la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q)
         up = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
-        # Base framing 1.3, divided by 1.5 so the initial VR model is 1.5×
-        # bigger (smaller show_object scale = object fills more of the view).
-        scale = (1.3 / 1.5) / max(0.3, min(6.0, self._vr_zoom[key]))
+        # Shared framing factor (initial model 80%); matches the DVR halfH.
+        scale = _VR_VIEW_SCALE / max(0.3, min(6.0, self._vr_zoom[key]))
         # Frame the HEART CROP (same bounds the CPU DVR uses), NOT the whole
         # padded texture — otherwise the GPU MIP frames the full volume and the
         # heart comes out a different size than the DVR stop-frame. Pass the crop
