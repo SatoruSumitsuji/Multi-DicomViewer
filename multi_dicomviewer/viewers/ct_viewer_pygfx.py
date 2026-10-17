@@ -733,7 +733,9 @@ class _Overlay(QWidget):
         # the overlay stays transparent (just the mode label). A CPU fallback
         # image is only drawn if the GPU volume isn't up (e.g. Metal black).
         if v._vr_on.get(key):
-            if v.pane[key].vr_volume is None:
+            # The CPU DVR stop-frame (when shown) or the CPU fallback image is an
+            # opaque QImage covering the canvas (GPU MIP + territory points below).
+            if v._vr_dvr_shown.get(key) or v.pane[key].vr_volume is None:
                 img = v._vr_img.get(key)
                 if img is not None:
                     p.drawImage(self.rect(), img)
@@ -797,7 +799,12 @@ class _Overlay(QWidget):
         the VR camera onto the rendered volume. The far side (behind the centre)
         is faded as a depth cue. Same data as the MPR coronary overlay."""
         v = self._v
-        gpu = v.pane[key].vr_volume is not None
+        # Use the GPU perspective projection while the GPU MIP is shown; when the
+        # CPU DVR stop-frame is shown, the volume is drawn with the PARALLEL
+        # _vr_basis, so project the tree the same way (keeps the overlay aligned
+        # with whichever image is on screen).
+        gpu = (v.pane[key].vr_volume is not None
+               and not v._vr_dvr_shown.get(key))
 
         def project(pts):
             if gpu:
@@ -842,13 +849,20 @@ class _Overlay(QWidget):
                            * 255))
         hrgb = _hex_to_rgb(halo_hex)
         # Front/back depth ordering (like the Windows 3-D tubes): build a coarse
-        # depth buffer from the heart-surface voxels. Smaller projected depth
-        # (w) = nearer the camera; each grid cell keeps the NEAREST surface
-        # depth, i.e. the heart's FRONT surface. A coronary point is hidden when
-        # it sits well BEHIND that front surface (the far side of the heart);
-        # a small relative margin lets the near-surface vessels through.
+        # depth buffer from the heart-surface voxels, each cell keeping the
+        # NEAREST surface = the heart's FRONT surface; a coronary point is hidden
+        # when it is well BEHIND that front surface (far side of the heart).
+        # The two projections disagree on sign — GPU perspective 'w' is LARGER
+        # when FARTHER, the parallel 'd' is LARGER when NEARER — so normalise to
+        # a "depth where smaller == nearer" and use an additive margin from the
+        # heart's own depth spread (scale-independent across both projections).
+        def _near(dd):
+            dd = np.asarray(dd, float)
+            return dd if gpu else -dd
+
         GB = 48 if dragging else 72
         depthbuf = None
+        occ_margin = 0.0
         occ = v._vr_occ_points()
         if occ is not None and len(occ):
             try:
@@ -856,28 +870,34 @@ class _Overlay(QWidget):
                 ox, oy, ow = project(occ[::ostep])
                 ox = np.asarray(ox, float)
                 oy = np.asarray(oy, float)
-                ow = np.asarray(ow, float)
-                good = ((ow > 1e-6) & np.isfinite(ox) & np.isfinite(oy)
+                od = _near(ow)
+                good = (np.isfinite(ox) & np.isfinite(oy) & np.isfinite(od)
                         & (ox >= 0) & (ox < w) & (oy >= 0) & (oy < h))
+                if gpu:
+                    good = good & (np.asarray(ow, float) > 1e-6)
                 if good.any():
                     gi = np.clip((ox[good] / w * GB).astype(int), 0, GB - 1)
                     gj = np.clip((oy[good] / h * GB).astype(int), 0, GB - 1)
                     depthbuf = np.full((GB, GB), np.inf)
-                    np.minimum.at(depthbuf, (gj, gi), ow[good])
+                    np.minimum.at(depthbuf, (gj, gi), od[good])
+                    fin = depthbuf[np.isfinite(depthbuf)]
+                    if fin.size:
+                        occ_margin = 0.08 * (float(fin.max() - fin.min()) or 1.0)
             except Exception:                            # noqa: BLE001
                 depthbuf = None
 
         def _visible(sx_a, sy_a, d_a):
             """Per-point visibility vs the heart front-surface depth buffer."""
-            d_a = np.asarray(d_a, float)
+            nd = _near(d_a)
             if depthbuf is None:
-                return d_a > 1e-6
+                return (np.asarray(d_a, float) > 1e-6) if gpu \
+                    else np.ones(len(np.atleast_1d(sx_a)), bool)
             gi = np.clip((np.asarray(sx_a, float) / w * GB).astype(int),
                          0, GB - 1)
             gj = np.clip((np.asarray(sy_a, float) / h * GB).astype(int),
                          0, GB - 1)
             front = depthbuf[gj, gi]
-            return (d_a > 1e-6) & (d_a <= front * 1.05)
+            return nd <= front + occ_margin
 
         spec = getattr(v, "_coro_overlay", None)
         if spec:
@@ -2570,6 +2590,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: NOT restored (so no SlabMIP appears behind it). Separate from _vr_on
         #: (which is the mode itself).
         self._vr_img_hidden = {"A": False, "B": False}
+        #: Hybrid VR: while rotating, the fast GPU MIP shows; once still, a CPU
+        #: DVR composite (shaded, CTA transfer func — the Windows-like look) is
+        #: rendered on a worker and shown instead. True = the DVR stop-frame is
+        #: currently displayed for that pane (opaque QImage over the canvas).
+        self._vr_dvr_shown = {"A": False, "B": False}
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
         self._vr_mask = None                 # bool crop (heart) or None (full CT)
         self._vr_busy = False                # an async VR drag render is running
@@ -3005,6 +3030,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Alt needed. A plain right-click still falls through to the normal menu.
         if self._vr_on.get(key) and self._drag_btn == 1:
             self._vr_drag = key
+            # Dragging resumes the fast GPU MIP; the CPU DVR stop-frame comes back
+            # on release (see _on_up → _vr_schedule_dvr).
+            if self._vr_dvr_shown.get(key):
+                self._vr_dvr_shown[key] = False
+                try:
+                    self._overlay[key].update()
+                except Exception:                        # noqa: BLE001
+                    pass
             self._vr_drag_mode = {
                 "ZOOM": "zoom", "MOVE": "move", "SPIN": "spin",
                 "WL": "wl", "ROTATE": "rotate"}.get(self._tool, "rotate")
@@ -3351,6 +3384,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                                       self.pane[kk].canvas.request_draw())
                 except Exception:                        # noqa: BLE001
                     pass
+                # Hybrid: now that the orbit stopped, render the pretty CPU DVR
+                # stop-frame and show it in place of the flat GPU MIP.
+                self._vr_schedule_dvr(k)
             return
         # End an LV apex drag (record apex + borders as one Ctrl+Z step).
         if self._lv_apex_drag is not None:
@@ -5403,20 +5439,25 @@ class CTViewer(CPRMixin, AbstractViewer):
                         (fb[4] + fb[5]) * 0.5], float)
         diag = math.sqrt((fb[1] - fb[0]) ** 2 + (fb[3] - fb[2]) ** 2
                          + (fb[5] - fb[4]) ** 2) or 1.0
-        az, el = self._vr_az[key], self._vr_el[key]
-        ce, se = math.cos(el), math.sin(el)
-        ca, sa = math.cos(az), math.sin(az)
-        back = _norm(np.array([ce * sa, se, ce * ca], float))
-        up0 = np.array([0.0, 0.0, 1.0], float)
-        if abs(float(np.dot(back, up0))) > 0.98:
-            up0 = np.array([0.0, 1.0, 0.0], float)
-        right = _norm(np.cross(up0, back))
-        up = _norm(np.cross(back, right))
+        # Orientation from the SAME trackball quaternion the GPU MIP camera uses,
+        # so the CPU DVR stop-frame shows the exact view the GPU MIP was showing
+        # (back = centre→camera, like _vr_config_cam_gpu). Parallel projection.
+        q = self._vr_rot[key]
+        back = _norm(la.vec_transform_quat(np.array([0.0, 0.0, 1.0]), q))
+        up = _norm(la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q))
+        right = _norm(la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q))
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
-        halfH = 0.62 * diag
+        # Match the GPU show_object framing (extent = radius*2*(1.3/1.5)/zoom;
+        # radius ≈ diag/2) so the heart is the SAME size across the MIP↔DVR swap.
+        zoom = max(0.3, min(6.0, self._vr_zoom.get(key, 1.0)))
+        halfH = (diag * 0.5) * (1.3 / 1.5) / zoom
         halfW = halfH * (pw / ph)
+        # Pan: the GPU slides the camera by right*px + up*py; shift the image
+        # centre the opposite way so the parallel view pans to match.
+        px, py = self._vr_pan.get(key, [0.0, 0.0])
+        ctr = ctr - right * float(px) - up * float(py)
         return ctr, right, up, back, halfW, halfH, pw, ph
 
     def _vr_project_pts(self, key, pts3d):
@@ -5465,12 +5506,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
         self._overlay[key].update()
 
-    def _vr_async(self, key) -> None:
-        """Render the drag frame on a WORKER thread so the mouse never blocks on
-        the ~0.1-0.2 s ray-cast. Only one render runs at a time; a request that
-        arrives while busy is remembered and re-run (with the latest angle) when
-        the worker finishes — so the view always converges to the current angle
-        without the lag pile-up that a synchronous per-move render causes."""
+    def _vr_async(self, key, lod: bool = True) -> None:
+        """Render a VR frame on a WORKER thread so the mouse never blocks on the
+        ~0.1-1 s ray-cast. Only one render runs at a time; a request that arrives
+        while busy is remembered and re-run when the worker finishes. lod=True is
+        the fast low-res preview; lod=False the full-res DVR stop-frame."""
         if self._vr_busy:
             self._vr_dirty = key
             return
@@ -5478,12 +5518,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_gen += 1
         gen = self._vr_gen
         try:
-            params = self._vr_params(key, lod=True)
+            params = self._vr_params(key, lod=lod)
         except Exception:                                # noqa: BLE001
             self._vr_busy = False
             return
         threading.Thread(target=self._vr_worker, args=(key, gen, params),
                          daemon=True).start()
+
+    def _vr_schedule_dvr(self, key) -> None:
+        """Hybrid VR: show the fast GPU MIP now, then render the pretty CPU DVR
+        stop-frame shortly after the view settles. Safe no-op without a GPU
+        volume; on any failure the GPU MIP just stays shown."""
+        if not self._vr_on.get(key) or self.pane[key].vr_volume is None:
+            return
+        self._vr_dvr_shown[key] = False          # show the GPU MIP immediately
+        try:
+            self._overlay[key].update()
+        except Exception:                                # noqa: BLE001
+            pass
+        QTimer.singleShot(
+            160, lambda k=key: (self._vr_async(k, lod=False)
+                                if self._vr_on.get(k)
+                                and self.pane[k].vr_volume is not None
+                                and self._vr_drag is None else None))
 
     def _vr_worker(self, key, gen, params) -> None:
         try:
@@ -5501,6 +5558,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if img is not None and self._vr_on.get(key):
             self._vr_img[key] = img
+            # Only reveal the DVR stop-frame if the user isn't dragging again (a
+            # drag resumes the GPU MIP). The volume being present means this is
+            # the hybrid GPU path → showing the DVR is the stop-frame.
+            if (self._vr_drag is None
+                    and self.pane[key].vr_volume is not None):
+                self._vr_dvr_shown[key] = True
             self._overlay[key].update()
         if self._vr_dirty is not None:
             k = self._vr_dirty
@@ -5617,6 +5680,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.canvas.request_draw()                  # ensure a clean async draw
         except Exception:                            # noqa: BLE001
             pass
+        # Start on the fast GPU MIP, then settle to the pretty CPU DVR stop-frame.
+        self._vr_dvr_shown[key] = False
+        self._vr_schedule_dvr(key)
 
     def _vr_gpu_disable(self, key, restore: bool = True) -> None:
         p = self.pane[key]
@@ -5626,6 +5692,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                        # noqa: BLE001
                 pass
         p.vr_terr_nodes = []
+        self._vr_dvr_shown[key] = False              # no DVR stop-frame once off
         if p.vr_volume is not None:
             try:
                 p.scene.remove(p.vr_volume)
@@ -5823,6 +5890,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 self.pane[key].render()
             self._overlay[key].update()
+            self._vr_schedule_dvr(key)                   # refresh the DVR stop-frame
         elif kind in ("fliph", "flipv"):
             fl = self._vr_flip[key]
             if kind == "fliph":
@@ -5830,7 +5898,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 fl[1] = not fl[1]
             self._vr_gpu_enable(key)                     # rebuild flipped texture
-            self._overlay[key].update()
+            self._overlay[key].update()                  # _vr_gpu_enable schedules DVR
 
     def _vr_angio_vals(self, key):
         """The VR view's (primary, secondary) C-arm angles from the camera's
@@ -5875,6 +5943,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             self.pane[key].render()
         self._overlay[key].update()
+        self._vr_schedule_dvr(key)                       # refresh the DVR stop-frame
 
     def _vr_refresh(self, key, lod: bool = False) -> None:
         """Re-apply VR after a state change (W/L, crop, territory). For the GPU
@@ -7958,6 +8027,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self.pane[k].canvas.request_draw()
                 except Exception:                        # noqa: BLE001
                     pass
+                self._vr_schedule_dvr(k)     # DVR composites territory → refresh
             if self._overlay.get(k) is not None:
                 self._overlay[k].update()
         # Territory is composited INTO the VR image (not a live overlay), so an
