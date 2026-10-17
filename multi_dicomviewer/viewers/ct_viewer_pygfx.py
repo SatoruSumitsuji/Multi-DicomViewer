@@ -924,9 +924,11 @@ class _Overlay(QWidget):
                              0, ih_ - 1)
                 front = dm[dj, di]
                 dd = np.asarray(d_a, float)           # vessel depth (mm, larger=near)
-                # Visible where there's no surface, or the vessel is in front of /
-                # near it (10 mm lets the epicardial vessels sit just outside).
-                return np.isnan(front) | (dd >= front - 10.0)
+                # Visible where there's no surface, or the vessel is at / in front
+                # of it. A generous 18 mm band keeps the centreline (which runs a
+                # few mm INSIDE the epicardial surface, and dips near the edge-on
+                # silhouette) continuous; only the genuine far side is hidden.
+                return np.isnan(front) | (dd >= front - 18.0)
             nd = _near(d_a)
             if depthbuf is None:
                 return (np.asarray(d_a, float) > 1e-6) if gpu \
@@ -5515,7 +5517,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Pan: the GPU slides the camera by right*px + up*py; shift the image
         # centre the opposite way so the parallel view pans to match.
         px, py = self._vr_pan.get(key, [0.0, 0.0])
-        ctr = ctr - right * float(px) - up * float(py)
+        ctr = ctr + right * float(px) + up * float(py)
         return ctr, right, up, back, halfW, halfH, pw, ph
 
     def _vr_project_pts(self, key, pts3d):
@@ -5698,9 +5700,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Base framing 1.3, divided by 1.5 so the initial VR model is 1.5×
         # bigger (smaller show_object scale = object fills more of the view).
         scale = (1.3 / 1.5) / max(0.3, min(6.0, self._vr_zoom[key]))
+        # Frame the HEART CROP (same bounds the CPU DVR uses), NOT the whole
+        # padded texture — otherwise the GPU MIP frames the full volume and the
+        # heart comes out a different size than the DVR stop-frame. Pass the crop
+        # as a sphere so both paths frame exactly the same thing.
+        fb = self._vr_frame_bounds()
+        cx, cy, cz = ((fb[0] + fb[1]) * 0.5, (fb[2] + fb[3]) * 0.5,
+                      (fb[4] + fb[5]) * 0.5)
+        hr = 0.5 * math.sqrt((fb[1] - fb[0]) ** 2 + (fb[3] - fb[2]) ** 2
+                             + (fb[5] - fb[4]) ** 2) or 1.0
         try:
             p.vr_cam.show_object(
-                p.vr_volume, view_dir=tuple(float(-c) for c in back),
+                (float(cx), float(cy), float(cz), float(hr)),
+                view_dir=tuple(float(-c) for c in back),
                 up=tuple(float(c) for c in up), scale=scale)
             # Pan (Alt+Left): slide the camera laterally in its own right/up so
             # the framed volume shifts on screen.
@@ -5894,12 +5906,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         ph = max(1, p.canvas.height())
         q = self._vr_rot[key]
         if mode == "move":
-            # Pan in world mm (screen px × world-per-px); drag moves the volume
-            # with the cursor (y-down screen → y-up world).
+            # Pan in world mm (screen px × world-per-px). Signs reversed (the user
+            # found Move went the wrong way) and kept consistent with the DVR pan
+            # in _vr_basis so the MIP and the stop-frame move together.
             g = (2.0 * 0.62 * float(self._diag or 1.0)) / ph / max(
                 0.3, self._vr_zoom[key])
-            self._vr_pan[key][0] -= dx * g
-            self._vr_pan[key][1] += dy * g
+            self._vr_pan[key][0] += dx * g
+            self._vr_pan[key][1] -= dy * g
         elif mode == "zoom":
             # Vertical drag dollies: drag DOWN = zoom in, UP = zoom out (user).
             self._vr_zoom[key] = float(min(6.0, max(0.3,
