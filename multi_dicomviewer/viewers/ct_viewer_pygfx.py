@@ -645,6 +645,17 @@ class _PygfxPane:
         # freeze / white-pane / dead-button state. `sync` is accepted for API
         # symmetry (the snapshot readback) but both paths force_draw now.
         if _PygfxPane._RENDERING:
+            # Re-entrant call (force_draw's processEvents re-entered the loop):
+            # don't recurse, but DON'T silently drop this pane either — schedule
+            # an async redraw so it repaints with the final state once the outer
+            # render unwinds. Without this a multi-pane op (Reset, mode change …)
+            # could leave one pane's slice stale while its overlay already shows
+            # the new projection — the "superimpose ズレ" that a stray click fixed
+            # (the click was just the skipped pane's next render request).
+            try:
+                self.canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                pass
             return
         _PygfxPane._RENDERING = True
         try:
@@ -17315,11 +17326,36 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Re-apply the current mode (re-locks 2-D / restores dual MPR) and
             # refits the camera.
             self._set_mode(self._mode, reset_cam=True)
+            self._resync_overlays()          # guard against the superimpose ズレ
         else:
             before = self._view_snapshot()
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
             self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
+
+    def _resync_overlays(self) -> None:
+        """Re-render BOTH panes and repaint their overlays once the current call
+        stack unwinds. Mimics the stray-click that used to fix the superimpose
+        ズレ: after a multi-pane op a re-entrant pane render may have been deferred,
+        so force a fresh async redraw + overlay repaint with the final state.
+        Safe to call after any view-changing operation that shows the mismatch."""
+        from PyQt6.QtCore import QTimer
+
+        def _go():
+            for k in ("A", "B"):
+                p = self.pane.get(k)
+                if p is not None:
+                    try:
+                        p.canvas.request_draw()
+                    except Exception:                    # noqa: BLE001
+                        pass
+                ov = self._overlay.get(k)
+                if ov is not None:
+                    try:
+                        ov.update()
+                    except Exception:                    # noqa: BLE001
+                        pass
+        QTimer.singleShot(0, _go)
 
     def _apply_preset(self, name):
         if name in CT_WL_PRESETS:

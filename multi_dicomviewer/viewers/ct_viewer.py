@@ -20553,11 +20553,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Re-apply the current mode (re-locks 2-D / restores dual MPR) and
             # refits the camera.
             self._set_mode(self._mode, reset_cam=True)
+            self._resync_overlays()          # guard against the superimpose ズレ
         else:
             before = self._view_snapshot()
             self._win, self._lvl = self._win0, self._lvl0
             self._refresh()
             self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
+
+    def _resync_overlays(self) -> None:
+        """Recompute the reprojected overlays and re-render BOTH panes once the
+        current call stack unwinds — mimics the stray-click that used to fix the
+        superimpose ズレ. render() skips a pane that isn't on-screen at the instant
+        it is called (load / layout transition), so a multi-pane op can leave one
+        pane's overlay at a stale projection until the next interaction; deferring
+        a fresh _refresh + render with the final state closes that gap. Safe to
+        call after any view-changing operation that shows the mismatch."""
+        def _go():
+            try:
+                self._refresh(reset_cam=False)
+            except Exception:                            # noqa: BLE001
+                pass
+            for k in ("A", "B"):
+                p = self.pane.get(k)
+                if p is not None:
+                    try:
+                        p.render()
+                    except Exception:                    # noqa: BLE001
+                        pass
+        QTimer.singleShot(0, _go)
 
     def _patient_axis_vol(self, p):
         """A patient-LPS direction (e.g. (1,0,0)=Left) expressed in volume
