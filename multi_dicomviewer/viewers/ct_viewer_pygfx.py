@@ -505,6 +505,12 @@ def _vr_render_image(p):
                 tr[i], tg[i], tb[i], ton[i] = c[0], c[1], c[2], True
         acc = np.zeros((ih, iw, 3), np.float32)
         aca = np.zeros((ih, iw), np.float32)
+        # Per-pixel FRONT-surface depth (the t, in world mm along `back`, where the
+        # ray first accumulates real opacity). Returned so the coronary overlay can
+        # occlude against the EXACT rendered surface (no sparse-grid gaps). back
+        # points centre→camera, so larger t = nearer; a vessel is hidden where its
+        # own depth is well behind this.
+        front_t = np.full((ih, iw), np.nan, np.float32)
         terr_floor = 0.22 * (ds / 0.8)        # min per-step opacity for territory
         for t in ts:
             hu, oob, vz, vy, vx = sample(t)
@@ -529,6 +535,9 @@ def _vr_render_image(p):
             acc[..., 1] += w * cg
             acc[..., 2] += w * cb
             aca += w
+            newly = np.isnan(front_t) & (aca >= 0.25)   # first real surface hit
+            if newly.any():
+                front_t[newly] = t
             if float(aca.min()) > 0.97:
                 break
         rgb = (np.clip(acc, 0.0, 1.0) * 255.0).astype(np.uint8)
@@ -541,8 +550,10 @@ def _vr_render_image(p):
         g = np.clip((mip - (lvl - win / 2.0)) / win, 0.0, 1.0)
         gg = (g * 255.0).astype(np.uint8)
         rgb = np.stack([gg, gg, gg], axis=2)
+        front_t = None                        # MIP has no front surface
     rgb = np.ascontiguousarray(rgb)
-    return QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
+    img = QImage(rgb.data, iw, ih, 3 * iw, QImage.Format.Format_RGB888).copy()
+    return img, front_t
 
 
 class _LvvWorker(QThread):
@@ -865,12 +876,18 @@ class _Overlay(QWidget):
             dd = np.asarray(dd, float)
             return dd if gpu else -dd
 
+        # DVR stop-frame: occlude against the EXACT per-pixel front-surface depth
+        # the ray-cast recorded (continuous, matches the rendered heart — no
+        # sparse-grid silhouette gaps). dm[y,x] = surface t in world mm (nan = no
+        # surface there → the vessel shows). Only built for the DVR frame.
+        dm = v._vr_depth.get(key) if v._vr_dvr_shown.get(key) else None
+
         # Finer grid when still → the depth buffer tracks the curved epicardial
         # surface closely, so on-surface vessels aren't falsely culled into gaps.
         GB = 48 if dragging else 112
         depthbuf = None
         occ_margin = 0.0
-        occ = v._vr_occ_points()
+        occ = v._vr_occ_points() if dm is None else None
         if occ is not None and len(occ):
             try:
                 ostep = 3 if dragging else 1
@@ -899,6 +916,17 @@ class _Overlay(QWidget):
 
         def _visible(sx_a, sy_a, d_a):
             """Per-point visibility vs the heart front-surface depth buffer."""
+            if dm is not None:                       # DVR per-pixel surface depth
+                ih_, iw_ = dm.shape
+                di = np.clip((np.asarray(sx_a, float) / w * iw_).astype(int),
+                             0, iw_ - 1)
+                dj = np.clip((np.asarray(sy_a, float) / h * ih_).astype(int),
+                             0, ih_ - 1)
+                front = dm[dj, di]
+                dd = np.asarray(d_a, float)           # vessel depth (mm, larger=near)
+                # Visible where there's no surface, or the vessel is in front of /
+                # near it (10 mm lets the epicardial vessels sit just outside).
+                return np.isnan(front) | (dd >= front - 10.0)
             nd = _near(d_a)
             if depthbuf is None:
                 return (np.asarray(d_a, float) > 1e-6) if gpu \
@@ -2613,6 +2641,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         #: currently displayed for that pane (opaque QImage over the canvas).
         self._vr_dvr_shown = {"A": False, "B": False}
         self._vr_img = {"A": None, "B": None}  # CPU-rendered VR QImage per pane
+        #: Per-pixel front-surface depth (world mm along the view dir) of the DVR
+        #: stop-frame, so the coronary overlay occludes against the EXACT rendered
+        #: heart surface (continuous, no sparse-grid gaps). None for a MIP frame.
+        self._vr_depth = {"A": None, "B": None}
         self._vr_mask = None                 # bool crop (heart) or None (full CT)
         self._vr_busy = False                # an async VR drag render is running
         self._vr_dirty = None                # pane needing a re-render when free
@@ -5529,7 +5561,10 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _vr_refresh(self, key, lod: bool = False) -> None:
         if not lod:
             self._vr_bump()      # a synchronous still invalidates in-flight async
-        self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
+        res = self._vr_cpu_image(key, lod=lod)
+        img, depth = res if res else (None, None)
+        self._vr_img[key] = img
+        self._vr_depth[key] = depth
         self._overlay[key].update()
 
     def _vr_async(self, key, lod: bool = True) -> None:
@@ -5570,20 +5605,22 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _vr_worker(self, key, gen, params) -> None:
         try:
-            img = _vr_render_image(params)
+            res = _vr_render_image(params)               # (QImage, depth | None)
         except Exception:                                # noqa: BLE001
-            img = None
-        self._vr_done.emit((key, gen, img))
+            res = None
+        self._vr_done.emit((key, gen, res))
 
     def _on_vr_done(self, payload) -> None:
-        key, gen, img = payload
+        key, gen, res = payload
         self._vr_busy = False
         # Discard a stale frame: a newer drag frame, or the full still rendered
         # on release, has bumped the generation (see _vr_bump).
         if gen != self._vr_gen:
             return
+        img, depth = res if res else (None, None)
         if img is not None and self._vr_on.get(key):
             self._vr_img[key] = img
+            self._vr_depth[key] = depth              # front-surface depth map
             # Only reveal the DVR stop-frame if the user isn't dragging again (a
             # drag resumes the GPU MIP). The volume being present means this is
             # the hybrid GPU path → showing the DVR is the stop-frame.
@@ -5886,8 +5923,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
             # A full pane width / height of drag = ~180° (direct 1:1 grab feel).
-            ax = (dx / pw) * math.pi          # horizontal drag → spin about up
-            ay = (dy / ph) * math.pi          # vertical drag → tilt about right
+            # Negated so a drag turns the model the SAME way as the cursor moves
+            # (the user found up/down and left/right reversed).
+            ax = -(dx / pw) * math.pi         # horizontal drag → spin about up
+            ay = -(dy / ph) * math.pi         # vertical drag → tilt about right
             dq = la.quat_mul(la.quat_from_axis_angle(up_w, ax),
                              la.quat_from_axis_angle(right_w, ay))
             q = la.quat_mul(dq, q)
@@ -5985,7 +6024,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         # CPU fallback (unused while the GPU path is active).
         if not lod:
             self._vr_bump()
-        self._vr_img[key] = self._vr_cpu_image(key, lod=lod)
+        res = self._vr_cpu_image(key, lod=lod)
+        img, depth = res if res else (None, None)
+        self._vr_img[key] = img
+        self._vr_depth[key] = depth
         self._overlay[key].update()
 
     def _vr_pane_key(self) -> str:
