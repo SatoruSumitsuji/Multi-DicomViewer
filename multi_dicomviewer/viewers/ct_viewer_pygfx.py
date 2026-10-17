@@ -5552,11 +5552,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         return (a, b)
 
     def _vr_make_gpu_material(self):
-        """MIP material (uint8 texture + nearest — the Metal-safe path confirmed
-        on real hardware). Depth / rotation direction is read from the coronary
-        tree projected on top, which rotates with the volume."""
+        """MIP material. uint8 (r8unorm) texture is the Metal-safe FORMAT; linear
+        interpolation (r8unorm is filterable on Metal) smooths the blocky/grainy
+        voxel stepping that 'nearest' gave. Depth / rotation direction is read
+        from the coronary tree projected on top, which rotates with the volume."""
         return gfx.VolumeMipMaterial(clim=self._vr_clim_u8(),
-                                     interpolation="nearest")
+                                     interpolation="linear")
 
     def _vr_config_cam_gpu(self, key) -> None:
         """Aim the GPU VR camera from the trackball quaternion, framed on the
