@@ -2455,7 +2455,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(ms, self.coronary_overlay_refresh)
             return t("表示中") if ok else ""
         if src_dir and os.path.isdir(src_dir):
-            self.case_open_folders([src_dir])
+            self.case_open_folders([src_dir], dicom_only=True)
             QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
         if not prompt:
@@ -2475,7 +2475,7 @@ class MainWindow(QMainWindow):
                 if (parent and os.path.isdir(parent)
                         and parent != os.path.normpath(cpr_dir)):
                     scan.append(parent)
-            self.case_open_folders(scan)
+            self.case_open_folders(scan, dicom_only=True)
             QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
         # Last resort: ask. Default to a folder that EXISTS on this machine (the
@@ -2489,7 +2489,7 @@ class MainWindow(QMainWindow):
         folder = QFileDialog.getExistingDirectory(
             self, t("この冠動脈の元となった3DCTフォルダを選択してください"), start)
         if folder:
-            self.case_open_folders([folder])
+            self.case_open_folders([folder], dicom_only=True)
             QTimer.singleShot(300, lambda: _poll_show(0))
             return t("3DCTを読込中…")
         return ""
@@ -3086,13 +3086,13 @@ class MainWindow(QMainWindow):
         if not scan and drop_dir and os.path.isdir(drop_dir):
             scan = drop_dir
         if scan:
-            self.case_open_folders([scan])
+            self.case_open_folders([scan], dicom_only=True)
             self._poll_lv_apply(uid, files, 0)
             return
         folder = QFileDialog.getExistingDirectory(
             self, t("この解析の元となった3DCTフォルダを選択してください"))
         if folder:
-            self.case_open_folders([folder])
+            self.case_open_folders([folder], dicom_only=True)
             self._poll_lv_apply(uid, files, 0)
 
     def _poll_lv_apply(self, uid: str, files: dict, attempt: int = 0) -> None:
@@ -3247,7 +3247,7 @@ class MainWindow(QMainWindow):
             self._poll_cpr_apply(uid, data, 0)
             return
         if src_dir and os.path.isdir(src_dir):
-            self.case_open_folders([src_dir])
+            self.case_open_folders([src_dir], dicom_only=True)
             self._poll_cpr_apply(uid, data, 0)
             return
         self._prompt_cpr_ct(uid, data, drop_dir)
@@ -3262,7 +3262,7 @@ class MainWindow(QMainWindow):
             self, t("この短軸(CPR)の元となった3DCTフォルダを選択してください"),
             start_dir if (start_dir and os.path.isdir(start_dir)) else "")
         if folder:
-            self.case_open_folders([folder])
+            self.case_open_folders([folder], dicom_only=True)
             self._poll_cpr_apply(uid, data, 0)
 
     def _poll_cpr_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
@@ -3398,16 +3398,17 @@ class MainWindow(QMainWindow):
                     return True
         return False
 
-    def case_open_folders(self, folders: list) -> int:
+    def case_open_folders(self, folders: list, dicom_only=False) -> int:
         """Re-scan the given folders so a saved presentation's series get
         (re)indexed. Async — series bind when the user next clicks 表示.
+        *dicom_only* indexes only DICOM (no .cpr.json sweep) — see _load_paths.
         Returns how many folders were actually queued."""
         dirs = []
         for f in (folders or []):
             if f and os.path.isdir(f) and f not in dirs:
                 dirs.append(f)
         if dirs:
-            self._load_paths(dirs)
+            self._load_paths(dirs, dicom_only=dicom_only)
         return len(dirs)
 
     def _case_resolve_uids(self, uid: str) -> list:
@@ -5750,9 +5751,15 @@ class MainWindow(QMainWindow):
             open_in_pane=open_in_pane,
         )
 
-    def _load_paths(self, paths: list[str], open_in_pane=None) -> None:
+    def _load_paths(self, paths: list[str], open_in_pane=None,
+                    dicom_only=False) -> None:
         """Import a drop of ANY mix of folders and files — several folders at
-        once included. Folders expand recursively; plain files do not."""
+        once included. Folders expand recursively; plain files do not.
+
+        *dicom_only* (used by the programmatic source-CT re-scan) indexes ONLY
+        DICOM and does NOT sweep the folders for .cpr.json / analysis files — a
+        cross-OS source-CT scan over a case folder must not vacuum stray CPRs
+        from sibling analysis folders into the Coronary Tree (phantom vessels)."""
         paths = [p for p in (paths or []) if p]
         # Peel off any Case Presentation .json drops → open them in the Case
         # Presentation panel (loads the related folders in the background), not
@@ -5802,19 +5809,20 @@ class MainWindow(QMainWindow):
         cpr_dirs = []
         loaded_cpr = False
         w = None
-        for d in list(dirs):
-            cprs = self._folder_cpr_files(d)
-            if cprs:
-                cpr_dirs.append(d)
-                w = self._open_coronary_tree()
-                if w is not None and hasattr(w, "_load_cpr_paths"):
-                    w._load_cpr_paths(cprs)
-                    loaded_cpr = True
-        # A dropped CPR folder should also bring up its source 3-D CT (like a
-        # .corotree.json / multi-.cpr.json drop): turn the overlay ON, which
-        # (re)opens the source CT by UID / saved folder and draws the centrelines.
-        if loaded_cpr and w is not None and hasattr(w, "_set_overlay"):
-            w._set_overlay(True)
+        if not dicom_only:
+            for d in list(dirs):
+                cprs = self._folder_cpr_files(d)
+                if cprs:
+                    cpr_dirs.append(d)
+                    w = self._open_coronary_tree()
+                    if w is not None and hasattr(w, "_load_cpr_paths"):
+                        w._load_cpr_paths(cprs)
+                        loaded_cpr = True
+            # A dropped CPR folder should also bring up its source 3-D CT (like a
+            # .corotree.json / multi-.cpr.json drop): turn the overlay ON, which
+            # (re)opens the source CT by UID / saved folder and draws the lines.
+            if loaded_cpr and w is not None and hasattr(w, "_set_overlay"):
+                w._set_overlay(True)
         dirs = [d for d in dirs if d not in cpr_dirs]
         if not dirs and not files:
             return
