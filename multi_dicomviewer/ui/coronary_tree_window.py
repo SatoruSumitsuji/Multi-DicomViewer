@@ -1023,25 +1023,42 @@ class CoronaryTreeWindow(SnapDock):
             on = item.checkState(0) == Qt.CheckState.Checked
             # Cascade to the WHOLE subtree: toggling a parent branch shows/hides
             # every descendant branch too — so collapsing a parent and unchecking
-            # it hides its children as well (and re-checking shows them). Works
-            # whether the parent is expanded or collapsed.
-            vids = [vid]
+            # it controls its children as well. Works whether the parent is
+            # expanded or collapsed.
+            desc = []
             try:
-                vids += self._descendant_vids(vid)
+                desc = self._descendant_vids(vid)
             except Exception:                            # noqa: BLE001
-                pass
-            for v2 in vids:
-                if on:
-                    self._hidden.discard(v2)
-                else:
-                    self._hidden.add(v2)
-            # Mirror the new state onto the child items' checkboxes (block our own
-            # itemChanged re-entrancy while we do).
+                desc = []
+            saved_map = getattr(self, "_subtree_saved", None)
+            if saved_map is None:
+                saved_map = self._subtree_saved = {}
+            uid = self._active_uid
+            if not on:
+                # Turning OFF: remember which descendants were ALREADY hidden
+                # individually, then hide the whole subtree.
+                saved_map[(uid, vid)] = {d for d in desc if d in self._hidden}
+                self._hidden.add(vid)
+                for d in desc:
+                    self._hidden.add(d)
+            else:
+                # Turning ON: show the parent and RESTORE each descendant to its
+                # individual state from before the parent was switched off (a
+                # branch hidden on its own stays hidden; the rest come back).
+                self._hidden.discard(vid)
+                saved = saved_map.pop((uid, vid), None)
+                for d in desc:
+                    if saved is not None and d in saved:
+                        self._hidden.add(d)
+                    else:
+                        self._hidden.discard(d)
+            # Mirror the resulting state onto the child items' checkboxes (block
+            # our own itemChanged re-entrancy while we do).
             self._tree_w.blockSignals(True)
-            self._set_subtree_check(item, on)
+            self._sync_subtree_check(item)
             self._tree_w.blockSignals(False)
-            for v2 in vids:
-                self.visibilityChanged.emit(v2, on)
+            for v2 in [vid] + desc:
+                self.visibilityChanged.emit(v2, v2 not in self._hidden)
             self._push_overlay()
 
     def _descendant_vids(self, vid: str) -> list:
@@ -1052,15 +1069,16 @@ class CoronaryTreeWindow(SnapDock):
             out += self._descendant_vids(c)
         return out
 
-    def _set_subtree_check(self, item, on: bool) -> None:
-        """Set the check state of every child item under *item* to match *on*
-        (call with itemChanged signals blocked)."""
-        state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+    def _sync_subtree_check(self, item) -> None:
+        """Set every child item's checkbox under *item* to match the current
+        _hidden set (call with itemChanged signals blocked)."""
         for i in range(item.childCount()):
             ch = item.child(i)
-            if ch.data(0, _UID_ROLE):
-                ch.setCheckState(0, state)
-            self._set_subtree_check(ch, on)
+            cvid = ch.data(0, _UID_ROLE)
+            if cvid:
+                ch.setCheckState(0, Qt.CheckState.Unchecked if cvid in self._hidden
+                                 else Qt.CheckState.Checked)
+            self._sync_subtree_check(ch)
 
     # --------------------------------------------------------- overlay
     def uid_for_series(self, series_uid: str) -> str:
