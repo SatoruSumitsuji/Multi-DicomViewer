@@ -1021,12 +1021,46 @@ class CoronaryTreeWindow(SnapDock):
         if vid:
             self._activate_item_ct(item)
             on = item.checkState(0) == Qt.CheckState.Checked
-            if on:
-                self._hidden.discard(vid)
-            else:
-                self._hidden.add(vid)
-            self.visibilityChanged.emit(vid, on)
+            # Cascade to the WHOLE subtree: toggling a parent branch shows/hides
+            # every descendant branch too — so collapsing a parent and unchecking
+            # it hides its children as well (and re-checking shows them). Works
+            # whether the parent is expanded or collapsed.
+            vids = [vid]
+            try:
+                vids += self._descendant_vids(vid)
+            except Exception:                            # noqa: BLE001
+                pass
+            for v2 in vids:
+                if on:
+                    self._hidden.discard(v2)
+                else:
+                    self._hidden.add(v2)
+            # Mirror the new state onto the child items' checkboxes (block our own
+            # itemChanged re-entrancy while we do).
+            self._tree_w.blockSignals(True)
+            self._set_subtree_check(item, on)
+            self._tree_w.blockSignals(False)
+            for v2 in vids:
+                self.visibilityChanged.emit(v2, on)
             self._push_overlay()
+
+    def _descendant_vids(self, vid: str) -> list:
+        """Every branch vid below *vid* in the active tree (recursive)."""
+        out = []
+        for c in self._tree.children(vid):
+            out.append(c)
+            out += self._descendant_vids(c)
+        return out
+
+    def _set_subtree_check(self, item, on: bool) -> None:
+        """Set the check state of every child item under *item* to match *on*
+        (call with itemChanged signals blocked)."""
+        state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
+        for i in range(item.childCount()):
+            ch = item.child(i)
+            if ch.data(0, _UID_ROLE):
+                ch.setCheckState(0, state)
+            self._set_subtree_check(ch, on)
 
     # --------------------------------------------------------- overlay
     def uid_for_series(self, series_uid: str) -> str:
