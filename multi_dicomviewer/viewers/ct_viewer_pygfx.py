@@ -889,9 +889,11 @@ class _Overlay(QWidget):
                     np.minimum.at(depthbuf, (gj, gi), od[good])
                     fin = depthbuf[np.isfinite(depthbuf)]
                     if fin.size:
-                        # Looser margin → keep the vessels CONTINUOUS (the user
-                        # saw them break up); still hides the clearly far side.
-                        occ_margin = 0.16 * (float(fin.max() - fin.min()) or 1.0)
+                        # Loose margin → keep the vessels CONTINUOUS even where
+                        # they wrap around the heart's silhouette (a tighter
+                        # margin chopped them into gaps); only the clearly far
+                        # side (deep behind the front surface) is still hidden.
+                        occ_margin = 0.30 * (float(fin.max() - fin.min()) or 1.0)
             except Exception:                            # noqa: BLE001
                 depthbuf = None
 
@@ -913,6 +915,12 @@ class _Overlay(QWidget):
             for ves in spec:
                 pts = ves.get("points")
                 if pts is None or len(pts) < 2:
+                    continue
+                # Skip unconnected / unknown-root vessels on the VR — they carry
+                # the grey #888888 fallback colour (no LM/LAD/LCX/RCA root) and
+                # show as the "不要な灰色線" the user wants hidden.
+                if (not ves.get("root")
+                        or str(ves.get("color", "")).lower() in ("#888888", "#888")):
                     continue
                 if stride > 1:
                     pts = np.asarray(pts, float)[::stride]
