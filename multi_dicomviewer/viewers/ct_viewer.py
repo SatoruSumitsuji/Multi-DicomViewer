@@ -9420,10 +9420,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cmap_btn.clicked.connect(self._toggle_color)
         row.addWidget(self._cmap_btn)
 
-        # NOTE: the old image-top "VR" button was removed — Volume Rendering is
-        # now driven from the Coronary Tree panel's VR row (表示/非表示・内腔/シェル
-        # ・シェル範囲), via set_vr_on/set_vr_shell/set_vr_shell_mm below.
-
         self._meas_btn = FitButton("📏 Measure")
         self._meas_btn.setCheckable(True)
         self._meas_btn.setStyleSheet(            # blue when in Measure mode (= IVUS)
@@ -9433,6 +9429,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         )
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
+
+        # VR is a TOP-LEVEL mode toggle (independent of the Tools), so it gets its
+        # own button next to Color/Measure: ON = VR (立体表示, tinted background),
+        # OFF = back to the normal CT view (also leaves the territory review). Re-
+        # enabling returns to the exact last VR view (完全復元). Hiding only the VR
+        # IMAGE stays on the Coronary panel's VR 表示/非表示 toggle.
+        self._vr_btn = FitButton("VR")
+        self._vr_btn.setCheckable(True)
+        self._vr_btn.setStyleSheet(
+            "QPushButton:checked { background:#7a4fb0; color:white; }")
+        self._vr_btn.setHelpToolTip(t(
+            "VR (立体表示) のオン/オフ。オフで通常CT表示に戻ります。"
+            "再オンで最後のVR表示に復元"))
+        self._vr_btn.clicked.connect(self._toggle_vr_mode)
+        row.addWidget(self._vr_btn)
 
         self._slab_lbl = QLabel(t("Slab(mm):"))
         row.addWidget(self._slab_lbl)
@@ -11859,9 +11870,29 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._territory_display = False
                 self._refresh_tool_availability()
                 self._terr_bar_sync()               # restore the LV / Coronary bars
+        self._sync_vr_btn()
 
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
+
+    def _toggle_vr_mode(self) -> None:
+        """Top-level VR button: toggle VR for the VR pane. OFF returns to the
+        normal CT view (and leaves the territory review); ON restores the last
+        VR view (完全復元)."""
+        if self._image is None or self._mode != "3D":
+            self._sync_vr_btn()
+            return
+        self._vr_toggle(self._vr_pane_key())
+
+    def _sync_vr_btn(self) -> None:
+        """Keep the VR toolbar button's checked/tint state in step with the actual
+        VR mode (it can be toggled by the territory review / Coronary panel too)."""
+        btn = getattr(self, "_vr_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        btn.setChecked(self.vr_active())
+        btn.blockSignals(False)
 
     def _reset_coronary_vr_display(self) -> None:
         """Drop ALL coronary / VR / perfusion-territory DISPLAY state so a NEW series

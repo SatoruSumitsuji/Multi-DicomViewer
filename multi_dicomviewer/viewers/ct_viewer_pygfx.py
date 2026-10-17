@@ -3940,6 +3940,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
+        # VR is a TOP-LEVEL mode toggle (independent of the Tools), so it gets its
+        # own button next to Color/Measure: ON = VR (立体表示, tinted background),
+        # OFF = back to the normal CT view. Re-enabling returns to the exact last
+        # VR view (完全復元). Hiding only the VR IMAGE stays on the Coronary panel's
+        # VR 表示/非表示 toggle.
+        self._vr_btn = FitButton("VR")
+        self._vr_btn.setCheckable(True)
+        self._vr_btn.setStyleSheet(
+            "QPushButton:checked { background:#7a4fb0; color:white; }")
+        self._vr_btn.setHelpToolTip(t(
+            "VR (立体表示) のオン/オフ。オフで通常CT表示に戻ります。"
+            "再オンで最後のVR表示に復元"))
+        self._vr_btn.clicked.connect(self._toggle_vr_mode)
+        row.addWidget(self._vr_btn)
+
         self._slab_lbl = QLabel(t("Slab:"))
         row.addWidget(self._slab_lbl)
         self._slab_spin = QDoubleSpinBox()
@@ -5916,6 +5931,26 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_mask = None
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
         self._overlay[key].update()
+        self._sync_vr_btn()
+
+    def _toggle_vr_mode(self) -> None:
+        """Top-level VR button: toggle VR for the VR pane. OFF returns the pane to
+        the normal CT view; ON restores the last VR view (完全復元)."""
+        if self._vol is None or self._mode != "3D":
+            self._sync_vr_btn()
+            return
+        key = self._vr_pane_key()
+        self._vr_set(key, not self._vr_on.get(key))
+
+    def _sync_vr_btn(self) -> None:
+        """Keep the VR toolbar button's checked/tint state in step with the actual
+        VR mode (it can be toggled by the territory review / Coronary panel too)."""
+        btn = getattr(self, "_vr_btn", None)
+        if btn is None:
+            return
+        btn.blockSignals(True)
+        btn.setChecked(self.vr_active())
+        btn.blockSignals(False)
 
     # ---- VR API called by the shell / Coronary Tree VR row ----
     def vr_active(self, key=None) -> bool:
