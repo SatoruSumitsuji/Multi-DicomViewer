@@ -5503,6 +5503,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         vmesh.visible = not self._vr_img_hidden.get(key, False)
         p.vr_volume = vmesh
         p.scene.add(vmesh)
+        self._vr_update_territory(key)           # coloured perfusion-territory shell
         if p.vr_cam is None:
             p.vr_cam = gfx.PerspectiveCamera(40)
         self._vr_config_cam_gpu(key)
@@ -5514,6 +5515,12 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _vr_gpu_disable(self, key, restore: bool = True) -> None:
         p = self.pane[key]
+        for node in getattr(p, "vr_terr_nodes", []):   # drop territory shells
+            try:
+                p.scene.remove(node)
+            except Exception:                        # noqa: BLE001
+                pass
+        p.vr_terr_nodes = []
         if p.vr_volume is not None:
             try:
                 p.scene.remove(p.vr_volume)
@@ -5526,6 +5533,84 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.mesh.visible = True
             self._config_cam(key)
             p.render()
+
+    def _vr_update_territory(self, key) -> None:
+        """Rebuild the 3-D perfusion-territory colour on VR pane *key*: one
+        translucent coloured POINT shell (surface voxels) per label — LAD/LCX/RCA
+        + Target. Windows draws smooth iso-surface actors via VTK, but the Mac
+        build has no VTK/skimage; a coloured shell of the mask's boundary voxels
+        (scipy binary_erosion) renders on wgpu-Metal and rotates with the volume
+        (it lives in the same scene). Built in the unpadded voxel×spacing frame —
+        the same world frame the coronary overlay projects into — so it aligns
+        with the volume and the tree. A one-off on VR enable / territory change,
+        not a per-frame cost."""
+        p = self.pane[key]
+        for node in getattr(p, "vr_terr_nodes", []):
+            try:
+                p.scene.remove(node)
+            except Exception:                        # noqa: BLE001
+                pass
+        p.vr_terr_nodes = []
+        if p.vr_volume is None or not self._vr_on.get(key):
+            return
+        lab = getattr(self, "_terr_mask_vol", None)
+        colors = getattr(self, "_terr_colors", None)
+        if lab is None or not colors or self._vol is None:
+            return
+        try:
+            from scipy.ndimage import binary_erosion
+        except Exception:                            # noqa: BLE001
+            binary_erosion = None
+        lab = np.rint(np.asarray(lab)).astype(np.int16)
+        sx, sy, sz = (float(d) for d in self._dims)
+        nx = int(self._vol.shape[2])
+        ny = int(self._vol.shape[1])
+        fh, fv = self._vr_flip.get(key, [False, False])
+        nodes = []
+        for i, c in enumerate(colors, 1):
+            m = (lab == i)
+            if not m.any():
+                continue
+            zz, yy, xx = np.where(m)
+            z0, z1 = int(zz.min()), int(zz.max()) + 1
+            y0, y1 = int(yy.min()), int(yy.max()) + 1
+            x0, x1 = int(xx.min()), int(xx.max()) + 1
+            sub = m[z0:z1, y0:y1, x0:x1]
+            # Surface shell = voxels on the mask boundary (keeps the point count
+            # low and reads as a surface, not a solid fog).
+            if binary_erosion is not None and min(sub.shape) > 2:
+                shell = sub & ~binary_erosion(sub)
+            else:
+                shell = sub
+            zs, ys, xs = np.where(shell)
+            if len(zs) == 0:
+                continue
+            zs = zs + z0
+            ys = ys + y0
+            xs = xs + x0
+            cap = 40000                              # keep the cloud light
+            if len(zs) > cap:
+                step = int(np.ceil(len(zs) / cap))
+                zs, ys, xs = zs[::step], ys[::step], xs[::step]
+            X = xs.astype(np.float32) * sx
+            Y = ys.astype(np.float32) * sy
+            Z = zs.astype(np.float32) * sz
+            if fh:                                   # match the mirrored texture
+                X = (nx - 1) * sx - X
+            if fv:
+                Y = (ny - 1) * sy - Y
+            pos = np.ascontiguousarray(np.column_stack([X, Y, Z]), np.float32)
+            r, g, b = float(c[0]), float(c[1]), float(c[2])
+            a = float(c[3]) if len(c) > 3 else 0.5
+            try:
+                geo = gfx.Geometry(positions=pos)
+                mat = gfx.PointsMaterial(size=4.0, color=(r, g, b, a))
+                node = gfx.Points(geo, mat)
+                p.scene.add(node)
+                nodes.append(node)
+            except Exception:                        # noqa: BLE001
+                continue
+        p.vr_terr_nodes = nodes
 
     def _vr_project_pts_gpu(self, key, pts3d):
         """Project world-mm points through the GPU VR camera to pane pixels:
@@ -7711,6 +7796,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             self._terr_img[k] = (self._lvv_plane_rgba(k, "terr")
                                  if self._terr_mask_vol is not None else None)
+            # Rebuild the 3-D territory shell on an active VR pane so the colour
+            # shows on the VR model too (not just the short-axis tint).
+            if self._vr_on.get(k) and self.pane[k].vr_volume is not None:
+                self._vr_update_territory(k)
+                try:
+                    self.pane[k].canvas.request_draw()
+                except Exception:                        # noqa: BLE001
+                    pass
             if self._overlay.get(k) is not None:
                 self._overlay[k].update()
         # Territory is composited INTO the VR image (not a live overlay), so an
