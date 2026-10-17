@@ -5879,14 +5879,39 @@ class CTViewer(CPRMixin, AbstractViewer):
             # The heart crop (scipy EDT shell) is the slow part of turning VR on —
             # compute it behind an animated busy/progress window so it doesn't
             # look hung, then build the GPU volume.
-            self._vr_flip[key] = [False, False]
             self._vr_img_hidden[key] = False      # a fresh VR starts visible
+            snap = getattr(self, "_vr_saved", {}).get(key)
+            if snap is not None:                  # 完全復元: restore the last VR view
+                self._vr_rot[key] = np.asarray(snap["rot"], float).copy()
+                self._vr_zoom[key] = float(snap["zoom"])
+                self._vr_pan[key] = [float(snap["pan"][0]),
+                                     float(snap["pan"][1])]
+                self._vr_flip[key] = [bool(snap["flip"][0]),
+                                      bool(snap["flip"][1])]
+                self._vr_shell = bool(snap.get("shell",
+                                               getattr(self, "_vr_shell", True)))
+            else:
+                self._vr_flip[key] = [False, False]   # a fresh VR starts un-flipped
             self._vr_mask = self._run_busy(
                 t("VR"), t("VR構築中…"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
             if self._tool not in ("ROTATE", "ZOOM", "MOVE", "SPIN"):
                 self._set_tool("ROTATE")          # sensible default VR tool
         else:
+            # 完全復元: snapshot the full VR view (rotation / zoom / pan / flip /
+            # crop mode) so turning VR back on returns to exactly this view.
+            saved = getattr(self, "_vr_saved", None)
+            if saved is None:
+                saved = self._vr_saved = {}
+            fl = self._vr_flip.get(key, [False, False])
+            saved[key] = {
+                "rot": np.asarray(self._vr_rot[key], float).copy(),
+                "zoom": float(self._vr_zoom[key]),
+                "pan": [float(self._vr_pan[key][0]),
+                        float(self._vr_pan[key][1])],
+                "flip": [bool(fl[0]), bool(fl[1])],
+                "shell": bool(getattr(self, "_vr_shell", True)),
+            }
             self._vr_img.pop(key, None)
             self._vr_mask = None
             self._vr_gpu_disable(key)             # restore the MPR slice + camera

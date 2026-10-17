@@ -11763,44 +11763,69 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._vr_hidden[key].append(a)
                     a.SetVisibility(False)
             p.vr_volume.SetVisibility(True)
-            self._vr_xform[key] = np.eye(4)         # a fresh VR starts un-oriented
+            # 完全復元: if a prior VR session was switched off, restore its exact
+            # orientation (Rt90/Flip xform) + camera pose; else start fresh.
+            snap_view = getattr(self, "_vr_view_saved", {}).get(key)
+            self._vr_xform[key] = (
+                np.asarray(snap_view["xform"], float).copy()
+                if snap_view is not None else np.eye(4))
             self._vr_update_coronary(key)           # 3-D coronary tubes
             self._vr_update_territory(key)          # 3-D territory surface
             self._vr_update_targets(key)            # 3-D target spheres
-            self._vr_apply_xform(key)               # (identity here) ready for flips
+            self._vr_apply_xform(key)               # apply the restored/identity xform
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
             cam.ParallelProjectionOff()             # perspective depth for VR
-            p.ren.ResetCamera(vr_bounds)            # frame the heart, not the thorax
-            # Centre the VR on the centreline crossing (LV mid) rather than the
-            # cropped-volume bounding-box centre, so it sits at the same centre as
-            # the short-axis pane. Only when that point is finite AND inside the
-            # volume — a stray centre would push the volume off-screen (black VR).
-            ctr = getattr(self, "_center", None)
-            if ctr is not None:
-                ctr = np.asarray(ctr, float)
-                b = vr_bounds
-                inside = (np.all(np.isfinite(ctr))
-                          and b[0] - 1 <= ctr[0] <= b[1] + 1
-                          and b[2] - 1 <= ctr[1] <= b[3] + 1
-                          and b[4] - 1 <= ctr[2] <= b[5] + 1)
-                if inside:
-                    fp = np.array(cam.GetFocalPoint(), float)
-                    pos = np.array(cam.GetPosition(), float)
-                    off = pos - fp
-                    cam.SetFocalPoint(*ctr)
-                    cam.SetPosition(*(ctr + off))
-            cam.Elevation(-70.0)                    # a cardiac-ish top view
-            cam.OrthogonalizeViewUp()
-            # Start the VR at 80% of the fit size (per request) — in perspective,
-            # Zoom(<1) widens the view angle so the heart renders a bit smaller,
-            # leaving margin around it.
-            cam.Zoom(0.8)
+            if snap_view is not None:
+                # Restore the exact last VR camera pose.
+                pp, pos, fp, up, ps = snap_view["cam"]
+                cam.SetParallelProjection(pp)
+                cam.SetPosition(*pos)
+                cam.SetFocalPoint(*fp)
+                cam.SetViewUp(*up)
+                cam.SetParallelScale(ps)
+            else:
+                p.ren.ResetCamera(vr_bounds)        # frame the heart, not the thorax
+                # Centre the VR on the centreline crossing (LV mid) rather than the
+                # cropped-volume bounding-box centre, so it sits at the same centre
+                # as the short-axis pane. Only when that point is finite AND inside
+                # the volume — a stray centre would push the volume off-screen.
+                ctr = getattr(self, "_center", None)
+                if ctr is not None:
+                    ctr = np.asarray(ctr, float)
+                    b = vr_bounds
+                    inside = (np.all(np.isfinite(ctr))
+                              and b[0] - 1 <= ctr[0] <= b[1] + 1
+                              and b[2] - 1 <= ctr[1] <= b[3] + 1
+                              and b[4] - 1 <= ctr[2] <= b[5] + 1)
+                    if inside:
+                        fp = np.array(cam.GetFocalPoint(), float)
+                        pos = np.array(cam.GetPosition(), float)
+                        off = pos - fp
+                        cam.SetFocalPoint(*ctr)
+                        cam.SetPosition(*(ctr + off))
+                cam.Elevation(-70.0)                # a cardiac-ish top view
+                cam.OrthogonalizeViewUp()
+                # Start the VR at 80% of the fit size (per request) — Zoom(<1)
+                # widens the view angle so the heart renders a bit smaller.
+                cam.Zoom(0.8)
             p.ren.ResetCameraClippingRange()
             self._vr_update_angle(key)              # initial LAO/CRA readout
             self._vr_update_summary(key)            # territory summary (bottom-right)
         else:
+            # 完全復元: snapshot the current VR view (xform + camera pose) BEFORE
+            # restoring the MPR camera, so turning VR back on returns to it.
+            saved = getattr(self, "_vr_view_saved", None)
+            if saved is None:
+                saved = self._vr_view_saved = {}
+            saved[key] = {
+                "xform": np.asarray(
+                    self._vr_xform.get(key, np.eye(4)), float).copy(),
+                "cam": (cam.GetParallelProjection(), tuple(cam.GetPosition()),
+                        tuple(cam.GetFocalPoint()), tuple(cam.GetViewUp()),
+                        cam.GetParallelScale()),
+            }
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),
