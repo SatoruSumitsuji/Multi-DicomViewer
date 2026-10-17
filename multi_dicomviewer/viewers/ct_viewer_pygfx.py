@@ -5450,36 +5450,37 @@ class CTViewer(CPRMixin, AbstractViewer):
         return full
 
     def _vr_lv_myo_mask(self):
-        """VR crop = the LV MYOCARDIUM (perfusion-territory region) + a thin
-        outward shell for the epicardial coronaries. Excludes the RV and the
-        blood cavities so the septal territory + coronary aren't hidden behind
-        them (user choice A). None until an LV region is known."""
-        reg = getattr(self, "_vr_lv_region", None)
-        if reg is None or self._vol is None:
+        """VR crop = the Epi region = the SOLID LV enclosed by the epicardium
+        (cavity FILLED, RV excluded). This is the LV-only mask the user asked for
+        (mask with the LV Epi boundary — the same region the Windows VR uses).
+        A tiny outward shell keeps the epicardial coronaries' surroundings solid
+        for the depth map. None until the Epi model is loaded."""
+        epi = self._vr_epi_full_mask()
+        if epi is None or self._vol is None:
             return None
-        reg = np.asarray(reg)
-        if tuple(reg.shape) != tuple(self._vol.shape) or not reg.any():
+        epi = np.asarray(epi).astype(bool)
+        if not epi.any():
             return None
         try:
             from scipy.ndimage import distance_transform_edt
             sx, sy, sz = (float(d) for d in self._dims)
-            zz, yy, xx = np.where(reg)
-            m = 8
-            z0, z1 = max(0, zz.min() - m), min(reg.shape[0], zz.max() + m + 1)
-            y0, y1 = max(0, yy.min() - m), min(reg.shape[1], yy.max() + m + 1)
-            x0, x1 = max(0, xx.min() - m), min(reg.shape[2], xx.max() + m + 1)
-            sub = reg[z0:z1, y0:y1, x0:x1]
+            zz, yy, xx = np.where(epi)
+            m = 6
+            z0, z1 = max(0, zz.min() - m), min(epi.shape[0], zz.max() + m + 1)
+            y0, y1 = max(0, yy.min() - m), min(epi.shape[1], yy.max() + m + 1)
+            x0, x1 = max(0, xx.min() - m), min(epi.shape[2], xx.max() + m + 1)
+            sub = epi[z0:z1, y0:y1, x0:x1]
             d = distance_transform_edt(~sub, sampling=(sz, sy, sx))
-            shell = sub | (d <= 4.0)             # ~4 mm outward for the coronaries
-            out = np.zeros(reg.shape, bool)
+            shell = sub | (d <= 2.5)             # ~2.5 mm, just the coronaries
+            out = np.zeros(epi.shape, bool)
             out[z0:z1, y0:y1, x0:x1] = shell
             return out
         except Exception:                                # noqa: BLE001
-            return np.ascontiguousarray(reg.astype(bool))
+            return np.ascontiguousarray(epi)
 
     def _vr_crop_mask(self):
-        """The bool crop for the VR. When an LV territory region is known, crop
-        to the LV MYOCARDIUM (+thin shell) so the RV / blood cavities don't hide
+        """The bool crop for the VR. When the Epi model is loaded, crop to the
+        SOLID LV (Epi region, RV excluded) so the RV / see-through doesn't hide
         the septal territory + coronary (A); else Epi+shell / Epi interior."""
         if self._vol is None:
             return None
