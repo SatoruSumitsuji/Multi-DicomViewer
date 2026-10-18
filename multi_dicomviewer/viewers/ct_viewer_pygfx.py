@@ -846,6 +846,7 @@ class _Overlay(QWidget):
         # one 1 mm step along each axis at the volume centre and take the largest
         # screen displacement (the axis most in the view plane).
         pxmm = None
+        cdepth = None                                    # heart-centre depth (raw)
         try:
             c = np.asarray(v._vr_center(), float).reshape(3)
             pr = project([c, c + [1.0, 0, 0], c + [0, 1.0, 0], c + [0, 0, 1.0]])
@@ -854,6 +855,9 @@ class _Overlay(QWidget):
                 pxmm = max(
                     float(np.hypot(pxs[i] - pxs[0], pys[i] - pys[0]))
                     for i in (1, 2, 3))
+                cd0 = float(np.asarray(_d).reshape(-1)[0])
+                if np.isfinite(cd0):
+                    cdepth = cd0
         except Exception:                                # noqa: BLE001
             pxmm = None
 
@@ -940,7 +944,22 @@ class _Overlay(QWidget):
                 # of it. A generous 18 mm band keeps the centreline (which runs a
                 # few mm INSIDE the epicardial surface, and dips near the edge-on
                 # silhouette) continuous; only the genuine far side is hidden.
-                return np.isnan(front) | (dd >= front - 18.0)
+                vis = np.isnan(front) | (dd >= front - 18.0)
+                # Far-hemisphere cull: a point that projects OUTSIDE the heart
+                # silhouette (no front surface there) but sits clearly BEHIND the
+                # heart centre is on the far side wrapping round the back — hide it
+                # (otherwise the distal RCA shows as a stray dotted line off the
+                # model edge, where nothing occludes it). larger dd = nearer.
+                if cdepth is not None:
+                    try:
+                        fin = dm[np.isfinite(dm)]
+                        span = float(fin.max() - fin.min()) if fin.size else 0.0
+                    except Exception:                    # noqa: BLE001
+                        span = 0.0
+                    band = max(3.0, 0.30 * span)
+                    nos = np.isnan(front)
+                    vis = vis & ~(nos & (dd < cdepth - band))
+                return vis
             nd = _near(d_a)
             if depthbuf is None:
                 return (np.asarray(d_a, float) > 1e-6) if gpu \
@@ -950,7 +969,16 @@ class _Overlay(QWidget):
             gj = np.clip((np.asarray(sy_a, float) / h * GB).astype(int),
                          0, GB - 1)
             front = depthbuf[gj, gi]
-            return nd <= front + occ_margin
+            vis = nd <= front + occ_margin
+            # Far-hemisphere cull (same idea as the DVR branch): a point that
+            # projects into an EMPTY silhouette cell (front == inf) but is clearly
+            # behind the heart centre is wrapping round the back — hide it so the
+            # distal vessel doesn't trail off the model as a stray dotted line.
+            if cdepth is not None:
+                cnear = cdepth if gpu else -cdepth       # _near() of the centre
+                nos = ~np.isfinite(front)
+                vis = vis & ~(nos & (nd > cnear + max(occ_margin, 3.0)))
+            return vis
 
         spec = getattr(v, "_coro_overlay", None)
         if spec:
