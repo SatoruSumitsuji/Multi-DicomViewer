@@ -695,7 +695,15 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             pass
         if self._territory_on:
-            self._push_territory()
+            # Paint the newly-picked % in the combo RIGHT NOW: the recolour below
+            # blocks the GUI thread for a moment (esp. on Windows) and otherwise
+            # the box keeps showing the OLD value until it finishes, so it looks
+            # like nothing happened. Then run the (possibly slow) territory
+            # recolour behind the busy/progress window so the user sees it working.
+            from PyQt6.QtWidgets import QApplication
+            self._terr_alpha_combo.repaint()
+            QApplication.processEvents()
+            self._run_busy(t("領域色の透過度を変更中…"), self._push_territory)
 
     def _toggle_lv_borders(self) -> None:
         """LV ▸ 境界線: show/hide the Epi/Endo boundary traces on the source CT,

@@ -1101,7 +1101,56 @@ class _Overlay(QWidget):
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
                 text, yellow, width=1.0)
 
-        _block(getattr(v, "_terr_summary_text", ""), False, 13, "TR")
+        def _block_terr_tr(text, pt):
+            """TOP-RIGHT per-system summary with INLINE emphasis: on each
+            'ROLE pct%/ml' line the ROLE label and the percentage (up to and
+            including '%') are BOLD, the '/ml' tail and the 'Myocardium …mL'
+            line stay regular (the user wants the LM/LAD/LCX/RCA %図 to stand
+            out, the mL un-emphasised)."""
+            if not text:
+                return
+            freg = QFont("monospace", pt)
+            fbold = QFont("monospace", pt)
+            fbold.setBold(True)
+            p.setFont(fbold)
+            fmb = p.fontMetrics()
+            p.setFont(freg)
+            fmr = p.fontMetrics()
+            segs = []                                    # (bold_head, reg_tail)
+            for ln in text.split("\n"):
+                k = ln.find("%")                         # split after first '%'
+                if k >= 0:
+                    segs.append((ln[:k + 1], ln[k + 1:]))
+                else:
+                    segs.append(("", ln))                # Myocardium line: no bold
+            widths = [fmb.horizontalAdvance(b) + fmr.horizontalAdvance(r)
+                      for b, r in segs]
+            maxw = max(widths, default=0)
+            lh = max(fmb.lineSpacing(), fmr.lineSpacing())
+            bh = lh + 4
+            x0 = max(w * 0.40, w - maxw - 10)
+            y = 6
+            for (b, r) in segs:
+                x = x0
+                if b:
+                    bw = fmb.horizontalAdvance(b)
+                    p.setFont(fbold)
+                    _draw_outlined_text(
+                        p, QRectF(x, y, bw + 4, bh),
+                        int(Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignTop),
+                        b, yellow, width=1.0)
+                    x += bw
+                if r:
+                    p.setFont(freg)
+                    _draw_outlined_text(
+                        p, QRectF(x, y, fmr.horizontalAdvance(r) + 4, bh),
+                        int(Qt.AlignmentFlag.AlignLeft
+                            | Qt.AlignmentFlag.AlignTop),
+                        r, yellow, width=1.0)
+                y += lh
+
+        _block_terr_tr(getattr(v, "_terr_summary_text", ""), 13)
         _block(getattr(v, "_tgt_summary_text", ""), True, 15, "BR")
         # WW/WL bottom-left (same as the MPR panes' readout).
         _ww, _wl = v._wl_of(key)
@@ -3420,8 +3469,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._vr_drag is not None:
             if ev.get("buttons"):
                 lx, ly = self._last or (ev["x"], ev["y"])
+                _sh = "Shift" in (ev.get("modifiers") or ())
                 self._vr_gesture(self._vr_drag, ev["x"] - lx, ev["y"] - ly,
-                                 self._vr_drag_mode or "rotate")
+                                 self._vr_drag_mode or "rotate", shift=_sh)
             self._last = (ev["x"], ev["y"])
             return
         if self._cmp_on:                      # Compare-select: clicks pick, no drag
@@ -6072,7 +6122,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         sy = (0.5 - ny * 0.5) * ph      # NDC y-up → screen y-down
         return sx, sy, w
 
-    def _vr_gesture(self, key, dx, dy, mode) -> None:
+    def _vr_gesture(self, key, dx, dy, mode, shift=False) -> None:
         """One VR drag step. mode: 'rotate' (trackball, plain drag) or — when
         Alt+Left-drag applies the SELECTED toolbar tool — 'move' (pan), 'zoom'
         (dolly), 'spin' (roll). The volume is on the GPU → camera move + async
@@ -6108,13 +6158,28 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif mode == "wl":
             # Window/Level, same feel as the MPR WL drag (→ widen window,
             # ↑ brighter). Per pane: retune ONLY this VR pane's clim (no camera
-            # change); the other pane keeps its own window.
-            w = self._wl[key]
-            w[0] = max(1.0, w[0] + dx * 2.0)
-            w[1] = w[1] - dy * 2.0
-            vol = self.pane[key].vr_volume
-            if vol is not None and vol.material is not None:
-                vol.material.clim = self._vr_clim_u8(key)
+            # change); the other pane keeps its own window. Shift+WL snaps BOTH
+            # panes to the LEFT (A) pane the moment it starts, then moves them
+            # together (parity with the MPR _drag Shift+WL).
+            if shift:
+                nw = max(1.0, self._wl["A"][0] + dx * 2.0)
+                nl = self._wl["A"][1] - dy * 2.0
+                self._wl["A"] = [nw, nl]
+                self._wl["B"] = [nw, nl]
+                wl_panes = ("A", "B")
+            else:
+                w = self._wl[key]
+                w[0] = max(1.0, w[0] + dx * 2.0)
+                w[1] = w[1] - dy * 2.0
+                wl_panes = (key,)
+            for wk in wl_panes:
+                vol = self.pane[wk].vr_volume
+                if self._vr_on.get(wk) and vol is not None \
+                        and vol.material is not None:
+                    vol.material.clim = self._vr_clim_u8(wk)
+            # Shift moved pane A too; if A is an ordinary MPR pane, re-render it.
+            if shift and not self._vr_on.get("A"):
+                self._refresh(only="A")
         else:                                          # trackball rotate
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
