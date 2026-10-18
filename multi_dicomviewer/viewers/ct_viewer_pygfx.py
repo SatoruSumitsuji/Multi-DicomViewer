@@ -8390,19 +8390,36 @@ class CTViewer(CPRMixin, AbstractViewer):
             # shows on the VR model too (not just the short-axis tint).
             if self._vr_on.get(k) and self.pane[k].vr_volume is not None:
                 self._vr_update_territory(k)
-                try:
-                    self.pane[k].canvas.request_draw()
-                except Exception:                        # noqa: BLE001
-                    pass
-                self._vr_schedule_dvr(k)     # DVR composites territory → refresh
             if self._overlay.get(k) is not None:
                 self._overlay[k].update()
-        # Territory is composited INTO the VR image (not a live overlay), so an
-        # active VR must re-render to pick up the new colours.
-        if self.vr_active():
+        # Territory is composited INTO the VR image (CPU DVR stop-frame), not a
+        # live overlay, so an active VR must RE-RENDER to pick up the new colours
+        # / 透過度. Do it SYNCHRONOUSLY and reveal the DVR frame here — do NOT rely
+        # on _vr_refresh (a later definition shadows it with a GPU-MIP-only no-op)
+        # nor on the async _vr_schedule_dvr alone, which left the pane on the flat
+        # GPU MIP until the user clicked it (the target-set "VR非表示" and the
+        # 領域色透過度 "変わらない" bugs). A deferred double request_draw settles the
+        # occasional dropped/blank GPU present after the scene rebuild.
+        if self.vr_active() and self._vr_drag is None:
             for k in ("A", "B"):
-                if self._vr_on.get(k):
-                    self._vr_refresh(k, lod=False)
+                if not self._vr_on.get(k):
+                    continue
+                try:
+                    res = self._vr_cpu_image(k, lod=False)
+                except Exception:                        # noqa: BLE001
+                    res = None
+                if res and res[0] is not None:
+                    self._vr_img[k], self._vr_depth[k] = res
+                    if self.pane[k].vr_volume is not None:
+                        self._vr_dvr_shown[k] = True
+                try:
+                    self.pane[k].canvas.request_draw()
+                    QTimer.singleShot(16, lambda kk=k:
+                                      self.pane[kk].canvas.request_draw())
+                except Exception:                        # noqa: BLE001
+                    pass
+                if self._overlay.get(k) is not None:
+                    self._overlay[k].update()
 
     def _coronary_pick_sample(self, which, sx, sy, tol=10.0):
         """Nearest coronary-overlay (vid, sample-index) within *tol* px, or
