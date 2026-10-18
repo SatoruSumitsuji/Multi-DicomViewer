@@ -370,15 +370,27 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_vis_btn.clicked.connect(self._toggle_territory_color)
         lv_row.addWidget(self._terr_vis_btn)
         lv_row.addWidget(QLabel(t("透過度")))
-        self._terr_alpha_spin = QSpinBox()
-        self._terr_alpha_spin.setRange(10, 90)
-        self._terr_alpha_spin.setSingleStep(5)
-        self._terr_alpha_spin.setSuffix(" %")
-        self._terr_alpha_spin.setValue(int(round(self._terr_alpha * 100)))
-        self._terr_alpha_spin.setToolTip(
-            t("領域色の不透明度 (10–90%)。Mac・Windows 共通、設定不要で変更"))
-        self._terr_alpha_spin.valueChanged.connect(self._on_terr_alpha)
-        lv_row.addWidget(self._terr_alpha_spin)
+        # Pick the transparency from a list (0% = 不透過 … 100% = 完全透過), not a
+        # ±1 spin. Item data = transparency %, so alpha = 1 − data/100.
+        self._terr_alpha_combo = QComboBox()
+        for _tp in range(0, 101, 10):
+            if _tp == 0:
+                _lab = t("0% (不透過)")
+            elif _tp == 100:
+                _lab = t("100% (完全透過)")
+            else:
+                _lab = f"{_tp}%"
+            self._terr_alpha_combo.addItem(_lab, _tp)
+        cur_tp = int(round((1.0 - self._terr_alpha) * 100))
+        cur_tp = max(0, min(100, int(round(cur_tp / 10.0)) * 10))
+        self._terr_alpha_combo.setCurrentIndex(
+            max(0, self._terr_alpha_combo.findData(cur_tp)))
+        self._terr_alpha_combo.setToolTip(
+            t("領域色の透過度 (0%=不透過 … 100%=完全透過)。Mac・Windows 共通、"
+              "設定不要で変更"))
+        self._terr_alpha_combo.currentIndexChanged.connect(
+            self._on_terr_alpha_combo)
+        lv_row.addWidget(self._terr_alpha_combo)
         lv_row.addStretch(1)
         outer.addLayout(lv_row)
         self._lv_border_vis_btn = None       # 境界線 removed (guarded elsewhere)
@@ -666,10 +678,14 @@ class CoronaryTreeWindow(SnapDock):
                 t("非表示") if self._territory_on else t("表示"))
         self._push_territory()
 
-    def _on_terr_alpha(self, pct: int) -> None:
-        """領域色透過度 changed → recolour the territory (both the MPR tint and the
-        Mac/Windows VR) at the new opacity and persist it in the coronary params."""
-        self._terr_alpha = max(0.1, min(0.9, int(pct) / 100.0))
+    def _on_terr_alpha_combo(self, _i: int) -> None:
+        """領域色透過度 list changed → recolour the territory (MPR tint + Mac/Windows
+        VR) at the new opacity and persist it. List value = transparency %, so the
+        fill alpha (opacity) = 1 − transparency/100 (0% → opaque, 100% → clear)."""
+        tp = self._terr_alpha_combo.currentData()
+        if tp is None:
+            return
+        self._terr_alpha = max(0.0, min(1.0, 1.0 - int(tp) / 100.0))
         try:
             cp = settings_mod.load_coronary_params()
             cp["territory_opacity"] = self._terr_alpha

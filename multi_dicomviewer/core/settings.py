@@ -839,7 +839,8 @@ def load_coronary_params() -> dict:
             pass
         try:
             to = float(data.get("territory_opacity", out["territory_opacity"]))
-            out["territory_opacity"] = max(0.1, min(0.9, to))
+            # 0.0 = fully transparent … 1.0 = opaque (the panel's 0–100% list).
+            out["territory_opacity"] = max(0.0, min(1.0, to))
         except (TypeError, ValueError):
             pass
         lc = data.get("line_colors")
@@ -876,7 +877,7 @@ def save_coronary_params(params: dict) -> None:
             "halo_color": _clean_hex(merged["halo_color"],
                                      CORONARY_PARAMS_DEFAULT["halo_color"]),
             "halo_opacity": max(0.1, min(0.9, float(merged["halo_opacity"]))),
-            "territory_opacity": max(0.1, min(0.9,
+            "territory_opacity": max(0.0, min(1.0,
                                              float(merged["territory_opacity"]))),
             "line_colors": {
                 k: _clean_hex((merged.get("line_colors") or {}).get(k),

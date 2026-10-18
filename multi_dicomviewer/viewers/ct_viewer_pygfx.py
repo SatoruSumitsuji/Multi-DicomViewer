@@ -768,6 +768,8 @@ class _Overlay(QWidget):
             # Coronary tree + targets: projected through the GPU camera (or the
             # CPU basis in fallback). The rotating tree is the orientation cue.
             self._paint_vr_coronary(p, key, w, h)
+            # Territory / target readouts (top-right / bottom-right) + WW/WL.
+            self._paint_vr_readouts(p, key, w, h)
             # C-arm angle readout (LAO/CRA, bottom-centre) — right-click it to
             # type a target angle, like the MPR panes.
             ang = v._angio_angle(key)
@@ -1041,6 +1043,45 @@ class _Overlay(QWidget):
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 str(tg.get("n", "")), tcol, width=1.2)
         p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_vr_readouts(self, p, key, w, h) -> None:
+        """VR-pane corner readouts (Windows parity): per-system myocardium
+        summary TOP-RIGHT (left-aligned), per-target list BOTTOM-RIGHT (bold /
+        emphasised), WW/WL BOTTOM-LEFT."""
+        v = self._v
+        yellow = QColor(255, 217, 0)
+
+        def _block(text, bold, pt, corner):
+            if not text:
+                return
+            fb = QFont("monospace", pt)
+            fb.setBold(bold)
+            p.setFont(fb)
+            fm = p.fontMetrics()
+            lines = text.split("\n")
+            maxw = max((fm.horizontalAdvance(s) for s in lines), default=0)
+            lh = fm.lineSpacing()
+            bh = lh * len(lines) + 4
+            if corner == "TR":
+                x = max(w * 0.40, w - maxw - 10)
+                y = 6
+            else:                                    # BR (bottom-right)
+                x = max(w * 0.40, w - maxw - 10)
+                y = h - bh - 34                       # clear of the angle readout
+            _draw_outlined_text(
+                p, QRectF(x, y, maxw + 6, bh),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop),
+                text, yellow, width=1.0)
+
+        _block(getattr(v, "_terr_summary_text", ""), False, 13, "TR")
+        _block(getattr(v, "_tgt_summary_text", ""), True, 15, "BR")
+        # WW/WL bottom-left (same as the MPR panes' readout).
+        _ww, _wl = v._wl_of(key)
+        p.setFont(QFont("monospace", 12))
+        p.setPen(QColor(255, 255, 255))
+        p.drawText(QRectF(6, h - 28, w - 12, 24),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                   f"WW {_ww:.0f}  WL {_wl:.0f}")
 
     def _paint_cpr(self, p, w, h):
         """Short-axis overlay: a centred amber crosshair (the cross-section is
@@ -2708,6 +2749,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_cb = None
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
+        # VR-pane territory readout text (pushed by the panel): per-system
+        # myocardium summary (top-right) + per-target list (bottom-right).
+        self._terr_summary_text = ""
+        self._tgt_summary_text = ""
         # vids whose NAME label is painted. Empty by default (labels cluttered
         # the view); turned on per-vessel via the CPR line's right-click menu.
         self._coro_names: set[str] = set()
@@ -4311,7 +4356,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_invert_btn", None) is not None:
             # WB reverse: 2-D only (unneeded in 3-D MPR, disabled in LV) — VTK
             # parity. Revivable by relaxing this to `not in_lv`.
-            self._invert_btn.setEnabled(is2d and not in_lv)
+            _wb_on = is2d and not in_lv
+            self._invert_btn.setEnabled(_wb_on)
+            # FitButton ignores Qt's default disabled palette, so grey it
+            # explicitly (same look as the greyed interaction tools above);
+            # clear the sheet when live so its checked state shows normally.
+            self._invert_btn.setStyleSheet(
+                "" if _wb_on else
+                "background:#e6e6e6;color:#a8a8a8;border:1px solid #d8d8d8;")
         # Slab spin: available in ALL 3-D LV sub-modes (Endo/Epi AND Blood) so
         # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
         # right 5 mm but may be changed. Disabled only in 2-D (VTK parity).
@@ -8255,6 +8307,22 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._overlay[k].update()
         except Exception:                                # noqa: BLE001
             pass
+
+    def set_territory_summary(self, text) -> None:
+        """Public (shell): per-system territory summary (Myocardium + LM/LAD/LCX/
+        RCA) shown at the VR pane's TOP-RIGHT (left-aligned)."""
+        self._terr_summary_text = text or ""
+        for k in ("A", "B"):
+            if self._vr_on.get(k) and self._overlay.get(k) is not None:
+                self._overlay[k].update()
+
+    def set_target_summary(self, text) -> None:
+        """Public (shell): per-target list shown at the VR pane's BOTTOM-RIGHT
+        (emphasised / bold)."""
+        self._tgt_summary_text = text or ""
+        for k in ("A", "B"):
+            if self._vr_on.get(k) and self._overlay.get(k) is not None:
+                self._overlay[k].update()
 
     def set_coronary_resume_cb(self, cb) -> None:
         """Register cb(vid) for a CPR-overlay-line right-click ▸ 編集 (Resume)."""
