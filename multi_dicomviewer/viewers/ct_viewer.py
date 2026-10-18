@@ -11128,8 +11128,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # + filled per push in _vr_update_territory.
         p.vr_terr_actors = []
         p.vr_terr_pipe = []                      # keep contour filters/images alive
-        # 3 systems (LAD/LCX/RCA) + up to 6 Target territories (labels 4..9).
-        for _ in range(9):
+        # 4 systems (LAD/LCX/RCA/LM) + up to 6 Target territories (labels 1..10).
+        for _ in range(10):
             mp = vtkPolyDataMapper()
             mp.SetInputData(vtkPolyData())
             mp.ScalarVisibilityOff()
@@ -11396,7 +11396,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             nrm.SetInputConnection(sm.GetOutputPort())
             nrm.SetFeatureAngle(60.0)
             ac.GetMapper().SetInputConnection(nrm.GetOutputPort())
-            a = c[3] if len(c) > 3 else 0.4
+            # The territory is a TRANSLUCENT surface over the DVR volume, so it
+            # reads much fainter than the Mac DVR (which replaces the tissue
+            # colour outright). Scale the 領域色透過度 up so it dominates the
+            # volume and the opacity control has a strong, visible effect
+            # (0.45 → ~0.85; the 10–90% range → ~0.2–1.0).
+            base_a = float(c[3]) if len(c) > 3 else 0.4
+            a = min(0.98, base_a * 1.9)
             ac.GetProperty().SetColor(float(c[0]), float(c[1]), float(c[2]))
             ac.GetProperty().SetOpacity(float(a))
             ac.SetVisibility(True)
