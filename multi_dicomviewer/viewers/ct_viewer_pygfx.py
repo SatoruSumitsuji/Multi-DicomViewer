@@ -3101,6 +3101,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the ACTIVE toolbar tool — Rotate (trackball) / Zoom / Move / Spin — no
         # Alt needed. A plain right-click still falls through to the normal menu.
         if self._vr_on.get(key) and self._drag_btn == 1:
+            # Territory target mode: a left-click on a coronary line on the VR
+            # pane sets a Target (Shift skips it to orbit instead). Checked BEFORE
+            # the orbit starts, which would otherwise swallow the click.
+            if (getattr(self, "_coro_target_mode", False)
+                    and "Shift" not in (ev.get("modifiers") or ())
+                    and self._coronary_target_click(key, x, y)):
+                self._reset_pointer_state()
+                return
             self._vr_drag = key
             # Dragging resumes the fast GPU MIP; the CPU DVR stop-frame comes back
             # on release (see _on_up → _vr_schedule_dvr).
@@ -8204,7 +8212,11 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _coronary_pick(self, which, sx, sy, tol=6.0):
         """vid of the coronary-overlay vessel whose reprojected centreline is
-        within *tol* px of (sx, sy) on pane *which*, or None. 3-D MPR only."""
+        within *tol* px of (sx, sy) on pane *which*, or None. On a VR pane the
+        tree is projected through the VR camera, so pick there too."""
+        if self._vr_on.get(which):
+            vid, _idx = self._coronary_pick_sample_vr(which, sx, sy)
+            return vid
         spec = self._coro_overlay if self._mode == "3D" else None
         if not spec:
             return None
@@ -8228,6 +8240,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_mode = bool(on)
         if cb is not None:
             self._coro_target_cb = cb
+
+    def set_coronary_target_pick_cb(self, cb) -> None:
+        """Register the (vid, idx) target-set callback (so a coronary-line
+        right-click ▸ ここにターゲット設定 can set a Target even when the ターゲット
+        設定 mode was never toggled on). Matches the Windows viewer."""
+        self._coro_target_cb = cb
 
     def set_coronary_targets(self, specs) -> None:
         self._coro_targets = list(specs or [])
@@ -8310,10 +8328,54 @@ class CTViewer(CPRMixin, AbstractViewer):
                     best, best_vid, best_idx = d, ves.get("vid"), i
         return best_vid, best_idx
 
+    def _coronary_pick_sample_vr(self, which, sx, sy, tol=16.0):
+        """Nearest coronary (vid, sample-index) under (sx, sy) on a VR pane,
+        projected through the SAME camera (_vr_project_pts_gpu while the GPU MIP
+        is shown, else the parallel _vr_basis) the overlay is drawn with, so the
+        pick matches the line the user sees. (None, None) if nothing is close."""
+        spec = getattr(self, "_coro_overlay", None)
+        if not spec or not self._vr_on.get(which):
+            return None, None
+        gpu = (self.pane[which].vr_volume is not None
+               and not self._vr_dvr_shown.get(which))
+
+        def project(pts):
+            if gpu:
+                r = self._vr_project_pts_gpu(which, pts)
+                if r is not None:
+                    return r
+            return self._vr_project_pts(which, pts)
+
+        best, best_vid, best_idx = float(tol), None, None
+        for ves in spec:
+            pts = ves.get("points")
+            if pts is None or len(pts) < 2:
+                continue
+            # Skip the grey unknown-root lines (not drawn on the VR).
+            if (not ves.get("root")
+                    or str(ves.get("color", "")).lower() in ("#888888", "#888")):
+                continue
+            pr = project(np.asarray(pts, float))
+            if pr is None:
+                continue
+            pxs, pys, dd = (np.asarray(a, float) for a in pr)
+            dist = np.hypot(pxs - sx, pys - sy)
+            if gpu:                         # drop points behind the camera
+                dist = np.where(dd > 1e-6, dist, np.inf)
+            if not np.isfinite(dist).any():
+                continue
+            i = int(np.nanargmin(dist))
+            if dist[i] < best:
+                best, best_vid, best_idx = float(dist[i]), ves.get("vid"), i
+        return best_vid, best_idx
+
     def _coronary_target_click(self, which, sx, sy) -> bool:
         if not self._coro_target_mode or self._coro_target_cb is None:
             return False
-        vid, idx = self._coronary_pick_sample(which, sx, sy)
+        if self._vr_on.get(which):
+            vid, idx = self._coronary_pick_sample_vr(which, sx, sy)
+        else:
+            vid, idx = self._coronary_pick_sample(which, sx, sy)
         if vid is None:
             return False
         try:
@@ -8327,6 +8389,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         vessel's NAME on the image. Names are off by default."""
         names = self._coro_names
         menu = QMenu(self)
+        # Territory target: right-click a coronary line ▸ set a Target here (same
+        # as the ターゲット設定 button, but one-shot without toggling the mode).
+        tgt_act = menu.addAction(t("ここにターゲット設定")) \
+            if getattr(self, "_coro_target_cb", None) is not None else None
+        if tgt_act is not None:
+            menu.addSeparator()
         edit_act = menu.addAction(t("この血管を編集 (Resume)")) \
             if self._coro_resume_cb is not None else None
         over_act = menu.addAction(t("この血管に上書き保存")) \
@@ -8341,6 +8409,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 QPoint(int(sx), int(sy))))
         finally:
             self._reset_pointer_state()
+        if tgt_act is not None and chosen is tgt_act:
+            # Pick the exact sample under the click (VR or MPR projection).
+            if self._vr_on.get(which):
+                tvid, tidx = self._coronary_pick_sample_vr(which, sx, sy)
+            else:
+                tvid, tidx = self._coronary_pick_sample(which, sx, sy)
+            if tvid is None:                      # fall back to the menu's vessel
+                tvid, tidx = vid, 0
+            try:
+                self._coro_target_cb(tvid, int(tidx))
+            except Exception:                        # noqa: BLE001
+                pass
+            return
         if edit_act is not None and chosen is edit_act:
             self._coro_resume_cb(vid)
             return
