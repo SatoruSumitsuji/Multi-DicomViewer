@@ -1216,7 +1216,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             dx = e.position().x() - self._last.x()
             dy = e.position().y() - self._last.y()
             self._last = e.position()
-            self._owner._vr_drag_dispatch(self._which, dx, dy)
+            _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self._owner._vr_drag_dispatch(self._which, dx, dy, shift=_sh)
             return
         # Short-axis (CPR) pane, left-drag in progress → dispatch by tool.
         if (self._owner._cpr is not None and self._which == "A"
@@ -2237,12 +2238,15 @@ class _Pane:
         self.ren.AddViewProp(self.resultact)
         # CT Territory per-system summary — bottom-right of the VR pane, same yellow
         # + font as the result block (set_territory_summary / _vr_update_summary).
+        # MONOSPACE (Courier, built-in — NOT the Meiryo font FILE, which makes
+        # SetBold a no-op). The summary is ASCII, and a fixed-pitch face lets the
+        # bold overlay (terract_b) align char-for-char with space padding so only
+        # the LM/LAD/LCX/RCA label + % reads bold while the mL tail stays regular.
         self.terract = vtkTextActor()
         self.terract.SetTextScaleModeToNone()
         _ttp = self.terract.GetTextProperty()
         _ttp.SetColor(1.0, 0.851, 0.0)
-        _ttp.SetFontFamilyToArial()
-        _set_vtk_tag_font(_ttp)
+        _ttp.SetFontFamilyToCourier()
         _ttp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _ttp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
         _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
@@ -2251,6 +2255,22 @@ class _Pane:
         self.terract.GetPositionCoordinate().SetValue(0.70, 0.985)   # top-right
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
+        # Bold overlay, same font/size/position: holds ONLY the emphasised chars
+        # (role label + %), the rest space-padded, drawn on top of terract.
+        self.terract_b = vtkTextActor()
+        self.terract_b.SetTextScaleModeToNone()
+        _tbp = self.terract_b.GetTextProperty()
+        _tbp.SetColor(1.0, 0.851, 0.0)
+        _tbp.SetFontFamilyToCourier()
+        _tbp.SetBold(True)
+        _tbp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+        _tbp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        _tbp.SetJustificationToLeft()
+        _tbp.SetVerticalJustificationToTop()
+        self.terract_b.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        self.terract_b.GetPositionCoordinate().SetValue(0.70, 0.985)
+        self.terract_b.SetInput("")
+        self.ren.AddViewProp(self.terract_b)
         # CT Territory per-target list — bottom-LEFT of the VR, same style.
         self.tgtact = vtkTextActor()
         self.tgtact.SetTextScaleModeToNone()
@@ -11784,7 +11804,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Keep the bottom-centre C-arm readout (angle + its halo copies) on the
             # VR too — everything else 2-D is hidden.
             keep = {p.vr_volume, getattr(p, "angle", None),
-                    getattr(p, "terract", None), getattr(p, "tgtact", None),
+                    getattr(p, "terract", None), getattr(p, "terract_b", None),
+                    getattr(p, "tgtact", None),
                     getattr(p, "wlact", None)}
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
@@ -11873,6 +11894,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                        getattr(p, "vr_coro_cap_actor", None),
                        getattr(p, "vr_tgt_actor", None),
                        getattr(p, "terract", None),
+                       getattr(p, "terract_b", None),
                        getattr(p, "tgtact", None),
                        getattr(p, "wlact", None),
                        *getattr(p, "vr_terr_actors", []),
@@ -12327,11 +12349,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             fs = p.resultact.GetTextProperty().GetFontSize()
         except Exception:                                # noqa: BLE001
             fs = None
+        # Split the per-system summary into a REGULAR layer (mL tail + Myocardium)
+        # and a BOLD layer (role label + %), space-padded so the fixed-pitch
+        # Courier overlay aligns char-for-char. Split each line after the first
+        # '%': head (ROLE + pct%) → bold, tail (/…mL) → regular; a line with no
+        # '%' (Myocardium …mL) is all regular.
+        terr_txt = getattr(self, "_terr_summary_text", "") if on else ""
+        reg_lines, bold_lines = [], []
+        for ln in terr_txt.split("\n"):
+            k = ln.find("%")
+            if k >= 0:
+                head, tail = ln[:k + 1], ln[k + 1:]
+                bold_lines.append(head + " " * len(tail))
+                reg_lines.append(" " * len(head) + tail)
+            else:
+                bold_lines.append(" " * len(ln))
+                reg_lines.append(ln)
+        terr_reg = "\n".join(reg_lines) if terr_txt else ""
+        terr_bold = "\n".join(bold_lines) if terr_txt else ""
         # terract (top-right) uses the result-block size; tgtact (bottom-right
         # Target list) is 1.2× larger so it stands out.
         for ta, txt, scale in (
-                (getattr(p, "terract", None),
-                 getattr(self, "_terr_summary_text", "") if on else "", 1.0),
+                (getattr(p, "terract", None), terr_reg, 1.0),
+                (getattr(p, "terract_b", None), terr_bold, 1.0),
                 (getattr(p, "tgtact", None),
                  getattr(self, "_tgt_summary_text", "") if on else "", 1.2)):
             if ta is None:
@@ -12355,11 +12395,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return min(0.82, max(0.40, 1.0 - frac))
             except Exception:                            # noqa: BLE001
                 return 0.70
-        # terract → TOP-RIGHT, tgtact → BOTTOM-RIGHT (both right-hugged).
+        # terract (+ its bold overlay) → TOP-RIGHT, tgtact → BOTTOM-RIGHT (both
+        # right-hugged). terract_b shares terract's x so the layers coincide.
         ter = getattr(p, "terract", None)
         if ter is not None and on and getattr(self, "_terr_summary_text", ""):
-            ter.GetPositionCoordinate().SetValue(
-                _right_left(ter, self._terr_summary_text), 0.985)
+            _tx = _right_left(ter, self._terr_summary_text)
+            ter.GetPositionCoordinate().SetValue(_tx, 0.985)
+            terb = getattr(p, "terract_b", None)
+            if terb is not None:
+                terb.GetPositionCoordinate().SetValue(_tx, 0.985)
         tgt = getattr(p, "tgtact", None)
         if tgt is not None and on and getattr(self, "_tgt_summary_text", ""):
             tgt.GetPositionCoordinate().SetValue(
@@ -12377,7 +12421,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                         pass
             wl.SetVisibility(bool(on))
 
-    def _vr_drag_dispatch(self, key, dx, dy) -> None:
+    def _vr_drag_dispatch(self, key, dx, dy, shift=False) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
         Move (pan), Spin (roll), WL (transfer-function shift), else Rotate."""
         if not self._vr_on.get(key):
@@ -12393,9 +12437,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif tool == "SPIN":
             cam.Roll(-dx * 0.3)
         elif tool == "WL":                          # drag tunes how much shows
-            self._wl[key][1] = float(self._wl[key][1]) - dy * 3.0
-            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(key)))
-            self._vr_update_summary(key)            # live WW/WL readout
+            # Per-pane W/L, as in MPR. Shift+WL snaps BOTH panes to the LEFT (A)
+            # pane's value the moment it starts, then moves them together — so the
+            # VR level and the companion short-axis pane share one window.
+            if shift:
+                nw = max(1.0, float(self._wl["A"][0]))
+                nl = float(self._wl["A"][1]) - dy * 3.0
+                self._wl["A"] = [nw, nl]
+                self._wl["B"] = [nw, nl]
+                panes = ("A", "B")
+            else:
+                self._wl[key][1] = float(self._wl[key][1]) - dy * 3.0
+                panes = (key,)
+            for pk in panes:
+                pp = self.pane[pk]
+                if self._vr_on.get(pk) \
+                        and getattr(pp, "vr_volume", None) is not None:
+                    pp.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(pk)))
+                    self._vr_update_summary(pk)
+                    pp.render()
+            # Shift moved pane A too; if A is an ordinary MPR pane (the short-axis
+            # companion), re-LUT it at the new W/L.
+            if shift and not self._vr_on.get("A"):
+                self._refresh(only="A")
+            return
         else:                                       # ROTATE (default) / others
             cam.Azimuth(-dx * 0.4)
             cam.Elevation(dy * 0.4)
