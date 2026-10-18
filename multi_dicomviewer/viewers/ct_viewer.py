@@ -2246,9 +2246,9 @@ class _Pane:
         _ttp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _ttp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
         _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
-        _ttp.SetVerticalJustificationToBottom()
+        _ttp.SetVerticalJustificationToTop()
         self.terract.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        self.terract.GetPositionCoordinate().SetValue(0.70, 0.015)   # bottom-right (fits)
+        self.terract.GetPositionCoordinate().SetValue(0.70, 0.985)   # top-right
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
         # CT Territory per-target list — bottom-LEFT of the VR, same style.
@@ -2266,9 +2266,26 @@ class _Pane:
         _gtp.SetJustificationToLeft()
         _gtp.SetVerticalJustificationToBottom()
         self.tgtact.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
-        self.tgtact.GetPositionCoordinate().SetValue(0.012, 0.015)   # bottom-left
+        self.tgtact.GetPositionCoordinate().SetValue(0.70, 0.015)    # bottom-right
         self.tgtact.SetInput("")
         self.ren.AddViewProp(self.tgtact)
+        # VR-pane WW/WL readout — bottom-LEFT, white (same corner as the MPR info
+        # readout, which is hidden while VR is on). Shown only in VR.
+        self.wlact = vtkTextActor()
+        self.wlact.SetTextScaleModeToNone()
+        _wtp = self.wlact.GetTextProperty()
+        _wtp.SetColor(1.0, 1.0, 1.0)
+        _wtp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_wtp)
+        _wtp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
+        _wtp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
+        _wtp.SetJustificationToLeft()
+        _wtp.SetVerticalJustificationToBottom()
+        self.wlact.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        self.wlact.GetPositionCoordinate().SetValue(0.012, 0.015)    # bottom-left
+        self.wlact.SetInput("")
+        self.wlact.SetVisibility(False)
+        self.ren.AddViewProp(self.wlact)
 
         # Follows the cursor to show the HU under it while the Point probe tool
         # is armed (positioned in display pixels on each hover; see
@@ -11767,7 +11784,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Keep the bottom-centre C-arm readout (angle + its halo copies) on the
             # VR too — everything else 2-D is hidden.
             keep = {p.vr_volume, getattr(p, "angle", None),
-                    getattr(p, "terract", None), getattr(p, "tgtact", None)}
+                    getattr(p, "terract", None), getattr(p, "tgtact", None),
+                    getattr(p, "wlact", None)}
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
@@ -11856,6 +11874,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                        getattr(p, "vr_tgt_actor", None),
                        getattr(p, "terract", None),
                        getattr(p, "tgtact", None),
+                       getattr(p, "wlact", None),
                        *getattr(p, "vr_terr_actors", []),
                        *getattr(p, "vr_tgt_labels", [])):
                 if _a is not None:
@@ -12299,15 +12318,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.pane[k].render()
 
     def _vr_update_summary(self, key) -> None:
-        """Refresh the VR pane's bottom-right per-system summary + bottom-left
-        per-target list (both match the result block's font size)."""
+        """Refresh the VR pane's corner readouts: per-system myocardium summary
+        TOP-RIGHT (terract), per-target list BOTTOM-RIGHT (tgtact, emphasised),
+        WW/WL BOTTOM-LEFT (wlact). All match the result block's font size."""
         p = self.pane[key]
         on = self._vr_on.get(key)
         try:
             fs = p.resultact.GetTextProperty().GetFontSize()
         except Exception:                                # noqa: BLE001
             fs = None
-        # terract (bottom-right) uses the result-block size; tgtact (bottom-left
+        # terract (top-right) uses the result-block size; tgtact (bottom-right
         # Target list) is 1.2× larger so it stands out.
         for ta, txt, scale in (
                 (getattr(p, "terract", None),
@@ -12323,22 +12343,39 @@ class CTViewer(CPRMixin, AbstractViewer):
                     pass
             ta.SetInput(txt or "")
             ta.SetVisibility(bool(txt))
-        # Position the bottom-right summary so its LONGEST line (usually Myocardium)
-        # sits fully on-screen with ~1 char of right margin, while the lines stay
-        # left-aligned. Width is a fraction of the render window, so dpr cancels.
-        ter = getattr(p, "terract", None)
-        if ter is not None and on and getattr(self, "_terr_summary_text", ""):
+
+        def _right_left(ta, text):
+            """Left edge (normalised x) so a left-aligned block's longest line
+            fits with ~1 char right margin. dpr cancels (width is a fraction)."""
             try:
                 w_px = float(p.ren.GetRenderWindow().GetSize()[0]) or 1.0
-                tfs = float(ter.GetTextProperty().GetFontSize())
-                lines = self._terr_summary_text.split("\n")
-                max_chars = max((len(s) for s in lines), default=0)
-                # Arial ≈ 0.58 em average advance; +1 char right margin.
-                frac = (max_chars + 1.0) * 0.58 * tfs / w_px
-                left = min(0.82, max(0.40, 1.0 - frac))
-                ter.GetPositionCoordinate().SetValue(left, 0.015)
+                tfs = float(ta.GetTextProperty().GetFontSize())
+                max_chars = max((len(s) for s in text.split("\n")), default=0)
+                frac = (max_chars + 1.0) * 0.58 * tfs / w_px   # Arial ≈ 0.58 em
+                return min(0.82, max(0.40, 1.0 - frac))
             except Exception:                            # noqa: BLE001
-                pass
+                return 0.70
+        # terract → TOP-RIGHT, tgtact → BOTTOM-RIGHT (both right-hugged).
+        ter = getattr(p, "terract", None)
+        if ter is not None and on and getattr(self, "_terr_summary_text", ""):
+            ter.GetPositionCoordinate().SetValue(
+                _right_left(ter, self._terr_summary_text), 0.985)
+        tgt = getattr(p, "tgtact", None)
+        if tgt is not None and on and getattr(self, "_tgt_summary_text", ""):
+            tgt.GetPositionCoordinate().SetValue(
+                _right_left(tgt, self._tgt_summary_text), 0.015)
+        # WW/WL bottom-left (VR pane only; the MPR info readout is hidden in VR).
+        wl = getattr(p, "wlact", None)
+        if wl is not None:
+            if on:
+                ww, lvl = self._wl_of(key)
+                wl.SetInput(f"WW {ww:.0f}  WL {lvl:.0f}")
+                if fs is not None:
+                    try:
+                        wl.GetTextProperty().SetFontSize(int(round(fs)))
+                    except Exception:                    # noqa: BLE001
+                        pass
+            wl.SetVisibility(bool(on))
 
     def _vr_drag_dispatch(self, key, dx, dy) -> None:
         """Run the SELECTED tool on the VR volume for a mouse delta: Zoom (dolly),
@@ -12358,6 +12395,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif tool == "WL":                          # drag tunes how much shows
             self._wl[key][1] = float(self._wl[key][1]) - dy * 3.0
             p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(key)))
+            self._vr_update_summary(key)            # live WW/WL readout
         else:                                       # ROTATE (default) / others
             cam.Azimuth(-dx * 0.4)
             cam.Elevation(dy * 0.4)
