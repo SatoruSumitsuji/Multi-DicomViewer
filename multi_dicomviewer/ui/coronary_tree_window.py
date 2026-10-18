@@ -388,8 +388,10 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_alpha_combo.setToolTip(
             t("領域色の透過度 (0%=不透過 … 100%=完全透過)。Mac・Windows 共通、"
               "設定不要で変更"))
-        self._terr_alpha_combo.currentIndexChanged.connect(
-            self._on_terr_alpha_combo)
+        # `activated` fires the moment the user PICKS an item from the popup (one
+        # interaction), even when re-picking the same value — so the opacity
+        # applies on a single selection, not only after a change/second click.
+        self._terr_alpha_combo.activated.connect(self._on_terr_alpha_combo)
         lv_row.addWidget(self._terr_alpha_combo)
         lv_row.addStretch(1)
         outer.addLayout(lv_row)
