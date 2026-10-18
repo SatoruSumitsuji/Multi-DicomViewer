@@ -5958,13 +5958,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         ph = max(1, p.canvas.height())
         q = self._vr_rot[key]
         if mode == "move":
-            # Pan in world mm (screen px × world-per-px). Signs reversed (the user
-            # found Move went the wrong way) and kept consistent with the DVR pan
-            # in _vr_basis so the MIP and the stop-frame move together.
+            # Pan in world mm (screen px × world-per-px). These deltas + the DVR
+            # pan sign in _vr_basis (ctr + right·px + up·py) make BOTH the GPU MIP
+            # and the DVR stop-frame move the model WITH the cursor (grab feel).
             g = (2.0 * 0.62 * float(self._diag or 1.0)) / ph / max(
                 0.3, self._vr_zoom[key])
-            self._vr_pan[key][0] += dx * g
-            self._vr_pan[key][1] -= dy * g
+            self._vr_pan[key][0] -= dx * g
+            self._vr_pan[key][1] += dy * g
         elif mode == "zoom":
             # Vertical drag dollies: drag DOWN = zoom in, UP = zoom out (user).
             self._vr_zoom[key] = float(min(6.0, max(0.3,
@@ -6126,6 +6126,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_mask = self._run_busy(
                 t("VR"), t("VR構築中…"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
+            # Orient the LEFT (non-VR) pane to the LV short-axis so Paging steps
+            # through LV levels and it stays ON the LV (Windows parity).
+            self._vr_orient_left_sax("A" if key != "A" else "B")
             if self._tool not in ("ROTATE", "ZOOM", "MOVE", "SPIN"):
                 self._set_tool("ROTATE")          # sensible default VR tool
         else:
@@ -6148,6 +6151,37 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
         self._overlay[key].update()
         self._sync_vr_btn()
+
+    def _vr_orient_left_sax(self, key="A") -> None:
+        """Orient the LEFT (non-VR) pane to the LV SHORT-AXIS — the plane ⟂ the LV
+        long axis (apex→MV), centred at mid-LV. Like Windows: Paging then steps
+        through LV short-axis levels and the pane stays ON the LV (the axial view
+        paged off the heart → the image 'disappeared'). No-op without an LV axis."""
+        if self._vol is None:
+            return
+        ax = self._lv_cosync_axis() if hasattr(self, "_lv_cosync_axis") else None
+        if ax is None:
+            return
+        apex, axis, _amin, amax = ax
+        n = _norm(np.asarray(axis, float))
+        if not np.all(np.isfinite(n)) or float(np.linalg.norm(n)) < 1e-6:
+            return
+        ref = (np.array([0.0, 0.0, 1.0]) if abs(float(n[2])) < 0.9
+               else np.array([1.0, 0.0, 0.0]))
+        u = _norm(np.cross(ref, n))
+        v = _norm(np.cross(n, u))
+        self._frame[key] = self._ortho(u, v)          # pane normal = cross(u,v)=n
+        center = np.asarray(apex, float) + n * (float(amax) * 0.5)
+        self._center = center.copy()
+        self._pc[key] = center.copy()
+        self._cross_ang[key] = 0.0
+        self._roll[key] = 0.0
+        self._view_initial = False
+        try:
+            self._clamp_center()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._refresh(only=key)
 
     def _toggle_vr_mode(self) -> None:
         """Top-level VR button: toggle VR for the VR pane. OFF returns the pane to
