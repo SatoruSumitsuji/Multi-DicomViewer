@@ -2219,9 +2219,10 @@ class _Overlay(QWidget):
         p.setFont(QFont("monospace", 12))       # corner readouts stay compact
         slab = v._thick[key]
         kind = f"Slab MIP {slab:.1f}mm" if slab > 0 else "MPR (thin)"
+        _ww, _wl = v._wl_of(key)
         p.drawText(QRectF(6, h - 28, w - 12, 24),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   f"WW {v._win:.0f}  WL {v._lvl:.0f}")
+                   f"WW {_ww:.0f}  WL {_wl:.0f}")
         p.drawText(QRectF(6, h - 28, w - 12, 24),
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    f"{key}  |  {kind}")
@@ -2605,10 +2606,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._ps = {"A": 1.0, "B": 1.0}      # camera half-height (mm) per pane
         self._pan = {"A": np.zeros(2), "B": np.zeros(2)}  # focal offset (u,v)
         self._roll = {"A": 0.0, "B": 0.0}    # camera roll (deg) for SPIN
-        self._win, self._lvl = 800.0, 200.0
+        self._active_pane = "A"
+        # Window/Level is PER PANE (left/right independent) in every mode. The
+        # _win/_lvl properties below read/write the ACTIVE pane's slot; rendering
+        # (_gray_material / _lut_texture / slab / VR) passes the pane key so each
+        # pane draws with its own W/L. Shift+WL equalises both to the LEFT (A)
+        # pane then moves them together (see _drag).
+        self._wl = {"A": [800.0, 200.0], "B": [800.0, 200.0]}
         self._win0, self._lvl0 = 800.0, 200.0
         self._thick = {"A": 0.0, "B": 5.0}
-        self._active_pane = "A"
         self._view_initial = True
         self._cl_on = True                   # crosshair/slab overlay visible
         self._color = False                  # HU colormap on/off
@@ -2619,11 +2625,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._opacity = float(_cm["opacity"])
         self._cmap_smooth_mm = float(_cm.get("smooth_mm", 0.4))
         self._cmap_dlg = None
-        self._lut_key = None                 # cache key for the colormap tex
-        self._lut_tex = None
+        self._lut_key = {}                   # per-pane cache key for colormap tex
+        self._lut_tex = {}
         self._invert = False                 # WB reverse (grayscale negative)
-        self._inv_key = None                 # cache key for the inverted ramp
-        self._inv_tex = None
+        self._inv_key = {}                   # per-pane cache key, inverted ramp
+        self._inv_tex = {}
         # short-axis (CPR) state — shared logic lives in CPRMixin. None unless
         # the user turns a polyline trace into a vessel centreline (_enter_cpr);
         # pane A then becomes the cross-section scroller.
@@ -4241,8 +4247,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Epi border setting: the slab is fixed at 0, so Thick is greyed + inactive.
         epi_edit = (self._lv_current_submode() == "epi") \
             if hasattr(self, "_lv_current_submode") else False
+        # VR/territory review: the toolbar is shared, so it reflects the ACTIVE
+        # pane. The VR (right) pane disables Paging; the LV short-axis (left) pane
+        # disables Rotate; BOTH disable Thick (+ the slab spin + WB reverse below).
+        vr_mode = self.vr_active() if hasattr(self, "vr_active") else False
+        active = getattr(self, "_active_pane", "A")
+        active_is_vr = bool(self._vr_on.get(active, False)) if vr_mode else False
 
         def _disabled(n):
+            if vr_mode:
+                # VR review owns the tool set outright (3-D, no 2-D/epi/lv-lock
+                # fall-through, so those can't wrongly disable the VR pane's
+                # Rotate): Thick off both panes; Paging off on the VR pane;
+                # Rotate off on the left SAX pane; the rest stay live.
+                if n == "THICK":
+                    return True
+                if n == "PAGING":
+                    return active_is_vr
+                if n == "ROTATE":
+                    return not active_is_vr
+                return False
             return ((is2d and n in _MPR_ONLY_TOOLS)
                     or (lv_lock and n in _LV_LOCK_DISABLED)
                     or (epi_edit and n == "THICK"))
@@ -4284,13 +4308,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the operator can adjust each pane's slab — Endo/Epi default to left 0 /
         # right 5 mm but may be changed. Disabled only in 2-D (VTK parity).
         if getattr(self, "_slab_spin", None) is not None:
-            self._slab_spin.setEnabled((not is2d) and not epi_edit)
+            self._slab_spin.setEnabled(
+                (not is2d) and not epi_edit and not vr_mode)
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
+        # VR review greys tools per the ACTIVE pane (Rotate off on the left SAX
+        # pane, Paging off on the VR pane), so re-evaluate on any active switch.
+        if hasattr(self, "vr_active") and self.vr_active():
+            self._refresh_tool_availability()
         # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
         # same, so a shared Rt90/Flip/… acts on the matching side in both.
         if (getattr(self, "_sync_view_on", False)
@@ -4901,8 +4930,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         pb = loaded.patient_basis
         self._pbasis = (np.asarray(pb, dtype=np.float64)
                         if pb is not None else np.eye(3))
-        self._win = self._win0 = float(loaded.window or 800.0)
-        self._lvl = self._lvl0 = float(loaded.level or 200.0)
+        self._win0 = float(loaded.window or 800.0)
+        self._lvl0 = float(loaded.level or 200.0)
+        # Both panes start from the series' default window (independent after).
+        self._wl = {"A": [self._win0, self._lvl0],
+                    "B": [self._win0, self._lvl0]}
+        self._lut_key = {}
+        self._inv_key = {}
         self._thick = {"A": 0.0, "B": 5.0}
         # Reset any 2-D rotate/flip to the native orientation for the new series.
         self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
@@ -5594,7 +5628,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "halfW": halfW, "halfH": halfH, "pw": pw, "ph": ph,
             "lod": bool(lod), "ih_drag": 150,
             "mode": self._vr_mode,
-            "win": float(self._win), "lvl": float(self._lvl),
+            "win": self._wl_of(key)[0], "lvl": self._wl_of(key)[1],
             "mask": self._vr_mask,
             "tvol": (None if lod else getattr(self, "_terr_mask_vol", None)),
             "tcols": getattr(self, "_terr_colors", None),
@@ -5720,10 +5754,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         return np.ascontiguousarray(np.pad(u8, 1, mode="constant",
                                            constant_values=0))
 
-    def _vr_clim_u8(self):
-        """Current W/L window expressed in the uint8 texture's value space."""
-        lo = self._lvl - self._win * 0.5
-        hi = self._lvl + self._win * 0.5
+    def _vr_clim_u8(self, key=None):
+        """Pane *key*'s W/L window expressed in the uint8 texture's value space
+        (defaults to the active pane)."""
+        win, lvl = self._wl_of(key)
+        lo = lvl - win * 0.5
+        hi = lvl + win * 0.5
 
         def u8(h):
             return (h - _HU_LO) / (_HU_HI - _HU_LO) * 255.0
@@ -5732,12 +5768,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             b = a + 1.0
         return (a, b)
 
-    def _vr_make_gpu_material(self):
+    def _vr_make_gpu_material(self, key=None):
         """MIP material. uint8 (r8unorm) texture is the Metal-safe FORMAT; linear
         interpolation (r8unorm is filterable on Metal) smooths the blocky/grainy
         voxel stepping that 'nearest' gave. Depth / rotation direction is read
         from the coronary tree projected on top, which rotates with the volume."""
-        return gfx.VolumeMipMaterial(clim=self._vr_clim_u8(),
+        return gfx.VolumeMipMaterial(clim=self._vr_clim_u8(key),
                                      interpolation="linear")
 
     def _vr_config_cam_gpu(self, key) -> None:
@@ -5783,7 +5819,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         vp = self._vr_u8_padded(key)
         tex = gfx.Texture(np.ascontiguousarray(vp), dim=3)
         geom = gfx.Geometry(grid=tex)
-        vmesh = gfx.Volume(geom, self._vr_make_gpu_material())
+        vmesh = gfx.Volume(geom, self._vr_make_gpu_material(key))
         sx, sy, sz = (float(d) for d in self._dims)
         # POSITIVE scale only: a negative (mirror) scale flips face winding and
         # breaks the volume ray-cast on wgpu-Metal (front-face culling → black /
@@ -5958,11 +5994,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         ph = max(1, p.canvas.height())
         q = self._vr_rot[key]
         if mode == "move":
-            # Pan in world mm (screen px × world-per-px). These deltas + the DVR
-            # pan sign in _vr_basis (ctr + right·px + up·py) make BOTH the GPU MIP
-            # and the DVR stop-frame move the model WITH the cursor (grab feel).
-            g = (2.0 * 0.62 * float(self._diag or 1.0)) / ph / max(
-                0.3, self._vr_zoom[key])
+            # Pan in world mm (screen px × world-per-px). For a true 1:1 grab the
+            # world-mm moved per screen-px must equal the on-screen world-per-px,
+            # which is 2·halfH/ph with halfH = (crop_diag·0.5)·_VR_VIEW_SCALE/zoom
+            # (the SAME framing _vr_basis / _vr_config_cam_gpu use). The old gain
+            # used the FULL-volume diagonal (self._diag), far larger than the LV
+            # crop that is actually framed, so the model slid much too far.
+            fb = self._vr_frame_bounds()
+            cdiag = math.sqrt((fb[1] - fb[0]) ** 2 + (fb[3] - fb[2]) ** 2
+                              + (fb[5] - fb[4]) ** 2) or 1.0
+            g = (cdiag * _VR_VIEW_SCALE) / ph / max(0.3, self._vr_zoom[key])
+            # These deltas + the DVR pan sign in _vr_basis (ctr + right·px + up·py)
+            # make BOTH the GPU MIP and the DVR stop-frame move WITH the cursor.
             self._vr_pan[key][0] -= dx * g
             self._vr_pan[key][1] += dy * g
         elif mode == "zoom":
@@ -5976,14 +6019,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_rot[key] = q / (np.linalg.norm(q) or 1.0)
         elif mode == "wl":
             # Window/Level, same feel as the MPR WL drag (→ widen window,
-            # ↑ brighter). Retune the volume material's clim (no camera change).
-            self._win = max(1.0, self._win + dx * 2.0)
-            self._lvl = self._lvl - dy * 2.0
-            clim = self._vr_clim_u8()
-            for k2 in ("A", "B"):
-                vol = self.pane[k2].vr_volume
-                if vol is not None and vol.material is not None:
-                    vol.material.clim = clim
+            # ↑ brighter). Per pane: retune ONLY this VR pane's clim (no camera
+            # change); the other pane keeps its own window.
+            w = self._wl[key]
+            w[0] = max(1.0, w[0] + dx * 2.0)
+            w[1] = w[1] - dy * 2.0
+            vol = self.pane[key].vr_volume
+            if vol is not None and vol.material is not None:
+                vol.material.clim = self._vr_clim_u8(key)
         else:                                          # trackball rotate
             right_w = la.vec_transform_quat(np.array([1.0, 0.0, 0.0]), q)
             up_w = la.vec_transform_quat(np.array([0.0, 1.0, 0.0]), q)
@@ -6081,7 +6124,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if p.vr_volume is not None:
             if p.vr_volume.material is not None:
-                p.vr_volume.material.clim = self._vr_clim_u8()
+                p.vr_volume.material.clim = self._vr_clim_u8(key)
             self._vr_config_cam_gpu(key)
             p.render()
             self._overlay[key].update()
@@ -6129,8 +6172,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Orient the LEFT (non-VR) pane to the LV short-axis so Paging steps
             # through LV levels and it stays ON the LV (Windows parity).
             self._vr_orient_left_sax("A" if key != "A" else "B")
+            # Make the VR pane active so the toolbar greys for IT (Rotate enabled
+            # on the VR pane; the left SAX pane disables Rotate) — must precede the
+            # tool default or _refresh_tool_availability would fall ROTATE back.
+            self._set_active(key)
             if self._tool not in ("ROTATE", "ZOOM", "MOVE", "SPIN"):
                 self._set_tool("ROTATE")          # sensible default VR tool
+            self._refresh_tool_availability()
         else:
             # 完全復元: snapshot the full VR view (rotation / zoom / pan / flip /
             # crop mode) so turning VR back on returns to exactly this view.
@@ -6151,6 +6199,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
         self._overlay[key].update()
         self._sync_vr_btn()
+        self._refresh_tool_availability()   # (un)grey Paging/Rotate/Thick for VR
 
     def _vr_orient_left_sax(self, key="A") -> None:
         """Orient the LEFT (non-VR) pane to the LV SHORT-AXIS — the plane ⟂ the LV
@@ -6166,11 +6215,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         n = _norm(np.asarray(axis, float))
         if not np.all(np.isfinite(n)) or float(np.linalg.norm(n)) < 1e-6:
             return
-        ref = (np.array([0.0, 0.0, 1.0]) if abs(float(n[2])) < 0.9
+        # axis points apex→base, so a camera on the +axis (cross(u,v)=+axis) side
+        # looks base→apex. The clinical short-axis is viewed FROM the apex looking
+        # toward the base, so negate the plane normal (camera sits apex-side); the
+        # image is the mirror of the base→apex view the user saw before.
+        nv = -n
+        ref = (np.array([0.0, 0.0, 1.0]) if abs(float(nv[2])) < 0.9
                else np.array([1.0, 0.0, 0.0]))
-        u = _norm(np.cross(ref, n))
-        v = _norm(np.cross(n, u))
-        self._frame[key] = self._ortho(u, v)          # pane normal = cross(u,v)=n
+        u = _norm(np.cross(ref, nv))
+        v = _norm(np.cross(nv, u))
+        self._frame[key] = self._ortho(u, v)          # pane normal = cross(u,v)=nv
         center = np.asarray(apex, float) + n * (float(amax) * 0.5)
         self._center = center.copy()
         self._pc[key] = center.copy()
@@ -6359,7 +6413,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "invert": bool(self._invert),
             "bands": [dict(b) for b in self._bands],
             "opacity": float(self._opacity),
-            "win": float(self._win), "lvl": float(self._lvl),
+            "win": self._wl_of(key)[0], "lvl": self._wl_of(key)[1],
         }
 
     def _build_slab_qimage(self, key, lod=False):
@@ -6441,9 +6495,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # Colormap bakes W/L into the LUT over [_HU_LO,_HU_HI]; clim
                 # maps that HU span to the LUT's 0..1 domain.
                 p.material.clim = (_HU_LO, _HU_HI)
-                p.material.map = self._lut_texture()
+                p.material.map = self._lut_texture(key)
             else:
-                self._gray_material(p)
+                self._gray_material(p, key)
             if reset_cam:
                 self._fit_pane(key)
             else:
@@ -6629,13 +6683,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._gesture_moved = True
         only_pane = None
         if t == "WL":
-            self._win = max(1.0, self._win + dx * 2.0)
-            self._lvl = self._lvl - dy * 2.0
-            # Keep any active VR volume's window in step (arrow-key WL etc.).
-            if self._vr_on.get(which):
-                vol = self.pane[which].vr_volume
-                if vol is not None and vol.material is not None:
-                    vol.material.clim = self._vr_clim_u8()
+            # W/L is per pane. A plain WL drag adjusts ONLY the dragged pane.
+            # Shift+WL equalises both panes to the LEFT (A) pane then moves them
+            # together (so the two panes share one window from then on).
+            if shift:
+                nw = max(1.0, self._wl["A"][0] + dx * 2.0)
+                nl = self._wl["A"][1] - dy * 2.0
+                self._wl["A"] = [nw, nl]
+                self._wl["B"] = [nw, nl]
+                wl_panes = ("A", "B")
+            else:
+                w = self._wl[which]
+                w[0] = max(1.0, w[0] + dx * 2.0)
+                w[1] = w[1] - dy * 2.0
+                wl_panes = (which,)
+            # Keep each affected pane's VR volume window in step (arrow-key WL,
+            # VR WL tool, etc.).
+            for wk in wl_panes:
+                if self._vr_on.get(wk):
+                    vol = self.pane[wk].vr_volume
+                    if vol is not None and vol.material is not None:
+                        vol.material.clim = self._vr_clim_u8(wk)
         elif t == "PAGING":
             if self._mode == "2D":
                 # 2-D: page integer native slices, ~6 px of drag per slice.
@@ -15624,6 +15692,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                        (np.asarray(self._axes2d[0], float).copy(),
                         np.asarray(self._axes2d[1], float).copy())),
             "slice2d": int(self._slice2d),
+            # Per-pane W/L (win/lvl kept for legacy/Case-Presentation restore).
+            "wl": {k: [float(self._wl[k][0]), float(self._wl[k][1])]
+                   for k in ("A", "B")},
             "win": float(self._win), "lvl": float(self._lvl),
             "side": self._side,
             "cpr_T": (None if self._cpr is None
@@ -15678,8 +15749,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         if snap.get("axes2d") is not None:
             self._axes2d = (snap["axes2d"][0].copy(), snap["axes2d"][1].copy())
         self._slice2d = int(snap.get("slice2d", self._slice2d))
-        self._win = float(snap.get("win", self._win))
-        self._lvl = float(snap.get("lvl", self._lvl))
+        wl = snap.get("wl")
+        if isinstance(wl, dict) and "A" in wl and "B" in wl:
+            self._wl = {k: [float(wl[k][0]), float(wl[k][1])]
+                        for k in ("A", "B")}
+        else:                                   # legacy snapshot: one shared W/L
+            _w = float(snap.get("win", self._win))
+            _l = float(snap.get("lvl", self._lvl))
+            self._wl = {"A": [_w, _l], "B": [_w, _l]}
         self._side = snap.get("side", self._side)
         if self._cpr is not None and snap.get("cpr_T") is not None:
             self._cpr["T"] = np.asarray(snap["cpr_T"], float).copy()
@@ -17332,9 +17409,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                             float(-np.dot(n, o)))
         if self._color:
             p.material.clim = (_HU_LO, _HU_HI)
-            p.material.map = self._lut_texture()
+            p.material.map = self._lut_texture("A")
         else:
-            self._gray_material(p)
+            self._gray_material(p, "A")
         p.mesh.visible = True
         self._mip_img["A"] = None
         self._config_cpr_cam(p, o, u, v)
@@ -17463,51 +17540,89 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._refresh(lod=False)
 
     # ---------------------------------------------------- HU colormap
-    def _lut_texture(self):
-        """1-D colormap Texture for the current bands/opacity/W-L, rebuilt
-        only when those change."""
+    def _lut_texture(self, pane_key=None):
+        """1-D colormap Texture for the given pane's bands/opacity/W-L, rebuilt
+        only when those change. Cached per pane so the two panes' independent
+        W/L don't thrash one shared LUT."""
+        win, lvl = self._wl_of(pane_key)
+        pk = pane_key or getattr(self, "_active_pane", "A")
         key = (tuple((tuple(b["rgb"]), b["lo"], b["hi"], b["on"])
                      for b in self._bands),
-               self._opacity, self._win, self._lvl)
-        if key != self._lut_key:
-            arr = _band_lut_array(self._bands, self._opacity,
-                                  self._win, self._lvl)
-            self._lut_tex = gfx.Texture(arr, dim=1)
-            self._lut_key = key
-        return self._lut_tex
+               self._opacity, win, lvl)
+        if not isinstance(getattr(self, "_lut_key", None), dict):
+            self._lut_key = {}
+            self._lut_tex = {}
+        if key != self._lut_key.get(pk):
+            arr = _band_lut_array(self._bands, self._opacity, win, lvl)
+            self._lut_tex[pk] = gfx.Texture(arr, dim=1)
+            self._lut_key[pk] = key
+        return self._lut_tex[pk]
 
-    def _invert_texture(self):
+    def _invert_texture(self, pane_key=None):
         """1-D white→black gray ramp with the W/L window baked in, over the
         full HU domain [_HU_LO,_HU_HI] — the same mechanism (and clim) as the
-        HU colormap, which is the proven-good path on Metal.
+        HU colormap, which is the proven-good path on Metal. Cached per pane so
+        the two panes' independent W/L each get their own ramp.
 
         Why not just swap the clim ends: a reversed clim (low > high) is
         undefined behaviour for the material's clamp, so it renders garbage on
         gradients. Why 4096 entries: the window is baked into the ramp, so a
         narrow window must still resolve >256 grey levels or it would band."""
-        key = (self._win, self._lvl)
-        if key != self._inv_key:
+        win, lvl = self._wl_of(pane_key)
+        pk = pane_key or getattr(self, "_active_pane", "A")
+        key = (win, lvl)
+        if not isinstance(getattr(self, "_inv_key", None), dict):
+            self._inv_key = {}
+            self._inv_tex = {}
+        if key != self._inv_key.get(pk):
             n = 4096
             hu = _HU_LO + (_HU_HI - _HU_LO) * np.arange(n) / (n - 1)
-            g = np.clip((hu - (self._lvl - self._win / 2.0))
-                        / max(1e-6, self._win), 0.0, 1.0).astype(np.float32)
+            g = np.clip((hu - (lvl - win / 2.0))
+                        / max(1e-6, win), 0.0, 1.0).astype(np.float32)
             g = (1.0 - g).astype(np.float32)          # the negative
             arr = np.stack([g, g, g, np.ones_like(g)], axis=1)
-            self._inv_tex = gfx.Texture(arr, dim=1)
-            self._inv_key = key
-        return self._inv_tex
+            self._inv_tex[pk] = gfx.Texture(arr, dim=1)
+            self._inv_key[pk] = key
+        return self._inv_tex[pk]
 
-    def _gray_material(self, p):
+    # ----------------------------------------------- per-pane W/L accessors
+    # _win/_lvl are the ACTIVE pane's window/level (so the ~20 existing readers
+    # — readouts, VR clim, presets — keep working unchanged, acting on the pane
+    # the user is driving). Rendering passes an explicit key so each pane draws
+    # with ITS OWN W/L (see _wl, set up in __init__).
+    @property
+    def _win(self):
+        return self._wl[getattr(self, "_active_pane", "A")][0]
+
+    @_win.setter
+    def _win(self, v):
+        self._wl[getattr(self, "_active_pane", "A")][0] = float(v)
+
+    @property
+    def _lvl(self):
+        return self._wl[getattr(self, "_active_pane", "A")][1]
+
+    @_lvl.setter
+    def _lvl(self, v):
+        self._wl[getattr(self, "_active_pane", "A")][1] = float(v)
+
+    def _wl_of(self, key):
+        """(win, lvl) for pane *key* (defaults to the active pane)."""
+        win, lvl = self._wl[key or getattr(self, "_active_pane", "A")]
+        return float(win), float(lvl)
+
+    def _gray_material(self, p, key=None):
         """Apply the plain (non-colormap) grayscale mapping to a pane material.
         WB reverse renders through an inverted gray ramp; the normal path is
-        left exactly as it was (direct clim, no map)."""
+        left exactly as it was (direct clim, no map). *key* selects the pane's
+        own W/L so the two panes are independent."""
+        win, lvl = self._wl_of(key)
         if self._invert:
             p.material.clim = (_HU_LO, _HU_HI)
-            p.material.map = self._invert_texture()
+            p.material.map = self._invert_texture(key)
         else:
             p.material.map = None
-            p.material.clim = (self._lvl - self._win / 2.0,
-                               self._lvl + self._win / 2.0)
+            p.material.clim = (lvl - win / 2.0, lvl + win / 2.0)
 
     def _toggle_color(self):
         self._color = self._cmap_btn.isChecked()
@@ -17587,7 +17702,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._resync_overlays()          # guard against the superimpose ズレ
         else:
             before = self._view_snapshot()
-            self._win, self._lvl = self._win0, self._lvl0
+            # Reset BOTH panes' independent W/L back to the series default.
+            self._wl = {"A": [self._win0, self._lvl0],
+                        "B": [self._win0, self._lvl0]}
             self._refresh()
             self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 

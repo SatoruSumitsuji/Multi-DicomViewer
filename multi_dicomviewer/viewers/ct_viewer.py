@@ -2719,7 +2719,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         }
         self._half = 1.0                     # symmetric FOV half-size mm
         self._npx = 64                       # output pixels / side
-        self._win, self._lvl = 800.0, 200.0
+        # Window/Level is PER PANE (left/right independent) in every mode. The
+        # _win/_lvl properties below read/write the ACTIVE pane's slot; the LUT
+        # is rebuilt per pane (_lut(key)). Shift+WL equalises both to the LEFT
+        # (A) pane then moves them together (see _drag).
+        self._wl = {"A": [800.0, 200.0], "B": [800.0, 200.0]}
         self._win0, self._lvl0 = 800.0, 200.0
         self._thick = {"A": 0.0, "B": 5.0}   # slab mm per pane
         self._color = False
@@ -11723,10 +11727,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             return any(self._vr_on.values())
         return bool(self._vr_on.get(key))
 
-    def _vr_shift(self) -> float:
-        """HU shift of the VR preset from the current W/L centre, so W/L still
-        tunes how much tissue the VR shows (300 ≈ the preset's contrast knee)."""
-        return float(self._lvl) - 300.0
+    def _vr_shift(self, key=None) -> float:
+        """HU shift of the VR preset from pane *key*'s W/L centre (defaults to
+        the active pane), so W/L still tunes how much tissue the VR shows
+        (300 ≈ the preset's contrast knee)."""
+        return self._wl_of(key)[1] - 300.0
 
     def _vr_set(self, key, on) -> None:
         """Turn Volume Rendering on/off for pane *key* (contrast-CTA preset)."""
@@ -11754,7 +11759,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 except Exception:                    # noqa: BLE001
                     pass
                 vr_bounds = self._image.GetBounds()
-            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
+            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(key)))
             # Hide EVERY existing prop (MPR image, tints, crosshair, coronary /
             # measure overlays, labels, info) so nothing 2-D lingers, misplaced,
             # over the 3-D volume; restored verbatim on VR off.
@@ -12351,8 +12356,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         elif tool == "SPIN":
             cam.Roll(-dx * 0.3)
         elif tool == "WL":                          # drag tunes how much shows
-            self._lvl = float(self._lvl) - dy * 3.0
-            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift()))
+            self._wl[key][1] = float(self._wl[key][1]) - dy * 3.0
+            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(key)))
         else:                                       # ROTATE (default) / others
             cam.Azimuth(-dx * 0.4)
             cam.Elevation(dy * 0.4)
@@ -13266,6 +13271,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             "apex_flip": dict(self._apex_flip),
             "thick": dict(self._thick),
             "slice2d": int(self._slice2d),
+            # Per-pane W/L (win/lvl kept for legacy/Case-Presentation restore).
+            "wl": {k: [float(self._wl[k][0]), float(self._wl[k][1])]
+                   for k in ("A", "B")},
             "win": float(self._win),
             "lvl": float(self._lvl),
             "cam": {k: cam(k) for k in ("A", "B")},
@@ -13328,10 +13336,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._apex_flip = dict(snap["apex_flip"])
         self._thick = dict(snap["thick"])
         self._slice2d = int(snap.get("slice2d", self._slice2d))
-        if snap.get("win") is not None:
-            self._win = float(snap["win"])
-        if snap.get("lvl") is not None:
-            self._lvl = float(snap["lvl"])
+        wl = snap.get("wl")
+        if isinstance(wl, dict) and "A" in wl and "B" in wl:
+            self._wl = {k: [float(wl[k][0]), float(wl[k][1])]
+                        for k in ("A", "B")}
+        elif snap.get("win") is not None and snap.get("lvl") is not None:
+            _w = float(snap["win"])              # legacy: one shared W/L
+            _l = float(snap["lvl"])
+            self._wl = {"A": [_w, _l], "B": [_w, _l]}
         if self._cpr is not None and snap.get("cpr_T") is not None:
             self._cpr["T"] = np.asarray(snap["cpr_T"], float).copy()
             if snap.get("cpr_idx") is not None:
@@ -14288,8 +14300,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             np.asarray(pb, dtype=np.float64)
             if pb is not None else np.eye(3)
         )
-        self._win = self._win0 = float(loaded.window or 800.0)
-        self._lvl = self._lvl0 = float(loaded.level or 200.0)
+        self._win0 = float(loaded.window or 800.0)
+        self._lvl0 = float(loaded.level or 200.0)
+        # Both panes start from the series' default window (independent after).
+        self._wl = {"A": [self._win0, self._lvl0],
+                    "B": [self._win0, self._lvl0]}
         self._thick = {"A": 0.0, "B": 5.0}
         # Reset any 2-D rotate/flip to the native orientation for the new series.
         self._axes2d = (np.array([1.0, 0.0, 0.0]), np.array([0.0, -1.0, 0.0]))
@@ -14393,7 +14408,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         for key in ("A", "B"):
             p = self.pane[key]
             p.reslice.SetInputData(self._image)
-            p.colors.SetLookupTable(self._lut())
+            p.colors.SetLookupTable(self._lut(key))
         # A reused pane viewer must NOT inherit a previous CT's coronary / VR /
         # perfusion-territory display (frames are set now, so VR teardown + overlay
         # clears are safe); _set_mode below then redraws clean MPR.
@@ -17930,16 +17945,40 @@ class CTViewer(CPRMixin, AbstractViewer):
         pane, including the short-axis (all use the gray LUT)."""
         self._invert = self._invert_btn.isChecked()
         for k in ("A", "B"):
-            self.pane[k].colors.SetLookupTable(self._lut())
+            self.pane[k].colors.SetLookupTable(self._lut(k))
             self.pane[k].colors.Modified()
         self._refresh()
 
-    def _lut(self):
+    # ----------------------------------------------- per-pane W/L accessors
+    # _win/_lvl are the ACTIVE pane's window/level (so existing readers —
+    # readouts, VR shift, presets — act on the pane the user is driving). The
+    # LUT is built per pane (_lut(key)) so the two panes are independent.
+    @property
+    def _win(self):
+        return self._wl[getattr(self, "_active_pane", "A")][0]
+
+    @_win.setter
+    def _win(self, v):
+        self._wl[getattr(self, "_active_pane", "A")][0] = float(v)
+
+    @property
+    def _lvl(self):
+        return self._wl[getattr(self, "_active_pane", "A")][1]
+
+    @_lvl.setter
+    def _lvl(self, v):
+        self._wl[getattr(self, "_active_pane", "A")][1] = float(v)
+
+    def _wl_of(self, key):
+        """(win, lvl) for pane *key* (defaults to the active pane)."""
+        win, lvl = self._wl[key or getattr(self, "_active_pane", "A")]
+        return float(win), float(lvl)
+
+    def _lut(self, pane_key=None):
+        win, lvl = self._wl_of(pane_key)
         if self._color:
-            return _band_lut(
-                self._bands, self._opacity, self._win, self._lvl
-            )
-        return _gray_lut(self._win, self._lvl, invert=self._invert)
+            return _band_lut(self._bands, self._opacity, win, lvl)
+        return _gray_lut(win, lvl, invert=self._invert)
 
     def _open_setting(self, parent=None, modal=False):
         """Open the HU colour-map editor. *parent*/*modal* let the shell open it
@@ -18492,7 +18531,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 p.reslice.SetOutputExtent(0, ncpr - 1, 0, ncpr - 1, 0, 0)
                 p.reslice.SetSlabNumberOfSlices(1)
                 p.reslice.Modified()
-                p.colors.SetLookupTable(self._lut())
+                p.colors.SetLookupTable(self._lut("A"))
                 p.colors.Modified()
                 self._wire_color_smoothing(p, step)
                 if reset_cam:
@@ -18500,7 +18539,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # No crosshair / C-arm angle on a cross-section; label the
                 # pane and its arc-length position instead.
                 c = self._cpr
-                p.info.SetText(0, f"WW {self._win:.0f}  WL {self._lvl:.0f}")
+                _ww, _wl = self._wl_of("A")
+                p.info.SetText(0, f"WW {_ww:.0f}  WL {_wl:.0f}")
                 p.info.SetText(
                     1, "A  |  " + t("Short-axis {i}/{n}",
                                     i=c["idx"] + 1, n=c["cl"].n))
@@ -18622,7 +18662,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if hasattr(p.reslice_thick, "SetSlabNumberOfSlices"):
                     p.reslice_thick.SetSlabNumberOfSlices(1)
                 p.reslice_thick.Modified()
-            p.colors.SetLookupTable(self._lut())
+            p.colors.SetLookupTable(self._lut(key))
             p.colors.Modified()
             self._wire_color_smoothing(p, spacing)
             self._update_cross(key)
@@ -19022,8 +19062,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.tagact.SetInput(_tagtext)                 # top-left (fixed-size actor)
         for _ha in p.tagact_halo:                   # thin black outline copies
             _ha.SetInput(_tagtext)
+        _ww, _wl = self._wl_of(key)
         p.info.SetText(
-            0, f"WW {self._win:.0f}  WL {self._lvl:.0f}"
+            0, f"WW {_ww:.0f}  WL {_wl:.0f}"
         )                                           # bottom-left
         p.info.SetText(1, f"{key}  |  {kind}")      # bottom-right
         _ang = self._angio_angle(key)
@@ -19828,8 +19869,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         # companion pane untouched → reslice ONLY the dragged pane each move.
         only_pane = None
         if t == "WL":
-            self._win = max(1.0, self._win + dx * 2.0)
-            self._lvl = self._lvl - dy * 2.0
+            # W/L is per pane. A plain WL drag adjusts ONLY the dragged pane.
+            # Shift+WL equalises both panes to the LEFT (A) pane then moves them
+            # together (so the two panes share one window from then on).
+            if shift:
+                nw = max(1.0, self._wl["A"][0] + dx * 2.0)
+                nl = self._wl["A"][1] - dy * 2.0
+                self._wl["A"] = [nw, nl]
+                self._wl["B"] = [nw, nl]
+            else:
+                w = self._wl[which]
+                w[0] = max(1.0, w[0] + dx * 2.0)
+                w[1] = w[1] - dy * 2.0
         elif t == "PAGING":
             if self._mode == "2D":
                 # 2-D: page integer native slices, ~6 px of drag per slice.
@@ -20562,7 +20613,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._resync_overlays()          # guard against the superimpose ズレ
         else:
             before = self._view_snapshot()
-            self._win, self._lvl = self._win0, self._lvl0
+            # Reset BOTH panes' independent W/L back to the series default.
+            self._wl = {"A": [self._win0, self._lvl0],
+                        "B": [self._win0, self._lvl0]}
             self._refresh()
             self._undo_view(before, self._view_snapshot())   # Ctrl+Z / Ctrl+Y
 
