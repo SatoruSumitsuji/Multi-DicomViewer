@@ -3011,13 +3011,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         below_col.addWidget(plane_bar)
         below_col.addWidget(self._build_seek_bar())
         below_col.addWidget(self._build_lv_bar())
-        # Coronary short-axis row sits BELOW the LV bar (its own 3rd row).
-        below_col.addWidget(self._build_cpr_bar())
         # CT Territory review bar — a minimal replacement for the LV bar shown ONLY
         # during a FullLv review (Blood / 壁厚3D / 壁厚短軸 toggles).
         below_col.addWidget(self._build_terr_bar())
         self._below_scroll = self._make_chrome_scroll(self._below_wrap)
         lay.addWidget(self._below_scroll)
+        # Coronary short-axis (CPR) row: kept OUTSIDE the height-capped chrome
+        # scroll so its Draw/Fit/Snap/Load/Save/Exit controls are ALWAYS fully
+        # visible (the image-floor cap used to clip this bottom row, so it only
+        # flashed then scrolled out of view). As a top-level row directly below
+        # the scrolled bars it sits in the same place (under the LV bar) but can
+        # never be clipped; _apply_image_floor reserves its height when shown.
+        lay.addWidget(self._build_cpr_bar())
 
         for c in (self.canvas_a, self.canvas_b):
             c.Initialize()
@@ -19745,6 +19750,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                "QDoubleSpinBox{font-size:11px;}") if on else ""
         for w in (getattr(self, "_toolbar_bar", None),
                   getattr(self, "_below_wrap", None),
+                  getattr(self, "_cpr_wrap", None),   # now a top-level row
                   getattr(self, "_measure_bar", None)):
             if w is not None:
                 w.setStyleSheet(qss)
