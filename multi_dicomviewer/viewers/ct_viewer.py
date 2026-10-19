@@ -11590,7 +11590,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         colors = getattr(self, "_terr_colors_v", None)
         for ac in pool:                          # hide all first
             ac.SetVisibility(False)
-            ac.GetMapper().SetInputData(vtkPolyData())
+            m = ac.GetMapper()
+            m.SetInputData(vtkPolyData())
+            m.ScalarVisibilityOff()              # reset: base shell turns it On
         p.vr_terr_pipe = []
         if lab is None or not colors or not self._vr_on.get(key):
             return
@@ -11603,16 +11605,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         from vtkmodules.vtkFiltersCore import (vtkFlyingEdges3D,
                                                vtkPolyDataNormals,
                                                vtkWindowedSincPolyDataFilter)
-        for i, c in enumerate(colors, 1):
-            if i > len(pool):
-                break
-            binsub = (sub == i)
-            ac = pool[i - 1]
+        ox, oy, oz = float(x0) * sx, float(y0) * sy, float(z0) * sz
+
+        def _terr_surface(binsub):
+            """Contour + smooth one binary territory sub-mask → a vtkPolyDataNormals
+            filter (its output is the surface). Returns (nrm, pipe-tuple) or
+            (None, None) when empty."""
             if not binsub.any():
-                continue
+                return None, None
             img = numpy_to_vtk_image(
                 np.ascontiguousarray(binsub, np.float32), sx, sy, sz)
-            img.SetOrigin(float(x0) * sx, float(y0) * sy, float(z0) * sz)
+            img.SetOrigin(ox, oy, oz)
             mc = vtkFlyingEdges3D()
             mc.SetInputData(img)
             mc.SetValue(0, 0.5)
@@ -11629,18 +11632,80 @@ class CTViewer(CPRMixin, AbstractViewer):
             nrm = vtkPolyDataNormals()
             nrm.SetInputConnection(sm.GetOutputPort())
             nrm.SetFeatureAngle(60.0)
-            ac.GetMapper().SetInputConnection(nrm.GetOutputPort())
+            return nrm, (mc, sm, nrm, img)
+
+        def _terr_opacity(c):
             # The territory is a TRANSLUCENT surface over the DVR volume, so it
-            # reads much fainter than the Mac DVR (which replaces the tissue
-            # colour outright). Scale the 領域色透過度 up so it dominates the
-            # volume and the opacity control has a strong, visible effect
-            # (0.45 → ~0.85; the 10–90% range → ~0.2–1.0).
+            # reads much fainter than the Mac DVR (which replaces the tissue colour
+            # outright). Scale 領域色透過度 up so it dominates the volume and the
+            # opacity control has a strong, visible effect (0.45 → ~0.85).
             base_a = float(c[3]) if len(c) > 3 else 0.4
-            a = min(0.98, base_a * 1.9)
+            return min(0.98, base_a * 1.9)
+
+        ai = 0                                   # next free actor in the pool
+        # BASE systems (LAD=1 / LCX=2 / RCA=3 / LM=4) as ONE continuous myocardium
+        # shell, coloured PER-POINT by its territory — so the systems share a single
+        # watertight surface. Contouring each system separately left a thin brown
+        # SEAM along their mutual borders (one iso-surface pulling back from the
+        # other where the compact wall is full-thickness): the holes the user saw at
+        # the LAD/RCA border (≈1 and ≈7 o'clock) were those seams, not missing
+        # myocardium. One shell has no internal border, so no seam.
+        base = (sub >= 1) & (sub <= 4)
+        nrm, pipe = _terr_surface(base)
+        if nrm is not None:
+            nrm.Update()
+            poly = vtkPolyData()
+            poly.DeepCopy(nrm.GetOutput())
+            n = poly.GetNumberOfPoints()
+            if n:
+                pts = vtk_to_numpy(poly.GetPoints().GetData())
+                vx = np.clip(np.round(pts[:, 0] / sx).astype(int) - x0,
+                             0, sub.shape[2] - 1)
+                vy = np.clip(np.round(pts[:, 1] / sy).astype(int) - y0,
+                             0, sub.shape[1] - 1)
+                vz = np.clip(np.round(pts[:, 2] / sz).astype(int) - z0,
+                             0, sub.shape[0] - 1)
+                pl = sub[vz, vy, vx]
+                pl = np.where((pl >= 1) & (pl <= 4), pl, 1)   # fallback LAD colour
+                rgb = np.zeros((n, 3), np.uint8)
+                for li in (1, 2, 3, 4):
+                    if li - 1 < len(colors):
+                        cc = colors[li - 1]
+                        rgb[pl == li] = (int(round(cc[0] * 255)),
+                                         int(round(cc[1] * 255)),
+                                         int(round(cc[2] * 255)))
+                carr = numpy_to_vtk(np.ascontiguousarray(rgb), deep=True,
+                                    array_type=VTK_UNSIGNED_CHAR)
+                carr.SetNumberOfComponents(3)
+                poly.GetPointData().SetScalars(carr)
+                ac = pool[ai]
+                mp = ac.GetMapper()
+                mp.SetInputData(poly)
+                mp.ScalarVisibilityOn()
+                mp.SetColorModeToDirectScalars()
+                ac.GetProperty().SetOpacity(_terr_opacity(colors[0]))
+                ac.SetVisibility(True)
+                p.vr_terr_pipe.append(pipe)
+                p.vr_terr_pipe.append(poly)      # keep the coloured copy alive
+                ai += 1
+        # TARGET territories (labels 5..10) stay as SEPARATE flat-coloured overlay
+        # surfaces, drawn ON TOP of the base shell (each its own distal wedge).
+        for li in range(5, len(colors) + 1):
+            if ai >= len(pool):
+                break
+            c = colors[li - 1]
+            nrm, pipe = _terr_surface(sub == li)
+            if nrm is None:
+                continue
+            ac = pool[ai]
+            mp = ac.GetMapper()
+            mp.SetInputConnection(nrm.GetOutputPort())
+            mp.ScalarVisibilityOff()
             ac.GetProperty().SetColor(float(c[0]), float(c[1]), float(c[2]))
-            ac.GetProperty().SetOpacity(float(a))
+            ac.GetProperty().SetOpacity(_terr_opacity(c))
             ac.SetVisibility(True)
-            p.vr_terr_pipe.append((mc, sm, nrm, img))   # keep alive (pipeline)
+            p.vr_terr_pipe.append(pipe)
+            ai += 1
 
     def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
         """Cast a ray through (sx, sy) on VR pane *key* and return the nearest
