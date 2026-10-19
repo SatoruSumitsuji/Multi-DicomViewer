@@ -1007,6 +1007,17 @@ class ViewerPane(QFrame):
     def reset(self) -> None:
         for v in self.all_viewers():
             v.clear()
+            # CT's VTK clear() frees the volume but leaves _loaded_uid set (and a
+            # CT viewer keeps its VR / territory-review display state too), which
+            # would let _open_series' fast-path resurrect this now-empty viewer —
+            # VR and all — on a later re-drop of the same series. Force a real
+            # reload by clearing _loaded_uid (load_series then rebuilds clean MPR
+            # and drops any VR/territory via _reset_coronary_vr_display). Same fix
+            # demote_to_still already applies; XA's clear() already resets it.
+            try:
+                v._loaded_uid = ""
+            except Exception:                            # noqa: BLE001
+                pass
         self._cur_viewer = None
         self._shown_uid = None
         self._series_ref = None
@@ -3158,8 +3169,20 @@ class MainWindow(QMainWindow):
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then draw the LV overlays from a
-        FullLv (display-only observe). Mirrors _poll_lv_apply."""
+        FullLv (display-only observe). Mirrors _poll_lv_apply.
+
+        Coalesced per source CT (base UID): the FullLv-JSON-drop path and the
+        dock-resume path (_maybe_resume_territory_review) can both start a poll for
+        the same CT, and this guard makes sure the heavy apply_full_lv runs ONCE."""
         from PyQt6.QtCore import QTimer
+        base = (uid or "").split("#", 1)[0]
+        inflight = getattr(self, "_full_lv_inflight", None)
+        if inflight is None:
+            inflight = self._full_lv_inflight = set()
+        if attempt == 0:
+            if base in inflight:
+                return                                   # an apply is already running
+            inflight.add(base)
         shown = self._coronary_display_uid(uid) if uid else True
         v = self._active.current_viewer() if self._active is not None else None
         ready = v is not None and (getattr(v, "_image", None) is not None
@@ -3170,10 +3193,49 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 import traceback
                 traceback.print_exc()
+            finally:
+                inflight.discard(base)
             return
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
                 300, lambda: self._poll_full_lv_apply(uid, data, attempt + 1))
+        else:
+            inflight.discard(base)                       # gave up; allow a retry
+
+    def _maybe_resume_territory_review(self, series, pane) -> None:
+        """A CT just became shown (full load path). If the Coronary Tree dock STILL
+        holds a FullLv (CT-Territory) bundle for THIS CT, re-enter the perfusion-
+        territory review (VR) on it — so re-dropping a CT whose analysis is still
+        docked restores its VR review. When the dock holds NO FullLv for it (e.g.
+        the series was deleted and the panel no longer has it), nothing re-applies
+        and the CT comes up as a plain, editable new volume.
+
+        Only runs from _finish_open_series (the full load path), never the fast-
+        path resume (that keeps a live viewer's own state), and no-ops on a viewer
+        already in a review or one without the LV port (e.g. pygfx)."""
+        if getattr(series, "modality", None) != Modality.CT:
+            return
+        v = pane.current_viewer() if pane is not None else None
+        if v is None or not hasattr(v, "apply_full_lv"):
+            return
+        if getattr(v, "_territory_display", False):
+            return                                       # already in a review
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "full_lv_for_series"):
+            return
+        # Gate on the Coronary Tree panel actually being PRESENT in the dock (the
+        # user's rule: "data shown in the dock → VR OK; not shown → plain new CT").
+        # isHidden() is True only when the dock was closed; a dock tabbed behind
+        # Studies is still open (not hidden), so the tab counts as present.
+        try:
+            if w.isHidden():
+                return
+        except Exception:                                # noqa: BLE001
+            return
+        data = w.full_lv_for_series(series.series_uid)
+        if not data:
+            return                                       # dock has no LV for this CT
+        self._poll_full_lv_apply(series.series_uid, data, 0)
 
     # ------------------------------------------------- CPR (.cpr.json) drop
     @staticmethod
@@ -6885,6 +6947,10 @@ class MainWindow(QMainWindow):
         # pressing 画像表示 again. Cheap no-op when no tree panel is open.
         if getattr(self, "_corotree_win", None) is not None:
             self.coronary_overlay_refresh()
+            # Re-enter the perfusion-territory review (VR) ONLY when the dock still
+            # holds this CT's FullLv — so a re-drop after deleting the series (dock
+            # now empty) comes up as a plain editable CT, not a resurrected VR.
+            self._maybe_resume_territory_review(series, pane)
         self.statusBar().showMessage(t("Loaded {label}", label=series.label))
 
     def _clear_all(self) -> None:

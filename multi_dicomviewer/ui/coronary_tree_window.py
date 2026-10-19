@@ -1139,6 +1139,18 @@ class CoronaryTreeWindow(SnapDock):
                 return uid
         return ""
 
+    def full_lv_for_series(self, series_uid: str):
+        """The FullLv (CT-Territory LV bundle) dict the dock currently holds for
+        the CT showing *series_uid*, or None. Lets the shell decide whether a
+        freshly-shown CT should re-enter the perfusion-territory review (VR):
+        only while its analysis is still docked here (gone once the panel no
+        longer has a bundle for it)."""
+        u = self.uid_for_series(series_uid)
+        if not u:
+            return None
+        b = self._by_uid.get(u)
+        return b.get("full_lv") if b else None
+
     def overlay_spec(self, force: bool = False, uid: str | None = None) -> list:
         """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
         its world-mm centreline, root colour and name — for the CT viewers to
