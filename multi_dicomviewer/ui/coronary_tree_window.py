@@ -1826,32 +1826,60 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("ルート(LM/LAD/LCX/RCA)の親は変更できません。"
                          "役割を「枝」に変えてから接続してください。"))
             return
-        # Candidate parents = ROOT vessels only (role LM/LAD/LCX/RCA), never a
-        # descendant of vid. Per user request the picker lists trunks only, so a
-        # loose branch is attached to a root; further branch-to-branch nesting is
-        # done via 接続 (nearest endpoint).
+        # Candidate parents = EVERY other vessel — roots AND branches — except vid
+        # itself and its own descendants (attaching to a descendant would make a
+        # cycle). So e.g. D9 can be re-parented onto another branch (D9aL), not
+        # only onto a trunk.
         banned = {vid, *self._tree.descendants(vid)}
-        cands = [(k, self._tree.vessels[k].name, self._tree.vessels[k].role)
-                 for k, vv in self._tree.vessels.items()
-                 if k not in banned and vv.role in ROOT_ROLES]
-        if not cands:
-            self._warn(t("親にできるルート(LM/LAD/LCX/RCA)がありません。"
-                         "先にルートを設定してください。"))
+        cand_keys = [k for k in self._tree.vessels
+                     if k not in banned]
+        if not cand_keys:
+            self._warn(t("親にできる血管がありません。"))
             return
-        # Show the ROLE (LM / LAD / LCX / RCA) first, then the vessel name only
-        # when it differs from the role — so the picker reads as roots, not file
-        # names.
-        labels = [role if name == role else f"{role}（{name}）"
-                  for _k, name, role in cands]
-        keys = [k for k, _n, _r in cands]
+        # Order roots first (LM/LAD/LCX/RCA), then branches by name, so a long
+        # all-vessel list stays navigable.
+        def _sort_key(k):
+            vv = self._tree.vessels[k]
+            if vv.role in ROOT_ROLES:
+                return (0, ROOT_ROLES.index(vv.role), vv.name or "")
+            return (1, 0, vv.name or "")
+        cand_keys.sort(key=_sort_key)
+        # Build a readable, UNIQUE label per candidate (a root shows its role;
+        # a branch shows its name; collisions get a " [n]" suffix so the reverse
+        # label→key lookup can never pick the wrong vessel).
+        labels, keys, seen = [], [], {}
+        for k in cand_keys:
+            vv = self._tree.vessels[k]
+            if vv.role in ROOT_ROLES:
+                base = vv.role if vv.name == vv.role else f"{vv.role}（{vv.name}）"
+            else:
+                base = vv.name or k
+            n = seen.get(base, 0) + 1
+            seen[base] = n
+            labels.append(base if n == 1 else f"{base} [{n}]")
+            keys.append(k)
         cur = labels[keys.index(v.parent)] if v.parent in keys else labels[0]
         pick, ok = QInputDialog.getItem(self, t("親を変更"), t("新しい親:"),
                                         labels, labels.index(cur), False)
-        if ok and pick:
-            new_parent = keys[labels.index(pick)]
-            self._tree.set_parent(vid, new_parent)   # junction = nearest sample
-            self._populate()
-            self.treeChanged.emit()
+        if not (ok and pick):
+            return
+        new_parent = keys[labels.index(pick)]
+        # Safety: a manual re-parent must respect the same proximity rule as 接続.
+        # The nearer of the branch's two endpoints must be within _CONNECT_TOL_MM
+        # of the chosen parent's centreline (this is exactly the distance
+        # set_parent would snap at). Farther → 選択不可: do NOT change the tree.
+        best = self._tree._nearest_endpoint_to(vid, [new_parent])
+        if best is None or best["dist"] > _CONNECT_TOL_MM:
+            d = ("—" if best is None else f"{best['dist']:.1f}")
+            self._warn(t(
+                "選択不可です。選んだ親まで {d} mm 離れています"
+                "（接続可能距離は {tol:.0f} mm 以内）。\n"
+                "近い枝を選ぶか、先に接続し直してください。",
+                d=d, tol=_CONNECT_TOL_MM))
+            return
+        self._tree.set_parent(vid, new_parent)   # junction = nearest endpoint
+        self._populate()
+        self.treeChanged.emit()
 
     def _delete(self):
         vid = self.selected_vid()
