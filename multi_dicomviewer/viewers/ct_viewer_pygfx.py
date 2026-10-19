@@ -2905,6 +2905,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_epi_model_dict = None       # LVModel dict for Save
         self._lvv_loaded_bld = None           # last LOADED BldLv dict (FullLV fallback)
         self._full_lv_bld_snapshot = None     # BldLv captured on Blood/Endo Exit
+        self._full_lv_saved = False           # True once a .FullLv.json was saved → green btn
         self._lvv_epi_ml = None               # cached epicardial volume (mL)
         self._lvv_hl_on = True                # 血流領域表示 (in-range tint) on
         self._lvv_epi_show = False            # Epi境界 (green border) on
@@ -13671,8 +13672,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         miss = self._full_lv_missing()
         b.setEnabled(not miss)
+        # Green background once a .FullLv.json has been saved, so "保存済み" is
+        # obvious at a glance; plain grey otherwise.
+        if getattr(self, "_full_lv_saved", False):
+            b.setStyleSheet("QPushButton{background:#2e8b57;color:white;}"
+                            + self._BTN_DIS)
+        else:
+            b.setStyleSheet(self._BTN_DIS)
         b.setHelpToolTip(       # FitButton keeps this as the hover tooltip
-            t("FullLv を保存（Epi + Endo/Blood バンドル → Tools ▸ Territory）")
+            (t("FullLv 保存済み — 再保存で上書きできます")
+             if getattr(self, "_full_lv_saved", False) else
+             t("FullLv を保存（Epi + Endo/Blood バンドル → Tools ▸ Territory）"))
             if not miss else
             t("FullLV は準備できていません — 不足: {m}", m=" / ".join(miss)))
 
@@ -13735,6 +13745,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             if full is not None:
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(full, f, ensure_ascii=False)
+                self._full_lv_saved = True   # flip FullLV button to its saved colour
+                self._full_lv_refresh_btn()
         except Exception as exc:                        # noqa: BLE001
             traceback.print_exc()
             busy.close()
@@ -14185,6 +14197,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._overlay[k].update()
         # Reflect the just-loaded LV analysis in the FullLV button (territory
         # export becomes available once Epi region + Endo + valves + apex exist).
+        # A freshly loaded analysis has not been FullLv-saved yet → clear the
+        # saved colour so it doesn't wrongly read as "保存済み".
+        self._full_lv_saved = False
         self._full_lv_refresh_btn()
         return applied
 
