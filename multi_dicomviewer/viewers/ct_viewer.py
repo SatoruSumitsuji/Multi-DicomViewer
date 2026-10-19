@@ -705,6 +705,60 @@ def _vr_cta_property(shift: float = 0.0) -> vtkVolumeProperty:
     return prop
 
 
+def _vr_territory_property(colors, shift: float = 0.0) -> vtkVolumeProperty:
+    """Volume property for the perfusion-territory VR — the Mac-parity path.
+
+    Instead of building a separate iso-surface per LAD/LCX/RCA (which left a brown
+    SEAM at the system borders and striped wrinkles under smoothing, and showed any
+    1-voxel mask pinhole as a real hole), the territory colour is painted STRAIGHT
+    INTO the DVR with a GPU label-map mask: label 0 (non-myocardium) is fully
+    transparent → the volume is cropped to the labelled myocardium, and every
+    territory label *i* renders a flat solid colour on the real tissue voxels. A
+    border is then only a colour change inside one continuous volume (no geometry
+    gap), and the render is volumetric so pinholes fill the way Mac's ray-cast does.
+
+    *colors* is the RGBA list (index 0 → label 1 …); each colour's alpha is the
+    領域色透過度 and scales that label's per-sample opacity. *shift* (HU) slides the
+    myocardium opacity ramp with the pane W/L, matching the CTA property."""
+    prop = vtkVolumeProperty()
+    prop.SetInterpolationTypeToLinear()
+    prop.ShadeOn()
+    prop.SetAmbient(0.50)
+    prop.SetDiffuse(0.50)
+    prop.SetSpecular(0.10)
+    prop.SetSpecularPower(8.0)
+    # Primary (label 0 = non-myocardium) → fully transparent: crops the DVR to the
+    # labelled myocardium, exactly the region Mac shows in territory mode.
+    po = vtkPiecewiseFunction()
+    po.AddPoint(-1000 + shift, 0.0)
+    po.AddPoint(3000 + shift, 0.0)
+    pc = vtkColorTransferFunction()
+    pc.AddRGBPoint(-1000 + shift, 0.0, 0.0, 0.0)
+    prop.SetScalarOpacity(po)
+    prop.SetColor(pc)
+    for i, c in enumerate(colors, 1):
+        r, g, b = float(c[0]), float(c[1]), float(c[2])
+        a = float(c[3]) if len(c) > 3 else 0.4
+        # Per-sample peak opacity; it accumulates over the ~10-20-voxel wall to a
+        # solid wash, so a modest value reads as "ベタっと". 透過度 scales it so the
+        # panel's opacity control still has a clear, visible effect.
+        peak = min(0.90, max(0.08, a * 1.4))
+        ctf = vtkColorTransferFunction()
+        ctf.AddRGBPoint(-1000 + shift, r, g, b)
+        ctf.AddRGBPoint(3000 + shift, r, g, b)
+        otf = vtkPiecewiseFunction()
+        # Myocardium is soft tissue; keep air/very-low HU out so a boundary voxel of
+        # air at the epicardial edge doesn't paint colour, but show all real tissue.
+        otf.AddPoint(-1000 + shift, 0.0)
+        otf.AddPoint(-200 + shift, 0.0)
+        otf.AddPoint(-50 + shift, peak)
+        otf.AddPoint(3000 + shift, peak)
+        prop.SetLabelColor(i, ctf)
+        prop.SetLabelScalarOpacity(i, otf)
+    prop.SetScalarOpacityUnitDistance(0.8)
+    return prop
+
+
 def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
                   alpha: float = 0.5) -> vtkLookupTable:
     """LUT for the measured-region mask reslice: value 1 → red at 50% opacity
@@ -2915,6 +2969,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_mask_arr = {}               # current VR crop (bool) per pane, for
         #                                      the Flip-H/V data-flip (reflection
         #                                      user-matrix blanks the GPU volume)
+        # Perfusion-territory VR: when active on a pane the mapper runs in LABEL-MAP
+        # mask mode (the territory int-label map IS the mask → colour painted into
+        # the DVR, label 0 transparent). _vr_mask_arr then holds the uint8 label map;
+        # _vr_crop_cache keeps the plain binary crop to restore when territory clears.
+        self._vr_terr_mode = {}              # key -> bool (label-map DVR active)
+        self._vr_crop_cache = {}             # key -> the binary crop to revert to
         self._vr_prev_cam = {"A": None, "B": None}   # saved MPR camera to restore
         self._vr_hidden = {"A": [], "B": []}         # MPR props hidden during VR
         # VR orientation transform (Rt90/Lt90 roll, Flip-H/V mirror) applied to ALL
@@ -11577,135 +11637,57 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_apply_xform(key)      # the number billboards are recreated here
 
     def _vr_update_territory(self, key) -> None:
-        """Rebuild the 3-D perfusion-territory iso-surfaces on VR pane *key*: one
-        translucent coloured surface per label (LAD blue / LCX yellow / RCA green /
-        Target red). Each label's binary sub-mask is contoured on the heart bbox
-        only (cheap), so this is a sub-second one-off on load / target change, not a
-        per-frame cost."""
+        """Perfusion-territory VR on pane *key* — the Mac-parity path.
+
+        The LAD/LCX/RCA/Target colours are painted STRAIGHT INTO the DVR with a GPU
+        label-map mask (the territory int-label map becomes the mapper's mask, label
+        0 transparent so the volume is cropped to the labelled myocardium). There is
+        no separate iso-surface per system, so there is no brown SEAM at a system
+        border and no striped wrinkle under smoothing, and because the render is
+        volumetric a 1-voxel mask pinhole fills the way Mac's CPU ray-cast does —
+        the "holes" the user saw at the LAD/RCA border and their wrinkled surface
+        were both artefacts of the old per-label FlyingEdges surfaces.
+
+        Entering/leaving territory mode swaps the mapper's single mask slot between
+        the label map (SetMaskTypeToLabelMap) and the plain binary crop
+        (SetMaskTypeToBinary, kept in _vr_crop_cache) and swaps the volume property
+        to match. A one-off on VR enable / territory change, not a per-frame cost."""
         p = self.pane[key]
-        pool = getattr(p, "vr_terr_actors", None)
-        if not pool:
-            return
-        lab = getattr(self, "_terr_label_np", None)
-        colors = getattr(self, "_terr_colors_v", None)
-        for ac in pool:                          # hide all first
+        # The old iso-surface pool is unused now — keep every actor hidden/empty so
+        # nothing lingers from a previous (pre-label-map) render.
+        for ac in getattr(p, "vr_terr_actors", None) or []:
             ac.SetVisibility(False)
             m = ac.GetMapper()
-            m.SetInputData(vtkPolyData())
-            m.ScalarVisibilityOff()              # reset: base shell turns it On
+            if m is not None:
+                m.SetInputData(vtkPolyData())
+                m.ScalarVisibilityOff()
         p.vr_terr_pipe = []
-        if lab is None or not colors or not self._vr_on.get(key):
+        lab = getattr(self, "_terr_label_np", None)
+        colors = getattr(self, "_terr_colors_v", None)
+        prev = bool(getattr(self, "_vr_terr_mode", {}).get(key))
+        want = (lab is not None and colors is not None and bool(colors)
+                and self._vr_on.get(key)
+                and getattr(p, "vr_volume", None) is not None)
+        if not want:
+            # Plain CTA VR: if we were in territory mode, restore the binary crop
+            # mask + the contrast-CTA property so the volume renders normally again.
+            if prev:
+                self._vr_terr_mode[key] = False
+                self._vr_mask_arr[key] = self._vr_crop_cache.get(key)
+                self._vr_set_property(key)
+                self._vr_apply_xform(key)         # re-feed mask (binary) + matrix
+                p.render()
             return
-        nz = np.argwhere(lab > 0)
-        if len(nz) == 0:
-            return
-        (z0, y0, x0), (z1, y1, x1) = nz.min(0), nz.max(0) + 1
-        sub = lab[z0:z1, y0:y1, x0:x1]
-        sx, sy, sz = self._dims
-        from vtkmodules.vtkFiltersCore import (vtkFlyingEdges3D,
-                                               vtkPolyDataNormals,
-                                               vtkWindowedSincPolyDataFilter)
-        ox, oy, oz = float(x0) * sx, float(y0) * sy, float(z0) * sz
-
-        def _terr_surface(binsub):
-            """Contour + smooth one binary territory sub-mask → a vtkPolyDataNormals
-            filter (its output is the surface). Returns (nrm, pipe-tuple) or
-            (None, None) when empty."""
-            if not binsub.any():
-                return None, None
-            img = numpy_to_vtk_image(
-                np.ascontiguousarray(binsub, np.float32), sx, sy, sz)
-            img.SetOrigin(ox, oy, oz)
-            mc = vtkFlyingEdges3D()
-            mc.SetInputData(img)
-            mc.SetValue(0, 0.5)
-            mc.ComputeNormalsOff()
-            # Smooth the voxel-stepped surface so the territory reads as a clean
-            # wedge, not a striped stack of slabs.
-            sm = vtkWindowedSincPolyDataFilter()
-            sm.SetInputConnection(mc.GetOutputPort())
-            sm.SetNumberOfIterations(20)
-            sm.SetPassBand(0.1)
-            sm.NonManifoldSmoothingOn()
-            sm.NormalizeCoordinatesOn()
-            sm.BoundarySmoothingOff()
-            nrm = vtkPolyDataNormals()
-            nrm.SetInputConnection(sm.GetOutputPort())
-            nrm.SetFeatureAngle(60.0)
-            return nrm, (mc, sm, nrm, img)
-
-        def _terr_opacity(c):
-            # The territory is a TRANSLUCENT surface over the DVR volume, so it
-            # reads much fainter than the Mac DVR (which replaces the tissue colour
-            # outright). Scale 領域色透過度 up so it dominates the volume and the
-            # opacity control has a strong, visible effect (0.45 → ~0.85).
-            base_a = float(c[3]) if len(c) > 3 else 0.4
-            return min(0.98, base_a * 1.9)
-
-        ai = 0                                   # next free actor in the pool
-        # BASE systems (LAD=1 / LCX=2 / RCA=3 / LM=4) as ONE continuous myocardium
-        # shell, coloured PER-POINT by its territory — so the systems share a single
-        # watertight surface. Contouring each system separately left a thin brown
-        # SEAM along their mutual borders (one iso-surface pulling back from the
-        # other where the compact wall is full-thickness): the holes the user saw at
-        # the LAD/RCA border (≈1 and ≈7 o'clock) were those seams, not missing
-        # myocardium. One shell has no internal border, so no seam.
-        base = (sub >= 1) & (sub <= 4)
-        nrm, pipe = _terr_surface(base)
-        if nrm is not None:
-            nrm.Update()
-            poly = vtkPolyData()
-            poly.DeepCopy(nrm.GetOutput())
-            n = poly.GetNumberOfPoints()
-            if n:
-                pts = vtk_to_numpy(poly.GetPoints().GetData())
-                vx = np.clip(np.round(pts[:, 0] / sx).astype(int) - x0,
-                             0, sub.shape[2] - 1)
-                vy = np.clip(np.round(pts[:, 1] / sy).astype(int) - y0,
-                             0, sub.shape[1] - 1)
-                vz = np.clip(np.round(pts[:, 2] / sz).astype(int) - z0,
-                             0, sub.shape[0] - 1)
-                pl = sub[vz, vy, vx]
-                pl = np.where((pl >= 1) & (pl <= 4), pl, 1)   # fallback LAD colour
-                rgb = np.zeros((n, 3), np.uint8)
-                for li in (1, 2, 3, 4):
-                    if li - 1 < len(colors):
-                        cc = colors[li - 1]
-                        rgb[pl == li] = (int(round(cc[0] * 255)),
-                                         int(round(cc[1] * 255)),
-                                         int(round(cc[2] * 255)))
-                carr = numpy_to_vtk(np.ascontiguousarray(rgb), deep=True,
-                                    array_type=VTK_UNSIGNED_CHAR)
-                carr.SetNumberOfComponents(3)
-                poly.GetPointData().SetScalars(carr)
-                ac = pool[ai]
-                mp = ac.GetMapper()
-                mp.SetInputData(poly)
-                mp.ScalarVisibilityOn()
-                mp.SetColorModeToDirectScalars()
-                ac.GetProperty().SetOpacity(_terr_opacity(colors[0]))
-                ac.SetVisibility(True)
-                p.vr_terr_pipe.append(pipe)
-                p.vr_terr_pipe.append(poly)      # keep the coloured copy alive
-                ai += 1
-        # TARGET territories (labels 5..10) stay as SEPARATE flat-coloured overlay
-        # surfaces, drawn ON TOP of the base shell (each its own distal wedge).
-        for li in range(5, len(colors) + 1):
-            if ai >= len(pool):
-                break
-            c = colors[li - 1]
-            nrm, pipe = _terr_surface(sub == li)
-            if nrm is None:
-                continue
-            ac = pool[ai]
-            mp = ac.GetMapper()
-            mp.SetInputConnection(nrm.GetOutputPort())
-            mp.ScalarVisibilityOff()
-            ac.GetProperty().SetColor(float(c[0]), float(c[1]), float(c[2]))
-            ac.GetProperty().SetOpacity(_terr_opacity(c))
-            ac.SetVisibility(True)
-            p.vr_terr_pipe.append(pipe)
-            ai += 1
+        # Territory mode: the label map IS the mask (label 0 transparent → crop to
+        # myocardium). Stash the plain crop so we can revert when territory clears.
+        if not prev:
+            self._vr_crop_cache[key] = self._vr_mask_arr.get(key)
+        self._vr_terr_mode[key] = True
+        self._vr_mask_arr[key] = np.ascontiguousarray(
+            np.clip(np.rint(np.asarray(lab)), 0, 255).astype(np.uint8))
+        self._vr_set_property(key)
+        self._vr_apply_xform(key)                 # feeds the label-map mask + matrix
+        p.render()
 
     def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
         """Cast a ray through (sx, sy) on VR pane *key* and return the nearest
@@ -12006,6 +11988,36 @@ class CTViewer(CPRMixin, AbstractViewer):
         img.GetPointData().SetScalars(arr)
         return img
 
+    def _label_to_vtk(self, lab):
+        """An int-label [z,y,x] territory map → a uint8 vtkImageData LABEL MAP for
+        the GPU volume mapper's label-map mask (0 = non-myocardium / primary TF,
+        i = territory *i*'s per-label colour/opacity). Same spacing as the CT so it
+        registers voxel-for-voxel with the volume."""
+        sx, sy, sz = self._dims
+        z, y, x = lab.shape
+        flat = np.ascontiguousarray(
+            np.clip(np.rint(np.asarray(lab)), 0, 255).astype(np.uint8).ravel(order="C"))
+        arr = numpy_to_vtk(flat, deep=True, array_type=VTK_UNSIGNED_CHAR)
+        img = vtkImageData()
+        img.SetDimensions(x, y, z)
+        img.SetSpacing(float(sx), float(sy), float(sz))
+        img.GetPointData().SetScalars(arr)
+        return img
+
+    def _vr_set_property(self, key) -> None:
+        """Apply the correct volume property to pane *key*'s VR volume: the
+        perfusion-territory property (flat label colours, label 0 transparent) when
+        territory is active there, else the contrast-CTA property."""
+        p = self.pane[key]
+        if getattr(p, "vr_volume", None) is None:
+            return
+        colors = getattr(self, "_terr_colors_v", None)
+        if getattr(self, "_vr_terr_mode", {}).get(key) and colors:
+            p.vr_volume.SetProperty(
+                _vr_territory_property(colors, self._vr_shift(key)))
+        else:
+            p.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(key)))
+
     def _mask_world_bounds(self, mask):
         """World-mm bounds (xmin,xmax,…) of a bool crop mask, to frame the VR on
         the heart instead of the whole thorax. None if empty."""
@@ -12276,6 +12288,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not self._vr_on.get(key):
             return
         p = self.pane[key]
+        # In territory mode the DVR is cropped by the label map (label 0 transparent),
+        # not the shell mask — rebuild the plain crop only for the revert cache and
+        # keep the territory render on screen.
+        if getattr(self, "_vr_terr_mode", {}).get(key):
+            self._vr_crop_cache[key] = self._run_busy(
+                t("VR"), t("Building VR…"), self._vr_crop_mask)
+            self._vr_apply_xform(key)
+            p.ren.ResetCameraClippingRange()
+            p.render()
+            return
         mask = self._run_busy(t("VR"), t("Building VR…"), self._vr_crop_mask)
         self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
         if mask is not None:
@@ -12491,6 +12513,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         reflected = float(np.linalg.det(M[:3, :3])) < 0.0
         mask = self._vr_mask_arr.get(key)
+        terr = bool(getattr(self, "_vr_terr_mode", {}).get(key))
+
+        def _mask_img(arr):
+            if arr is None:
+                return None
+            # In territory mode the mask is the uint8 LABEL map (per-label colour);
+            # otherwise it is the plain binary crop (render / skip).
+            return self._label_to_vtk(arr) if terr else self._mask_to_vtk_binary(arr)
+
         if reflected:
             b = self._image.GetBounds()
             cx = 0.5 * (b[0] + b[1])                      # image X centre (world)
@@ -12500,16 +12531,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             U = M @ F
             p.vr_mapper.SetInputData(self._vr_flipx_image())
             p.vr_mapper.SetMaskInput(
-                self._mask_to_vtk_binary(mask[:, :, ::-1])
-                if mask is not None else None)
+                _mask_img(mask[:, :, ::-1]) if mask is not None else None)
             p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(U))
         else:
             p.vr_mapper.SetInputData(self._image)
-            p.vr_mapper.SetMaskInput(
-                self._mask_to_vtk_binary(mask) if mask is not None else None)
+            p.vr_mapper.SetMaskInput(_mask_img(mask) if mask is not None else None)
             p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(M))
         if mask is not None:
-            p.vr_mapper.SetMaskTypeToBinary()
+            if terr:
+                p.vr_mapper.SetMaskTypeToLabelMap()
+                p.vr_mapper.SetMaskBlendFactor(1.0)
+            else:
+                p.vr_mapper.SetMaskTypeToBinary()
 
     def _vr_flipx_image(self):
         """X-flipped copy of the CT (cached) — the render-safe way to mirror the
@@ -12725,7 +12758,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pp = self.pane[pk]
                 if self._vr_on.get(pk) \
                         and getattr(pp, "vr_volume", None) is not None:
-                    pp.vr_volume.SetProperty(_vr_cta_property(self._vr_shift(pk)))
+                    self._vr_set_property(pk)   # territory property if active, else CTA
                     self._vr_update_summary(pk)
                     pp.render()
             # Shift moved pane A too; if A is an ordinary MPR pane (the short-axis
