@@ -4966,21 +4966,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         off = self._LV_STY["off"]
         self._lv_endo_btn.setStyleSheet(
             self._LV_STY["endo"] if (sm == "endo" or endo_loaded) else off)
+        # Epi selector: SOLID while any Epi overlay (境界/領域) is shown, OUTLINE
+        # when Epi data exists but all its overlays are hidden, grey otherwise.
         epi_on = (sm == "epi" or epi_loaded)
-        if epi_on and self._lv_rc_active("_lv_epi_rchidden"):
-            # Epi overlays quick-hidden via right-click → outline (green border).
+        if epi_on and not self._lv_epi_overlays_shown():
             self._lv_epi_btn.setStyleSheet(
-                self._lv_sel_style("#2e8b57", False, False))
+                self._lv_sel_style("#2e8b57", False, False))   # outline
         else:
             self._lv_epi_btn.setStyleSheet(
                 self._LV_STY["epi"] if epi_on else off)
         # Blood/Endo button: endo is part of this sub-mode now, so it reads active/
-        # loaded for either blood OR endo data.
+        # loaded for either blood OR endo data. SOLID while any Blood/Endo/LVD
+        # overlay is shown, OUTLINE when loaded but all hidden.
         be_on = (sm in ("blood", "endo") or blood_loaded or endo_loaded)
-        if be_on and self._lv_rc_active("_lvv_rchidden"):
-            # Overlays quick-hidden via right-click → outline (green border only).
+        if be_on and not self._lv_blood_overlays_shown():
             self._lvv_start_btn.setStyleSheet(
-                self._lv_sel_style("#2e8b57", False, False))
+                self._lv_sel_style("#2e8b57", False, False))   # outline
         elif be_on:
             self._lvv_start_btn.setStyleSheet(
                 "QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
@@ -4990,51 +4991,48 @@ class CTViewer(CPRMixin, AbstractViewer):
                 + self._BTN_DIS)
 
     # ---- Right-click quick hide/show of the Epi / Blood-Endo overlays --------
-    # Mirrors MV/AoV/Apex: right-click the selector to hide the overlays it
-    # fronts (button → outline); right-click again to restore exactly those.
-    _LV_EPI_RC_BTNS = ("_lv_border_btn", "_lv_region_btn", "_lvv_epi_btn")
-    _LV_BLOOD_RC_BTNS = ("_lvv_hl_btn", "_lvv_mask_btn", "_lvv_auto_endo_btn")
+    # Mirrors MV/AoV/Apex: right-click the selector to hide the overlays it fronts
+    # (button → outline); right-click again to restore exactly what was shown. The
+    # selector colour is DERIVED from the live overlay flags (not a stored flag),
+    # so it stays correct even if the user toggles an overlay by hand; the
+    # snapshot is used only to remember what to restore.
+    def _lv_epi_overlays_shown(self) -> bool:
+        """Any Epi overlay visible: Epi境界 (traced or blood-view) or — when it
+        is the Epi area and not the blood region — Epi領域 (red)."""
+        return (bool(getattr(self, "_lv_border_show", False))
+                or bool(getattr(self, "_lvv_epi_show", False))
+                or (self._lvv is None
+                    and bool(getattr(self, "_lvv_mask_on", False))))
 
-    def _lv_rc_active(self, store_attr) -> bool:
-        """True while a right-click quick-hide is still in effect. Self-heals:
-        if the user has since re-shown every overlay we hid, the snapshot is
-        dropped and the selector goes back to solid."""
-        st = getattr(self, store_attr, None)
-        if not st:
-            return False
-        all_back = all(b is None or b.isChecked() for b in st.get("btns", ()))
-        if st.get("lvd"):
-            all_back = all_back and bool(getattr(self, "_lvv_lvd_shown", False))
-        if all_back:
-            setattr(self, store_attr, None)
-            return False
-        return True
+    def _lv_blood_overlays_shown(self) -> bool:
+        """Any Blood/Endo overlay visible: Auto-Endo border, LVD, or — in a blood
+        session — the blood fill (LV-Blood 水色 or 全域HU tint)."""
+        return (bool(getattr(self, "_lvv_endo_show", False))
+                or bool(getattr(self, "_lvv_lvd_shown", False))
+                or (self._lvv is not None
+                    and (bool(getattr(self, "_lvv_mask_on", False))
+                         or bool(getattr(self, "_lvv_hl_on", False)))))
 
-    def _lv_quick_hide(self, store_attr, btn_names, lvd=False) -> None:
-        """Toggle visibility of a selector's overlays. First call hides every
-        overlay currently shown (snapshotting them); the next restores them."""
-        btns = [getattr(self, n, None) for n in btn_names]
-        btns = [b for b in btns if b is not None]
-        st = getattr(self, store_attr, None)
-        if st:                                   # restore
-            for b in st.get("btns", ()):
-                if b is not None and b.isEnabled() and not b.isChecked():
-                    b.click()
-            if st.get("lvd") and not getattr(self, "_lvv_lvd_shown", False):
-                self._lv_quick_set_lvd(True)
-            setattr(self, store_attr, None)
-        else:                                    # hide what is shown
-            on = [b for b in btns if b.isChecked() and b.isEnabled()]
-            lvd_on = lvd and bool(getattr(self, "_lvv_lvd_shown", False))
-            if not on and not lvd_on:
-                self._lvv_prompt(t("表示中のオーバーレイがありません。"))
-                return
-            for b in on:
-                b.click()                        # its slot hides the overlay
-            if lvd_on:
-                self._lv_quick_set_lvd(False)
-            setattr(self, store_attr, {"btns": on, "lvd": lvd_on})
-        self._lv_style_selectors()
+    def _lv_set_epi_blood_border(self, on) -> None:
+        if getattr(self, "_lvv_epi_btn", None) is None:
+            return
+        if self._lvv_epi_btn.isChecked() != bool(on):
+            self._lvv_epi_btn.setChecked(bool(on))
+            self._lvv_toggle_epi()
+
+    def _lv_set_epi_area(self, on) -> None:
+        if getattr(self, "_lv_region_btn", None) is None:
+            return
+        if self._lv_region_btn.isChecked() != bool(on):
+            self._lv_region_btn.setChecked(bool(on))
+            self._lv_toggle_region()
+
+    def _lv_set_auto_endo(self, on) -> None:
+        if getattr(self, "_lvv_auto_endo_btn", None) is None:
+            return
+        if self._lvv_auto_endo_btn.isChecked() != bool(on):
+            self._lvv_auto_endo_btn.setChecked(bool(on))
+            self._lvv_toggle_auto_endo()
 
     def _lv_quick_set_lvd(self, show) -> None:
         """Safely toggle the LVD line (non-checkable button). No-op if the LVD
@@ -5044,14 +5042,85 @@ class CTViewer(CPRMixin, AbstractViewer):
         if bool(getattr(self, "_lvv_lvd_shown", False)) != bool(show):
             self._lvv_toggle_lvd()               # level set → just flips + redraws
 
+    def _lv_set_blood(self, mode) -> None:
+        """Set the blood fill to 'lv' (LV-Blood 水色), 'all' (全域HU tint) or None
+        (both off). Bypasses the built-in LV⇔All auto-switch so None truly hides
+        both — the right-click's 'blood off' needs that."""
+        if mode == "all":
+            if not self._lvv_hl_btn.isChecked():
+                self._lvv_hl_btn.setChecked(True)
+                self._lvv_toggle_highlight()
+        elif mode == "lv":
+            if not self._lvv_mask_btn.isChecked():
+                self._lvv_mask_btn.setChecked(True)
+                self._lvv_toggle_blood()
+        else:                                    # both off (no auto-switch)
+            self._lvv_mask_on = False
+            self._lvv_hl_on = False
+            self._lvv_mask_btn.setChecked(False)
+            self._lvv_hl_btn.setChecked(False)
+            self._lvv_style_toggle(self._lvv_mask_btn, "#40e0ff", "black")
+            self._lvv_style_toggle(self._lvv_hl_btn, "#40c0ff", "black")
+            self._lvv_update_mask()
+            self._lvv_update_highlight()
+
     def _lv_rclick_epi(self) -> None:
-        """Right-click Epi: hide/show Epi境界 + Epi領域 (and the blood-view Epi
-        border), matching the MV/AoV/Apex quick-hide."""
-        self._lv_quick_hide("_lv_epi_rchidden", self._LV_EPI_RC_BTNS)
+        """Right-click Epi: toggle the Epi overlays. Hiding stores what was shown;
+        showing turns Epi境界 on and restores Epi領域 only if it had been shown
+        (per spec). Never touches the blood region."""
+        border = bool(getattr(self, "_lv_border_show", False))
+        blood_border = bool(getattr(self, "_lvv_epi_show", False))
+        area = (self._lvv is None
+                and bool(getattr(self, "_lvv_mask_on", False)))
+        st = self._lv_epi_rchidden
+        if st is None and (border or blood_border or area):
+            # HIDE everything currently shown, remembering it.
+            self._lv_epi_rchidden = {"border": border,
+                                     "blood_border": blood_border,
+                                     "area": area}
+            if border:
+                self.set_lv_border_visible(False)
+            if blood_border:
+                self._lv_set_epi_blood_border(False)
+            if area:
+                self._lv_set_epi_area(False)
+        else:
+            # SHOW: Epi境界 on; Epi領域 on only if it was shown before hiding.
+            self.set_lv_border_visible(True)
+            if st and st.get("blood_border"):
+                self._lv_set_epi_blood_border(True)
+            if st and st.get("area"):
+                self._lv_set_epi_area(True)
+            self._lv_epi_rchidden = None
+        self._lv_style_selectors()
 
     def _lv_rclick_blood(self) -> None:
-        """Right-click Blood/Endo: hide/show the Blood / Endo / LVD overlays."""
-        self._lv_quick_hide("_lvv_rchidden", self._LV_BLOOD_RC_BTNS, lvd=True)
+        """Right-click Blood/Endo: toggle the Endo border, LVD and the blood fill
+        (keeping whichever blood mode — LV-Blood or 全域HU — was last shown)."""
+        endo = bool(getattr(self, "_lvv_endo_show", False))
+        lvd = bool(getattr(self, "_lvv_lvd_shown", False))
+        blood = ("lv" if getattr(self, "_lvv_mask_on", False)
+                 else ("all" if getattr(self, "_lvv_hl_on", False) else None))
+        if self._lvv is None:
+            blood = None                         # blood fill only in a session
+        st = self._lvv_rchidden
+        if st is None and (endo or lvd or blood):
+            self._lvv_rchidden = {"endo": endo, "lvd": lvd, "blood": blood}
+            if endo:
+                self._lv_set_auto_endo(False)
+            if lvd:
+                self._lv_quick_set_lvd(False)
+            if blood:
+                self._lv_set_blood(None)
+        else:
+            if st and st.get("endo"):
+                self._lv_set_auto_endo(True)
+            if st and st.get("lvd"):
+                self._lv_quick_set_lvd(True)
+            if st and st.get("blood"):
+                self._lv_set_blood(st["blood"])
+            self._lvv_rchidden = None
+        self._lv_style_selectors()
 
     def _lvv_sync(self) -> None:
         on = self._lvv is not None
