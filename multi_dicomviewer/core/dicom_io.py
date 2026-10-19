@@ -1600,6 +1600,51 @@ def load_xa(
     )
 
 
+def _xa_plane_tile(ds, max_px: int) -> np.ndarray:
+    """Normalised + downsampled frame-0 preview of one XA projection.
+    Returns a 2-D uint8 gray array, or (H, W, 3) uint8 for a colour plane."""
+    px = _decode_frame(ds, 0)
+    if px.ndim == 3:        # colour (keep as-is, downsample)
+        step = max(1, -(-max(px.shape[:2]) // max_px))
+        return np.ascontiguousarray(px[::step, ::step, :3].astype(np.uint8))
+    px = px.astype(np.float32)
+    lo, hi = float(px.min()), float(px.max())
+    g = np.clip((px - lo) / max(hi - lo, 1e-6), 0.0, 1.0) * 255.0
+    step = max(1, -(-max(g.shape) // max_px))
+    return g[::step, ::step].astype(np.uint8)
+
+
+def _xa_biplane_thumbnail(series: Series, max_px: int) -> np.ndarray:
+    """Side-by-side preview of a biplane XA series so the thumbnail matches
+    the viewer's Bi view instead of only the frontal plane. Planes are ordered
+    frontal-first by |PositionerPrimaryAngle|, the same rule as load_xa."""
+    entries = []
+    for idx, path in enumerate(series.files):
+        ds = pydicom.dcmread(path, force=True)
+        pa = _to_float(getattr(ds, "PositionerPrimaryAngle", None))
+        sort_key = abs(pa) if pa is not None else float(idx)
+        entries.append((sort_key, idx, ds))
+    entries.sort(key=lambda t: (t[0], t[1]))  # frontal (small angle) first
+
+    tiles = [_xa_plane_tile(ds, max_px) for _k, _i, ds in entries]
+    any_color = any(t.ndim == 3 for t in tiles)
+    if any_color:   # promote gray planes to 3-channel so layouts match
+        tiles = [t if t.ndim == 3 else np.repeat(t[..., None], 3, axis=2)
+                 for t in tiles]
+
+    sep = 2  # thin black separator between planes, like XAViewer.snapshot()
+    h = max(t.shape[0] for t in tiles)
+    total_w = sum(t.shape[1] for t in tiles) + sep * (len(tiles) - 1)
+    shape = (h, total_w, 3) if any_color else (h, total_w)
+    out = np.zeros(shape, dtype=np.uint8)
+    x = 0
+    for t in tiles:          # top-aligned, matching snapshot() (drawn at y=0)
+        th, tw = t.shape[:2]
+        out[0:th, x:x + tw] = t
+        x += tw + sep
+    return np.ascontiguousarray(out)
+
+
 def thumbnail(series: Series, max_px: int = 144) -> np.ndarray:
     """Small uint8 preview of *series* (one frame / mid slice). Returns a
     2-D grayscale array, or (H, W, 3) uint8 for color series."""
@@ -1607,6 +1652,14 @@ def thumbnail(series: Series, max_px: int = 144) -> np.ndarray:
     # below, not the HU window — they are not Hounsfield data — and their
     # PI=RGB pseudo-colour is degenerate, so they're shown as grayscale.
     is_sc = _series_is_secondary_capture(series)
+    # Biplane XA (≥2 projection files): preview both planes side by side so the
+    # thumbnail shows the full acquisition, not just the frontal plane.
+    if (series.modality == Modality.XA and not is_sc
+            and len(series.files) >= 2):
+        try:
+            return _xa_biplane_thumbnail(series, max_px)
+        except Exception:
+            pass  # any decode trouble → fall through to single-file preview
     if series.modality == Modality.CT and not is_sc:
         files = sorted(series.files)
         ds = pydicom.dcmread(files[len(files) // 2], force=True)
