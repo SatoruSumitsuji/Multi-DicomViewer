@@ -722,11 +722,11 @@ def _vr_territory_property(colors, shift: float = 0.0) -> vtkVolumeProperty:
     myocardium opacity ramp with the pane W/L, matching the CTA property."""
     prop = vtkVolumeProperty()
     prop.SetInterpolationTypeToLinear()
-    prop.ShadeOn()
-    prop.SetAmbient(0.50)
-    prop.SetDiffuse(0.50)
-    prop.SetSpecular(0.10)
-    prop.SetSpecularPower(8.0)
+    # NO gradient shading: the myocardium mask edge is voxel-stepped, and shading
+    # turns every step into a lit ridge → the heavy "皺" the user saw. A flat DVR
+    # composite reads as a clean "ベタっと" colour the way the Mac VR does; the 3-D
+    # form still reads from the silhouette and the territory-colour borders.
+    prop.ShadeOff()
     # Primary (label 0 = non-myocardium) → fully transparent: crops the DVR to the
     # labelled myocardium, exactly the region Mac shows in territory mode.
     po = vtkPiecewiseFunction()
