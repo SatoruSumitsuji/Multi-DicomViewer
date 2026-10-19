@@ -2876,6 +2876,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_apex = None
         self._lv_apex_edit = False
         self._lv_apex_shown = True
+        # Right-click quick-hide snapshots for the Epi / Blood-Endo selectors
+        # (like MV/AoV/Apex): a list of the overlay buttons hidden by the last
+        # right-click, so the next right-click restores exactly those. None =
+        # nothing hidden (selector shows its solid colour).
+        self._lv_epi_rchidden = None
+        self._lvv_rchidden = None
         #: Epi guided gate: True once Draw was pressed (or a border loaded/resumed).
         self._lv_epi_armed = False
         #: Content signatures at the last Save/Load, so Exit can skip the
@@ -10906,15 +10912,92 @@ class CTViewer(CPRMixin, AbstractViewer):
         # greys out on macOS too (an empty stylesheet there stays enabled-looking
         # even when setEnabled(False)).
         off = self._BTN_DIS
-        self._lv_epi_btn.setStyleSheet(
-            (self._LV_STY.get("epi", "") + self._BTN_DIS)
-            if (sm == "epi" or epi_loaded) else off)
+        epi_on = (sm == "epi" or epi_loaded)
+        if epi_on and self._lv_rc_active("_lv_epi_rchidden"):
+            # Epi overlays quick-hidden via right-click → outline (green border).
+            self._lv_epi_btn.setStyleSheet(
+                self._lv_sel_style("#2e8b57", False, False))
+        else:
+            self._lv_epi_btn.setStyleSheet(
+                (self._LV_STY.get("epi", "") + self._BTN_DIS) if epi_on else off)
         be_on = (sm in ("blood", "endo") or blood_loaded or endo_loaded)
-        self._lvv_start_btn.setStyleSheet(
-            ("QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
-            if be_on
-            else ("QPushButton:checked{background:#2e8b57;color:white;}"
-                  + self._BTN_DIS))
+        if be_on and self._lv_rc_active("_lvv_rchidden"):
+            self._lvv_start_btn.setStyleSheet(
+                self._lv_sel_style("#2e8b57", False, False))
+        elif be_on:
+            self._lvv_start_btn.setStyleSheet(
+                "QPushButton{background:#2e8b57;color:white;}" + self._BTN_DIS)
+        else:
+            self._lvv_start_btn.setStyleSheet(
+                "QPushButton:checked{background:#2e8b57;color:white;}"
+                + self._BTN_DIS)
+
+    # ---- Right-click quick hide/show of the Epi / Blood-Endo overlays --------
+    # Mirrors MV/AoV/Apex: right-click the selector to hide the overlays it
+    # fronts (button → outline); right-click again to restore exactly those.
+    _LV_EPI_RC_BTNS = ("_lv_border_btn", "_lv_region_btn", "_lvv_epi_btn")
+    _LV_BLOOD_RC_BTNS = ("_lvv_hl_btn", "_lvv_mask_btn", "_lvv_auto_endo_btn")
+
+    def _lv_rc_active(self, store_attr) -> bool:
+        """True while a right-click quick-hide is still in effect. Self-heals:
+        if the user has since re-shown every overlay we hid, the snapshot is
+        dropped and the selector goes back to solid."""
+        st = getattr(self, store_attr, None)
+        if not st:
+            return False
+        all_back = all(b is None or b.isChecked() for b in st.get("btns", ()))
+        if st.get("lvd"):
+            all_back = all_back and bool(getattr(self, "_lvv_lvd_shown", False))
+        if all_back:
+            setattr(self, store_attr, None)
+            return False
+        return True
+
+    def _lv_quick_hide(self, store_attr, btn_names, lvd=False) -> None:
+        """Toggle visibility of a selector's overlays. First call hides every
+        overlay currently shown (snapshotting them); the next restores them."""
+        btns = [getattr(self, n, None) for n in btn_names]
+        btns = [b for b in btns if b is not None]
+        st = getattr(self, store_attr, None)
+        if st:                                   # restore
+            for b in st.get("btns", ()):
+                if b is not None and b.isEnabled() and not b.isChecked():
+                    b.click()
+            if st.get("lvd") and not getattr(self, "_lvv_lvd_shown", False):
+                self._lv_quick_set_lvd(True)
+            setattr(self, store_attr, None)
+        else:                                    # hide what is shown
+            on = [b for b in btns if b.isChecked() and b.isEnabled()]
+            lvd_on = lvd and bool(getattr(self, "_lvv_lvd_shown", False))
+            if not on and not lvd_on:
+                self._lvv_prompt(t("表示中のオーバーレイがありません。"))
+                return
+            for b in on:
+                b.click()                        # its slot hides the overlay
+            if lvd_on:
+                self._lv_quick_set_lvd(False)
+            setattr(self, store_attr, {"btns": on, "lvd": lvd_on})
+        self._lv_style_selectors()
+
+    def _lv_quick_set_lvd(self, show) -> None:
+        """Safely toggle the LVD line (non-checkable button). No-op if the LVD
+        level is unset (pressing it then would prompt, not toggle)."""
+        if getattr(self, "_lvv_lvd_level", None) is None:
+            return
+        if bool(getattr(self, "_lvv_lvd_shown", False)) != bool(show):
+            self._lvv_toggle_lvd()               # level set → just flips + redraws
+
+    def _lv_rclick_epi(self) -> None:
+        """Right-click Epi: hide/show Epi境界 + Epi領域 (and the blood-view Epi
+        border), matching the MV/AoV/Apex quick-hide."""
+        self._lv_quick_hide("_lv_epi_rchidden", self._LV_EPI_RC_BTNS)
+        # Deferred so it runs AFTER any modal teardown re-grab (macOS recovery).
+        QTimer.singleShot(0, self._reset_pointer_state)
+
+    def _lv_rclick_blood(self) -> None:
+        """Right-click Blood/Endo: hide/show the Blood / Endo / LVD overlays."""
+        self._lv_quick_hide("_lvv_rchidden", self._LV_BLOOD_RC_BTNS, lvd=True)
+        QTimer.singleShot(0, self._reset_pointer_state)
 
     def _lv_update_submode_ui(self) -> None:
         if not hasattr(self, "_lv_grp_trace"):
@@ -11218,8 +11301,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_epi_btn = FitButton(t("Epi"))
         self._lv_epi_btn.setHelpToolTip(
             t("Epi (myocardial) pass — align its long-axis view, Set axis, then "
-              "Trace"))
+              "Trace（右クリックで Epi境界/領域 の表示 ⇔ 非表示）"))
         self._lv_epi_btn.clicked.connect(lambda: self._lv_select_submode("epi"))
+        self._lv_epi_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lv_epi_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_epi())
         row1.addWidget(self._lv_epi_btn)
         row1.addWidget(self._lvv_start_btn)      # "Blood/Endo" (built in lvv bar)
         # FullLV: bundle the loaded EpiLv + the Blood/Endo (BldLv) analysis into
@@ -11510,8 +11597,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_start_btn.setCheckable(True)
         self._lvv_start_btn.setHelpToolTip(
             t("Blood + Endo sub-mode: set the blood HU range, compute the blood "
-              "volume, then derive & edit the Endo border (needs Epi + MV/AoV)"))
+              "volume, then derive & edit the Endo border (needs Epi + MV/AoV)"
+              "（右クリックで Blood/Endo/LVD の表示 ⇔ 非表示）"))
         self._lvv_start_btn.clicked.connect(lambda: self._lv_select_submode("blood"))
+        self._lvv_start_btn.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._lvv_start_btn.customContextMenuRequested.connect(
+            lambda _p: self._lv_rclick_blood())
         # Blood per-mode Apex is RETIRED — the COMMON apex (Apex selector) is
         # seeded on entry. Hidden placeholder keeps references safe.
         self._lvv_apex_btn = FitButton(t("Apex"))
