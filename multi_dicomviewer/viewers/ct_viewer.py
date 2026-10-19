@@ -11355,6 +11355,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetProperty(_vr_cta_property())
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
+        # Foreground overlay renderer (layer 1, SHARED camera): the coronary tubes
+        # are drawn here so they sit ON TOP of the territory DVR. The solid colour is
+        # opaque, so a vessel buried in the myocardium — the septal branches above
+        # all — would otherwise be occluded; the overlay clears only the depth buffer
+        # (keeps the volume's colour) so every coronary line stays observable while
+        # still turning / mirroring with the volume (shared camera + same UserMatrix).
+        rw = p.ren.GetRenderWindow()
+        p.ren_fg = vtkRenderer()
+        p.ren_fg.SetLayer(1)
+        p.ren_fg.SetPreserveColorBuffer(True)   # don't erase the volume beneath
+        p.ren_fg.SetPreserveDepthBuffer(False)  # fresh depth → tubes ignore volume
+        p.ren_fg.InteractiveOff()
+        p.ren_fg.SetActiveCamera(p.ren.GetActiveCamera())
+        if rw is not None:
+            if rw.GetNumberOfLayers() < 2:
+                rw.SetNumberOfLayers(2)
+            rw.AddRenderer(p.ren_fg)
         # Coronary tree as 3-D tubes (world-mm, so they sit in the volume and
         # rotate with it). Per-root colour via per-cell RGB scalars.
         p.vr_coro_tube = vtkTubeFilter()
@@ -11401,8 +11418,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         _hp.SetSpecular(0.0)
         _hp.SetFrontfaceCulling(True)        # show only back faces → silhouette rim
         p.vr_coro_halo_actor.SetVisibility(False)
-        p.ren.AddActor(p.vr_coro_halo_actor)
-        p.ren.AddActor(p.vr_coro_actor)      # coloured tube in front of its halo
+        p.ren_fg.AddActor(p.vr_coro_halo_actor)   # overlay layer → always on top
+        p.ren_fg.AddActor(p.vr_coro_actor)   # coloured tube in front of its halo
         # Rounded tube ends: a sphere (same colour + radius) at every vessel
         # endpoint, so the 断端 are round, not flat discs.
         p.vr_coro_cap_mapper = vtkPolyDataMapper()
@@ -11416,7 +11433,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         _kp.SetDiffuse(0.0)
         _kp.SetSpecular(0.0)
         p.vr_coro_cap_actor.SetVisibility(False)
-        p.ren.AddActor(p.vr_coro_cap_actor)
+        p.ren_fg.AddActor(p.vr_coro_cap_actor)    # overlay layer → always on top
         # Perfusion territories as translucent 3-D iso-surfaces — a POOL of actors
         # (one per label: LAD blue / LCX yellow / RCA green / Target red), coloured
         # + filled per push in _vr_update_territory.
@@ -11443,7 +11460,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if hasattr(p.vr_tgt_actor.GetProperty(), "SetRenderPointsAsSpheres"):
             p.vr_tgt_actor.GetProperty().SetRenderPointsAsSpheres(True)
         p.vr_tgt_actor.SetVisibility(False)
-        p.ren.AddActor(p.vr_tgt_actor)
+        p.ren_fg.AddActor(p.vr_tgt_actor)        # overlay layer → always on top
         p.vr_tgt_labels = []                     # per-target number billboards
         # Depth peeling so the TRANSLUCENT territory surfaces composite correctly
         # with the GPU volume (plain alpha blending drops translucent geometry
@@ -11574,9 +11591,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if getattr(p, "vr_tgt_actor", None) is None:
             return
-        # Clear the previous number billboards (in the main renderer).
+        # Clear the previous number billboards (in the foreground overlay renderer).
+        fg = getattr(p, "ren_fg", None) or p.ren
         for lb in getattr(p, "vr_tgt_labels", []):
-            p.ren.RemoveViewProp(lb)
+            fg.RemoveViewProp(lb)
         p.vr_tgt_labels = []
         specs = self._coro_targets if self._vr_on.get(key) else []
         if not specs:
@@ -11619,7 +11637,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
                     lb.SetDisplayOffset(6, 4)        # small nudge off the sphere
-                p.ren.AddViewProp(lb)
+                fg.AddViewProp(lb)
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
