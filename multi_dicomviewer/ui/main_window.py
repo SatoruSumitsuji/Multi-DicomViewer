@@ -3202,6 +3202,19 @@ class MainWindow(QMainWindow):
         else:
             inflight.discard(base)                       # gave up; allow a retry
 
+    def _corotree_dock_hidden(self) -> bool:
+        """True when the Coronary Tree dock is closed (hidden), so a CT load must
+        NOT re-push its vessel lines / territory colours / VR. A dock merely
+        tabbed behind Studies is still open (not hidden) and counts as present.
+        Any error → treat as hidden (fail safe to a plain CT)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None:
+            return True
+        try:
+            return bool(w.isHidden())
+        except Exception:                                # noqa: BLE001
+            return True
+
     def _maybe_resume_territory_review(self, series, pane) -> None:
         """A CT just became shown (full load path). If the Coronary Tree dock STILL
         holds a FullLv (CT-Territory) bundle for THIS CT, re-enter the perfusion-
@@ -3225,12 +3238,7 @@ class MainWindow(QMainWindow):
             return
         # Gate on the Coronary Tree panel actually being PRESENT in the dock (the
         # user's rule: "data shown in the dock → VR OK; not shown → plain new CT").
-        # isHidden() is True only when the dock was closed; a dock tabbed behind
-        # Studies is still open (not hidden), so the tab counts as present.
-        try:
-            if w.isHidden():
-                return
-        except Exception:                                # noqa: BLE001
+        if self._corotree_dock_hidden():
             return
         data = w.full_lv_for_series(series.series_uid)
         if not data:
@@ -6945,7 +6953,16 @@ class MainWindow(QMainWindow):
         # here (shown_series_uid is only set now, after the async load); push the
         # overlay so the CPR lines appear on this first display without the user
         # pressing 画像表示 again. Cheap no-op when no tree panel is open.
-        if getattr(self, "_corotree_win", None) is not None:
+        #
+        # BUT gate it on the Coronary Tree dock actually being OPEN (not hidden):
+        # the user's rule is "data shown in the dock → coronaries/VR OK; dock not
+        # shown → plain new CT". A freshly (re-)loaded CT already comes up clean
+        # (load_series drops any prior overlay/VR), so when the dock is closed we
+        # simply do NOT re-push the vessel lines / territory colours onto it — it
+        # stays a plain, editable volume. Pushing them here was why re-dropping a
+        # CT after closing the Coronary Tree tab still drew the lines/領域色.
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and not self._corotree_dock_hidden():
             self.coronary_overlay_refresh()
             # Re-enter the perfusion-territory review (VR) ONLY when the dock still
             # holds this CT's FullLv — so a re-drop after deleting the series (dock
