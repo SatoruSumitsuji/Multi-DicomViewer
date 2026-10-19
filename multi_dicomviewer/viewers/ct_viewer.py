@@ -56,6 +56,7 @@ from vtkmodules.vtkCommonCore import (
 from vtkmodules.vtkCommonDataModel import (
     vtkCellArray,
     vtkImageData,
+    vtkPlane,
     vtkPolyData,
 )
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
@@ -779,6 +780,10 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
 _VR_CORO_R = 0.765 * 0.8 * 0.8          # 0.49 — other vessels (thinner, has an outline)
 _VR_CORO_R_LM = 0.765 * 1.5 * 0.8       # 0.92 — LM trunk (also 80%)
 _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
+#: How far BEHIND the LV centre (toward the far side) the coronary near-hemisphere
+#: clip plane sits — a margin so near-wall / septal vessels just past the equator are
+#: kept while the clearly far-side tree is hidden. Larger = keep more of the far side.
+_VR_CORO_CLIP_MARGIN_MM = 10.0
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -11462,6 +11467,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_tgt_actor.SetVisibility(False)
         p.ren_fg.AddActor(p.vr_tgt_actor)        # overlay layer → always on top
         p.vr_tgt_labels = []                     # per-target number billboards
+        # Near-hemisphere clip: the overlay keeps NEAR-side vessels from being buried
+        # in the myocardium, but it would also show the ones on the FAR side of the
+        # LV. A single clip plane through the LV centre, normal toward the camera,
+        # removes that far half (updated on rotate / xform in _vr_update_coro_clip).
+        p.vr_coro_clip = vtkPlane()
+        p.vr_coro_clip.SetNormal(0.0, 0.0, 1.0)
+        for _m in (p.vr_coro_mapper, p.vr_coro_halo_mapper,
+                   p.vr_coro_cap_mapper, p.vr_tgt_mapper):
+            _m.AddClippingPlane(p.vr_coro_clip)
         # Depth peeling so the TRANSLUCENT territory surfaces composite correctly
         # with the GPU volume (plain alpha blending drops translucent geometry
         # behind the volume — the reason the territory colours didn't appear while
@@ -12160,6 +12174,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # widens the view angle so the heart renders a bit smaller.
                 cam.Zoom(0.8)
             p.ren.ResetCameraClippingRange()
+            self._vr_update_coro_clip(key)          # near-hemisphere clip for the view
             self._vr_update_angle(key)              # initial LAO/CRA readout
             self._vr_update_summary(key)            # territory summary (bottom-right)
         else:
@@ -12526,6 +12541,43 @@ class CTViewer(CPRMixin, AbstractViewer):
                     pass
         if vol is not None and getattr(p, "vr_mapper", None) is not None:
             self._vr_apply_volume_xform(key, M)
+        self._vr_update_coro_clip(key)               # hide the far-side tree
+
+    def _vr_update_coro_clip(self, key) -> None:
+        """Position the coronary near-hemisphere clip plane on VR pane *key*: through
+        the LV centre, normal pointing toward the camera, so only the vessels on the
+        camera side of the LV are drawn (the overlay keeps those from being buried in
+        the myocardium; this removes the ones on the far side). Called on rotate /
+        Flip / rebuild — cheap (just repositions one plane)."""
+        p = self.pane[key]
+        pl = getattr(p, "vr_coro_clip", None)
+        if pl is None:
+            return
+        cam = p.ren.GetActiveCamera()
+        pos = np.asarray(cam.GetPosition(), float)
+        foc = np.asarray(cam.GetFocalPoint(), float)
+        d = pos - foc
+        n = float(np.linalg.norm(d))
+        if n < 1e-6:
+            return
+        cdir = d / n                                 # toward the camera (world)
+        c = getattr(self, "_center", None)
+        if c is None and self._image is not None:
+            b = self._image.GetBounds()
+            c = np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
+                          (b[4] + b[5]) * 0.5])
+        c = np.asarray(c, float) if c is not None else np.zeros(3)
+        M = self._vr_xform.get(key)                  # tubes render under this matrix
+        if M is not None:
+            cw = np.asarray(M, float) @ np.array([c[0], c[1], c[2], 1.0])
+            w = cw[3] if abs(cw[3]) > 1e-9 else 1.0
+            c = cw[:3] / w
+        # Sit the plane a margin BEHIND the centre (away from the camera) so near-wall
+        # / septal vessels just past the equator are kept, not clipped at the silhouette.
+        origin = c - cdir * _VR_CORO_CLIP_MARGIN_MM
+        pl.SetNormal(float(cdir[0]), float(cdir[1]), float(cdir[2]))
+        pl.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
+        pl.Modified()
 
     def _vr_apply_volume_xform(self, key, M) -> None:
         p = self.pane[key]
@@ -12788,6 +12840,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             cam.Azimuth(-dx * 0.4)
             cam.Elevation(dy * 0.4)
             cam.OrthogonalizeViewUp()
+        self._vr_update_coro_clip(key)               # follow the new view direction
         p.ren.ResetCameraClippingRange()
         p.render()
 
