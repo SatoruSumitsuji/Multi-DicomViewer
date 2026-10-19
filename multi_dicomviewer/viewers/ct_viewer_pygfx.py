@@ -9910,28 +9910,41 @@ class CTViewer(CPRMixin, AbstractViewer):
         return ("QPushButton{background:palette(button);color:%s;"
                 "border:%dpx solid %s;}%s" % (color, bw, color, self._BTN_DIS))
 
+    def _lv_edit_style(self, color) -> str:
+        """Selector CURRENTLY being placed (MV/AoV/Apex 指定操作中): solid data
+        colour, bold white text and a thick bright-yellow border so it is
+        unmistakable which one is being edited — even before any point is set
+        (fixes 'Apexボタンが何も変化しないので今何してるか分からない')."""
+        return ("QPushButton{background:%s;color:white;font-weight:bold;"
+                "border:3px solid #ffeb3b;}%s" % (color, self._BTN_DIS))
+
     def _lv_update_valve_buttons(self) -> None:
         if getattr(self, "_lv_mv_btn", None) is None:
             return
+        ve = getattr(self, "_lv_valve_edit", None)
+        ax = bool(getattr(self, "_lv_apex_edit", False))
         for which, btn, color in (("mitral", self._lv_mv_btn, "#2b6cb0"),
                                    ("aortic", self._lv_aov_btn, "#b8860b")):
-            if self._lv_valves.get(which) is None:
+            if ve == which:
+                btn.setStyleSheet(self._lv_edit_style(color))
+            elif self._lv_valves.get(which) is None:
                 btn.setStyleSheet(self._BTN_DIS)
             else:
                 btn.setStyleSheet(self._lv_sel_style(
                     color, self._lv_valve_shown.get(which, True),
                     getattr(btn, "_mdv_soft_off", False)))
         # Valve-edit Hide/Show toggle label follows visibility.
-        ve = getattr(self, "_lv_valve_edit", None)
         if ve is not None and getattr(self, "_lv_ve_show_btn", None) is not None:
             has = self._lv_valves.get(ve) is not None
             self._lv_ve_show_btn.setEnabled(has)
             self._lv_ve_show_btn.setText(
                 t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
-        # Apex selector styling (red).
+        # Apex selector styling (red); highlighted while being placed.
         abtn = getattr(self, "_lv_apex_sel_btn", None)
         if abtn is not None:
-            if self._lv_apex is None:
+            if ax:
+                abtn.setStyleSheet(self._lv_edit_style("#d32f2f"))
+            elif self._lv_apex is None:
                 abtn.setStyleSheet(self._BTN_DIS)
             else:
                 abtn.setStyleSheet(self._lv_sel_style(
