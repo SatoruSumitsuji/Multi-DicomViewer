@@ -6398,9 +6398,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh(only=key)
 
     def _toggle_vr_mode(self) -> None:
-        """Top-level VR button: toggle VR for the VR pane. OFF returns the pane to
-        the normal CT view; ON restores the last VR view (完全復元)."""
-        if self._vol is None or self._mode != "3D":
+        """Top-level VR button: toggle VR. OFF returns to the normal CT view; ON
+        restores the last VR view (完全復元).
+
+        Turning VR OFF must ALWAYS work and clear EVERY pane: a territory/FullLv
+        review can leave VR on BOTH panes, and the single-pane toggle only
+        cleared one — so the button sprang back (vr_active() still true) and the
+        user was stuck in VR. Off is also not gated on _mode=="3D" (only ON is)."""
+        if self._vol is None:
+            self._sync_vr_btn()
+            return
+        if self.vr_active():                     # OFF: clear every VR pane
+            for k in ("A", "B"):
+                if self._vr_on.get(k):
+                    self._vr_set(k, False)
+            self._sync_vr_btn()
+            return
+        if self._mode != "3D":                   # ON requires the 3-D MPR view
             self._sync_vr_btn()
             return
         key = self._vr_pane_key()
