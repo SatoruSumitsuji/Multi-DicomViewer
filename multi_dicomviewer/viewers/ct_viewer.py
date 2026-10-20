@@ -3289,8 +3289,27 @@ class CTViewer(CPRMixin, AbstractViewer):
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
         row.addStretch(1)
+        # Save the whole Territory session (corotree + FullLv + Targets + params)
+        # to a .territory.json — a one-drop restore of this review. Right-aligned.
+        self._terr_save_btn = FitButton(t("territory保存"))
+        self._terr_save_btn.setHelpToolTip(t(
+            "この Territory セッション（冠動脈ツリー＋LV＋ターゲット＋表示設定）を "
+            ".territory.json に保存（ドラッグ＆ドロップで復元）"))
+        self._terr_save_btn.clicked.connect(self._terr_save)
+        row.addWidget(self._terr_save_btn)
         self._terr_bar.setVisible(False)
         return self._terr_bar
+
+    def _terr_save(self) -> None:
+        """Territory bar 保存: ask the shell (which owns the Coronary Tree panel +
+        its corotree / FullLv / Targets) to write the .territory.json."""
+        shell = self.window()
+        if hasattr(shell, "territory_save_active"):
+            try:
+                shell.territory_save_active()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
 
     def _terr_toggle_blood(self) -> None:
         self._lvv_toggle_blood()

@@ -3275,6 +3275,60 @@ class MainWindow(QMainWindow):
             return False
         return full_lv.is_full_lv(data)
 
+    @staticmethod
+    def _is_territory_json(path: str) -> bool:
+        """True if *path* is a .territory.json (a saved CT Territory session), so a
+        drag&drop restores the whole review instead of reading DICOM."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return isinstance(data, dict) and data.get("format") == "MDV-Territory"
+
+    def _open_territory_file(self, path: str) -> None:
+        """Drop a .territory.json → restore the whole Territory session: feed the
+        Coronary Tree panel the embedded corotree + FullLv + Targets + params,
+        bring up the source CT with BOTH overlays, and re-enter the perfusion-
+        territory review (VR)."""
+        import json
+        import os
+        from multi_dicomviewer.core import territory_file
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        w = self._open_coronary_tree()
+        if w is None or not hasattr(w, "load_territory"):
+            return
+        if not w.load_territory(data, path=path):
+            return
+        uid = territory_file.series_uid(data)
+        src_dir = territory_file.src_dir(data)
+        try:
+            self.coronary_show_ct(uid, src_dir,
+                                  cpr_dir=os.path.dirname(path), prompt=True)
+        except Exception:                                # noqa: BLE001
+            pass
+        if getattr(w, "_tree", None) is not None and w._tree.vessels \
+                and hasattr(w, "_set_overlay"):
+            w._set_overlay(True)
+        full = territory_file.full_lv_data(data)
+        self._lv_analysis_register(full)
+        self._poll_full_lv_apply(uid, full, 0)           # VR review once CT shown
+
+    def territory_save_active(self) -> bool:
+        """Save the Coronary Tree panel's current Territory session to a
+        .territory.json (file dialog). Called by the Territory bar's 保存 button."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "save_territory"):
+            return False
+        return bool(w.save_territory())
+
     def _open_coronary_tree_file(self, path: str) -> None:
         """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
         load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /
@@ -6091,6 +6145,14 @@ class MainWindow(QMainWindow):
         for p in cp_files:
             self._open_case_presentation_file(p)
         paths = [p for p in paths if p not in cp_files]
+        # Peel off .territory.json drops FIRST (a saved Territory session) → restore
+        # corotree + FullLv + Targets + review in one go. Checked before the plain
+        # corotree / FullLv detectors (it is its own format marker).
+        terr_files = [p for p in paths
+                      if os.path.isfile(p) and self._is_territory_json(p)]
+        for p in terr_files:
+            self._open_territory_file(p)
+        paths = [p for p in paths if p not in terr_files]
         # Peel off Coronary Tree .corotree.json drops → open the panel, load the
         # tree and re-open its source 3-D CT with the overlay.
         ct_files = [p for p in paths

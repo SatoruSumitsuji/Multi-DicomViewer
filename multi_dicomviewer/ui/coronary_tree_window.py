@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import full_lv as full_lv_mod
 from multi_dicomviewer.core import settings as settings_mod
+from multi_dicomviewer.core import territory_file as territory_file_mod
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
     ROOT_ROLES, CoronaryTree, format_territory_report, short_vessel_name)
@@ -116,8 +117,9 @@ class CoronaryTreeWindow(SnapDock):
         b = self._by_uid.get(uid)
         if b is None:
             b = {"tree": CoronaryTree(), "hidden": set(), "targets": [],
-                 "full_lv": None, "territory": None, "myo_ml": None,
-                 "ct_dir": "", "last_path": None, "label": "", "visible": True,
+                 "full_lv": None, "full_lv_path": "", "territory": None,
+                 "myo_ml": None, "ct_dir": "", "last_path": None,
+                 "terr_path": "", "label": "", "visible": True,
                  "series": {}, "paths": {}}   # paths: vid → its .cpr.json file
             self._by_uid[uid] = b
         return b
@@ -197,6 +199,16 @@ class CoronaryTreeWindow(SnapDock):
     def _full_lv_data(self): return self._bundle()["full_lv"]
     @_full_lv_data.setter
     def _full_lv_data(self, v): self._bundle()["full_lv"] = v
+
+    @property
+    def _full_lv_path(self): return self._bundle().get("full_lv_path", "")
+    @_full_lv_path.setter
+    def _full_lv_path(self, v): self._bundle()["full_lv_path"] = v or ""
+
+    @property
+    def _terr_path(self): return self._bundle().get("terr_path", "")
+    @_terr_path.setter
+    def _terr_path(self, v): self._bundle()["terr_path"] = v or ""
 
     @property
     def _territory(self): return self._bundle()["territory"]
@@ -1237,7 +1249,9 @@ class CoronaryTreeWindow(SnapDock):
         the territory analysis, then compute + show the report. Public — the
         shell calls it on a .FullLv.json drop."""
         data = data_or_path
+        src_path = ""
         if isinstance(data_or_path, str):
+            src_path = data_or_path
             try:
                 with open(data_or_path, encoding="utf-8") as f:
                     data = json.load(f)
@@ -1268,11 +1282,134 @@ class CoronaryTreeWindow(SnapDock):
         if not self._active_uid and fser:
             self._use_uid(fser)
         self._full_lv_data = data
+        if src_path:
+            self._full_lv_path = src_path            # for the linked-file readout
         if not self._ct_dir:
             self._ct_dir = ((data.get("src") or {}).get("src_dir")) or ""
         self._targets = []
         self._compute_territory()
         return True
+
+    # ---- .territory.json: save / load the whole Territory session -------
+    def save_territory(self, path: str | None = None) -> bool:
+        """Save the current Territory session (corotree + FullLv + Targets +
+        params) to a ``.territory.json``. Needs a tree AND a FullLv loaded.
+        Returns True on success. Called by the Territory bar's 保存 button (via the
+        shell) and usable headlessly with an explicit *path*."""
+        if not self._tree.vessels:
+            self._warn(t("先に冠動脈ツリーを読み込んでください。"))
+            return False
+        if self._full_lv_data is None:
+            self._warn(t("先に FullLv を読み込んでください。"))
+            return False
+        series = self._corotree_series_block()
+        coro = self._tree.to_json(series=series)
+        src_meta = {
+            "series_uid": self._ct_uid, "src_dir": self._ct_dir,
+            "patient": series.get("patient", ""),
+            "date": series.get("date", ""),
+            "series_number": series.get("series_number", ""),
+        }
+        data, err = territory_file_mod.build(
+            src_meta=src_meta, corotree_data=coro,
+            corotree_path=self._last_path or "",
+            full_lv_data=self._full_lv_data,
+            full_lv_path=self._full_lv_path or "",
+            targets=[dict(tg) for tg in self._targets],
+            params={"territory_opacity": float(getattr(self, "_terr_alpha", 0.45)),
+                    "targets_shown": bool(getattr(self, "_targets_shown", True))})
+        if data is None:
+            self._warn(t("territory を保存できません: {e}", e=err))
+            return False
+        if path is None:
+            d = os.path.dirname(self._last_path or self._full_lv_path or "") or ""
+            meta = territory_file_mod.label_meta(data)
+            stem = "_".join(p for p in (meta.get("date", ""),
+                                        meta.get("series_number")
+                                        and "Se" + meta.get("series_number"))
+                            if p) or "territory"
+            default = os.path.join(d, stem + ".territory.json") if d \
+                else stem + ".territory.json"
+            path, _ = QFileDialog.getSaveFileName(
+                self, t("Territory を保存"), default,
+                t("Territory (*.territory.json)"))
+            if not path:
+                return False
+        if not path.endswith(".json"):
+            path += ".territory.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            self._warn(t("保存に失敗しました: {e}", e=str(exc)))
+            return False
+        self._terr_path = path
+        self._hint.setText(t("Territory を保存しました: {p}",
+                             p=os.path.basename(path)))
+        return True
+
+    def load_territory(self, data_or_path, path: str = "") -> bool:
+        """Load a ``.territory.json`` (parsed dict OR a path): restore the corotree,
+        the FullLv, the Targets and the display params, then compute + show the
+        territory review. Public — the shell calls it on a .territory.json drop."""
+        data = data_or_path
+        src_path = path
+        if isinstance(data_or_path, str):
+            src_path = data_or_path
+            try:
+                with open(data_or_path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError) as exc:            # noqa: BLE001
+                self._warn(t("読込に失敗しました: {e}", e=str(exc)))
+                return False
+        if not territory_file_mod.is_territory(data):
+            self._warn(t("Territory (.territory.json) 形式ではありません。"))
+            return False
+        coro = territory_file_mod.corotree_data(data)
+        full = territory_file_mod.full_lv_data(data)
+        if not isinstance(coro, dict) or not full_lv_mod.is_full_lv(full):
+            self._warn(t("territory ファイルの中身が不完全です。"))
+            return False
+        uid = territory_file_mod.series_uid(data)
+        ser = coro.get("series") or {}
+        self._use_uid(uid, ct_dir=territory_file_mod.src_dir(data), series=ser)
+        # Restore the tree, its source paths, params and targets, then the FullLv
+        # (which computes + shows the territory).
+        self._tree = CoronaryTree.from_json(coro)
+        self._dedupe_tree()
+        self._hidden.clear()
+        self._last_path = territory_file_mod.corotree_path(data) or ""
+        self._full_lv_path = territory_file_mod.full_lv_path(data) or ""
+        self._terr_path = src_path or ""
+        p = territory_file_mod.params(data)
+        if "territory_opacity" in p:
+            try:
+                self._terr_alpha = max(0.0, min(1.0, float(p["territory_opacity"])))
+                self._sync_terr_alpha_combo()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._full_lv_data = full
+        self._targets = [dict(tg) for tg in territory_file_mod.targets(data)]
+        self._compute_territory()                  # rebuilds engine + targets + overlay
+        self.show()
+        self.raise_()
+        label = full_lv_mod.format_label(
+            territory_file_mod.label_meta(data), "Territory")
+        self._hint.setText(t("Territory を読込みました: {p}",
+                             p=os.path.basename(src_path) if src_path else label))
+        return True
+
+    def _sync_terr_alpha_combo(self) -> None:
+        """Reflect self._terr_alpha on the 透過度 combo without re-triggering it."""
+        combo = getattr(self, "_terr_alpha_combo", None)
+        if combo is None:
+            return
+        tp = int(round((1.0 - float(self._terr_alpha)) * 100))
+        i = combo.findData(tp)
+        if i >= 0:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(i)
+            combo.blockSignals(False)
 
     def _compute_territory(self) -> None:
         """Re-entrancy guard around the actual compute. _run_busy pumps the event
@@ -2067,6 +2204,27 @@ class CoronaryTreeWindow(SnapDock):
         else:
             self._save_as()
 
+    def _corotree_series_block(self) -> dict:
+        """The embedded ``series`` block for a corotree / territory save: the
+        source-CT UID + folder + the readable identity (症例 / 検査日 / Se番号). The
+        readable meta is embedded so a later load WITHOUT the CT open still labels
+        the dataset clearly instead of a bare UID; pulled from the live loaded-CT
+        header (via the shell), then the bundle's stored series meta."""
+        series = {"series_uid": self._ct_uid, "src_dir": self._ct_dir}
+        live_meta = {}
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_series_meta"):
+            try:
+                live_meta = self._shell.coronary_series_meta(self._ct_uid) or {}
+            except Exception:                            # noqa: BLE001
+                live_meta = {}
+        stored_meta = self._bundle().get("series") or {}
+        for _k in ("patient", "date", "series_number"):
+            _v = live_meta.get(_k) or stored_meta.get(_k)
+            if _v not in (None, ""):
+                series[_k] = _v
+        return series
+
     def _write_to(self, path):
         try:
             # Refresh the saved source folder from the LIVE loaded CT (dirname of
@@ -2082,25 +2240,10 @@ class CoronaryTreeWindow(SnapDock):
                     live = ""
                 if live and os.path.isdir(live):
                     self._ct_dir = live                  # persist on the bundle too
-            # Embed the source-CT identity so a later load (or a drag&drop of
-            # the .corotree.json onto the shell) can re-open the same 3-D CT.
-            series = {"series_uid": self._ct_uid, "src_dir": self._ct_dir}
-            # Also embed the READABLE identity (症例 / 検査日 / Se番号) so loading the
-            # tree WITHOUT the source CT open still labels the group clearly in the
-            # Coronary Tree tab instead of falling back to the bare UID. Prefer the
-            # live loaded-CT header, then the bundle's stored series meta.
-            live_meta = {}
-            if self._shell is not None \
-                    and hasattr(self._shell, "coronary_series_meta"):
-                try:
-                    live_meta = self._shell.coronary_series_meta(self._ct_uid) or {}
-                except Exception:                        # noqa: BLE001
-                    live_meta = {}
-            stored_meta = self._bundle().get("series") or {}
-            for _k in ("patient", "date", "series_number"):
-                _v = live_meta.get(_k) or stored_meta.get(_k)
-                if _v not in (None, ""):
-                    series[_k] = _v
+            # Embed the source-CT identity (+ readable 症例/検査日/Se番号) so a later
+            # load (or a drag&drop onto the shell) re-opens the same 3-D CT and
+            # labels it clearly even without the CT open. See _corotree_series_block.
+            series = self._corotree_series_block()
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._tree.to_json(series=series), f,
                           ensure_ascii=False, indent=2)
