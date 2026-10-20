@@ -11711,56 +11711,70 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_apply_xform(key)                 # feeds the label-map mask + matrix
         p.render()
 
-    def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
-        """Cast a ray through (sx, sy) on VR pane *key* and return the coronary
-        (vid, sample-idx) under the cursor, or None. Among the samples within *tol_mm*
-        of the ray the NEAREST-THE-CAMERA one wins, so a click sets a Target on the
-        visible near-side vessel, never a far-side RCA behind the heart."""
+    def _vr_pick_vessel(self, key, sx, sy, tol_px=16.0):
+        """The coronary (vid, sample-idx) under a click at (sx, sy) on VR pane *key*,
+        or None. Vessel samples are projected to the screen through the SAME matrix the
+        tubes render under (orientation + the toward-camera depth LIFT), so the hit is
+        the line exactly where it is DRAWN under the cursor. Among the samples whose
+        projection is within *tol_px* of the click, the OUTERMOST (nearest-camera) one
+        wins — the frontmost coronary line the user is looking at; it never jumps to a
+        laterally-offset or far-side vessel."""
         src = self._coro_overlay_vr or self._coro_overlay
         if not self._vr_on.get(key) or not src:
             return None
         p = self.pane[key]
         ren = p.ren
         dpr = max(1.0, p.canvas.devicePixelRatioF())
-        size = ren.GetRenderWindow().GetSize()
+        W, H = ren.GetRenderWindow().GetSize()
         vx = sx * dpr
-        vy = size[1] - sy * dpr
-
-        def world_at(z):
-            ren.SetDisplayPoint(vx, vy, z)
-            ren.DisplayToWorld()
-            w = ren.GetWorldPoint()
-            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
-
-        a = world_at(0.0)                            # ray start (near plane, toward cam)
-        d = world_at(1.0) - a
+        vy = H - sy * dpr                            # VTK display y is bottom-up
+        cam = ren.GetActiveCamera()
+        cpos = np.asarray(cam.GetPosition(), float)
+        # The display matrix = toward-camera LIFT · orientation M (what the tubes use).
+        M = self._vr_xform.get(key)
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        d = cpos - np.asarray(cam.GetFocalPoint(), float)
         dn = float(np.linalg.norm(d))
         if dn < 1e-6:
             return None
-        d = d / dn                                   # ray dir into the scene (t grows = farther)
-        M = self._vr_xform.get(key)                  # tubes render under this matrix
-        Mm = np.asarray(M, float) if M is not None else None
-        best_t, best_vid, best_idx = 1e18, None, None
+        L = np.eye(4)
+        L[:3, 3] = (d / dn) * _VR_CORO_LIFT_MM
+        Lm = L @ Mm
+        # World → display (device px) via the camera's composite projection matrix.
+        cm = cam.GetCompositeProjectionTransformMatrix(
+            ren.GetTiledAspectRatio(), -1.0, 1.0)
+        C = np.array([[cm.GetElement(i, j) for j in range(4)] for i in range(4)])
+        tol2 = (tol_px * dpr) ** 2
+        best_in, best_any = (1e18, None, None), (1e18, None, None)   # (key, vid, idx)
         for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
                 continue
+            vid = ves.get("vid")
             P = np.asarray(p3, float)
-            if Mm is not None:                       # to rendered (world) coords
-                Ph = np.column_stack([P, np.ones(len(P))]) @ Mm.T
-                P = Ph[:, :3] / Ph[:, 3:4]
-            t = (P - a) @ d                          # distance along ray (smaller = nearer cam)
-            proj = a + np.outer(t, d)
-            dist = np.linalg.norm(P - proj, axis=1)
-            within = np.where(dist <= tol_mm)[0]     # samples under the cursor
-            if len(within) == 0:
-                continue
-            j = int(within[np.argmin(t[within])])    # the NEAREST-camera of them
-            if t[j] < best_t:
-                best_t, best_vid, best_idx = float(t[j]), ves.get("vid"), j
-        if best_vid is None:
-            return None
-        return best_vid, int(best_idx)
+            Pw = (np.column_stack([P, np.ones(len(P))]) @ Lm.T)      # lifted world
+            Pw = Pw[:, :3] / Pw[:, 3:4]
+            clip = np.column_stack([Pw, np.ones(len(Pw))]) @ C.T
+            w = clip[:, 3:4]
+            w[np.abs(w) < 1e-9] = 1e-9
+            ndc = clip[:, :3] / w
+            dxp = (ndc[:, 0] * 0.5 + 0.5) * W - vx
+            dyp = (ndc[:, 1] * 0.5 + 0.5) * H - vy
+            px2 = dxp * dxp + dyp * dyp                              # px² from the click
+            camd = np.linalg.norm(Pw - cpos, axis=1)                # smaller = outermost
+            i_any = int(np.argmin(px2))
+            if px2[i_any] < best_any[0]:
+                best_any = (float(px2[i_any]), vid, i_any)
+            near = np.where(px2 <= tol2)[0]                         # under the cursor
+            if len(near):
+                j = int(near[np.argmin(camd[near])])               # outermost of them
+                if camd[j] < best_in[0]:
+                    best_in = (float(camd[j]), vid, j)
+        if best_in[1] is not None:                  # a line is under the cursor
+            return best_in[1], int(best_in[2])
+        if best_any[1] is not None:                 # else the closest line on screen
+            return best_any[1], int(best_any[2])
+        return None
 
     def _vr_pick_target(self, key, sx, sy) -> bool:
         """3-D target pick on the VR: set a Target at the nearest coronary sample
@@ -11786,49 +11800,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_move_cb = cb
 
     def _vr_move_target(self, key, n, sx, sy, commit=False) -> None:
-        """Drag Target #n on VR pane *key*: re-pick the nearest coronary sample
-        under the cursor and report it (n, vid, idx, commit) so the panel moves the
-        Target there along the tree. During the drag *commit* is False → the panel
-        just repositions the marker (cheap); on release it is True → the panel
-        recomputes the territory ONCE. (Recomputing on every drag step ran the modal
-        busy window's processEvents re-entrantly → the endless 再計算 loop.)"""
+        """Drag Target #n on VR pane *key*: re-pick the coronary sample DRAWN under the
+        cursor (the same screen-space, lift-aware, outermost pick as a Target set) and
+        report it (n, vid, idx, commit) so the panel moves the Target there along the
+        tree. During the drag *commit* is False → the panel just repositions the marker
+        (cheap); on release it is True → the panel recomputes the territory ONCE.
+        (Recomputing on every drag step ran the modal busy window's processEvents
+        re-entrantly → the endless 再計算 loop.)"""
         if self._coro_target_move_cb is None or not self._coro_overlay_vr:
             return
-        p = self.pane[key]
-        ren = p.ren
-        dpr = max(1.0, p.canvas.devicePixelRatioF())
-        size = ren.GetRenderWindow().GetSize()
-        vx = sx * dpr
-        vy = size[1] - sy * dpr
-
-        def world_at(z):
-            ren.SetDisplayPoint(vx, vy, z)
-            ren.DisplayToWorld()
-            w = ren.GetWorldPoint()
-            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
-
-        a = world_at(0.0)
-        d = world_at(1.0) - a
-        dn = float(np.linalg.norm(d))
-        if dn < 1e-6:
-            return
-        d = d / dn
-        best, best_vid, best_idx = 1e18, None, None
-        for ves in self._coro_overlay_vr:
-            p3 = ves.get("points")
-            if p3 is None or len(p3) < 2:
-                continue
-            P = np.asarray(p3, float)
-            t = (P - a) @ d
-            proj = a + np.outer(t, d)
-            dist = np.linalg.norm(P - proj, axis=1)
-            i = int(np.argmin(dist))
-            if dist[i] < best:
-                best, best_vid, best_idx = dist[i], ves.get("vid"), i
-        if best_vid is None or best > 12.0:
+        hit = self._vr_pick_vessel(key, sx, sy)
+        if hit is None:
             return
         try:
-            self._coro_target_move_cb(int(n), best_vid, int(best_idx), bool(commit))
+            self._coro_target_move_cb(int(n), hit[0], int(hit[1]), bool(commit))
         except Exception:                                # noqa: BLE001
             pass
 
