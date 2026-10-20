@@ -2083,6 +2083,22 @@ class CoronaryTreeWindow(SnapDock):
             # Embed the source-CT identity so a later load (or a drag&drop of
             # the .corotree.json onto the shell) can re-open the same 3-D CT.
             series = {"series_uid": self._ct_uid, "src_dir": self._ct_dir}
+            # Also embed the READABLE identity (症例 / 検査日 / Se番号) so loading the
+            # tree WITHOUT the source CT open still labels the group clearly in the
+            # Coronary Tree tab instead of falling back to the bare UID. Prefer the
+            # live loaded-CT header, then the bundle's stored series meta.
+            live_meta = {}
+            if self._shell is not None \
+                    and hasattr(self._shell, "coronary_series_meta"):
+                try:
+                    live_meta = self._shell.coronary_series_meta(self._ct_uid) or {}
+                except Exception:                        # noqa: BLE001
+                    live_meta = {}
+            stored_meta = self._bundle().get("series") or {}
+            for _k in ("patient", "date", "series_number"):
+                _v = live_meta.get(_k) or stored_meta.get(_k)
+                if _v not in (None, ""):
+                    series[_k] = _v
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._tree.to_json(series=series), f,
                           ensure_ascii=False, indent=2)

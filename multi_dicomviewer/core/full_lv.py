@@ -46,6 +46,13 @@ def build(epi_dict, bld_dict):
         "series_uid": ser.get("series_uid", "") or "",
         "src_dir": bld_dict.get("src_dir", "") or "",
         "spacing": [float(s) for s in (bld_dict.get("spacing") or [])],
+        # Human-readable source identity (症例 / 検査日 / Se番号) so a later load
+        # WITHOUT the source CT open can still label the dataset clearly in the
+        # LV Analysis / Coronary Tree tabs, not by the bare UID. Pulled from the
+        # BldLv's embedded series meta (viewer._lv_series_meta()).
+        "patient": ser.get("patient", "") or "",
+        "date": ser.get("date", "") or "",
+        "series_number": ser.get("series_number", "") or "",
     }
     return ({"format": FORMAT, "version": VERSION, "src": src,
              "epi": epi_dict, "bld": bld_dict}, "")
@@ -70,3 +77,37 @@ def spacing(data) -> list:
     sp = ((fd.get("src") or {}).get("spacing")
           or (fd.get("bld") or {}).get("spacing"))
     return [float(s) for s in sp] if sp else []
+
+
+def src_dir(data) -> str:
+    """Source-CT folder recorded in a FullLv (or '')."""
+    fd = data or {}
+    return (((fd.get("src") or {}).get("src_dir"))
+            or (fd.get("bld") or {}).get("src_dir")
+            or "")
+
+
+def label_meta(data) -> dict:
+    """Readable source identity for a dataset label: patient / date /
+    series_number / series_uid / src_dir. Prefers the FullLv ``src`` block, then
+    falls back to the embedded BldLv ``series`` meta. Empty strings when absent
+    (an older FullLv saved before these fields were embedded)."""
+    fd = data or {}
+    src = fd.get("src") or {}
+    ser = (fd.get("bld") or {}).get("series") or {}
+
+    def pick(*keys):
+        for store in (src, ser):
+            for k in keys:
+                v = store.get(k)
+                if v not in (None, ""):
+                    return str(v).strip()
+        return ""
+
+    return {
+        "patient": pick("patient", "patient_id"),
+        "date": pick("date", "study_date"),
+        "series_number": pick("series_number"),
+        "series_uid": series_uid(fd),
+        "src_dir": src_dir(fd),
+    }
