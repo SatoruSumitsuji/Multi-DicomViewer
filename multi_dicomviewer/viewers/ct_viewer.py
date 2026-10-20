@@ -12600,14 +12600,27 @@ class CTViewer(CPRMixin, AbstractViewer):
         reflected = float(np.linalg.det(M[:3, :3])) < 0.0
         mask = self._vr_mask_arr.get(key)
         terr = bool(getattr(self, "_vr_terr_mode", {}).get(key))
-
-        def _mask_img(arr):
-            if arr is None:
+        # The mask vtkImageData (a full-volume ~100 MB label map / binary crop) only
+        # depends on the mask array, the reflection and the mode — NOT on the camera
+        # rotation. Rebuilding it on every xform / target-drag step was the lag; cache
+        # it (reused as the SAME object → no GPU re-upload) and rebuild only when one
+        # of those actually changes.
+        def _mask_img():
+            if mask is None:
                 return None
-            # In territory mode the mask is the uint8 LABEL map (per-label colour);
-            # otherwise it is the plain binary crop (render / skip).
-            return self._label_to_vtk(arr) if terr else self._mask_to_vtk_binary(arr)
+            sig = (id(mask), bool(reflected), bool(terr))
+            cache = getattr(self, "_vr_mask_img_cache", None)
+            if cache is None:
+                cache = self._vr_mask_img_cache = {}
+            hit = cache.get(key)
+            if hit is not None and hit[0] == sig:
+                return hit[1]
+            arr = mask[:, :, ::-1] if reflected else mask
+            img = self._label_to_vtk(arr) if terr else self._mask_to_vtk_binary(arr)
+            cache[key] = (sig, img)
+            return img
 
+        mimg = _mask_img()
         if reflected:
             b = self._image.GetBounds()
             cx = 0.5 * (b[0] + b[1])                      # image X centre (world)
@@ -12616,12 +12629,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             F[0, 3] = 2.0 * cx                            # reflect about x = cx
             U = M @ F
             p.vr_mapper.SetInputData(self._vr_flipx_image())
-            p.vr_mapper.SetMaskInput(
-                _mask_img(mask[:, :, ::-1]) if mask is not None else None)
+            p.vr_mapper.SetMaskInput(mimg)
             p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(U))
         else:
             p.vr_mapper.SetInputData(self._image)
-            p.vr_mapper.SetMaskInput(_mask_img(mask) if mask is not None else None)
+            p.vr_mapper.SetMaskInput(mimg)
             p.vr_volume.SetUserMatrix(self._np_to_vtkmatrix(M))
         if mask is not None:
             if terr:
