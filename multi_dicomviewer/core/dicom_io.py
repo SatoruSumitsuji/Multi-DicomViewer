@@ -335,6 +335,33 @@ def index_files(
     return _build_tree(all_files, progress)
 
 
+def folder_has_dicom(folder: str, limit: int = 1000) -> bool:
+    """True if *folder* DIRECTLY (non-recursively) holds at least one readable DICOM
+    file. Shallow and cheap — stops at the FIRST hit (dcmread with force=False rejects
+    a non-DICOM at the DICM magic, without reading the body). Used as a gate so the
+    CT-find scan for a .corotree/.FullLv drop stays in the JSON's OWN folder and does
+    NOT broaden to a possibly-huge parent when the CT is right there beside the JSON."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return False
+    checked = 0
+    for name in names:
+        p = os.path.join(folder, name)
+        if not os.path.isfile(p):
+            continue
+        checked += 1
+        if checked > limit:
+            break
+        try:
+            pydicom.dcmread(p, stop_before_pixels=True,
+                            specific_tags=["SOPInstanceUID"], force=False)
+            return True
+        except Exception:                            # noqa: BLE001
+            continue
+    return False
+
+
 def index_paths(
     paths: list[str], progress: Optional[Callable[[int, int], None]] = None
 ) -> dict[str, Patient]:
