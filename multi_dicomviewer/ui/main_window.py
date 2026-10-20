@@ -2643,6 +2643,38 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def coronary_targets_only_refresh(self) -> None:
+        """Push ONLY the Target markers to each CT viewer (not the vessel tubes / the
+        territory colour). Used while DRAGGING a Target so the marker follows the cursor
+        cheaply — the full coronary_overlay_refresh rebuilds every tube and the VR
+        volume mask, which made the drag lag."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "target_specs"):
+            return
+        has_map = hasattr(w, "uid_for_series")
+        for p in self._panes:
+            try:
+                v = p.current_viewer()
+            except Exception:                            # noqa: BLE001
+                v = None
+            if v is None or not hasattr(v, "set_coronary_targets"):
+                continue
+            try:
+                su = p.shown_series_uid() or ""
+            except Exception:                            # noqa: BLE001
+                su = ""
+            pane_uid = w.uid_for_series(su) if has_map else ""
+            tspec = []
+            if pane_uid:
+                try:
+                    tspec = w.target_specs(uid=pane_uid or None)
+                except Exception:                        # noqa: BLE001
+                    tspec = []
+            try:
+                v.set_coronary_targets(tspec)
+            except Exception:                            # noqa: BLE001
+                pass
+
     def coronary_target_mode(self, on: bool) -> None:
         """Coronary Tree ▸ ターゲット設定 toggle: put every CT viewer into (or out
         of) the territory-target pick mode (left-click a vessel line → a Target)."""

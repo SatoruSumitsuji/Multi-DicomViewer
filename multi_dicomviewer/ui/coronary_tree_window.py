@@ -1219,6 +1219,16 @@ class CoronaryTreeWindow(SnapDock):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def _push_targets_only(self):
+        """Push ONLY the Target markers (fast) — used while DRAGGING a Target so the
+        marker follows the cursor without rebuilding every tube / the VR volume mask."""
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_targets_only_refresh"):
+            try:
+                self._shell.coronary_targets_only_refresh()
+            except Exception:                            # noqa: BLE001
+                pass
+
     # -------------------------------------------------------- territory
     def load_full_lv(self, data_or_path) -> bool:
         """Load a FullLv (parsed dict OR a .FullLv.json path) as the LV side of
@@ -1673,12 +1683,13 @@ class CoronaryTreeWindow(SnapDock):
         nn = self._tree.vessels[vid].n
         idx = max(0, min(int(idx), nn - 1))
         if phase == "preview":
-            # Remember the pre-drag state ONCE (for 元に戻る), then move the marker only.
+            # Remember the pre-drag state ONCE (for 元に戻る), then move the marker only
+            # (targets-only push → no tube / VR-mask rebuild → the drag stays smooth).
             dr = getattr(self, "_target_drag", None)
             if dr is None or dr.get("n") != n:
                 self._target_drag = {"n": n, "orig": dict(self._targets[i])}
             self._targets[i].update({"vid": vid, "idx": idx})
-            self._push_overlay()
+            self._push_targets_only()
             return
         # phase == "end": settle the marker at the drop, then confirm (deferred so the
         # modal dialog is not opened from inside the VR pointer handler).
