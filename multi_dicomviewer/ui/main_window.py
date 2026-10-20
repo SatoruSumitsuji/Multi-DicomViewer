@@ -1655,6 +1655,14 @@ class MainWindow(QMainWindow):
             ".corotree.json. Floats or docks with Studies"))
         self._corotree_act.triggered.connect(self._open_coronary_tree)
         tm.addAction(self._corotree_act)
+        self._lvanalysis_act = QAction(t("LV Analysis…"), self)
+        self._lvanalysis_act.setToolTip(t(
+            "Manage the LV side of a CT Territory analysis (the .FullLv.json): "
+            "list datasets by 日付 / 症例名 / Se番号, open the source CT to edit "
+            "MV / AoV / Apex / Epi / Blood-Endo, and save. Floats or docks with "
+            "Studies"))
+        self._lvanalysis_act.triggered.connect(self._open_lv_analysis)
+        tm.addAction(self._lvanalysis_act)
 
         tm.addSeparator()
         self._dicommanager_act = QAction(t("DicomManager…"), self)
@@ -2371,6 +2379,35 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
+    def _open_lv_analysis(self):
+        """Tools ▸ LV Analysis — a dockable manager for the LV side (.FullLv.json)
+        of a CT Territory analysis, equal in standing to the Coronary Tree. One
+        instance is kept. Docks + tabs with Studies in the LEFT area by default;
+        drag the tab out (or double-click its title bar) to float it."""
+        from multi_dicomviewer.ui.lv_analysis_window import LVAnalysisWindow
+        w = getattr(self, "_lvanalysis_win", None)
+        if w is None:
+            w = LVAnalysisWindow(self)
+            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
+            if getattr(self, "_studies_dock", None) is not None:
+                self.tabifyDockWidget(self._studies_dock, w)
+            self._lvanalysis_win = w
+            w.resize(380, 520)
+        if not w.isVisible():
+            w.show()
+        if w.isFloating():
+            too_small = w.width() < 220 or w.height() < 160
+            scr = self.screen().availableGeometry() if self.screen() else None
+            off = scr is not None and not scr.intersects(w.frameGeometry())
+            if too_small or off:
+                w.resize(380, 520)
+                c = self.geometry().center()
+                w.move(max(0, c.x() - 190), max(0, c.y() - 260))
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        return w
+
     def coronary_series_meta(self, uid: str) -> dict:
         """Live metadata (patient / study date / series number) of a LOADED CT
         series, looked up by UID (base-UID match tolerating a '#…' suffix), for
@@ -2790,7 +2827,154 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 import traceback
                 traceback.print_exc()
+        self._lv_analysis_register(full)                 # also list it in the LV tab
         return True
+
+    # ===================== LV Analysis tab coordination ================
+    def _lv_analysis_register(self, full) -> None:
+        """If the LV Analysis tab is open, add/refresh this FullLv in its list so
+        the LV dataset is visible there too (non-intrusive — never force-opens)."""
+        w = getattr(self, "_lvanalysis_win", None)
+        if w is not None and hasattr(w, "load_full_lv"):
+            try:
+                w.load_full_lv(full)
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def lv_open_full_for_edit(self, full_data, src_dir: str = "") -> bool:
+        """Open the source 3-D CT for a FullLv and load it into the viewer's
+        EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo), so the user can edit it in
+        the in-viewer LV bar. Called by the LV Analysis tab's 「元CTで編集」.
+
+        Decomposes the FullLv bundle into the 5-component ``files`` dict and feeds
+        the proven editable loader (``apply_lv_analysis``). The CT is found by UID,
+        else the saved src_dir is scanned, else the user is asked."""
+        import os
+        from multi_dicomviewer.core import full_lv
+        data = full_data or {}
+        bld = data.get("bld") or {}
+        epi = data.get("epi") or {}
+        files: dict = {}
+        if isinstance(bld.get("mitral"), dict):
+            files["valve_mitral"] = bld["mitral"]
+        if isinstance(bld.get("aortic"), dict):
+            files["valve_aortic"] = bld["aortic"]
+        if bld.get("apex") is not None:
+            files["apex"] = {"apex": bld["apex"]}
+        if isinstance(epi, dict) and epi:
+            files["epi"] = epi
+        if isinstance(bld, dict) and bld:
+            files["blood"] = bld
+        if not files:
+            return False
+        uid = full_lv.series_uid(data)
+        sd = src_dir or full_lv.src_dir(data)
+        if uid and self.case_series_loaded(uid):
+            self._poll_lv_apply(uid, files, 0)           # CT already up → apply now
+            return True
+        scan = sd if (sd and os.path.isdir(sd)) else ""
+        if scan:
+            self.case_open_folders([scan], dicom_only=True)
+            self._poll_lv_apply(uid, files, 0)
+            return True
+        from PyQt6.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(
+            self, t("この LV データの元となった3DCTフォルダを選択してください"))
+        if folder:
+            self.case_open_folders([folder], dicom_only=True)
+            self._poll_lv_apply(uid, files, 0)
+            return True
+        return False
+
+    def lv_save_active_full(self):
+        """Save the ACTIVE CT viewer's current editable LV state to a FullLv.json
+        AND the 5 component files (MV / AoV / Apex / Epi / Blood-Endo). Returns the
+        saved FullLv dict on success, False if there's nothing to save. Called by
+        the LV Analysis tab's 「保存」."""
+        import json
+        import numpy as np
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core import full_lv
+        v = self._active.current_viewer() if self._active is not None else None
+        if v is None or not hasattr(v, "_lvv_build_dict"):
+            return False
+        valves = getattr(v, "_lv_valves", {}) or {}
+        apex = getattr(v, "_lv_apex", None)
+        if valves.get("mitral") is None or valves.get("aortic") is None \
+                or apex is None:
+            QMessageBox.information(
+                self, t("LV Analysis"),
+                t("MV・AoV・Apex が揃っていません。先に「元CTで編集」で LV データを "
+                  "読み込んでから保存してください。"))
+            return False
+        try:
+            bld = v._lvv_build_dict(warn=False)
+            epi = v._full_lv_epi_dict()
+        except Exception as exc:                         # noqa: BLE001
+            QMessageBox.warning(self, t("LV Analysis"),
+                                t("保存用データの作成に失敗しました: {e}", e=str(exc)))
+            return False
+        if bld is None or epi is None:
+            QMessageBox.information(
+                self, t("LV Analysis"),
+                t("Epi または Blood/Endo が未完成です（Endo 境界・Epi 領域が必要）。"))
+            return False
+        full, err = full_lv.build(epi, bld)
+        if full is None:
+            QMessageBox.information(
+                self, t("LV Analysis"),
+                t("FullLv を作成できません: {e}", e=err or ""))
+            return False
+        # One path pick for the whole set; the 5 component files + the FullLv are
+        # written next to it under the same stem.
+        d = v._lv_series_dir() if hasattr(v, "_lv_series_dir") else ""
+        stem_name = (v._lv_default_stem() if hasattr(v, "_lv_default_stem")
+                     else "LV")
+        import os
+        default = os.path.join(d, stem_name + ".FullLv.json") if d \
+            else stem_name + ".FullLv.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, t("LV データを保存 (FullLv ＋ 個別ファイル)"), default,
+            "Full LV (*.FullLv.json);;JSON (*.json)")
+        if not path:
+            return False
+        if path.endswith(".FullLv.json"):
+            stem = path[:-len(".FullLv.json")]
+        elif path.endswith(".json"):
+            stem = path[:-len(".json")]
+        else:
+            stem = path
+        sm = v._lv_series_meta() if hasattr(v, "_lv_series_meta") else {}
+        sd = v._lv_series_dir() if hasattr(v, "_lv_series_dir") else ""
+
+        def _dump(obj, p):
+            if hasattr(v, "_unlink_case_variant"):
+                try:
+                    v._unlink_case_variant(p)
+                except Exception:                        # noqa: BLE001
+                    pass
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False)
+
+        try:
+            for which, suf in (("mitral", ".MVLv.json"),
+                               ("aortic", ".AoVLv.json")):
+                c, n, r = valves[which]
+                _dump({"type": "valve", "valve": which, "series": sm,
+                       "src_dir": sd,
+                       "c": list(map(float, c)), "n": list(map(float, n)),
+                       "r": float(r)}, stem + suf)
+            _dump({"type": "apex", "series": sm, "src_dir": sd,
+                   "apex": list(map(float, np.asarray(apex, float)))},
+                  stem + ".ApxLv.json")
+            _dump(epi, stem + ".EpiLv.json")
+            _dump(bld, stem + ".BldLv.json")
+            _dump(full, stem + ".FullLv.json")
+        except OSError as exc:
+            QMessageBox.warning(self, t("LV Analysis"),
+                                t("保存に失敗しました: {e}", e=str(exc)))
+            return False
+        return full
 
     def coronary_territory_summary(self, text: str) -> None:
         """Overlay the per-system territory summary (myocardium + LM/LAD/LCX/RCA)
@@ -3196,6 +3380,7 @@ class MainWindow(QMainWindow):
         if getattr(w, "_tree", None) is not None and w._tree.vessels \
                 and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
+        self._lv_analysis_register(data)                 # also list it in the LV tab
         self._poll_full_lv_apply(uid, data, 0)
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:

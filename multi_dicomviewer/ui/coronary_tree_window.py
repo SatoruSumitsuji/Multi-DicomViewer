@@ -165,7 +165,9 @@ class CoronaryTreeWindow(SnapDock):
         date = pick("date", "study_date")                   # 8-digit, no dashes
         sn = pick("series_number")
         se = f"Se{sn}" if sn else ""
-        parts = [p for p in (name, date, se) if p]
+        # Display order per request: 日付 → 症例名 → シリーズ番号 (so a glance tells
+        # which source data a dataset derives from). Same order in the LV tab.
+        parts = [p for p in (date, name, se) if p]
         short = (uid[:16] + "…") if uid and len(uid) > 16 else uid
         if len(parts) == 3:                                 # all present → no ID
             return "CT: " + " ".join(parts)

@@ -87,6 +87,27 @@ def src_dir(data) -> str:
             or "")
 
 
+def format_label(meta: dict, prefix: str = "") -> str:
+    """One-line human label for a dataset from its :func:`label_meta`, in the
+    requested order 日付 → 症例名 → Se番号 (so a glance identifies the source).
+    Appends a short source UID only when a field is missing; UID alone when
+    nothing readable is known. *prefix* (e.g. "LV", "CT") heads the string."""
+    meta = meta or {}
+    name = str(meta.get("patient") or "").strip()
+    date = str(meta.get("date") or "").strip()          # 8-digit, no dashes
+    sn = str(meta.get("series_number") or "").strip()
+    uid = str(meta.get("series_uid") or "").strip()
+    se = f"Se{sn}" if sn else ""
+    parts = [p for p in (date, name, se) if p]
+    short = (uid[:16] + "…") if uid and len(uid) > 16 else uid
+    head = (prefix + ": ") if prefix else ""
+    if len(parts) == 3:                                  # all present → no ID
+        return head + " ".join(parts)
+    if parts:                                            # some missing → + ID
+        return head + " ".join(parts) + " / " + (short or "(ID不明)")
+    return head + (short or "(未指定)")                   # nothing → ID only
+
+
 def label_meta(data) -> dict:
     """Readable source identity for a dataset label: patient / date /
     series_number / series_uid / src_dir. Prefers the FullLv ``src`` block, then
