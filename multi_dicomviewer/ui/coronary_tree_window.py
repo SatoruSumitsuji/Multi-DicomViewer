@@ -140,40 +140,25 @@ class CoronaryTreeWindow(SnapDock):
         return b
 
     def _uid_label(self, uid, series=None):
-        """CT-group label = 症例 / 検査日(8桁) / シリーズ番号 (patient / study date /
-        Se#). The LIVE loaded-CT metadata is preferred (always correct once the CT
-        is up), then the .cpr.json's embedded *series*. If ALL three are present →
-        just those; if ANY is missing → append the source UID after whatever
-        exists; if none → the UID alone."""
-        emb = dict(series or {})
-        # Also pull the readable identity from an associated FullLv (its src block
-        # carries 症例/検査日/Se#). In a Territory session the FullLv is loaded into
-        # this CT's bundle, so the tree labels correctly even when the corotree.json
-        # predates meta-embedding AND the live-UID lookup misses (the bug where the
-        # row showed a bare UID while the LV tab — reading the same FullLv — did not).
-        b = self._by_uid.get(uid) or {}
-        fl = b.get("full_lv")
-        if fl:
-            try:
-                fmeta = full_lv_mod.label_meta(fl)
-                for _k in ("patient", "date", "series_number"):
-                    if not emb.get(_k) and fmeta.get(_k):
-                        emb[_k] = fmeta[_k]
-            except Exception:                               # noqa: BLE001
-                pass
-        live = {}
-        if self._shell is not None and hasattr(self._shell, "coronary_series_meta"):
-            try:
-                live = self._shell.coronary_series_meta(uid) or {}
-            except Exception:                               # noqa: BLE001
-                live = {}
+        """CT-group label = 検査日(8桁) / 症例 / シリーズ番号 (study date / patient /
+        Se#), built ONLY from the .corotree.json's own embedded *series* meta. If
+        all three are present → just those; if any is missing → append the source
+        UID; if none → the UID alone.
+
+        By design the label is NOT enriched from the live CT or an associated
+        FullLv / other file: a row that still shows a bare UID is the SIGNAL that
+        this is an OLD corotree.json with no embedded 症例/検査日/Se# — i.e. re-save
+        it to fix the name. Backfilling from elsewhere would hide that signal
+        (user request, 2026-10-21). The meta is embedded at SAVE time (_write_to
+        pulls it from the live CT then), so a freshly saved tree labels correctly
+        on its own."""
+        emb = series or {}
 
         def pick(*keys):
-            for src in (live, emb):                         # live wins
-                for k in keys:
-                    v = src.get(k)
-                    if v not in (None, ""):
-                        return str(v).strip()
+            for k in keys:
+                v = emb.get(k)
+                if v not in (None, ""):
+                    return str(v).strip()
             return ""
 
         name = pick("patient", "patient_id")
