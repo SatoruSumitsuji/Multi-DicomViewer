@@ -18,7 +18,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -99,19 +98,24 @@ class _ScanWorker(QThread):
             self.done.emit(out)
 
 
-class DicomCheckWindow(QMainWindow):
+class DicomCheckPanel(QWidget):
+    """The DicomCheck UI as an embeddable panel (used inside DicomManager).
+
+    Emits ``folder_dropped(path)`` when a folder is dropped on it (the host loads
+    it into every panel) and ``processed()`` after a delete changes the source (the
+    host re-scans every panel)."""
+
+    folder_dropped = pyqtSignal(str)
+    processed = pyqtSignal()
+
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(t("DicomCheck — remove non-DICOM files"))
-        self.resize(900, 700)
         self.setAcceptDrops(True)                  # drop a folder anywhere
         self._root: str | None = None
         self._worker: _ScanWorker | None = None
         self._guard = False                        # re-entrancy for itemChanged
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QVBoxLayout(self)
 
         root.addWidget(QLabel(t(
             "Keep DICOM files only — find non-DICOM files and empty folders "
@@ -189,14 +193,19 @@ class DicomCheckWindow(QMainWindow):
         d = self._dropped_dir(ev)
         if d:
             ev.acceptProposedAction()
-            self._start_scan(d)
+            self.folder_dropped.emit(d)             # host loads it into every panel
+
+    def load_folder(self, path: str) -> None:
+        """Public: (re)scan *path* — called by the host on drop / after a sibling
+        panel changed the folder."""
+        self._start_scan(path)
 
     # --------------------------------------------------------------- scan
     def _pick(self) -> None:
         d = QFileDialog.getExistingDirectory(
             self, t("Select folder"), self._root or "")
         if d:
-            self._start_scan(d)
+            self.folder_dropped.emit(d)             # host loads it into every panel
 
     def _start_scan(self, d: str) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -354,9 +363,8 @@ class DicomCheckWindow(QMainWindow):
         if fail:
             msg += t("  ({n} could not be deleted)", n=fail)
         QMessageBox.information(self, t("DicomCheck"), msg + ".")
-        # Re-scan so the tree reflects the new state.
-        if self._root:
-            self._start_scan(self._root)
+        # The source changed — the host re-scans EVERY panel (this one included).
+        self.processed.emit()
 
     def _remove_empty_dirs(self) -> int:
         if not self._root:
@@ -373,8 +381,12 @@ class DicomCheckWindow(QMainWindow):
                 pass
         return removed
 
-    def closeEvent(self, ev):                       # noqa: N802 (Qt override)
+    def cleanup(self) -> None:
+        """Stop the scan worker — called by the host window on close."""
         if self._worker is not None and self._worker.isRunning():
             self._worker.stop()
             self._worker.wait(2000)
+
+    def closeEvent(self, ev):                       # noqa: N802 (Qt override)
+        self.cleanup()
         super().closeEvent(ev)
