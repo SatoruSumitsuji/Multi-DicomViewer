@@ -59,7 +59,7 @@ class _ScanWorker(QThread):
 
     counting = pyqtSignal()
     progress = pyqtSignal(int, int)               # done, total
-    done = pyqtSignal(list)                        # [(relpath, full, size)]
+    done = pyqtSignal(list, dict)                 # [(relpath, full, size)], stats
 
     def __init__(self, root: str, include_dicomdir: bool):
         super().__init__()
@@ -80,22 +80,33 @@ class _ScanWorker(QThread):
                 all_files.append(os.path.join(dirpath, fn))
         total = len(all_files)
         out: list[tuple[str, str, int]] = []
+        total_size = dcm_files = dcm_size = non_files = non_size = 0
         for i, fp in enumerate(all_files):
             if self._abort:
                 return
             name = os.path.basename(fp)
             is_dcm = _is_dicom(fp)
+            try:
+                size = os.path.getsize(fp)
+            except OSError:
+                size = 0
+            total_size += size
+            if is_dcm:
+                dcm_files += 1
+                dcm_size += size
+            else:
+                non_files += 1
+                non_size += size
             is_dicomdir = name.upper() == "DICOMDIR"
             if (not is_dcm) or (is_dicomdir and self._inc):
-                try:
-                    size = os.path.getsize(fp)
-                except OSError:
-                    size = 0
                 out.append((os.path.relpath(fp, self._root), fp, size))
             if i % 50 == 0 or i == total - 1:
                 self.progress.emit(i + 1, total)
         if not self._abort:
-            self.done.emit(out)
+            stats = {"total_files": total, "total_size": total_size,
+                     "dcm_files": dcm_files, "dcm_size": dcm_size,
+                     "non_files": non_files, "non_size": non_size}
+            self.done.emit(out, stats)
 
 
 class DicomCheckPanel(QWidget):
@@ -133,8 +144,14 @@ class DicomCheckPanel(QWidget):
         root.addLayout(row)
 
         self._path_lbl = QLabel(t("No folder selected."))
-        self._path_lbl.setStyleSheet("color:#555;")
+        # Slightly larger + bold so the current folder path is easy to read.
+        self._path_lbl.setStyleSheet("color:#333; font-size:13px; font-weight:bold;")
         root.addWidget(self._path_lbl)
+
+        # Per-folder tally: Total / non-DICOM / DICOM (files + size), filled on scan.
+        self._summary_lbl = QLabel("")
+        self._summary_lbl.setStyleSheet("color:#555;")
+        root.addWidget(self._summary_lbl)
 
         self._tree = QTreeWidget()
         self._tree.setHeaderLabels([t("Name"), t("Size")])
@@ -212,6 +229,7 @@ class DicomCheckPanel(QWidget):
             return
         self._root = d
         self._path_lbl.setText(t("Folder: {d}", d=d))
+        self._summary_lbl.setText("")
         self._tree.clear()
         self._stat_lbl.setText("")
         self._set_busy(True)
@@ -229,9 +247,20 @@ class DicomCheckPanel(QWidget):
         self._bar.setValue(done)
         self._stat_lbl.setText(t("Scanning… {done}/{total}", done=done, total=total))
 
-    def _on_scan_done(self, items: list[tuple[str, str, int]]) -> None:
+    def _on_scan_done(self, items: list[tuple[str, str, int]],
+                      stats: dict | None = None) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
+        if stats:
+            self._summary_lbl.setText(t(
+                "Total {tn} files {ts},  non-DICOM {nn} files {ns},  "
+                "DICOM {dn} files {ds}",
+                tn=stats.get("total_files", 0),
+                ts=_human(stats.get("total_size", 0)),
+                nn=stats.get("non_files", 0),
+                ns=_human(stats.get("non_size", 0)),
+                dn=stats.get("dcm_files", 0),
+                ds=_human(stats.get("dcm_size", 0))))
         self._populate(items)
         has = bool(items)
         self._all_btn.setEnabled(has)
