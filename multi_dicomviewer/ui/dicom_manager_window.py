@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import os
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QMainWindow, QSplitter
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QMainWindow, QMessageBox, QSplitter
 
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.ui.dicom_check_window import DicomCheckPanel
@@ -46,7 +46,10 @@ class DicomManagerWindow(QMainWindow):
         # BOTH so DicomCheck and DicomFolder always reflect the same folder state.
         for pnl in (self._check, self._folder):
             pnl.folder_dropped.connect(self._load_into_all)
-            pnl.processed.connect(self._reload_all)
+            # After a Sort Files / Delete finishes, the folder changed — but a
+            # re-scan isn't always wanted, so ASK (再スキャン / Clear / 終了)
+            # instead of auto-reloading both panels.
+            pnl.processed.connect(self._after_action)
         # "Clear Selection" (on the DicomFolder panel) clears BOTH views: the
         # folder panel has already reset itself, so the host clears DicomCheck too
         # and forgets the current root.
@@ -70,6 +73,35 @@ class DicomManagerWindow(QMainWindow):
         itself, so clear the DicomCheck panel and forget the root."""
         self._root = None
         self._check.clear()
+
+    # ---- what to do after a Sort Files / Delete ------------------------
+    def _after_action(self) -> None:
+        """A panel finished a Sort Files / Delete. Re-scanning isn't always
+        needed, so defer and ask the user what to do next."""
+        QTimer.singleShot(0, self._ask_next)
+
+    def _ask_next(self) -> None:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(t("DicomManager"))
+        box.setText(t("Processing finished. What would you like to do?"))
+        rescan_btn = box.addButton(t("Re-scan"),
+                                   QMessageBox.ButtonRole.AcceptRole)
+        clear_btn = box.addButton(t("Clear Selection"),
+                                  QMessageBox.ButtonRole.ActionRole)
+        close_btn = box.addButton(t("Close"),
+                                  QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(rescan_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is rescan_btn:
+            self._reload_all()
+        elif clicked is clear_btn:
+            # Clear BOTH views; the folder panel's _clear emits `cleared`, which
+            # the host routes to _clear_all to also clear DicomCheck.
+            self._folder._clear()
+        elif clicked is close_btn:
+            self.close()
 
     # ---- drag&drop on the window chrome (splitter handle / margins) -----
     @staticmethod
