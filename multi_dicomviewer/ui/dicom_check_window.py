@@ -217,6 +217,23 @@ class DicomCheckPanel(QWidget):
         panel changed the folder."""
         self._start_scan(path)
 
+    def clear(self) -> None:
+        """Public: reset this panel to its initial empty state (the host calls this
+        when "Clear Selection" is pressed on the DicomFolder panel)."""
+        if self._worker is not None and self._worker.isRunning():
+            return
+        self._root = None
+        self._guard = True
+        self._tree.clear()
+        self._guard = False
+        self._path_lbl.setText(t("No folder selected."))
+        self._summary_lbl.setText("")
+        self._stat_lbl.setText("")
+        self._bar.setVisible(False)
+        self._all_btn.setEnabled(False)
+        self._none_btn.setEnabled(False)
+        self._del_btn.setEnabled(False)
+
     # --------------------------------------------------------------- scan
     def _pick(self) -> None:
         d = QFileDialog.getExistingDirectory(

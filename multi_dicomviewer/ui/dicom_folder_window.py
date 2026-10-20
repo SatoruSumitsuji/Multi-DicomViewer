@@ -685,6 +685,7 @@ class DicomFolderPanel(QWidget):
 
     folder_dropped = pyqtSignal(str)
     processed = pyqtSignal()
+    cleared = pyqtSignal()                           # "Clear Selection" was pressed
 
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
@@ -873,16 +874,11 @@ class DicomFolderPanel(QWidget):
         root.addWidget(self._bar)
 
         brow = QHBoxLayout()
-        brow.addStretch(1)
-        # Red warning shown (left of the button) while no output folder is set.
-        # Kept at the button's ORIGINAL text size (per request), so capture that
-        # before enlarging the button.
+        # "Sort Files" sits at the FAR LEFT so it lines up under DicomCheck's
+        # "Select all" button. The red "no output folder" warning follows it, then
+        # a stretch pushes "Clear Selection" to the far right (position unchanged).
         self._go_btn = QPushButton(t("Sort Files"))
         _base_font = QFont(self._go_btn.font())
-        self._no_out_lbl = QLabel(t("Output folder is not selected"))
-        self._no_out_lbl.setFont(_base_font)
-        self._no_out_lbl.setStyleSheet("color:#d00;")
-        brow.addWidget(self._no_out_lbl)
         # Enlarge the action button ×1.5 to make it stand out (was "Organize").
         _go_font = QFont(_base_font)
         _go_font.setPointSizeF(_base_font.pointSizeF() * 1.5)
@@ -890,8 +886,15 @@ class DicomFolderPanel(QWidget):
         self._go_btn.setEnabled(False)
         self._go_btn.clicked.connect(self._organize)
         brow.addWidget(self._go_btn)
-        # "Clear Selection" (right of Sort Files): reset source/output folders
-        # and the scanned groups back to the initial empty state.
+        # Red warning shown (right of the button) while no output folder is set.
+        # Kept at the button's ORIGINAL text size (per request).
+        self._no_out_lbl = QLabel(t("Output folder is not selected"))
+        self._no_out_lbl.setFont(_base_font)
+        self._no_out_lbl.setStyleSheet("color:#d00;")
+        brow.addWidget(self._no_out_lbl)
+        brow.addStretch(1)
+        # "Clear Selection" (far right, position unchanged): clears BOTH the
+        # DicomFolder and the DicomCheck view back to the initial empty state.
         self._clear_btn = QPushButton(t("Clear Selection"))
         self._clear_btn.setFont(_go_font)
         self._clear_btn.clicked.connect(self._clear)
@@ -936,6 +939,7 @@ class DicomFolderPanel(QWidget):
         self._bar.setVisible(False)
         self._update_tgt_lbl()                      # output (none) back to grey
         self._update_go()                           # disable Sort Files, hide warning
+        self.cleared.emit()                         # host also clears DicomCheck
 
     # ---------------------------------------------------------- drag&drop
     @staticmethod

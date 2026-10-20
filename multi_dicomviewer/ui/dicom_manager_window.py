@@ -47,6 +47,10 @@ class DicomManagerWindow(QMainWindow):
         for pnl in (self._check, self._folder):
             pnl.folder_dropped.connect(self._load_into_all)
             pnl.processed.connect(self._reload_all)
+        # "Clear Selection" (on the DicomFolder panel) clears BOTH views: the
+        # folder panel has already reset itself, so the host clears DicomCheck too
+        # and forgets the current root.
+        self._folder.cleared.connect(self._clear_all)
 
     # ---- folder coordination -------------------------------------------
     def _load_into_all(self, path: str) -> None:
@@ -60,6 +64,12 @@ class DicomManagerWindow(QMainWindow):
         if self._root and os.path.isdir(self._root):
             self._check.load_folder(self._root)
             self._folder.load_folder(self._root)
+
+    def _clear_all(self) -> None:
+        """"Clear Selection" was pressed: the DicomFolder panel already reset
+        itself, so clear the DicomCheck panel and forget the root."""
+        self._root = None
+        self._check.clear()
 
     # ---- drag&drop on the window chrome (splitter handle / margins) -----
     @staticmethod
