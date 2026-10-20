@@ -11513,7 +11513,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_coro_cap_actor", None) is not None:
                 p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
                 p.vr_coro_cap_actor.SetVisibility(False)
+            self._vr_coro_pts_data = None
             return
+        # Cache all vessel points (data coords) → the near-hemisphere clip plane is
+        # centred on the coronary TREE itself, not the LV centre (which sits off to
+        # the left-anterior and mis-splits the RCA / far-side LAD).
+        _allp = [np.asarray(v["points"], float) for v in spec
+                 if v.get("points") is not None and len(v.get("points")) >= 2]
+        self._vr_coro_pts_data = np.vstack(_allp) if _allp else None
         from vtkmodules.vtkFiltersSources import vtkSphereSource
         from vtkmodules.vtkFiltersCore import vtkAppendPolyData
         pts = vtkPoints()
@@ -11723,7 +11730,9 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
         """Cast a ray through (sx, sy) on VR pane *key* and return the nearest
-        coronary (vid, sample-idx) within *tol_mm*, or None."""
+        coronary (vid, sample-idx) within *tol_mm*, or None. Points on the FAR side
+        of the near-hemisphere clip (the ones not drawn) are ignored, so a click sets
+        a Target on the VISIBLE near-side vessel, never a far-side RCA behind the LV."""
         src = self._coro_overlay_vr or self._coro_overlay
         if not self._vr_on.get(key) or not src:
             return None
@@ -11746,18 +11755,31 @@ class CTViewer(CPRMixin, AbstractViewer):
         if dn < 1e-6:
             return None
         d = d / dn
+        M = self._vr_xform.get(key)                  # tubes render under this matrix
+        Mm = np.asarray(M, float) if M is not None else None
+        clip = getattr(p, "vr_coro_clip", None)      # far-side points are not drawn
+        cnrm = corg = None
+        if clip is not None:
+            cnrm = np.asarray(clip.GetNormal(), float)
+            corg = np.asarray(clip.GetOrigin(), float)
         best, best_vid, best_idx = 1e18, None, None
         for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
                 continue
             P = np.asarray(p3, float)
+            if Mm is not None:                       # to rendered (world) coords
+                Ph = np.column_stack([P, np.ones(len(P))]) @ Mm.T
+                P = Ph[:, :3] / Ph[:, 3:4]
             t = (P - a) @ d
             proj = a + np.outer(t, d)
             dist = np.linalg.norm(P - proj, axis=1)
+            if cnrm is not None:                     # drop clipped (far-side) samples
+                side = (P - corg) @ cnrm
+                dist = np.where(side >= 0.0, dist, np.inf)
             i = int(np.argmin(dist))
             if dist[i] < best:
-                best, best_vid, best_idx = dist[i], ves.get("vid"), i
+                best, best_vid, best_idx = float(dist[i]), ves.get("vid"), i
         if best_vid is None or best > tol_mm:
             return None
         return best_vid, int(best_idx)
@@ -12561,20 +12583,38 @@ class CTViewer(CPRMixin, AbstractViewer):
         if n < 1e-6:
             return
         cdir = d / n                                 # toward the camera (world)
-        c = getattr(self, "_center", None)
-        if c is None and self._image is not None:
-            b = self._image.GetBounds()
-            c = np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
-                          (b[4] + b[5]) * 0.5])
-        c = np.asarray(c, float) if c is not None else np.zeros(3)
         M = self._vr_xform.get(key)                  # tubes render under this matrix
-        if M is not None:
-            cw = np.asarray(M, float) @ np.array([c[0], c[1], c[2], 1.0])
-            w = cw[3] if abs(cw[3]) > 1e-9 else 1.0
-            c = cw[:3] / w
+        Mm = np.asarray(M, float) if M is not None else None
+        # Centre the split on the coronary TREE itself (its mid-DEPTH along the view),
+        # NOT the LV centre — the LV centre sits off to the left-anterior, so a plane
+        # through it mis-splits the tree (far-side LAD kept, near-side RCA clipped).
+        pts = getattr(self, "_vr_coro_pts_data", None)
+        origin = None
+        if pts is not None and len(pts):
+            P = np.asarray(pts, float)
+            if Mm is not None:
+                Ph = np.column_stack([P, np.ones(len(P))]) @ Mm.T
+                P = Ph[:, :3] / Ph[:, 3:4]
+            centroid = P.mean(0)
+            proj = P @ cdir                          # depth along the view axis
+            mid = 0.5 * (float(proj.min()) + float(proj.max()))
+            # Point on the plane: the centroid slid along the view axis to the tree's
+            # mid-depth (so the plane bisects the tree's near/far extent).
+            origin = centroid + (mid - float(centroid @ cdir)) * cdir
+        if origin is None:                           # no tree yet → LV / bbox centre
+            c = getattr(self, "_center", None)
+            if c is None and self._image is not None:
+                b = self._image.GetBounds()
+                c = np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
+                              (b[4] + b[5]) * 0.5])
+            c = np.asarray(c, float) if c is not None else np.zeros(3)
+            if Mm is not None:
+                cw = Mm @ np.array([c[0], c[1], c[2], 1.0])
+                c = cw[:3] / (cw[3] if abs(cw[3]) > 1e-9 else 1.0)
+            origin = c
         # Sit the plane a margin BEHIND the centre (away from the camera) so near-wall
         # / septal vessels just past the equator are kept, not clipped at the silhouette.
-        origin = c - cdir * _VR_CORO_CLIP_MARGIN_MM
+        origin = origin - cdir * _VR_CORO_CLIP_MARGIN_MM
         pl.SetNormal(float(cdir[0]), float(cdir[1]), float(cdir[2]))
         pl.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
         pl.Modified()
