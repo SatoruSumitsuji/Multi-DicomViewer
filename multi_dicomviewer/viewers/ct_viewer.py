@@ -11359,23 +11359,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             raise box["err"]
         return box.get("r")
 
-    def _vr_begin_busy(self):
-        """Show a modal busy window for the VR build and return it (the caller closes
-        it after the first render). The first GPU render runs on the main thread, so
-        the bar can't animate during it — but the window appears first, so the user
-        sees 'VR を描画中…' instead of a black pane and doesn't think it hung."""
-        from PyQt6.QtWidgets import QProgressDialog, QApplication
-        dlg = QProgressDialog(t("VR を描画中…"), "", 0, 0, self.window())
-        dlg.setWindowTitle(t("VR"))
-        dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.setCancelButton(None)
-        dlg.setMinimumDuration(0)
-        dlg.setValue(0)
-        self._enlarge_busy(dlg)
-        dlg.show()
-        QApplication.processEvents()                # paint it before the blocking render
-        return dlg
-
     # ---- Volume Rendering (VR) -----------------------------------------
     def _vr_ensure(self, p) -> None:
         """Create the pane's GPU ray-cast VR pipeline + its 3-D overlays once."""
@@ -11388,6 +11371,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetProperty(_vr_cta_property())
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
+        # "VR を描画中…" overlay: shown on a FAST frame (volume still hidden) just before
+        # the slow first GPU render of the territory volume, so the pane shows this
+        # instead of a black gap. A 2-D text actor drawn in the same render — NO event
+        # loop pumping (a modal + processEvents re-entered a concurrent DICOM load).
+        p.vr_busy_text = vtkTextActor()
+        p.vr_busy_text.SetInput(t("VR を描画中…"))
+        _bp = p.vr_busy_text.GetTextProperty()
+        _bp.SetFontSize(30)
+        _bp.SetColor(1.0, 1.0, 1.0)
+        _bp.SetJustificationToCentered()
+        _bp.SetVerticalJustificationToCentered()
+        p.vr_busy_text.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+        p.vr_busy_text.SetPosition(0.5, 0.5)
+        p.vr_busy_text.SetVisibility(False)
+        p.ren.AddViewProp(p.vr_busy_text)
         # Coronary tubes live in the MAIN renderer WITH the volume, so the GPU ray-cast
         # occludes them against the EXACT rendered heart surface (the far-side tree is
         # hidden, following the curved epicardium). A small toward-camera depth LIFT
@@ -12092,7 +12090,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         on = bool(on)
         self._vr_on[key] = on
         cam = p.ren.GetActiveCamera()
-        _dlg = None                                 # VR-render busy window (on-path)
         if on:
             self._vr_ensure(p)
             p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
@@ -12100,10 +12097,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             # build it behind an ANIMATED busy window so it doesn't look hung.
             mask = self._run_busy(t("VR"), t("Building VR…"),
                                   self._vr_crop_mask)  # Epi+shell / Epi interior
-            # Keep a busy window up through the volume build + FIRST GPU render: that
-            # render compiles the label-map shaders / uploads the volume and takes a
-            # moment, during which the pane would sit BLACK (looks like a bug).
-            _dlg = self._vr_begin_busy()
             self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
             if mask is not None:
                 p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
@@ -12144,6 +12137,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if a.GetVisibility():
                     self._vr_hidden[key].append(a)
                     a.SetVisibility(False)
+            # Fast text frame with the volume STILL hidden → the slow first GPU render
+            # below then blocks with "VR を描画中…" on screen, not a black pane.
+            if getattr(p, "vr_busy_text", None) is not None:
+                p.vr_busy_text.SetVisibility(True)
+                p.render()                          # volume hidden → this frame is fast
             p.vr_volume.SetVisibility(True)
             # 完全復元: if a prior VR session was switched off, restore its exact
             # orientation (Rt90/Flip xform) + camera pose; else start fresh.
@@ -12237,13 +12235,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 cam.ParallelProjectionOn()
             self._vr_prev_cam[key] = None
+        if getattr(p, "vr_busy_text", None) is not None:
+            p.vr_busy_text.SetVisibility(False)     # clean final frame (VR is ready)
         p.render()
-        if _dlg is not None:                        # close the VR-render busy window
-            try:
-                _dlg.reset()
-                _dlg.deleteLater()
-            except Exception:                        # noqa: BLE001
-                pass
         if not on:
             self._refresh(reset_cam=False)          # rebuild the MPR overlays
             if not any(self._vr_on.values()):       # left the territory VR layout
