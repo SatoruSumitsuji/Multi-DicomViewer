@@ -1655,9 +1655,15 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
             self._push_territory()
 
-    def move_target_n(self, n: int, vid: str, idx: int) -> None:
-        """Move the n-th (1-based) target to (vid, idx) — a VR marker drag. Recompute
-        its territory and refresh the table + overlays."""
+    def move_target_n(self, n: int, vid: str, idx: int,
+                      commit: bool = True) -> None:
+        """Move the n-th (1-based) target to (vid, idx) — a VR marker drag.
+
+        *commit* False (during the drag) just repositions the marker via the overlay —
+        CHEAP, no territory recompute and NO modal busy window. Recomputing on every
+        drag step ran the busy window's processEvents() re-entrantly (each step fired
+        the next queued mouse-move → another recompute), so the 再計算 never settled.
+        *commit* True (on release) recomputes the territory ONCE."""
         i = int(n) - 1
         if not (0 <= i < len(self._targets)):
             return
@@ -1665,6 +1671,11 @@ class CoronaryTreeWindow(SnapDock):
             return
         nn = self._tree.vessels[vid].n
         idx = max(0, min(int(idx), nn - 1))
+        if not commit:
+            # Preview: move the marker along the tree only (no territory fill / busy).
+            self._targets[i].update({"vid": vid, "idx": idx})
+            self._push_overlay()
+            return
         _mask, ml = self._territory.territory(vid, idx)
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
         self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})

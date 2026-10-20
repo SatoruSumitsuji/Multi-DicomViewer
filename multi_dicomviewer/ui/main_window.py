@@ -2809,13 +2809,15 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def coronary_target_move(self, n: int, vid: str, idx: int) -> None:
+    def coronary_target_move(self, n: int, vid: str, idx: int,
+                             commit: bool = True) -> None:
         """A VR-pane drag of target #n reported a new (vid, idx) → move it in the
-        Coronary Tree (recomputes its territory)."""
+        Coronary Tree. *commit* False during the drag (reposition only); True on
+        release (recompute the territory once)."""
         w = getattr(self, "_corotree_win", None)
         if w is not None and hasattr(w, "move_target_n"):
             try:
-                w.move_target_n(int(n), vid, int(idx))
+                w.move_target_n(int(n), vid, int(idx), bool(commit))
             except Exception:                            # noqa: BLE001
                 pass
 

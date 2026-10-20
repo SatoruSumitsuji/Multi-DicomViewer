@@ -1009,6 +1009,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._meas_drag = False
         self._vr_drag = False             # rotating the VR volume
         self._vr_tgt_drag = None          # Target number being dragged on the VR
+        self._vr_tgt_moved = False        # did the grabbed Target actually move?
         style = vtkInteractorStyleUser()  # neutralise default VTK style
         self.SetInteractorStyle(style)
         # Track motion with no button down so the crosshair can preview (vivid
@@ -1030,6 +1031,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 n = self._owner._vr_pick_target_marker(self._which, x, y)
                 if n is not None:
                     self._vr_tgt_drag = n
+                    self._vr_tgt_moved = False
                     self._last = e.position()
                     return
             # (no Shift) Target-set mode: a click 3-D-picks the nearest vessel.
@@ -1265,6 +1267,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # VR: dragging a grabbed Target marker re-picks the nearest vessel point
         # under the cursor and moves the Target there (along the tree).
         if self._vr_tgt_drag is not None:
+            self._vr_tgt_moved = True
             self._owner._vr_move_target(
                 self._which, self._vr_tgt_drag,
                 e.position().x(), e.position().y())
@@ -1378,8 +1381,16 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mouseReleaseEvent(self, e):
         if self._vr_tgt_drag is not None:
-            self._vr_tgt_drag = None
+            n = self._vr_tgt_drag
+            self._vr_tgt_drag = None             # clear FIRST → no re-entrant move
             self._last = None
+            # Commit the final position ONCE, only if it actually moved (recompute the
+            # territory here, not per drag step — that ran the modal busy re-entrantly
+            # and never settled). A plain click that didn't drag recomputes nothing.
+            if self._vr_tgt_moved:
+                self._vr_tgt_moved = False
+                self._owner._vr_move_target(
+                    self._which, n, e.position().x(), e.position().y(), commit=True)
             return
         if self._vr_drag:
             self._vr_drag = False
@@ -11774,10 +11785,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Register cb(n, vid, idx) for a VR-pane drag of a Target marker."""
         self._coro_target_move_cb = cb
 
-    def _vr_move_target(self, key, n, sx, sy) -> None:
+    def _vr_move_target(self, key, n, sx, sy, commit=False) -> None:
         """Drag Target #n on VR pane *key*: re-pick the nearest coronary sample
-        under the cursor and report it (n, vid, idx) so the panel moves the Target
-        there along the tree."""
+        under the cursor and report it (n, vid, idx, commit) so the panel moves the
+        Target there along the tree. During the drag *commit* is False → the panel
+        just repositions the marker (cheap); on release it is True → the panel
+        recomputes the territory ONCE. (Recomputing on every drag step ran the modal
+        busy window's processEvents re-entrantly → the endless 再計算 loop.)"""
         if self._coro_target_move_cb is None or not self._coro_overlay_vr:
             return
         p = self.pane[key]
@@ -11814,7 +11828,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if best_vid is None or best > 12.0:
             return
         try:
-            self._coro_target_move_cb(int(n), best_vid, int(best_idx))
+            self._coro_target_move_cb(int(n), best_vid, int(best_idx), bool(commit))
         except Exception:                                # noqa: BLE001
             pass
 
