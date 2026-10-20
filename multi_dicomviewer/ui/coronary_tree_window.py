@@ -1656,14 +1656,15 @@ class CoronaryTreeWindow(SnapDock):
             self._push_territory()
 
     def move_target_n(self, n: int, vid: str, idx: int,
-                      commit: bool = True) -> None:
+                      phase: str = "end") -> None:
         """Move the n-th (1-based) target to (vid, idx) — a VR marker drag.
 
-        *commit* False (during the drag) just repositions the marker via the overlay —
-        CHEAP, no territory recompute and NO modal busy window. Recomputing on every
-        drag step ran the busy window's processEvents() re-entrantly (each step fired
-        the next queued mouse-move → another recompute), so the 再計算 never settled.
-        *commit* True (on release) recomputes the territory ONCE."""
+        *phase* 'preview' (during the drag) just repositions the marker via the overlay
+        so it FOLLOWS the cursor — cheap, no territory recompute, no busy window. On the
+        first preview of a drag the target's pre-move state is remembered (for 元に戻る).
+        *phase* 'end' (on release) leaves the marker where it was dropped and asks
+        whether to recompute here — so a wrong drop doesn't waste a (slow) recompute,
+        and the point no longer drifts in an endless 再計算 loop."""
         i = int(n) - 1
         if not (0 <= i < len(self._targets)):
             return
@@ -1671,17 +1672,59 @@ class CoronaryTreeWindow(SnapDock):
             return
         nn = self._tree.vessels[vid].n
         idx = max(0, min(int(idx), nn - 1))
-        if not commit:
-            # Preview: move the marker along the tree only (no territory fill / busy).
+        if phase == "preview":
+            # Remember the pre-drag state ONCE (for 元に戻る), then move the marker only.
+            dr = getattr(self, "_target_drag", None)
+            if dr is None or dr.get("n") != n:
+                self._target_drag = {"n": n, "orig": dict(self._targets[i])}
             self._targets[i].update({"vid": vid, "idx": idx})
             self._push_overlay()
             return
-        _mask, ml = self._territory.territory(vid, idx)
-        pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-        self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
-        self._refresh_targets_table()
-        self._run_busy(t("灌流域を再計算中…"),
-                       lambda: (self._push_overlay(), self._push_territory()))
+        # phase == "end": settle the marker at the drop, then confirm (deferred so the
+        # modal dialog is not opened from inside the VR pointer handler).
+        self._targets[i].update({"vid": vid, "idx": idx})
+        self._push_overlay()
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._confirm_target_move(int(n), vid, int(idx)))
+
+    def _confirm_target_move(self, n: int, vid: str, idx: int) -> None:
+        """After a Target drag ends, ask whether to recompute the territory at the new
+        point. 再計算 = recompute here; 再設定 = keep this spot, don't recompute yet (the
+        old result is retained); 元の位置に戻る = restore the pre-drag point + old result."""
+        i = int(n) - 1
+        if not (0 <= i < len(self._targets)):
+            self._target_drag = None
+            return
+        dr = getattr(self, "_target_drag", None)
+        orig = dr.get("orig") if dr else None
+        box = QMessageBox(self)
+        box.setWindowTitle(t("ターゲット移動"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("この点で灌流域を再計算しますか？"))
+        b_calc = box.addButton(t("再計算"), QMessageBox.ButtonRole.AcceptRole)
+        b_keep = box.addButton(t("再設定（計算しない）"),
+                               QMessageBox.ButtonRole.ActionRole)
+        b_undo = box.addButton(t("元の位置に戻る"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_calc)
+        box.exec()
+        ch = box.clickedButton()
+        if ch is b_undo and orig is not None:
+            # Restore the pre-drag point AND its retained result (never recomputed).
+            self._targets[i] = dict(orig)
+            self._refresh_targets_table()
+            self._push_overlay()
+        elif ch is b_calc:
+            _mask, ml = self._territory.territory(vid, idx)
+            pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
+            self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
+            self._refresh_targets_table()
+            self._run_busy(t("灌流域を再計算中…"),
+                           lambda: (self._push_overlay(), self._push_territory()))
+        else:
+            # 再設定: keep the new marker position; the old territory result is retained
+            # (not recomputed). Show the new vessel/position; %/mL stay the old values.
+            self._refresh_targets_table()
+        self._target_drag = None
 
     def _targets_menu(self, pos):
         it = self._targets_w.itemAt(pos)

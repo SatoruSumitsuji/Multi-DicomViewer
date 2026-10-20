@@ -1384,13 +1384,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             n = self._vr_tgt_drag
             self._vr_tgt_drag = None             # clear FIRST → no re-entrant move
             self._last = None
-            # Commit the final position ONCE, only if it actually moved (recompute the
-            # territory here, not per drag step — that ran the modal busy re-entrantly
-            # and never settled). A plain click that didn't drag recomputes nothing.
+            # End of drag: only if it actually moved, ask the panel whether to
+            # recompute at this point (no per-step recompute → no re-entrant busy loop;
+            # a plain click that didn't drag does nothing).
             if self._vr_tgt_moved:
                 self._vr_tgt_moved = False
                 self._owner._vr_move_target(
-                    self._which, n, e.position().x(), e.position().y(), commit=True)
+                    self._which, n, e.position().x(), e.position().y(), phase="end")
             return
         if self._vr_drag:
             self._vr_drag = False
@@ -11359,6 +11359,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             raise box["err"]
         return box.get("r")
 
+    def _vr_begin_busy(self):
+        """Show a modal busy window for the VR build and return it (the caller closes
+        it after the first render). The first GPU render runs on the main thread, so
+        the bar can't animate during it — but the window appears first, so the user
+        sees 'VR を描画中…' instead of a black pane and doesn't think it hung."""
+        from PyQt6.QtWidgets import QProgressDialog, QApplication
+        dlg = QProgressDialog(t("VR を描画中…"), "", 0, 0, self.window())
+        dlg.setWindowTitle(t("VR"))
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setCancelButton(None)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        self._enlarge_busy(dlg)
+        dlg.show()
+        QApplication.processEvents()                # paint it before the blocking render
+        return dlg
+
     # ---- Volume Rendering (VR) -----------------------------------------
     def _vr_ensure(self, p) -> None:
         """Create the pane's GPU ray-cast VR pipeline + its 3-D overlays once."""
@@ -11711,16 +11728,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_apply_xform(key)                 # feeds the label-map mask + matrix
         p.render()
 
-    def _vr_pick_vessel(self, key, sx, sy, tol_px=8.0):
+    def _vr_pick_vessel(self, key, sx, sy, tol_px=8.0, fallback=False):
         """The coronary (vid, sample-idx) under a click at (sx, sy) on VR pane *key*,
         or None. Vessel samples are projected to the screen through the SAME matrix the
         tubes render under (orientation + the toward-camera depth LIFT), so the hit is
         the line exactly where it is DRAWN under the cursor. ONLY samples whose
         projection is within *tol_px* of the click (≈ the Target dot's radius) count —
-        there is NO fall-back to the nearest line on screen, so the Target never slides
-        sideways to a vessel the user did not click. Among the in-range samples the
-        OUTERMOST (nearest-camera) one wins (the frontmost line the user is looking at).
-        Nothing within the tight radius → None (zoom in for a pinpoint hit)."""
+        for a Target SET there is NO fall-back to the nearest line on screen, so the
+        Target never slides sideways to a vessel the user did not click. Among the
+        in-range samples the OUTERMOST (nearest-camera) one wins (the frontmost line
+        the user is looking at). Nothing within the tight radius → None (zoom in for a
+        pinpoint hit). *fallback* True (a Target DRAG) instead returns the nearest line
+        anywhere on screen so the marker keeps following the cursor."""
         src = self._coro_overlay_vr or self._coro_overlay
         if not self._vr_on.get(key) or not src:
             return None
@@ -11747,7 +11766,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             ren.GetTiledAspectRatio(), -1.0, 1.0)
         C = np.array([[cm.GetElement(i, j) for j in range(4)] for i in range(4)])
         tol2 = (tol_px * dpr) ** 2
-        best = (1e18, None, None)                   # (camera-distance, vid, idx)
+        best = (1e18, None, None)                   # in-range: (camera-distance, vid, idx)
+        best_any = (1e18, None, None)               # fallback: (px², vid, idx) on screen
         for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
@@ -11763,6 +11783,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             dxp = (ndc[:, 0] * 0.5 + 0.5) * W - vx
             dyp = (ndc[:, 1] * 0.5 + 0.5) * H - vy
             px2 = dxp * dxp + dyp * dyp                              # px² from the click
+            if fallback:
+                i_any = int(np.argmin(px2))
+                if px2[i_any] < best_any[0]:
+                    best_any = (float(px2[i_any]), vid, i_any)
             near = np.where(px2 <= tol2)[0]                         # under the cursor only
             if len(near) == 0:
                 continue
@@ -11770,9 +11794,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             j = int(near[np.argmin(camd)])                          # outermost in range
             if float(camd.min()) < best[0]:
                 best = (float(camd.min()), vid, j)
-        if best[1] is None:                         # no line within the tight radius
-            return None
-        return best[1], int(best[2])
+        if best[1] is not None:                     # a line under the cursor
+            return best[1], int(best[2])
+        if fallback and best_any[1] is not None:    # drag: follow the nearest line
+            return best_any[1], int(best_any[2])
+        return None
 
     def _vr_pick_target(self, key, sx, sy) -> bool:
         """3-D target pick on the VR: set a Target at the nearest coronary sample
@@ -11794,24 +11820,24 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_action_cb = cb
 
     def set_coronary_target_move_cb(self, cb) -> None:
-        """Register cb(n, vid, idx) for a VR-pane drag of a Target marker."""
+        """Register cb(n, vid, idx, phase) for a VR-pane drag of a Target marker."""
         self._coro_target_move_cb = cb
 
-    def _vr_move_target(self, key, n, sx, sy, commit=False) -> None:
-        """Drag Target #n on VR pane *key*: re-pick the coronary sample DRAWN under the
-        cursor (the same screen-space, lift-aware, outermost pick as a Target set) and
-        report it (n, vid, idx, commit) so the panel moves the Target there along the
-        tree. During the drag *commit* is False → the panel just repositions the marker
-        (cheap); on release it is True → the panel recomputes the territory ONCE.
-        (Recomputing on every drag step ran the modal busy window's processEvents
-        re-entrantly → the endless 再計算 loop.)"""
+    def _vr_move_target(self, key, n, sx, sy, phase="preview") -> None:
+        """Drag Target #n on VR pane *key*: re-pick the coronary sample the cursor is
+        over (lift-aware screen pick, with fall-back so the marker keeps FOLLOWING the
+        cursor) and report it (n, vid, idx, phase). *phase* 'preview' (during the drag)
+        → the panel just repositions the marker, cheap, no recompute. *phase* 'end' (on
+        release) → the panel asks whether to recompute the territory at this point (so a
+        wrong drop doesn't waste a recompute, and the point drifting is no longer an
+        endless 再計算 loop)."""
         if self._coro_target_move_cb is None or not self._coro_overlay_vr:
             return
-        hit = self._vr_pick_vessel(key, sx, sy)
+        hit = self._vr_pick_vessel(key, sx, sy, fallback=True)
         if hit is None:
             return
         try:
-            self._coro_target_move_cb(int(n), hit[0], int(hit[1]), bool(commit))
+            self._coro_target_move_cb(int(n), hit[0], int(hit[1]), str(phase))
         except Exception:                                # noqa: BLE001
             pass
 
@@ -12066,6 +12092,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         on = bool(on)
         self._vr_on[key] = on
         cam = p.ren.GetActiveCamera()
+        _dlg = None                                 # VR-render busy window (on-path)
         if on:
             self._vr_ensure(p)
             p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
@@ -12073,6 +12100,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             # build it behind an ANIMATED busy window so it doesn't look hung.
             mask = self._run_busy(t("VR"), t("Building VR…"),
                                   self._vr_crop_mask)  # Epi+shell / Epi interior
+            # Keep a busy window up through the volume build + FIRST GPU render: that
+            # render compiles the label-map shaders / uploads the volume and takes a
+            # moment, during which the pane would sit BLACK (looks like a bug).
+            _dlg = self._vr_begin_busy()
             self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
             if mask is not None:
                 p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
@@ -12207,6 +12238,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cam.ParallelProjectionOn()
             self._vr_prev_cam[key] = None
         p.render()
+        if _dlg is not None:                        # close the VR-render busy window
+            try:
+                _dlg.reset()
+                _dlg.deleteLater()
+            except Exception:                        # noqa: BLE001
+                pass
         if not on:
             self._refresh(reset_cam=False)          # rebuild the MPR overlays
             if not any(self._vr_on.values()):       # left the territory VR layout
