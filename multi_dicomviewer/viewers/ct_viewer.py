@@ -2306,17 +2306,17 @@ class _Pane:
         self.resultact, _ = _mk_overlay_text(True, (1.0, 0.851, 0.0))  # top-right
         self.ren.AddViewProp(self.tagact)
         self.ren.AddViewProp(self.resultact)
-        # CT Territory per-system summary — bottom-right of the VR pane, same yellow
-        # + font as the result block (set_territory_summary / _vr_update_summary).
-        # MONOSPACE (Courier, built-in — NOT the Meiryo font FILE, which makes
-        # SetBold a no-op). The summary is ASCII, and a fixed-pitch face lets the
-        # bold overlay (terract_b) align char-for-char with space padding so only
-        # the LM/LAD/LCX/RCA label + % reads bold while the mL tail stays regular.
+        # CT Territory per-system summary — top-right of the VR pane, same yellow +
+        # font as the WW/WL / LAO-CRA readouts (the shared Meiryo overlay font, Arial
+        # fallback) so every corner readout matches. (It used to be Courier monospace
+        # with a char-aligned bold overlay (terract_b); the user found the typewriter
+        # face out of place, so it's now one plain layer in the shared font.)
         self.terract = vtkTextActor()
         self.terract.SetTextScaleModeToNone()
         _ttp = self.terract.GetTextProperty()
         _ttp.SetColor(1.0, 0.851, 0.0)
-        _ttp.SetFontFamilyToCourier()
+        _ttp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_ttp)
         _ttp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _ttp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
         _ttp.SetJustificationToLeft()            # LM/LAD/LCX/RCA lines left-aligned
@@ -2325,14 +2325,14 @@ class _Pane:
         self.terract.GetPositionCoordinate().SetValue(0.70, 0.985)   # top-right
         self.terract.SetInput("")
         self.ren.AddViewProp(self.terract)
-        # Bold overlay, same font/size/position: holds ONLY the emphasised chars
-        # (role label + %), the rest space-padded, drawn on top of terract.
+        # Legacy bold overlay — no longer populated (the summary is now one plain
+        # layer in terract); kept as an empty actor so references stay valid.
         self.terract_b = vtkTextActor()
         self.terract_b.SetTextScaleModeToNone()
         _tbp = self.terract_b.GetTextProperty()
         _tbp.SetColor(1.0, 0.851, 0.0)
-        _tbp.SetFontFamilyToCourier()
-        _tbp.SetBold(True)
+        _tbp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_tbp)
         _tbp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _tbp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
         _tbp.SetJustificationToLeft()
@@ -2346,13 +2346,15 @@ class _Pane:
         self.tgtact.SetTextScaleModeToNone()
         _gtp = self.tgtact.GetTextProperty()
         _gtp.SetColor(1.0, 0.851, 0.0)
-        # NOTE: don't load the Meiryo font FILE here — a file-based font ignores
-        # SetBold. The target list is ASCII ("Target-N …%/…mL"), so Arial-bold is
-        # fine and actually renders bold (the user asked for bold).
+        # Use the shared Meiryo overlay font (Arial fallback) so the bottom-right
+        # Target list matches the WW/WL / LAO-CRA readouts (the user wanted the corner
+        # fonts unified). The Meiryo FILE ignores SetBold, so the list is no longer
+        # bold — the font now matches the rest, which the user asked for.
         _gtp.SetFontFamilyToArial()
+        _set_vtk_tag_font(_gtp)
         _gtp.SetLineSpacing(_VTK_TAG_LINE_SPACING)
         _gtp.SetFontSize(_vtk_font_px(TAG_FONT_PT_DEFAULT))
-        _gtp.SetBold(True)                       # Target list stands out
+        _gtp.SetBold(True)                       # kept (no-op under the Meiryo file)
         _gtp.SetJustificationToLeft()
         _gtp.SetVerticalJustificationToBottom()
         self.tgtact.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
@@ -12752,29 +12754,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             fs = p.resultact.GetTextProperty().GetFontSize()
         except Exception:                                # noqa: BLE001
             fs = None
-        # Split the per-system summary into a REGULAR layer (mL tail + Myocardium)
-        # and a BOLD layer (role label + %), space-padded so the fixed-pitch
-        # Courier overlay aligns char-for-char. Split each line after the first
-        # '%': head (ROLE + pct%) → bold, tail (/…mL) → regular; a line with no
-        # '%' (Myocardium …mL) is all regular.
-        terr_txt = getattr(self, "_terr_summary_text", "") if on else ""
-        reg_lines, bold_lines = [], []
-        for ln in terr_txt.split("\n"):
-            k = ln.find("%")
-            if k >= 0:
-                head, tail = ln[:k + 1], ln[k + 1:]
-                bold_lines.append(head + " " * len(tail))
-                reg_lines.append(" " * len(head) + tail)
-            else:
-                bold_lines.append(" " * len(ln))
-                reg_lines.append(ln)
-        terr_reg = "\n".join(reg_lines) if terr_txt else ""
-        terr_bold = "\n".join(bold_lines) if terr_txt else ""
-        # terract (top-right) uses the result-block size; tgtact (bottom-right
+        # The per-system summary is drawn as ONE plain layer now (shared proportional
+        # font — the char-aligned Courier bold overlay is retired); terract_b stays
+        # empty. terract (top-right) uses the result-block size; tgtact (bottom-right
         # Target list) is 1.2× larger so it stands out.
+        terr_txt = getattr(self, "_terr_summary_text", "") if on else ""
         for ta, txt, scale in (
-                (getattr(p, "terract", None), terr_reg, 1.0),
-                (getattr(p, "terract_b", None), terr_bold, 1.0),
+                (getattr(p, "terract", None), terr_txt, 1.0),
+                (getattr(p, "terract_b", None), "", 1.0),
                 (getattr(p, "tgtact", None),
                  getattr(self, "_tgt_summary_text", "") if on else "", 1.2)):
             if ta is None:
