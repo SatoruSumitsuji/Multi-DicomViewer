@@ -2810,14 +2810,14 @@ class MainWindow(QMainWindow):
                 pass
 
     def coronary_target_move(self, n: int, vid: str, idx: int,
-                             commit: bool = True) -> None:
+                             phase: str = "end") -> None:
         """A VR-pane drag of target #n reported a new (vid, idx) → move it in the
-        Coronary Tree. *commit* False during the drag (reposition only); True on
-        release (recompute the territory once)."""
+        Coronary Tree. *phase* 'preview' during the drag (reposition only); 'end' on
+        release (ask whether to recompute the territory here)."""
         w = getattr(self, "_corotree_win", None)
         if w is not None and hasattr(w, "move_target_n"):
             try:
-                w.move_target_n(int(n), vid, int(idx), bool(commit))
+                w.move_target_n(int(n), vid, int(idx), str(phase))
             except Exception:                            # noqa: BLE001
                 pass
 
