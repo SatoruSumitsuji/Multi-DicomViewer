@@ -56,7 +56,6 @@ from vtkmodules.vtkCommonCore import (
 from vtkmodules.vtkCommonDataModel import (
     vtkCellArray,
     vtkImageData,
-    vtkPlane,
     vtkPolyData,
 )
 from vtkmodules.vtkCommonMath import vtkMatrix4x4
@@ -780,10 +779,11 @@ def _lvv_mask_lut(on: bool, rgb=(1.0, 0.25, 0.25),
 _VR_CORO_R = 0.765 * 0.8 * 0.8          # 0.49 — other vessels (thinner, has an outline)
 _VR_CORO_R_LM = 0.765 * 1.5 * 0.8       # 0.92 — LM trunk (also 80%)
 _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
-#: How far BEHIND the LV centre (toward the far side) the coronary near-hemisphere
-#: clip plane sits — a margin so near-wall / septal vessels just past the equator are
-#: kept while the clearly far-side tree is hidden. Larger = keep more of the far side.
-_VR_CORO_CLIP_MARGIN_MM = 10.0
+#: How far the coronary tubes are floated TOWARD the camera (mm) over the volume, so
+#: the near-side centreline (a few mm inside the epicardial surface) isn't buried in
+#: the opaque territory colour. The real surface still occludes the far-side tree.
+#: Larger = lifts deeper vessels but floats the tree farther off the surface.
+_VR_CORO_LIFT_MM = 7.0
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -11360,23 +11360,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetProperty(_vr_cta_property())
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
-        # Foreground overlay renderer (layer 1, SHARED camera): the coronary tubes
-        # are drawn here so they sit ON TOP of the territory DVR. The solid colour is
-        # opaque, so a vessel buried in the myocardium — the septal branches above
-        # all — would otherwise be occluded; the overlay clears only the depth buffer
-        # (keeps the volume's colour) so every coronary line stays observable while
-        # still turning / mirroring with the volume (shared camera + same UserMatrix).
-        rw = p.ren.GetRenderWindow()
-        p.ren_fg = vtkRenderer()
-        p.ren_fg.SetLayer(1)
-        p.ren_fg.SetPreserveColorBuffer(True)   # don't erase the volume beneath
-        p.ren_fg.SetPreserveDepthBuffer(False)  # fresh depth → tubes ignore volume
-        p.ren_fg.InteractiveOff()
-        p.ren_fg.SetActiveCamera(p.ren.GetActiveCamera())
-        if rw is not None:
-            if rw.GetNumberOfLayers() < 2:
-                rw.SetNumberOfLayers(2)
-            rw.AddRenderer(p.ren_fg)
+        # Coronary tubes live in the MAIN renderer WITH the volume, so the GPU ray-cast
+        # occludes them against the EXACT rendered heart surface (the far-side tree is
+        # hidden, following the curved epicardium). A small toward-camera depth LIFT
+        # (_vr_coro_depth_lift) floats the near-side centreline just in front of that
+        # surface so it isn't buried in the myocardium — the VTK analogue of the Mac
+        # front-surface depth test with a tolerance band.
         # Coronary tree as 3-D tubes (world-mm, so they sit in the volume and
         # rotate with it). Per-root colour via per-cell RGB scalars.
         p.vr_coro_tube = vtkTubeFilter()
@@ -11423,8 +11412,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         _hp.SetSpecular(0.0)
         _hp.SetFrontfaceCulling(True)        # show only back faces → silhouette rim
         p.vr_coro_halo_actor.SetVisibility(False)
-        p.ren_fg.AddActor(p.vr_coro_halo_actor)   # overlay layer → always on top
-        p.ren_fg.AddActor(p.vr_coro_actor)   # coloured tube in front of its halo
+        p.ren.AddActor(p.vr_coro_halo_actor)
+        p.ren.AddActor(p.vr_coro_actor)      # coloured tube in front of its halo
         # Rounded tube ends: a sphere (same colour + radius) at every vessel
         # endpoint, so the 断端 are round, not flat discs.
         p.vr_coro_cap_mapper = vtkPolyDataMapper()
@@ -11438,7 +11427,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         _kp.SetDiffuse(0.0)
         _kp.SetSpecular(0.0)
         p.vr_coro_cap_actor.SetVisibility(False)
-        p.ren_fg.AddActor(p.vr_coro_cap_actor)    # overlay layer → always on top
+        p.ren.AddActor(p.vr_coro_cap_actor)
         # Perfusion territories as translucent 3-D iso-surfaces — a POOL of actors
         # (one per label: LAD blue / LCX yellow / RCA green / Target red), coloured
         # + filled per push in _vr_update_territory.
@@ -11465,17 +11454,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         if hasattr(p.vr_tgt_actor.GetProperty(), "SetRenderPointsAsSpheres"):
             p.vr_tgt_actor.GetProperty().SetRenderPointsAsSpheres(True)
         p.vr_tgt_actor.SetVisibility(False)
-        p.ren_fg.AddActor(p.vr_tgt_actor)        # overlay layer → always on top
+        p.ren.AddActor(p.vr_tgt_actor)
         p.vr_tgt_labels = []                     # per-target number billboards
-        # Near-hemisphere clip: the overlay keeps NEAR-side vessels from being buried
-        # in the myocardium, but it would also show the ones on the FAR side of the
-        # LV. A single clip plane through the LV centre, normal toward the camera,
-        # removes that far half (updated on rotate / xform in _vr_update_coro_clip).
-        p.vr_coro_clip = vtkPlane()
-        p.vr_coro_clip.SetNormal(0.0, 0.0, 1.0)
-        for _m in (p.vr_coro_mapper, p.vr_coro_halo_mapper,
-                   p.vr_coro_cap_mapper, p.vr_tgt_mapper):
-            _m.AddClippingPlane(p.vr_coro_clip)
         # Depth peeling so the TRANSLUCENT territory surfaces composite correctly
         # with the GPU volume (plain alpha blending drops translucent geometry
         # behind the volume — the reason the territory colours didn't appear while
@@ -11513,14 +11493,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             if getattr(p, "vr_coro_cap_actor", None) is not None:
                 p.vr_coro_cap_mapper.SetInputData(vtkPolyData())
                 p.vr_coro_cap_actor.SetVisibility(False)
-            self._vr_coro_pts_data = None
             return
-        # Cache all vessel points (data coords) → the near-hemisphere clip plane is
-        # centred on the coronary TREE itself, not the LV centre (which sits off to
-        # the left-anterior and mis-splits the RCA / far-side LAD).
-        _allp = [np.asarray(v["points"], float) for v in spec
-                 if v.get("points") is not None and len(v.get("points")) >= 2]
-        self._vr_coro_pts_data = np.vstack(_allp) if _allp else None
         from vtkmodules.vtkFiltersSources import vtkSphereSource
         from vtkmodules.vtkFiltersCore import vtkAppendPolyData
         pts = vtkPoints()
@@ -11612,10 +11585,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         p = self.pane[key]
         if getattr(p, "vr_tgt_actor", None) is None:
             return
-        # Clear the previous number billboards (in the foreground overlay renderer).
-        fg = getattr(p, "ren_fg", None) or p.ren
+        # Clear the previous number billboards (in the main renderer).
         for lb in getattr(p, "vr_tgt_labels", []):
-            fg.RemoveViewProp(lb)
+            p.ren.RemoveViewProp(lb)
         p.vr_tgt_labels = []
         specs = self._coro_targets if self._vr_on.get(key) else []
         if not specs:
@@ -11658,7 +11630,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
                     lb.SetDisplayOffset(6, 4)        # small nudge off the sphere
-                fg.AddViewProp(lb)
+                p.ren.AddViewProp(lb)
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
@@ -11729,10 +11701,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.render()
 
     def _vr_pick_vessel(self, key, sx, sy, tol_mm=8.0):
-        """Cast a ray through (sx, sy) on VR pane *key* and return the nearest
-        coronary (vid, sample-idx) within *tol_mm*, or None. Points on the FAR side
-        of the near-hemisphere clip (the ones not drawn) are ignored, so a click sets
-        a Target on the VISIBLE near-side vessel, never a far-side RCA behind the LV."""
+        """Cast a ray through (sx, sy) on VR pane *key* and return the coronary
+        (vid, sample-idx) under the cursor, or None. Among the samples within *tol_mm*
+        of the ray the NEAREST-THE-CAMERA one wins, so a click sets a Target on the
+        visible near-side vessel, never a far-side RCA behind the heart."""
         src = self._coro_overlay_vr or self._coro_overlay
         if not self._vr_on.get(key) or not src:
             return None
@@ -11749,20 +11721,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             w = ren.GetWorldPoint()
             return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
 
-        a = world_at(0.0)
+        a = world_at(0.0)                            # ray start (near plane, toward cam)
         d = world_at(1.0) - a
         dn = float(np.linalg.norm(d))
         if dn < 1e-6:
             return None
-        d = d / dn
+        d = d / dn                                   # ray dir into the scene (t grows = farther)
         M = self._vr_xform.get(key)                  # tubes render under this matrix
         Mm = np.asarray(M, float) if M is not None else None
-        clip = getattr(p, "vr_coro_clip", None)      # far-side points are not drawn
-        cnrm = corg = None
-        if clip is not None:
-            cnrm = np.asarray(clip.GetNormal(), float)
-            corg = np.asarray(clip.GetOrigin(), float)
-        best, best_vid, best_idx = 1e18, None, None
+        best_t, best_vid, best_idx = 1e18, None, None
         for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
@@ -11771,16 +11738,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             if Mm is not None:                       # to rendered (world) coords
                 Ph = np.column_stack([P, np.ones(len(P))]) @ Mm.T
                 P = Ph[:, :3] / Ph[:, 3:4]
-            t = (P - a) @ d
+            t = (P - a) @ d                          # distance along ray (smaller = nearer cam)
             proj = a + np.outer(t, d)
             dist = np.linalg.norm(P - proj, axis=1)
-            if cnrm is not None:                     # drop clipped (far-side) samples
-                side = (P - corg) @ cnrm
-                dist = np.where(side >= 0.0, dist, np.inf)
-            i = int(np.argmin(dist))
-            if dist[i] < best:
-                best, best_vid, best_idx = float(dist[i]), ves.get("vid"), i
-        if best_vid is None or best > tol_mm:
+            within = np.where(dist <= tol_mm)[0]     # samples under the cursor
+            if len(within) == 0:
+                continue
+            j = int(within[np.argmin(t[within])])    # the NEAREST-camera of them
+            if t[j] < best_t:
+                best_t, best_vid, best_idx = float(t[j]), ves.get("vid"), j
+        if best_vid is None:
             return None
         return best_vid, int(best_idx)
 
@@ -11852,22 +11819,23 @@ class CTViewer(CPRMixin, AbstractViewer):
             pass
 
     def _vr_pick_target_marker(self, key, sx, sy, tol_px=10.0):
-        """The Target number (1-based, spec 'n') whose 3-D marker PROJECTS nearest the
-        click on VR pane *key*, within *tol_px* SCREEN pixels (≈ the drawn dot's
-        radius), or None. A pixel tolerance — not a world radius — keeps the delete /
-        menu hit to the visible dot itself, so a NEW target can be placed right next
-        to an existing one (zoom in for a pinpoint hit). Markers clipped away on the
-        far side of the LV are not hittable."""
+        """The Target number (1-based, spec 'n') whose 3-D marker PROJECTS within
+        *tol_px* SCREEN pixels of the click on VR pane *key* (≈ the drawn dot's radius),
+        or None. A pixel tolerance — not a world radius — keeps the delete / menu hit to
+        the visible dot itself, so a NEW target can be placed right next to an existing
+        one (zoom in for a pinpoint hit). On overlap the NEAREST-camera dot wins (the
+        visible one; a far-side marker sits behind the heart)."""
         if not self._vr_on.get(key) or not self._coro_targets:
             return None
         p = self.pane[key]
-        ren = p.ren                              # shares the camera with the overlay
+        ren = p.ren
         dpr = max(1.0, p.canvas.devicePixelRatioF())
         vx = sx * dpr
         vy = ren.GetRenderWindow().GetSize()[1] - sy * dpr   # VTK display y is bottom-up
+        cam = ren.GetActiveCamera()
+        cpos = np.asarray(cam.GetPosition(), float)
         M = self._vr_xform.get(key)              # markers render under this matrix
-        clip = getattr(p, "vr_coro_clip", None)  # far-side markers are clipped
-        best, best_n = 1e18, None
+        best_depth, best_n = 1e18, None
         for spec in self._coro_targets:
             pt = spec.get("point")
             if pt is None:
@@ -11876,16 +11844,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             if M is not None:
                 w = np.asarray(M, float) @ np.array([P[0], P[1], P[2], 1.0])
                 P = w[:3] / (w[3] if abs(w[3]) > 1e-9 else 1.0)
-            if clip is not None and clip.EvaluateFunction(
-                    float(P[0]), float(P[1]), float(P[2])) < 0.0:
-                continue                         # on the clipped (far) side → not shown
             ren.SetWorldPoint(float(P[0]), float(P[1]), float(P[2]), 1.0)
             ren.WorldToDisplay()
             dp = ren.GetDisplayPoint()           # device px, y bottom-up
-            dd = float(np.hypot(dp[0] - vx, dp[1] - vy))
-            if dd < best:
-                best, best_n = dd, spec.get("n")
-        if best_n is None or best > tol_px * dpr:
+            if float(np.hypot(dp[0] - vx, dp[1] - vy)) > tol_px * dpr:
+                continue                         # outside the dot → not a hit
+            depth = float(np.linalg.norm(P - cpos))   # nearer the camera wins
+            if depth < best_depth:
+                best_depth, best_n = depth, spec.get("n")
+        if best_n is None:
             return None
         return int(best_n)
 
@@ -12134,6 +12101,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             keep.update(getattr(p, "angle_halo", []))
             keep.update(getattr(p, "vr_terr_actors", []))  # territory pool self-managed
             keep.update(getattr(p, "vr_tgt_labels", []))   # target number billboards
+            keep.add(getattr(p, "vr_coro_actor", None))    # coloured coronary tubes
+            keep.add(getattr(p, "vr_tgt_actor", None))     # target spheres
             keep.add(getattr(p, "vr_coro_cap_actor", None))  # tube end caps
             keep.add(getattr(p, "vr_coro_halo_actor", None))  # tube halo outline
             props = p.ren.GetViewProps()
@@ -12196,7 +12165,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # widens the view angle so the heart renders a bit smaller.
                 cam.Zoom(0.8)
             p.ren.ResetCameraClippingRange()
-            self._vr_update_coro_clip(key)          # near-hemisphere clip for the view
+            self._vr_coro_depth_lift(key)           # float near-side tubes to the front
             self._vr_update_angle(key)              # initial LAO/CRA readout
             self._vr_update_summary(key)            # territory summary (bottom-right)
         else:
@@ -12563,61 +12532,40 @@ class CTViewer(CPRMixin, AbstractViewer):
                     pass
         if vol is not None and getattr(p, "vr_mapper", None) is not None:
             self._vr_apply_volume_xform(key, M)
-        self._vr_update_coro_clip(key)               # hide the far-side tree
+        self._vr_coro_depth_lift(key)                # float near-side tubes to the front
 
-    def _vr_update_coro_clip(self, key) -> None:
-        """Position the coronary near-hemisphere clip plane on VR pane *key*: through
-        the LV centre, normal pointing toward the camera, so only the vessels on the
-        camera side of the LV are drawn (the overlay keeps those from being buried in
-        the myocardium; this removes the ones on the far side). Called on rotate /
-        Flip / rebuild — cheap (just repositions one plane)."""
+    def _vr_coro_depth_lift(self, key) -> None:
+        """Nudge the coronary tube / target actors a few mm TOWARD the camera on VR
+        pane *key*, on top of the orientation matrix. The tubes share the volume's
+        renderer, so the GPU ray-cast occludes them against the real heart surface —
+        the far-side tree is hidden following the curved epicardium. Without the lift
+        the near-side centreline (a few mm INSIDE the epicardial surface) is buried in
+        the opaque territory colour; floating it just in front of the surface keeps it
+        observable, the VTK analogue of Mac's front-surface depth-test tolerance. The
+        lift is along the view axis, so it changes only depth, not the tube's shape;
+        re-applied on every rotate / Flip (the camera direction changes)."""
         p = self.pane[key]
-        pl = getattr(p, "vr_coro_clip", None)
-        if pl is None:
+        M = self._vr_xform.get(key)
+        if M is None:
             return
         cam = p.ren.GetActiveCamera()
-        pos = np.asarray(cam.GetPosition(), float)
-        foc = np.asarray(cam.GetFocalPoint(), float)
-        d = pos - foc
+        d = np.asarray(cam.GetPosition(), float) - np.asarray(cam.GetFocalPoint(), float)
         n = float(np.linalg.norm(d))
         if n < 1e-6:
             return
         cdir = d / n                                 # toward the camera (world)
-        M = self._vr_xform.get(key)                  # tubes render under this matrix
-        Mm = np.asarray(M, float) if M is not None else None
-        # Centre the split on the coronary TREE itself (its mid-DEPTH along the view),
-        # NOT the LV centre — the LV centre sits off to the left-anterior, so a plane
-        # through it mis-splits the tree (far-side LAD kept, near-side RCA clipped).
-        pts = getattr(self, "_vr_coro_pts_data", None)
-        origin = None
-        if pts is not None and len(pts):
-            P = np.asarray(pts, float)
-            if Mm is not None:
-                Ph = np.column_stack([P, np.ones(len(P))]) @ Mm.T
-                P = Ph[:, :3] / Ph[:, 3:4]
-            centroid = P.mean(0)
-            proj = P @ cdir                          # depth along the view axis
-            mid = 0.5 * (float(proj.min()) + float(proj.max()))
-            # Point on the plane: the centroid slid along the view axis to the tree's
-            # mid-depth (so the plane bisects the tree's near/far extent).
-            origin = centroid + (mid - float(centroid @ cdir)) * cdir
-        if origin is None:                           # no tree yet → LV / bbox centre
-            c = getattr(self, "_center", None)
-            if c is None and self._image is not None:
-                b = self._image.GetBounds()
-                c = np.array([(b[0] + b[1]) * 0.5, (b[2] + b[3]) * 0.5,
-                              (b[4] + b[5]) * 0.5])
-            c = np.asarray(c, float) if c is not None else np.zeros(3)
-            if Mm is not None:
-                cw = Mm @ np.array([c[0], c[1], c[2], 1.0])
-                c = cw[:3] / (cw[3] if abs(cw[3]) > 1e-9 else 1.0)
-            origin = c
-        # Sit the plane a margin BEHIND the centre (away from the camera) so near-wall
-        # / septal vessels just past the equator are kept, not clipped at the silhouette.
-        origin = origin - cdir * _VR_CORO_CLIP_MARGIN_MM
-        pl.SetNormal(float(cdir[0]), float(cdir[1]), float(cdir[2]))
-        pl.SetOrigin(float(origin[0]), float(origin[1]), float(origin[2]))
-        pl.Modified()
+        T = np.eye(4)
+        T[:3, 3] = cdir * _VR_CORO_LIFT_MM           # world-space pull toward camera
+        lifted = self._np_to_vtkmatrix(T @ np.asarray(M, float))
+        for a in (getattr(p, "vr_coro_actor", None),
+                  getattr(p, "vr_coro_halo_actor", None),
+                  getattr(p, "vr_coro_cap_actor", None),
+                  getattr(p, "vr_tgt_actor", None)):
+            if a is not None and hasattr(a, "SetUserMatrix"):
+                try:
+                    a.SetUserMatrix(lifted)
+                except Exception:                    # noqa: BLE001
+                    pass
 
     def _vr_apply_volume_xform(self, key, M) -> None:
         p = self.pane[key]
@@ -12880,7 +12828,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             cam.Azimuth(-dx * 0.4)
             cam.Elevation(dy * 0.4)
             cam.OrthogonalizeViewUp()
-        self._vr_update_coro_clip(key)               # follow the new view direction
+        self._vr_coro_depth_lift(key)                # follow the new view direction
         p.ren.ResetCameraClippingRange()
         p.render()
 
