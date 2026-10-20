@@ -145,7 +145,22 @@ class CoronaryTreeWindow(SnapDock):
         is up), then the .cpr.json's embedded *series*. If ALL three are present →
         just those; if ANY is missing → append the source UID after whatever
         exists; if none → the UID alone."""
-        emb = series or {}
+        emb = dict(series or {})
+        # Also pull the readable identity from an associated FullLv (its src block
+        # carries 症例/検査日/Se#). In a Territory session the FullLv is loaded into
+        # this CT's bundle, so the tree labels correctly even when the corotree.json
+        # predates meta-embedding AND the live-UID lookup misses (the bug where the
+        # row showed a bare UID while the LV tab — reading the same FullLv — did not).
+        b = self._by_uid.get(uid) or {}
+        fl = b.get("full_lv")
+        if fl:
+            try:
+                fmeta = full_lv_mod.label_meta(fl)
+                for _k in ("patient", "date", "series_number"):
+                    if not emb.get(_k) and fmeta.get(_k):
+                        emb[_k] = fmeta[_k]
+            except Exception:                               # noqa: BLE001
+                pass
         live = {}
         if self._shell is not None and hasattr(self._shell, "coronary_series_meta"):
             try:
