@@ -2475,13 +2475,15 @@ class MainWindow(QMainWindow):
         # folder the tree file came from before asking, so the CT is found itself.
         if cpr_dir and os.path.isdir(cpr_dir):
             scan = [cpr_dir]
-            # Cross-OS case: the saved src_dir exists in the file but is NOT a
-            # real folder here (e.g. a Windows path opened on a Mac). The analysis
-            # JSONs are usually in a SUBFOLDER beside the CT folder, so also scan
-            # one level up to catch a SIBLING CT the recursive cpr_dir scan would
-            # miss. Only broaden on this clear cross-OS signal (an invalid saved
-            # src_dir), so same-OS drops keep their tight single-folder scan.
-            if src_dir and not os.path.isdir(src_dir):
+            # By default search ONLY the JSON's own folder — the .corotree/.FullLv and
+            # the source CT normally sit together. Broaden to the PARENT (one level up)
+            # ONLY when the saved src_dir is invalid (renamed/cross-OS) AND the JSON's
+            # folder itself holds NO DICOM — i.e. the JSON really is in a sibling
+            # subfolder. Without the "no DICOM here" gate, a renamed CT folder made
+            # this scan the whole (possibly huge) parent — e.g. Desktop\Export — which
+            # was pathologically slow.
+            if (src_dir and not os.path.isdir(src_dir)
+                    and not dicom_io.folder_has_dicom(cpr_dir)):
                 parent = os.path.dirname(os.path.normpath(cpr_dir))
                 if (parent and os.path.isdir(parent)
                         and parent != os.path.normpath(cpr_dir)):
