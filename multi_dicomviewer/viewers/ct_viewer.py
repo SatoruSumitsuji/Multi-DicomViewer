@@ -11711,14 +11711,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._vr_apply_xform(key)                 # feeds the label-map mask + matrix
         p.render()
 
-    def _vr_pick_vessel(self, key, sx, sy, tol_px=16.0):
+    def _vr_pick_vessel(self, key, sx, sy, tol_px=8.0):
         """The coronary (vid, sample-idx) under a click at (sx, sy) on VR pane *key*,
         or None. Vessel samples are projected to the screen through the SAME matrix the
         tubes render under (orientation + the toward-camera depth LIFT), so the hit is
-        the line exactly where it is DRAWN under the cursor. Among the samples whose
-        projection is within *tol_px* of the click, the OUTERMOST (nearest-camera) one
-        wins — the frontmost coronary line the user is looking at; it never jumps to a
-        laterally-offset or far-side vessel."""
+        the line exactly where it is DRAWN under the cursor. ONLY samples whose
+        projection is within *tol_px* of the click (≈ the Target dot's radius) count —
+        there is NO fall-back to the nearest line on screen, so the Target never slides
+        sideways to a vessel the user did not click. Among the in-range samples the
+        OUTERMOST (nearest-camera) one wins (the frontmost line the user is looking at).
+        Nothing within the tight radius → None (zoom in for a pinpoint hit)."""
         src = self._coro_overlay_vr or self._coro_overlay
         if not self._vr_on.get(key) or not src:
             return None
@@ -11745,7 +11747,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             ren.GetTiledAspectRatio(), -1.0, 1.0)
         C = np.array([[cm.GetElement(i, j) for j in range(4)] for i in range(4)])
         tol2 = (tol_px * dpr) ** 2
-        best_in, best_any = (1e18, None, None), (1e18, None, None)   # (key, vid, idx)
+        best = (1e18, None, None)                   # (camera-distance, vid, idx)
         for ves in src:
             p3 = ves.get("points")
             if p3 is None or len(p3) < 2:
@@ -11761,20 +11763,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             dxp = (ndc[:, 0] * 0.5 + 0.5) * W - vx
             dyp = (ndc[:, 1] * 0.5 + 0.5) * H - vy
             px2 = dxp * dxp + dyp * dyp                              # px² from the click
-            camd = np.linalg.norm(Pw - cpos, axis=1)                # smaller = outermost
-            i_any = int(np.argmin(px2))
-            if px2[i_any] < best_any[0]:
-                best_any = (float(px2[i_any]), vid, i_any)
-            near = np.where(px2 <= tol2)[0]                         # under the cursor
-            if len(near):
-                j = int(near[np.argmin(camd[near])])               # outermost of them
-                if camd[j] < best_in[0]:
-                    best_in = (float(camd[j]), vid, j)
-        if best_in[1] is not None:                  # a line is under the cursor
-            return best_in[1], int(best_in[2])
-        if best_any[1] is not None:                 # else the closest line on screen
-            return best_any[1], int(best_any[2])
-        return None
+            near = np.where(px2 <= tol2)[0]                         # under the cursor only
+            if len(near) == 0:
+                continue
+            camd = np.linalg.norm(Pw[near] - cpos, axis=1)          # smaller = outermost
+            j = int(near[np.argmin(camd)])                          # outermost in range
+            if float(camd.min()) < best[0]:
+                best = (float(camd.min()), vid, j)
+        if best[1] is None:                         # no line within the tight radius
+            return None
+        return best[1], int(best[2])
 
     def _vr_pick_target(self, key, sx, sy) -> bool:
         """3-D target pick on the VR: set a Target at the nearest coronary sample
