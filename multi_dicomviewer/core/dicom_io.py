@@ -22,17 +22,23 @@ from pydicom.pixels import apply_color_lut, convert_color_space, pixel_array
 
 from .study_model import Modality, Patient, Series, Study
 
-# Japanese modalities often declare the malformed SpecificCharacterSet defined
-# term "ISO 2022 IR87" (missing the space before the number). pydicom warns
-# about it from inside dcmread — before we get a chance to repair it — for every
-# such file. We deliberately handle this case (see _normalize_charset /
-# decode_text below), so silence just that one warning to keep logs clean.
-warnings.filterwarnings(
-    "ignore",
-    message=r"Unknown encoding 'ISO 2022 IR\d+'",
-    category=UserWarning,
-    module="pydicom.charset",
-)
+# Japanese modalities often declare a malformed SpecificCharacterSet — "ISO 2022
+# IR87" (missing the space), "ISO_IR 13 " (trailing space), a bare " ", or an
+# escape sequence pydicom doesn't know. pydicom warns about each from inside
+# dcmread, BEFORE we get a chance to repair it (see _normalize_charset /
+# decode_text below), ONCE PER FILE. On a big folder scan that console flood is
+# itself a real slowdown (synchronous stderr writes, worse from the scan thread),
+# on top of being pure noise — we handle the charset ourselves, so silence them.
+for _msg in (r"Unknown encoding", r"Found unknown escape sequence",
+             r"Invalid value for VR", r"Empty value for"):
+    warnings.filterwarnings(
+        "ignore", message=_msg, category=UserWarning, module=r"pydicom\..*")
+# Vendor UIDs with leading-zero components (e.g. root 1.2.392.200069…) are
+# non-conformant but read/display/export fine; stop pydicom warning per element.
+try:
+    pydicom.config.settings.reading_validation_mode = pydicom.config.IGNORE
+except Exception:                                    # noqa: BLE001
+    pass
 
 
 def _warn(msg: str) -> None:
