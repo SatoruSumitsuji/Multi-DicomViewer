@@ -1655,14 +1655,6 @@ class MainWindow(QMainWindow):
             ".corotree.json. Floats or docks with Studies"))
         self._corotree_act.triggered.connect(self._open_coronary_tree)
         tm.addAction(self._corotree_act)
-        self._lvanalysis_act = QAction(t("LV Analysis…"), self)
-        self._lvanalysis_act.setToolTip(t(
-            "Manage the LV side of a CT Territory analysis (the .FullLv.json): "
-            "list datasets by 日付 / 症例名 / Se番号, open the source CT to edit "
-            "MV / AoV / Apex / Epi / Blood-Endo, and save. Floats or docks with "
-            "Studies"))
-        self._lvanalysis_act.triggered.connect(self._open_lv_analysis)
-        tm.addAction(self._lvanalysis_act)
 
         tm.addSeparator()
         self._dicommanager_act = QAction(t("DicomManager…"), self)
@@ -2379,35 +2371,6 @@ class MainWindow(QMainWindow):
         w.activateWindow()
         return w
 
-    def _open_lv_analysis(self):
-        """Tools ▸ LV Analysis — a dockable manager for the LV side (.FullLv.json)
-        of a CT Territory analysis, equal in standing to the Coronary Tree. One
-        instance is kept. Docks + tabs with Studies in the LEFT area by default;
-        drag the tab out (or double-click its title bar) to float it."""
-        from multi_dicomviewer.ui.lv_analysis_window import LVAnalysisWindow
-        w = getattr(self, "_lvanalysis_win", None)
-        if w is None:
-            w = LVAnalysisWindow(self)
-            self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, w)
-            if getattr(self, "_studies_dock", None) is not None:
-                self.tabifyDockWidget(self._studies_dock, w)
-            self._lvanalysis_win = w
-            w.resize(380, 520)
-        if not w.isVisible():
-            w.show()
-        if w.isFloating():
-            too_small = w.width() < 220 or w.height() < 160
-            scr = self.screen().availableGeometry() if self.screen() else None
-            off = scr is not None and not scr.intersects(w.frameGeometry())
-            if too_small or off:
-                w.resize(380, 520)
-                c = self.geometry().center()
-                w.move(max(0, c.x() - 190), max(0, c.y() - 260))
-        w.show()
-        w.raise_()
-        w.activateWindow()
-        return w
-
     def coronary_series_meta(self, uid: str) -> dict:
         """Live metadata (patient / study date / series number) of a LOADED CT
         series, looked up by UID (base-UID match tolerating a '#…' suffix), for
@@ -2871,20 +2834,9 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 import traceback
                 traceback.print_exc()
-        self._lv_analysis_register(full)                 # also list it in the LV tab
         return True
 
-    # ===================== LV Analysis tab coordination ================
-    def _lv_analysis_register(self, full) -> None:
-        """If the LV Analysis tab is open, add/refresh this FullLv in its list so
-        the LV dataset is visible there too (non-intrusive — never force-opens)."""
-        w = getattr(self, "_lvanalysis_win", None)
-        if w is not None and hasattr(w, "load_full_lv"):
-            try:
-                w.load_full_lv(full)
-            except Exception:                            # noqa: BLE001
-                pass
-
+    # ===================== LV editable open / save (reused by Territory) =====
     def lv_open_full_for_edit(self, full_data, src_dir: str = "") -> bool:
         """Open the source 3-D CT for a FullLv and load it into the viewer's
         EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo), so the user can edit it in
@@ -3318,7 +3270,6 @@ class MainWindow(QMainWindow):
                 and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
         full = territory_file.full_lv_data(data)
-        self._lv_analysis_register(full)
         self._poll_full_lv_apply(uid, full, 0)           # VR review once CT shown
 
     def territory_save_active(self) -> bool:
@@ -3478,7 +3429,6 @@ class MainWindow(QMainWindow):
         if getattr(w, "_tree", None) is not None and w._tree.vessels \
                 and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
-        self._lv_analysis_register(data)                 # also list it in the LV tab
         self._poll_full_lv_apply(uid, data, 0)
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
