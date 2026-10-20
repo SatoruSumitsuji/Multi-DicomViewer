@@ -228,6 +228,8 @@
   "DicomFolder — organize DICOM files": "DicomFolder — DICOM ファイルを整理",
   "DicomManager": "DicomManager",
   "DicomManager…": "DicomManager…",
+  "Processing finished. What would you like to do?": "処理が完了しました。次の操作を選んでください。",
+  "Re-scan": "再スキャン",
   "Drop a folder to delete non-DICOM files AND organize the DICOM files into sub-folders — DicomCheck + DicomFolder in one window": "フォルダをドロップして、非DICOMファイルの削除とDICOMファイルのフォルダ整理を一括で行う（DicomCheck＋DicomFolderを1つのウィンドウに統合）",
   "Total {tn} files {ts},  non-DICOM {nn} files {ns},  DICOM {dn} files {ds}": "合計 {tn} ファイル {ts}、 非DICOM {nn} ファイル {ns}、 DICOM {dn} ファイル {ds}",
   "Direction arrow": "方向矢印",
