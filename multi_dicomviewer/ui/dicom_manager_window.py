@@ -33,8 +33,13 @@ class DicomManagerWindow(QMainWindow):
         self._folder = DicomFolderPanel(start_dir)
         split.addWidget(self._check)
         split.addWidget(self._folder)
+        # A wide, grabbable handle so the user can freely drag the top (DicomCheck)
+        # panel DOWN to enlarge its file tree; neither panel fully collapses.
+        split.setHandleWidth(8)
+        split.setChildrenCollapsible(False)
         split.setStretchFactor(0, 1)
-        split.setStretchFactor(1, 2)               # DicomFolder (bigger) gets more room
+        split.setStretchFactor(1, 1)
+        split.setSizes([470, 510])                 # near-even; drag to taste
         self._split = split
 
         # One drop / pick on EITHER panel loads BOTH; either panel's action re-scans
