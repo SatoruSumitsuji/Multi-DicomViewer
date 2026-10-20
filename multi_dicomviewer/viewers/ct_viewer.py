@@ -11829,41 +11829,41 @@ class CTViewer(CPRMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
-    def _vr_pick_target_marker(self, key, sx, sy, tol_mm=10.0):
-        """The Target number (1-based, spec 'n') whose 3-D marker is nearest the
-        click ray on VR pane *key*, or None. Used for the right-click menu."""
+    def _vr_pick_target_marker(self, key, sx, sy, tol_px=10.0):
+        """The Target number (1-based, spec 'n') whose 3-D marker PROJECTS nearest the
+        click on VR pane *key*, within *tol_px* SCREEN pixels (≈ the drawn dot's
+        radius), or None. A pixel tolerance — not a world radius — keeps the delete /
+        menu hit to the visible dot itself, so a NEW target can be placed right next
+        to an existing one (zoom in for a pinpoint hit). Markers clipped away on the
+        far side of the LV are not hittable."""
         if not self._vr_on.get(key) or not self._coro_targets:
             return None
         p = self.pane[key]
-        ren = p.ren
+        ren = p.ren                              # shares the camera with the overlay
         dpr = max(1.0, p.canvas.devicePixelRatioF())
-        size = ren.GetRenderWindow().GetSize()
         vx = sx * dpr
-        vy = size[1] - sy * dpr
-
-        def world_at(z):
-            ren.SetDisplayPoint(vx, vy, z)
-            ren.DisplayToWorld()
-            w = ren.GetWorldPoint()
-            return np.array(w[:3]) / (w[3] if abs(w[3]) > 1e-12 else 1.0)
-
-        a = world_at(0.0)
-        d = world_at(1.0) - a
-        dn = float(np.linalg.norm(d))
-        if dn < 1e-6:
-            return None
-        d = d / dn
+        vy = ren.GetRenderWindow().GetSize()[1] - sy * dpr   # VTK display y is bottom-up
+        M = self._vr_xform.get(key)              # markers render under this matrix
+        clip = getattr(p, "vr_coro_clip", None)  # far-side markers are clipped
         best, best_n = 1e18, None
         for spec in self._coro_targets:
             pt = spec.get("point")
             if pt is None:
                 continue
             P = np.asarray(pt, float)
-            t = float((P - a) @ d)
-            dist = float(np.linalg.norm(P - (a + t * d)))
-            if dist < best:
-                best, best_n = dist, spec.get("n")
-        if best_n is None or best > tol_mm:
+            if M is not None:
+                w = np.asarray(M, float) @ np.array([P[0], P[1], P[2], 1.0])
+                P = w[:3] / (w[3] if abs(w[3]) > 1e-9 else 1.0)
+            if clip is not None and clip.EvaluateFunction(
+                    float(P[0]), float(P[1]), float(P[2])) < 0.0:
+                continue                         # on the clipped (far) side → not shown
+            ren.SetWorldPoint(float(P[0]), float(P[1]), float(P[2]), 1.0)
+            ren.WorldToDisplay()
+            dp = ren.GetDisplayPoint()           # device px, y bottom-up
+            dd = float(np.hypot(dp[0] - vx, dp[1] - vy))
+            if dd < best:
+                best, best_n = dd, spec.get("n")
+        if best_n is None or best > tol_px * dpr:
             return None
         return int(best_n)
 
