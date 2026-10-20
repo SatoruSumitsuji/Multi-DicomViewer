@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QMenu,
@@ -404,7 +405,10 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.setColumnCount(4)
         self._tree_w.setHeaderLabels(
             [t("血管"), t("役割"), t("分岐"), t("心筋量")])
-        self._tree_w.setColumnWidth(0, 130)
+        # 血管 column auto-fits its contents so the full vessel name (now with the
+        # @SeNN suffix) is always visible instead of being truncated at a fixed width.
+        self._tree_w.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents)
         self._tree_w.setColumnWidth(1, 70)
         self._tree_w.setColumnWidth(2, 70)
         # Ctrl = arbitrary multi-select, Shift = contiguous range (for 消去).
