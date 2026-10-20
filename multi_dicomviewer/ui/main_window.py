@@ -2421,21 +2421,30 @@ class MainWindow(QMainWindow):
                 if k == uid or k.split("#", 1)[0] == base:
                     se = s
                     break
+        import os
         hdr = getattr(se, "header", None) if se is not None else None
+        src = ""
+        if se is not None:
+            try:
+                files = list(getattr(se, "files", []) or [])
+                if files:
+                    src = os.path.dirname(os.path.abspath(files[0]))
+            except Exception:                            # noqa: BLE001
+                src = ""
+        # Fallback: the UID lookup can miss (the saved corotree UID isn't an
+        # exact/base match of any loaded series' SeriesInstanceUID) OR the found
+        # LoadedSeries may carry no retained header — yet the CT is right there on
+        # screen. Read the header straight off the pane DISPLAYING this tree's CT
+        # (the live viewer header that DICOM Info shows), so a re-save embeds the
+        # 症例/検査日/Se# instead of leaving the row a bare UID.
+        if hdr is None:
+            hdr2, src2 = self._coronary_displayed_header(uid)
+            if hdr2 is not None:
+                hdr = hdr2
+                src = src or src2
         if hdr is None:
             return {}
         pn = str(getattr(hdr, "PatientName", "") or "")
-        # The LIVE folder this CT was actually loaded from (dirname of its first
-        # file) — so a saved overlay can refresh its auto-open shortcut to the
-        # current folder even after the source folder was renamed / moved.
-        import os
-        src = ""
-        try:
-            files = list(getattr(se, "files", []) or [])
-            if files:
-                src = os.path.dirname(os.path.abspath(files[0]))
-        except Exception:                                # noqa: BLE001
-            src = ""
         return {
             "patient": pn.split("^")[0].strip() or pn.strip(),
             "date": str(getattr(hdr, "StudyDate", "")
@@ -2443,6 +2452,41 @@ class MainWindow(QMainWindow):
             "series_number": str(getattr(hdr, "SeriesNumber", "") or ""),
             "src_dir": src,
         }
+
+    def _coronary_displayed_header(self, uid: str):
+        """(header, src_dir) read from the CT viewer of a pane currently DISPLAYING
+        this tree's CT: a pane whose shown SeriesUID base-matches *uid*, else the
+        active pane (the user is looking at the tree's CT when they save). The live
+        viewer header is authoritative (it's what DICOM Info renders); returns
+        (None, '') if no CT viewer is up."""
+        base = (uid or "").split("#", 1)[0]
+        try:
+            shown = self._shown_panes()
+        except Exception:                                # noqa: BLE001
+            shown = []
+        ordered = []
+        for p in shown:                                  # UID-matching panes first
+            try:
+                su = p.shown_series_uid() or ""
+            except Exception:                            # noqa: BLE001
+                su = ""
+            if su and (su == uid or su.split("#", 1)[0] == base):
+                ordered.append(p)
+        if self._active is not None and self._active not in ordered:
+            ordered.append(self._active)                 # safety net: active pane
+        for p in ordered:
+            v = p.current_viewer() if p is not None else None
+            h = getattr(v, "_header", None)
+            if h is None:
+                continue
+            src = ""
+            try:
+                if hasattr(v, "_lv_series_dir"):
+                    src = v._lv_series_dir() or ""
+            except Exception:                            # noqa: BLE001
+                src = ""
+            return h, src
+        return None, ""
 
     def coronary_register_cpr(self, data, name=None, path=None) -> bool:
         """A CT viewer's 登録 button: register an in-memory CPR into the Coronary
