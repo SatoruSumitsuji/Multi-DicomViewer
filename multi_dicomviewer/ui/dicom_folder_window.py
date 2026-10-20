@@ -987,6 +987,12 @@ class DicomFolderPanel(QWidget):
     def _scan(self, d: str) -> None:
         self._files = []
         self._tree.clear()
+        # Tree items are now deleted C++ objects — drop the stale references so a
+        # later _rebuild_tree doesn't call isExpanded() on a dead item and crash
+        # (hit on the auto re-scan after a Copy/Move).
+        self._item_by_key = {}
+        self._leaf_by_index = {}
+        self._preview_leaf = None
         self._set_busy(True)
         self._bar.setVisible(True)
         self._bar.setRange(0, 0)
@@ -1114,8 +1120,15 @@ class DicomFolderPanel(QWidget):
             gfiles.setdefault(key, []).append(idx)
 
         # Remember which folders were expanded so a rebuild (e.g. after a
-        # drag-move) doesn't collapse everything the user had open.
-        expanded = {k for k, it in self._item_by_key.items() if it.isExpanded()}
+        # drag-move) doesn't collapse everything the user had open. Guard against a
+        # stale item whose C++ object was already deleted (RuntimeError).
+        expanded = set()
+        for k, it in self._item_by_key.items():
+            try:
+                if it.isExpanded():
+                    expanded.add(k)
+            except RuntimeError:
+                pass
 
         # Populate with sorting OFF (fast, order preserved) then switch it back
         # on so the header stays click-sortable.
