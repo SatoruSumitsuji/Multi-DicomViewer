@@ -1517,7 +1517,7 @@ class MainWindow(QMainWindow):
         # dialogs can't be reached while the language menu is open, so they
         # just pick it up next open). Only those that implement retranslate_ui.
         for attr in ("_coreg_win", "_rupture_win", "_ortho_win",
-                     "_dicomcheck_win", "_dicomfolder_win", "_hist_dialog"):
+                     "_dicommanager_win", "_hist_dialog"):
             win = getattr(self, attr, None)
             if (win is not None and hasattr(win, "retranslate_ui")
                     and win.isVisible()):
@@ -1657,18 +1657,13 @@ class MainWindow(QMainWindow):
         tm.addAction(self._corotree_act)
 
         tm.addSeparator()
-        self._dicomcheck_act = QAction(t("DicomCheck…"), self)
-        self._dicomcheck_act.setToolTip(t(
-            "Scan a folder and delete non-DICOM files (and empty folders)"
+        self._dicommanager_act = QAction(t("DicomManager…"), self)
+        self._dicommanager_act.setToolTip(t(
+            "Drop a folder to delete non-DICOM files AND organize the DICOM files "
+            "into sub-folders — DicomCheck + DicomFolder in one window"
         ))
-        self._dicomcheck_act.triggered.connect(self._open_dicom_check)
-        tm.addAction(self._dicomcheck_act)
-        self._dicomfolder_act = QAction(t("DicomFolder…"), self)
-        self._dicomfolder_act.setToolTip(t(
-            "Organize DICOM files into sub-folders by date / modality / study"
-        ))
-        self._dicomfolder_act.triggered.connect(self._open_dicom_folder)
-        tm.addAction(self._dicomfolder_act)
+        self._dicommanager_act.triggered.connect(self._open_dicom_manager)
+        tm.addAction(self._dicommanager_act)
         self._bintag_act = QAction(t("Export binary DICOM tag…"), self)
         self._bintag_act.setToolTip(t(
             "Write a binary VR tag (OB/OW/UN — shown as <binary>) to text "
@@ -4073,14 +4068,15 @@ class MainWindow(QMainWindow):
                     450, lambda vv=v, s=st: vv.restore_view_state(s))
         return True
 
-    def _open_dicom_check(self) -> None:
-        """Launch the DicomCheck tool (delete non-DICOM files / empty dirs)."""
-        from multi_dicomviewer.ui.dicom_check_window import DicomCheckWindow
-        self._dicomcheck_win = DicomCheckWindow(
+    def _open_dicom_manager(self) -> None:
+        """Launch the DicomManager tool (DicomCheck + DicomFolder combined: delete
+        non-DICOM files AND organize the DICOM files into sub-folders)."""
+        from multi_dicomviewer.ui.dicom_manager_window import DicomManagerWindow
+        self._dicommanager_win = DicomManagerWindow(
             start_dir=self._last_open_dir())
-        self._as_taskbar_window(self._dicomcheck_win)
-        self._dicomcheck_win.show()
-        self._dicomcheck_win.raise_()
+        self._as_taskbar_window(self._dicommanager_win)
+        self._dicommanager_win.show()
+        self._dicommanager_win.raise_()
 
     def _open_bintag_export(self) -> None:
         """Launch the binary-tag export dialog (hex / Base64 / Latin-1). The
@@ -4095,15 +4091,6 @@ class MainWindow(QMainWindow):
                             "label": (se.label if se else ""),
                             "path": path})
         BinaryTagExportDialog(entries, self).exec()
-
-    def _open_dicom_folder(self) -> None:
-        """Launch the DicomFolder tool (organize DICOM files by tag)."""
-        from multi_dicomviewer.ui.dicom_folder_window import DicomFolderWindow
-        self._dicomfolder_win = DicomFolderWindow(
-            start_dir=self._last_open_dir())
-        self._as_taskbar_window(self._dicomfolder_win)
-        self._dicomfolder_win.show()
-        self._dicomfolder_win.raise_()
 
     def _last_open_dir(self):
         """Best-effort starting folder for the file tools — the last folder
@@ -4930,7 +4917,7 @@ class MainWindow(QMainWindow):
     #: Attribute names on self; closed together with the main window below.
     _TOOL_WINDOW_ATTRS = (
         "_coreg_win", "_multisync", "_ortho_win", "_rupture_win",
-        "_dicomcheck_win", "_dicomfolder_win", "_casepres_win",
+        "_dicommanager_win", "_casepres_win",
     )
 
     def _as_taskbar_window(self, win):

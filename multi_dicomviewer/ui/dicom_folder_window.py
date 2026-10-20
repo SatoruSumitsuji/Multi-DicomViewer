@@ -35,7 +35,6 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
-    QMainWindow,
     QMenu,
     QMessageBox,
     QHeaderView,
@@ -677,11 +676,18 @@ class _GroupTree(QTreeWidget):
             ev.ignore()
 
 
-class DicomFolderWindow(QMainWindow):
+class DicomFolderPanel(QWidget):
+    """The DicomFolder UI as an embeddable panel (used inside DicomManager).
+
+    Emits ``folder_dropped(path)`` when a folder is dropped on it (the host loads it
+    into every panel) and ``processed()`` after a Copy/Move changes the source (the
+    host re-scans every panel)."""
+
+    folder_dropped = pyqtSignal(str)
+    processed = pyqtSignal()
+
     def __init__(self, start_dir: str | None = None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(t("DicomFolder — organize DICOM files"))
-        self.resize(950, 720)
         self.setAcceptDrops(True)                  # drop a folder = source
         self._files: list[dict] = []
         self._source: str | None = start_dir
@@ -701,9 +707,7 @@ class DicomFolderWindow(QMainWindow):
         self._preview_leaf = None                    # grey-highlighted row
         self._worker: QThread | None = None
 
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root = QVBoxLayout(self)
 
         # ---- source / target pickers
         srow = QHBoxLayout()
@@ -957,14 +961,19 @@ class DicomFolderWindow(QMainWindow):
         d = self._dropped_dir(ev)
         if d:
             ev.acceptProposedAction()
-            self._set_source_and_scan(d)            # a dropped folder = source
+            self.folder_dropped.emit(d)             # host loads it into every panel
+
+    def load_folder(self, path: str) -> None:
+        """Public: set *path* as the source and (re)scan it — called by the host on
+        drop / after a sibling panel changed the folder."""
+        self._set_source_and_scan(path)
 
     # ----------------------------------------------------------- source
     def _pick_source(self) -> None:
         d = QFileDialog.getExistingDirectory(
             self, t("Select source folder"), self._source or "")
         if d:
-            self._set_source_and_scan(d)
+            self.folder_dropped.emit(d)             # host loads it into every panel
 
     def _set_source_and_scan(self, d: str) -> None:
         if self._worker is not None and self._worker.isRunning():
@@ -1369,13 +1378,17 @@ class DicomFolderWindow(QMainWindow):
         if fail:
             msg += t("\n{n} failed: {err}", n=fail, err=err)
         QMessageBox.information(self, t("DicomFolder"), msg)
-        if moved:                                    # sources are gone — rescan
-            if self._source:
-                self._scan(self._source)
+        # The source changed (Move empties it; Copy leaves it) — the host re-scans
+        # EVERY panel so both views reflect the new folder state.
+        self.processed.emit()
 
-    def closeEvent(self, ev):                        # noqa: N802 (Qt override)
+    def cleanup(self) -> None:
+        """Stop any running worker — called by the host window on close."""
         if self._worker is not None and self._worker.isRunning():
             if hasattr(self._worker, "stop"):
                 self._worker.stop()
             self._worker.wait(2000)
+
+    def closeEvent(self, ev):                        # noqa: N802 (Qt override)
+        self.cleanup()
         super().closeEvent(ev)
