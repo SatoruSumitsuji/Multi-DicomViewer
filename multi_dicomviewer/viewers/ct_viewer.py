@@ -18773,6 +18773,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Remember the MPR view we're tracing on so re-Draw (see _coronary_draw)
         # can return to THIS exact image instead of a reset MPR.
         self._cpr_prev_view = self._view_snapshot()
+        # Fresh CPR entry: no tree-vessel being resumed yet (the resume caller
+        # re-sets these AFTER apply_cpr_data). A plain Draw leaves them cleared so
+        # its overlay isn't suppressed and Save offers the generic name.
+        self._coro_edit_vid = ""
+        self._cpr_suggested_name = ""
         # Capture the frame of the pane the route was drawn on (the RMF seed).
         u, v, nrm = self._axes_for(which)
         # The cross-section is ALWAYS pane A, the MAP (with the drawn route) is pane
@@ -18851,6 +18856,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         *keep_view* restores the MPR view that was showing when this short-axis
         was built (so re-Draw traces on the SAME image), instead of resetting to
         a default MPR."""
+        # Leaving CPR ends any tree-vessel edit: stop suppressing its overlay line
+        # and forget its suggested Save name.
+        self._coro_edit_vid = ""
+        self._cpr_suggested_name = ""
         if self._cpr is None:
             self._coronary_sync_ui()
             return
@@ -18921,15 +18930,26 @@ class CTViewer(CPRMixin, AbstractViewer):
         path on success, else None (cancelled / failed) — 保存登録 uses the path."""
         from PyQt6.QtWidgets import QFileDialog
         import os
+        import re
         data = self._cpr_build_data()
         if data is None:
             return None
-        # Default to the vessel's OWN .cpr.json when this short-axis was loaded /
-        # resumed from one (the right-click ▸ 編集 sets _cpr_last_path) — editing a
-        # target CPR is almost always an overwrite, so offer its real name first
-        # instead of a generic "<series>.cpr.json".
+        # Default name priority (always via this Save dialog — never a silent
+        # overwrite):
+        #  1. Resumed a Coronary-Tree vessel (右クリック ▸ 編集) → the VESSEL NAME in
+        #     the CT folder, e.g. "D9aL.cpr.json" (user preference). Taking the
+        #     vessel name — not a remembered path — also avoids offering a STALE
+        #     name left over from a previously-edited vessel.
+        #  2. Loaded from a real .cpr.json → that file's own path.
+        #  3. Otherwise the generic "<series>.cpr.json".
+        sug = getattr(self, "_cpr_suggested_name", "") or ""
         last = getattr(self, "_cpr_last_path", "") or ""
-        if last:
+        if sug:
+            d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+            nm = re.sub(r'[\\/:*?"<>|]', "_", sug).strip() or "shortaxis"
+            default = os.path.join(d, nm + ".cpr.json") if d \
+                else nm + ".cpr.json"
+        elif last:
             default = last
         else:
             d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""

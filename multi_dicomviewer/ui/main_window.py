@@ -2611,6 +2611,14 @@ class MainWindow(QMainWindow):
                         else None
                 except Exception:                        # noqa: BLE001
                     this_spec = None
+            # While this viewer is editing a tree vessel (右クリック ▸ 編集), drop
+            # that vessel's reference line from its own 2-D overlay — the live
+            # editable CPR trace already shows it, so without this the user sees a
+            # duplicate (the old grey line next to the one being edited). VR tubes
+            # are left intact.
+            ev = getattr(v, "_coro_edit_vid", "") or ""
+            if ev and getattr(v, "_cpr", None) is not None and this_spec:
+                this_spec = [e for e in this_spec if e.get("vid") != ev]
             try:
                 v.set_coronary_overlay(this_spec)
             except Exception:                            # noqa: BLE001
@@ -3070,8 +3078,18 @@ class MainWindow(QMainWindow):
             # pick this CPR and the angle must not jump/revert on 編集.
             if v.apply_cpr_data({"ctrl": data["ctrl"]}, keep_view=True):
                 self._coro_editing_vid = vid
+                try:
+                    # Tell the viewer which tree vessel it is editing so (a) its
+                    # reference overlay line is suppressed while the live editable
+                    # trace is shown (no duplicate grey line) and (b) Save defaults
+                    # to the VESSEL NAME (e.g. D9aL.cpr.json), not a stale/generic
+                    # name. Both are cleared when the viewer leaves CPR.
+                    v._coro_edit_vid = vid
+                    v._cpr_suggested_name = data.get("name") or ""
+                except Exception:                        # noqa: BLE001
+                    pass
                 # Point Overwrite at the vessel's own .cpr.json (if known) so the
-                # viewer's own save writes the same file.
+                # right-click ▸ 上書き保存 writes the same file.
                 if data.get("path"):
                     try:
                         v._cpr_last_path = data["path"]
