@@ -124,18 +124,43 @@ class SnapDock(QDockWidget):
         return (obj is self or self.isAncestorOf(obj)) and not in_content
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt override)
-        et = event.type()
-        # A NATIVE title-bar double-click (the default when a dock first floats
-        # on Windows) arrives as a NON-CLIENT event on the top-level window, not
-        # as a normal MouseButtonDblClick — miss it and Qt's default float↔dock
-        # toggle fires (the panel "closes" into the Studies dock). Catch both.
-        if et == QEvent.Type.NonClientAreaMouseButtonDblClick and (
-                obj is self or obj is self.window()):
-            if self.isFloating():
-                self.toggle_maximize()
-            return True
-        if et == QEvent.Type.MouseButtonDblClick and self._on_titlebar(obj):
-            if self.isFloating():
-                self.toggle_maximize()
-            return True
-        return super().eventFilter(obj, event)
+        # This filter is installed app-wide, so it runs for EVERY event. If this
+        # SnapDock's C++ object was deleted while the filter was still installed,
+        # touching self (isFloating / window / super) raises RuntimeError on each
+        # event — which floods the console endlessly. Guard it: on that error (or
+        # any), uninstall ourselves and stop. The dedicated handling below only
+        # fires for our own title-bar double-clicks.
+        try:
+            et = event.type()
+            # A NATIVE title-bar double-click (the default when a dock first floats
+            # on Windows) arrives as a NON-CLIENT event on the top-level window,
+            # not as a normal MouseButtonDblClick — miss it and Qt's default
+            # float↔dock toggle fires (the panel "closes" into Studies). Catch both.
+            if et == QEvent.Type.NonClientAreaMouseButtonDblClick and (
+                    obj is self or obj is self.window()):
+                if self.isFloating():
+                    self.toggle_maximize()
+                return True
+            if et == QEvent.Type.MouseButtonDblClick and self._on_titlebar(obj):
+                if self.isFloating():
+                    self.toggle_maximize()
+                return True
+            return super().eventFilter(obj, event)
+        except RuntimeError:
+            self._uninstall_filter()
+            return False
+        except Exception:                                # noqa: BLE001
+            return False
+
+    def _uninstall_filter(self) -> None:
+        """Remove this dock's app-wide event filter (so a deleted dock can't keep
+        firing eventFilter and flooding the console). Only called when touching
+        self already raised — i.e. the C++ object is gone — NOT on a normal close
+        (a dock close just HIDES it; the filter must stay so maximize still works
+        after a reopen)."""
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+        except Exception:                                # noqa: BLE001
+            pass
