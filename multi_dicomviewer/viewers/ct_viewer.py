@@ -3341,11 +3341,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         button) during a FullLv review; restore otherwise. Reflects the current
         Blood / 壁厚 overlay state on the toggles."""
         terr = bool(getattr(self, "_territory_display", False))
+        # The Territory / Coronary / LV editing bars are ALL MPR-only — none of
+        # their tools apply to a 2-D native-slice (cine) view, so hide every one of
+        # them in 2-D (the "Coronary: CPR / LV: …" row the user saw under a 2-D CT).
+        is2d = (getattr(self, "_mode", "3D") == "2D")
         if getattr(self, "_terr_bar", None) is not None:
-            self._terr_bar.setVisible(terr)
+            self._terr_bar.setVisible(terr and not is2d)
         if getattr(self, "_lv_wrap", None) is not None:
-            self._lv_wrap.setVisible(not terr)
-        if terr and getattr(self, "_cpr_wrap", None) is not None:
+            self._lv_wrap.setVisible(not terr and not is2d)
+        if getattr(self, "_cpr_wrap", None) is not None and (terr or is2d):
             self._cpr_wrap.setVisible(False)
         b2d = (self._mode_btns.get("2D")
                if getattr(self, "_mode_btns", None) else None)
@@ -19813,6 +19817,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Disable the MPR-only tools/controls in 2-D (handled with the
         # measure-mode greying in one place).
         self._refresh_tool_availability()
+        # Hide the MPR-only bottom bars (Coronary / LV / Territory) in 2-D.
+        self._terr_bar_sync()
         self._slab_spin.setEnabled(not is2d)
         self._cl_btn.setEnabled(
             (not is2d) and not self._lv_cross_suppressed())
