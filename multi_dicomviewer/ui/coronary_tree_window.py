@@ -738,6 +738,32 @@ class CoronaryTreeWindow(SnapDock):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def show_coronary_only(self) -> None:
+        """CoronaryTree edit mode (Territory bar 「CoronaryTreeモード」): hide the
+        perfusion-territory tint AND the Epi/Endo borders, and make sure the
+        coronary tree overlay is ON — so only the CPR lines show and can be
+        edited. The FullLv data stays loaded (re-shown via LVモード / 領域色)."""
+        self._territory_on = False
+        if getattr(self, "_terr_vis_btn", None) is not None:
+            self._terr_vis_btn.setText(t("表示"))
+        try:
+            self._push_territory()                       # clears the MPR/VR tint
+        except Exception:                                # noqa: BLE001
+            pass
+        self._lv_borders_on = False
+        if getattr(self, "_lv_border_vis_btn", None) is not None:
+            self._lv_border_vis_btn.setText(t("表示"))
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_lv_borders"):
+            try:
+                self._shell.coronary_lv_borders(False)   # hide Epi/Endo borders
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            self._set_overlay(True)                      # coronary tree overlay ON
+        except Exception:                                # noqa: BLE001
+            pass
+
     # ------------------------------------------------------------- VR row
     def _sync_vr_row(self) -> None:
         """Update the VR show/hide button's label to the current state. (シェルVR
