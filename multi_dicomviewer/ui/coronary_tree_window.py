@@ -1328,8 +1328,17 @@ class CoronaryTreeWindow(SnapDock):
         if self._full_lv_data is None:
             self._warn(t("先に FullLv を読み込んでください。"))
             return False
+        # A .territory.json LINKS to the corotree.json + FullLv.json FILES (it does
+        # not embed their data), so both must have been saved first.
+        if not self._last_path:
+            self._warn(t("先に冠動脈ツリーを .corotree.json に保存してください"
+                         "（territory は corotree.json へのリンクを持ちます）。"))
+            return False
+        if not self._full_lv_path:
+            self._warn(t("先に LV を .FullLv.json に保存してください"
+                         "（territory は FullLv.json へのリンクを持ちます）。"))
+            return False
         series = self._corotree_series_block()
-        coro = self._tree.to_json(series=series)
         src_meta = {
             "series_uid": self._ct_uid, "src_dir": self._ct_dir,
             "patient": series.get("patient", ""),
@@ -1337,10 +1346,8 @@ class CoronaryTreeWindow(SnapDock):
             "series_number": series.get("series_number", ""),
         }
         data, err = territory_file_mod.build(
-            src_meta=src_meta, corotree_data=coro,
-            corotree_path=self._last_path or "",
-            full_lv_data=self._full_lv_data,
-            full_lv_path=self._full_lv_path or "",
+            src_meta=src_meta,
+            corotree_path=self._last_path, full_lv_path=self._full_lv_path,
             targets=[dict(tg) for tg in self._targets],
             params={"territory_opacity": float(getattr(self, "_terr_alpha", 0.45)),
                     "targets_shown": bool(getattr(self, "_targets_shown", True))})
@@ -1374,31 +1381,26 @@ class CoronaryTreeWindow(SnapDock):
                              p=os.path.basename(path)))
         return True
 
-    def load_territory(self, data_or_path, path: str = "") -> bool:
-        """Load a ``.territory.json`` (parsed dict OR a path): restore the corotree,
-        the FullLv, the Targets and the display params, then compute + show the
-        territory review. Public — the shell calls it on a .territory.json drop."""
-        data = data_or_path
-        src_path = path
-        if isinstance(data_or_path, str):
-            src_path = data_or_path
-            try:
-                with open(data_or_path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (OSError, ValueError) as exc:            # noqa: BLE001
-                self._warn(t("読込に失敗しました: {e}", e=str(exc)))
-                return False
+    def load_territory(self, data, coro, full, path: str = "") -> bool:
+        """Install a Territory session from its link file + the two already-loaded
+        linked files: *data* = the parsed .territory.json, *coro* = the parsed
+        corotree.json dict, *full* = the parsed FullLv.json dict (the shell
+        resolves the links — incl. the locate-on-missing flow — and loads them).
+        Restores the tree, the FullLv, the Targets and the display params, then
+        computes + shows the territory review."""
         if not territory_file_mod.is_territory(data):
             self._warn(t("Territory (.territory.json) 形式ではありません。"))
             return False
-        coro = territory_file_mod.corotree_data(data)
-        full = territory_file_mod.full_lv_data(data)
         if not isinstance(coro, dict) or not full_lv_mod.is_full_lv(full):
-            self._warn(t("territory ファイルの中身が不完全です。"))
+            self._warn(t("リンク先 (corotree.json / FullLv.json) の中身が不正です。"))
             return False
-        uid = territory_file_mod.series_uid(data)
+        src_path = path
+        uid = (territory_file_mod.series_uid(data)
+               or full_lv_mod.series_uid(full)
+               or (coro.get("series") or {}).get("series_uid", "") or "")
         ser = coro.get("series") or {}
-        self._use_uid(uid, ct_dir=territory_file_mod.src_dir(data), series=ser)
+        self._use_uid(uid, ct_dir=(territory_file_mod.src_dir(data)
+                                   or full_lv_mod.src_dir(full)), series=ser)
         # Restore the tree, its source paths, params and targets, then the FullLv
         # (which computes + shows the territory).
         self._tree = CoronaryTree.from_json(coro)
@@ -2324,6 +2326,14 @@ class CoronaryTreeWindow(SnapDock):
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         self._last_path = path
+        # A corotree.json drop is a CPR-editing context: this CT shows ONLY its
+        # coronary lines, never an LV / territory overlay. Drop any FullLv still
+        # held for THIS CT's bundle so re-opening the CT can't auto-resume the
+        # perfusion-territory review (the "corotree drop also loaded LV" report).
+        self._full_lv_data = None
+        self._full_lv_path = ""
+        self._territory = None
+        self._myo_ml = None
         self._populate()
         self.treeChanged.emit()
         self._hint.setText(t("読込みました: {p}", p=path))

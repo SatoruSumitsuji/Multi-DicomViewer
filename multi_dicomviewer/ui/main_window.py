@@ -3244,35 +3244,101 @@ class MainWindow(QMainWindow):
             return False
         return isinstance(data, dict) and data.get("format") == "MDV-Territory"
 
+    def _territory_resolve_link(self, data, link: str, base: str, which: str):
+        """Resolve a .territory.json LINK to an existing file. Tries the stored
+        path (absolute, else relative to the territory.json's folder, else by
+        basename beside it); on a miss it ALERTS and lets the user locate the file
+        (writing the new path back into *data*). Returns the path, or None if the
+        user cancelled (so the caller aborts). No in-app file creation."""
+        import os
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core import territory_file
+        for c in ([link, (os.path.join(base, link) if link
+                          and not os.path.isabs(link) else ""),
+                   (os.path.join(base, os.path.basename(link)) if link else "")]):
+            if c and os.path.isfile(c):
+                return c
+        name = "corotree.json" if which == "corotree" else "FullLv.json"
+        filt = (t("CoroTree (*.corotree.json)") if which == "corotree"
+                else t("Full LV (*.FullLv.json)"))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(t("Territory"))
+        box.setText(t("{n} が見当たりません。\n「ファイルを探す」で関連付けるか、"
+                      "一度終了して {n} を作成し関連付けてください。", n=name))
+        locate = box.addButton(t("ファイルを探す"),
+                               QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(t("閉じる"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not locate:
+            return None
+        p, _ = QFileDialog.getOpenFileName(
+            self, t("{n} を選択", n=name), base, filt)
+        if not p:
+            return None
+        if which == "corotree":
+            territory_file.set_corotree_path(data, p)
+        else:
+            territory_file.set_full_lv_path(data, p)
+        return p
+
     def _open_territory_file(self, path: str) -> None:
-        """Drop a .territory.json → restore the whole Territory session: feed the
-        Coronary Tree panel the embedded corotree + FullLv + Targets + params,
-        bring up the source CT with BOTH overlays, and re-enter the perfusion-
-        territory review (VR)."""
+        """Drop a .territory.json (a LINK file) → resolve its links to the
+        corotree.json + FullLv.json (letting the user locate a missing one), load
+        those two files, feed the Coronary Tree panel, bring up the source CT with
+        BOTH overlays, and re-enter the perfusion-territory review (VR)."""
         import json
         import os
-        from multi_dicomviewer.core import territory_file
+        from multi_dicomviewer.core import territory_file, full_lv
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, ValueError):
             return
+        if not territory_file.is_territory(data):
+            return
+        base = os.path.dirname(path)
+        coro_path = self._territory_resolve_link(
+            data, territory_file.corotree_path(data), base, "corotree")
+        if coro_path is None:
+            return                                       # cancelled / not associated
+        lv_path = self._territory_resolve_link(
+            data, territory_file.full_lv_path(data), base, "full_lv")
+        if lv_path is None:
+            return
+        # Persist any re-association back into the .territory.json (links only).
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+        from PyQt6.QtWidgets import QMessageBox
+        try:
+            with open(coro_path, encoding="utf-8") as f:
+                coro = json.load(f)
+            with open(lv_path, encoding="utf-8") as f:
+                full = json.load(f)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Territory"),
+                                t("リンク先の読込に失敗しました: {e}", e=str(exc)))
+            return
         w = self._open_coronary_tree()
         if w is None or not hasattr(w, "load_territory"):
             return
-        if not w.load_territory(data, path=path):
+        if not w.load_territory(data, coro, full, path=path):
             return
-        uid = territory_file.series_uid(data)
-        src_dir = territory_file.src_dir(data)
+        uid = (territory_file.series_uid(data) or full_lv.series_uid(full)
+               or (coro.get("series") or {}).get("series_uid", "") or "")
+        src_dir = (territory_file.src_dir(data) or full_lv.src_dir(full)
+                   or (coro.get("series") or {}).get("src_dir", "") or "")
         try:
             self.coronary_show_ct(uid, src_dir,
-                                  cpr_dir=os.path.dirname(path), prompt=True)
+                                  cpr_dir=os.path.dirname(coro_path), prompt=True)
         except Exception:                                # noqa: BLE001
             pass
         if getattr(w, "_tree", None) is not None and w._tree.vessels \
                 and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
-        full = territory_file.full_lv_data(data)
         self._poll_full_lv_apply(uid, full, 0)           # VR review once CT shown
 
     def territory_save_active(self) -> bool:
