@@ -3465,7 +3465,11 @@ class CTViewer(CPRMixin, AbstractViewer):
                                 t("VR のレンダーウィンドウが取得できません。"))
             return
         stem = self._terr_export_stem()
-        default = stem + ".glb"
+        # Default to the ORIGINAL 3-D CT's own data folder, so the VR export lands
+        # beside the source it came from.
+        src = getattr(self, "_src_dir", "") or ""
+        default = os.path.join(src, stem + ".glb") if src and os.path.isdir(src) \
+            else stem + ".glb"
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("VR を書き出し (glTF / GLB)"), default,
             t("glTF Binary (*.glb);;glTF (*.gltf)"))
