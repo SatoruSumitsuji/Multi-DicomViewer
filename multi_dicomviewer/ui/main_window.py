@@ -2489,10 +2489,22 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
 
+        # Per-source "already located" latch. A deliberate find can start SEVERAL
+        # concurrent poll chains (corotree drop + overlay show both call this), and
+        # each would time out and re-pop the folder dialog. Once the user has
+        # picked a folder for this source we stop asking again until the CT
+        # actually loads (cleared on success) — so after one good pick the image
+        # just appears, no second "OK".
+        located = getattr(self, "_coro_ct_located", None)
+        if located is None:
+            located = self._coro_ct_located = set()
+        latch_key = series_uid or cpr_dir or src_dir
+
         def _poll_show(attempt=0, on_fail=None):
             # Wait for the (async) folder scan to index the series, then show it
             # and draw the overlay; refresh again after the volume decodes.
             if series_uid and self._coronary_display_uid(series_uid):
+                located.discard(latch_key)      # resolved → allow a future re-find
                 for ms in (0, 700, 1600):
                     QTimer.singleShot(ms, self.coronary_overlay_refresh)
                 return
@@ -2507,8 +2519,12 @@ class MainWindow(QMainWindow):
         def _ask_ct_folder():
             # The source 3-D CT wasn't found where it was expected → let the USER
             # pick its folder (no automatic broad search). Guard against re-entry
-            # so a second drop/poll can't stack dialogs.
+            # so a second drop/poll can't stack dialogs, AND against re-asking once
+            # the user has already picked a folder for this source (a slower poll
+            # chain must not pop the dialog again).
             if getattr(self, "_coro_ct_prompting", False):
+                return
+            if latch_key in located:
                 return
             self._coro_ct_prompting = True
             try:
@@ -2524,10 +2540,12 @@ class MainWindow(QMainWindow):
             finally:
                 self._coro_ct_prompting = False
             if folder:
+                located.add(latch_key)          # don't ask again for this source
                 self.case_open_folders([folder], dicom_only=True)
                 QTimer.singleShot(300, lambda: _poll_show(0, None))  # no re-prompt
 
         if series_uid and self.case_series_loaded(series_uid):
+            located.discard(latch_key)          # loaded → clear any stale latch
             ok = self._coronary_display_uid(series_uid)
             for ms in (0, 700, 1600):
                 QTimer.singleShot(ms, self.coronary_overlay_refresh)
