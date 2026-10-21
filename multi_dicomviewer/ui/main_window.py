@@ -2873,16 +2873,12 @@ class MainWindow(QMainWindow):
         return True
 
     # ===================== LV editable open / save (reused by Territory) =====
-    def lv_open_full_for_edit(self, full_data, src_dir: str = "") -> bool:
-        """Open the source 3-D CT for a FullLv and load it into the viewer's
-        EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo), so the user can edit it in
-        the in-viewer LV bar. Called by the LV Analysis tab's 「元CTで編集」.
-
-        Decomposes the FullLv bundle into the 5-component ``files`` dict and feeds
-        the proven editable loader (``apply_lv_analysis``). The CT is found by UID,
-        else the saved src_dir is scanned, else the user is asked."""
-        import os
-        from multi_dicomviewer.core import full_lv
+    @staticmethod
+    def _full_lv_to_files(full_data) -> dict:
+        """Decompose a FullLv bundle (epi + bld) into the 5-component ``files`` dict
+        (valve_mitral / valve_aortic / apex / epi / blood) the EDITABLE LV loader
+        ``apply_lv_analysis`` consumes — the same mapping the 5-file drag&drop
+        produces. Empty dict when the bundle carries no LV data."""
         data = full_data or {}
         bld = data.get("bld") or {}
         epi = data.get("epi") or {}
@@ -2897,6 +2893,20 @@ class MainWindow(QMainWindow):
             files["epi"] = epi
         if isinstance(bld, dict) and bld:
             files["blood"] = bld
+        return files
+
+    def lv_open_full_for_edit(self, full_data, src_dir: str = "") -> bool:
+        """Open the source 3-D CT for a FullLv and load it into the viewer's
+        EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo), so the user can edit it in
+        the in-viewer LV bar. Called by the LV Analysis tab's 「元CTで編集」.
+
+        Decomposes the FullLv bundle into the 5-component ``files`` dict and feeds
+        the proven editable loader (``apply_lv_analysis``). The CT is found by UID,
+        else the saved src_dir is scanned, else the user is asked."""
+        import os
+        from multi_dicomviewer.core import full_lv
+        data = full_data or {}
+        files = self._full_lv_to_files(data)
         if not files:
             return False
         uid = full_lv.series_uid(data)
@@ -3628,6 +3638,11 @@ class MainWindow(QMainWindow):
                 v.apply_lv_analysis(files)
             except Exception:                            # noqa: BLE001
                 pass
+            # Backstop: clear any FullLv edit-pending mark for this CT (a drop whose
+            # CT was already loaded never fires _maybe_resume_territory_review).
+            pend = getattr(self, "_full_lv_edit_pending", None)
+            if pend:
+                pend.discard((uid or "").split("#", 1)[0])
             return
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
@@ -3635,9 +3650,13 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------- FullLv (.FullLv.json) drop
     def _open_full_lv_files(self, paths: list) -> None:
-        """Drop a .FullLv.json → open the Coronary Tree panel with the CT Territory
-        analysis: load the FullLv (report), bring up the source CT, and draw BOTH
-        the coronary overlay and the LV overlays (Epi/Endo/Blood) on it."""
+        """Drop a .FullLv.json → open the source CT and restore its LV analysis as
+        an EDITABLE LV state (MV / AoV / Apex / Epi / Blood-Endo) — stopping at the
+        finished LV screen, NOT advancing to the VR / perfusion-territory review.
+        The bundle already holds the five LV results, so it reloads them directly
+        (no need to re-create them); territory is reached only on an explicit
+        compute. The coronary overlay still draws when a tree is docked for this CT
+        (the LV and coronary sides are decoupled)."""
         import json
         import os
         w = self._open_coronary_tree()
@@ -3674,7 +3693,20 @@ class MainWindow(QMainWindow):
         if getattr(w, "_tree", None) is not None and w._tree.vessels \
                 and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
-        self._poll_full_lv_apply(uid, data, 0)
+        # Apply the LV overlays EDITABLY and stop there — do NOT run apply_full_lv
+        # (which lays the panes on the LV axis and auto-enters the VR review). The
+        # CT load triggered above may also fire _maybe_resume_territory_review; mark
+        # this UID edit-pending so that path skips the VR resume for this drop.
+        files = self._full_lv_to_files(data)
+        if not files:
+            return
+        base = (uid or "").split("#", 1)[0]
+        pend = getattr(self, "_full_lv_edit_pending", None)
+        if pend is None:
+            pend = self._full_lv_edit_pending = set()
+        if base:
+            pend.add(base)
+        self._poll_lv_apply(uid, files, 0)
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then draw the LV overlays from a
@@ -3742,6 +3774,14 @@ class MainWindow(QMainWindow):
             return
         if getattr(v, "_territory_display", False):
             return                                       # already in a review
+        # A .FullLv DROP that is in flight for this CT wants the EDITABLE LV screen,
+        # NOT the VR review — its own _poll_lv_apply handles the overlays. Skip the
+        # VR resume here and consume the pending mark (set by _open_full_lv_files).
+        base = (getattr(series, "series_uid", "") or "").split("#", 1)[0]
+        pend = getattr(self, "_full_lv_edit_pending", None)
+        if pend and base in pend:
+            pend.discard(base)
+            return
         w = getattr(self, "_corotree_win", None)
         if w is None or not hasattr(w, "full_lv_for_series"):
             return
