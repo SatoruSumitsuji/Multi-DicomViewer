@@ -3435,20 +3435,32 @@ class MainWindow(QMainWindow):
         return bool(w.save_territory())
 
     def territory_to_lv_mode(self) -> None:
-        """Territory bar 「LVモード」: leave the review and load the FullLv into the
-        active CT viewer's EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo). The
-        FullLv lives on the Coronary Tree panel's active bundle."""
+        """Territory bar 「LVモード」: come back to the EDITABLE LV view by RE-OPENING
+        the 3-D CT fresh (same 'open anew' approach as CoronaryTreeモード, user
+        request) rather than an in-place VR teardown. Dispose the VR/territory CT
+        viewer, then load the FullLv into a clean editable LV state
+        (MV/AoV/Apex/Epi/Blood-Endo); lv_open_full_for_edit → _poll_lv_apply
+        re-displays the CT and applies the editable LV on it."""
+        w = getattr(self, "_corotree_win", None)
+        full = getattr(w, "_full_lv_data", None) if w is not None else None
+        if full and hasattr(self, "lv_open_full_for_edit"):
+            from multi_dicomviewer.core import full_lv
+            # Dispose the active pane's VR-laden CT viewer so the re-open gets a
+            # FRESH MPR viewer (no lingering VR / territory state).
+            if self._active is not None:
+                try:
+                    self._free_pane_ct_for_reload(self._active)
+                except Exception:                        # noqa: BLE001
+                    pass
+            self.lv_open_full_for_edit(full, full_lv.src_dir(full))
+            return
+        # Fallback — no FullLv on the panel: best-effort in-place review exit.
         v = self._active.current_viewer() if self._active is not None else None
         if v is not None and hasattr(v, "exit_territory_review"):
             try:
                 v.exit_territory_review()
             except Exception:                            # noqa: BLE001
                 pass
-        w = getattr(self, "_corotree_win", None)
-        full = getattr(w, "_full_lv_data", None) if w is not None else None
-        if full and hasattr(self, "lv_open_full_for_edit"):
-            from multi_dicomviewer.core import full_lv
-            self.lv_open_full_for_edit(full, full_lv.src_dir(full))
 
     def territory_to_coronary_mode(self) -> None:
         """Territory bar 「CoronaryTreeモード」: come back to the plain Coronary-Tree
