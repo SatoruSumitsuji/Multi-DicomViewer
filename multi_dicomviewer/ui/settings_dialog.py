@@ -191,20 +191,38 @@ class SettingsDialog(QDialog):
             ctqlay.addWidget(rb)
         root.addWidget(gb_ctq)
 
-        # ---- LV Auto-Endo (advanced) --------------------------------------
-        # The everyday 肉柱 knob lives on the Blood/Endo bar; these are the rarely
-        # touched per-method shape/resolution values. Defaults are good.
+        # ---- LV Auto-Endo -------------------------------------------------
+        # The Auto-Endo build METHOD (方式) and the rarely touched per-method
+        # shape/resolution values live here. Defaults are good for almost everyone.
         lv = dict(settings._LV_ENDO_DEFAULTS)
         if isinstance(lv_endo, dict):
             lv.update({k: lv_endo[k] for k in lv if k in lv_endo})
-        gb_lv = QGroupBox(t("LV Auto-Endo (advanced)"))
+        gb_lv = QGroupBox(t("LV Auto-Endo"))
         lvform = QFormLayout(gb_lv)
         lvnote = QLabel(
-            t("Advanced Auto-Endo shape/resolution. Normally leave these — the "
-              "everyday 肉柱 knob is on the Blood/Endo bar. Smaller resolution "
-              "values are finer but slower."))
+            t("Auto-Endo の作り方 (方式) と形状/解像度。通常は既定のままで構いません。"
+              "解像度を小さくすると精細ですが遅くなります。"))
         lvnote.setWordWrap(True)
         lvform.addRow(lvnote)
+        # 方式 (method): the Auto-Endo build algorithm — sits ABOVE 凹み判定 (弦長),
+        # which is the 凸包滑 method's concavity test. Default 凸包滑 (hull_smooth).
+        self._lv_method_combo = QComboBox()
+        _method_labels = (
+            ("hull_smooth", t("凸包滑")),
+            ("hull", t("凸包(層)")),
+            ("hull_round", t("凸包(丸)")),
+            ("polar", t("放射")),
+            ("convex3d", t("3D凸包")),
+        )
+        for data, label in _method_labels:
+            self._lv_method_combo.addItem(label, data)
+        mi = self._lv_method_combo.findData(lv.get("method", "hull_smooth"))
+        self._lv_method_combo.setCurrentIndex(mi if mi >= 0 else 0)
+        self._lv_method_combo.setToolTip(
+            t("Auto-Endo の作り方: 凸包滑=短軸レベル凸包の頂点間を外に膨らむ滑らかな"
+              "カーブで結ぶ(推奨)、凸包(層)=凸包の多角形そのまま、凸包(丸)=円に近づける"
+              "(肉柱)、放射=各方向の最遠血流(肉柱で谷を橋渡し)、3D凸包=3次元凸包"))
+        lvform.addRow(t("方式"), self._lv_method_combo)
         self._lv_spins: dict[str, QDoubleSpinBox | QSpinBox] = {}
         # (key, label, tip, is_int, lo, hi, step, decimals, suffix)
         lv_fields = (
@@ -465,9 +483,9 @@ class SettingsDialog(QDialog):
         return out
 
     def lv_endo(self) -> dict:
-        """Chosen advanced Auto-Endo params (min_chord_mm / n_meridians /
+        """Chosen Auto-Endo params (method / min_chord_mm / n_meridians /
         grid_mm / step_mm)."""
-        out = {}
+        out = {"method": self._lv_method_combo.currentData() or "hull_smooth"}
         for k, sb in self._lv_spins.items():
             v = sb.value()
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
