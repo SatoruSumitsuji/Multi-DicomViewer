@@ -6336,7 +6336,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             else:
                 self._vr_flip[key] = [False, False]   # a fresh VR starts un-flipped
             self._vr_mask = self._run_busy(
-                t("VR"), t("VR構築中…"), self._vr_crop_mask)
+                t("VR作成中"), t("VR作成中"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
             # Orient the LEFT (non-VR) pane to the LV short-axis so Paging steps
             # through LV levels and it stays ON the LV (Windows parity).
