@@ -3460,7 +3460,13 @@ class MainWindow(QMainWindow):
                     w._set_overlay(False)
                 except Exception:                        # noqa: BLE001
                     pass
-            self.lv_open_full_for_edit(full, full_lv.src_dir(full))
+            # DEFER the re-open (next event-loop pass) so the freed VR viewer's GL
+            # context/volume is released FIRST — otherwise re-decoding the big CT
+            # while the old VR viewer is still alive exhausts the GPU → black pane.
+            from PyQt6.QtCore import QTimer
+            sd = full_lv.src_dir(full)
+            QTimer.singleShot(
+                0, lambda d=full, s=sd: self.lv_open_full_for_edit(d, s))
             return
         # Fallback — no FullLv on the panel: best-effort in-place review exit.
         v = self._active.current_viewer() if self._active is not None else None
@@ -3480,6 +3486,7 @@ class MainWindow(QMainWindow):
         the bundle's FullLv so the CT can't auto-resume the territory review, and
         _set_overlay re-opens the CT with the coronary overlay on a clean MPR)."""
         import os
+        from PyQt6.QtCore import QTimer
         w = getattr(self, "_corotree_win", None)
         corotree_path = (getattr(w, "_last_path", "") or "") if w is not None else ""
         if w is not None and corotree_path and os.path.isfile(corotree_path):
@@ -3490,8 +3497,13 @@ class MainWindow(QMainWindow):
                     self._free_pane_ct_for_reload(self._active)
                 except Exception:                        # noqa: BLE001
                     pass
-            # Re-open exactly like a fresh .corotree.json drop.
-            self._open_coronary_tree_file(corotree_path)
+            # DEFER the re-open (next event-loop pass): the freed viewer's GL
+            # context is finalised synchronously but the widget deletes on
+            # deleteLater — re-decoding a big CT while that old VR viewer is still
+            # alive exhausts the GPU and the new CT comes up BLACK. One loop pass
+            # lets it go first. Re-open exactly like a fresh .corotree.json drop.
+            QTimer.singleShot(
+                0, lambda p=corotree_path: self._open_coronary_tree_file(p))
             return
         # Fallback — the tree was never saved (no corotree.json path): best-effort
         # in-place switch (exit the review + show only the coronary overlay).
