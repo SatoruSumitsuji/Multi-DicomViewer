@@ -3451,8 +3451,30 @@ class MainWindow(QMainWindow):
             self.lv_open_full_for_edit(full, full_lv.src_dir(full))
 
     def territory_to_coronary_mode(self) -> None:
-        """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
-        territory overlay, and show ONLY the coronary CPR lines for editing."""
+        """Territory bar 「CoronaryTreeモード」: come back to the plain Coronary-Tree
+        view by RE-OPENING the 3-D CT + its .corotree.json FRESH — not an in-place
+        VR teardown. The in-place switch (exit VR → rebuild MPR) was unreliable (it
+        left the right pane black / mixed state); the user asked for a clean 'open
+        the 3DCT and corotree.json anew' instead. So: dispose the VR/territory CT
+        viewer, then run the same path as a .corotree.json drop (load_file clears
+        the bundle's FullLv so the CT can't auto-resume the territory review, and
+        _set_overlay re-opens the CT with the coronary overlay on a clean MPR)."""
+        import os
+        w = getattr(self, "_corotree_win", None)
+        corotree_path = (getattr(w, "_last_path", "") or "") if w is not None else ""
+        if w is not None and corotree_path and os.path.isfile(corotree_path):
+            # Dispose the active pane's VR-laden CT viewer so the re-open gets a
+            # FRESH MPR viewer (no lingering VR / territory state, no black pane).
+            if self._active is not None:
+                try:
+                    self._free_pane_ct_for_reload(self._active)
+                except Exception:                        # noqa: BLE001
+                    pass
+            # Re-open exactly like a fresh .corotree.json drop.
+            self._open_coronary_tree_file(corotree_path)
+            return
+        # Fallback — the tree was never saved (no corotree.json path): best-effort
+        # in-place switch (exit the review + show only the coronary overlay).
         v = self._active.current_viewer() if self._active is not None else None
         if v is not None:
             if hasattr(v, "exit_territory_review"):
@@ -3465,7 +3487,6 @@ class MainWindow(QMainWindow):
                     v.enter_coronary_only()
                 except Exception:                        # noqa: BLE001
                     pass
-        w = getattr(self, "_corotree_win", None)
         if w is not None and hasattr(w, "show_coronary_only"):
             try:
                 w.show_coronary_only()

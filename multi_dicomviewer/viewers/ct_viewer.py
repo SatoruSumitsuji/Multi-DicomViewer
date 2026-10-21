@@ -784,12 +784,12 @@ _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
 #: the opaque territory colour. The real surface still occludes the far-side tree.
 #: Larger = lifts deeper vessels but floats the tree farther off the surface.
 _VR_CORO_LIFT_MM = 7.0
-#: Target SPHERE: sits on the clicked centreline point, just 1 mm in front of the
-#: tube so it reads on top without being z-fought — NOT more. The user picks the
-#: Target on the VISIBLE tube (already lifted _VR_CORO_LIFT_MM); lifting the sphere
-#: much farther pushed it visibly off the click under the perspective VR camera
-#: (the 'クリック位置から少し上にズレる' report 2026-10-21).
-_VR_TGT_LIFT_MM = _VR_CORO_LIFT_MM + 1.0
+#: Target SPHERE: floated by EXACTLY the coronary-tube lift, so the sphere centre
+#: coincides with the clicked centreline point on screen. The user picks the Target
+#: on the VISIBLE tube (rendered at _VR_CORO_LIFT_MM); any EXTRA lift projects the
+#: sphere off the click under the perspective VR camera (the 'クリック位置から少し上
+#: にズレる' report 2026-10-21) — so match the tube exactly, no more.
+_VR_TGT_LIFT_MM = _VR_CORO_LIFT_MM
 #: Target NUMBER label floats a bit MORE than the sphere/tubes so it is never
 #: occluded by a vessel line (the number was hidden UNDER the coronary line); it is
 #: also nudged up-right in screen space (SetDisplayOffset) so it clears the line.
@@ -9503,27 +9503,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")             # overlays only draw in 3-D MPR
-        from PyQt6.QtWidgets import QApplication, QProgressDialog
         try:
             if isinstance(epi, dict):
                 self._lvv_apply_epi_data(epi)  # animated "Loading Epi data…"
-            # Blood/Endo restore touches Qt/VTK (can't run off-thread), but it's a
-            # short wait — show a labelled busy window so it doesn't look frozen.
-            busy = QProgressDialog(t("Applying Blood/Endo…"), "", 0, 0,
-                                   self.window())
-            busy.setWindowTitle(t("Blood/Endo"))
-            busy.setWindowModality(Qt.WindowModality.WindowModal)
-            busy.setCancelButton(None)
-            busy.setMinimumDuration(0)
-            busy.setValue(0)
-            self._enlarge_busy(busy)
-            busy.show()
-            QApplication.processEvents()
-            try:
-                self._lvv_apply_data(bld)    # enter Blood/Endo + restore overlays
-            finally:
-                busy.reset()
-                busy.deleteLater()
+            # Blood/Endo restore touches Qt/VTK on the main thread — a short wait.
+            # Do NOT pump the event loop here: QApplication.processEvents() re-enters
+            # a still-running DICOM folder scan (territory is usually reached right
+            # after the CT finishes loading) and left its "Loading DICOM…" progress
+            # dialog stuck open at 100% — the same re-entrancy the VR-busy rule
+            # forbids. Run it directly (it's brief); the VR build below shows its own
+            # 「VR作成中」.
+            self._lvv_apply_data(bld)        # enter Blood/Endo + restore overlays
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
