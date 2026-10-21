@@ -12261,7 +12261,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
             # The crop mask (scipy EDT shell) is the slow part of turning VR on —
             # build it behind an ANIMATED busy window so it doesn't look hung.
-            mask = self._run_busy(t("VR"), t("Building VR…"),
+            mask = self._run_busy(t("VR作成中"), t("VR作成中"),
                                   self._vr_crop_mask)  # Epi+shell / Epi interior
             self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
             if mask is not None:
@@ -12518,12 +12518,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         # keep the territory render on screen.
         if getattr(self, "_vr_terr_mode", {}).get(key):
             self._vr_crop_cache[key] = self._run_busy(
-                t("VR"), t("Building VR…"), self._vr_crop_mask)
+                t("VR作成中"), t("VR作成中"), self._vr_crop_mask)
             self._vr_apply_xform(key)
             p.ren.ResetCameraClippingRange()
             p.render()
             return
-        mask = self._run_busy(t("VR"), t("Building VR…"), self._vr_crop_mask)
+        mask = self._run_busy(t("VR作成中"), t("VR作成中"), self._vr_crop_mask)
         self._vr_mask_arr[key] = mask            # kept for Flip-H/V data flip
         if mask is not None:
             p.vr_mapper.SetMaskInput(self._mask_to_vtk_binary(mask))
