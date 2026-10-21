@@ -3465,6 +3465,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                                 t("VR のレンダーウィンドウが取得できません。"))
             return
         stem = self._terr_export_stem()
+        self._pending_vr_export_key = key        # consumed by _export_vr_gltf
         # Default to the ORIGINAL 3-D CT's own data folder, so the VR export lands
         # beside the source it came from.
         src = getattr(self, "_src_dir", "") or ""
@@ -3498,11 +3499,88 @@ class CTViewer(CPRMixin, AbstractViewer):
         stem = "_".join(s for s in parts if s)
         return (stem + "_territory_VR") if stem else "territory_VR"
 
+    def _vr_terr_export_actors(self, key) -> list:
+        """Build temporary coloured perfusion-territory SURFACE actors from the
+        territory label volume (`_terr_label_np` + `_terr_colors_v`), aligned to the
+        coronary tubes, and ADD them to pane *key*'s VR renderer for a glTF/GLB
+        export. The live render uses a DVR volume label-map (not meshes), so these
+        surfaces exist only for the export. Returns the actors added (caller removes
+        them). One iso-surface per territory label, coloured by its fill."""
+        import numpy as np
+        lab = getattr(self, "_terr_label_np", None)
+        colors = getattr(self, "_terr_colors_v", None)
+        added: list = []
+        if lab is None or not colors or self._image is None:
+            return added
+        from vtkmodules.vtkImagingCore import vtkImageThreshold
+        from vtkmodules.vtkFiltersCore import (
+            vtkFlyingEdges3D, vtkWindowedSincPolyDataFilter)
+        p = self.pane[key]
+        sx, sy, sz = self._dims
+        img = numpy_to_vtk_image(
+            np.ascontiguousarray(np.asarray(lab), np.float32), sx, sy, sz)
+        # Match the CT image's world placement so the surfaces land on the tubes.
+        try:
+            img.SetOrigin(self._image.GetOrigin())
+            if hasattr(self._image, "GetDirectionMatrix") \
+                    and hasattr(img, "SetDirectionMatrix"):
+                img.SetDirectionMatrix(self._image.GetDirectionMatrix())
+        except Exception:                                # noqa: BLE001
+            pass
+        M = self._vr_xform.get(key)
+        vm = self._np_to_vtkmatrix(np.asarray(M, float)) if M is not None else None
+        ncol = len(colors)
+        labels_present = sorted({int(v) for v in np.unique(np.asarray(lab))
+                                 if int(v) > 0})
+        for lv in labels_present:
+            try:
+                th = vtkImageThreshold()
+                th.SetInputData(img)
+                th.ThresholdBetween(lv - 0.5, lv + 0.5)
+                th.SetInValue(1.0)
+                th.SetOutValue(0.0)
+                th.SetOutputScalarTypeToFloat()
+                fe = vtkFlyingEdges3D()
+                fe.SetInputConnection(th.GetOutputPort())
+                fe.SetValue(0, 0.5)
+                fe.ComputeNormalsOn()
+                sm = vtkWindowedSincPolyDataFilter()
+                sm.SetInputConnection(fe.GetOutputPort())
+                sm.SetNumberOfIterations(15)
+                sm.BoundarySmoothingOff()
+                sm.FeatureEdgeSmoothingOff()
+                sm.NonManifoldSmoothingOn()
+                sm.NormalizeCoordinatesOn()
+                sm.Update()
+                pd = sm.GetOutput()
+                if pd is None or pd.GetNumberOfPoints() == 0:
+                    continue
+                mp = vtkPolyDataMapper()
+                mp.SetInputData(pd)
+                mp.ScalarVisibilityOff()
+                ac = vtkActor()
+                ac.SetMapper(mp)
+                c = colors[lv - 1] if 0 <= lv - 1 < ncol else (0.9, 0.4, 0.4, 0.8)
+                r, g, b = float(c[0]), float(c[1]), float(c[2])
+                a = float(c[3]) if len(c) > 3 else 1.0
+                prop = ac.GetProperty()
+                prop.SetColor(r, g, b)
+                prop.SetOpacity(min(0.9, max(0.5, a)))
+                if vm is not None:
+                    ac.SetUserMatrix(vm)
+                p.ren.AddActor(ac)
+                added.append(ac)
+            except Exception:                            # noqa: BLE001
+                continue
+        return added
+
     def _export_vr_gltf(self, rw, path: str) -> str:
         """Write the VR render window to *path* as glTF. A .glb target is packed into
         a single binary file; any other extension writes a single self-contained
         .gltf (inline base64 buffers). The per-system perfusion summary is embedded
-        in asset.extras. Returns the path actually written."""
+        in asset.extras. Returns the path actually written. Temporary coloured
+        territory surfaces are added for the export (the live territory is in the DVR
+        volume, which glTF can't carry) and removed afterwards."""
         import os
         import json
         import base64
@@ -3512,6 +3590,34 @@ class CTViewer(CPRMixin, AbstractViewer):
         from vtkmodules.vtkIOExport import vtkGLTFExporter
         summary = getattr(self, "_terr_summary_text", "") or ""
         want_glb = path.lower().endswith(".glb")
+        # The on-screen perfusion territory is painted into the DVR VOLUME (a GPU
+        # label-map mask), which glTF can't carry — so build temporary coloured
+        # SURFACE meshes from the territory label volume, add them to the VR renderer
+        # for the export, and remove them afterwards. Without this only the coronary
+        # tubes + target markers would export (the user saw "no coloured regions").
+        key = getattr(self, "_pending_vr_export_key", None)
+        tmp_actors = []
+        try:
+            if key is not None:
+                tmp_actors = self._vr_terr_export_actors(key)
+            return self._do_export_vr_gltf(rw, path, want_glb, summary)
+        finally:
+            if key is not None and tmp_actors:
+                try:
+                    pren = self.pane[key].ren
+                    for ac in tmp_actors:
+                        pren.RemoveActor(ac)
+                except Exception:                        # noqa: BLE001
+                    pass
+
+    def _do_export_vr_gltf(self, rw, path, want_glb, summary):
+        import os
+        import json
+        import base64
+        import struct
+        import tempfile
+        import shutil
+        from vtkmodules.vtkIOExport import vtkGLTFExporter
         if not want_glb:
             # Single self-contained .gltf (inline base64 buffers).
             exp = vtkGLTFExporter()
