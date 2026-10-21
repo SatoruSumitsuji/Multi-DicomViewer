@@ -226,6 +226,12 @@ class SettingsDialog(QDialog):
         self._lv_spins: dict[str, QDoubleSpinBox | QSpinBox] = {}
         # (key, label, tip, is_int, lo, hi, step, decimals, suffix)
         lv_fields = (
+            ("close_mm", t("膨らみ (肉柱)"),
+             t("方式ごとの形状係数: 凸包滑=凹み(頂点間)を外へ膨らませる量 / "
+               "凸包(丸)=円に近づける度合い / 放射=谷を橋渡しする角度幅。大きいほど"
+               "丸く/大きく橋渡し。凸包(層)・3D凸包では無効。「凹み判定(弦長)」とは"
+               "別の値です。"),
+             True, 1, 20, 1, 0, t(" mm")),
             ("min_chord_mm", t("凸包滑: 凹み判定 (弦長)"),
              t("Hull edges longer than this (mm) are treated as concavities and "
                "bulged; shorter = convex wall, kept straight."),

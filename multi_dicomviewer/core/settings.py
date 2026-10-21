@@ -502,12 +502,14 @@ LV_ENDO_METHODS = ("hull_smooth", "hull", "hull_round", "polar", "convex3d")
 #: the Blood/Endo bar). Defaults are good for almost everyone.
 _LV_ENDO_DEFAULTS = {
     "method": "hull_smooth",  # 方式: Auto-Endo build method (default 凸包滑)
+    "close_mm": 5,         # 膨らみ/肉柱: per-method shape knob (bulge / round / bridge)
     "min_chord_mm": 5.0,   # 凸包滑: hull edge longer than this = a concavity to bulge
     "n_meridians": 240,    # 放射: number of radial directions
     "grid_mm": 0.7,        # mask sampling pitch (smaller = finer/slower)
     "step_mm": 0.45,       # display outline sampling pitch
 }
 _LV_ENDO_RANGES = {       # (min, max) sanity clamps — numeric keys only
+    "close_mm": (1, 20),
     "min_chord_mm": (1.0, 30.0),
     "n_meridians": (60, 720),
     "grid_mm": (0.3, 2.0),
