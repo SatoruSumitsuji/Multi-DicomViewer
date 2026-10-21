@@ -2307,6 +2307,79 @@ class CoronaryTreeWindow(SnapDock):
             self._hidden.discard(vid)
         return len(drop)
 
+    def _refresh_vessels_from_newer_cpr(self, corotree_path: str,
+                                        want_uid: str = "") -> list:
+        """After loading a tree, adopt a vessel's OWN ``<vesselname>.cpr.json``
+        centreline whenever it DIFFERS from the tree's inline line — the per-vessel
+        .cpr.json is the authoritative edit, so it takes over. This is the recovery
+        for a corotree.json saved before a vessel's CPR was edited (the old 'Save
+        wrote the file but not the tree' gap): the tree would otherwise redraw the
+        stale (long) line even though the vessel's .cpr.json is correct. Matched by
+        the file being named for the vessel; mtime is NOT used (a corotree saved
+        last can still hold a stale line, so 'newest file' is the wrong test — the
+        .cpr.json content wins). Only a REAL difference is applied, so an in-sync
+        tree is untouched and nothing is falsely reported.
+
+        Searches the corotree's own folder and the source-CT folder; only applies a
+        .cpr.json whose embedded series UID matches (when both are known), so a
+        same-named vessel from another case can't bleed in. Returns the list of
+        changed vessel names (for the hint)."""
+        import re
+        dirs = []
+        for d in (os.path.dirname(corotree_path) if corotree_path else "",
+                  self._ct_dir or ""):
+            if d and os.path.isdir(d) and d not in dirs:
+                dirs.append(d)
+        if not dirs:
+            return []
+        refreshed = []
+        for vid, v in self._tree.vessels.items():
+            name = (v.name or "").strip()
+            if not name:
+                continue
+            safe = re.sub(r'[\\/:*?"<>|]', "_", name).strip()
+            cand = ""
+            for d in dirs:
+                p = os.path.join(d, safe + ".cpr.json")
+                if os.path.isfile(p):
+                    cand = p
+                    break
+            if not cand:
+                continue
+            try:
+                with open(cand, encoding="utf-8") as f:
+                    cd = json.load(f)
+            except (OSError, ValueError):
+                continue
+            # Safety: skip a .cpr.json that belongs to a DIFFERENT series.
+            cuid = (cd.get("series") or {}).get("series_uid", "") or ""
+            if want_uid and cuid and cuid.split("#", 1)[0] != want_uid.split("#", 1)[0]:
+                continue
+            ctrl = cd.get("ctrl")
+            if not ctrl or len(ctrl) < 2:
+                continue
+            try:
+                ctrl_arr = np.asarray(ctrl, float)
+            except Exception:                            # noqa: BLE001
+                continue
+            # Only adopt when it ACTUALLY differs from the tree's current control
+            # points (so an already-in-sync vessel isn't touched or falsely listed).
+            cur = v.ctrl
+            if cur is not None:
+                cur_arr = np.asarray(cur, float)
+                if cur_arr.shape == ctrl_arr.shape \
+                        and np.allclose(cur_arr, ctrl_arr, atol=1e-3):
+                    continue
+            try:
+                cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
+            except Exception:                            # noqa: BLE001
+                continue
+            v.points = cl.points
+            v.ctrl = ctrl_arr
+            self._bundle()["paths"][vid] = cand          # remember its .cpr.json
+            refreshed.append(name)
+        return refreshed
+
     def load_file(self, path) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -2326,6 +2399,11 @@ class CoronaryTreeWindow(SnapDock):
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         self._last_path = path
+        # Recovery: if a vessel has a <name>.cpr.json (next to the tree / in the CT
+        # folder) whose line DIFFERS from the tree's, adopt that edited line — the
+        # authoritative per-vessel file wins over a corotree.json saved before the
+        # edit, killing a stale long line the tree would otherwise redraw.
+        refreshed = self._refresh_vessels_from_newer_cpr(path, uid)
         # A (re)load replaces the overlay but does NOT by itself end a CPR edit in
         # progress — so the line the user was editing would linger on top of the
         # fresh tree ('編集前の線が残る'). Ask the source CT viewer(s) to leave any
@@ -2346,7 +2424,12 @@ class CoronaryTreeWindow(SnapDock):
         self._myo_ml = None
         self._populate()
         self.treeChanged.emit()
-        self._hint.setText(t("読込みました: {p}", p=path))
+        if refreshed:
+            self._hint.setText(
+                t("読込みました: {p}（{n}本の血管を最新の .cpr.json で更新: {names}）",
+                  p=path, n=len(refreshed), names="・".join(refreshed[:8])))
+        else:
+            self._hint.setText(t("読込みました: {p}", p=path))
         return True
 
     def _load(self):
