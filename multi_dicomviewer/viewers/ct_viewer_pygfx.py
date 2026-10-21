@@ -17556,12 +17556,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                                  if not m.get("_cpr_src")]
             self._redraw_meas(k)
 
-    def _enter_cpr(self, which, mi, ref_up=None):
+    def _enter_cpr(self, which, mi, ref_up=None, keep_view: bool = False):
         """Turn polyline *mi* on pane *which* into a vessel centreline and put
         pane A into short-axis (cross-section) scroll mode. Mirrors the VTK
         viewer's _enter_cpr. *ref_up* overrides the RMF seed (used by Load so a
         saved short-axis rebuilds with the exact base frame its state is
-        relative to)."""
+        relative to).
+
+        *keep_view* (the right-click ▸ 編集 resume) does NOT re-fit the map camera
+        on entry, so the LAO/CRA angle the user adjusted is kept instead of
+        jumping back to a default (LAO0/CRA0) MPR."""
         # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
         self._cpr_prev_view = self._view_snapshot()
         u, v, nrm = self._axes_for(which)        # RMF seed = the drawn plane
@@ -17619,7 +17623,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             sc.setEnabled(True)
         self._cpr_sync_bar()
         self._coronary_sync_ui()                   # show scrub, enable Save
-        self._refresh(reset_cam=True)
+        self._refresh(reset_cam=not keep_view)
 
     def _exit_cpr(self, keep_view=False):
         """Leave short-axis mode and restore pane A's normal MPR. The coronary
@@ -17753,7 +17757,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         try:
             ok = self._cpr_apply_saved(data.get("ctrl"), data.get("ref_up"),
-                                       data.get("state", {}))
+                                       data.get("state", {}), keep_view=keep_view)
         except Exception:                        # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -17815,12 +17819,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("Load failed: {err}", err=str(exc)))
 
-    def _cpr_apply_saved(self, ctrl, ref_up, state) -> bool:
+    def _cpr_apply_saved(self, ctrl, ref_up, state, keep_view: bool = False) -> bool:
         """Rebuild a short-axis from a saved centreline + display state — shared
         by Load and the Case Presentation restore. Re-creates the source
         polyline (tagged _cpr_src so repeated restores don't pile up), enters
         CPR with the saved RMF seed, and restores T / rotation / reverse / FOV /
-        position. Returns True on success. Caller renders."""
+        position. Returns True on success. Caller renders.
+
+        *keep_view* (the right-click ▸ 編集 resume) keeps the map camera the user
+        adjusted (the LAO/CRA angle) instead of re-fitting it to a default MPR."""
         ctrl = [np.asarray(P, float) for P in (ctrl or [])]
         if len(ctrl) < 2:
             return False
@@ -17828,7 +17835,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if src not in ("A", "B"):
             src = "A"
         if self._cpr is not None:
-            self._exit_cpr()
+            self._exit_cpr(keep_view=keep_view)
         # Drop any AUTO-created trace from a previous load/restore (user-drawn
         # traces are untagged and left untouched).
         for k in ("A", "B"):
@@ -17845,7 +17852,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             "pts3d": [list(map(float, P)) for P in ctrl], "_cpr_src": True})
         self._redraw_meas(src)
         mi = len(self._measures[src]) - 1
-        self._enter_cpr(src, mi, ref_up=ref_up)
+        self._enter_cpr(src, mi, ref_up=ref_up, keep_view=keep_view)
         if self._cpr is None:
             return False
         c = self._cpr
