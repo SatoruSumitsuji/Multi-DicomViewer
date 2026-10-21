@@ -2826,6 +2826,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_cb = None
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
+        self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
         # VR-pane territory readout text (pushed by the panel): per-system
         # myocardium summary (top-right) + per-target list (bottom-right).
         self._terr_summary_text = ""
@@ -8453,6 +8454,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     def set_coronary_overwrite_cb(self, cb) -> None:
         """Register cb(vid) for a CPR-overlay-line right-click ▸ 上書き保存."""
         self._coro_overwrite_cb = cb
+
+    def set_coronary_tree_sync_cb(self, cb) -> None:
+        """Register cb(vid, path) so the CPR Save of a resumed tree vessel pushes
+        the edited centreline back into the tree (overlay redraws the new line)."""
+        self._coro_tree_sync_cb = cb
 
     def set_territory_mask(self, mask, colors=None) -> None:
         """Public (shell): overlay the perfusion-territory colour map on the CT.
@@ -17764,6 +17770,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         if not self._cpr_write(path, data):
             return None
+        # Resumed from a Coronary-Tree vessel → push the edited centreline back
+        # into the TREE so the overlay redraws the new line (not the old stored one).
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        if evid and getattr(self, "_coro_tree_sync_cb", None) is not None:
+            try:
+                self._coro_tree_sync_cb(evid, self._cpr_last_path)
+            except Exception:                            # noqa: BLE001
+                pass
         return self._cpr_last_path               # the real path (.cpr.json appended)
 
     def _cpr_overwrite(self) -> None:
@@ -17779,6 +17793,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if data is None:
             return
         self._cpr_write(path, data)
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        if evid and getattr(self, "_coro_tree_sync_cb", None) is not None:
+            try:
+                self._coro_tree_sync_cb(evid, path)      # push edit into the tree
+            except Exception:                            # noqa: BLE001
+                pass
 
     def apply_cpr_data(self, data, keep_view: bool = False) -> bool:
         """Headless: rebuild the short-axis (CPR) from a parsed .cpr.json on THIS

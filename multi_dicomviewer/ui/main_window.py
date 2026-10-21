@@ -2685,6 +2685,11 @@ class MainWindow(QMainWindow):
                     v.set_coronary_overwrite_cb(self.coronary_overwrite_edit)
                 except Exception:                        # noqa: BLE001
                     pass
+            if hasattr(v, "set_coronary_tree_sync_cb"):
+                try:
+                    v.set_coronary_tree_sync_cb(self.coronary_sync_edited_vessel)
+                except Exception:                        # noqa: BLE001
+                    pass
             # Territory Target markers (same source-CT gate as the vessels).
             if hasattr(v, "set_coronary_targets"):
                 tspec = []
@@ -3191,6 +3196,35 @@ class MainWindow(QMainWindow):
                     v.coronary_clear_cpr_edit()
                 except Exception:                        # noqa: BLE001
                     pass
+
+    def coronary_sync_edited_vessel(self, vid: str, path: str = "") -> None:
+        """Push an edited short-axis centreline from the live CPR back into the
+        Coronary Tree vessel *vid* (and register its .cpr.json *path*), so the
+        overlay redraws the EDITED line instead of the vessel's old stored one.
+        Called by the viewer's CPR Save / Overwrite for a RESUMED tree vessel — no
+        file IO here (the viewer already wrote the file), so no second dialog."""
+        w = getattr(self, "_corotree_win", None)
+        if w is None or not hasattr(w, "update_vessel_cpr"):
+            return
+        try:
+            data = w.cpr_resume_data(vid)
+        except Exception:                                # noqa: BLE001
+            data = None
+        if not data:
+            return
+        v = self._viewer_for_series(data.get("uid", ""))
+        if v is None or not hasattr(v, "get_current_cpr"):
+            return
+        try:
+            cur = v.get_current_cpr()                    # live (edited) ctrl points
+        except Exception:                                # noqa: BLE001
+            cur = None
+        if not cur or not cur[0]:
+            return
+        try:
+            w.update_vessel_cpr(vid, cur[0], path or data.get("path") or "")
+        except Exception:                                # noqa: BLE001
+            pass
 
     def coronary_vr_visible(self, on: bool) -> None:
         """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide the VR on the source CT.
