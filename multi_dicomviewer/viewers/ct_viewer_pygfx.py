@@ -4513,6 +4513,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.setChecked(k == mode)
         is2d = (mode == "2D")
         self._refresh_tool_availability()   # MPR-only tools off in 2-D
+        # The LV editing bar is MPR-only — hide it in 2-D native-slice (cine) mode
+        # where none of its tools apply (parity with the VTK viewer).
+        if getattr(self, "_lv_wrap", None) is not None:
+            self._lv_wrap.setVisible(not is2d)
         self._slab_spin.setEnabled(not is2d)
         self._cl_btn.setEnabled(
             (not is2d) and not self._lv_cross_suppressed())
