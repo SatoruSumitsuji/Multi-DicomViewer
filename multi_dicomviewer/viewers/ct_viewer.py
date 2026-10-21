@@ -4377,6 +4377,34 @@ class CTViewer(CPRMixin, AbstractViewer):
                     or self._cpr is not None
                     or getattr(self, "_coronary_mpr_pending", False))
 
+    def _coronary_only_display(self) -> bool:
+        """True when this CT is showing a Coronary Tree overlay with NO LV analysis
+        loaded — a plain .corotree drop / CoronaryTreeモードのMPR. In that state the
+        LV elements (MV / AoV / Apex / Epi / Blood-Endo / FullLV) are NOT used, so
+        the whole LV row stays greyed (the coronary tree and LV sides are
+        decoupled). It switches OFF the moment any LV data is present (a .FullLv
+        drop / LV edit) or a territory review is active (the Territory bar owns the
+        bar then)."""
+        if getattr(self, "_territory_display", False):
+            return False                      # territory review → Territory bar
+        # A docked coronary tree for this CT shows up as the 2-D overlay AND/OR the
+        # VR spec (pushed even while ツリー表示 is OFF) — either means CoronaryTreeモード.
+        if (getattr(self, "_coro_overlay", None) is None
+                and getattr(self, "_coro_overlay_vr", None) is None):
+            return False                      # no coronary tree driving this CT
+        # Any LV analysis present → LV edit mode; keep the LV bar active.
+        if getattr(self, "_lv", None) is not None \
+                or getattr(self, "_lvv", None) is not None:
+            return False
+        if getattr(self, "_lvv_epi_surf", None) is not None:
+            return False
+        valves = getattr(self, "_lv_valves", None) or {}
+        if (valves.get("mitral") is not None
+                or valves.get("aortic") is not None
+                or getattr(self, "_lv_apex", None) is not None):
+            return False
+        return True
+
     def _lv_mode_active(self) -> bool:
         """An LV mode is actively selected (a valve/apex edit step, or a sub-mode
         being edited) → CPR greys out. Merely having MV/AoV/Apex SET (data, no
@@ -5142,7 +5170,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # reads as the selected mode. Runs LAST so it overrides every enable above
         # (disabled buttons show their stylesheet's :disabled grey). The CPR
         # button itself is kept in step here too (greys when an LV mode is active).
-        if self._lv_cpr_active():
+        # CoronaryTreeモード (a .corotree overlay with no LV data) greys the SAME row
+        # — the LV side isn't used there, so MV/AoV/Apex read as inactive too.
+        if self._lv_cpr_active() or self._coronary_only_display():
             for b in (getattr(self, "_lv_mv_btn", None),
                       getattr(self, "_lv_aov_btn", None),
                       getattr(self, "_lv_apex_sel_btn", None),
@@ -11274,6 +11304,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     self._redraw_geom(k)
         except Exception:                                # noqa: BLE001
             pass
+        # A coronary overlay arriving / clearing flips CoronaryTreeモード, which
+        # greys (or restores) the LV row — re-evaluate it now so MV/AoV/Apex read
+        # as inactive the instant the .corotree lines appear (and active again once
+        # they're gone, e.g. in LVモード).
+        try:
+            self._lv_update_submode_ui()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def coronary_params_refresh(self) -> None:
         """Re-read the coronary appearance params (Settings ▸ Coronary Tree /
@@ -11299,6 +11337,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if self._vr_on.get(k):
                     self._vr_update_coronary(k)
                     self.pane[k].render()
+        except Exception:                                # noqa: BLE001
+            pass
+        # Same CoronaryTreeモード re-evaluation as set_coronary_overlay: the VR spec
+        # is pushed even while ツリー表示 is OFF, so it's the reliable "a tree is
+        # docked for this CT" signal for greying the LV row.
+        try:
+            self._lv_update_submode_ui()
         except Exception:                                # noqa: BLE001
             pass
 
