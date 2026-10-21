@@ -3181,6 +3181,17 @@ class MainWindow(QMainWindow):
             out.append(v)
         return out
 
+    def coronary_clear_cpr_edit(self) -> None:
+        """Tell every source CT viewer to leave any active CPR edit and drop its
+        editable trace. Called by the panel when a .corotree.json is (re)loaded so
+        the line the user was editing doesn't linger on the freshly-loaded tree."""
+        for v in self._coronary_source_viewers():
+            if hasattr(v, "coronary_clear_cpr_edit"):
+                try:
+                    v.coronary_clear_cpr_edit()
+                except Exception:                        # noqa: BLE001
+                    pass
+
     def coronary_vr_visible(self, on: bool) -> None:
         """Coronary Tree ▸ VR ▸ 表示/非表示 — show/hide the VR on the source CT.
 

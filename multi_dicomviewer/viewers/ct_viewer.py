@@ -3358,6 +3358,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             pass
         self._terr_bar_sync()
 
+    def coronary_clear_cpr_edit(self) -> None:
+        """Leave any active CPR edit and delete its on-map editable trace. Called
+        when a .corotree.json is (re)loaded so the line the user was editing never
+        lingers on top of the freshly-loaded tree (the '編集前の線が残る' report):
+        a reload replaces the overlay but does NOT by itself exit the viewer's CPR
+        mode, so the old editable _cpr_src polyline would stay drawn."""
+        try:
+            if self._cpr is not None:
+                self._cpr_drop_source()              # remove the editable trace
+                self._exit_cpr()                     # leave CPR, clear edit markers
+            else:
+                # Not in CPR, but a stale _cpr_src trace may still be drawn.
+                for k in ("A", "B"):
+                    before = len(self._measures[k])
+                    self._measures[k] = [m for m in self._measures[k]
+                                         if not m.get("_cpr_src")]
+                    if len(self._measures[k]) != before:
+                        self._redraw_meas(k)
+            self._coro_edit_vid = ""
+            self._cpr_suggested_name = ""
+        except Exception:                            # noqa: BLE001
+            pass
+
     def enter_coronary_only(self) -> None:
         """Hide every LV overlay (Epi / Endo borders, territory wash, blood/壁厚)
         but KEEP the coronary centreline overlay, for the CoronaryTree edit mode.

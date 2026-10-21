@@ -2326,6 +2326,16 @@ class CoronaryTreeWindow(SnapDock):
         self._dedupe_tree()          # drop unconnected ghosts of connected vessels
         self._hidden.clear()
         self._last_path = path
+        # A (re)load replaces the overlay but does NOT by itself end a CPR edit in
+        # progress — so the line the user was editing would linger on top of the
+        # fresh tree ('編集前の線が残る'). Ask the source CT viewer(s) to leave any
+        # active CPR edit and drop that editable trace before the new overlay draws.
+        if self._shell is not None \
+                and hasattr(self._shell, "coronary_clear_cpr_edit"):
+            try:
+                self._shell.coronary_clear_cpr_edit()
+            except Exception:                            # noqa: BLE001
+                pass
         # A corotree.json drop is a CPR-editing context: this CT shows ONLY its
         # coronary lines, never an LV / territory overlay. Drop any FullLv still
         # held for THIS CT's bundle so re-opening the CT can't auto-resume the
