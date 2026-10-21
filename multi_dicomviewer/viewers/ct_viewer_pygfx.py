@@ -4565,6 +4565,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._sync_slab_spin()
         self._refresh(reset_cam=reset_cam or is2d)
         self._sync_seek()
+        # A 2D⇄3D switch changes which below-image bars are visible (seek/cine
+        # bar in 2-D; LV bar hidden in 2-D) — relayout the chrome synchronously so
+        # its stale height doesn't overflow into a scrollbar (VTK parity).
+        self._lv_relayout_bar()
 
     def _page2d(self, step):
         """Page by *step* native slices in 2-D mode (integer slice index)."""
