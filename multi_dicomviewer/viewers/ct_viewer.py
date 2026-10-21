@@ -19866,6 +19866,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._sync_slab_spin()
         self._refresh(reset_cam=reset_cam or is2d)
         self._sync_seek()
+        # A 2D⇄3D switch changes which below-image bars are visible (the seek/cine
+        # bar appears in 2-D; the Coronary/LV bar is hidden in 2-D). Force the
+        # chrome scroll to relayout SYNCHRONOUSLY for the new set — otherwise its
+        # stale allocated height makes the content overflow into a scrollbar with
+        # the top (Plane) row clipped (the 2-D CT "はみ出し" the user saw).
+        self._lv_relayout_bar()
 
     def _page2d(self, step):
         """Page by *step* native slices in 2-D mode (integer slice index)."""
