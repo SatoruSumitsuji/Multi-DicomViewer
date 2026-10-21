@@ -5608,6 +5608,19 @@ class MainWindow(QMainWindow):
             v.clear()                    # free the volume/GPU before teardown
         except Exception:                # noqa: BLE001
             pass
+        # Release each VTK render window's GL context NOW, while the widget is
+        # still parented and its native HWND is valid. Otherwise the deleteLater()
+        # below tears the render windows down AFTER setParent(None) has
+        # invalidated the handle, and VTK floods the terminal with
+        # 'wglMakeCurrent failed in MakeCurrent()/Clean() ... (code 6)' — the flood
+        # the user saw on opening a 2nd 3-D CT. Duck-typed: only the VTK CT viewer
+        # defines finalize_gl (pygfx / QPainter viewers have no GL surface).
+        fin = getattr(v, "finalize_gl", None)
+        if callable(fin):
+            try:
+                fin()
+            except Exception:            # noqa: BLE001
+                pass
         if pane._cur_viewer is v:
             pane._cur_viewer = None
         try:
