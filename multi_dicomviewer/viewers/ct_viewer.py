@@ -3307,15 +3307,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_thicksax_btn.clicked.connect(
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
-        # Save the whole Territory session (corotree + FullLv + Targets + params)
-        # to a .territory.json — a small gap to the right of 壁厚短軸.
+        # Export the VR model (perfusion territory surfaces + coronary tubes +
+        # target markers) as a STATIC, general-purpose 3-D file (glTF / GLB) — a
+        # self-contained artifact independent of corotree.json / FullLv.json. Only on
+        # the Territory bar, which shows only while a VR model exists.
         row.addSpacing(24)
-        self._terr_save_btn = FitButton(t("保存"))
-        self._terr_save_btn.setHelpToolTip(t(
-            "この Territory セッション（冠動脈ツリー＋LV＋ターゲット＋表示設定）を "
-            ".territory.json に保存（ドラッグ＆ドロップで復元）"))
-        self._terr_save_btn.clicked.connect(self._terr_save)
-        row.addWidget(self._terr_save_btn)
+        self._terr_export_btn = FitButton(t("VR書き出し"))
+        self._terr_export_btn.setHelpToolTip(t(
+            "この VR モデル（灌流領域サーフェス＋冠動脈＋ターゲット）を汎用3Dファイル "
+            "(.glb / glTF) として書き出します。元ファイルから独立した静的データです。"))
+        self._terr_export_btn.clicked.connect(self._terr_export_glb)
+        row.addWidget(self._terr_export_btn)
         # Mode-switch buttons: leave the Territory review to EDIT the LV or the
         # coronary tree, then come back (re-enter Territory re-computes).
         row.addSpacing(18)
@@ -3436,16 +3438,153 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def _terr_save(self) -> None:
-        """Territory bar 保存: ask the shell (which owns the Coronary Tree panel +
-        its corotree / FullLv / Targets) to write the .territory.json."""
-        shell = self.window()
-        if hasattr(shell, "territory_save_active"):
-            try:
-                shell.territory_save_active()
-            except Exception:                            # noqa: BLE001
-                import traceback
-                traceback.print_exc()
+    def _terr_export_glb(self) -> None:
+        """Territory bar 書き出し: export the VR model (perfusion-territory surfaces +
+        coronary tubes + target markers) as a STATIC, general-purpose glTF/GLB — a
+        self-contained 3-D artifact independent of corotree.json / FullLv.json. The
+        DVR heart VOLUME is not a mesh, so it is not included (the colour territory
+        surfaces carry the perfusion regions). GLB is a single binary file; .gltf is
+        a single self-contained text file."""
+        import os
+        import traceback
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        key = None
+        for k in ("B", "A"):
+            if self._vr_on.get(k):
+                key = k
+                break
+        if key is None:
+            QMessageBox.information(self.window(), t("VR書き出し"),
+                                    t("VR モデルがありません。"))
+            return
+        p = self.pane[key]
+        ren = getattr(p, "ren", None)
+        rw = ren.GetRenderWindow() if ren is not None else None
+        if rw is None:
+            QMessageBox.warning(self.window(), t("VR書き出し"),
+                                t("VR のレンダーウィンドウが取得できません。"))
+            return
+        stem = self._terr_export_stem()
+        default = stem + ".glb"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("VR を書き出し (glTF / GLB)"), default,
+            t("glTF Binary (*.glb);;glTF (*.gltf)"))
+        if not path:
+            return
+        try:
+            out = self._export_vr_gltf(rw, path)
+        except Exception as exc:                         # noqa: BLE001
+            traceback.print_exc()
+            QMessageBox.warning(self.window(), t("VR書き出し"),
+                                t("書き出しに失敗しました: {e}", e=str(exc)))
+            return
+        QMessageBox.information(
+            self.window(), t("VR書き出し"),
+            t("書き出しました: {p}", p=os.path.basename(out)))
+
+    def _terr_export_stem(self) -> str:
+        """A filename stem for the VR export, from the CT's own labels when known."""
+        try:
+            meta = self._lv_series_meta() if hasattr(self, "_lv_series_meta") else {}
+        except Exception:                                # noqa: BLE001
+            meta = {}
+        parts = [str(meta.get("date", "") or ""),
+                 ("Se" + str(meta.get("series_number")))
+                 if meta.get("series_number") else ""]
+        stem = "_".join(s for s in parts if s)
+        return (stem + "_territory_VR") if stem else "territory_VR"
+
+    def _export_vr_gltf(self, rw, path: str) -> str:
+        """Write the VR render window to *path* as glTF. A .glb target is packed into
+        a single binary file; any other extension writes a single self-contained
+        .gltf (inline base64 buffers). The per-system perfusion summary is embedded
+        in asset.extras. Returns the path actually written."""
+        import os
+        import json
+        import base64
+        import struct
+        import tempfile
+        import shutil
+        from vtkmodules.vtkIOExport import vtkGLTFExporter
+        summary = getattr(self, "_terr_summary_text", "") or ""
+        want_glb = path.lower().endswith(".glb")
+        if not want_glb:
+            # Single self-contained .gltf (inline base64 buffers).
+            exp = vtkGLTFExporter()
+            exp.SetRenderWindow(rw)
+            exp.InlineDataOn()
+            exp.SaveNormalOn()
+            exp.SetFileName(path)
+            exp.Write()
+            self._gltf_embed_extras(path, summary)
+            return path
+        # GLB: export to a temp .gltf + .bin (external buffer), then pack into one
+        # binary container. Falls back to a self-contained .gltf if the exporter did
+        # not produce the expected single external buffer.
+        tmpdir = tempfile.mkdtemp(prefix="mdv_glb_")
+        try:
+            tmp_gltf = os.path.join(tmpdir, "scene.gltf")
+            exp = vtkGLTFExporter()
+            exp.SetRenderWindow(rw)
+            exp.InlineDataOff()
+            exp.SaveNormalOn()
+            exp.SetFileName(tmp_gltf)
+            exp.Write()
+            with open(tmp_gltf, encoding="utf-8") as f:
+                gltf = json.load(f)
+            bufs = gltf.get("buffers") or []
+            uri0 = str(bufs[0].get("uri", "")) if len(bufs) == 1 else ""
+            bin_path = os.path.join(tmpdir, uri0) if uri0 else ""
+            if len(bufs) != 1 or not uri0 or uri0.startswith("data:") \
+                    or not os.path.isfile(bin_path):
+                # Unexpected shape → self-contained .gltf fallback next to the target.
+                alt = os.path.splitext(path)[0] + ".gltf"
+                exp2 = vtkGLTFExporter()
+                exp2.SetRenderWindow(rw)
+                exp2.InlineDataOn()
+                exp2.SaveNormalOn()
+                exp2.SetFileName(alt)
+                exp2.Write()
+                self._gltf_embed_extras(alt, summary)
+                return alt
+            with open(bin_path, "rb") as f:
+                bin_data = f.read()
+            bufs[0].pop("uri", None)
+            bufs[0]["byteLength"] = len(bin_data)
+            gltf.setdefault("asset", {}).setdefault("extras", {})
+            if summary:
+                gltf["asset"]["extras"]["perfusion_summary"] = summary
+            gltf["asset"]["extras"]["generator"] = "Multi-DICOMviewer"
+            json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
+            json_bytes += b" " * ((4 - len(json_bytes) % 4) % 4)      # pad: spaces
+            bin_pad = (4 - len(bin_data) % 4) % 4
+            bin_data = bin_data + b"\x00" * bin_pad                   # pad: zeros
+            total = 12 + 8 + len(json_bytes) + 8 + len(bin_data)
+            with open(path, "wb") as f:
+                f.write(struct.pack("<III", 0x46546C67, 2, total))   # 'glTF', v2, len
+                f.write(struct.pack("<II", len(json_bytes), 0x4E4F534A))  # JSON chunk
+                f.write(json_bytes)
+                f.write(struct.pack("<II", len(bin_data), 0x004E4942))    # BIN chunk
+                f.write(bin_data)
+            return path
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _gltf_embed_extras(path: str, summary: str) -> None:
+        """Add the perfusion summary to a written .gltf's asset.extras (best-effort)."""
+        import json
+        try:
+            with open(path, encoding="utf-8") as f:
+                gltf = json.load(f)
+            gltf.setdefault("asset", {}).setdefault("extras", {})
+            if summary:
+                gltf["asset"]["extras"]["perfusion_summary"] = summary
+            gltf["asset"]["extras"]["generator"] = "Multi-DICOMviewer"
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(gltf, f, ensure_ascii=False, separators=(",", ":"))
+        except (OSError, ValueError):
+            pass
 
     def _vr_busy_frame(self, p, i: int) -> None:
         """Render a CHEAP VR frame (volume still hidden) showing the static busy

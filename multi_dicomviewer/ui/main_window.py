@@ -3325,124 +3325,11 @@ class MainWindow(QMainWindow):
             return False
         return full_lv.is_full_lv(data)
 
-    @staticmethod
-    def _is_territory_json(path: str) -> bool:
-        """True if *path* is a .territory.json (a saved CT Territory session), so a
-        drag&drop restores the whole review instead of reading DICOM."""
-        if not path.lower().endswith(".json"):
-            return False
-        import json
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return False
-        return isinstance(data, dict) and data.get("format") == "MDV-Territory"
-
-    def _territory_resolve_link(self, data, link: str, base: str, which: str):
-        """Resolve a .territory.json LINK to an existing file. Tries the stored
-        path (absolute, else relative to the territory.json's folder, else by
-        basename beside it); on a miss it ALERTS and lets the user locate the file
-        (writing the new path back into *data*). Returns the path, or None if the
-        user cancelled (so the caller aborts). No in-app file creation."""
-        import os
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        from multi_dicomviewer.core import territory_file
-        for c in ([link, (os.path.join(base, link) if link
-                          and not os.path.isabs(link) else ""),
-                   (os.path.join(base, os.path.basename(link)) if link else "")]):
-            if c and os.path.isfile(c):
-                return c
-        name = "corotree.json" if which == "corotree" else "FullLv.json"
-        filt = (t("CoroTree (*.corotree.json)") if which == "corotree"
-                else t("Full LV (*.FullLv.json)"))
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle(t("Territory"))
-        box.setText(t("{n} が見当たりません。\n「ファイルを探す」で関連付けるか、"
-                      "一度終了して {n} を作成し関連付けてください。", n=name))
-        locate = box.addButton(t("ファイルを探す"),
-                               QMessageBox.ButtonRole.AcceptRole)
-        box.addButton(t("閉じる"), QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is not locate:
-            return None
-        p, _ = QFileDialog.getOpenFileName(
-            self, t("{n} を選択", n=name), base, filt)
-        if not p:
-            return None
-        if which == "corotree":
-            territory_file.set_corotree_path(data, p)
-        else:
-            territory_file.set_full_lv_path(data, p)
-        return p
-
-    def _open_territory_file(self, path: str) -> None:
-        """Drop a .territory.json (a LINK file) → resolve its links to the
-        corotree.json + FullLv.json (letting the user locate a missing one), load
-        those two files, feed the Coronary Tree panel, bring up the source CT with
-        BOTH overlays, and re-enter the perfusion-territory review (VR)."""
-        import json
-        import os
-        from multi_dicomviewer.core import territory_file, full_lv
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            return
-        if not territory_file.is_territory(data):
-            return
-        base = os.path.dirname(path)
-        coro_path = self._territory_resolve_link(
-            data, territory_file.corotree_path(data), base, "corotree")
-        if coro_path is None:
-            return                                       # cancelled / not associated
-        lv_path = self._territory_resolve_link(
-            data, territory_file.full_lv_path(data), base, "full_lv")
-        if lv_path is None:
-            return
-        # Persist any re-association back into the .territory.json (links only).
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except OSError:
-            pass
-        from PyQt6.QtWidgets import QMessageBox
-        try:
-            with open(coro_path, encoding="utf-8") as f:
-                coro = json.load(f)
-            with open(lv_path, encoding="utf-8") as f:
-                full = json.load(f)
-        except (OSError, ValueError) as exc:
-            QMessageBox.warning(self, t("Territory"),
-                                t("リンク先の読込に失敗しました: {e}", e=str(exc)))
-            return
-        w = self._open_coronary_tree()
-        if w is None or not hasattr(w, "load_territory"):
-            return
-        if not w.load_territory(data, coro, full, path=path):
-            return
-        uid = (territory_file.series_uid(data) or full_lv.series_uid(full)
-               or (coro.get("series") or {}).get("series_uid", "") or "")
-        src_dir = (territory_file.src_dir(data) or full_lv.src_dir(full)
-                   or (coro.get("series") or {}).get("src_dir", "") or "")
-        try:
-            self.coronary_show_ct(uid, src_dir,
-                                  cpr_dir=os.path.dirname(coro_path), prompt=True)
-        except Exception:                                # noqa: BLE001
-            pass
-        if getattr(w, "_tree", None) is not None and w._tree.vessels \
-                and hasattr(w, "_set_overlay"):
-            w._set_overlay(True)
-        self._poll_full_lv_apply(uid, full, 0)           # VR review once CT shown
-
-    def territory_save_active(self) -> bool:
-        """Save the Coronary Tree panel's current Territory session to a
-        .territory.json (file dialog). Called by the Territory bar's 保存 button."""
-        w = getattr(self, "_corotree_win", None)
-        if w is None or not hasattr(w, "save_territory"):
-            return False
-        return bool(w.save_territory())
+    # NOTE: the .territory.json session file (a link to corotree.json + FullLv.json
+    # + saved Targets) was REMOVED by design — Territory is always re-derived by
+    # dropping the corotree.json + FullLv.json pair, and the VR result is shared via
+    # a one-way glTF/GLB export (the Territory bar's 書き出し button) instead. So the
+    # drop handler, the link resolver and the save hook are all gone.
 
     def territory_to_lv_mode(self) -> None:
         """Territory bar 「LVモード」: come back to the EDITABLE LV view by RE-OPENING
@@ -6502,14 +6389,8 @@ class MainWindow(QMainWindow):
         for p in cp_files:
             self._open_case_presentation_file(p)
         paths = [p for p in paths if p not in cp_files]
-        # Peel off .territory.json drops FIRST (a saved Territory session) → restore
-        # corotree + FullLv + Targets + review in one go. Checked before the plain
-        # corotree / FullLv detectors (it is its own format marker).
-        terr_files = [p for p in paths
-                      if os.path.isfile(p) and self._is_territory_json(p)]
-        for p in terr_files:
-            self._open_territory_file(p)
-        paths = [p for p in paths if p not in terr_files]
+        # (.territory.json dropping was removed — Territory is re-derived from the
+        # corotree.json + FullLv.json pair.)
         # Peel off Coronary Tree .corotree.json drops → open the panel, load the
         # tree and re-open its source 3-D CT with the overlay.
         ct_files = [p for p in paths
