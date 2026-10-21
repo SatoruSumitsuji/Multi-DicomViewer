@@ -3452,6 +3452,14 @@ class MainWindow(QMainWindow):
                     self._free_pane_ct_for_reload(self._active)
                 except Exception:                        # noqa: BLE001
                     pass
+            # Decouple: LVモード shows ONLY the LV — turn the coronary tree overlay
+            # OFF (the FullLv file carries no coronary data; the two sides stay
+            # separate). CoronaryTreeモード is the mirror (coronary only, no LV).
+            if hasattr(w, "_set_overlay"):
+                try:
+                    w._set_overlay(False)
+                except Exception:                        # noqa: BLE001
+                    pass
             self.lv_open_full_for_edit(full, full_lv.src_dir(full))
             return
         # Fallback — no FullLv on the panel: best-effort in-place review exit.
