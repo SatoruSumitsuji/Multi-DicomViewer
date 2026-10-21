@@ -203,6 +203,36 @@ def _install_vtk_log_filter() -> None:
         pass
 
 
+def _install_qt_message_filter() -> None:
+    """Drop the benign, repetitive Qt warning
+    ``QWidgetWindow(...) must be a top level window.`` — emitted when a
+    NON-top-level window (a VTK CT canvas / a docked panel) gets a geometry op
+    during layout / VR realize / dock float. It is harmless (display + behaviour
+    are fine) but floods the terminal. Every OTHER Qt message passes through.
+    Best-effort."""
+    try:
+        from PyQt6.QtCore import qInstallMessageHandler
+    except Exception:                                    # noqa: BLE001
+        return
+    _drop = ("must be a top level window",)
+
+    def _handler(mode, context, message):
+        try:
+            if message and any(s in message for s in _drop):
+                return
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            sys.stderr.write((message or "") + "\n")
+        except Exception:                                # noqa: BLE001
+            pass
+
+    try:
+        qInstallMessageHandler(_handler)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def main(argv: list[str]) -> int:
     # External "restart" shortcut launches us with --restart: kill the hung
     # instance and reopen it, then exit (no GUI for this helper process).
@@ -213,6 +243,7 @@ def main(argv: list[str]) -> int:
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
     _install_vtk_log_filter()               # silence the benign wglMakeCurrent spam
+    _install_qt_message_filter()            # drop the benign "top level window" warning
 
     # macOS centres dock tab bars; left-align them to match Windows. The proxy
     # (no explicit base) lazily recreates a fresh instance of the current native
