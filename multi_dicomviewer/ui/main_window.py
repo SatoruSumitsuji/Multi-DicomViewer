@@ -2489,15 +2489,23 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
 
-        def _poll_show(attempt=0):
+        def _poll_show(attempt=0, broaden="", broadened=False):
             # Wait for the (async) folder scan to index the series, then show it
             # and draw the overlay; refresh again after the volume decodes.
             if series_uid and self._coronary_display_uid(series_uid):
                 for ms in (0, 700, 1600):
                     QTimer.singleShot(ms, self.coronary_overlay_refresh)
                 return
+            # LAZY fallback: if the JSON-folder scan hasn't surfaced the CT after a
+            # short while, scan the PARENT once (the CT is in a sibling subfolder,
+            # not under the JSON's folder). Done only on a miss so the common case
+            # (CT beside/below the JSON) never pays for a possibly-huge parent scan.
+            if broaden and not broadened and attempt >= 6:      # ~1.8 s, no hit yet
+                self.case_open_folders([broaden], dicom_only=True)
+                broadened = True
             if attempt < 40:                    # ~12 s max
-                QTimer.singleShot(300, lambda: _poll_show(attempt + 1))
+                QTimer.singleShot(
+                    300, lambda: _poll_show(attempt + 1, broaden, broadened))
 
         if series_uid and self.case_series_loaded(series_uid):
             ok = self._coronary_display_uid(series_uid)
@@ -2513,22 +2521,17 @@ class MainWindow(QMainWindow):
         # Deliberate action (画像表示 / ツリー読込 / .corotree.json drop): try the
         # folder the tree file came from before asking, so the CT is found itself.
         if cpr_dir and os.path.isdir(cpr_dir):
-            scan = [cpr_dir]
-            # By default search ONLY the JSON's own folder — the .corotree/.FullLv and
-            # the source CT normally sit together. Broaden to the PARENT (one level up)
-            # ONLY when the saved src_dir is invalid (renamed/cross-OS) AND the JSON's
-            # folder itself holds NO DICOM — i.e. the JSON really is in a sibling
-            # subfolder. Without the "no DICOM here" gate, a renamed CT folder made
-            # this scan the whole (possibly huge) parent — e.g. Desktop\Export — which
-            # was pathologically slow.
-            if (src_dir and not os.path.isdir(src_dir)
-                    and not dicom_io.folder_has_dicom(cpr_dir)):
-                parent = os.path.dirname(os.path.normpath(cpr_dir))
-                if (parent and os.path.isdir(parent)
-                        and parent != os.path.normpath(cpr_dir)):
-                    scan.append(parent)
-            self.case_open_folders(scan, dicom_only=True)
-            QTimer.singleShot(300, lambda: _poll_show(0))
+            # Scan the JSON's OWN folder RECURSIVELY first — the source CT normally
+            # lives here or in a SUBFOLDER (e.g. .../Case/CT-.../400img), which
+            # case_open_folders finds quickly. Do NOT eagerly scan the parent: a
+            # Cases/Export root can be huge and was the pathologically slow drop.
+            # _poll_show only falls back to the parent (once) if the UID still isn't
+            # found — the rarer layout where the CT is in a SIBLING of the JSON.
+            self.case_open_folders([cpr_dir], dicom_only=True)
+            parent = os.path.dirname(os.path.normpath(cpr_dir))
+            broaden = (parent if (parent and os.path.isdir(parent)
+                                  and parent != os.path.normpath(cpr_dir)) else "")
+            QTimer.singleShot(300, lambda: _poll_show(0, broaden))
             return t("3DCTを読込中…")
         # Last resort: ask. Default to a folder that EXISTS on this machine (the
         # drop folder) rather than the saved src_dir (which may be a dead
