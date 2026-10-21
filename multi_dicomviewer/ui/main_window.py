@@ -3283,6 +3283,44 @@ class MainWindow(QMainWindow):
             return False
         return bool(w.save_territory())
 
+    def territory_to_lv_mode(self) -> None:
+        """Territory bar 「LVモード」: leave the review and load the FullLv into the
+        active CT viewer's EDITABLE LV state (MV/AoV/Apex/Epi/Blood-Endo). The
+        FullLv lives on the Coronary Tree panel's active bundle."""
+        v = self._active.current_viewer() if self._active is not None else None
+        if v is not None and hasattr(v, "exit_territory_review"):
+            try:
+                v.exit_territory_review()
+            except Exception:                            # noqa: BLE001
+                pass
+        w = getattr(self, "_corotree_win", None)
+        full = getattr(w, "_full_lv_data", None) if w is not None else None
+        if full and hasattr(self, "lv_open_full_for_edit"):
+            from multi_dicomviewer.core import full_lv
+            self.lv_open_full_for_edit(full, full_lv.src_dir(full))
+
+    def territory_to_coronary_mode(self) -> None:
+        """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
+        territory overlay, and show ONLY the coronary CPR lines for editing."""
+        v = self._active.current_viewer() if self._active is not None else None
+        if v is not None:
+            if hasattr(v, "exit_territory_review"):
+                try:
+                    v.exit_territory_review()
+                except Exception:                        # noqa: BLE001
+                    pass
+            if hasattr(v, "enter_coronary_only"):
+                try:
+                    v.enter_coronary_only()
+                except Exception:                        # noqa: BLE001
+                    pass
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "show_coronary_only"):
+            try:
+                w.show_coronary_only()
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _open_coronary_tree_file(self, path: str) -> None:
         """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
         load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /

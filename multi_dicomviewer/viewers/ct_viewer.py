@@ -3292,17 +3292,97 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_thicksax_btn.clicked.connect(
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
-        row.addStretch(1)
         # Save the whole Territory session (corotree + FullLv + Targets + params)
-        # to a .territory.json — a one-drop restore of this review. Right-aligned.
-        self._terr_save_btn = FitButton(t("territory保存"))
+        # to a .territory.json — a small gap to the right of 壁厚短軸.
+        row.addSpacing(24)
+        self._terr_save_btn = FitButton(t("保存"))
         self._terr_save_btn.setHelpToolTip(t(
             "この Territory セッション（冠動脈ツリー＋LV＋ターゲット＋表示設定）を "
             ".territory.json に保存（ドラッグ＆ドロップで復元）"))
         self._terr_save_btn.clicked.connect(self._terr_save)
         row.addWidget(self._terr_save_btn)
+        # Mode-switch buttons: leave the Territory review to EDIT the LV or the
+        # coronary tree, then come back (re-enter Territory re-computes).
+        row.addSpacing(18)
+        self._terr_lv_btn = FitButton(t("LVモード"))
+        self._terr_lv_btn.setHelpToolTip(t(
+            "LV 編集モードへ移動：MV / AoV / Apex / Epi / Blood-Endo を編集できる画面"))
+        self._terr_lv_btn.clicked.connect(self._terr_to_lv_mode)
+        row.addWidget(self._terr_lv_btn)
+        self._terr_coro_btn = FitButton(t("CoronaryTreeモード"))
+        self._terr_coro_btn.setHelpToolTip(t(
+            "CoronaryTree 編集モードへ移動：領域色・Epi・Blood・Endo・LVD を消し、冠動脈 "
+            "CPR 線だけを表示して CPR 線を編集できる画面"))
+        self._terr_coro_btn.clicked.connect(self._terr_to_coronary_mode)
+        row.addWidget(self._terr_coro_btn)
+        row.addStretch(1)
         self._terr_bar.setVisible(False)
         return self._terr_bar
+
+    def _terr_to_lv_mode(self) -> None:
+        """Territory bar 「LVモード」: leave the review and open the LV editing bar
+        with the FullLv loaded editable (via the shell, which holds the FullLv)."""
+        shell = self.window()
+        if hasattr(shell, "territory_to_lv_mode"):
+            try:
+                shell.territory_to_lv_mode()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+
+    def _terr_to_coronary_mode(self) -> None:
+        """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
+        territory overlay and show ONLY the coronary CPR lines for editing."""
+        shell = self.window()
+        if hasattr(shell, "territory_to_coronary_mode"):
+            try:
+                shell.territory_to_coronary_mode()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+
+    def exit_territory_review(self) -> None:
+        """Leave the VR / perfusion-territory review layout back to the normal 3-D
+        MPR: VR off on every pane (which clears _territory_display and restores the
+        LV / Coronary bars). Shared by the LVモード / CoronaryTreeモード switches."""
+        for k in ("A", "B"):
+            try:
+                if self._vr_on.get(k):
+                    self._vr_set(k, False)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._territory_display = False
+        try:
+            self._refresh_tool_availability()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._terr_bar_sync()
+
+    def enter_coronary_only(self) -> None:
+        """Hide every LV overlay (Epi / Endo borders, territory wash, blood/壁厚)
+        but KEEP the coronary centreline overlay, for the CoronaryTree edit mode.
+        The LV data lives in the FullLv (reloadable via LVモード), so dropping the
+        live LV display is safe."""
+        try:
+            self.set_lv_border_visible(False)            # hide Epi/Endo borders
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            self.set_territory_mask(None, None)          # drop the MPR territory wash
+        except Exception:                                # noqa: BLE001
+            pass
+        # Drop the live LV blood/壁厚 display sessions so they don't redraw on the
+        # MPR (the Epi surface / masks stay reloadable from the FullLv).
+        self._lvv = None
+        self._lv = None
+        try:
+            self._lvv_sync()
+        except Exception:                                # noqa: BLE001
+            pass
+        try:
+            self._refresh(reset_cam=False)
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _terr_save(self) -> None:
         """Territory bar 保存: ask the shell (which owns the Coronary Tree panel +
