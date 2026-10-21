@@ -12965,20 +12965,38 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pass
         # Target NUMBER labels are 2-D overlay text actors pinned to a WORLD point —
         # re-point them at M · (base point) so they track the VR orientation (Flip /
-        # Spin). No depth-lift needed: the 2-D overlay is always on top; the vtkText-
-        # Actor's world PositionCoordinate re-projects via the camera each render, so
-        # a pure orbit needs no update here. (A legacy 3-D billboard, if any, still
-        # takes a UserMatrix.)
+        # Spin); the vtkTextActor's world PositionCoordinate re-projects via the
+        # camera each render (a pure orbit needs no update). A 2-D overlay has no
+        # depth test, so it is always ON TOP of the thin coronary line — but we HIDE
+        # it when its target sits on the FAR side of the heart, so it matches the
+        # line (which the GPU volume occludes there) instead of floating over the
+        # whole heart. Front/back = the target's outward normal (from the LV centre)
+        # vs the camera direction. (A legacy 3-D billboard, if any, takes a matrix.)
         lifted_label = _lift(_VR_TGT_LABEL_LIFT_MM)
+        ctr_local = getattr(self, "_center", None)
+        ctr_local = np.asarray(ctr_local, float) \
+            if ctr_local is not None else None
+        R = Mf[:3, :3]
         for a in getattr(p, "vr_tgt_labels", []):
             if a is None:
                 continue
             lp = getattr(a, "_mdv_lp", None)
             if lp is not None and hasattr(a, "GetPositionCoordinate"):
                 try:
-                    w = Mf @ np.array([lp[0], lp[1], lp[2], 1.0])
+                    lpv = np.asarray(lp, float)
+                    w = Mf @ np.array([lpv[0], lpv[1], lpv[2], 1.0])
                     a.GetPositionCoordinate().SetValue(
                         float(w[0]), float(w[1]), float(w[2]))
+                    # Front/back cull: show only when the outward normal faces the
+                    # camera (a small tolerance past the silhouette, to match the
+                    # tube's forward depth-lift). No LV centre → always show.
+                    front = True
+                    if ctr_local is not None:
+                        ow = R @ (lpv - ctr_local)
+                        nn = float(np.linalg.norm(ow))
+                        if nn > 1e-6:
+                            front = float(np.dot(ow / nn, cdir)) > -0.15
+                    a.SetVisibility(bool(front))
                 except Exception:                    # noqa: BLE001
                     pass
             elif hasattr(a, "SetUserMatrix"):
