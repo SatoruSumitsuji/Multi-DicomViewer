@@ -11952,14 +11952,12 @@ class CTViewer(CPRMixin, AbstractViewer):
             p.vr_tgt_mapper.SetInputData(vtkPolyData())
             p.vr_tgt_actor.SetVisibility(False)
             return
-        try:
-            from vtkmodules.vtkRenderingCore import vtkBillboardTextActor3D
-        except Exception:                                # noqa: BLE001
-            vtkBillboardTextActor3D = None
         # LV centre (to push the number toward the EPICARDIUM = outward from the
         # cavity, so it sits just outside the surface at the target).
         ctr = getattr(self, "_center", None)
         ctr = np.asarray(ctr, float) if ctr is not None else None
+        M0 = self._vr_xform.get(key)             # current VR orientation (world)
+        M0 = np.asarray(M0, float) if M0 is not None else np.eye(4)
         pts = vtkPoints()
         tcols = vtkUnsignedCharArray()           # per-point colour (per target)
         tcols.SetNumberOfComponents(3)
@@ -11971,25 +11969,34 @@ class CTViewer(CPRMixin, AbstractViewer):
             pts.InsertNextPoint(float(Pw[0]), float(Pw[1]), float(Pw[2]))
             crgb = _hex_to_rgb(tg.get("color") or "#f22626")
             tcols.InsertNextTuple3(int(crgb[0]), int(crgb[1]), int(crgb[2]))
-            if vtkBillboardTextActor3D is not None:
-                lp = Pw
-                if ctr is not None and np.all(np.isfinite(ctr)):
-                    out = Pw - ctr
-                    n = float(np.linalg.norm(out))
-                    if n > 1e-6:
-                        lp = Pw + (out / n) * 2.0     # hug the point (~2mm out)
-                lb = vtkBillboardTextActor3D()
-                lb.SetPosition(float(lp[0]), float(lp[1]), float(lp[2]))
-                lb.SetInput(str(tg.get("n", "")))
-                tp = lb.GetTextProperty()
-                tp.SetFontSize(18)
-                tp.SetColor(1.0, 1.0, 1.0)       # white number (reads on any fill)
-                tp.SetBold(True)
-                tp.SetJustificationToLeft()
-                if hasattr(lb, "SetDisplayOffset"):
-                    lb.SetDisplayOffset(7, 12)       # up-right of the point, off the line
-                p.ren.AddViewProp(lb)
-                p.vr_tgt_labels.append(lb)
+            # The Target NUMBER is a 2-D OVERLAY text pinned to the point in WORLD
+            # coordinates (vtkTextActor + a world PositionCoordinate). A 2-D actor
+            # draws in the overlay pass with NO depth test, so it is ALWAYS ON TOP of
+            # the coronary tubes from EVERY view direction (the old 3-D billboard was
+            # depth-tested and hid under the line from some angles / stale depth-lift).
+            # Left+Bottom justification makes the number sit just ABOVE the point and
+            # a touch to the RIGHT (near straight above, nudged to the side).
+            lp = Pw
+            if ctr is not None and np.all(np.isfinite(ctr)):
+                out = Pw - ctr
+                n = float(np.linalg.norm(out))
+                if n > 1e-6:
+                    lp = Pw + (out / n) * 2.0        # hug the point (~2mm out)
+            lb = vtkTextActor()
+            lb.SetInput(str(tg.get("n", "")))
+            tp = lb.GetTextProperty()
+            tp.SetFontSize(18)
+            tp.SetColor(1.0, 1.0, 1.0)           # white number (reads on any fill)
+            tp.SetBold(True)
+            tp.SetJustificationToLeft()          # extends RIGHT of the point (横)
+            tp.SetVerticalJustificationToBottom()  # extends ABOVE the point (ほぼ真上)
+            lb._mdv_lp = (float(lp[0]), float(lp[1]), float(lp[2]))  # base pt (pre-M)
+            w = M0 @ np.array([lp[0], lp[1], lp[2], 1.0])
+            pc = lb.GetPositionCoordinate()
+            pc.SetCoordinateSystemToWorld()
+            pc.SetValue(float(w[0]), float(w[1]), float(w[2]))
+            p.ren.AddViewProp(lb)
+            p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
         for i in range(pts.GetNumberOfPoints()):
             verts.InsertNextCell(1)
@@ -12956,9 +12963,25 @@ class CTViewer(CPRMixin, AbstractViewer):
                 a.SetUserMatrix(lifted_tgt)
             except Exception:                        # noqa: BLE001
                 pass
+        # Target NUMBER labels are 2-D overlay text actors pinned to a WORLD point —
+        # re-point them at M · (base point) so they track the VR orientation (Flip /
+        # Spin). No depth-lift needed: the 2-D overlay is always on top; the vtkText-
+        # Actor's world PositionCoordinate re-projects via the camera each render, so
+        # a pure orbit needs no update here. (A legacy 3-D billboard, if any, still
+        # takes a UserMatrix.)
         lifted_label = _lift(_VR_TGT_LABEL_LIFT_MM)
         for a in getattr(p, "vr_tgt_labels", []):
-            if a is not None and hasattr(a, "SetUserMatrix"):
+            if a is None:
+                continue
+            lp = getattr(a, "_mdv_lp", None)
+            if lp is not None and hasattr(a, "GetPositionCoordinate"):
+                try:
+                    w = Mf @ np.array([lp[0], lp[1], lp[2], 1.0])
+                    a.GetPositionCoordinate().SetValue(
+                        float(w[0]), float(w[1]), float(w[2]))
+                except Exception:                    # noqa: BLE001
+                    pass
+            elif hasattr(a, "SetUserMatrix"):
                 try:
                     a.SetUserMatrix(lifted_label)
                 except Exception:                    # noqa: BLE001
