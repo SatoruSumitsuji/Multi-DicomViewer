@@ -172,6 +172,56 @@ def _make_splash() -> QSplashScreen:
     return splash
 
 
+def _install_vtk_log_filter() -> None:
+    """Keep the terminal clean of the benign, repetitive VTK
+    ``wglMakeCurrent failed ... (code 6)`` spam that floods it when a 2nd 3-D CT
+    is opened: the 1st CT's two render windows briefly render into an invalidated
+    GL context while they are torn down, then Clean() — the display is unaffected
+    (both CTs show fine). The user was alarmed by the flood; it is cosmetic.
+
+    VTK 9 logs these via its loguru logger STRAIGHT to the C stderr (fd 2),
+    bypassing Python — and offers no per-message content filter — so the only way
+    to stop the flood is to turn VTK's stderr logging OFF. To not lose real VTK
+    errors, they are redirected to a per-session log file instead. The classic
+    ``vtkOutputWindow`` path (used by a few messages) is also filtered. All
+    best-effort; a no-op if VTK isn't importable."""
+    try:
+        from vtkmodules.vtkCommonCore import vtkLogger, vtkOutputWindow
+    except Exception:                                    # noqa: BLE001
+        return
+    _drop = ("wglMakeCurrent failed",)
+
+    class _FilteredOutput(vtkOutputWindow):
+        def DisplayText(self, txt):                      # noqa: N802 (VTK override)
+            try:
+                if txt and any(s in txt for s in _drop):
+                    return                               # swallow the GL teardown spam
+            except Exception:                            # noqa: BLE001
+                pass
+            try:
+                sys.stderr.write(txt or "")
+            except Exception:                            # noqa: BLE001
+                pass
+
+    try:
+        vtkOutputWindow.SetInstance(_FilteredOutput())
+    except Exception:                                    # noqa: BLE001
+        pass
+    # Silence VTK's loguru stderr stream (the flood) and tee it to a bounded,
+    # per-session file so genuine VTK errors stay recoverable off the terminal.
+    try:
+        vtkLogger.SetStderrVerbosity(vtkLogger.VERBOSITY_OFF)
+    except Exception:                                    # noqa: BLE001
+        pass
+    try:
+        import os
+        import tempfile
+        log = os.path.join(tempfile.gettempdir(), "MultiDicomViewer_vtk.log")
+        vtkLogger.LogToFile(log, vtkLogger.TRUNCATE, vtkLogger.VERBOSITY_WARNING)
+    except Exception:                                    # noqa: BLE001
+        pass
+
+
 def main(argv: list[str]) -> int:
     # External "restart" shortcut launches us with --restart: kill the hung
     # instance and reopen it, then exit (no GUI for this helper process).
@@ -181,6 +231,7 @@ def main(argv: list[str]) -> int:
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationDisplayName(APP_NAME)
+    _install_vtk_log_filter()               # silence the benign wglMakeCurrent spam
 
     # macOS centres dock tab bars; left-align them to match Windows. The proxy
     # (no explicit base) lazily recreates a fresh instance of the current native
