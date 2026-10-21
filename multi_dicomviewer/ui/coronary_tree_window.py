@@ -41,7 +41,6 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import full_lv as full_lv_mod
 from multi_dicomviewer.core import settings as settings_mod
-from multi_dicomviewer.core import territory_file as territory_file_mod
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
     ROOT_ROLES, CoronaryTree, format_territory_report, short_vessel_name)
@@ -204,11 +203,6 @@ class CoronaryTreeWindow(SnapDock):
     def _full_lv_path(self): return self._bundle().get("full_lv_path", "")
     @_full_lv_path.setter
     def _full_lv_path(self, v): self._bundle()["full_lv_path"] = v or ""
-
-    @property
-    def _terr_path(self): return self._bundle().get("terr_path", "")
-    @_terr_path.setter
-    def _terr_path(self, v): self._bundle()["terr_path"] = v or ""
 
     @property
     def _territory(self): return self._bundle()["territory"]
@@ -1350,115 +1344,10 @@ class CoronaryTreeWindow(SnapDock):
         return True
 
     # ---- .territory.json: save / load the whole Territory session -------
-    def save_territory(self, path: str | None = None) -> bool:
-        """Save the current Territory session (corotree + FullLv + Targets +
-        params) to a ``.territory.json``. Needs a tree AND a FullLv loaded.
-        Returns True on success. Called by the Territory bar's 保存 button (via the
-        shell) and usable headlessly with an explicit *path*."""
-        if not self._tree.vessels:
-            self._warn(t("先に冠動脈ツリーを読み込んでください。"))
-            return False
-        if self._full_lv_data is None:
-            self._warn(t("先に FullLv を読み込んでください。"))
-            return False
-        # A .territory.json LINKS to the corotree.json + FullLv.json FILES (it does
-        # not embed their data), so both must have been saved first.
-        if not self._last_path:
-            self._warn(t("先に冠動脈ツリーを .corotree.json に保存してください"
-                         "（territory は corotree.json へのリンクを持ちます）。"))
-            return False
-        if not self._full_lv_path:
-            self._warn(t("先に LV を .FullLv.json に保存してください"
-                         "（territory は FullLv.json へのリンクを持ちます）。"))
-            return False
-        series = self._corotree_series_block()
-        src_meta = {
-            "series_uid": self._ct_uid, "src_dir": self._ct_dir,
-            "patient": series.get("patient", ""),
-            "date": series.get("date", ""),
-            "series_number": series.get("series_number", ""),
-        }
-        data, err = territory_file_mod.build(
-            src_meta=src_meta,
-            corotree_path=self._last_path, full_lv_path=self._full_lv_path,
-            targets=[dict(tg) for tg in self._targets],
-            params={"territory_opacity": float(getattr(self, "_terr_alpha", 0.45)),
-                    "targets_shown": bool(getattr(self, "_targets_shown", True))})
-        if data is None:
-            self._warn(t("territory を保存できません: {e}", e=err))
-            return False
-        if path is None:
-            d = os.path.dirname(self._last_path or self._full_lv_path or "") or ""
-            meta = territory_file_mod.label_meta(data)
-            stem = "_".join(p for p in (meta.get("date", ""),
-                                        meta.get("series_number")
-                                        and "Se" + meta.get("series_number"))
-                            if p) or "territory"
-            default = os.path.join(d, stem + ".territory.json") if d \
-                else stem + ".territory.json"
-            path, _ = QFileDialog.getSaveFileName(
-                self, t("Territory を保存"), default,
-                t("Territory (*.territory.json)"))
-            if not path:
-                return False
-        if not path.endswith(".json"):
-            path += ".territory.json"
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except OSError as exc:
-            self._warn(t("保存に失敗しました: {e}", e=str(exc)))
-            return False
-        self._terr_path = path
-        self._hint.setText(t("Territory を保存しました: {p}",
-                             p=os.path.basename(path)))
-        return True
-
-    def load_territory(self, data, coro, full, path: str = "") -> bool:
-        """Install a Territory session from its link file + the two already-loaded
-        linked files: *data* = the parsed .territory.json, *coro* = the parsed
-        corotree.json dict, *full* = the parsed FullLv.json dict (the shell
-        resolves the links — incl. the locate-on-missing flow — and loads them).
-        Restores the tree, the FullLv, the Targets and the display params, then
-        computes + shows the territory review."""
-        if not territory_file_mod.is_territory(data):
-            self._warn(t("Territory (.territory.json) 形式ではありません。"))
-            return False
-        if not isinstance(coro, dict) or not full_lv_mod.is_full_lv(full):
-            self._warn(t("リンク先 (corotree.json / FullLv.json) の中身が不正です。"))
-            return False
-        src_path = path
-        uid = (territory_file_mod.series_uid(data)
-               or full_lv_mod.series_uid(full)
-               or (coro.get("series") or {}).get("series_uid", "") or "")
-        ser = coro.get("series") or {}
-        self._use_uid(uid, ct_dir=(territory_file_mod.src_dir(data)
-                                   or full_lv_mod.src_dir(full)), series=ser)
-        # Restore the tree, its source paths, params and targets, then the FullLv
-        # (which computes + shows the territory).
-        self._tree = CoronaryTree.from_json(coro)
-        self._dedupe_tree()
-        self._hidden.clear()
-        self._last_path = territory_file_mod.corotree_path(data) or ""
-        self._full_lv_path = territory_file_mod.full_lv_path(data) or ""
-        self._terr_path = src_path or ""
-        p = territory_file_mod.params(data)
-        if "territory_opacity" in p:
-            try:
-                self._terr_alpha = max(0.0, min(1.0, float(p["territory_opacity"])))
-                self._sync_terr_alpha_combo()
-            except Exception:                            # noqa: BLE001
-                pass
-        self._full_lv_data = full
-        self._targets = [dict(tg) for tg in territory_file_mod.targets(data)]
-        self._compute_territory()                  # rebuilds engine + targets + overlay
-        self.show()
-        self.raise_()
-        label = full_lv_mod.format_label(
-            territory_file_mod.label_meta(data), "Territory")
-        self._hint.setText(t("Territory を読込みました: {p}",
-                             p=os.path.basename(src_path) if src_path else label))
-        return True
+    # NOTE: save_territory / load_territory (the .territory.json session file) were
+    # REMOVED by design — Territory is always re-derived by dropping the
+    # corotree.json + FullLv.json pair, and the VR result is shared via a one-way
+    # glTF/GLB export instead (the Territory bar's 書き出し button).
 
     def _sync_terr_alpha_combo(self) -> None:
         """Reflect self._terr_alpha on the 透過度 combo without re-triggering it."""
