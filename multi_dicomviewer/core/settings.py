@@ -493,15 +493,21 @@ def save_display_quality(prefs: dict) -> None:
 # ------------------------------------- LV Auto-Endo advanced (shape/resolution)
 LV_ENDO_PATH = SETTINGS_DIR / "lv_endo_params.json"
 
-#: Advanced Auto-Endo params exposed in Settings (the per-method "肉柱" knob lives
-#: on the Blood/Endo bar instead). All are rarely touched; defaults are good.
+#: Auto-Endo build methods (方式) — what the Settings selector offers. The first
+#: is the default. Order matches the Settings combo.
+LV_ENDO_METHODS = ("hull_smooth", "hull", "hull_round", "polar", "convex3d")
+
+#: Auto-Endo params exposed in Settings → LV Auto-Endo. The build METHOD (方式)
+#: and the rarely touched per-method shape/resolution values live here (moved off
+#: the Blood/Endo bar). Defaults are good for almost everyone.
 _LV_ENDO_DEFAULTS = {
+    "method": "hull_smooth",  # 方式: Auto-Endo build method (default 凸包滑)
     "min_chord_mm": 5.0,   # 凸包滑: hull edge longer than this = a concavity to bulge
     "n_meridians": 240,    # 放射: number of radial directions
     "grid_mm": 0.7,        # mask sampling pitch (smaller = finer/slower)
     "step_mm": 0.45,       # display outline sampling pitch
 }
-_LV_ENDO_RANGES = {       # (min, max) sanity clamps
+_LV_ENDO_RANGES = {       # (min, max) sanity clamps — numeric keys only
     "min_chord_mm": (1.0, 30.0),
     "n_meridians": (60, 720),
     "grid_mm": (0.3, 2.0),
@@ -510,12 +516,17 @@ _LV_ENDO_RANGES = {       # (min, max) sanity clamps
 
 
 def load_lv_endo_params() -> dict:
-    """Persisted advanced Auto-Endo params, defaults for any missing/bad key."""
+    """Persisted Auto-Endo params, defaults for any missing/bad key."""
     out = dict(_LV_ENDO_DEFAULTS)
     try:
         data = json.loads(LV_ENDO_PATH.read_text(encoding="utf-8"))
         if isinstance(data, dict):
+            m = data.get("method")
+            if isinstance(m, str) and m in LV_ENDO_METHODS:
+                out["method"] = m
             for k, dv in _LV_ENDO_DEFAULTS.items():
+                if k == "method":
+                    continue
                 v = data.get(k)
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     lo, hi = _LV_ENDO_RANGES[k]
@@ -527,10 +538,15 @@ def load_lv_endo_params() -> dict:
 
 
 def save_lv_endo_params(params: dict) -> None:
-    """Best-effort persist of the advanced Auto-Endo params."""
+    """Best-effort persist of the Auto-Endo params."""
     try:
         out = {}
+        m = params.get("method", _LV_ENDO_DEFAULTS["method"])
+        out["method"] = m if (isinstance(m, str) and m in LV_ENDO_METHODS) \
+            else _LV_ENDO_DEFAULTS["method"]
         for k, dv in _LV_ENDO_DEFAULTS.items():
+            if k == "method":
+                continue
             v = params.get(k, dv)
             lo, hi = _LV_ENDO_RANGES[k]
             try:

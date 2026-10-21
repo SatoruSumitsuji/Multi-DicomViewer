@@ -4198,20 +4198,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._meas_btn.clicked.connect(self._toggle_measure)
         row.addWidget(self._meas_btn)
 
-        # VR is a TOP-LEVEL mode toggle (independent of the Tools), so it gets its
-        # own button next to Color/Measure: ON = VR (立体表示, tinted background),
-        # OFF = back to the normal CT view. Re-enabling returns to the exact last
-        # VR view (完全復元). Hiding only the VR IMAGE stays on the Coronary panel's
-        # VR 表示/非表示 toggle.
-        self._vr_btn = FitButton("VR")
-        self._vr_btn.setCheckable(True)
-        self._vr_btn.setStyleSheet(
-            "QPushButton:checked { background:#7a4fb0; color:white; }")
-        self._vr_btn.setHelpToolTip(t(
-            "VR (立体表示) のオン/オフ。オフで通常CT表示に戻ります。"
-            "再オンで最後のVR表示に復元"))
-        self._vr_btn.clicked.connect(self._toggle_vr_mode)
-        row.addWidget(self._vr_btn)
+        # NOTE: the old top-level "VR" toggle button (next to Measure) was removed
+        # (parity with the Windows viewer) — LVモード never needs the LV VR model and
+        # Territoryモード drives VR itself, so a manual toggle only confused. VR is
+        # entered/left by the Territory review path; the Coronary panel's VR 表示/
+        # 非表示 toggle still hides just the VR image. _toggle_vr_mode / _sync_vr_btn
+        # remain (no-op without the button) so any internal callers stay safe.
 
         self._slab_lbl = QLabel(t("Slab:"))
         row.addWidget(self._slab_lbl)
@@ -11797,41 +11789,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lvv_lvd_btn.customContextMenuRequested.connect(
             lambda _p: self._lvv_lvd_reset())
-        # Auto-Endo 係数: papillary/trabecula BRIDGING radius (close_mm). Larger =
-        # smoother (trabeculae included); smaller = follows the blood indents.
-        self._lvv_close_lbl = QLabel(t("肉柱"))
-        self._lvv_close_spin = QSpinBox()
-        self._lvv_close_spin.setRange(1, 12)
-        self._lvv_close_spin.setValue(5)
-        self._lvv_close_spin.setSuffix(" mm")
-        self._lvv_close_spin.setKeyboardTracking(False)
-        self._lvv_close_spin.setToolTip(
-            t("Auto-Endo の肉柱/乳頭筋の凹凸を橋渡しする量 (close_mm): 大きいほど"
-              "滑らか＝緻密層寄り、小さいほど血流に忠実"))
-        self._lvv_close_spin.valueChanged.connect(
-            lambda _v: self._lvv_close_changed())
-        # Auto-Endo 方式 (method) — parity with the Windows viewer. The single knob
-        # above is relabelled per method (膨らみ / 丸み / 橋渡し / 肉柱) by
-        # _lvv_update_close_ui.
-        self._lvv_method_lbl = QLabel(t("方式"))
-        self._lvv_method_combo = QComboBox()
-        self._lvv_method_combo.addItem("凸包滑", "hull_smooth")
-        self._lvv_method_combo.addItem("凸包(層)", "hull")
-        self._lvv_method_combo.addItem("凸包(丸)", "hull_round")
-        self._lvv_method_combo.addItem("放射", "polar")
-        self._lvv_method_combo.addItem("3D凸包", "convex3d")
-        self._lvv_method_combo.setToolTip(
-            t("Auto-Endo の作り方: 凸包滑=凸包+外へ膨らむ滑らか輪郭 / 凸包(層)=各"
-              "短軸の凸包 / 凸包(丸)=円に近づけた凸包 / 放射=谷を角度で橋渡し / "
-              "3D凸包=3次元凸包"))
-        self._lvv_method_combo.currentIndexChanged.connect(
-            lambda _i: self._lvv_method_changed())
-        # Row-2 order (spec): 方式 (method) then 膨らみ (the context-sensitive knob).
-        row.addWidget(self._lvv_method_lbl)
-        row.addWidget(self._lvv_method_combo)
-        row.addWidget(self._lvv_close_lbl)
-        row.addWidget(self._lvv_close_spin)
-        self._lvv_update_close_ui()          # label the knob for the default method
+        # Auto-Endo の 方式 (method) + per-method shape knob (膨らみ / 肉柱 …) USED to
+        # live here (parity with the Windows viewer). Both were moved to Settings →
+        # LV Auto-Endo (方式 selector above 凹み判定(弦長)) — irrelevant to almost
+        # everyone, only cluttered the bar. Attrs set to None so defensive
+        # `getattr(..., None)` checks short-circuit; the method now comes from
+        # Settings (`_lv_endo_adv`) and the 膨らみ knob stays at its default.
+        self._lvv_close_lbl = None
+        self._lvv_close_spin = None
+        self._lvv_method_lbl = None
+        self._lvv_method_combo = None
         # Endo-Border(Manual): enter the Endo edit mode. Seeds from Auto-Endo the
         # first time; the hand-edited border is retained across HU changes. Moved
         # to row 3.
@@ -12444,16 +12411,26 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _lvv_method_changed(self) -> None:
         """Auto-Endo 方式 changed → relabel the knob and drop the stale auto Endo
-        so a re-press of Auto-Endo表示 recomputes with the new method."""
-        self._lv_endo_method = (self._lvv_method_combo.currentData()
-                                or "hull_smooth")
+        so a re-press of Auto-Endo表示 recomputes with the new method. The 方式
+        selector moved to Settings, so the bar combo is gone — guarded in case an
+        old caller survives."""
+        combo = getattr(self, "_lvv_method_combo", None)
+        if combo is None:
+            return
+        self._lv_endo_method = combo.currentData() or "hull_smooth"
         self._lvv_update_close_ui()
         self._lvv_close_changed()          # invalidate + hide (same as 肉柱 change)
 
     def _lvv_close_changed(self) -> None:
         """Auto-Endo 肉柱 bridging (close_mm) changed → drop the stale auto Endo +
-        hide Auto-Endo表示 so a re-press recomputes. Manual Endo is unaffected."""
-        self._lv_endo_close_mm = float(self._lvv_close_spin.value())
+        hide Auto-Endo表示 so a re-press recomputes. Manual Endo is unaffected.
+
+        The knob moved to Settings (value stays at its default), so the bar spin is
+        gone — guarded in case an old caller survives."""
+        spin = getattr(self, "_lvv_close_spin", None)
+        if spin is None:
+            return
+        self._lv_endo_close_mm = float(spin.value())
         self._lv_endo_auto_model = None
         self._lv_endo_auto_surf = None
         self._lv_endo_auto_sig = None
@@ -12659,27 +12636,34 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     # -------- Auto-Endo表示 (display) / Manual-Endo (edit) --------
     def _lv_endo_adv(self) -> dict:
-        """Advanced Auto-Endo params (Settings → LV Auto-Endo), cached — the SAME
-        source the Windows viewer reads, so both platforms build the identical
-        envelope mask. Re-read on demand after a Settings change."""
+        """Auto-Endo params (Settings → LV Auto-Endo), cached — the SAME source the
+        Windows viewer reads, so both platforms build the identical envelope mask.
+        Also syncs the build METHOD (方式) from Settings (it moved off the bar), so
+        a fresh build / rebuild follows the Settings choice. Re-read on demand after
+        a Settings change."""
         adv = getattr(self, "_lv_endo_adv_cache", None)
         if adv is None:
             try:
                 from multi_dicomviewer.core import settings as _st
                 adv = _st.load_lv_endo_params()
             except Exception:                            # noqa: BLE001
-                adv = {"min_chord_mm": 5.0, "n_meridians": 240,
-                       "grid_mm": 0.7, "step_mm": 0.45}
+                adv = {"method": "hull_smooth", "min_chord_mm": 5.0,
+                       "n_meridians": 240, "grid_mm": 0.7, "step_mm": 0.45}
             self._lv_endo_adv_cache = adv
+            self._lv_endo_method = adv.get("method", "hull_smooth")
         return adv
 
     def _lv_endo_adv_refresh(self) -> None:
         """Settings ▸ LV Auto-Endo changed: drop the cached params so the next
-        Auto-Endo re-reads them, and invalidate any built Auto-Endo (mask / model
-        / 壁厚) so a re-press rebuilds with the new values. Blood and the
-        hand-edited Manual Endo are untouched. Parity with the Windows VTK
-        _lv_endo_adv_refresh — the hook the shell calls on every viewer."""
+        Auto-Endo re-reads them (incl. the 方式/method), and invalidate any built
+        Auto-Endo (mask / model / 壁厚) so a re-press rebuilds with the new values.
+        Blood and the hand-edited Manual Endo are untouched. Parity with the Windows
+        VTK _lv_endo_adv_refresh — the hook the shell calls on every viewer."""
         self._lv_endo_adv_cache = None
+        try:
+            self._lv_endo_adv()          # re-sync _lv_endo_method from Settings now
+        except Exception:                            # noqa: BLE001
+            pass
         try:
             if (getattr(self, "_lvv_thick_mode", None) is not None
                     or getattr(self, "_lvv_thick_cache", None)):
@@ -12811,9 +12795,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 epi_full[ez0:ez1, ey0:ey1, ex0:ex1] = np.asarray(ec, bool)
         except Exception:                                # noqa: BLE001
             epi_full = None
-        adv = self._lv_endo_adv()
+        adv = self._lv_endo_adv()                   # syncs _lv_endo_method (Settings)
         knob = float(getattr(self, "_lv_endo_close_mm", 5.0))
-        method = getattr(self, "_lv_endo_method", "hull_smooth")  # 方式 combo
+        method = str(adv.get("method", getattr(self, "_lv_endo_method", "hull_smooth")))
         bridge = max(10.0, knob * 4.0)  # 放射: 橋渡し angular span
         # 凸包(丸): 丸み → how far the hull rounds toward a circle (0..~0.85).
         roundness = (min(0.85, knob / 24.0) if method == "hull_round" else 0.0)
