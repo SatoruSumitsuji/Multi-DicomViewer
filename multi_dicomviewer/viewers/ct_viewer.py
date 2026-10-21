@@ -3991,13 +3991,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lvv_lvd_btn.customContextMenuRequested.connect(
             lambda _p: self._lvv_lvd_reset())
         # Auto-Endo の 方式 (build method) and the per-method shape knob (膨らみ /
-        # 肉柱 …) USED to live here as a selector + spin. They were moved to
-        # Settings → LV Auto-Endo (方式 selector above 凹み判定(弦長)) because they are
-        # irrelevant to almost everyone and only cluttered the LV bar. The attrs are
-        # set to None so every defensive `getattr(..., None)` check short-circuits;
-        # the ACTUAL values now come from Settings (`_lv_endo_adv`) — 方式 drives
-        # `_lv_endo_method`, and the 膨らみ knob stays at its approved default
-        # (`_lv_endo_close_mm`, set in __init__).
+        # 肉柱 …) USED to live here as a selector + spin. Both moved to Settings → LV
+        # Auto-Endo (方式 and 膨らみ, above 凹み判定(弦長)) because they are irrelevant to
+        # almost everyone and only cluttered the LV bar. The attrs are set to None so
+        # every defensive `getattr(..., None)` check short-circuits; the ACTUAL
+        # values now come from Settings via `_lv_endo_adv` (方式 → `_lv_endo_method`,
+        # 膨らみ → `_lv_endo_close_mm`).
         self._lvv_close_lbl = None
         self._lvv_close_spin = None
         self._lvv_method_lbl = None
@@ -7909,10 +7908,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                 from multi_dicomviewer.core import settings as _st
                 adv = _st.load_lv_endo_params()
             except Exception:                            # noqa: BLE001
-                adv = {"method": "hull_smooth", "min_chord_mm": 5.0,
-                       "n_meridians": 240, "grid_mm": 0.7, "step_mm": 0.45}
+                adv = {"method": "hull_smooth", "close_mm": 5,
+                       "min_chord_mm": 5.0, "n_meridians": 240,
+                       "grid_mm": 0.7, "step_mm": 0.45}
             self._lv_endo_adv_cache = adv
             self._lv_endo_method = adv.get("method", "hull_smooth")
+            self._lv_endo_close_mm = float(adv.get("close_mm", 5))
         return adv
 
     def _lv_endo_adv_refresh(self) -> None:
