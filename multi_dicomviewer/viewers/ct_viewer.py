@@ -3560,12 +3560,19 @@ class CTViewer(CPRMixin, AbstractViewer):
                 mp.ScalarVisibilityOff()
                 ac = vtkActor()
                 ac.SetMapper(mp)
-                c = colors[lv - 1] if 0 <= lv - 1 < ncol else (0.9, 0.4, 0.4, 0.8)
+                c = colors[lv - 1] if 0 <= lv - 1 < ncol else (0.9, 0.4, 0.4, 0.45)
                 r, g, b = float(c[0]), float(c[1]), float(c[2])
-                a = float(c[3]) if len(c) > 3 else 1.0
+                a = float(c[3]) if len(c) > 3 else 0.45
                 prop = ac.GetProperty()
                 prop.SetColor(r, g, b)
-                prop.SetOpacity(min(0.9, max(0.5, a)))
+                # Match the in-app territory translucency (its own per-label alpha,
+                # ~0.45) so the exported look is close to Multi-DICOMviewer's VR; a
+                # matte-ish surface (low specular) reads like the DVR wash. An exact
+                # DVR look is not reproducible as a mesh in glTF.
+                prop.SetOpacity(max(0.3, min(0.85, a)))
+                prop.SetSpecular(0.1)
+                prop.SetAmbient(0.35)
+                prop.SetDiffuse(0.75)
                 if vm is not None:
                     ac.SetUserMatrix(vm)
                 p.ren.AddActor(ac)
