@@ -10146,7 +10146,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_file_name = name or ""
             self._full_lv_saved = True
             try:
-                if self._lvv is not None and self._lv_current_submode() is not None:
+                if self._lvv is not None:
                     self._lvv_observe_exit()
             except Exception:                            # noqa: BLE001
                 pass
