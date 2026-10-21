@@ -2489,23 +2489,43 @@ class MainWindow(QMainWindow):
         from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QFileDialog
 
-        def _poll_show(attempt=0, broaden="", broadened=False):
+        def _poll_show(attempt=0, on_fail=None):
             # Wait for the (async) folder scan to index the series, then show it
             # and draw the overlay; refresh again after the volume decodes.
             if series_uid and self._coronary_display_uid(series_uid):
                 for ms in (0, 700, 1600):
                     QTimer.singleShot(ms, self.coronary_overlay_refresh)
                 return
-            # LAZY fallback: if the JSON-folder scan hasn't surfaced the CT after a
-            # short while, scan the PARENT once (the CT is in a sibling subfolder,
-            # not under the JSON's folder). Done only on a miss so the common case
-            # (CT beside/below the JSON) never pays for a possibly-huge parent scan.
-            if broaden and not broadened and attempt >= 6:      # ~1.8 s, no hit yet
-                self.case_open_folders([broaden], dicom_only=True)
-                broadened = True
-            if attempt < 40:                    # ~12 s max
-                QTimer.singleShot(
-                    300, lambda: _poll_show(attempt + 1, broaden, broadened))
+            if attempt < 15:                    # ~4.5 s to index the scanned folder
+                QTimer.singleShot(300, lambda: _poll_show(attempt + 1, on_fail))
+                return
+            # Still not found. Do NOT broad-search (a huge parent scan was the
+            # "元3DCT探し迷子"). Hand off to the user to LOCATE the folder.
+            if on_fail is not None:
+                on_fail()
+
+        def _ask_ct_folder():
+            # The source 3-D CT wasn't found where it was expected → let the USER
+            # pick its folder (no automatic broad search). Guard against re-entry
+            # so a second drop/poll can't stack dialogs.
+            if getattr(self, "_coro_ct_prompting", False):
+                return
+            self._coro_ct_prompting = True
+            try:
+                start = ""
+                for cand in (cpr_dir, src_dir):
+                    if cand and os.path.isdir(cand):
+                        start = cand
+                        break
+                folder = QFileDialog.getExistingDirectory(
+                    self,
+                    t("元の3DCTデータが見つかりません。元の3DCTフォルダを選択してください"),
+                    start)
+            finally:
+                self._coro_ct_prompting = False
+            if folder:
+                self.case_open_folders([folder], dicom_only=True)
+                QTimer.singleShot(300, lambda: _poll_show(0, None))  # no re-prompt
 
         if series_uid and self.case_series_loaded(series_uid):
             ok = self._coronary_display_uid(series_uid)
@@ -2514,40 +2534,22 @@ class MainWindow(QMainWindow):
             return t("表示中") if ok else ""
         if src_dir and os.path.isdir(src_dir):
             self.case_open_folders([src_dir], dicom_only=True)
-            QTimer.singleShot(300, lambda: _poll_show(0))
+            QTimer.singleShot(300, lambda: _poll_show(0, _ask_ct_folder if prompt
+                                                      else None))
             return t("3DCTを読込中…")
         if not prompt:
             return t("元3DCT未読込")           # auto path: never scan / prompt
-        # Deliberate action (画像表示 / ツリー読込 / .corotree.json drop): try the
-        # folder the tree file came from before asking, so the CT is found itself.
+        # Deliberate action (画像表示 / ツリー読込 / .corotree.json drop): scan the
+        # JSON's OWN folder recursively (the source CT usually lives here or in a
+        # SUBFOLDER), and if it's NOT found there, ASK the user to pick the folder —
+        # NEVER an automatic broad search of a (possibly huge) parent.
         if cpr_dir and os.path.isdir(cpr_dir):
-            # Scan the JSON's OWN folder RECURSIVELY first — the source CT normally
-            # lives here or in a SUBFOLDER (e.g. .../Case/CT-.../400img), which
-            # case_open_folders finds quickly. Do NOT eagerly scan the parent: a
-            # Cases/Export root can be huge and was the pathologically slow drop.
-            # _poll_show only falls back to the parent (once) if the UID still isn't
-            # found — the rarer layout where the CT is in a SIBLING of the JSON.
             self.case_open_folders([cpr_dir], dicom_only=True)
-            parent = os.path.dirname(os.path.normpath(cpr_dir))
-            broaden = (parent if (parent and os.path.isdir(parent)
-                                  and parent != os.path.normpath(cpr_dir)) else "")
-            QTimer.singleShot(300, lambda: _poll_show(0, broaden))
+            QTimer.singleShot(300, lambda: _poll_show(0, _ask_ct_folder))
             return t("3DCTを読込中…")
-        # Last resort: ask. Default to a folder that EXISTS on this machine (the
-        # drop folder) rather than the saved src_dir (which may be a dead
-        # cross-OS path that opens the picker at the volume root).
-        start = ""
-        for cand in (cpr_dir, src_dir):
-            if cand and os.path.isdir(cand):
-                start = cand
-                break
-        folder = QFileDialog.getExistingDirectory(
-            self, t("この冠動脈の元となった3DCTフォルダを選択してください"), start)
-        if folder:
-            self.case_open_folders([folder], dicom_only=True)
-            QTimer.singleShot(300, lambda: _poll_show(0))
-            return t("3DCTを読込中…")
-        return ""
+        # No folder context at all → ask straight away.
+        _ask_ct_folder()
+        return t("3DCTを読込中…")
 
     def _coronary_display_uid(self, series_uid: str) -> bool:
         """Show the series with this UID (base-vs-'#' tolerant) in a pane —
