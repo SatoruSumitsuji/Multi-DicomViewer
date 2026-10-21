@@ -17568,6 +17568,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         jumping back to a default (LAO0/CRA0) MPR."""
         # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
         self._cpr_prev_view = self._view_snapshot()
+        # Fresh CPR entry: no tree-vessel being resumed yet (the resume caller
+        # re-sets these AFTER apply_cpr_data). A plain Draw leaves them cleared.
+        self._coro_edit_vid = ""
+        self._cpr_suggested_name = ""
         u, v, nrm = self._axes_for(which)        # RMF seed = the drawn plane
         # Cross-section is ALWAYS pane A, MAP (route) is pane B. If drawn on A, move
         # the trace to B so the route stays visible after A becomes the cross-section.
@@ -17631,6 +17635,10 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         *keep_view* restores the MPR view that was showing when this short-axis
         was built (so re-Draw traces on the SAME image) instead of resetting."""
+        # Leaving CPR ends any tree-vessel edit: stop suppressing its overlay line
+        # and forget its suggested Save name.
+        self._coro_edit_vid = ""
+        self._cpr_suggested_name = ""
         if self._cpr is None:
             self._coronary_sync_ui()
             return
@@ -17705,13 +17713,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         path on success, else None (cancelled / failed) — 保存登録 uses the path."""
         from PyQt6.QtWidgets import QFileDialog
         import os
+        import re
         data = self._cpr_build_data()
         if data is None:
             return None
-        # Default to the vessel's OWN .cpr.json when resumed/loaded from one
-        # (editing a target CPR is almost always an overwrite).
+        # Default name priority (always via this Save dialog — never a silent
+        # overwrite): (1) resumed a Coronary-Tree vessel (右クリック ▸ 編集) → the
+        # VESSEL NAME in the CT folder, e.g. "D9aL.cpr.json" (user preference; also
+        # avoids a STALE name from a previously-edited vessel); (2) loaded from a
+        # real .cpr.json → that file's path; (3) generic "<series>.cpr.json".
+        sug = getattr(self, "_cpr_suggested_name", "") or ""
         last = getattr(self, "_cpr_last_path", "") or ""
-        if last:
+        if sug:
+            d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+            nm = re.sub(r'[\\/:*?"<>|]', "_", sug).strip() or "shortaxis"
+            default = os.path.join(d, nm + ".cpr.json") if d \
+                else nm + ".cpr.json"
+        elif last:
             default = last
         else:
             d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
