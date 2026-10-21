@@ -3546,13 +3546,30 @@ class MainWindow(QMainWindow):
         bar into Coronary mode (hide the LV row, colour CPR + show the filename)."""
         import os
         w = self._open_coronary_tree()
-        if w is None or not hasattr(w, "load_file") or not w.load_file(path):
+        if w is None or not hasattr(w, "load_file"):
+            return
+        # Capture any FullLv already docked for the ACTIVE CT BEFORE load_file — it
+        # CLEARS the bundle's FullLv (so a plain corotree drop can't auto-resume the
+        # review). If the corotree is for that same CT, we re-install it below so the
+        # pair → Territory instead of being lost ("FullLv 未読込").
+        pre_full = getattr(w, "_full_lv_data", None)
+        if not w.load_file(path):
             return
         if hasattr(w, "_set_overlay"):
             w._set_overlay(True)         # overlay ON + open the source CT
         uid = w.active_uid() if hasattr(w, "active_uid") else ""
         full = w.full_lv_for_series(uid) if (
             uid and hasattr(w, "full_lv_for_series")) else None
+        if full is None and pre_full is not None and uid \
+                and hasattr(w, "load_full_lv"):
+            try:
+                from multi_dicomviewer.core import full_lv as _fl
+                if (_fl.series_uid(pre_full) or "").split("#", 1)[0] \
+                        == uid.split("#", 1)[0]:
+                    w.load_full_lv(pre_full)             # re-install (load_file cleared it)
+                    full = pre_full
+            except Exception:                            # noqa: BLE001
+                pass
         if full:
             self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
             return
@@ -3762,10 +3779,43 @@ class MainWindow(QMainWindow):
             pend = self._full_lv_edit_pending = set()
         if base:
             pend.add(base)
-        self._poll_lv_apply(uid, files, 0)
-        # Drive the bottom bar into LV mode (hide Coronary:CPR, show the LV selector
-        # row, colour FullLV + show the filename) + collapse the Blood/Endo sub-mode.
-        self._poll_set_bottom_ctx(uid, "lv", fname, 0)
+        # ONE poller applies the LV overlays then sets the bottom-bar LV context in
+        # the SAME call — the context (collapse Blood/Endo + green FullLV + filename)
+        # MUST run AFTER apply_lv_analysis (which resets _full_lv_saved and enters
+        # Blood/Endo). Two separate pollers raced here: apply_lv_analysis pumps the
+        # event loop (a modal mask-progress dialog), so the context poll fired mid-
+        # apply → the collapse/green were undone when apply finished.
+        self._poll_full_lv_edit(uid, files, fname, 0)
+
+    def _poll_full_lv_edit(self, uid: str, files: dict, fname: str,
+                           attempt: int = 0) -> None:
+        """Wait for the CT to be shown + decoded, then apply the LV overlays EDITABLY
+        and immediately set the LVモード bottom-bar context (collapse Blood/Endo to
+        the selector, FullLV green 保存済, show <name>.FullLv.json) — both in one
+        call so the context lands AFTER the apply."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid) if uid else True
+        v = self._active.current_viewer() if self._active is not None else None
+        ready = v is not None and (getattr(v, "_image", None) is not None
+                                   or getattr(v, "_vol", None) is not None)
+        if shown and ready and hasattr(v, "apply_lv_analysis"):
+            try:
+                v.apply_lv_analysis(files)
+            except Exception:                            # noqa: BLE001
+                pass
+            if hasattr(v, "set_bottom_file_context"):
+                try:
+                    v.set_bottom_file_context("lv", fname)
+                except Exception:                        # noqa: BLE001
+                    pass
+            pend = getattr(self, "_full_lv_edit_pending", None)
+            if pend:
+                pend.discard((uid or "").split("#", 1)[0])
+            return
+        if attempt < 40:                                 # ~12 s
+            QTimer.singleShot(
+                300,
+                lambda: self._poll_full_lv_edit(uid, files, fname, attempt + 1))
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then draw the LV overlays from a

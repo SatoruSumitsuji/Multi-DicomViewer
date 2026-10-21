@@ -4460,8 +4460,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             # Collapse any open Blood/Endo sub-mode back to the plain selector row
             # (the user wants the simple "LV: MV AoV Apex Epi Blood/Endo FullLV"
             # state, not the expanded Blood/Endo controls) — keep the overlays.
+            # Unconditional (matches apply_full_lv): _lvv_observe_exit self-guards on
+            # _lvv and is a no-op when already observing.
             try:
-                if self._lvv is not None and self._lv_current_submode() is not None:
+                if self._lvv is not None:
                     self._lvv_observe_exit()
             except Exception:                            # noqa: BLE001
                 pass
@@ -11706,6 +11708,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_busy_text = vtkTextActor()
         p.vr_busy_text.SetInput(t("VR作成中"))
         _bp = p.vr_busy_text.GetTextProperty()
+        _bp.SetFontFamilyToArial()                   # fallback before the CJK font
+        _set_vtk_tag_font(_bp)                        # Meiryo → render 作成中 (not just "VR")
         _bp.SetFontSize(30)
         _bp.SetColor(1.0, 1.0, 1.0)
         _bp.SetJustificationToCentered()
