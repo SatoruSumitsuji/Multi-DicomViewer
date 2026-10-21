@@ -18920,11 +18920,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         data = self._cpr_build_data()
         if data is None:
             return None
-        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
-        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
-                else "shortaxis")
-        default = os.path.join(d, stem + ".cpr.json") if d \
-            else stem + ".cpr.json"
+        # Default to the vessel's OWN .cpr.json when this short-axis was loaded /
+        # resumed from one (the right-click ▸ 編集 sets _cpr_last_path) — editing a
+        # target CPR is almost always an overwrite, so offer its real name first
+        # instead of a generic "<series>.cpr.json".
+        last = getattr(self, "_cpr_last_path", "") or ""
+        if last:
+            default = last
+        else:
+            d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+            stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                    else "shortaxis")
+            default = os.path.join(d, stem + ".cpr.json") if d \
+                else stem + ".cpr.json"
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save short-axis"), default,
             "Short-axis (*.cpr.json);;JSON (*.json)")
@@ -18948,10 +18956,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         self._cpr_write(path, data)
 
-    def apply_cpr_data(self, data) -> bool:
+    def apply_cpr_data(self, data, keep_view: bool = False) -> bool:
         """Headless: rebuild the short-axis (CPR) from a parsed .cpr.json on THIS
         CT and show its centreline trace + cross-sections. Used by the .cpr.json
-        drag&drop (the shell opens the source CT first). Returns True on success."""
+        drag&drop (the shell opens the source CT first). Returns True on success.
+
+        *keep_view* True (the right-click ▸ 編集 resume) does NOT re-fit the
+        cameras, so the image the user adjusted to pick the target CPR is kept
+        instead of jumping/reverting."""
         if self._image is None:
             return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
@@ -18966,7 +18978,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             traceback.print_exc()
             return False
         if ok:
-            self._refresh(reset_cam=True)
+            self._refresh(reset_cam=not keep_view)
             self._view_initial = False           # lock the view (no resize refit)
         return bool(ok)
 

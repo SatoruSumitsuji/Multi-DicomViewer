@@ -3066,7 +3066,9 @@ class MainWindow(QMainWindow):
         if v is None or not hasattr(v, "apply_cpr_data"):
             return
         try:
-            if v.apply_cpr_data({"ctrl": data["ctrl"]}):
+            # keep_view: don't re-fit the cameras — the user adjusted the image to
+            # pick this CPR and the angle must not jump/revert on 編集.
+            if v.apply_cpr_data({"ctrl": data["ctrl"]}, keep_view=True):
                 self._coro_editing_vid = vid
                 # Point Overwrite at the vessel's own .cpr.json (if known) so the
                 # viewer's own save writes the same file.
