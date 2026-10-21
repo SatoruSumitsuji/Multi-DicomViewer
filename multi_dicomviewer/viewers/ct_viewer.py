@@ -784,10 +784,16 @@ _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
 #: the opaque territory colour. The real surface still occludes the far-side tree.
 #: Larger = lifts deeper vessels but floats the tree farther off the surface.
 _VR_CORO_LIFT_MM = 7.0
-#: Target markers (sphere + number) are floated a bit MORE than the coronary tubes
-#: so the Target point and its number sit clearly ON TOP of the vessel lines
-#: instead of being buried under them (user request 2026-10-21).
-_VR_TGT_LIFT_MM = _VR_CORO_LIFT_MM + 6.0
+#: Target SPHERE: sits on the clicked centreline point, just 1 mm in front of the
+#: tube so it reads on top without being z-fought — NOT more. The user picks the
+#: Target on the VISIBLE tube (already lifted _VR_CORO_LIFT_MM); lifting the sphere
+#: much farther pushed it visibly off the click under the perspective VR camera
+#: (the 'クリック位置から少し上にズレる' report 2026-10-21).
+_VR_TGT_LIFT_MM = _VR_CORO_LIFT_MM + 1.0
+#: Target NUMBER label floats a bit MORE than the sphere/tubes so it is never
+#: occluded by a vessel line (the number was hidden UNDER the coronary line); it is
+#: also nudged up-right in screen space (SetDisplayOffset) so it clears the line.
+_VR_TGT_LABEL_LIFT_MM = _VR_CORO_LIFT_MM + 4.0
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -11816,7 +11822,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 tp.SetBold(True)
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
-                    lb.SetDisplayOffset(3, 2)        # sit right next to the point
+                    lb.SetDisplayOffset(7, 12)       # up-right of the point, off the line
                 p.ren.AddViewProp(lb)
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
@@ -12771,14 +12777,21 @@ class CTViewer(CPRMixin, AbstractViewer):
                     a.SetUserMatrix(lifted)
                 except Exception:                    # noqa: BLE001
                     pass
-        # Target sphere + its number billboards float a bit MORE than the tubes, so
-        # the Target point and number read ON TOP of the vessel lines, not under.
+        # Target SPHERE sits essentially ON the clicked tube point (just 1 mm in
+        # front), so it doesn't drift off the click. The NUMBER label floats a bit
+        # MORE so a vessel line never covers it.
         lifted_tgt = _lift(_VR_TGT_LIFT_MM)
-        for a in [getattr(p, "vr_tgt_actor", None),
-                  *getattr(p, "vr_tgt_labels", [])]:
+        a = getattr(p, "vr_tgt_actor", None)
+        if a is not None and hasattr(a, "SetUserMatrix"):
+            try:
+                a.SetUserMatrix(lifted_tgt)
+            except Exception:                        # noqa: BLE001
+                pass
+        lifted_label = _lift(_VR_TGT_LABEL_LIFT_MM)
+        for a in getattr(p, "vr_tgt_labels", []):
             if a is not None and hasattr(a, "SetUserMatrix"):
                 try:
-                    a.SetUserMatrix(lifted_tgt)
+                    a.SetUserMatrix(lifted_label)
                 except Exception:                    # noqa: BLE001
                     pass
 
