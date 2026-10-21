@@ -2820,6 +2820,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # selected}, pushed by the shell (set_coronary_overlay). Painted in 3-D
         # MPR only, reprojected onto each pane's plane every repaint.
         self._coro_overlay = None
+        # Bottom-bar file context (set by the shell on a drop): "both" = the full
+        # Coronary:CPR + LV: row; "coronary" = a .corotree drop (show only
+        # Coronary:CPR + filename); "lv" = a .FullLv drop (show the LV selector row +
+        # filename). Reset to "both" on a fresh series. Parity with the VTK viewer.
+        self._bottom_ctx = "both"
+        self._coro_file_name = ""
+        self._lv_file_name = ""
         # CT Territory targets (see the VTK viewer): markers + pick mode.
         self._coro_targets: list = []
         self._coro_target_mode = False
@@ -5193,6 +5200,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_overlay = None
         self._coro_targets = []
         self._coro_target_mode = False
+        # Fresh series → the full Coronary:CPR + LV: row again, no linked filenames.
+        self._bottom_ctx = "both"
+        self._coro_file_name = self._lv_file_name = ""
         if hasattr(self, "_coro_names"):
             try:
                 self._coro_names.clear()
@@ -10123,6 +10133,73 @@ class CTViewer(CPRMixin, AbstractViewer):
                 or bool(getattr(self, "_lv_apex_edit", False))
                 or self._lv_current_submode() is not None)
 
+    def set_bottom_file_context(self, ctx: str, name: str = "") -> None:
+        """Shell hook (parity with the Windows viewer): set which half of the bottom
+        bar shows + the linked filename. "coronary" = corotree only; "lv" = FullLv
+        only (FullLV reads 保存済, collapse the Blood/Endo sub-mode); "both"/"" = the
+        full bar."""
+        ctx = ctx if ctx in ("coronary", "lv", "both") else "both"
+        self._bottom_ctx = ctx
+        if ctx == "coronary":
+            self._coro_file_name = name or ""
+        elif ctx == "lv":
+            self._lv_file_name = name or ""
+            self._full_lv_saved = True
+            try:
+                if self._lvv is not None and self._lv_current_submode() is not None:
+                    self._lvv_observe_exit()
+            except Exception:                            # noqa: BLE001
+                pass
+        else:
+            self._coro_file_name = self._lv_file_name = ""
+        try:
+            self._full_lv_refresh_btn()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._apply_file_context()
+
+    def _apply_file_context(self) -> None:
+        """Show/hide the Coronary vs LV halves of the bottom bar per _bottom_ctx and
+        fill the linked-filename labels. Called on every bar refresh."""
+        if getattr(self, "_coronary_mpr_btn", None) is None \
+                or not hasattr(self, "_coro_group_widgets"):
+            return
+        ctx = getattr(self, "_bottom_ctx", "both")
+        sig = (ctx, getattr(self, "_coro_file_name", ""),
+               getattr(self, "_lv_file_name", ""))
+        changed = sig != getattr(self, "_file_ctx_sig", None)
+        self._file_ctx_sig = sig
+        show_coro = ctx in ("both", "coronary")
+        show_lv = ctx in ("both", "lv")
+        for w in self._coro_group_widgets:
+            if w is not None:
+                w.setVisible(show_coro)
+        for w in self._lv_selectors:
+            if w is not None:
+                w.setVisible(show_lv)
+        if getattr(self, "_coro_spacer_w", None) is not None:
+            self._coro_spacer_w.setVisible(ctx == "both")
+        if ctx == "coronary":
+            for g in getattr(self, "_lv_submode_groups", []):
+                if g is not None:
+                    g.setVisible(False)
+        cname = getattr(self, "_coro_file_name", "") or ""
+        self._coro_file_label.setText(cname)
+        self._coro_file_label.setVisible(show_coro and bool(cname))
+        lname = getattr(self, "_lv_file_name", "") or ""
+        self._lv_file_label.setText(lname)
+        self._lv_file_label.setVisible(show_lv and bool(lname))
+        btn = self._coronary_mpr_btn
+        base = getattr(self, "_cpr_base_style", None)
+        coro = getattr(self, "_cpr_coro_style", None)
+        if base is not None and coro is not None:
+            btn.setStyleSheet(coro if ctx == "coronary" else base)
+        if changed:
+            try:
+                self._lv_relayout_bar()
+            except Exception:                            # noqa: BLE001
+                pass
+
     def _lv_sync_cpr_btn(self) -> None:
         """CPR button state: checked + highlighted while CPR is active; greyed
         (non-selectable) while an LV mode owns the bar; plain otherwise — so
@@ -11205,6 +11282,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 if b is not None:
                     b.setEnabled(False)
         self._lv_sync_cpr_btn()
+        # Apply the Coronary/LV file-context show-hide LAST (after every enable/vis
+        # above) — parity with the Windows viewer.
+        self._apply_file_context()
 
     def _lv_relayout_bar(self) -> None:
         """Force a SYNCHRONOUS relayout of the LV bar after a row was shown/hidden
@@ -11327,6 +11407,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # MPR", so the user need not discover the trace's right-click menu. ----
         cor_cap = QLabel(t("Coronary:"))
         cf = cor_cap.font(); cf.setBold(True); cor_cap.setFont(cf)
+        self._coro_cap = cor_cap
         row1.addWidget(cor_cap)
         self._coronary_mpr_btn = FitButton(t("CPR"))
         self._coronary_mpr_btn.setCheckable(True)
@@ -11342,9 +11423,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coronary_mpr_btn.setStyleSheet(
             "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
         row1.addWidget(self._coronary_mpr_btn)
-        row1.addSpacing(12)
+        self._coro_file_label = QLabel("")       # <name>.corotree.json, right of CPR
+        self._coro_file_label.setStyleSheet("color:#b8860b;")
+        self._coro_file_label.setVisible(False)
+        row1.addWidget(self._coro_file_label)
+        self._coro_spacer_w = QWidget()          # the 12-px gap between the halves
+        self._coro_spacer_w.setFixedWidth(12)
+        row1.addWidget(self._coro_spacer_w)
         cap = QLabel(t("LV:"))
         f = cap.font(); f.setBold(True); cap.setFont(f)
+        self._lv_cap = cap
         row1.addWidget(cap)
         self._lv_btn = FitButton(t("Trace"))     # hidden internal mode flag
         self._lv_btn.setCheckable(True); self._lv_btn.setVisible(False)
@@ -11411,6 +11499,10 @@ class CTViewer(CPRMixin, AbstractViewer):
               "Blood/Endo analysis are both present."))
         self._full_lv_btn.clicked.connect(self._full_lv_save)
         row1.addWidget(self._full_lv_btn)
+        self._lv_file_label = QLabel("")         # <name>.FullLv.json, right of FullLV
+        self._lv_file_label.setStyleSheet("color:#50dc50;")
+        self._lv_file_label.setVisible(False)
+        row1.addWidget(self._lv_file_label)
         self._lv_endo_btn = FitButton(t("Endo"))
         self._lv_endo_btn.clicked.connect(lambda: self._lv_select_submode("endo"))
         self._lv_endo_btn.setVisible(False)
@@ -11633,6 +11725,27 @@ class CTViewer(CPRMixin, AbstractViewer):
                    self._lv_grp_r2_valve_edit, self._lv_grp_r2_apex,
                    self._lv_grp_r2_valves):
             _g.setVisible(False)
+        # ---- Bottom-bar file-context groups (CoronaryTreeモード / LVモード) ----
+        # Parity with the Windows viewer: a .corotree drop shows only the Coronary
+        # half, a .FullLv drop only the LV half (see _apply_file_context). The 12-px
+        # spacer shows only when BOTH do. _lv_endo_btn is a hidden internal flag,
+        # excluded so it is never force-shown.
+        self._coro_group_widgets = [self._coro_cap, self._coronary_mpr_btn,
+                                    self._coro_file_label]
+        self._lv_selectors = [self._lv_cap, self._lv_mv_btn, self._lv_aov_btn,
+                              self._lv_apex_sel_btn, self._lv_epi_btn,
+                              self._lvv_start_btn, self._full_lv_btn,
+                              self._lv_file_label]
+        self._lv_submode_groups = [
+            getattr(self, n, None) for n in
+            ("_lv_grp_trace", "_lv_grp_blood", "_lv_grp_r2_trace",
+             "_lv_grp_r2_blood", "_lv_grp_r2_valves", "_lv_grp_r2_valve_edit",
+             "_lv_grp_r2_apex")]
+        self._cpr_base_style = (
+            "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
+        self._cpr_coro_style = (
+            "QPushButton{background:#b8860b;color:white;}"
+            "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
         self._lv_sync_buttons()
         self._lv_update_submode_ui()
         return self._lv_wrap

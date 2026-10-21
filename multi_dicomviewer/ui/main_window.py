@@ -3538,11 +3538,25 @@ class MainWindow(QMainWindow):
     def _open_coronary_tree_file(self, path: str) -> None:
         """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
         load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /
-        saved folder / prompt) and the vessel overlay is drawn on it."""
+        saved folder / prompt) and the vessel overlay is drawn on it.
+
+        When this CT ALSO has a FullLv docked (the user dropped the corotree onto a
+        pane already showing a FullLv, or both together) → advance to the Territory
+        (VR) review. Otherwise it is a plain coronary-tree display: drive the bottom
+        bar into Coronary mode (hide the LV row, colour CPR + show the filename)."""
+        import os
         w = self._open_coronary_tree()
-        if w is not None and hasattr(w, "load_file") and w.load_file(path):
-            if hasattr(w, "_set_overlay"):
-                w._set_overlay(True)     # overlay ON + open the source CT
+        if w is None or not hasattr(w, "load_file") or not w.load_file(path):
+            return
+        if hasattr(w, "_set_overlay"):
+            w._set_overlay(True)         # overlay ON + open the source CT
+        uid = w.active_uid() if hasattr(w, "active_uid") else ""
+        full = w.full_lv_for_series(uid) if (
+            uid and hasattr(w, "full_lv_for_series")) else None
+        if full:
+            self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
+            return
+        self._poll_set_bottom_ctx(uid, "coronary", os.path.basename(path), 0)
 
     # ------------------------------------------------- LV analysis drop
     @staticmethod
@@ -3648,6 +3662,32 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(
                 300, lambda: self._poll_lv_apply(uid, files, attempt + 1))
 
+    def _poll_set_bottom_ctx(self, uid: str, ctx: str, name: str,
+                             attempt: int = 0) -> None:
+        """Wait for the CT viewer to be shown, then set its bottom-bar file context
+        ("coronary" = corotree only → hide the LV row, colour CPR + its filename;
+        "lv" = FullLv only → hide Coronary:CPR, show the LV selector row, colour
+        FullLV + its filename). A territory review (both files) overrides this. No-op
+        on viewers without the setter (e.g. a not-yet-ported pygfx build)."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid) if uid else True
+        v = self._active.current_viewer() if self._active is not None else None
+        # Require the volume DECODED too (not just shown) so this runs AFTER a
+        # paired _poll_lv_apply on the same CT — apply_lv_analysis resets
+        # _full_lv_saved, and the "lv" context sets it True, so order matters.
+        ready = v is not None and (getattr(v, "_image", None) is not None
+                                   or getattr(v, "_vol", None) is not None)
+        if shown and ready and hasattr(v, "set_bottom_file_context"):
+            try:
+                v.set_bottom_file_context(ctx, name)
+            except Exception:                            # noqa: BLE001
+                pass
+            return
+        if attempt < 40:                                 # ~12 s
+            QTimer.singleShot(
+                300,
+                lambda: self._poll_set_bottom_ctx(uid, ctx, name, attempt + 1))
+
     # ------------------------------------------------- FullLv (.FullLv.json) drop
     def _open_full_lv_files(self, paths: list) -> None:
         """Drop a .FullLv.json → open the source CT and restore its LV analysis as
@@ -3690,16 +3730,32 @@ class MainWindow(QMainWindow):
             self.coronary_show_ct(uid, src_dir, cpr_dir=drop_dir, prompt=True)
         except Exception:                                # noqa: BLE001
             pass
-        if getattr(w, "_tree", None) is not None and w._tree.vessels \
-                and hasattr(w, "_set_overlay"):
+        # Record the dropped path on the bundle (for the bottom-bar filename) and
+        # note whether this CT ALSO has a coronary tree with vessels.
+        try:
+            w._full_lv_path = (paths[0] if paths else "") or ""
+        except Exception:                                # noqa: BLE001
+            pass
+        fname = os.path.basename(paths[0]) if paths else ""
+        # load_full_lv switched the active bundle to this FullLv's CT, so w._tree is
+        # that CT's tree. BOTH present (tree with vessels + this FullLv) → Territory.
+        tree = getattr(w, "_tree", None)
+        has_tree = bool(tree is not None and getattr(tree, "vessels", None))
+        if has_tree and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
-        # Apply the LV overlays EDITABLY and stop there — do NOT run apply_full_lv
-        # (which lays the panes on the LV axis and auto-enters the VR review). The
-        # CT load triggered above may also fire _maybe_resume_territory_review; mark
-        # this UID edit-pending so that path skips the VR resume for this drop.
+        # TERRITORY when this CT has BOTH a corotree AND a FullLv (the user dropped
+        # the second of the pair, or both together) → run the full VR review via
+        # apply_full_lv. Otherwise stop at the EDITABLE LV screen (MV/AoV/Apex/Epi/
+        # Blood-Endo) — the bundle already holds the five results, so reload them
+        # directly; territory is reached only once both files are present.
+        if has_tree:
+            self._poll_full_lv_apply(uid, data, 0)       # → VR / Territory
+            return
         files = self._full_lv_to_files(data)
         if not files:
             return
+        # Mark this UID edit-pending so the CT-load's _maybe_resume_territory_review
+        # skips the VR resume (this drop wants the editable LV screen, not VR).
         base = (uid or "").split("#", 1)[0]
         pend = getattr(self, "_full_lv_edit_pending", None)
         if pend is None:
@@ -3707,6 +3763,9 @@ class MainWindow(QMainWindow):
         if base:
             pend.add(base)
         self._poll_lv_apply(uid, files, 0)
+        # Drive the bottom bar into LV mode (hide Coronary:CPR, show the LV selector
+        # row, colour FullLV + show the filename) + collapse the Blood/Endo sub-mode.
+        self._poll_set_bottom_ctx(uid, "lv", fname, 0)
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then draw the LV overlays from a

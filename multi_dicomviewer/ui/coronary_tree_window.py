@@ -1195,6 +1195,39 @@ class CoronaryTreeWindow(SnapDock):
         b = self._by_uid.get(u)
         return b.get("full_lv") if b else None
 
+    def active_uid(self) -> str:
+        """The CT bundle currently being worked on (the one a just-dropped file
+        installed into). "" when nothing is loaded."""
+        return self._active_uid or ""
+
+    def tree_vessels_for_series(self, series_uid: str) -> bool:
+        """True when the dock holds a Coronary Tree WITH ≥1 vessel for the CT
+        showing *series_uid*. Lets the shell detect when a pane now has BOTH a
+        corotree and a FullLv (→ Territory). Accepts a bare uid too."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        if not u:
+            return False
+        b = self._by_uid.get(u)
+        tree = b.get("tree") if b else None
+        return bool(tree is not None and getattr(tree, "vessels", None))
+
+    def corotree_path_for_series(self, series_uid: str) -> str:
+        """The .corotree.json path the dock loaded for *series_uid*'s CT (for the
+        bottom-bar filename readout), or ""."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        return (b.get("last_path") or "") if b else ""
+
+    def full_lv_path_for_series(self, series_uid: str) -> str:
+        """The .FullLv.json path the dock loaded for *series_uid*'s CT (for the
+        bottom-bar filename readout), or ""."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        return (b.get("full_lv_path") or "") if b else ""
+
     def overlay_spec(self, force: bool = False, uid: str | None = None) -> list:
         """The on-image overlay: one entry per VISIBLE vessel with 2+ points —
         its world-mm centreline, root colour and name — for the CT viewers to
