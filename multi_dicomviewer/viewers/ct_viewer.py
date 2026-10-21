@@ -784,6 +784,10 @@ _VR_CORO_HALO = 0.30             # halo rim width (mm) beyond the tube
 #: the opaque territory colour. The real surface still occludes the far-side tree.
 #: Larger = lifts deeper vessels but floats the tree farther off the surface.
 _VR_CORO_LIFT_MM = 7.0
+#: Target markers (sphere + number) are floated a bit MORE than the coronary tubes
+#: so the Target point and its number sit clearly ON TOP of the vessel lines
+#: instead of being buried under them (user request 2026-10-21).
+_VR_TGT_LIFT_MM = _VR_CORO_LIFT_MM + 6.0
 
 
 def _terr_label_lut(colors) -> vtkLookupTable:
@@ -3310,6 +3314,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 import traceback
                 traceback.print_exc()
+
+    def _vr_busy_frame(self, p, i: int) -> None:
+        """Render a CHEAP VR frame (volume still hidden) with the busy text showing
+        an animated 'VR を描画中' + cycling dots, so the build visibly progresses.
+        Called between the CPU build steps; a no-op if the busy text isn't set up."""
+        bt = getattr(p, "vr_busy_text", None)
+        if bt is None:
+            return
+        try:
+            bt.SetInput(t("VR を描画中") + "．" * (int(i) % 4))
+            p.render()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _terr_toggle_blood(self) -> None:
         self._lvv_toggle_blood()
@@ -11666,7 +11683,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                     out = Pw - ctr
                     n = float(np.linalg.norm(out))
                     if n > 1e-6:
-                        lp = Pw + (out / n) * 6.0     # ~6mm toward the epicardium
+                        lp = Pw + (out / n) * 2.0     # hug the point (~2mm out)
                 lb = vtkBillboardTextActor3D()
                 lb.SetPosition(float(lp[0]), float(lp[1]), float(lp[2]))
                 lb.SetInput(str(tg.get("n", "")))
@@ -11676,7 +11693,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 tp.SetBold(True)
                 tp.SetJustificationToLeft()
                 if hasattr(lb, "SetDisplayOffset"):
-                    lb.SetDisplayOffset(6, 4)        # small nudge off the sphere
+                    lb.SetDisplayOffset(3, 2)        # sit right next to the point
                 p.ren.AddViewProp(lb)
                 p.vr_tgt_labels.append(lb)
         verts = vtkCellArray()
@@ -12162,8 +12179,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             # below then blocks with "VR を描画中…" on screen, not a black pane.
             if getattr(p, "vr_busy_text", None) is not None:
                 p.vr_busy_text.SetVisibility(True)
-                p.render()                          # volume hidden → this frame is fast
-            p.vr_volume.SetVisibility(True)
+                self._vr_busy_frame(p, 0)           # volume hidden → this frame is fast
+            # Keep the volume HIDDEN through the CPU build below so we can render a
+            # few CHEAP frames with an animated "…" between the build steps — the
+            # wait then visibly progresses instead of freezing on a static text. The
+            # volume is shown just before the slow final GPU render (p.render()).
             # 完全復元: if a prior VR session was switched off, restore its exact
             # orientation (Rt90/Flip xform) + camera pose; else start fresh.
             snap_view = getattr(self, "_vr_view_saved", {}).get(key)
@@ -12171,9 +12191,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 np.asarray(snap_view["xform"], float).copy()
                 if snap_view is not None else np.eye(4))
             self._vr_update_coronary(key)           # 3-D coronary tubes
+            self._vr_busy_frame(p, 1)
             self._vr_update_territory(key)          # 3-D territory surface
+            self._vr_busy_frame(p, 2)
             self._vr_update_targets(key)            # 3-D target spheres
+            self._vr_busy_frame(p, 3)
             self._vr_apply_xform(key)               # apply the restored/identity xform
+            p.vr_volume.SetVisibility(True)         # now show it → final render is the slow one
             self._vr_prev_cam[key] = (
                 cam.GetParallelProjection(), cam.GetPosition(),
                 cam.GetFocalPoint(), cam.GetViewUp(), cam.GetParallelScale())
@@ -12603,16 +12627,30 @@ class CTViewer(CPRMixin, AbstractViewer):
         if n < 1e-6:
             return
         cdir = d / n                                 # toward the camera (world)
-        T = np.eye(4)
-        T[:3, 3] = cdir * _VR_CORO_LIFT_MM           # world-space pull toward camera
-        lifted = self._np_to_vtkmatrix(T @ np.asarray(M, float))
+        Mf = np.asarray(M, float)
+
+        def _lift(mm):
+            T = np.eye(4)
+            T[:3, 3] = cdir * mm                     # world-space pull toward camera
+            return self._np_to_vtkmatrix(T @ Mf)
+
+        lifted = _lift(_VR_CORO_LIFT_MM)             # tubes: just in front of surface
         for a in (getattr(p, "vr_coro_actor", None),
                   getattr(p, "vr_coro_halo_actor", None),
-                  getattr(p, "vr_coro_cap_actor", None),
-                  getattr(p, "vr_tgt_actor", None)):
+                  getattr(p, "vr_coro_cap_actor", None)):
             if a is not None and hasattr(a, "SetUserMatrix"):
                 try:
                     a.SetUserMatrix(lifted)
+                except Exception:                    # noqa: BLE001
+                    pass
+        # Target sphere + its number billboards float a bit MORE than the tubes, so
+        # the Target point and number read ON TOP of the vessel lines, not under.
+        lifted_tgt = _lift(_VR_TGT_LIFT_MM)
+        for a in [getattr(p, "vr_tgt_actor", None),
+                  *getattr(p, "vr_tgt_labels", [])]:
+            if a is not None and hasattr(a, "SetUserMatrix"):
+                try:
+                    a.SetUserMatrix(lifted_tgt)
                 except Exception:                    # noqa: BLE001
                     pass
 

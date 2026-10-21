@@ -1566,7 +1566,12 @@ class CoronaryTreeWindow(SnapDock):
 
     def _run_busy(self, msg, fn):
         """Run *fn* behind a modal busy window (the territory colour-fill / VR
-        rebuild is a short but visible wait)."""
+        rebuild is a short but visible wait). An indeterminate (marquee) bar + an
+        animated trailing '…' make the window read as actively working rather than
+        frozen. NOTE: a single heavy VTK/CPU step blocks the GUI thread, so the
+        dots advance at step boundaries, not perfectly continuously — the VR pane
+        itself animates during its build (see _vr_busy_frame)."""
+        from PyQt6.QtCore import QTimer
         from PyQt6.QtWidgets import QApplication, QProgressDialog
         dlg = QProgressDialog(msg, "", 0, 0, self)
         dlg.setWindowTitle(t("Territory"))
@@ -1574,11 +1579,21 @@ class CoronaryTreeWindow(SnapDock):
         dlg.setMinimumDuration(0)
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
         dlg.setValue(0)
+        dots = {"n": 0}
+
+        def _tick():
+            dots["n"] = (dots["n"] + 1) % 4
+            dlg.setLabelText(msg + "．" * dots["n"])
+
+        anim = QTimer(dlg)
+        anim.timeout.connect(_tick)
+        anim.start(300)
         dlg.show()
         QApplication.processEvents()
         try:
             return fn()
         finally:
+            anim.stop()
             dlg.reset()
             dlg.deleteLater()
 
@@ -1830,17 +1845,18 @@ class CoronaryTreeWindow(SnapDock):
             self._targets[i].update({"vid": vid, "idx": idx})
             self._push_targets_only()
             return
-        # phase == "end": settle the marker at the drop, then confirm (deferred so the
-        # modal dialog is not opened from inside the VR pointer handler).
+        # phase == "end": the marker is ALREADY at the drop (cheap preview push), so
+        # DON'T rebuild the overlay / territory here — that redraw was the wait the
+        # user felt before the dialog. Just ask (deferred so the modal isn't opened
+        # from inside the VR pointer handler) whether to recompute at this point.
         self._targets[i].update({"vid": vid, "idx": idx})
-        self._push_overlay()
         from PyQt6.QtCore import QTimer
         QTimer.singleShot(0, lambda: self._confirm_target_move(int(n), vid, int(idx)))
 
     def _confirm_target_move(self, n: int, vid: str, idx: int) -> None:
-        """After a Target drag ends, ask whether to recompute the territory at the new
-        point. 再計算 = recompute here; 再設定 = keep this spot, don't recompute yet (the
-        old result is retained); 元の位置に戻る = restore the pre-drag point + old result."""
+        """After a Target drag ends, ask INSTANTLY (no recompute/redraw yet) what to
+        do at the new point. 再計算 = recompute + redraw the territory from here;
+        元の位置に戻る = just move the marker back (no recompute, no redraw)."""
         i = int(n) - 1
         if not (0 <= i < len(self._targets)):
             self._target_drag = None
@@ -1852,28 +1868,25 @@ class CoronaryTreeWindow(SnapDock):
         box.setIcon(QMessageBox.Icon.Question)
         box.setText(t("この点で灌流域を再計算しますか？"))
         b_calc = box.addButton(t("再計算"), QMessageBox.ButtonRole.AcceptRole)
-        b_keep = box.addButton(t("再設定（計算しない）"),
-                               QMessageBox.ButtonRole.ActionRole)
         b_undo = box.addButton(t("元の位置に戻る"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(b_calc)
         box.exec()
         ch = box.clickedButton()
-        if ch is b_undo and orig is not None:
-            # Restore the pre-drag point AND its retained result (never recomputed).
-            self._targets[i] = dict(orig)
-            self._refresh_targets_table()
-            self._push_overlay()
-        elif ch is b_calc:
+        if ch is b_calc:
+            # Recompute the territory at the new point, THEN redraw (behind a busy
+            # window) — only now, after the user asked for it.
             _mask, ml = self._territory.territory(vid, idx)
             pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
             self._targets[i].update({"vid": vid, "idx": idx, "ml": ml, "pct": pct})
             self._refresh_targets_table()
             self._run_busy(t("灌流域を再計算中…"),
                            lambda: (self._push_overlay(), self._push_territory()))
-        else:
-            # 再設定: keep the new marker position; the old territory result is retained
-            # (not recomputed). Show the new vessel/position; %/mL stay the old values.
+        elif orig is not None:
+            # 元の位置に戻る (or dialog dismissed): move the marker back ONLY — cheap
+            # targets-only push, no territory recompute and no full overlay redraw.
+            self._targets[i] = dict(orig)
             self._refresh_targets_table()
+            self._push_targets_only()
         self._target_drag = None
 
     def _targets_menu(self, pos):
