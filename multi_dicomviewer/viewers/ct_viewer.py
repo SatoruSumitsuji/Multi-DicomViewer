@@ -3379,10 +3379,24 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_sync()
         except Exception:                                # noqa: BLE001
             pass
+        # The territory review had re-laid the panes onto the LV axis (pane A = LV
+        # short-axis, pane B = LV long-axis → VR). Simply leaving VR would show
+        # those oblique LV planes — or a black pane — on the right. Rebuild the
+        # DEFAULT 3-D MPR on BOTH panes so this matches a fresh .corotree.json drop
+        # (pane A = MPR, pane B = 5 mm slab MIP), then let the coronary overlay
+        # redraw on it.
         try:
-            self._refresh(reset_cam=False)
+            if getattr(self, "_mode", "3D") != "3D":
+                self._set_mode("3D")
+            self.set_side("Bi")
+            self._init_frames()                          # default anatomical MPR
+            self._thick = {"A": 0.0, "B": 5.0}           # pane B = slab MIP
+            self._refresh(reset_cam=True)                # frame the heart, both panes
         except Exception:                                # noqa: BLE001
-            pass
+            try:
+                self._refresh(reset_cam=False)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _terr_save(self) -> None:
         """Territory bar 保存: ask the shell (which owns the Coronary Tree panel +
