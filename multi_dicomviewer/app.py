@@ -173,20 +173,14 @@ def _make_splash() -> QSplashScreen:
 
 
 def _install_vtk_log_filter() -> None:
-    """Keep the terminal clean of the benign, repetitive VTK
-    ``wglMakeCurrent failed ... (code 6)`` spam that floods it when a 2nd 3-D CT
-    is opened: the 1st CT's two render windows briefly render into an invalidated
-    GL context while they are torn down, then Clean() — the display is unaffected
-    (both CTs show fine). The user was alarmed by the flood; it is cosmetic.
-
-    VTK 9 logs these via its loguru logger STRAIGHT to the C stderr (fd 2),
-    bypassing Python — and offers no per-message content filter — so the only way
-    to stop the flood is to turn VTK's stderr logging OFF. To not lose real VTK
-    errors, they are redirected to a per-session log file instead. The classic
-    ``vtkOutputWindow`` path (used by a few messages) is also filtered. All
-    best-effort; a no-op if VTK isn't importable."""
+    """Filter the benign, repetitive ``wglMakeCurrent failed`` message on VTK's
+    classic ``vtkOutputWindow`` path. This is now just insurance: the real cause
+    of the flood on opening a 2nd 3-D CT — the 1st CT's render windows being torn
+    down with a live GL context — is fixed at the source (the demoted CT viewer is
+    finalize_gl()'d before deleteLater in MainWindow._free_pane_ct_for_reload), so
+    VTK's loguru stderr is left ON for full diagnosability. Best-effort."""
     try:
-        from vtkmodules.vtkCommonCore import vtkLogger, vtkOutputWindow
+        from vtkmodules.vtkCommonCore import vtkOutputWindow
     except Exception:                                    # noqa: BLE001
         return
     _drop = ("wglMakeCurrent failed",)
@@ -205,19 +199,6 @@ def _install_vtk_log_filter() -> None:
 
     try:
         vtkOutputWindow.SetInstance(_FilteredOutput())
-    except Exception:                                    # noqa: BLE001
-        pass
-    # Silence VTK's loguru stderr stream (the flood) and tee it to a bounded,
-    # per-session file so genuine VTK errors stay recoverable off the terminal.
-    try:
-        vtkLogger.SetStderrVerbosity(vtkLogger.VERBOSITY_OFF)
-    except Exception:                                    # noqa: BLE001
-        pass
-    try:
-        import os
-        import tempfile
-        log = os.path.join(tempfile.gettempdir(), "MultiDicomViewer_vtk.log")
-        vtkLogger.LogToFile(log, vtkLogger.TRUNCATE, vtkLogger.VERBOSITY_WARNING)
     except Exception:                                    # noqa: BLE001
         pass
 
