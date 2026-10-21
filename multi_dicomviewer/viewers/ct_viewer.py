@@ -2985,6 +2985,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_vessel_hide_cb = None     # (vid) from VR right-click ▸ 非表示
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
+        self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
         # Volume Rendering (VR) mode per pane: a GPU ray-cast of the CT volume
         # with a contrast-CTA preset, replacing the MPR image. Built lazily.
         self._vr_on = {"A": False, "B": False}
@@ -3433,14 +3434,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                 traceback.print_exc()
 
     def _vr_busy_frame(self, p, i: int) -> None:
-        """Render a CHEAP VR frame (volume still hidden) with the busy text showing
-        an animated 'VR を描画中' + cycling dots, so the build visibly progresses.
-        Called between the CPU build steps; a no-op if the busy text isn't set up."""
+        """Render a CHEAP VR frame (volume still hidden) showing the static busy
+        text 'VR作成中'. The CPU build can't drive a real progress bar or animate
+        reliably, so a plain '作成中' label is shown (user: that's enough to know
+        it's working and wait). Called between build steps; no-op if not set up."""
         bt = getattr(p, "vr_busy_text", None)
         if bt is None:
             return
         try:
-            bt.SetInput(t("VR を描画中") + "．" * (int(i) % 4))
+            bt.SetInput(t("VR作成中"))
             p.render()
         except Exception:                                # noqa: BLE001
             pass
@@ -11530,12 +11532,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         p.vr_volume.SetProperty(_vr_cta_property())
         p.vr_volume.SetVisibility(False)
         p.ren.AddViewProp(p.vr_volume)
-        # "VR を描画中…" overlay: shown on a FAST frame (volume still hidden) just before
+        # "VR作成中" overlay: shown on a FAST frame (volume still hidden) just before
         # the slow first GPU render of the territory volume, so the pane shows this
         # instead of a black gap. A 2-D text actor drawn in the same render — NO event
         # loop pumping (a modal + processEvents re-entered a concurrent DICOM load).
         p.vr_busy_text = vtkTextActor()
-        p.vr_busy_text.SetInput(t("VR を描画中…"))
+        p.vr_busy_text.SetInput(t("VR作成中"))
         _bp = p.vr_busy_text.GetTextProperty()
         _bp.SetFontSize(30)
         _bp.SetColor(1.0, 1.0, 1.0)
@@ -12103,6 +12105,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     def set_coronary_overwrite_cb(self, cb) -> None:
         """Register cb(vid) for a CPR-overlay-line right-click ▸ 上書き保存."""
         self._coro_overwrite_cb = cb
+
+    def set_coronary_tree_sync_cb(self, cb) -> None:
+        """Register cb(vid, path) so the CPR Save of a resumed tree vessel pushes
+        the edited centreline back into the tree (overlay redraws the new line)."""
+        self._coro_tree_sync_cb = cb
 
     def set_coronary_target_pick_cb(self, cb) -> None:
         """Register the (vid, idx) target-set callback (so a VR right-click can set
@@ -19001,6 +19008,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             return None
         if not self._cpr_write(path, data):
             return None
+        # When this short-axis was resumed from a Coronary-Tree vessel, Save must
+        # also push the edited centreline back into the TREE (and register this
+        # file as the vessel's .cpr.json) — otherwise the overlay keeps drawing
+        # the vessel's OLD, pre-edit line even though the .cpr.json on disk is new.
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        if evid and getattr(self, "_coro_tree_sync_cb", None) is not None:
+            try:
+                self._coro_tree_sync_cb(evid, self._cpr_last_path)
+            except Exception:                            # noqa: BLE001
+                pass
         return self._cpr_last_path               # the real path (.cpr.json appended)
 
     def _cpr_overwrite(self) -> None:
@@ -19016,6 +19033,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if data is None:
             return
         self._cpr_write(path, data)
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        if evid and getattr(self, "_coro_tree_sync_cb", None) is not None:
+            try:
+                self._coro_tree_sync_cb(evid, path)      # push edit into the tree
+            except Exception:                            # noqa: BLE001
+                pass
 
     def apply_cpr_data(self, data, keep_view: bool = False) -> bool:
         """Headless: rebuild the short-axis (CPR) from a parsed .cpr.json on THIS
