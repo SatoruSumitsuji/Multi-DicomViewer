@@ -4051,12 +4051,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_wrap.setVisible(on)
         for w in getattr(self, "_cpr_scrub_widgets", ()):   # scrub only when built
             w.setVisible(cpr)
-        # While Draw is armed (tracing), grey out Load / Save / Exit so the trace
-        # can't be interrupted; disarm Draw (press it again) to re-enable them.
+        # While Draw is armed (tracing), grey out Load / Save so the trace can't be
+        # interrupted; disarm Draw (press it again) to re-enable them. EXIT stays
+        # enabled even mid-Draw — entering CPR auto-arms Draw, so a greyed Exit left
+        # no way out of the detail mode (user request). _coronary_exit cleanly drops
+        # any in-progress trace.
         if getattr(self, "_cpr_load_btn", None) is not None:
             self._cpr_load_btn.setEnabled(not pend)
         if getattr(self, "_cpr_exit_btn", None) is not None:
-            self._cpr_exit_btn.setEnabled(not pend)
+            self._cpr_exit_btn.setEnabled(True)
         if getattr(self, "_cpr_save_btn", None) is not None:
             self._cpr_save_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_register_btn", None) is not None:
