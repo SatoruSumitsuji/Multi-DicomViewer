@@ -2123,8 +2123,7 @@ class _Overlay(QWidget):
                     p.drawLine(S(pts[-1]), S(hover))
                 dots(pts, QColor(255, 217, 0), 4.0)
             else:
-                # Yellow DASHED preview that follows the cursor while points are
-                # being placed (matches the XA/IVUS canvas), incl. the angle tool.
+                # Yellow DASHED preview of the draft-in-progress.
                 pen = QPen(QColor(244, 208, 63), 1.2)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 p.setPen(pen)
@@ -2139,7 +2138,15 @@ class _Overlay(QWidget):
                                             minor_ratio=_mr))))
                 else:
                     preview = list(d["pts"])
-                    if hover is not None and d["type"] != "ellipse":
+                    # Polyline (CPR centreline / Polyline tool) draws ONLY the
+                    # committed segments — NO rubber-band to the cursor — so a
+                    # new segment appears only when the next point is clicked.
+                    # This matches the VTK/Windows viewer (its draft preview is
+                    # built from committed pts alone) and stops a spurious dashed
+                    # line shooting to the cursor after an Alt+double-click
+                    # recentre moves the image out from under the pointer.
+                    if (hover is not None
+                            and d["type"] not in ("ellipse", "polyline")):
                         preview.append(hover)
                     if len(preview) >= 2:
                         p.drawPolyline(poly(preview))
@@ -3429,6 +3436,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._cpr is not None and key == "A":
             if self._drag_btn == 1:
                 if self._cpr_grab(x, y):
+                    # A near-marker press grabs the edit point to drag. In EDIT
+                    # mode (idle Measure, no Alt) ALSO jump it to the click right
+                    # now, so even a SINGLE click very close to the marker moves
+                    # the point — previously a near press only grabbed it and a
+                    # drag was required to actually move it (only a click far
+                    # enough to miss the 14 px grab radius moved on click). A
+                    # continued drag still fine-tunes it afterwards.
+                    if self._meas_on and not _alt:
+                        self._cpr_drag_move(x, y)
+                        self._last = (x, y)
+                        self._meas_drag = False
                     return
                 # EDIT mode: reaching here means idle Measure (no draw type /
                 # handle grabbed — the measure block above fell through) and no

@@ -1075,6 +1075,17 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if (e.button() == Qt.MouseButton.LeftButton
                 and self._owner._cpr is not None and self._which == "A"
                 and self._owner._cpr_grab(e.position().x(), e.position().y())):
+            # In EDIT mode (Measure on, no draw type / center-angle pick, no Alt)
+            # ALSO jump the grabbed point to the click right now, so even a SINGLE
+            # click very close to the marker moves it — previously a near press
+            # only grabbed it and a drag was required to actually move the point
+            # (only a click far enough to miss the grab radius, handled below,
+            # moved on click). A continued drag still fine-tunes it afterwards.
+            if (self._owner._meas_on and not self._owner._meas_type
+                    and self._owner._center_angle_target is None
+                    and not (e.modifiers() & Qt.KeyboardModifier.AltModifier)):
+                self._owner._cpr_drag_move(
+                    e.position().x(), e.position().y())
             self._last = e.position()
             self._cross = False
             self._meas_drag = False
