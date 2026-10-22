@@ -5954,6 +5954,17 @@ class MainWindow(QMainWindow):
             v.deleteLater()
         except Exception:                # noqa: BLE001
             pass
+        # CRITICAL: forget which series this pane was showing. The CT viewer is
+        # GONE, but the pane's _shown_uid still named the old series — so the
+        # re-display logic (_coronary_display_uid / coronary_show_ct's "already
+        # shown" shortcut) believed the CT was still on screen and NEVER re-opened
+        # it, leaving an empty BLACK pane (the LVモード / CoronaryTreeモード black
+        # screen). Clearing it forces a genuine re-open. _finish_open_series — the
+        # other caller — re-sets the shown series right after, so this is safe.
+        try:
+            pane.set_shown_series(None)
+        except Exception:                # noqa: BLE001
+            pass
 
     def _warn_ct_over_cap_with_lv(self, incoming_pane: ViewerPane,
                                   modality) -> None:

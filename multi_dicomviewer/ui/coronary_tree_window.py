@@ -436,6 +436,7 @@ class CoronaryTreeWindow(SnapDock):
         tv.setSpacing(2)
         self._terr_lbl = QLabel(t("Territory: FullLv 未読込"))
         self._terr_lbl.setStyleSheet("font-weight:bold;")
+        self._terr_lbl.setWordWrap(True)     # 2nd line = linked source filenames
         tv.addWidget(self._terr_lbl)
         self._targets_w = QTreeWidget()
         # Column 0 = show/hide CHECKBOX (its own column), 1 = Target number, then
@@ -1411,7 +1412,8 @@ class CoronaryTreeWindow(SnapDock):
             self._territory = eng
             self._myo_ml = float(lvf.myocardial_volume_ml())
             self._terr_lbl.setText(
-                t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
+                t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml)
+                + self._terr_source_suffix())
             self._terr_out.setPlainText("\n".join(lines))
             self._populate()             # fill the 心筋量 column (engine now exists)
             self._recompute_targets()
@@ -1422,6 +1424,23 @@ class CoronaryTreeWindow(SnapDock):
         except Exception as exc:                            # noqa: BLE001
             self._terr_out.setPlainText(t("解析失敗: {e}", e=str(exc)))
             return
+
+    def _terr_source_suffix(self) -> str:
+        """Second line under the Territory heading naming the TWO source files this
+        perfusion result was built from — the FullLv.json (LV myocardium) and the
+        .corotree.json (coronary tree) — so it's clear which pair produced it. Each
+        is shown as its basename; omitted when the path isn't on the bundle."""
+        import os
+        full_p = self._full_lv_path or ""
+        tree_p = self._last_path or ""
+        parts = []
+        if full_p:
+            parts.append(t("FullLv: {n}", n=os.path.basename(full_p)))
+        if tree_p:
+            parts.append(t("Tree: {n}", n=os.path.basename(tree_p)))
+        if not parts:
+            return ""
+        return "\n└ " + t("元ファイル") + ": " + " ＋ ".join(parts)
 
     def _myo_text(self, vid: str) -> str:
         """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the
