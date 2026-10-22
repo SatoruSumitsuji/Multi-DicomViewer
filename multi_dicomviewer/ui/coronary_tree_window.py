@@ -1319,10 +1319,14 @@ class CoronaryTreeWindow(SnapDock):
         # If that CT is loaded, switch to it FIRST so territory lands on the right
         # tree; otherwise keep the active CT and warn on a UID mismatch.
         match_uid = self.uid_for_series(fser) if fser else ""
-        if match_uid:
-            self._use_uid(match_uid)
-        elif self._active_uid and fser \
-                and self._active_uid.split("#", 1)[0] != fser.split("#", 1)[0]:
+        # A GENUINE "別症例" conflict only exists when the ACTIVE bundle still holds a
+        # REAL coronary tree (≥1 vessel) for a DIFFERENT CT. After ツリー：全消去 the
+        # tree is emptied (the bundle + _active_uid linger), so there is nothing to
+        # mismatch — the old check on `_active_uid` alone warned spuriously (user:
+        # "全消去したのに警告が出る = どこかにツリーが残っている"). Gate on real vessels.
+        if (not match_uid and self._active_uid and fser
+                and self._active_uid.split("#", 1)[0] != fser.split("#", 1)[0]
+                and self._tree.vessels):
             if QMessageBox.warning(
                     self, t("Coronary Tree"),
                     t("冠動脈ツリーと FullLv の元CT(SeriesUID)が一致しません。"
@@ -1332,8 +1336,12 @@ class CoronaryTreeWindow(SnapDock):
                     QMessageBox.StandardButton.No) \
                     != QMessageBox.StandardButton.Yes:
                 return False
-        if not self._active_uid and fser:
-            self._use_uid(fser)
+        # Attach the FullLv to ITS OWN series bundle (a loaded match, else a bundle
+        # keyed by its own UID) — NEVER to a stale/empty active bundle from another
+        # case. This keeps each case's LV in its own bundle (fixes case-2 FullLv
+        # landing in case-1's bundle after 全消去 / when its CT isn't loaded yet).
+        if fser:
+            self._use_uid(match_uid or fser)
         self._full_lv_data = data
         if src_path:
             self._full_lv_path = src_path            # for the linked-file readout
