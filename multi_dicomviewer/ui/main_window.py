@@ -3874,6 +3874,15 @@ class MainWindow(QMainWindow):
         data = w.full_lv_for_series(series.series_uid)
         if not data:
             return                                       # dock has no LV for this CT
+        # Territory VR needs BOTH a FullLv AND a Coronary Tree with vessels — the
+        # tree supplies the perfusion regions. With a FullLv but NO corotree there
+        # is nothing to review in VR, so DO NOT progress to the VR model; the CT
+        # comes up at the plain / editable LV screen instead. (A FullLv dropped on
+        # its own was wrongly resuming into VR here — this runs during the CT open
+        # BEFORE the drop's own has-tree gate / edit-pending mark is set.)
+        if (not hasattr(w, "tree_vessels_for_series")
+                or not w.tree_vessels_for_series(series.series_uid)):
+            return
         self._poll_full_lv_apply(series.series_uid, data, 0)
 
     # ------------------------------------------------- CPR (.cpr.json) drop
