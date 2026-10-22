@@ -1435,10 +1435,10 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             return ""
         pct = (100.0 * ml / self._myo_ml) if self._myo_ml else 0.0
-        # Integer % first (right-aligned 3 wide so the % sign lines up), then the
-        # mL starts right after "/ " (monospace column → the mL start lines up too,
-        # with only a single space after the slash).
-        return f"{round(pct):>3d}% / {ml:.1f}mL"
+        # % to 1 decimal (same precision as the mL), right-aligned 5 wide so the %
+        # sign lines up; then the mL starts right after "/ " (monospace column → the
+        # mL start lines up too, with only a single space after the slash).
+        return f"{pct:>5.1f}% / {ml:.1f}mL"
 
     def _recompute_targets(self) -> None:
         """Recompute each target's mL / % against the current engine, dropping any
