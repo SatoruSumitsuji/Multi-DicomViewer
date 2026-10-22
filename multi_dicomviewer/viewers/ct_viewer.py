@@ -11647,10 +11647,13 @@ class CTViewer(CPRMixin, AbstractViewer):
                 labels.append((f"#{m['id']}", (wx, wy)))
                 continue
             rgb = _hex_to_rgb(m.get("color"))
-            # A deselected CPR source line (Measure OFF) reads as a plain GREY
-            # reference line instead of its bright edit colour.
+            # A deselected CPR source line (Measure OFF) reads as a plain
+            # near-WHITE reference line instead of its bright edit colour — pale
+            # enough to recede behind the line being drawn, yet bright enough to
+            # stand out over the grey CT (a mid-grey was too faint to follow when
+            # tracing an additional CPR centreline against the first vessel).
             if m.get("_cpr_src") and not self._meas_on:
-                rgb = (170, 170, 170)
+                rgb = (240, 240, 240)
             # Hover-highlight the whole outline green (movable shape under cursor).
             if mi == hov_out_mi:
                 rgb = (80, 220, 80)
