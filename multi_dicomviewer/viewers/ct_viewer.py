@@ -7499,10 +7499,10 @@ class CTViewer(CPRMixin, AbstractViewer):
                 "centre, so setting MV first is desirable.)")
         self._lvv_prompt(msg)
         self._lv_update_submode_ui()
-        # Auto-orient to the MV-perpendicular view on entering Apex (a no-op when
-        # MV isn't set yet) — the apex is easiest to find looking down the LV
-        # long axis, i.e. the MV plane face-on / edge-on.
-        self._lv_view_mv_perpendicular()
+        # KEEP the user's exact pre-click view: they position the crosshair on
+        # the apex BEFORE pressing Apex, so do NOT re-orient here. (The old
+        # auto-flip to the MV-perpendicular face discarded that positioning and
+        # forced the apex to be set over again.)
 
     def _lv_apex_set(self) -> None:
         """Set the COMMON apex at the current centreline crossing (self._center).
