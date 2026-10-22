@@ -3357,6 +3357,21 @@ class MainWindow(QMainWindow):
                     w._set_overlay(False)
                 except Exception:                        # noqa: BLE001
                     pass
+            # CRITICAL: mark this CT edit-pending BEFORE the re-open so the fresh
+            # CT load's _maybe_resume_territory_review does NOT bounce straight back
+            # into the VR / perfusion-territory review (the FullLv is still docked).
+            # Without this, the re-opened CT re-enters VR while _poll_lv_apply is
+            # also applying the editable LV → two heavy GPU builds collide and the
+            # pane comes up BLACK. Same guard the plain .FullLv drop uses.
+            try:
+                base = (full_lv.series_uid(full) or "").split("#", 1)[0]
+                if base:
+                    pend = getattr(self, "_full_lv_edit_pending", None)
+                    if pend is None:
+                        pend = self._full_lv_edit_pending = set()
+                    pend.add(base)
+            except Exception:                            # noqa: BLE001
+                pass
             # DEFER the re-open (next event-loop pass) so the freed VR viewer's GL
             # context/volume is released FIRST — otherwise re-decoding the big CT
             # while the old VR viewer is still alive exhausts the GPU → black pane.
@@ -3398,9 +3413,14 @@ class MainWindow(QMainWindow):
             # context is finalised synchronously but the widget deletes on
             # deleteLater — re-decoding a big CT while that old VR viewer is still
             # alive exhausts the GPU and the new CT comes up BLACK. One loop pass
-            # lets it go first. Re-open exactly like a fresh .corotree.json drop.
+            # lets it go first. Re-open exactly like a fresh .corotree.json drop,
+            # but to_territory=False so this is a MODE SWITCH (show coronary only) —
+            # it must NOT recover the docked FullLv and bounce back into the VR
+            # territory review (that re-entry while the fresh CT is still loading is
+            # what blacked the pane).
             QTimer.singleShot(
-                0, lambda p=corotree_path: self._open_coronary_tree_file(p))
+                0, lambda p=corotree_path:
+                self._open_coronary_tree_file(p, to_territory=False))
             return
         # Fallback — the tree was never saved (no corotree.json path): best-effort
         # in-place switch (exit the review + show only the coronary overlay).
@@ -3422,7 +3442,8 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def _open_coronary_tree_file(self, path: str) -> None:
+    def _open_coronary_tree_file(self, path: str,
+                                 to_territory: bool = True) -> None:
         """Drop a .corotree.json onto the shell → open the Coronary Tree panel,
         load the tree, and reproduce it: the source 3-D CT is re-opened (by UID /
         saved folder / prompt) and the vessel overlay is drawn on it.
@@ -3451,9 +3472,22 @@ class MainWindow(QMainWindow):
             pass
         if not w.load_file(path):
             return
+        uid = w.active_uid() if hasattr(w, "active_uid") else ""
+        # MODE SWITCH (Territory → CoronaryTreeモード, to_territory=False): mark this
+        # CT edit-pending BEFORE the re-open so the fresh CT load's
+        # _maybe_resume_territory_review does NOT resume the VR territory review.
+        # The FullLv is still re-installed below (so a later LVモード still works),
+        # but we stay on the plain coronary screen instead of bouncing to VR — the
+        # re-entry while the CT was still loading is what blacked the pane.
+        if not to_territory and uid:
+            base = uid.split("#", 1)[0]
+            pend = getattr(self, "_full_lv_edit_pending", None)
+            if pend is None:
+                pend = self._full_lv_edit_pending = set()
+            if base:
+                pend.add(base)
         if hasattr(w, "_set_overlay"):
             w._set_overlay(True)         # overlay ON + open the source CT
-        uid = w.active_uid() if hasattr(w, "active_uid") else ""
         full = w.full_lv_for_series(uid) if (
             uid and hasattr(w, "full_lv_for_series")) else None
         if full is None and uid and hasattr(w, "load_full_lv"):
@@ -3464,7 +3498,10 @@ class MainWindow(QMainWindow):
                     full = recovered
                 except Exception:                        # noqa: BLE001
                     pass
-        if full:
+        # A real drop of the corotree onto a CT that ALSO has a FullLv → advance to
+        # the Territory (VR) review. A MODE SWITCH (to_territory=False) keeps the
+        # FullLv on the bundle but stays on the plain coronary screen.
+        if full and to_territory:
             self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
             return
         self._poll_set_bottom_ctx(uid, "coronary", os.path.basename(path), 0)
