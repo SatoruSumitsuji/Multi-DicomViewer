@@ -441,7 +441,9 @@ class CoronaryTreeWindow(SnapDock):
         # built from (FullLv.json ＋ corotree.json), so the pairing is explicit.
         self._terr_src_lbl = QLabel("")
         self._terr_src_lbl.setWordWrap(True)
-        self._terr_src_lbl.setStyleSheet("color:#888; font-size:11px;")
+        # Clearly legible (the earlier faint 11px/#888 grey was easy to miss):
+        # a readable dark colour, normal size, so the linked pair is obvious.
+        self._terr_src_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
         tv.addWidget(self._terr_src_lbl)
         self._targets_w = QTreeWidget()
         # Column 0 = show/hide CHECKBOX (its own column), 1 = Target number, then
