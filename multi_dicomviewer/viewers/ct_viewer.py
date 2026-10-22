@@ -3924,23 +3924,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_snap_btn.toggled.connect(
             lambda on: setattr(self, "_snap_lumen", bool(on)))
         row.addWidget(self._cpr_snap_btn)
-        # 腔除外: arm a seed click inside a bright chamber (LV/RV) → flood-fill it
-        # (HU 200–1000) and exclude that region from the lumen snap.
-        self._cpr_excl_btn = FitButton(t("腔除外"))
-        self._cpr_excl_btn.setCheckable(True)
-        self._cpr_excl_btn.setStyleSheet(
-            "QPushButton:checked{background:#8e44ad;color:white;}")
-        self._cpr_excl_btn.setHelpToolTip(t(
-            "オンにして心腔(LV/RV)の内部をクリック → その血液プールを抽出し "
-            "スナップ対象から除外（閉塞冠動脈が腔へ吸着するのを防止）。"
-            "大動脈には使わないでください（近位冠動脈に漏れます）"))
-        self._cpr_excl_btn.toggled.connect(
-            lambda on: setattr(self, "_cpr_exclude_seeding", bool(on)))
-        row.addWidget(self._cpr_excl_btn)
-        self._cpr_excl_clr_btn = FitButton(t("除外クリア"))
-        self._cpr_excl_clr_btn.setHelpToolTip(t("腔除外マスクを全て消去"))
-        self._cpr_excl_clr_btn.clicked.connect(self._cpr_clear_exclude)
-        row.addWidget(self._cpr_excl_clr_btn)
+        # 腔除外 / 除外クリア buttons REMOVED (user 2026-10-22): a coronary lumen is
+        # itself contrast-bright (HU 200–1000), so a chamber flood by HU threshold
+        # risks grabbing the proximal coronary too, and the Snap already auto-rejects
+        # chamber-SIZED bright regions (_bright_too_wide_inplane) without a manual
+        # exclude. The core logic (_cpr_exclude / _excl_apply / _cpr_seed_exclude /
+        # _cpr_clear_exclude) is kept dormant — _cpr_exclude stays empty so
+        # _excl_apply is a no-op — so the buttons can be revived if ever needed.
+        self._cpr_excl_btn = None
+        self._cpr_excl_clr_btn = None
         self._cpr_load_btn = FitButton(t("Load"))
         self._cpr_load_btn.setHelpToolTip(
             t("Load a saved short-axis (.cpr.json): rebuilds the centreline, "
