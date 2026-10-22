@@ -3807,6 +3807,17 @@ class MainWindow(QMainWindow):
                     w.set_territory_color(True)
                 except Exception:                        # noqa: BLE001
                     pass
+            # Name the two source files on the line under the Territory bar.
+            if hasattr(v, "set_territory_source_names"):
+                import os
+                full_name = os.path.basename(
+                    getattr(w, "_full_lv_path", "") or "") if w else ""
+                tree_name = os.path.basename(
+                    getattr(w, "_last_path", "") or "") if w else ""
+                try:
+                    v.set_territory_source_names(full_name, tree_name)
+                except Exception:                        # noqa: BLE001
+                    pass
             return
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
