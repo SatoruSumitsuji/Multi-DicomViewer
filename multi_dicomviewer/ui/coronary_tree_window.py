@@ -436,8 +436,13 @@ class CoronaryTreeWindow(SnapDock):
         tv.setSpacing(2)
         self._terr_lbl = QLabel(t("Territory: FullLv 未読込"))
         self._terr_lbl.setStyleSheet("font-weight:bold;")
-        self._terr_lbl.setWordWrap(True)     # 2nd line = linked source filenames
         tv.addWidget(self._terr_lbl)
+        # 2nd line under the Territory heading: the TWO source files this result was
+        # built from (FullLv.json ＋ corotree.json), so the pairing is explicit.
+        self._terr_src_lbl = QLabel("")
+        self._terr_src_lbl.setWordWrap(True)
+        self._terr_src_lbl.setStyleSheet("color:#888; font-size:11px;")
+        tv.addWidget(self._terr_src_lbl)
         self._targets_w = QTreeWidget()
         # Column 0 = show/hide CHECKBOX (its own column), 1 = Target number, then
         # 血管 / 位置 / 心筋% / 灌流域mL.
@@ -687,11 +692,21 @@ class CoronaryTreeWindow(SnapDock):
         """LV ▸ 領域色: show/hide the perfusion-territory tint, independent of the
         coronary tree overlay. The FullLv data stays loaded; only the tint draws
         or clears."""
-        self._territory_on = not self._territory_on
+        self.set_territory_color(not self._territory_on)
+
+    def set_territory_color(self, on: bool) -> None:
+        """Programmatically show/hide the 領域色 (perfusion-territory tint) and sync
+        the button label. Used by the mode switches so Territory always STARTS with
+        the colour ON and CoronaryTreeモード starts with it OFF, regardless of what
+        the toggle was left on before."""
+        self._territory_on = bool(on)
         if getattr(self, "_terr_vis_btn", None) is not None:
             self._terr_vis_btn.setText(
                 t("非表示") if self._territory_on else t("表示"))
-        self._push_territory()
+        try:
+            self._push_territory()
+        except Exception:                                # noqa: BLE001
+            pass
 
     def _on_terr_alpha_combo(self, _i: int) -> None:
         """領域色透過度 list changed → recolour the territory (MPR tint + Mac/Windows
@@ -1298,12 +1313,13 @@ class CoronaryTreeWindow(SnapDock):
                 pass
 
     # -------------------------------------------------------- territory
-    def load_full_lv(self, data_or_path) -> bool:
+    def load_full_lv(self, data_or_path, src_path: str = "") -> bool:
         """Load a FullLv (parsed dict OR a .FullLv.json path) as the LV side of
         the territory analysis, then compute + show the report. Public — the
-        shell calls it on a .FullLv.json drop."""
+        shell calls it on a .FullLv.json drop. *src_path* lets the caller record
+        the source filename when it passes the parsed dict (so the Territory
+        heading's source line is filled BEFORE the compute runs)."""
         data = data_or_path
-        src_path = ""
         if isinstance(data_or_path, str):
             src_path = data_or_path
             try:
@@ -1390,6 +1406,7 @@ class CoronaryTreeWindow(SnapDock):
         (assignment depends on the centrelines)."""
         self._territory = None
         self._myo_ml = None
+        self._refresh_terr_source_label()        # no engine yet → clears the line
         if self._full_lv_data is None:
             self._terr_lbl.setText(t("Territory: FullLv 未読込"))
             self._terr_out.setPlainText("")
@@ -1412,8 +1429,8 @@ class CoronaryTreeWindow(SnapDock):
             self._territory = eng
             self._myo_ml = float(lvf.myocardial_volume_ml())
             self._terr_lbl.setText(
-                t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml)
-                + self._terr_source_suffix())
+                t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
+            self._refresh_terr_source_label()
             self._terr_out.setPlainText("\n".join(lines))
             self._populate()             # fill the 心筋量 column (engine now exists)
             self._recompute_targets()
@@ -1425,11 +1442,11 @@ class CoronaryTreeWindow(SnapDock):
             self._terr_out.setPlainText(t("解析失敗: {e}", e=str(exc)))
             return
 
-    def _terr_source_suffix(self) -> str:
-        """Second line under the Territory heading naming the TWO source files this
-        perfusion result was built from — the FullLv.json (LV myocardium) and the
-        .corotree.json (coronary tree) — so it's clear which pair produced it. Each
-        is shown as its basename; omitted when the path isn't on the bundle."""
+    def _terr_source_suffix_text(self) -> str:
+        """The line naming the TWO source files this perfusion result was built from
+        — the FullLv.json (LV myocardium) and the .corotree.json (coronary tree) —
+        so it's clear which pair produced it. Each is shown as its basename; a part
+        is omitted when its path isn't on the active bundle. Empty when neither is."""
         import os
         full_p = self._full_lv_path or ""
         tree_p = self._last_path or ""
@@ -1440,7 +1457,18 @@ class CoronaryTreeWindow(SnapDock):
             parts.append(t("Tree: {n}", n=os.path.basename(tree_p)))
         if not parts:
             return ""
-        return "\n└ " + t("元ファイル") + ": " + " ＋ ".join(parts)
+        return "└ " + t("元ファイル") + ": " + " ＋ ".join(parts)
+
+    def _refresh_terr_source_label(self) -> None:
+        """Update the source-files line under the Territory heading from the active
+        bundle's stored paths. Shown only while a territory result is present; the
+        shell also calls this after it sets the FullLv path (which can land AFTER
+        the compute, e.g. a .FullLv drop)."""
+        lbl = getattr(self, "_terr_src_lbl", None)
+        if lbl is None:
+            return
+        lbl.setText(self._terr_source_suffix_text()
+                    if self._territory is not None else "")
 
     def _myo_text(self, vid: str) -> str:
         """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the
