@@ -10471,8 +10471,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             "axis (SAX). The apex + long axis are already set."))
         b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
+        # macOS: in the native alert, a custom AcceptRole button mixed with a
+        # StandardButton makes clickedButton() identity unreliable — the Draw
+        # press was read as "not b_draw" and the method returned, so tracing
+        # never started and the dialog just reappeared on the next press. Latch
+        # the press from the button's own clicked signal, which fires reliably
+        # on every platform, instead of comparing clickedButton() identity.
+        proceed = {"v": False}
+        b_draw.clicked.connect(lambda *_: proceed.__setitem__("v", True))
         box.exec()
-        if box.clickedButton() is not b_draw:
+        if not proceed["v"]:
             return
         self._lv_apply_common_apex_to_pass("epi")
         # Default Epi zoom for the RIGHT (long-axis) pane: show the apex→MV-centre
@@ -10489,6 +10497,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # right pane — Draw is the "start drawing" action, not just an unlock.
         self._lv_start_trace()                # ready + apex → enter contour (armed)
         self._lv_update_submode_ui()
+        # macOS: release any implicit canvas mouse-grab the modal left behind so
+        # the FIRST Epi trace click lands on the image (parity with _lvv_prompt).
+        QTimer.singleShot(0, self._reset_pointer_state)
 
     def _lvv_observe_exit(self) -> None:
         """Leave Blood/Endo to the selector but KEEP its overlays on screen
