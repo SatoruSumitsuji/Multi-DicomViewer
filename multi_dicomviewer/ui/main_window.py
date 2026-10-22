@@ -3335,9 +3335,11 @@ class MainWindow(QMainWindow):
         """Territory bar 「LVモード」: come back to the EDITABLE LV view by RE-OPENING
         the 3-D CT fresh (same 'open anew' approach as CoronaryTreeモード, user
         request) rather than an in-place VR teardown. Dispose the VR/territory CT
-        viewer, then load the FullLv into a clean editable LV state
-        (MV/AoV/Apex/Epi/Blood-Endo); lv_open_full_for_edit → _poll_lv_apply
-        re-displays the CT and applies the editable LV on it."""
+        viewer, then re-open the CT and apply the editable LV via the SAME path as a
+        .FullLv drop (_poll_full_lv_edit) — which collapses Blood/Endo to the
+        selector (the post-Exit OBSERVE state the user wants), not the expanded
+        Blood/Endo editing controls."""
+        import os
         w = getattr(self, "_corotree_win", None)
         full = getattr(w, "_full_lv_data", None) if w is not None else None
         if full and hasattr(self, "lv_open_full_for_edit"):
@@ -3375,10 +3377,23 @@ class MainWindow(QMainWindow):
             # DEFER the re-open (next event-loop pass) so the freed VR viewer's GL
             # context/volume is released FIRST — otherwise re-decoding the big CT
             # while the old VR viewer is still alive exhausts the GPU → black pane.
+            # The CT is still registered (we were just in its territory review), so
+            # re-open via _poll_full_lv_edit, exactly like a .FullLv drop: it applies
+            # the editable LV THEN collapses Blood/Endo to the selector (post-Exit
+            # OBSERVE). Fall back to lv_open_full_for_edit only if we can't build the
+            # component files or the series is somehow no longer loaded.
             from PyQt6.QtCore import QTimer
-            sd = full_lv.src_dir(full)
-            QTimer.singleShot(
-                0, lambda d=full, s=sd: self.lv_open_full_for_edit(d, s))
+            uid = full_lv.series_uid(full)
+            files = self._full_lv_to_files(full)
+            fname = os.path.basename(getattr(w, "_full_lv_path", "") or "")
+            if files and uid and self.case_series_loaded(uid):
+                QTimer.singleShot(
+                    0, lambda u=uid, f=files, n=fname:
+                    self._poll_full_lv_edit(u, f, n, 0))
+            else:
+                sd = full_lv.src_dir(full)
+                QTimer.singleShot(
+                    0, lambda d=full, s=sd: self.lv_open_full_for_edit(d, s))
             return
         # Fallback — no FullLv on the panel: best-effort in-place review exit.
         v = self._active.current_viewer() if self._active is not None else None
@@ -3504,6 +3519,14 @@ class MainWindow(QMainWindow):
         if full and to_territory:
             self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
             return
+        # CoronaryTreeモード (and a plain corotree display): start with the 領域色
+        # (perfusion tint) OFF — this is the coronary-only screen (user: it was
+        # coming up with the territory colour still shown).
+        if not to_territory and hasattr(w, "set_territory_color"):
+            try:
+                w.set_territory_color(False)
+            except Exception:                            # noqa: BLE001
+                pass
         self._poll_set_bottom_ctx(uid, "coronary", os.path.basename(path), 0)
 
     # ------------------------------------------------- LV analysis drop
@@ -3658,7 +3681,7 @@ class MainWindow(QMainWindow):
                     d = json.load(f)
             except (OSError, ValueError):                # noqa: PERF203
                 continue
-            if hasattr(w, "load_full_lv") and w.load_full_lv(d):
+            if hasattr(w, "load_full_lv") and w.load_full_lv(d, src_path=p):
                 from multi_dicomviewer.core import full_lv
                 data = d
                 uid = full_lv.series_uid(d)
@@ -3776,6 +3799,14 @@ class MainWindow(QMainWindow):
                 traceback.print_exc()
             finally:
                 inflight.discard(base)
+            # Territory always ENTERS with the 領域色 (perfusion tint) ON — whichever
+            # order the pair was dropped (user: corotree→FullLv came up with it off).
+            w = getattr(self, "_corotree_win", None)
+            if w is not None and hasattr(w, "set_territory_color"):
+                try:
+                    w.set_territory_color(True)
+                except Exception:                        # noqa: BLE001
+                    pass
             return
         if attempt < 40:                                 # ~12 s
             QTimer.singleShot(
