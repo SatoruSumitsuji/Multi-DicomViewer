@@ -4348,6 +4348,17 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Compute + show the LV blood inside the Epi surface (水色) and its "
               "volume. Exclusive with All-Blood; recomputes on HU-range change."))
         self._lvv_mask_btn.clicked.connect(self._lvv_toggle_blood)
+        # No-Blood: hide BOTH blood fills. The All-Blood / LV-Blood pair alone
+        # cannot reach "both off" (turning LV-Blood off re-enables All-Blood), so
+        # this is the explicit way to hide blood — a sticky choice kept through
+        # Exit → the post-Exit OBSERVE overlay, so Territory / CPR show no blood.
+        self._lvv_none_btn = FitButton(t("No-Blood"))
+        self._lvv_none_btn.setCheckable(True)
+        self._lvv_none_btn.setChecked(False)
+        self._lvv_none_btn.setHelpToolTip(
+            t("Hide the blood fill entirely (both All-Blood and LV-Blood off). "
+              "Kept when you Exit, so the Territory / CPR view shows no blood."))
+        self._lvv_none_btn.clicked.connect(self._lvv_toggle_noblood)
         self._lvv_epi_show = False
         # Epi読み込み is retired — the Epi is supplied before/at Blood/Endo entry
         # (trace, or the entry dialog's Load/Create). Hidden placeholder keeps
@@ -4522,7 +4533,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         row2.addWidget(self._lv_grp_r2_trace)
 
         # Blood/Endo row 3 (guided order): Save, Load, Exit, All-Blood, LV-Blood,
-        # Epi-Border, Endo-Border(Auto), Endo-Border(Manual). No Clear (per spec).
+        # No-Blood, Epi-Border, Endo-Border(Auto), Endo-Border(Manual). No Clear (per spec).
         # The display toggles (All-Blood … Endo-Border(Manual)) are created up in
         # the row-2 group block above; they are added to THIS row here.
         self._lv_grp_r2_blood = QWidget()
@@ -4549,7 +4560,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Border(Manual) is set APART (a gap to its left) so it is not misclicked
         # next to LVD (it enters the hand-edit mode).
         for b in (self._lvv_save_btn, self._lvv_load_btn, self._lvv_exit_btn,
-                  self._lvv_hl_btn, self._lvv_mask_btn, self._lvv_epi_btn,
+                  self._lvv_hl_btn, self._lvv_mask_btn, self._lvv_none_btn,
+                  self._lvv_epi_btn,
                   self._lvv_auto_endo_btn, self._lvv_lvd_btn):
             r2b.addWidget(b)
         r2b.addSpacing(24)                       # keep Manual apart from LVD
@@ -5823,6 +5835,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lvv_update_mask()
             self._lvv_update_highlight()
 
+    def _lvv_toggle_noblood(self, *args) -> None:
+        """No-Blood: hide BOTH blood fills (All-Blood 全域HU tint + LV-Blood 水色).
+        Sticky — kept through Exit → OBSERVE, so Territory / CPR show no blood."""
+        self._lv_set_blood(None)                  # both off (bypasses auto-switch)
+        self._lvv_sync_noblood_btn()
+
+    def _lvv_sync_noblood_btn(self) -> None:
+        """Keep the No-Blood button checked iff NEITHER blood fill is shown, so
+        the three blood buttons (All-Blood / LV-Blood / No-Blood) read as one
+        exclusive choice. Cheap; called from the fill-update paths."""
+        b = getattr(self, "_lvv_none_btn", None)
+        if b is None:
+            return
+        none = (not bool(getattr(self, "_lvv_mask_on", False))
+                and not bool(getattr(self, "_lvv_hl_on", False)))
+        if b.isChecked() != none:
+            b.setChecked(none)
+        self._lvv_style_toggle(b, "#9aa0a6", "white")
+
     def _lv_rclick_epi(self) -> None:
         """Right-click Epi: toggle the Epi overlays. Hiding stores what was shown;
         showing turns Epi境界 on and restores Epi領域 only if it had been shown
@@ -6341,6 +6372,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Tint the in-range (blood) voxels on both panes via the overlay LUT —
         the instant 全域HU preview. Shown whenever Blood/Endo is active and the
         LV-Blood (computed) region is NOT being shown (they are exclusive)."""
+        self._lvv_sync_noblood_btn()           # keep No-Blood in step with the fills
         on = (self._lvv is not None and getattr(self, "_lvv_hl_on", True)
               and not getattr(self, "_lvv_mask_on", False))
         if on:
@@ -7332,6 +7364,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         """Show/hide the measured-region (red) overlay on both panes. The opacity
         depends on the source (set when the mask is built): Blood is more solid
         (its cavity tint sits under it), the Epi/Endo contour region is lighter."""
+        self._lvv_sync_noblood_btn()           # keep No-Blood in step with the fills
         on = (self._lvv_mask_vol is not None
               and getattr(self, "_lvv_mask_on", False))
         alpha = getattr(self, "_lvv_mask_alpha", 0.5)
