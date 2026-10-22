@@ -437,14 +437,8 @@ class CoronaryTreeWindow(SnapDock):
         self._terr_lbl = QLabel(t("Territory: FullLv 未読込"))
         self._terr_lbl.setStyleSheet("font-weight:bold;")
         tv.addWidget(self._terr_lbl)
-        # 2nd line under the Territory heading: the TWO source files this result was
-        # built from (FullLv.json ＋ corotree.json), so the pairing is explicit.
-        self._terr_src_lbl = QLabel("")
-        self._terr_src_lbl.setWordWrap(True)
-        # Clearly legible (the earlier faint 11px/#888 grey was easy to miss):
-        # a readable dark colour, normal size, so the linked pair is obvious.
-        self._terr_src_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
-        tv.addWidget(self._terr_src_lbl)
+        # (The linked source-files line lives under the viewer's Territory bar now,
+        # not here in the panel — see ct_viewer.set_territory_source_names.)
         self._targets_w = QTreeWidget()
         # Column 0 = show/hide CHECKBOX (its own column), 1 = Target number, then
         # 血管 / 位置 / 心筋% / 灌流域mL.
@@ -1408,7 +1402,6 @@ class CoronaryTreeWindow(SnapDock):
         (assignment depends on the centrelines)."""
         self._territory = None
         self._myo_ml = None
-        self._refresh_terr_source_label()        # no engine yet → clears the line
         if self._full_lv_data is None:
             self._terr_lbl.setText(t("Territory: FullLv 未読込"))
             self._terr_out.setPlainText("")
@@ -1432,7 +1425,6 @@ class CoronaryTreeWindow(SnapDock):
             self._myo_ml = float(lvf.myocardial_volume_ml())
             self._terr_lbl.setText(
                 t("Territory: 心筋(緻密層) {v:.1f} mL", v=self._myo_ml))
-            self._refresh_terr_source_label()
             self._terr_out.setPlainText("\n".join(lines))
             self._populate()             # fill the 心筋量 column (engine now exists)
             self._recompute_targets()
@@ -1443,34 +1435,6 @@ class CoronaryTreeWindow(SnapDock):
         except Exception as exc:                            # noqa: BLE001
             self._terr_out.setPlainText(t("解析失敗: {e}", e=str(exc)))
             return
-
-    def _terr_source_suffix_text(self) -> str:
-        """The line naming the TWO source files this perfusion result was built from
-        — the FullLv.json (LV myocardium) and the .corotree.json (coronary tree) —
-        so it's clear which pair produced it. Each is shown as its basename; a part
-        is omitted when its path isn't on the active bundle. Empty when neither is."""
-        import os
-        full_p = self._full_lv_path or ""
-        tree_p = self._last_path or ""
-        parts = []
-        if full_p:
-            parts.append(t("FullLv: {n}", n=os.path.basename(full_p)))
-        if tree_p:
-            parts.append(t("Tree: {n}", n=os.path.basename(tree_p)))
-        if not parts:
-            return ""
-        return "└ " + t("元ファイル") + ": " + " ＋ ".join(parts)
-
-    def _refresh_terr_source_label(self) -> None:
-        """Update the source-files line under the Territory heading from the active
-        bundle's stored paths. Shown only while a territory result is present; the
-        shell also calls this after it sets the FullLv path (which can land AFTER
-        the compute, e.g. a .FullLv drop)."""
-        lbl = getattr(self, "_terr_src_lbl", None)
-        if lbl is None:
-            return
-        lbl.setText(self._terr_source_suffix_text()
-                    if self._territory is not None else "")
 
     def _myo_text(self, vid: str) -> str:
         """Territory at the vessel's PROXIMAL point = its WHOLE subtree from the

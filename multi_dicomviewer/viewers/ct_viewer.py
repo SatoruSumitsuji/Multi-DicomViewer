@@ -3284,8 +3284,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         Survives 'Max Image'."""
         self._terr_bar = QWidget()
         self._terr_bar._mdv_keep_on_max = True
-        row = QHBoxLayout(self._terr_bar)
-        row.setContentsMargins(8, 2, 8, 2)
+        # Vertical: the control row on top, a linked-source-files line below it (so
+        # it's clear which FullLv.json + corotree.json this Territory was built from).
+        outer = QVBoxLayout(self._terr_bar)
+        outer.setContentsMargins(8, 2, 8, 2)
+        outer.setSpacing(1)
+        row_host = QWidget()
+        row = QHBoxLayout(row_host)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(4)
         cap = QLabel(t("Territory:"))
         cf = cap.font(); cf.setBold(True); cap.setFont(cf)
@@ -3333,8 +3339,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_coro_btn.clicked.connect(self._terr_to_coronary_mode)
         row.addWidget(self._terr_coro_btn)
         row.addStretch(1)
+        outer.addWidget(row_host)
+        # Linked source files (set by the shell when a Territory review opens):
+        # 元ファイル: FullLv: x.FullLv.json ＋ Tree: y.corotree.json
+        self._terr_src_lbl = QLabel("")
+        self._terr_src_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
+        outer.addWidget(self._terr_src_lbl)
         self._terr_bar.setVisible(False)
         return self._terr_bar
+
+    def set_territory_source_names(self, full_name: str = "",
+                                   tree_name: str = "") -> None:
+        """Shell hook: name the TWO source files this Territory result was built
+        from, shown on the line under the Territory bar. Either part is omitted when
+        its name is empty; both empty clears the line."""
+        lbl = getattr(self, "_terr_src_lbl", None)
+        if lbl is None:
+            return
+        parts = []
+        if full_name:
+            parts.append(t("FullLv: {n}", n=full_name))
+        if tree_name:
+            parts.append(t("Tree: {n}", n=tree_name))
+        lbl.setText(t("元ファイル") + ": " + " ＋ ".join(parts) if parts else "")
 
     def _terr_to_lv_mode(self) -> None:
         """Territory bar 「LVモード」: leave the review and open the LV editing bar
@@ -3581,6 +3608,85 @@ class CTViewer(CPRMixin, AbstractViewer):
                 continue
         return added
 
+    def _vr_coro_export_prep(self, key):
+        """For a glTF/GLB export: the live coronary tubes + round caps colour via
+        CELL-data scalars, which vtkGLTFExporter does NOT carry — they exported
+        solid BLACK (the user's report). Hide those live actors and add temporary
+        copies with the per-vessel colour BAKED into POINT data (glTF writes that as
+        vertex colour), so the export keeps the LAD/LCX/RCA colours. The black halo
+        rim is hidden for the export so the coloured tubes read cleanly. Returns
+        (temp_actors, restore_callables); the caller removes the temps and restores
+        the live visibilities afterward."""
+        from vtkmodules.vtkFiltersCore import vtkCellDataToPointData
+        p = self.pane[key]
+        temp, restore = [], []
+        pren = getattr(p, "ren", None)
+        if pren is None:
+            return temp, restore
+
+        def _add_baked(src_obj, live_actor):
+            try:
+                if hasattr(src_obj, "Update"):
+                    src_obj.Update()
+                    src = src_obj.GetOutput()
+                else:
+                    src = src_obj
+                if src is None or src.GetNumberOfPoints() == 0:
+                    return
+                cd = src.GetCellData()
+                if cd is None or cd.GetScalars() is None:
+                    return
+                c2p = vtkCellDataToPointData()
+                c2p.SetInputData(src)
+                c2p.PassCellDataOff()
+                c2p.Update()
+                out = c2p.GetOutput()
+                pdp = out.GetPointData()
+                col = None
+                for i in range(pdp.GetNumberOfArrays()):
+                    arr = pdp.GetArray(i)
+                    if arr is not None and arr.GetNumberOfComponents() == 3:
+                        col = arr
+                        break
+                if col is None:
+                    return
+                pdp.SetScalars(col)                      # RGB → active point scalars
+                m = vtkPolyDataMapper()
+                m.SetInputData(out)
+                m.ScalarVisibilityOn()
+                m.SetScalarModeToUsePointData()
+                m.SetColorModeToDefault()                # unsigned-char → direct RGB
+                a = vtkActor()
+                a.SetMapper(m)
+                um = live_actor.GetUserMatrix()           # mirror the live placement
+                if um is not None:
+                    a.SetUserMatrix(um)
+                pr = a.GetProperty()
+                pr.SetSpecular(0.1)
+                pr.SetAmbient(0.5)
+                pr.SetDiffuse(0.7)
+                pren.AddActor(a)
+                temp.append(a)
+                live_actor.SetVisibility(False)
+                restore.append(lambda ac=live_actor: ac.SetVisibility(True))
+            except Exception:                            # noqa: BLE001
+                return
+
+        act = getattr(p, "vr_coro_actor", None)
+        if act is not None and act.GetVisibility():
+            _add_baked(getattr(p, "vr_coro_tube", None), act)
+        cap = getattr(p, "vr_coro_cap_actor", None)
+        if cap is not None and cap.GetVisibility():
+            capmap = getattr(p, "vr_coro_cap_mapper", None)
+            src = capmap.GetInput() if capmap is not None else None
+            if src is not None:
+                _add_baked(src, cap)
+        halo = getattr(p, "vr_coro_halo_actor", None)
+        if halo is not None and halo.GetVisibility():
+            halo.SetVisibility(False)
+            restore.append(lambda ac=halo: ac.SetVisibility(True))
+        return temp, restore
+
     def _export_vr_gltf(self, rw, path: str) -> str:
         """Write the VR render window to *path* as glTF. A .glb target is packed into
         a single binary file; any other extension writes a single self-contained
@@ -3604,18 +3710,29 @@ class CTViewer(CPRMixin, AbstractViewer):
         # tubes + target markers would export (the user saw "no coloured regions").
         key = getattr(self, "_pending_vr_export_key", None)
         tmp_actors = []
+        restore = []
         try:
             if key is not None:
                 tmp_actors = self._vr_terr_export_actors(key)
+                # Coronary tubes colour via CELL-data scalars, which glTF can't carry
+                # (they exported BLACK). Swap in temp actors with the colours baked
+                # into POINT data (per-vessel colours kept) for the export.
+                c_tmp, restore = self._vr_coro_export_prep(key)
+                tmp_actors = list(tmp_actors) + c_tmp
             return self._do_export_vr_gltf(rw, path, want_glb, summary)
         finally:
-            if key is not None and tmp_actors:
+            if key is not None:
                 try:
                     pren = self.pane[key].ren
                     for ac in tmp_actors:
                         pren.RemoveActor(ac)
                 except Exception:                        # noqa: BLE001
                     pass
+                for fn in restore:
+                    try:
+                        fn()
+                    except Exception:                    # noqa: BLE001
+                        pass
 
     def _do_export_vr_gltf(self, rw, path, want_glb, summary):
         import os
