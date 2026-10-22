@@ -3435,11 +3435,20 @@ class MainWindow(QMainWindow):
         w = self._open_coronary_tree()
         if w is None or not hasattr(w, "load_file"):
             return
-        # Capture any FullLv already docked for the ACTIVE CT BEFORE load_file — it
-        # CLEARS the bundle's FullLv (so a plain corotree drop can't auto-resume the
-        # review). If the corotree is for that same CT, we re-install it below so the
-        # pair → Territory instead of being lost ("FullLv 未読込").
-        pre_full = getattr(w, "_full_lv_data", None)
+        # Snapshot EVERY bundle's FullLv by base-UID BEFORE load_file — it CLEARS the
+        # loaded bundle's FullLv (so a plain corotree drop can't auto-resume the
+        # review). This lets us recover the corotree's OWN CT's FullLv afterward even
+        # when a DIFFERENT case was the active bundle at drop time (the multi-pane /
+        # multi-case case, e.g. dropping case-2's corotree onto case-2's LV while
+        # case-1 was active) → the pair still advances to Territory.
+        pre_full = {}
+        try:
+            for _u, _b in getattr(w, "_by_uid", {}).items():
+                _fl0 = _b.get("full_lv")
+                if _fl0 is not None:
+                    pre_full[str(_u).split("#", 1)[0]] = _fl0
+        except Exception:                                # noqa: BLE001
+            pass
         if not w.load_file(path):
             return
         if hasattr(w, "_set_overlay"):
@@ -3447,16 +3456,14 @@ class MainWindow(QMainWindow):
         uid = w.active_uid() if hasattr(w, "active_uid") else ""
         full = w.full_lv_for_series(uid) if (
             uid and hasattr(w, "full_lv_for_series")) else None
-        if full is None and pre_full is not None and uid \
-                and hasattr(w, "load_full_lv"):
-            try:
-                from multi_dicomviewer.core import full_lv as _fl
-                if (_fl.series_uid(pre_full) or "").split("#", 1)[0] \
-                        == uid.split("#", 1)[0]:
-                    w.load_full_lv(pre_full)             # re-install (load_file cleared it)
-                    full = pre_full
-            except Exception:                            # noqa: BLE001
-                pass
+        if full is None and uid and hasattr(w, "load_full_lv"):
+            recovered = pre_full.get(uid.split("#", 1)[0])
+            if recovered is not None:
+                try:
+                    w.load_full_lv(recovered)            # re-install (load_file cleared it)
+                    full = recovered
+                except Exception:                        # noqa: BLE001
+                    pass
         if full:
             self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
             return
