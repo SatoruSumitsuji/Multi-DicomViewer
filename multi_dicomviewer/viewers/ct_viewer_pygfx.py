@@ -17766,7 +17766,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_drop_source()
         self._draft = None
         if self._cpr is not None:
-            self._exit_cpr()
+            # Keep EXACTLY the view on screen NOW. A bare _exit_cpr() resets the
+            # camera (or restores the build-time view), so the image the user just
+            # adjusted (Rotate / Move / Paging) for the NEXT vessel — before
+            # remembering to press Exit — would jump away. Re-snapshot the current
+            # view and keep it, the same pattern _coronary_draw uses on re-arm.
+            self._cpr_prev_view = self._view_snapshot()
+            self._exit_cpr(keep_view=True)
         else:
             for k in ("A", "B"):
                 self._redraw_meas(k)
