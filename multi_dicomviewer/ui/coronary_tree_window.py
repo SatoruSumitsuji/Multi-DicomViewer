@@ -877,10 +877,33 @@ class CoronaryTreeWindow(SnapDock):
         if getattr(self, "_terr_vis_btn", None) is not None:
             self._terr_vis_btn.setText(
                 t("非表示") if self._territory_on else t("表示"))
-        try:
-            self._push_territory()
-        except Exception:                                # noqa: BLE001
-            pass
+        if self._territory_on:
+            # 領域色 is painted onto the VR heart, so turning the colour ON implies
+            # turning the VR ON — do it silently (the viewer shows its own「VR作成中」
+            # while it builds) so the user never has to find the separate VR button.
+            self._ensure_vr_on()
+            # The colour-fill / territory surfaces take a moment → show「領域色作成中」.
+            self._run_busy(t("領域色作成中…"), self._push_territory)
+        else:
+            try:
+                self._push_territory()               # clearing the tint is instant
+            except Exception:                        # noqa: BLE001
+                pass
+
+    def _ensure_vr_on(self) -> None:
+        """Turn the right-pane VR ON if it isn't already. 領域色 (perfusion-territory
+        colour) renders ONLY on the VR heart, so 領域色オン must imply VRオン —
+        otherwise the colour has nothing to render on and the pane stays a bare
+        coronary-line view. Never turns the VR OFF; no-op when already shown."""
+        if bool(getattr(self, "_vr_shown", True)):
+            return
+        self._vr_shown = True
+        self._sync_vr_row()                          # relabel 表示 → 非表示
+        if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):
+            try:
+                self._shell.coronary_vr_visible(True)
+            except Exception:                        # noqa: BLE001
+                pass
 
     def _on_terr_alpha_combo(self, _i: int) -> None:
         """領域色透過度 list changed → recolour the territory (MPR tint + Mac/Windows
