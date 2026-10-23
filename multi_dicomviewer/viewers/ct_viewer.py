@@ -1028,6 +1028,25 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
+        o = self._owner
+        # Coronary Tree / Territory: a LEFT-press ON a coronary overlay line (MPR
+        # centreline or VR tube) selects that vessel's row in the panel (highlights
+        # the branch / CPR line). Non-consuming side-effect — the normal gesture
+        # (orbit / tool / target) still proceeds.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and getattr(o, "_coro_select_cb", None) is not None
+                and getattr(o, "_coro_overlay", None)):
+            px, py = e.position().x(), e.position().y()
+            if o._vr_on.get(self._which):
+                _hit = o._vr_pick_vessel(self._which, px, py)
+                _svid = _hit[0] if _hit else None
+            else:
+                _svid = o._coronary_pick(self._which, px, py)
+            if _svid is not None:
+                try:
+                    o._coro_select_cb(_svid)
+                except Exception:                        # noqa: BLE001
+                    pass
         # Volume Rendering: a left-drag rotates the volume (trackball); a
         # right/middle-drag pans is left to the normal tools below (VR is a
         # display; targets are picked from the coronary overlay in a later phase).
@@ -3029,6 +3048,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_action_cb = None   # (n, "toggle"/"delete") from VR right-click
         self._coro_target_move_cb = None     # (n, vid, idx) from a VR marker drag
         self._coro_vessel_hide_cb = None     # (vid) from VR right-click ▸ 非表示
+        self._coro_select_cb = None          # (vid) a click on a CPR line selects it
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
         self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
@@ -12730,6 +12750,12 @@ class CTViewer(CPRMixin, AbstractViewer):
     def set_coronary_vessel_hide_cb(self, cb) -> None:
         """Register cb(vid) for a VR right-click ▸ この血管を非表示."""
         self._coro_vessel_hide_cb = cb
+
+    def set_coronary_select_cb(self, cb) -> None:
+        """Register cb(vid) so a LEFT-click on a coronary overlay line selects that
+        vessel's row in the Coronary Tree panel (highlights the branch / CPR line).
+        """
+        self._coro_select_cb = cb
 
     def set_coronary_resume_cb(self, cb) -> None:
         """Register cb(vid) for a CPR-overlay-line right-click ▸ 編集 (Resume)."""

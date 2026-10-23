@@ -1261,6 +1261,36 @@ class CoronaryTreeWindow(SnapDock):
         self.vesselSelected.emit(vid)        # re-highlight the selected vessel
         self._push_overlay()
 
+    def _item_for_vid(self, vid: str):
+        """The QTreeWidgetItem carrying *vid* (searched across all CT groups), or
+        None if that vessel isn't currently shown in the tree."""
+        def _walk(parent):
+            for i in range(parent.childCount()):
+                ch = parent.child(i)
+                if ch.data(0, _UID_ROLE) == vid:
+                    return ch
+                r = _walk(ch)
+                if r is not None:
+                    return r
+            return None
+        return _walk(self._tree_w.invisibleRootItem())
+
+    def select_vessel(self, vid: str) -> None:
+        """Public (shell): select + highlight the tree row for *vid* — driven by a
+        CLICK on that vessel's CPR line in the viewer (Coronary Tree / Territory
+        mode). Activates the owning CT, selects the row (scrolls it into view) and
+        pushes the overlay so the image highlight matches. No-op if the vid isn't
+        shown or is already current."""
+        if not vid:
+            return
+        it = self._item_for_vid(vid)
+        if it is None or it is self._tree_w.currentItem():
+            return
+        self._activate_item_ct(it)
+        self._tree_w.setCurrentItem(it)      # → _on_selection → vesselSelected
+        self._tree_w.scrollToItem(it)
+        self._push_overlay()
+
     def _ct_of_vessel(self, vid: str) -> str:
         """Which CT bundle owns a vid (first match); "" if none."""
         for uid, b in self._by_uid.items():

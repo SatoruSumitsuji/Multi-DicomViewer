@@ -2842,6 +2842,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_target_move_cb = None     # (n, vid, idx, phase) from a VR marker drag
         self._vr_tgt_drag = None             # Target number being dragged on the VR
         self._vr_tgt_moved = False           # did the grabbed Target actually move?
+        self._coro_select_cb = None          # (vid) a click on a CPR line selects it
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
         self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
@@ -3245,6 +3246,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         x, y = ev["x"], ev["y"]
         self._last = (x, y)
         self._spin_prev = None
+        # Coronary Tree / Territory: a LEFT-press that lands ON a coronary overlay
+        # line selects that vessel's row in the panel (highlights the branch / CPR
+        # line). Non-consuming side-effect — the normal gesture (orbit / tool /
+        # target) still proceeds; works on either pane (_coronary_pick handles VR).
+        if (self._drag_btn == 1 and self._coro_select_cb is not None
+                and self._coro_overlay):
+            _svid = self._coronary_pick(key, x, y)
+            if _svid is not None:
+                try:
+                    self._coro_select_cb(_svid)
+                except Exception:                        # noqa: BLE001
+                    pass
         # Volume Rendering gestures (Windows parity): a plain Left-drag applies
         # the ACTIVE toolbar tool — Rotate (trackball) / Zoom / Move / Spin — no
         # Alt needed. A plain right-click still falls through to the normal menu.
@@ -8636,6 +8649,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         for k in ("A", "B"):
             if self._vr_on.get(k) and self._overlay.get(k) is not None:
                 self._overlay[k].update()
+
+    def set_coronary_select_cb(self, cb) -> None:
+        """Register cb(vid) so a LEFT-click on a coronary overlay line selects that
+        vessel's row in the Coronary Tree panel (highlights the branch / CPR line).
+        """
+        self._coro_select_cb = cb
 
     def set_coronary_resume_cb(self, cb) -> None:
         """Register cb(vid) for a CPR-overlay-line right-click ▸ 編集 (Resume)."""
