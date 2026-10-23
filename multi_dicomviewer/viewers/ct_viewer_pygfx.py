@@ -8849,6 +8849,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                       and self._draft.get("pane") == which
                       and len(self._draft.get("pts", [])) >= 1)
         hit = None if lv_drawing else self._pick_handle(which, sx, sy)
+        # Drawing a new Polyline over the still-active CPR line (CPR not Exited):
+        # a click on the CPR centreline's control point — the GREEN edit marker —
+        # would otherwise grab it to edit the CPR instead of placing the new point.
+        # With the Polyline tool active, IGNORE a _cpr_src handle so the click adds
+        # a point there; other measures' handles stay grabbable as before.
+        if (hit is not None and self._meas_type == "polyline"
+                and self._measures[which][hit[0]].get("_cpr_src")):
+            hit = None
         # Starting a NEW LV border must not grab a DIFFERENT border's point.
         if (hit is not None and lv_target in ("endo", "epi")
                 and self._draft is None):
