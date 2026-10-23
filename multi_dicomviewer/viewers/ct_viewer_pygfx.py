@@ -3729,6 +3729,20 @@ class CTViewer(CPRMixin, AbstractViewer):
         # double-click in Measure mode still finishes the polyline draft.
         _mods = ev.get("modifiers") or ()
         if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
+            # During a coronary CPR centreline trace, a PLAIN double-click must
+            # NOT finish the polyline. Two deliberate point-clicks placed quickly
+            # (click-release-click) can be read by the OS as a double-click, which
+            # would finish the trace so the NEXT click starts a NEW, disconnected
+            # line — the "independent line" the user sees (it never happens on a
+            # press-drag, which can't form a double-click). Keep tracing instead;
+            # the deliberate finish is a RIGHT-CLICK (which also builds the short-
+            # axis). Ordinary, non-coronary polyline measures keep double-click-
+            # to-finish.
+            if (getattr(self, "_coronary_mpr_pending", False)
+                    and self._draft is not None
+                    and self._draft.get("pane") == key
+                    and self._draft.get("type") == "polyline"):
+                return
             self._measure_finish_draft()       # LV capture handled inside now
             return
         # NOTE: a double-click near a CPR overlay line is a plain RECENTRE (below),
@@ -17446,8 +17460,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_draw_btn = FitButton(t("Draw"))
         self._cpr_draw_btn.setCheckable(True)
         self._cpr_draw_btn.setHelpToolTip(
-            t("Draw the vessel centreline as a Polyline on the 3-D MPR (double- "
-              "or right-click to finish) → the short-axis opens automatically. "
+            t("Draw the vessel centreline as a Polyline on the 3-D MPR "
+              "(right-click to finish) → the short-axis opens automatically. "
               "Hold Alt/Option while dragging to run the SELECTED view tool "
               "(Zoom / Move / Rotate / Spin / Paging / Thick / W-L) or grab the "
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
