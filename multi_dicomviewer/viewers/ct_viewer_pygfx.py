@@ -944,21 +944,13 @@ class _Overlay(QWidget):
                 # of it. A generous 18 mm band keeps the centreline (which runs a
                 # few mm INSIDE the epicardial surface, and dips near the edge-on
                 # silhouette) continuous; only the genuine far side is hidden.
+                # Occlude ONLY where the vessel is BEHIND the LV/Epi front surface
+                # (the "LV 裏側"); where there is no Epi surface (nan front) it stays
+                # visible. The former far-hemisphere cull — which hid points that
+                # project OFF the silhouette when behind the heart centre — wrongly
+                # chopped the RCA running around the side of the heart, so it is
+                # removed: the Epi mask is now the only occluder (user request).
                 vis = np.isnan(front) | (dd >= front - 18.0)
-                # Far-hemisphere cull: a point that projects OUTSIDE the heart
-                # silhouette (no front surface there) but sits clearly BEHIND the
-                # heart centre is on the far side wrapping round the back — hide it
-                # (otherwise the distal RCA shows as a stray dotted line off the
-                # model edge, where nothing occludes it). larger dd = nearer.
-                if cdepth is not None:
-                    try:
-                        fin = dm[np.isfinite(dm)]
-                        span = float(fin.max() - fin.min()) if fin.size else 0.0
-                    except Exception:                    # noqa: BLE001
-                        span = 0.0
-                    band = max(3.0, 0.30 * span)
-                    nos = np.isnan(front)
-                    vis = vis & ~(nos & (dd < cdepth - band))
                 return vis
             nd = _near(d_a)
             if depthbuf is None:
@@ -969,15 +961,11 @@ class _Overlay(QWidget):
             gj = np.clip((np.asarray(sy_a, float) / h * GB).astype(int),
                          0, GB - 1)
             front = depthbuf[gj, gi]
+            # Occlude ONLY behind the LV/Epi surface; an empty silhouette cell
+            # (front == inf) leaves the vessel visible (nd <= inf). The former
+            # far-hemisphere cull is removed per request — it wrongly chopped the
+            # side-running RCA; the Epi mask is now the only occluder.
             vis = nd <= front + occ_margin
-            # Far-hemisphere cull (same idea as the DVR branch): a point that
-            # projects into an EMPTY silhouette cell (front == inf) but is clearly
-            # behind the heart centre is wrapping round the back — hide it so the
-            # distal vessel doesn't trail off the model as a stray dotted line.
-            if cdepth is not None:
-                cnear = cdepth if gpu else -cdepth       # _near() of the centre
-                nos = ~np.isfinite(front)
-                vis = vis & ~(nos & (nd > cnear + max(occ_margin, 3.0)))
             return vis
 
         spec = getattr(v, "_coro_overlay", None)
