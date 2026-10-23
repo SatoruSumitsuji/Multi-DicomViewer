@@ -299,6 +299,11 @@ class CoronaryTreeWindow(SnapDock):
         _row(t("CPR："), [
             (t("読込"), t("枝ごとの .cpr.json を複数選択で読込（未接続で追加）"),
              self._load_cpr, False),
+            (t("フォルダ更新"),
+             t("CPRフォルダと同期：役割・接続は保持したまま、フォルダの .cpr.json で"
+               "中心線を更新／フォルダに無い血管を一覧から削除／新しい .cpr.json を"
+               "未接続で追加（元の .cpr.json ファイルは変更しません）"),
+             self._resync_from_folder, False),
             (t("接続"), t("読み込んだ枝を最近接端点で接続 (5mm以内)"),
              self._connect, False),
             (t("消去"),
@@ -654,6 +659,179 @@ class CoronaryTreeWindow(SnapDock):
         self._push_overlay()
         self._hint.setText(t("「{n}」を上書き保存しました。", n=v.name))
         return True
+
+    def _resync_from_folder(self):
+        """CPRフォルダで更新 — reconcile the ACTIVE CT's tree with a folder of
+        per-vessel ``<name>.cpr.json`` files, KEEPING the existing roles/connections
+        (which live only in the tree / .corotree.json, never in a .cpr.json):
+
+          - a vessel whose ``<name>.cpr.json`` is still in the folder is KEPT (its
+            role + parent untouched) and its centreline updated if the file differs;
+          - a ``.cpr.json`` with no matching vessel is ADDED as an unconnected branch
+            (rename / new line → unconnected, as agreed);
+          - a vessel with no matching file in the folder is REMOVED, and any DIRECT
+            child it had is re-marked UNCONNECTED (parent=None) rather than deleted,
+            so a sub-tree is never silently dropped.
+
+        Matched by sanitized vessel NAME == .cpr.json filename stem, scoped to the
+        active CT by series UID so another case's files can neither bleed in nor
+        trigger a wrong deletion. The .cpr.json files on disk are never written."""
+        import re
+        uid = self._active_uid
+        b = self._by_uid.get(uid)
+        if b is None or not isinstance(b.get("tree"), CoronaryTree):
+            self._warn(t("先に CPR / ツリーを読み込んでください。"))
+            return
+        tree = b["tree"]
+
+        def _safe(nm):
+            return re.sub(r'[\\/:*?"<>|]', "_", (nm or "").strip()).strip()
+
+        # 1) choose the folder (default: where this CT's vessels' .cpr.json live).
+        start = self._tree_save_dir()
+        folder = QFileDialog.getExistingDirectory(
+            self, t("CPRフォルダを選択（このCTの .cpr.json があるフォルダ）"), start)
+        if not folder:
+            return
+        # 2) scan *.cpr.json recursively; keep THIS CT's (or uid-less) files, and
+        #    remember names that belong to a DIFFERENT case so they neither update
+        #    nor (wrongly) delete a same-named vessel of this CT.
+        base_uid = uid.split("#", 1)[0]
+        files: dict = {}             # safe-name → {"ctrl": list, "path": str}
+        other_names: set = set()     # safe-names found but for a DIFFERENT case
+        dup = 0
+        for root, _dirs, fnames in os.walk(folder):
+            for fn in fnames:
+                if not fn.lower().endswith(".cpr.json"):
+                    continue
+                p = os.path.join(root, fn)
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        cd = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                if cd.get("format") != "MDV-CPR":
+                    continue
+                ctrl = cd.get("ctrl")
+                if not ctrl or len(ctrl) < 2:
+                    continue
+                stem = os.path.splitext(os.path.splitext(fn)[0])[0]
+                safe = _safe(stem)
+                if not safe:
+                    continue
+                cuid = (cd.get("series") or {}).get("series_uid", "") or ""
+                if cuid and base_uid and cuid.split("#", 1)[0] != base_uid:
+                    other_names.add(safe)        # a different case → leave alone
+                    continue
+                if safe in files:
+                    dup += 1
+                files[safe] = {"ctrl": ctrl, "path": p}
+        if not files:
+            self._warn(t("このCTの .cpr.json がフォルダに見つかりませんでした。"))
+            return
+        # 3) diff the active tree against the folder (match by sanitized name).
+        to_update = []               # (vid, ctrl_arr, path) centreline changed
+        matched = set()
+        to_remove = []
+        for vid, v in tree.vessels.items():
+            safe = _safe(v.name)
+            fd = files.get(safe)
+            if fd is None:
+                # keep a vessel whose name exists only in ANOTHER case's file
+                # (ambiguous — never delete it); delete only a truly-absent name.
+                if safe not in other_names:
+                    to_remove.append(vid)
+                continue
+            matched.add(safe)
+            try:
+                ctrl_arr = np.asarray(fd["ctrl"], float)
+            except Exception:                                # noqa: BLE001
+                continue
+            cur = v.ctrl
+            if cur is not None:
+                cur_arr = np.asarray(cur, float)
+                if cur_arr.shape == ctrl_arr.shape \
+                        and np.allclose(cur_arr, ctrl_arr, atol=1e-3):
+                    continue                     # already in sync → no update
+            to_update.append((vid, ctrl_arr, fd["path"]))
+        to_add = [(safe, files[safe]) for safe in files if safe not in matched]
+        if not (to_update or to_remove or to_add):
+            self._hint.setText(t("フォルダと一致しています（更新はありません）。"))
+            return
+        # 4) confirm — the removals are the only destructive part, so name them.
+        rem_names = [tree.vessels[v].name for v in to_remove]
+        msg = t("CPRフォルダで更新しますか?\n追加 {a} 本 / 更新 {u} 本 / 削除 {d} 本",
+                a=len(to_add), u=len(to_update), d=len(to_remove))
+        if rem_names:
+            shown = "・".join(rem_names[:12]) + (" …" if len(rem_names) > 12 else "")
+            msg += "\n" + t("削除される血管: {names}", names=shown)
+            msg += "\n" + t("（削除された親の子は未接続に戻ります）")
+        if QMessageBox.question(self, t("CPRフォルダで更新"), msg) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        # 5) apply — all on the active CT's tree/bundle.
+        # 5a) updates: keep name/role/parent, swap only the geometry.
+        updated_vids = set()
+        for vid, ctrl_arr, path in to_update:
+            try:
+                cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
+            except Exception:                                # noqa: BLE001
+                continue
+            v = tree.vessels[vid]
+            v.points = cl.points
+            v.ctrl = ctrl_arr
+            b["paths"][vid] = path
+            updated_vids.add(vid)
+        # 5b) removals: orphan the DIRECT children (→ unconnected), then drop. A
+        #     child always has role 'branch' (roots never have a parent), so only
+        #     parent/junction need clearing.
+        for vid in to_remove:
+            for cv in tree.vessels.values():
+                if cv.parent == vid:
+                    cv.parent = None
+                    cv.junction = None
+            tree.vessels.pop(vid, None)
+            b["hidden"].discard(vid)
+            b["paths"].pop(vid, None)
+        # 5c) additions: unconnected branches (user assigns role / 接続 after).
+        for safe, fd in to_add:
+            try:
+                ctrl_arr = np.asarray(fd["ctrl"], float)
+                cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
+            except Exception:                                # noqa: BLE001
+                continue
+            new_vid = self._unique_vid()
+            tree.add_vessel(new_vid, safe, "branch", cl.points, ctrl=ctrl_arr)
+            b["paths"][new_vid] = fd["path"]
+        # 5d) a child whose PARENT geometry changed: re-derive its junction (index
+        #     into the parent's resampled points) by snapping the child's proximal
+        #     endpoint onto the new parent line — no reversal (keep orientation).
+        for cv in tree.vessels.values():
+            if cv.parent in updated_vids and cv.parent in tree.vessels:
+                try:
+                    p = tree.vessels[cv.parent]
+                    if p.n and cv.n:
+                        d = np.linalg.norm(p.points - cv.points[0], axis=1)
+                        cv.junction = int(np.argmin(d))
+                except Exception:                            # noqa: BLE001
+                    pass
+        self._populate()
+        self.treeChanged.emit()
+        if self._overlay_on:
+            self._push_overlay()
+        parts = []
+        if to_add:
+            parts.append(t("追加 {n}", n=len(to_add)))
+        if to_update:
+            parts.append(t("更新 {n}", n=len(to_update)))
+        if to_remove:
+            parts.append(t("削除 {n}", n=len(to_remove)))
+        msg = t("CPRフォルダで更新しました（{s}）。", s=" / ".join(parts))
+        if dup:
+            msg += " " + t("※同名ファイルが {d} 件あり最後の1つを採用。", d=dup)
+        if b.get("territory") is not None and (to_remove or to_update or to_add):
+            msg += " " + t("※灌流テリトリーは再計算してください。")
+        self._hint.setText(msg)
 
     def _toggle_overlay(self):
         """ツリー表示 / ツリー非表示 button: toggle the whole coronary overlay on
