@@ -17999,6 +17999,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             "Short-axis (*.cpr.json);;JSON (*.json)")
         if not path:
             return None
+        # Auto-Fit on Save: snap the control points to the lumen centre + rebuild
+        # (the same as pressing Fit), then re-build the payload so the saved
+        # .cpr.json is the fitted line. Done AFTER the dialog commits, so a
+        # cancelled Save never silently moves the points.
+        if self._cpr is not None:
+            self._cpr_fit()
+            data = self._cpr_build_data() or data
         if not self._cpr_write(path, data):
             return None
         # Resumed from a Coronary-Tree vessel → push the edited centreline back
@@ -18018,8 +18025,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         import os
         path = getattr(self, "_cpr_last_path", None)
         if not path or not os.path.exists(path):
-            self._cpr_save()                 # nothing to overwrite → Save As
+            self._cpr_save()                 # nothing to overwrite → Save As (fits)
             return
+        if self._cpr is not None:            # auto-Fit before saving (parity w/ Save)
+            self._cpr_fit()
         data = self._cpr_build_data()
         if data is None:
             return
