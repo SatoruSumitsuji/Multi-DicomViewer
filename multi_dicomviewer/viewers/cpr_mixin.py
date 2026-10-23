@@ -100,20 +100,21 @@ class CPRMixin:
         return ([list(map(float, np.asarray(P, float))) for P in ctrl],
                 pts.round(4).tolist())
 
-    def _cpr_register_to_tree(self) -> None:
+    def _cpr_register_to_tree(self) -> bool:
         """「保存登録」button: SAVE the current short-axis to a .cpr.json first
         (the user names the file), THEN register that CPR into the Coronary Tree —
         routed to its source CT by series UID, with the file name as the vessel
         name (保存後登録 in one click). Cancelling the save cancels the registration.
-        Shared by both viewers (VTK + pygfx)."""
+        Shared by both viewers (VTK + pygfx). Returns True when the file was saved
+        (so Save&Exit can follow through), False when cancelled / nothing to save."""
         import os
         from PyQt6.QtWidgets import QMessageBox
         path = self._cpr_save()                  # Save As prompt → path, or None
         if not path:                             # cancelled / nothing to save
-            return
+            return False
         data = self._cpr_build_data()            # includes series / src_dir / ctrl
         if data is None:
-            return
+            return False
         name = os.path.basename(path)            # file name → vessel name
         for suf in (".cpr.json", ".json"):
             if name.lower().endswith(suf):
@@ -124,12 +125,21 @@ class CPRMixin:
             QMessageBox.information(
                 self.window(), t("Coronary Tree"),
                 t("保存しました。Coronary Tree パネルを開けませんでした。"))
-            return
+            return True                          # file saved (registration skipped)
         try:
             shell.coronary_register_cpr(data, name or "vessel", path)
         except Exception as exc:                 # noqa: BLE001
             QMessageBox.warning(self.window(), t("Coronary Tree"),
                                 t("登録に失敗しました: {e}", e=str(exc)))
+        return True                              # file saved (register may have failed)
+
+    def _cpr_save_and_exit(self) -> None:
+        """「Save&Exit」button: save + register the short-axis, then — only if the
+        save completed (not cancelled) — leave coronary MPR / short-axis mode
+        automatically, so Exit need not be pressed separately. Shared by both
+        viewers; _coronary_exit is each viewer's own."""
+        if self._cpr_register_to_tree():
+            self._coronary_exit()
 
     def _coronary_trace_ctrl(self):
         """3-D control points of the drawn coronary centreline polyline when no

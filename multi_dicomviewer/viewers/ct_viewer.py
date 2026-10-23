@@ -3987,6 +3987,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cpr_register_btn.clicked.connect(self._cpr_register_to_tree)
         self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
         row.addWidget(self._cpr_register_btn)
+        # Save&Exit = Save (保存登録) followed by an automatic Exit, so the user
+        # need not press Exit separately. A cancelled Save does NOT exit.
+        self._cpr_save_exit_btn = FitButton(t("Save&Exit"))
+        self._cpr_save_exit_btn.setHelpToolTip(
+            t("保存・登録してから冠動脈MPR/短軸モードを自動で終了します"
+              "（Save→Exitを一括）。保存をキャンセルした場合は終了しません。"))
+        self._cpr_save_exit_btn.clicked.connect(self._cpr_save_and_exit)
+        self._cpr_save_exit_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
+        row.addWidget(self._cpr_save_exit_btn)
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
@@ -4088,6 +4097,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_save_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_register_btn", None) is not None:
             self._cpr_register_btn.setEnabled(cpr and not pend)
+        if getattr(self, "_cpr_save_exit_btn", None) is not None:
+            self._cpr_save_exit_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_overwrite_btn", None) is not None:
             self._cpr_overwrite_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_fit_btn", None) is not None:
