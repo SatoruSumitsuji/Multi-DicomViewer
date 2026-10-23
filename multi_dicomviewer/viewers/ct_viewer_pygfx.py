@@ -2838,6 +2838,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_targets: list = []
         self._coro_target_mode = False
         self._coro_target_cb = None
+        self._coro_target_action_cb = None   # (n, action) from a VR marker right-click
         self._coro_target_move_cb = None     # (n, vid, idx, phase) from a VR marker drag
         self._vr_tgt_drag = None             # Target number being dragged on the VR
         self._vr_tgt_moved = False           # did the grabbed Target actually move?
@@ -3323,6 +3324,18 @@ class CTViewer(CPRMixin, AbstractViewer):
             if ((self._meas_on or self._cpr_src_under(key, x, y))
                     and self._measure_right(key, x, y)):
                 return                        # handled a measure line/handle
+            # VR pane: right-click ON a Target marker → its menu (show/hide,
+            # delete, colour). Checked BEFORE the coronary-line menu so a dot sitting
+            # on its vessel still gets the target menu. Deferred out of the pointer
+            # handler (Mac modal-in-pointer-handler safety).
+            if self._vr_on.get(key) and self._coro_target_action_cb is not None:
+                tn = self._vr_pick_target_marker(key, x, y)
+                if tn is not None:
+                    self._reset_pointer_state()
+                    QTimer.singleShot(
+                        0, lambda k=key, n=tn, sx=x, sy=y:
+                        self._vr_target_menu(k, n, sx, sy))
+                    return
             # Coronary-tree overlay line → name show/hide menu (any mode; the
             # overlay is always visible in 3-D MPR). Deferred out of the pointer
             # handler (modal-in-pointer-handler safety).
@@ -8501,6 +8514,43 @@ class CTViewer(CPRMixin, AbstractViewer):
         (phase 'preview' during the drag → the panel just repositions the marker,
         'end' on release → the panel asks whether to recompute). Windows parity."""
         self._coro_target_move_cb = cb
+
+    def set_coronary_target_action_cb(self, cb) -> None:
+        """Register cb(n, action) for a VR-pane RIGHT-click on a Target marker
+        (action = 'toggle' territory show/hide, 'delete', or 'color:<hex>')."""
+        self._coro_target_action_cb = cb
+
+    def _vr_target_menu(self, which, n, sx, sy) -> None:
+        """Right-click menu for Target #n on the VR pane: territory show/hide,
+        delete, colour. Called DEFERRED (QTimer.singleShot) out of the pointer
+        handler so the modal exec never swallows the pointer-up (Mac dead-buttons
+        safety). Mirrors the Windows viewer's _vr_target_menu marker branch."""
+        if self._coro_target_action_cb is None:
+            return
+        try:
+            gp = self.pane[which].canvas.mapToGlobal(QPoint(int(sx), int(sy)))
+            menu = QMenu(self)
+            a_vis = menu.addAction(t("領域の色付け 表示/非表示"))
+            a_del = menu.addAction(t("ターゲットを削除"))
+            col_menu = menu.addMenu(t("領域の色変更"))
+            choices = [("赤", "#e06666"), ("橙", "#f6b26b"), ("桃", "#e78ac3"),
+                       ("紫", "#9b59b6"), ("白", "#f2f2f2")]
+            col_acts = {col_menu.addAction(t(nm)): hx for nm, hx in choices}
+            a_custom = col_menu.addAction(t("その他…"))
+            ch = menu.exec(gp)
+        finally:
+            self._reset_pointer_state()      # never leave a stuck grab (Mac)
+        if ch is a_vis:
+            self._coro_target_action_cb(int(n), "toggle")
+        elif ch is a_del:
+            self._coro_target_action_cb(int(n), "delete")
+        elif ch in col_acts:
+            self._coro_target_action_cb(int(n), "color:" + col_acts[ch])
+        elif ch is a_custom:
+            from PyQt6.QtWidgets import QColorDialog
+            c = QColorDialog.getColor(parent=self.window())
+            if c.isValid():
+                self._coro_target_action_cb(int(n), "color:" + c.name())
 
     def _vr_pick_target_marker(self, which, sx, sy, tol_px=10.0):
         """The Target number (1-based 'n') whose projected marker is within
