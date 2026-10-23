@@ -2838,6 +2838,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._coro_targets: list = []
         self._coro_target_mode = False
         self._coro_target_cb = None
+        self._coro_target_move_cb = None     # (n, vid, idx, phase) from a VR marker drag
+        self._vr_tgt_drag = None             # Target number being dragged on the VR
+        self._vr_tgt_moved = False           # did the grabbed Target actually move?
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
         self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
@@ -3245,11 +3248,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         # the ACTIVE toolbar tool — Rotate (trackball) / Zoom / Move / Spin — no
         # Alt needed. A plain right-click still falls through to the normal menu.
         if self._vr_on.get(key) and self._drag_btn == 1:
+            _no_shift = "Shift" not in (ev.get("modifiers") or ())
+            # Grab an EXISTING Target marker under the cursor to DRAG it along the
+            # tree — takes priority over set / orbit, so the point follows the mouse
+            # (Windows parity; Shift skips it to orbit instead).
+            if _no_shift:
+                n = self._vr_pick_target_marker(key, x, y)
+                if n is not None:
+                    self._vr_tgt_drag = n
+                    self._vr_tgt_moved = False
+                    self._last = (x, y)
+                    return
             # Territory target mode: a left-click on a coronary line on the VR
             # pane sets a Target (Shift skips it to orbit instead). Checked BEFORE
             # the orbit starts, which would otherwise swallow the click.
-            if (getattr(self, "_coro_target_mode", False)
-                    and "Shift" not in (ev.get("modifiers") or ())
+            if (getattr(self, "_coro_target_mode", False) and _no_shift
                     and self._coronary_target_click(key, x, y)):
                 self._reset_pointer_state()
                 return
@@ -3503,6 +3516,15 @@ class CTViewer(CPRMixin, AbstractViewer):
                     stuck = False
             if stuck:
                 self._reset_pointer_state()
+        # VR: dragging a grabbed Target marker re-picks the nearest vessel sample
+        # under the cursor and moves the Target there, so it FOLLOWS the mouse
+        # (preview = cheap reposition, no recompute). Takes priority over orbit.
+        if self._vr_tgt_drag is not None:
+            if ev.get("buttons"):
+                self._vr_tgt_moved = True
+                self._vr_move_target(key, self._vr_tgt_drag, x, y, phase="preview")
+            self._last = (x, y)
+            return
         # VR orbit: a left-drag spins the volume around its centre.
         if self._vr_drag is not None:
             if ev.get("buttons"):
@@ -3607,6 +3629,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
+        # End a Target-marker drag on the VR. Clear state FIRST (no re-entrant
+        # move), then — only if it actually moved — report phase 'end' so the
+        # panel asks whether to recompute at the drop (a plain click does nothing).
+        if self._vr_tgt_drag is not None:
+            n = self._vr_tgt_drag
+            self._vr_tgt_drag = None
+            self._drag_btn = None
+            self._last = None
+            if self._vr_tgt_moved:
+                self._vr_tgt_moved = False
+                self._vr_move_target(key, n, ev["x"], ev["y"], phase="end")
+            return
         # End a VR orbit. GPU VR is already full-quality every frame, so nothing
         # to refine; the CPU fallback (no GPU volume) renders its sharp still.
         if self._vr_drag is not None:
@@ -8462,6 +8496,72 @@ class CTViewer(CPRMixin, AbstractViewer):
         設定 mode was never toggled on). Matches the Windows viewer."""
         self._coro_target_cb = cb
 
+    def set_coronary_target_move_cb(self, cb) -> None:
+        """Register cb(n, vid, idx, phase) for a VR-pane DRAG of a Target marker
+        (phase 'preview' during the drag → the panel just repositions the marker,
+        'end' on release → the panel asks whether to recompute). Windows parity."""
+        self._coro_target_move_cb = cb
+
+    def _vr_pick_target_marker(self, which, sx, sy, tol_px=10.0):
+        """The Target number (1-based 'n') whose projected marker is within
+        *tol_px* SCREEN px of (sx, sy) on VR pane *which*, or None. Projected
+        through the SAME camera the markers are drawn with; on overlap the dot
+        NEAREST the camera wins (the visible one). Lets a press GRAB an existing
+        Target to drag it, instead of dropping a brand-new one."""
+        if not self._vr_on.get(which) or not self._coro_targets:
+            return None
+        gpu = (self.pane[which].vr_volume is not None
+               and not self._vr_dvr_shown.get(which))
+
+        def project(pts):
+            if gpu:
+                r = self._vr_project_pts_gpu(which, pts)
+                if r is not None:
+                    return r
+            return self._vr_project_pts(which, pts)
+
+        pts = []
+        idxmap = []
+        for tg in self._coro_targets:
+            P = tg.get("point")
+            if P is None:
+                continue
+            pts.append(np.asarray(P, float))
+            idxmap.append(tg)
+        if not pts:
+            return None
+        pr = project(np.asarray(pts, float))
+        if pr is None:
+            return None
+        pxs, pys, dd = (np.asarray(a, float) for a in pr)
+        best_near, best_n = -float("inf"), None
+        for k, tg in enumerate(idxmap):
+            if not (np.isfinite(pxs[k]) and np.isfinite(pys[k])):
+                continue
+            if gpu and not (dd[k] > 1e-6):           # behind the camera
+                continue
+            if float(np.hypot(pxs[k] - sx, pys[k] - sy)) > tol_px:
+                continue
+            near = float(dd[k]) if gpu else -float(dd[k])   # larger == nearer
+            if near > best_near:
+                best_near, best_n = near, tg.get("n")
+        return int(best_n) if best_n is not None else None
+
+    def _vr_move_target(self, which, n, sx, sy, phase="preview") -> None:
+        """Drag Target #n on VR pane *which*: re-pick the coronary sample under the
+        cursor (fallback=True so the marker keeps FOLLOWING even off the line) and
+        report (n, vid, idx, phase) to the panel. 'preview' = cheap reposition during
+        the drag; 'end' = on release → the panel asks whether to recompute."""
+        if self._coro_target_move_cb is None:
+            return
+        vid, idx = self._coronary_pick_sample_vr(which, sx, sy, fallback=True)
+        if vid is None:
+            return
+        try:
+            self._coro_target_move_cb(int(n), vid, int(idx), str(phase))
+        except Exception:                                # noqa: BLE001
+            pass
+
     def set_coronary_targets(self, specs) -> None:
         self._coro_targets = list(specs or [])
         try:
@@ -8581,11 +8681,14 @@ class CTViewer(CPRMixin, AbstractViewer):
                     best, best_vid, best_idx = d, ves.get("vid"), i
         return best_vid, best_idx
 
-    def _coronary_pick_sample_vr(self, which, sx, sy, tol=16.0):
+    def _coronary_pick_sample_vr(self, which, sx, sy, tol=16.0, fallback=False):
         """Nearest coronary (vid, sample-index) under (sx, sy) on a VR pane,
         projected through the SAME camera (_vr_project_pts_gpu while the GPU MIP
         is shown, else the parallel _vr_basis) the overlay is drawn with, so the
-        pick matches the line the user sees. (None, None) if nothing is close."""
+        pick matches the line the user sees. (None, None) if nothing is close —
+        unless *fallback* (used while DRAGGING a target marker), which drops the
+        pixel cap so the nearest sample is always returned and the marker keeps
+        FOLLOWING the cursor even when it strays off the line."""
         spec = getattr(self, "_coro_overlay", None)
         if not spec or not self._vr_on.get(which):
             return None, None
@@ -8599,7 +8702,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     return r
             return self._vr_project_pts(which, pts)
 
-        best, best_vid, best_idx = float(tol), None, None
+        best = float("inf") if fallback else float(tol)
+        best_vid, best_idx = None, None
         for ves in spec:
             pts = ves.get("points")
             if pts is None or len(pts) < 2:
