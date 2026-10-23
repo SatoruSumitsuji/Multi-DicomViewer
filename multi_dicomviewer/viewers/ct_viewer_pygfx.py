@@ -1211,6 +1211,15 @@ class _Overlay(QWidget):
             if pts3d is None or len(pts3d) < 2:
                 continue
             rgb = _hex_to_rgb(ves.get("color"))
+            # Unconnected / unknown-root vessels carry the grey #888888 fallback
+            # colour. While setting CPR lines one after another BEFORE connecting
+            # them in the tree, a mid-grey is hard to see over the CT, so draw
+            # these as a near-WHITE reference instead (they are still skipped on
+            # the VR — see the VR overlay loop). Connected (coloured) vessels keep
+            # their root colour.
+            if (not ves.get("root")
+                    or str(ves.get("color", "")).lower() in ("#888888", "#888")):
+                rgb = (235, 235, 235)
             sel = bool(ves.get("selected"))
             a_full = 255 if sel else 210
             a_half = 150 if sel else 90
@@ -9423,15 +9432,23 @@ class CTViewer(CPRMixin, AbstractViewer):
         mi, vi = hit
         m = self._measures[which][mi]
         menu = QMenu(self)
-        del_pt = del_res = resume_act = None
+        del_pt = del_res = resume_act = cpr_edit_act = None
         if m["type"] in ("polyline", "polygon"):
             del_pt = menu.addAction(t("Delete point"))
             if len(m["pts"]) <= 2:
                 del_pt.setEnabled(False)
-        # Right-click on a polyline END vertex (the 断端) → "Resume trace":
-        # un-commit it so the user can keep clicking points to EXTEND that end
-        # (Add point only inserts BETWEEN existing vertices, never past an end).
-        if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
+        # A CONFIRMED CPR centreline (tagged _cpr_src) → re-enter its short-axis
+        # so the control points can be edited (Add / Delete / move). This is the
+        # "編集 (Resume)" an unsaved CPR needs: it is not yet a tree vessel, so the
+        # coronary-overlay 「この血管を編集」menu can't reach it, and plain
+        # "Resume trace" only un-commits the polyline without rebuilding the
+        # cross-section. _enter_cpr (same call the outline menu uses) rebuilds it.
+        if m["type"] == "polyline" and m.get("_cpr_src"):
+            cpr_edit_act = menu.addAction(t("この短軸を編集 (Resume)"))
+        # Right-click on a (non-CPR) polyline END vertex (the 断端) → "Resume
+        # trace": un-commit it so the user can keep clicking points to EXTEND that
+        # end (Add point only inserts BETWEEN existing vertices, never past an end).
+        elif m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
             resume_act = menu.addAction(t("Resume trace"))
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
@@ -9462,6 +9479,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
             _mr_changed = True
+        elif cpr_edit_act is not None and chosen is cpr_edit_act:
+            self._enter_cpr(which, mi)           # re-enter the short-axis to edit
+            return                               # _enter_cpr redraws itself
         elif resume_act is not None and chosen is resume_act:
             self._resume_trace(which, mi, vi)
             return                               # _resume_trace redraws itself
@@ -9505,7 +9525,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             if self._mode == "3D" and len(m["pts"]) >= 2:
                 # Same feature as the Coronary: CPR row's Draw — converting a drawn
                 # line enters the identical short-axis workflow (no redraw needed).
-                cpr_act = menu.addAction(t("この線で短軸CPRを作成 (Coronary)"))
+                # A CONFIRMED CPR centreline (_cpr_src) already HAS a short-axis, so
+                # label it as an EDIT (Resume) rather than "作成" — same _enter_cpr.
+                cpr_act = menu.addAction(
+                    t("この短軸を編集 (Resume)") if m.get("_cpr_src")
+                    else t("この線で短軸CPRを作成 (Coronary)"))
         # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
         # checkable auto-snap toggle for future clicks.
         snap_now_act = snap_auto_act = None
