@@ -7497,10 +7497,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return (False, None, None)
-        # BOTH bands overlap → the crossline INTERSECTION: dragging here moves
-        # the whole crosshair (a live recentre), like the VTK viewer.
+        # BOTH bands overlap → the crossline INTERSECTION. Recentring is now
+        # DOUBLE-CLICK ONLY (unified, per request), so the intersection is no
+        # longer a click/drag grab — fall through to the tool here.
         if on_h and on_v:
-            return (True, "C", "center")
+            return (False, None, None)
         grab_h = on_h
         along = along_h if grab_h else along_v
         mode = "move" if along <= mid else "rotate"
@@ -9289,6 +9290,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             # so the drawn line can be right-click-Hidden without re-enabling it —
             # matching the Polyline→CPR route.
             self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
+            if self._cpr is not None:
+                self._cpr_fit()                  # auto-Fit on CPR creation
 
     def _measure_finish_draft(self):
         d = self._draft
@@ -9601,7 +9604,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._add_point(which, mi, sx, sy)
             _mr_changed = True
         elif cpr_act is not None and chosen is cpr_act:
+            was_create = not m.get("_cpr_src")   # create vs Resume (edit)
             self._enter_cpr(which, mi)
+            if was_create and self._cpr is not None:
+                self._cpr_fit()                  # auto-Fit on CPR creation
             return                               # _enter_cpr redraws itself
         elif snap_now_act is not None and chosen is snap_now_act:
             self._snap_trace(which, mi)
