@@ -3315,7 +3315,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._drag_btn == 2:
             self._cross_grab = False
             self._meas_drag = False
-            if self._meas_on and self._measure_right(key, x, y):
+            # A CONFIRMED CPR centreline (_cpr_src) stays right-click-editable even
+            # when Measure is OFF (and even before it's saved as a tree vessel), so
+            # its 「この短軸を編集 (Resume)」menu is always reachable — otherwise an
+            # unsaved CPR offers no resume path at all when Measure happens to be off.
+            if ((self._meas_on or self._cpr_src_under(key, x, y))
+                    and self._measure_right(key, x, y)):
                 return                        # handled a measure line/handle
             # Coronary-tree overlay line → name show/hide menu (any mode; the
             # overlay is always visible in 3-D MPR). Deferred out of the pointer
@@ -9345,6 +9350,22 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._coronary_mpr_pending = True
             self._coronary_sync_ui()
         self._redraw_meas(which)
+
+    def _cpr_src_under(self, which, sx, sy) -> bool:
+        """True if a CONFIRMED CPR centreline (a _cpr_src trace) is under the
+        cursor — so its right-click edit menu (「この短軸を編集 (Resume)」) stays
+        reachable even when Measure is OFF and even before it's saved as a tree
+        vessel. Checked on the outline AND the handles."""
+        try:
+            mi = self._pick_measure(which, sx, sy)
+            if mi is not None and self._measures[which][mi].get("_cpr_src"):
+                return True
+            hit = self._pick_handle(which, sx, sy)
+            if hit is not None and self._measures[which][hit[0]].get("_cpr_src"):
+                return True
+        except Exception:                                # noqa: BLE001
+            pass
+        return False
 
     def _measure_right(self, which, sx, sy) -> bool:
         """Right-click on a measure (handle / outline / Center-Angle marker) →
