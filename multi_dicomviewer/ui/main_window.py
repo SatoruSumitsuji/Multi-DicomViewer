@@ -2675,6 +2675,12 @@ class MainWindow(QMainWindow):
                     v.set_coronary_vessel_hide_cb(self.coronary_vessel_hide)
                 except Exception:                        # noqa: BLE001
                     pass
+            # A click on a CPR line selects that vessel's row in the panel.
+            if hasattr(v, "set_coronary_select_cb"):
+                try:
+                    v.set_coronary_select_cb(self.coronary_select_vessel)
+                except Exception:                        # noqa: BLE001
+                    pass
             if hasattr(v, "set_coronary_resume_cb"):
                 try:
                     v.set_coronary_resume_cb(self.coronary_resume_edit)
@@ -3061,6 +3067,17 @@ class MainWindow(QMainWindow):
         if w is not None and hasattr(w, "hide_vessel"):
             try:
                 w.hide_vessel(vid)
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def coronary_select_vessel(self, vid: str) -> None:
+        """A viewer reported a CLICK on coronary vessel *vid*'s CPR line (Coronary
+        Tree / Territory mode) → select + highlight that vessel's row in the
+        Coronary Tree panel."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "select_vessel"):
+            try:
+                w.select_vessel(vid)
             except Exception:                            # noqa: BLE001
                 pass
 
