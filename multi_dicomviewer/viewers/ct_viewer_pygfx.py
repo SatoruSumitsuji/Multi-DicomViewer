@@ -15048,14 +15048,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         # re-opened viewer could otherwise bounce straight back to VR (the right
         # pane kept its VR heart after LVモード). Mirrors the shell's edit-pending
         # guard in _maybe_resume_territory_review.
+        import sys as _sys
         try:
             shell = self._mdv_shell("_maybe_resume_territory_review")
             pend = getattr(shell, "_full_lv_edit_pending", None) if shell else None
-            if pend:
-                from multi_dicomviewer.core import full_lv as _fl
-                base = (_fl.series_uid(full_data) or "").split("#", 1)[0]
-                if base and base in pend:
-                    return False
+            from multi_dicomviewer.core import full_lv as _fl
+            _b = (_fl.series_uid(full_data) or "").split("#", 1)[0]
+            print(f"[LVモードDBG] pygfx.apply_full_lv: base={_b!r} "
+                  f"pend={list(pend) if pend else None} "
+                  f"skip={bool(pend and _b and _b in pend)}",
+                  file=_sys.stderr, flush=True)
+            if pend and _b and _b in pend:
+                return False
         except Exception:                                # noqa: BLE001
             pass
         if self._mode != "3D" and hasattr(self, "_set_mode"):
