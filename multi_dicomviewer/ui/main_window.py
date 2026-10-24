@@ -3915,6 +3915,11 @@ class MainWindow(QMainWindow):
         # the LV edit actually applies (_poll_full_lv_edit) or it gives up.
         base = (getattr(series, "series_uid", "") or "").split("#", 1)[0]
         pend = getattr(self, "_full_lv_edit_pending", None)
+        import sys as _sys
+        print(f"[LVモードDBG] _maybe_resume: base={base!r} "
+              f"pend={list(pend) if pend else None} "
+              f"blocked={bool(pend and base in pend)}",
+              file=_sys.stderr, flush=True)
         if pend and base in pend:
             return
         w = getattr(self, "_corotree_win", None)
@@ -3936,6 +3941,8 @@ class MainWindow(QMainWindow):
         if (not hasattr(w, "tree_vessels_for_series")
                 or not w.tree_vessels_for_series(series.series_uid)):
             return
+        print("[LVモードDBG] _maybe_resume -> _poll_full_lv_apply (RESUME VR!)",
+              file=_sys.stderr, flush=True)
         self._poll_full_lv_apply(series.series_uid, data, 0)
 
     # ------------------------------------------------- CPR (.cpr.json) drop
