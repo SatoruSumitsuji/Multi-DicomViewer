@@ -2943,6 +2943,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_mask_vol = None                    # territory int-label volume (numpy)
         self._terr_colors = None                      # per-label RGBA fills (or None)
         self._terr_img = {"A": None, "B": None}       # territory tint RGBA per pane
+        self._territory_display = False               # CT Territory (FullLv) review active
         # 壁厚 (wall thickness) state — None/"3d"/"sax"; the field is a full-grid
         # numpy mm volume; cache lets mode re-entry skip the EDT/radial recompute.
         self._lvv_thick_mode = None
@@ -3078,6 +3079,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addLayout(imgrow, 1)
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_lv_bar())     # unified bar (builds the lvv bar)
+        lay.addWidget(self._build_terr_bar())   # CT Territory review bar (hidden until a review)
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
 
@@ -4611,9 +4613,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         is2d = (mode == "2D")
         self._refresh_tool_availability()   # MPR-only tools off in 2-D
         # The LV editing bar is MPR-only — hide it in 2-D native-slice (cine) mode
-        # where none of its tools apply (parity with the VTK viewer).
+        # where none of its tools apply (parity with the VTK viewer). The Territory
+        # bar is MPR-only too; _terr_bar_sync drives both bars' visibility.
         if getattr(self, "_lv_wrap", None) is not None:
             self._lv_wrap.setVisible(not is2d)
+        if getattr(self, "_terr_bar", None) is not None:
+            self._terr_bar_sync()
         self._slab_spin.setEnabled(not is2d)
         self._cl_btn.setEnabled(
             (not is2d) and not self._lv_cross_suppressed())
@@ -5307,6 +5312,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pass
         self._terr_mask_vol = None
         self._terr_colors = None
+        self._territory_display = False              # fresh series → leave any review
         if hasattr(self, "_terr_img"):
             for _k in ("A", "B"):
                 self._terr_img[_k] = None
@@ -5317,6 +5323,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                 _fn()
             except Exception:                            # noqa: BLE001
                 pass
+        if getattr(self, "_terr_bar", None) is not None:
+            self._terr_bar_sync()                    # restore Coronary/LV bar
 
     def current_header(self):
         return self._header
@@ -6465,6 +6473,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._vr_img.pop(key, None)
             self._vr_mask = None
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
+            if not any(self._vr_on.values()):     # last VR off → leave Territory
+                self._territory_display = False
+                self._terr_bar_sync()
         self._overlay[key].update()
         self._sync_vr_btn()
         self._refresh_tool_availability()   # (un)grey Paging/Rotate/Thick for VR
@@ -10464,6 +10475,174 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_relayout_bar()
             except Exception:                            # noqa: BLE001
                 pass
+
+    # ---- CT Territory review bar (Windows/VTK parity) -------------------
+    def _build_terr_bar(self) -> QWidget:
+        """A minimal control row shown ONLY during a CT Territory (FullLv) review,
+        in place of the (hidden) LV + Coronary bars: LV-Blood show/hide and the
+        壁厚3D / 壁厚短軸 heat-map toggles (the LAD/LCX/RCA + Target colours are
+        always on). Reuses the real LV handlers so the overlays behave identically.
+        Survives 'Max Image'."""
+        self._terr_bar = QWidget()
+        self._terr_bar._mdv_keep_on_max = True
+        outer = QVBoxLayout(self._terr_bar)
+        outer.setContentsMargins(8, 2, 8, 2)
+        outer.setSpacing(1)
+        row_host = QWidget()
+        row = QHBoxLayout(row_host)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        cap = QLabel(t("Territory:"))
+        cf = cap.font(); cf.setBold(True); cap.setFont(cf)
+        row.addWidget(cap)
+        self._terr_blood_btn = FitButton(t("LV-Blood"))
+        self._terr_blood_btn.setCheckable(True)
+        self._terr_blood_btn.setHelpToolTip(t("LV血流(水色)の表示 / 非表示"))
+        self._terr_blood_btn.clicked.connect(self._terr_toggle_blood)
+        row.addWidget(self._terr_blood_btn)
+        self._terr_thick3d_btn = FitButton(t("壁厚3D"))
+        self._terr_thick3d_btn.setCheckable(True)
+        self._terr_thick3d_btn.setHelpToolTip(t("壁厚ヒートマップ(3D)の表示 / 非表示"))
+        self._terr_thick3d_btn.clicked.connect(lambda: self._terr_toggle_thick("3d"))
+        row.addWidget(self._terr_thick3d_btn)
+        self._terr_thicksax_btn = FitButton(t("壁厚短軸"))
+        self._terr_thicksax_btn.setCheckable(True)
+        self._terr_thicksax_btn.setHelpToolTip(
+            t("壁厚ヒートマップ(短軸)の表示 / 非表示"))
+        self._terr_thicksax_btn.clicked.connect(
+            lambda: self._terr_toggle_thick("sax"))
+        row.addWidget(self._terr_thicksax_btn)
+        # VR書き出し (glTF/GLB) is Windows/VTK-only: the pygfx VR is a flat 2-D
+        # composite (baked QImage + 2-D overlays), so there is no 3-D scene to
+        # export. Keep the button for layout parity but disabled, with a tooltip
+        # explaining why.
+        row.addSpacing(24)
+        self._terr_export_btn = FitButton(t("VR書き出し"))
+        self._terr_export_btn.setEnabled(False)
+        self._terr_export_btn.setHelpToolTip(t(
+            "VR の 3D 書き出し (.glb / glTF) は Windows 版のみ対応です。Mac 版の VR は "
+            "2D合成画像のため、書き出せる3Dシーンがありません。"))
+        row.addWidget(self._terr_export_btn)
+        # Mode-switch buttons: leave the Territory review to EDIT the LV or the
+        # coronary tree, then come back (re-enter Territory re-computes).
+        row.addSpacing(18)
+        self._terr_lv_btn = FitButton(t("LVモード"))
+        self._terr_lv_btn.setHelpToolTip(t(
+            "LV 編集モードへ移動：MV / AoV / Apex / Epi / Blood-Endo を編集できる画面"))
+        self._terr_lv_btn.clicked.connect(self._terr_to_lv_mode)
+        row.addWidget(self._terr_lv_btn)
+        self._terr_coro_btn = FitButton(t("CoronaryTreeモード"))
+        self._terr_coro_btn.setHelpToolTip(t(
+            "CoronaryTree 編集モードへ移動：領域色・Epi・Blood・Endo・LVD を消し、冠動脈 "
+            "CPR 線だけを表示して CPR 線を編集できる画面"))
+        self._terr_coro_btn.clicked.connect(self._terr_to_coronary_mode)
+        row.addWidget(self._terr_coro_btn)
+        row.addStretch(1)
+        outer.addWidget(row_host)
+        # Linked source files (set by the shell when a Territory review opens):
+        # 元ファイル: FullLv: x.FullLv.json ＋ Tree: y.corotree.json
+        self._terr_src_lbl = QLabel("")
+        self._terr_src_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
+        outer.addWidget(self._terr_src_lbl)
+        self._terr_bar.setVisible(False)
+        return self._terr_bar
+
+    def set_territory_source_names(self, full_name: str = "",
+                                   tree_name: str = "") -> None:
+        """Shell hook: name the TWO source files this Territory result was built
+        from, shown on the line under the Territory bar. Either part is omitted when
+        its name is empty; both empty clears the line."""
+        lbl = getattr(self, "_terr_src_lbl", None)
+        if lbl is None:
+            return
+        parts = []
+        if full_name:
+            parts.append(t("FullLv: {n}", n=full_name))
+        if tree_name:
+            parts.append(t("Tree: {n}", n=tree_name))
+        lbl.setText(t("元ファイル") + ": " + " ＋ ".join(parts) if parts else "")
+
+    def _terr_toggle_blood(self) -> None:
+        self._lvv_toggle_blood()
+        self._terr_bar_sync()
+
+    def _terr_toggle_thick(self, mode) -> None:
+        self._lvv_set_thick_mode(mode)
+        self._terr_bar_sync()
+
+    def _terr_bar_sync(self) -> None:
+        """Show the Territory bar (and hide the LV + Coronary bars, grey the 2D
+        button) during a FullLv review; restore otherwise. Reflects the current
+        Blood / 壁厚 overlay state on the toggles."""
+        terr = bool(getattr(self, "_territory_display", False))
+        # The Territory / Coronary / LV editing bars are ALL MPR-only — hide every
+        # one of them in 2-D native-slice (cine) view.
+        is2d = (getattr(self, "_mode", "3D") == "2D")
+        if getattr(self, "_terr_bar", None) is not None:
+            self._terr_bar.setVisible(terr and not is2d)
+        if getattr(self, "_lv_wrap", None) is not None:
+            self._lv_wrap.setVisible(not terr and not is2d)
+        if getattr(self, "_cpr_wrap", None) is not None and (terr or is2d):
+            self._cpr_wrap.setVisible(False)
+        b2d = (self._mode_btns.get("2D")
+               if getattr(self, "_mode_btns", None) else None)
+        if b2d is not None:                          # must stay 3-D in territory
+            b2d.setEnabled(not terr)
+        if terr:
+            if getattr(self, "_terr_blood_btn", None) is not None:
+                self._terr_blood_btn.setChecked(
+                    bool(getattr(self, "_lvv_mask_on", False)))
+            tm = getattr(self, "_lvv_thick_mode", None)
+            if getattr(self, "_terr_thick3d_btn", None) is not None:
+                self._terr_thick3d_btn.setChecked(tm == "3d")
+            if getattr(self, "_terr_thicksax_btn", None) is not None:
+                self._terr_thicksax_btn.setChecked(tm == "sax")
+        else:
+            # Leaving the review → the LV bar is back; re-apply the Coronary/LV
+            # file-context show-hide (hidden halves, filenames, CPR/FullLV colour).
+            try:
+                self._apply_file_context()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _terr_to_lv_mode(self) -> None:
+        """Territory bar 「LVモード」: leave the review and open the LV editing bar
+        with the FullLv loaded editable (via the shell, which holds the FullLv)."""
+        shell = self.window()
+        if hasattr(shell, "territory_to_lv_mode"):
+            try:
+                shell.territory_to_lv_mode()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+
+    def _terr_to_coronary_mode(self) -> None:
+        """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
+        territory overlay and show ONLY the coronary CPR lines for editing."""
+        shell = self.window()
+        if hasattr(shell, "territory_to_coronary_mode"):
+            try:
+                shell.territory_to_coronary_mode()
+            except Exception:                            # noqa: BLE001
+                import traceback
+                traceback.print_exc()
+
+    def exit_territory_review(self) -> None:
+        """Leave the VR / perfusion-territory review back to the normal 3-D MPR:
+        VR off on every pane (which clears _territory_display and restores the
+        LV / Coronary bars). Shared by the LVモード / CoronaryTreeモード switches."""
+        for k in ("A", "B"):
+            try:
+                if self._vr_on.get(k):
+                    self._vr_set(k, False)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._territory_display = False
+        try:
+            self._refresh_tool_availability()
+        except Exception:                                # noqa: BLE001
+            pass
+        self._terr_bar_sync()
 
     def _lv_sync_cpr_btn(self) -> None:
         """CPR button state: checked + highlighted while CPR is active; greyed
@@ -14845,6 +15024,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._refresh(reset_cam=False)
         for k in ("A", "B"):
             self._overlay[k].update()
+        # Enter the Territory review: swap the Coronary/LV bar for the Territory bar
+        # (LV-Blood / 壁厚 / mode-switch) + the 元ファイル line. (Windows parity.)
+        self._territory_display = True
+        self._terr_bar_sync()
         # Auto-advance to VR on the right pane (parity with Windows: dropping the
         # corotree + FullLv goes straight to the VR review). Deferred so it runs
         # after this apply + the pane's GL settle.
