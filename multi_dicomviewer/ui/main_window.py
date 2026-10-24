@@ -3528,19 +3528,15 @@ class MainWindow(QMainWindow):
         if not w.load_file(path):
             return
         uid = w.active_uid() if hasattr(w, "active_uid") else ""
-        # MODE SWITCH (Territory → CoronaryTreeモード, to_territory=False): mark this
-        # CT edit-pending BEFORE the re-open so the fresh CT load's
-        # _maybe_resume_territory_review does NOT resume the VR territory review.
-        # The FullLv is still re-installed below (so a later LVモード still works),
-        # but we stay on the plain coronary screen instead of bouncing to VR — the
-        # re-entry while the CT was still loading is what blacked the pane.
-        if not to_territory and uid:
-            base = uid.split("#", 1)[0]
-            pend = getattr(self, "_full_lv_edit_pending", None)
-            if pend is None:
-                pend = self._full_lv_edit_pending = set()
-            if base:
-                pend.add(base)
+        # MODE SWITCH (Territory → CoronaryTreeモード, to_territory=False): the fresh
+        # CT must NOT bounce back into the VR territory review while it re-opens. That
+        # is now handled by the UID-independent self._territory_mode_switching flag set
+        # in territory_to_coronary_mode (checked in _maybe_resume_territory_review). We
+        # deliberately DON'T add to _full_lv_edit_pending here any more: that mark was
+        # only ever cleared by the LV-edit poller (which never runs for this coronary-
+        # only switch), so it lingered forever and then blocked the user's next
+        # explicit Territory entry (dropping FullLv.json in CoronaryTreeモード → stayed
+        # on LV instead of advancing to Territory).
         if hasattr(w, "_set_overlay"):
             w._set_overlay(True)         # overlay ON + open the source CT
         full = w.full_lv_for_series(uid) if (

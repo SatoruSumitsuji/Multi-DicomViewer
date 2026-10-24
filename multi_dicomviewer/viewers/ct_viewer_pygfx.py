@@ -15038,21 +15038,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         epi, bld = fd.get("epi"), fd.get("bld")
         if not isinstance(bld, dict):
             return False
-        # If the shell has queued an LV EDIT for THIS CT (Territory bar 「LVモード」
-        # re-opens the CT, then applies the editable LV), do NOT (re-)enter the VR
-        # territory review here — the LV-edit path owns the screen. On Mac the
-        # re-opened viewer could otherwise bounce straight back to VR (the right
-        # pane kept its VR heart after LVモード). Mirrors the shell's edit-pending
-        # guard in _maybe_resume_territory_review.
-        try:
-            shell = self._mdv_shell("_maybe_resume_territory_review")
-            pend = getattr(shell, "_full_lv_edit_pending", None) if shell else None
-            from multi_dicomviewer.core import full_lv as _fl
-            _b = (_fl.series_uid(full_data) or "").split("#", 1)[0]
-            if pend and _b and _b in pend:
-                return False
-        except Exception:                                # noqa: BLE001
-            pass
+        # NOTE: apply_full_lv is the EXPLICIT "show the Territory/VR review" entry
+        # (the user dropped the corotree+FullLv pair, or dropped the second file
+        # while in a mode). It must NOT second-guess that with the shell's
+        # edit-pending mark — that mark is for suppressing the AUTOMATIC resume in
+        # _maybe_resume_territory_review only. A stale mark (e.g. left by a
+        # CoronaryTreeモード switch) was wrongly blocking this explicit call, so the
+        # pair no longer advanced to Territory. Suppression lives upstream now
+        # (_territory_mode_switching + the pend check inside _maybe_resume).
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")
         from PyQt6.QtWidgets import QApplication, QProgressDialog
