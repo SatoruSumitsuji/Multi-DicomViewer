@@ -3552,11 +3552,6 @@ class MainWindow(QMainWindow):
         # A real drop of the corotree onto a CT that ALSO has a FullLv → advance to
         # the Territory (VR) review. A MODE SWITCH (to_territory=False) keeps the
         # FullLv on the bundle but stays on the plain coronary screen.
-        import sys as _sys
-        print(f"[TERRDBG] _open_coronary_tree_file: to_territory={to_territory} "
-              f"uid={uid!r} active={w.active_uid() if hasattr(w,'active_uid') else '?'!r} "
-              f"full={full is not None} pre_full_keys={list(pre_full.keys())}",
-              file=_sys.stderr, flush=True)
         if full and to_territory:
             self._poll_full_lv_apply(uid, full, 0)       # BOTH present → Territory
             return
@@ -3753,16 +3748,6 @@ class MainWindow(QMainWindow):
         # that CT's tree. BOTH present (tree with vessels + this FullLv) → Territory.
         tree = getattr(w, "_tree", None)
         has_tree = bool(tree is not None and getattr(tree, "vessels", None))
-        import sys as _sys
-        try:
-            _tvfs = w.tree_vessels_for_series(uid) if hasattr(w, "tree_vessels_for_series") else "?"
-            _keys = list(getattr(w, "_by_uid", {}).keys())
-            _nv = {k: len(getattr(b.get("tree"), "vessels", {}) or {}) for k, b in getattr(w, "_by_uid", {}).items()}
-            print(f"[TERRDBG] _open_full_lv_files: uid={uid!r} active={w.active_uid()!r} "
-                  f"has_tree={has_tree} tree_vessels_for_series={_tvfs} "
-                  f"bundles={_keys} vessel_counts={_nv}", file=_sys.stderr, flush=True)
-        except Exception as _e:                              # noqa: BLE001
-            print(f"[TERRDBG] _open_full_lv_files dbg err: {_e}", file=_sys.stderr, flush=True)
         if has_tree and hasattr(w, "_set_overlay"):
             w._set_overlay(True)
         # TERRITORY when this CT has BOTH a corotree AND a FullLv (the user dropped
@@ -3843,21 +3828,12 @@ class MainWindow(QMainWindow):
             inflight = self._full_lv_inflight = set()
         if attempt == 0:
             if base in inflight:
-                import sys as _sys
-                print(f"[TERRDBG] _poll_full_lv_apply BLOCKED by inflight: base={base!r}",
-                      file=_sys.stderr, flush=True)
                 return                                   # an apply is already running
             inflight.add(base)
         shown = self._coronary_display_uid(uid) if uid else True
         v = self._active.current_viewer() if self._active is not None else None
         ready = v is not None and (getattr(v, "_image", None) is not None
                                    or getattr(v, "_vol", None) is not None)
-        if attempt in (0, 1, 2, 40):
-            import sys as _sys
-            print(f"[TERRDBG] _poll_full_lv_apply[{attempt}]: base={base!r} shown={shown} "
-                  f"ready={ready} v={type(v).__name__ if v else None} "
-                  f"has_apply={hasattr(v, 'apply_full_lv') if v else False}",
-                  file=_sys.stderr, flush=True)
         if shown and ready and hasattr(v, "apply_full_lv"):
             try:
                 v.apply_full_lv(data)

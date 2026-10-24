@@ -15034,12 +15034,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         screen, editing off, selector back). Returns True if applied."""
         if self._vol is None:
             return False
-        import sys as _sys
         fd = full_data or {}
         epi, bld = fd.get("epi"), fd.get("bld")
-        print(f"[TERRDBG] pygfx.apply_full_lv: vol={self._vol is not None} "
-              f"epi={isinstance(epi, dict)} bld={isinstance(bld, dict)}",
-              file=_sys.stderr, flush=True)
         if not isinstance(bld, dict):
             return False
         # NOTE: apply_full_lv is the EXPLICIT "show the Territory/VR review" entry
