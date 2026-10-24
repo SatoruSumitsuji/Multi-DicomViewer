@@ -127,7 +127,22 @@ class CoronaryTreeWindow(SnapDock):
         """Make *uid* the ACTIVE CT (its bundle then backs _tree/_hidden/…).
         *series* = the .cpr.json's embedded meta (patient/date/series_number) kept
         for the group label when the CT isn't loaded for a live lookup."""
-        self._active_uid = uid or ""
+        uid = uid or ""
+        # CONSOLIDATE per BASE UID. A CT re-opened several times (every Territory ⇄
+        # LVモード / CoronaryTreeモード switch re-opens it) can surface under slightly
+        # different SeriesUID strings ("…", "…#2"), and the tree vs the FullLv may
+        # each carry their own variant. Without this, a second variant spawns a NEW,
+        # EMPTY bundle, so the tree and the FullLv split across two bundles: dropping
+        # FullLv.json in CoronaryTreeモード then landed on the empty one (has_tree
+        # False) → the editable LV showed instead of Territory. Reuse the FIRST bundle
+        # whose base matches so a CT's tree + FullLv always share ONE bundle.
+        if uid:
+            base = uid.split("#", 1)[0]
+            for existing in self._by_uid:
+                if existing == uid or existing.split("#", 1)[0] == base:
+                    uid = existing
+                    break
+        self._active_uid = uid
         b = self._bundle()
         if ct_dir:
             b["ct_dir"] = ct_dir

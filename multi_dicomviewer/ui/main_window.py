@@ -3374,8 +3374,9 @@ class MainWindow(QMainWindow):
             # a later event-loop pass than apply_lv_analysis — clearing on apply would
             # let that late call resume VR. A single safety timer (well past the ~12 s
             # CT-ready poll) returns the app to normal resume behaviour.
-            self._lv_mode_switching = True
-            QTimer.singleShot(20000, lambda: setattr(self, "_lv_mode_switching", False))
+            self._territory_mode_switching = True
+            QTimer.singleShot(
+                20000, lambda: setattr(self, "_territory_mode_switching", False))
             # Dispose the active pane's VR-laden CT viewer so the re-open gets a
             # FRESH MPR viewer (no lingering VR / territory state).
             if self._active is not None:
@@ -3449,6 +3450,13 @@ class MainWindow(QMainWindow):
         w = getattr(self, "_corotree_win", None)
         corotree_path = (getattr(w, "_last_path", "") or "") if w is not None else ""
         if w is not None and corotree_path and os.path.isfile(corotree_path):
+            # Same UID-independent VR-resume block as LVモード (see territory_to_lv_mode):
+            # keep the fresh CT from bouncing back into the VR heart while this switch
+            # to the coronary-only view re-opens it. Boolean, not series_uid-keyed, so
+            # it can't miss on Mac. Cleared by a safety timer past the CT-ready poll.
+            self._territory_mode_switching = True
+            QTimer.singleShot(
+                20000, lambda: setattr(self, "_territory_mode_switching", False))
             # Dispose the active pane's VR-laden CT viewer so the re-open gets a
             # FRESH MPR viewer (no lingering VR / territory state, no black pane).
             if self._active is not None:
@@ -3890,11 +3898,12 @@ class MainWindow(QMainWindow):
         already in a review or one without the LV port (e.g. pygfx)."""
         if getattr(series, "modality", None) != Modality.CT:
             return
-        # Territory bar 「LVモード」 is switching THIS app to the editable LV view
-        # (dispose + re-open). Refuse EVERY VR resume until that finishes — a plain
-        # boolean, so it can't miss the way the series_uid-keyed edit-pending mark
-        # did on Mac (which let the fresh CT bounce back to the VR heart).
-        if getattr(self, "_lv_mode_switching", False):
+        # Territory bar 「LVモード」/「CoronaryTreeモード」 is switching THIS app to a
+        # single-side view (dispose + re-open the CT). Refuse EVERY VR resume until
+        # that finishes — a plain boolean, so it can't miss the way the
+        # series_uid-keyed edit-pending mark did on Mac (which let the fresh CT bounce
+        # back to the VR heart).
+        if getattr(self, "_territory_mode_switching", False):
             return
         v = pane.current_viewer() if pane is not None else None
         if v is None or not hasattr(v, "apply_full_lv"):
