@@ -3788,7 +3788,14 @@ class MainWindow(QMainWindow):
         v = self._active.current_viewer() if self._active is not None else None
         ready = v is not None and (getattr(v, "_image", None) is not None
                                    or getattr(v, "_vol", None) is not None)
+        import sys as _sys
+        print(f"[LVモードDBG] _poll_full_lv_edit[{attempt}]: shown={shown} "
+              f"ready={ready} v={type(v).__name__ if v else None} "
+              f"has_apply={hasattr(v, 'apply_lv_analysis') if v else False}",
+              file=_sys.stderr, flush=True)
         if shown and ready and hasattr(v, "apply_lv_analysis"):
+            print("[LVモードDBG] _poll_full_lv_edit -> apply_lv_analysis",
+                  file=_sys.stderr, flush=True)
             try:
                 v.apply_lv_analysis(files)
             except Exception:                            # noqa: BLE001
@@ -6024,6 +6031,15 @@ class MainWindow(QMainWindow):
             v = pane._viewers.pop(Modality.CT, None)
         except Exception:                                # noqa: BLE001
             v = None
+        import sys as _sys
+        try:
+            _keys = list(getattr(pane, "_viewers", {}).keys())
+        except Exception:                                # noqa: BLE001
+            _keys = "?"
+        print(f"[LVモードDBG] _free_pane_ct_for_reload: popped="
+              f"{type(v).__name__ if v else None} remaining_keys={_keys} "
+              f"cur={type(getattr(pane, '_cur_viewer', None)).__name__ if getattr(pane, '_cur_viewer', None) else None}",
+              file=_sys.stderr, flush=True)
         if v is None:
             return
         try:
