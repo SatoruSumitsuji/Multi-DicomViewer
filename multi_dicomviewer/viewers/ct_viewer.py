@@ -1182,7 +1182,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 return
             # A CONFIRMED CPR centreline (_cpr_src) stays right-click-editable even
             # when Measure is OFF (and even before it's saved as a tree vessel), so
-            # its 「この短軸を編集 (Resume)」menu is always reachable — otherwise an
+            # its 「この短軸を再計算 (ReCalc)」menu is always reachable — otherwise an
             # unsaved CPR offers no resume path at all when Measure happens to be off.
             if ((self._owner._meas_on
                  or self._owner._cpr_src_under(
@@ -15187,7 +15187,7 @@ class CTViewer(CPRMixin, AbstractViewer):
 
     def _cpr_src_under(self, which, sx, sy) -> bool:
         """True if a CONFIRMED CPR centreline (a _cpr_src trace) is under the
-        cursor — so its right-click edit menu (「この短軸を編集 (Resume)」) stays
+        cursor — so its right-click edit menu (「この短軸を再計算 (ReCalc)」) stays
         reachable even when Measure is OFF and even before it's saved as a tree
         vessel. Checked on the outline AND the handles."""
         try:
@@ -15344,7 +15344,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # "Resume trace" only un-commits the polyline without rebuilding the
         # cross-section. _enter_cpr (same call the outline menu uses) rebuilds it.
         if m["type"] == "polyline" and m.get("_cpr_src"):
-            cpr_edit_act = menu.addAction(t("この短軸を編集 (Resume)"))
+            cpr_edit_act = menu.addAction(t("この短軸を再計算 (ReCalc)"))
         # Right-click on a polyline END vertex (the 断端) → "Resume trace": un-commit
         # it so the user can keep clicking points to EXTEND that end (Add point only
         # inserts BETWEEN existing vertices, never past an end). Offered for a
@@ -15443,7 +15443,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # A CONFIRMED CPR centreline (_cpr_src) already HAS a short-axis, so
                 # label it as an EDIT (Resume) rather than "作成" — same _enter_cpr.
                 cpr_act = menu.addAction(
-                    t("この短軸を編集 (Resume)") if m.get("_cpr_src")
+                    t("この短軸を再計算 (ReCalc)") if m.get("_cpr_src")
                     else t("この線で短軸CPRを作成 (Coronary)"))
         # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
         # checkable auto-snap toggle for future clicks.
