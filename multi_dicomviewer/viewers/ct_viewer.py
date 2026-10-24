@@ -15345,10 +15345,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         # cross-section. _enter_cpr (same call the outline menu uses) rebuilds it.
         if m["type"] == "polyline" and m.get("_cpr_src"):
             cpr_edit_act = menu.addAction(t("この短軸を編集 (Resume)"))
-        # Right-click on a (non-CPR) polyline END vertex (the 断端) → "Resume
-        # trace": un-commit it so the user can keep clicking points to EXTEND that
-        # end (Add point only inserts BETWEEN existing vertices, never past an end).
-        elif m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
+        # Right-click on a polyline END vertex (the 断端) → "Resume trace": un-commit
+        # it so the user can keep clicking points to EXTEND that end (Add point only
+        # inserts BETWEEN existing vertices, never past an end). Offered for a
+        # CONFIRMED CPR line too (not just plain polylines) — a finished short-axis
+        # can still be lengthened from its proximal/distal tip; if that CPR is the
+        # one being edited right now, the handler leaves the short-axis first.
+        if m["type"] == "polyline" and vi in (0, len(m["pts"]) - 1):
             resume_act = menu.addAction(t("Resume trace"))
         # Change Color / Change Transparency — on every result type (incl.
         # Line/Angle, most easily right-clicked on a handle).
@@ -15385,6 +15388,11 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._enter_cpr(which, mi)           # re-enter the short-axis to edit
             return                               # _enter_cpr redraws itself
         elif resume_act is not None and chosen is resume_act:
+            # If this line IS the active CPR short-axis, leave it first so self._cpr
+            # doesn't dangle on the measure _resume_trace is about to un-commit.
+            c = self._cpr
+            if c is not None and c.get("src") == which and c.get("src_mi") == mi:
+                self._exit_cpr(keep_view=True)
             self._resume_trace(which, mi, vi)
             return                               # _resume_trace redraws itself
         elif chosen is hide_act:
