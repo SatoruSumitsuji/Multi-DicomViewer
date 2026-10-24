@@ -9,6 +9,49 @@ Multi-DICOMviewer のバージョンごとの主な機能・修正の履歴で�
 
 ---
 
+## 5.0.0 — 2026-10-24
+
+心臓 CT を軸にした大型リリースです。**冠動脈ツリー / CPR**、**パーフュージョン・
+テリトリー（Territory）解析と VR（3D 心臓）**、**左室（LV）機能解析（LVEF・心筋
+重量・壁厚）** を新規に搭載し、これらを **Windows（VTK）・macOS（pygfx）の両
+ビューアで** 使えるようにしました。
+
+**冠動脈ツリー & CPR（短軸再構成）**
+- CPR で冠動脈の中心線を引き、**Coronary Tree パネル**で枝（LM-LAD / LM-LCX /
+  RCA ＋ Branch）を木構造として管理。保存は per-vessel の `.cpr.json` と
+  `.corotree.json`。確定後の線は **「このCPR線を短軸で再計算 (ReCalc)」** や
+  **Resume（延長）** で編集・延長できます。
+- CPR 作成時に自動 Fit → 最も近位の編集点（|◀）へジャンプ。ツリー保存/読込の
+  既定フォルダは元 CT データフォルダの1つ上。
+
+**CT パーフュージョン・テリトリー（Territory）＋ VR**
+- 冠動脈の最近接中心線（Voronoi 割当）で**心筋の灌流テリトリー**を色分け。短軸
+  MPR と 3D VR（心臓）に反映。
+- **VR（3D 心臓）**：Windows は GPU ボリュームレンダリング、macOS は Metal 対応
+  の描画経路で実装。冠動脈チューブ、LAO/CRA 角度、Flip/Rt90、WL 調整に対応。
+  Windows は Territory の **glTF/GLB 書き出し**に対応。
+- **Territory バー**と **Territory ⇄ LVモード / CoronaryTreeモード の往復**：
+  tree ＋ FullLv の両方が揃えば Territory、片方のモードを選べば各結果のみ（VR
+  なし）、モード中にもう一方のファイルをドロップすれば Territory に戻ります。
+
+**左室（LV）機能解析**
+- **LVEF / 心筋重量 / 壁厚（Endo→Epi 距離ヒートマップ）** を心臓 CT から算出。
+  長軸は **apex→MV 3D中心**（臨床標準）で定義し、心尖点・独立軸・Endo→Epi 軸
+  への昇格に対応。Blood/Endo の自動シード＋排他トグルを刷新。
+- `.FullLv.json` 1 ファイルから関数的に体積・質量・壁厚を再計算できる自己完結
+  フォーマット。LV 結果 5 ファイルのドラッグ＆ドロップで元 CT を自動で開いて
+  オーバーレイ復元。
+
+**その他**
+- **Case Presentation（症例プレゼン）**：開いているシリーズを時系列テーブル化し、
+  1クリックで表示状態を完全復元。
+- **SyncView**：2 枚並べた 3DCT のマウス/キー操作を相互ミラー。
+- OCT/OFDI を IVUS ビューアへルーティング、MR/NM の 2D シネ再生 ほか多数の修正。
+- **macOS 対応の拡充**：上記の CT 系機能（CPR / Territory / VR / LV）を pygfx
+  ビューアへ移植。macOS VR の glTF 書き出しは今後対応予定（現状ボタンは無効）。
+
+---
+
 ## 4.3.1 — 2026-08-14
 
 v4.3.0 の macOS 実機確認で見つかった不具合の修正と、Undo/Redo ボタンの追加です。
