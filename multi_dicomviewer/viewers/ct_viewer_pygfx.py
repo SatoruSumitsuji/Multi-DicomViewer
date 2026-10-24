@@ -5271,6 +5271,17 @@ class CTViewer(CPRMixin, AbstractViewer):
         return QPixmap.fromImage(out)
 
     def clear(self) -> None:
+        # Tear down any VR / Territory review BEFORE _vol is dropped (so _vr_set can
+        # restore the MPR) — a REUSED pygfx viewer otherwise carries its VR heart
+        # into the next CT, e.g. the right pane kept VR after a Territory mode switch
+        # (LVモード / CoronaryTreeモード) on Mac.
+        for _k in ("A", "B"):
+            try:
+                if self._vr_on.get(_k):
+                    self._vr_set(_k, False)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._territory_display = False
         self._play2d_btn.setChecked(False)       # stop any running auto-page
         self._play2d_resume = False              # next Play starts at Frame 1
         self._cancel_lod()
@@ -14921,6 +14932,19 @@ class CTViewer(CPRMixin, AbstractViewer):
         then Blood (restores the combined overlay view). Returns True if applied."""
         if self._vol is None:
             return False
+        # Entering the EDITABLE LV view (e.g. Territory bar 「LVモード」) must never
+        # leave the Territory/VR review on screen — on Mac the right pane kept its
+        # VR heart because this pygfx viewer is REUSED (its _vr_on / baked VR image
+        # survive), whereas the VTK path gets a fresh viewer on re-open. Turn VR off
+        # on every pane first (which also clears _territory_display + restores the
+        # LV/Coronary bar), so LV editing always starts from a plain MPR.
+        for _k in ("A", "B"):
+            try:
+                if self._vr_on.get(_k):
+                    self._vr_set(_k, False)
+            except Exception:                            # noqa: BLE001
+                pass
+        self._territory_display = False
         if files.get("epi") is not None or files.get("blood") is not None:
             from PyQt6.QtWidgets import QMessageBox
             have_mv = (files.get("valve_mitral") is not None
