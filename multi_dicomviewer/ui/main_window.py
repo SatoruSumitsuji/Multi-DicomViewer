@@ -3787,6 +3787,13 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(
                 300,
                 lambda: self._poll_full_lv_edit(uid, files, fname, attempt + 1))
+        else:
+            # Gave up waiting for the CT — release the edit-pending mark so a future
+            # legitimate territory resume for this CT isn't blocked forever (the mark
+            # is otherwise only cleared when the LV edit applies, above).
+            pend = getattr(self, "_full_lv_edit_pending", None)
+            if pend:
+                pend.discard((uid or "").split("#", 1)[0])
 
     def _poll_full_lv_apply(self, uid: str, data: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then draw the LV overlays from a
@@ -3873,13 +3880,16 @@ class MainWindow(QMainWindow):
             return
         if getattr(v, "_territory_display", False):
             return                                       # already in a review
-        # A .FullLv DROP that is in flight for this CT wants the EDITABLE LV screen,
-        # NOT the VR review — its own _poll_lv_apply handles the overlays. Skip the
-        # VR resume here and consume the pending mark (set by _open_full_lv_files).
+        # A .FullLv DROP / mode-switch that is in flight for this CT wants the
+        # EDITABLE LV screen, NOT the VR review — its own _poll_full_lv_edit handles
+        # the overlays. Skip the VR resume here. Do NOT consume the mark: on Mac the
+        # mode-switch re-open fired _maybe_resume_territory_review MORE THAN ONCE, and
+        # consuming it on the 1st call let a later call bounce straight back to VR
+        # (the right pane kept its VR heart after LVモード). The mark is released when
+        # the LV edit actually applies (_poll_full_lv_edit) or it gives up.
         base = (getattr(series, "series_uid", "") or "").split("#", 1)[0]
         pend = getattr(self, "_full_lv_edit_pending", None)
         if pend and base in pend:
-            pend.discard(base)
             return
         w = getattr(self, "_corotree_win", None)
         if w is None or not hasattr(w, "full_lv_for_series"):

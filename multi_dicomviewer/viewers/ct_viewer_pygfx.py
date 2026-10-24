@@ -10621,11 +10621,29 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def _mdv_shell(self, attr: str = "territory_to_lv_mode"):
+        """The MainWindow shell. self.window() is usually it, but walk up the parent
+        chain too in case the pane nests this viewer so self.window() returns an
+        intermediate widget (then the Territory mode-switch buttons would silently
+        no-op). Identified by the shell-only method *attr*."""
+        w = self
+        for _ in range(16):
+            if w is None:
+                break
+            if hasattr(w, attr):
+                return w
+            try:
+                w = w.parent()
+            except Exception:                            # noqa: BLE001
+                break
+        win = self.window()
+        return win if (win is not None and hasattr(win, attr)) else None
+
     def _terr_to_lv_mode(self) -> None:
         """Territory bar 「LVモード」: leave the review and open the LV editing bar
         with the FullLv loaded editable (via the shell, which holds the FullLv)."""
-        shell = self.window()
-        if hasattr(shell, "territory_to_lv_mode"):
+        shell = self._mdv_shell("territory_to_lv_mode")
+        if shell is not None:
             try:
                 shell.territory_to_lv_mode()
             except Exception:                            # noqa: BLE001
@@ -10635,8 +10653,8 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _terr_to_coronary_mode(self) -> None:
         """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
         territory overlay and show ONLY the coronary CPR lines for editing."""
-        shell = self.window()
-        if hasattr(shell, "territory_to_coronary_mode"):
+        shell = self._mdv_shell("territory_to_coronary_mode")
+        if shell is not None:
             try:
                 shell.territory_to_coronary_mode()
             except Exception:                            # noqa: BLE001
@@ -15020,6 +15038,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         epi, bld = fd.get("epi"), fd.get("bld")
         if not isinstance(bld, dict):
             return False
+        # If the shell has queued an LV EDIT for THIS CT (Territory bar 「LVモード」
+        # re-opens the CT, then applies the editable LV), do NOT (re-)enter the VR
+        # territory review here — the LV-edit path owns the screen. On Mac the
+        # re-opened viewer could otherwise bounce straight back to VR (the right
+        # pane kept its VR heart after LVモード). Mirrors the shell's edit-pending
+        # guard in _maybe_resume_territory_review.
+        try:
+            shell = self._mdv_shell("_maybe_resume_territory_review")
+            pend = getattr(shell, "_full_lv_edit_pending", None) if shell else None
+            if pend:
+                from multi_dicomviewer.core import full_lv as _fl
+                base = (_fl.series_uid(full_data) or "").split("#", 1)[0]
+                if base and base in pend:
+                    return False
+        except Exception:                                # noqa: BLE001
+            pass
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")
         from PyQt6.QtWidgets import QApplication, QProgressDialog
