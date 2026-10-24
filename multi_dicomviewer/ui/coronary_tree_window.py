@@ -2382,8 +2382,15 @@ class CoronaryTreeWindow(SnapDock):
 
     def _tree_save_dir(self) -> str:
         """Default folder for ツリー保存 / 読込 dialogs: the folder of the LAST tree
-        saved/loaded this session for THIS CT (直前の保存先), else the SOURCE 3-D CT's
-        own folder, else a registered vessel's .cpr.json folder; '' if unknown."""
+        saved/loaded this session for THIS CT (直前の保存先), else the PARENT folder of
+        the SOURCE 3-D CT's own folder (当該3DCTデータのフォルダの1つ上), else a registered
+        vessel's .cpr.json folder's parent; '' if unknown."""
+        def _parent(d: str) -> str:
+            # One level up from the CT-data folder; fall back to the folder itself
+            # if it's a drive/mount root (no usable parent).
+            up = os.path.dirname(os.path.normpath(d))
+            return up if (up and os.path.isdir(up) and os.path.normpath(up)
+                          != os.path.normpath(d)) else d
         b = self._bundle()
         lp = b.get("last_path")
         if lp:
@@ -2392,11 +2399,11 @@ class CoronaryTreeWindow(SnapDock):
                 return d
         cd = b.get("ct_dir") or ""
         if cd and os.path.isdir(cd):
-            return cd
+            return _parent(cd)
         for p in (b.get("paths") or {}).values():
             d = os.path.dirname(p) if p else ""
             if d and os.path.isdir(d):
-                return d
+                return _parent(d)
         return ""
 
     def _save_as(self):
