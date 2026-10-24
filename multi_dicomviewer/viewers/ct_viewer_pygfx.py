@@ -10642,11 +10642,7 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _terr_to_lv_mode(self) -> None:
         """Territory bar 「LVモード」: leave the review and open the LV editing bar
         with the FullLv loaded editable (via the shell, which holds the FullLv)."""
-        import sys as _sys
         shell = self._mdv_shell("territory_to_lv_mode")
-        print(f"[LVモードDBG] _terr_to_lv_mode clicked; "
-              f"shell={type(shell).__name__ if shell else None}",
-              file=_sys.stderr, flush=True)
         if shell is not None:
             try:
                 shell.territory_to_lv_mode()
@@ -15048,16 +15044,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # re-opened viewer could otherwise bounce straight back to VR (the right
         # pane kept its VR heart after LVモード). Mirrors the shell's edit-pending
         # guard in _maybe_resume_territory_review.
-        import sys as _sys
         try:
             shell = self._mdv_shell("_maybe_resume_territory_review")
             pend = getattr(shell, "_full_lv_edit_pending", None) if shell else None
             from multi_dicomviewer.core import full_lv as _fl
             _b = (_fl.series_uid(full_data) or "").split("#", 1)[0]
-            print(f"[LVモードDBG] pygfx.apply_full_lv: base={_b!r} "
-                  f"pend={list(pend) if pend else None} "
-                  f"skip={bool(pend and _b and _b in pend)}",
-                  file=_sys.stderr, flush=True)
             if pend and _b and _b in pend:
                 return False
         except Exception:                                # noqa: BLE001

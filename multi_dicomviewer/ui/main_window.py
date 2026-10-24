@@ -3359,16 +3359,7 @@ class MainWindow(QMainWindow):
         import os
         w = getattr(self, "_corotree_win", None)
         full = getattr(w, "_full_lv_data", None) if w is not None else None
-        import sys as _sys
-        _v0 = self._active.current_viewer() if self._active is not None else None
-        print(f"[LVモードDBG] territory_to_lv_mode: w={w is not None} "
-              f"full={bool(full)} active={self._active is not None} "
-              f"viewer={type(_v0).__name__ if _v0 else None} "
-              f"has_lv_open={hasattr(self, 'lv_open_full_for_edit')}",
-              file=_sys.stderr, flush=True)
         if full and hasattr(self, "lv_open_full_for_edit"):
-            print("[LVモードDBG] -> PRIMARY path (dispose + re-open)",
-                  file=_sys.stderr, flush=True)
             from multi_dicomviewer.core import full_lv
             # Dispose the active pane's VR-laden CT viewer so the re-open gets a
             # FRESH MPR viewer (no lingering VR / territory state).
@@ -3412,27 +3403,17 @@ class MainWindow(QMainWindow):
             uid = full_lv.series_uid(full)
             files = self._full_lv_to_files(full)
             fname = os.path.basename(getattr(w, "_full_lv_path", "") or "")
-            print(f"[LVモードDBG] primary: files={bool(files)} uid={uid!r} "
-                  f"loaded={self.case_series_loaded(uid) if uid else None}",
-                  file=_sys.stderr, flush=True)
             if files and uid and self.case_series_loaded(uid):
-                print("[LVモードDBG] -> defer _poll_full_lv_edit",
-                      file=_sys.stderr, flush=True)
                 QTimer.singleShot(
                     0, lambda u=uid, f=files, n=fname:
                     self._poll_full_lv_edit(u, f, n, 0))
             else:
-                print("[LVモードDBG] -> defer lv_open_full_for_edit",
-                      file=_sys.stderr, flush=True)
                 sd = full_lv.src_dir(full)
                 QTimer.singleShot(
                     0, lambda d=full, s=sd: self.lv_open_full_for_edit(d, s))
             return
         # Fallback — no FullLv on the panel: best-effort in-place review exit.
         v = self._active.current_viewer() if self._active is not None else None
-        print(f"[LVモードDBG] -> FALLBACK; viewer={type(v).__name__ if v else None} "
-              f"has_exit={hasattr(v, 'exit_territory_review') if v else False}",
-              file=_sys.stderr, flush=True)
         if v is not None and hasattr(v, "exit_territory_review"):
             try:
                 v.exit_territory_review()
@@ -3788,14 +3769,7 @@ class MainWindow(QMainWindow):
         v = self._active.current_viewer() if self._active is not None else None
         ready = v is not None and (getattr(v, "_image", None) is not None
                                    or getattr(v, "_vol", None) is not None)
-        import sys as _sys
-        print(f"[LVモードDBG] _poll_full_lv_edit[{attempt}]: shown={shown} "
-              f"ready={ready} v={type(v).__name__ if v else None} "
-              f"has_apply={hasattr(v, 'apply_lv_analysis') if v else False}",
-              file=_sys.stderr, flush=True)
         if shown and ready and hasattr(v, "apply_lv_analysis"):
-            print("[LVモードDBG] _poll_full_lv_edit -> apply_lv_analysis",
-                  file=_sys.stderr, flush=True)
             try:
                 v.apply_lv_analysis(files)
             except Exception:                            # noqa: BLE001
@@ -3915,11 +3889,6 @@ class MainWindow(QMainWindow):
         # the LV edit actually applies (_poll_full_lv_edit) or it gives up.
         base = (getattr(series, "series_uid", "") or "").split("#", 1)[0]
         pend = getattr(self, "_full_lv_edit_pending", None)
-        import sys as _sys
-        print(f"[LVモードDBG] _maybe_resume: base={base!r} "
-              f"pend={list(pend) if pend else None} "
-              f"blocked={bool(pend and base in pend)}",
-              file=_sys.stderr, flush=True)
         if pend and base in pend:
             return
         w = getattr(self, "_corotree_win", None)
@@ -3941,8 +3910,6 @@ class MainWindow(QMainWindow):
         if (not hasattr(w, "tree_vessels_for_series")
                 or not w.tree_vessels_for_series(series.series_uid)):
             return
-        print("[LVモードDBG] _maybe_resume -> _poll_full_lv_apply (RESUME VR!)",
-              file=_sys.stderr, flush=True)
         self._poll_full_lv_apply(series.series_uid, data, 0)
 
     # ------------------------------------------------- CPR (.cpr.json) drop
@@ -6038,15 +6005,6 @@ class MainWindow(QMainWindow):
             v = pane._viewers.pop(Modality.CT, None)
         except Exception:                                # noqa: BLE001
             v = None
-        import sys as _sys
-        try:
-            _keys = list(getattr(pane, "_viewers", {}).keys())
-        except Exception:                                # noqa: BLE001
-            _keys = "?"
-        print(f"[LVモードDBG] _free_pane_ct_for_reload: popped="
-              f"{type(v).__name__ if v else None} remaining_keys={_keys} "
-              f"cur={type(getattr(pane, '_cur_viewer', None)).__name__ if getattr(pane, '_cur_viewer', None) else None}",
-              file=_sys.stderr, flush=True)
         if v is None:
             return
         try:
