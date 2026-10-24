@@ -3357,10 +3357,25 @@ class MainWindow(QMainWindow):
         selector (the post-Exit OBSERVE state the user wants), not the expanded
         Blood/Endo editing controls."""
         import os
+        from PyQt6.QtCore import QTimer
         w = getattr(self, "_corotree_win", None)
         full = getattr(w, "_full_lv_data", None) if w is not None else None
         if full and hasattr(self, "lv_open_full_for_edit"):
             from multi_dicomviewer.core import full_lv
+            # HARD suppression for the whole LVモード transition: while this flag is
+            # set, _maybe_resume_territory_review and the pygfx apply_full_lv REFUSE
+            # to (re-)enter the VR / perfusion-territory review — UNCONDITIONALLY, not
+            # keyed by series_uid. The old edit-pending guard matched the FullLv's
+            # embedded UID against the reloaded CT's UID; on Mac that match could miss
+            # (trailing '#'/format differences) so the fresh CT bounced straight back
+            # to VR and the right pane kept its VR heart. A plain boolean can't miss.
+            # Held for the WHOLE re-open window (not cleared on apply): the fresh CT
+            # fires _maybe_resume_territory_review when it is first SHOWN, which can be
+            # a later event-loop pass than apply_lv_analysis — clearing on apply would
+            # let that late call resume VR. A single safety timer (well past the ~12 s
+            # CT-ready poll) returns the app to normal resume behaviour.
+            self._lv_mode_switching = True
+            QTimer.singleShot(20000, lambda: setattr(self, "_lv_mode_switching", False))
             # Dispose the active pane's VR-laden CT viewer so the re-open gets a
             # FRESH MPR viewer (no lingering VR / territory state).
             if self._active is not None:
@@ -3874,6 +3889,12 @@ class MainWindow(QMainWindow):
         path resume (that keeps a live viewer's own state), and no-ops on a viewer
         already in a review or one without the LV port (e.g. pygfx)."""
         if getattr(series, "modality", None) != Modality.CT:
+            return
+        # Territory bar 「LVモード」 is switching THIS app to the editable LV view
+        # (dispose + re-open). Refuse EVERY VR resume until that finishes — a plain
+        # boolean, so it can't miss the way the series_uid-keyed edit-pending mark
+        # did on Mac (which let the fresh CT bounce back to the VR heart).
+        if getattr(self, "_lv_mode_switching", False):
             return
         v = pane.current_viewer() if pane is not None else None
         if v is None or not hasattr(v, "apply_full_lv"):
