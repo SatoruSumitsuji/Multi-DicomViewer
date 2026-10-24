@@ -3359,7 +3359,16 @@ class MainWindow(QMainWindow):
         import os
         w = getattr(self, "_corotree_win", None)
         full = getattr(w, "_full_lv_data", None) if w is not None else None
+        import sys as _sys
+        _v0 = self._active.current_viewer() if self._active is not None else None
+        print(f"[LVモードDBG] territory_to_lv_mode: w={w is not None} "
+              f"full={bool(full)} active={self._active is not None} "
+              f"viewer={type(_v0).__name__ if _v0 else None} "
+              f"has_lv_open={hasattr(self, 'lv_open_full_for_edit')}",
+              file=_sys.stderr, flush=True)
         if full and hasattr(self, "lv_open_full_for_edit"):
+            print("[LVモードDBG] -> PRIMARY path (dispose + re-open)",
+                  file=_sys.stderr, flush=True)
             from multi_dicomviewer.core import full_lv
             # Dispose the active pane's VR-laden CT viewer so the re-open gets a
             # FRESH MPR viewer (no lingering VR / territory state).
@@ -3403,17 +3412,27 @@ class MainWindow(QMainWindow):
             uid = full_lv.series_uid(full)
             files = self._full_lv_to_files(full)
             fname = os.path.basename(getattr(w, "_full_lv_path", "") or "")
+            print(f"[LVモードDBG] primary: files={bool(files)} uid={uid!r} "
+                  f"loaded={self.case_series_loaded(uid) if uid else None}",
+                  file=_sys.stderr, flush=True)
             if files and uid and self.case_series_loaded(uid):
+                print("[LVモードDBG] -> defer _poll_full_lv_edit",
+                      file=_sys.stderr, flush=True)
                 QTimer.singleShot(
                     0, lambda u=uid, f=files, n=fname:
                     self._poll_full_lv_edit(u, f, n, 0))
             else:
+                print("[LVモードDBG] -> defer lv_open_full_for_edit",
+                      file=_sys.stderr, flush=True)
                 sd = full_lv.src_dir(full)
                 QTimer.singleShot(
                     0, lambda d=full, s=sd: self.lv_open_full_for_edit(d, s))
             return
         # Fallback — no FullLv on the panel: best-effort in-place review exit.
         v = self._active.current_viewer() if self._active is not None else None
+        print(f"[LVモードDBG] -> FALLBACK; viewer={type(v).__name__ if v else None} "
+              f"has_exit={hasattr(v, 'exit_territory_review') if v else False}",
+              file=_sys.stderr, flush=True)
         if v is not None and hasattr(v, "exit_territory_review"):
             try:
                 v.exit_territory_review()

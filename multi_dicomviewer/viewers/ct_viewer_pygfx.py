@@ -10642,7 +10642,11 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _terr_to_lv_mode(self) -> None:
         """Territory bar 「LVモード」: leave the review and open the LV editing bar
         with the FullLv loaded editable (via the shell, which holds the FullLv)."""
+        import sys as _sys
         shell = self._mdv_shell("territory_to_lv_mode")
+        print(f"[LVモードDBG] _terr_to_lv_mode clicked; "
+              f"shell={type(shell).__name__ if shell else None}",
+              file=_sys.stderr, flush=True)
         if shell is not None:
             try:
                 shell.territory_to_lv_mode()
