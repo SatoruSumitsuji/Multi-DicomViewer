@@ -9453,6 +9453,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
             if self._cpr is not None:
                 self._cpr_fit()                  # auto-Fit on CPR creation
+                self._cpr_jump_ctrl_end(False)   # start at the most proximal edit point (|◀)
 
     def _measure_finish_draft(self):
         d = self._draft
@@ -9769,6 +9770,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._enter_cpr(which, mi)
             if was_create and self._cpr is not None:
                 self._cpr_fit()                  # auto-Fit on CPR creation
+                self._cpr_jump_ctrl_end(False)   # start at the most proximal edit point (|◀)
             return                               # _enter_cpr redraws itself
         elif snap_now_act is not None and chosen is snap_now_act:
             self._snap_trace(which, mi)
