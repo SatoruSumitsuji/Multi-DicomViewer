@@ -10519,6 +10519,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addSpacing(24)
         self._terr_export_btn = FitButton(t("VR書き出し"))
         self._terr_export_btn.setEnabled(False)
+        # macOS greys a disabled text button only faintly, so make "inactive"
+        # unmistakable with a muted text colour (the button is permanently
+        # disabled until a pygfx glTF exporter exists, so overriding the native
+        # look here is safe — it is never checked/pressed).
+        self._terr_export_btn.setStyleSheet("color:#9a9a9a;")
         self._terr_export_btn.setHelpToolTip(t(
             "VR の 3D 書き出し (.glb / glTF) は Windows 版のみ対応です。Mac 版の VR は "
             "2D合成画像のため、書き出せる3Dシーンがありません。"))
