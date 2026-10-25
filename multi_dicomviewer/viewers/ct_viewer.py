@@ -3372,9 +3372,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         row.addSpacing(24)
         self._terr_export_btn = FitButton(t("VR書き出し"))
         self._terr_export_btn.setHelpToolTip(t(
-            "この VR モデル（灌流領域サーフェス＋冠動脈＋ターゲット）を汎用3Dファイル "
-            "(.glb / glTF) として書き出します。元ファイルから独立した静的データです。"))
-        self._terr_export_btn.clicked.connect(self._terr_export_glb)
+            "VR モデル（灌流領域サーフェス＋冠動脈＋ターゲット）を、ブラウザで回せる "
+            "自己完結 HTML（または .glb）として書き出します。marching cubes + 平滑化で "
+            "3D メッシュを生成します（scikit-image が必要）。"))
+        self._terr_export_btn.clicked.connect(self._terr_export_html)
         row.addWidget(self._terr_export_btn)
         # Mode-switch buttons: leave the Territory review to EDIT the LV or the
         # coronary tree, then come back (re-enter Territory re-computes).
@@ -3517,54 +3518,134 @@ class CTViewer(CPRMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def _terr_export_glb(self) -> None:
-        """Territory bar 書き出し: export the VR model (perfusion-territory surfaces +
-        coronary tubes + target markers) as a STATIC, general-purpose glTF/GLB — a
-        self-contained 3-D artifact independent of corotree.json / FullLv.json. The
-        DVR heart VOLUME is not a mesh, so it is not included (the colour territory
-        surfaces carry the perfusion regions). GLB is a single binary file; .gltf is
-        a single self-contained text file."""
+    def _terr_export_html(self) -> None:
+        """Territory bar 書き出し: export the VR model (perfusion-territory coloured
+        surfaces + coronary tubes + target markers) as a SELF-CONTAINED .html
+        (drag to spin in any browser, offline) — or a .glb. Rebuilds the geometry
+        from the data via the shared core.vr_html_export pipeline (marching cubes
+        + Taubin), REPLACING the former VTK glTF exporter so Windows and Mac share
+        one path and one look. The DVR heart VOLUME is not a mesh, so it is not
+        included (the colour territory surfaces carry the perfusion regions).
+        Includes the top-right / bottom-right readouts, target markers + numbers,
+        and a live LAO/CRA readout (same patient-space math as the pane)."""
         import os
         import traceback
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        key = None
-        for k in ("B", "A"):
-            if self._vr_on.get(k):
-                key = k
-                break
-        if key is None:
-            QMessageBox.information(self.window(), t("VR書き出し"),
-                                    t("VR モデルがありません。"))
-            return
-        p = self.pane[key]
-        ren = getattr(p, "ren", None)
-        rw = ren.GetRenderWindow() if ren is not None else None
-        if rw is None:
-            QMessageBox.warning(self.window(), t("VR書き出し"),
-                                t("VR のレンダーウィンドウが取得できません。"))
-            return
-        stem = self._terr_export_stem()
-        self._pending_vr_export_key = key        # consumed by _export_vr_gltf
-        # Default to the ORIGINAL 3-D CT's own data folder, so the VR export lands
-        # beside the source it came from.
-        src = getattr(self, "_src_dir", "") or ""
-        default = os.path.join(src, stem + ".glb") if src and os.path.isdir(src) \
-            else stem + ".glb"
-        path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("VR を書き出し (glTF / GLB)"), default,
-            t("glTF Binary (*.glb);;glTF (*.gltf)"))
-        if not path:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox, QApplication
+        from PyQt6.QtCore import Qt as _Qt
+
+        lab = getattr(self, "_terr_label_np", None)
+        colors = getattr(self, "_terr_colors_v", None)
+        if lab is None or not colors:
+            QMessageBox.information(
+                self.window(), t("VR書き出し"),
+                t("テリトリーの VR モデルがありません。先に CT Territory を表示してください。"))
             return
         try:
-            out = self._export_vr_gltf(rw, path)
+            import skimage  # noqa: F401
+        except Exception:                                # noqa: BLE001
+            QMessageBox.warning(
+                self.window(), t("VR書き出し"),
+                t("3D 書き出しには scikit-image が必要です。次を実行してください:\n"
+                  "  pip install scikit-image\n（または pip install -r requirements.txt）"))
+            return
+
+        # Coronary tubes from the same overlay the VR draws (skip grey / unconnected).
+        vessels = []
+        cp = getattr(self, "_coro_params", None) or {}
+        base_d = max(0.1, float(cp.get("tube_diameter_mm", 1.0)))
+        lm_ratio = float(cp.get("lm_ratio", 1.5))
+        coro_src = (getattr(self, "_coro_overlay_vr", None)
+                    or getattr(self, "_coro_overlay", None) or [])
+        for ves in coro_src:
+            pts = ves.get("points")
+            if pts is None or len(pts) < 2:
+                continue
+            if (not ves.get("root")
+                    or str(ves.get("color", "")).lower() in ("#888888", "#888")):
+                continue
+            r, g, b = _hex_to_rgb(ves.get("color"))
+            diam = base_d * (lm_ratio if ves.get("role") == "LM" else 1.0)
+            vessels.append({"points": np.asarray(pts, float),
+                            "color": (r / 255.0, g / 255.0, b / 255.0, 1.0),
+                            "radius": max(0.3, diam * 0.5),
+                            "name": str(ves.get("name", "vessel"))})
+
+        # Territory colours → 0..1 RGBA (guard 0..255).
+        cols01 = []
+        for c in colors:
+            cc = [float(x) for x in c]
+            if max(cc[:3]) > 1.5:
+                cc = [cc[0] / 255.0, cc[1] / 255.0, cc[2] / 255.0] + cc[3:]
+            cols01.append(tuple(cc))
+
+        # Territory target markers (sphere + number label).
+        targets = []
+        for tg in (getattr(self, "_coro_targets", None) or []):
+            P = tg.get("point")
+            if P is None:
+                continue
+            hexc = tg.get("color") or "#ea9999"
+            r, g, b = _hex_to_rgb(hexc)
+            targets.append({"point": np.asarray(P, float).reshape(3),
+                            "color": (r / 255.0, g / 255.0, b / 255.0, 1.0),
+                            "color_hex": hexc if str(hexc).startswith("#")
+                            else "#%02x%02x%02x" % (r, g, b),
+                            "n": str(tg.get("n", "")), "radius": 2.6})
+
+        stem = self._terr_export_stem()
+        src = getattr(self, "_src_dir", "") or ""
+        default = os.path.join(src, stem + ".html") \
+            if src and os.path.isdir(src) else stem + ".html"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("VR を書き出し (HTML / GLB)"), default,
+            t("自己完結 HTML (*.html);;glTF Binary (*.glb)"))
+        if not path:
+            return
+
+        meta = self._lv_series_meta() if hasattr(self, "_lv_series_meta") else {}
+        subtitle = " / ".join(s for s in [
+            str(meta.get("date", "") or ""),
+            str(meta.get("patient", "") or ""),
+            ("Se" + str(meta.get("series_number")))
+            if meta.get("series_number") else ""] if s)
+        summary = getattr(self, "_terr_summary_text", "") or ""
+        tgt_summary = getattr(self, "_tgt_summary_text", "") or ""
+        try:
+            pbasis = np.asarray(self._pbasis, float).tolist()
+        except Exception:                                # noqa: BLE001
+            pbasis = None
+
+        QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+        try:
+            from multi_dicomviewer.core import vr_html_export as vx
+            out, stats = vx.export_vr_html(
+                path, lab, cols01, self._dims, vessels,
+                targets=targets, summary_tr=summary, summary_br=tgt_summary,
+                pbasis=pbasis,
+                title=t("Multi-DICOMviewer VR"),
+                subtitle=subtitle,
+                extras={"perfusion_summary": summary,
+                        "generator": "Multi-DICOMviewer"})
         except Exception as exc:                         # noqa: BLE001
+            QApplication.restoreOverrideCursor()
             traceback.print_exc()
             QMessageBox.warning(self.window(), t("VR書き出し"),
                                 t("書き出しに失敗しました: {e}", e=str(exc)))
             return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if out is None:
+            QMessageBox.information(
+                self.window(), t("VR書き出し"),
+                t("書き出せるテリトリー / 血管がありませんでした。"))
+            return
         QMessageBox.information(
             self.window(), t("VR書き出し"),
-            t("書き出しました: {p}", p=os.path.basename(out)))
+            t("書き出しました: {p}\nテリトリー {a} / 血管 {b} / ターゲット {c}",
+              p=os.path.basename(out),
+              a=stats.get("territories", 0), b=stats.get("vessels", 0),
+              c=stats.get("targets", 0)))
 
     def _terr_export_stem(self) -> str:
         """A filename stem for the VR export, from the CT's own labels when known."""
@@ -3577,300 +3658,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                  if meta.get("series_number") else ""]
         stem = "_".join(s for s in parts if s)
         return (stem + "_territory_VR") if stem else "territory_VR"
-
-    def _vr_terr_export_actors(self, key) -> list:
-        """Build temporary coloured perfusion-territory SURFACE actors from the
-        territory label volume (`_terr_label_np` + `_terr_colors_v`), aligned to the
-        coronary tubes, and ADD them to pane *key*'s VR renderer for a glTF/GLB
-        export. The live render uses a DVR volume label-map (not meshes), so these
-        surfaces exist only for the export. Returns the actors added (caller removes
-        them). One iso-surface per territory label, coloured by its fill."""
-        import numpy as np
-        lab = getattr(self, "_terr_label_np", None)
-        colors = getattr(self, "_terr_colors_v", None)
-        added: list = []
-        if lab is None or not colors or self._image is None:
-            return added
-        from vtkmodules.vtkImagingCore import vtkImageThreshold
-        from vtkmodules.vtkFiltersCore import (
-            vtkFlyingEdges3D, vtkWindowedSincPolyDataFilter)
-        p = self.pane[key]
-        sx, sy, sz = self._dims
-        img = numpy_to_vtk_image(
-            np.ascontiguousarray(np.asarray(lab), np.float32), sx, sy, sz)
-        # Match the CT image's world placement so the surfaces land on the tubes.
-        try:
-            img.SetOrigin(self._image.GetOrigin())
-            if hasattr(self._image, "GetDirectionMatrix") \
-                    and hasattr(img, "SetDirectionMatrix"):
-                img.SetDirectionMatrix(self._image.GetDirectionMatrix())
-        except Exception:                                # noqa: BLE001
-            pass
-        M = self._vr_xform.get(key)
-        vm = self._np_to_vtkmatrix(np.asarray(M, float)) if M is not None else None
-        ncol = len(colors)
-        labels_present = sorted({int(v) for v in np.unique(np.asarray(lab))
-                                 if int(v) > 0})
-        for lv in labels_present:
-            try:
-                th = vtkImageThreshold()
-                th.SetInputData(img)
-                th.ThresholdBetween(lv - 0.5, lv + 0.5)
-                th.SetInValue(1.0)
-                th.SetOutValue(0.0)
-                th.SetOutputScalarTypeToFloat()
-                fe = vtkFlyingEdges3D()
-                fe.SetInputConnection(th.GetOutputPort())
-                fe.SetValue(0, 0.5)
-                fe.ComputeNormalsOn()
-                sm = vtkWindowedSincPolyDataFilter()
-                sm.SetInputConnection(fe.GetOutputPort())
-                sm.SetNumberOfIterations(15)
-                sm.BoundarySmoothingOff()
-                sm.FeatureEdgeSmoothingOff()
-                sm.NonManifoldSmoothingOn()
-                sm.NormalizeCoordinatesOn()
-                sm.Update()
-                pd = sm.GetOutput()
-                if pd is None or pd.GetNumberOfPoints() == 0:
-                    continue
-                mp = vtkPolyDataMapper()
-                mp.SetInputData(pd)
-                mp.ScalarVisibilityOff()
-                ac = vtkActor()
-                ac.SetMapper(mp)
-                c = colors[lv - 1] if 0 <= lv - 1 < ncol else (0.9, 0.4, 0.4, 0.45)
-                r, g, b = float(c[0]), float(c[1]), float(c[2])
-                a = float(c[3]) if len(c) > 3 else 0.45
-                prop = ac.GetProperty()
-                prop.SetColor(r, g, b)
-                # Match the in-app territory translucency (its own per-label alpha,
-                # ~0.45) so the exported look is close to Multi-DICOMviewer's VR; a
-                # matte-ish surface (low specular) reads like the DVR wash. An exact
-                # DVR look is not reproducible as a mesh in glTF.
-                prop.SetOpacity(max(0.3, min(0.85, a)))
-                prop.SetSpecular(0.1)
-                prop.SetAmbient(0.35)
-                prop.SetDiffuse(0.75)
-                if vm is not None:
-                    ac.SetUserMatrix(vm)
-                p.ren.AddActor(ac)
-                added.append(ac)
-            except Exception:                            # noqa: BLE001
-                continue
-        return added
-
-    def _vr_coro_export_prep(self, key):
-        """For a glTF/GLB export: the live coronary tubes + round caps colour via
-        CELL-data scalars, which vtkGLTFExporter does NOT carry — they exported
-        solid BLACK (the user's report). Hide those live actors and add temporary
-        copies with the per-vessel colour BAKED into POINT data (glTF writes that as
-        vertex colour), so the export keeps the LAD/LCX/RCA colours. The black halo
-        rim is hidden for the export so the coloured tubes read cleanly. Returns
-        (temp_actors, restore_callables); the caller removes the temps and restores
-        the live visibilities afterward."""
-        from vtkmodules.vtkFiltersCore import vtkCellDataToPointData
-        p = self.pane[key]
-        temp, restore = [], []
-        pren = getattr(p, "ren", None)
-        if pren is None:
-            return temp, restore
-
-        def _add_baked(src_obj, live_actor):
-            try:
-                if hasattr(src_obj, "Update"):
-                    src_obj.Update()
-                    src = src_obj.GetOutput()
-                else:
-                    src = src_obj
-                if src is None or src.GetNumberOfPoints() == 0:
-                    return
-                cd = src.GetCellData()
-                if cd is None or cd.GetScalars() is None:
-                    return
-                c2p = vtkCellDataToPointData()
-                c2p.SetInputData(src)
-                c2p.PassCellDataOff()
-                c2p.Update()
-                out = c2p.GetOutput()
-                pdp = out.GetPointData()
-                col = None
-                for i in range(pdp.GetNumberOfArrays()):
-                    arr = pdp.GetArray(i)
-                    if arr is not None and arr.GetNumberOfComponents() == 3:
-                        col = arr
-                        break
-                if col is None:
-                    return
-                pdp.SetScalars(col)                      # RGB → active point scalars
-                m = vtkPolyDataMapper()
-                m.SetInputData(out)
-                m.ScalarVisibilityOn()
-                m.SetScalarModeToUsePointData()
-                m.SetColorModeToDefault()                # unsigned-char → direct RGB
-                a = vtkActor()
-                a.SetMapper(m)
-                um = live_actor.GetUserMatrix()           # mirror the live placement
-                if um is not None:
-                    a.SetUserMatrix(um)
-                pr = a.GetProperty()
-                pr.SetSpecular(0.1)
-                pr.SetAmbient(0.5)
-                pr.SetDiffuse(0.7)
-                pren.AddActor(a)
-                temp.append(a)
-                live_actor.SetVisibility(False)
-                restore.append(lambda ac=live_actor: ac.SetVisibility(True))
-            except Exception:                            # noqa: BLE001
-                return
-
-        act = getattr(p, "vr_coro_actor", None)
-        if act is not None and act.GetVisibility():
-            _add_baked(getattr(p, "vr_coro_tube", None), act)
-        cap = getattr(p, "vr_coro_cap_actor", None)
-        if cap is not None and cap.GetVisibility():
-            capmap = getattr(p, "vr_coro_cap_mapper", None)
-            src = capmap.GetInput() if capmap is not None else None
-            if src is not None:
-                _add_baked(src, cap)
-        halo = getattr(p, "vr_coro_halo_actor", None)
-        if halo is not None and halo.GetVisibility():
-            halo.SetVisibility(False)
-            restore.append(lambda ac=halo: ac.SetVisibility(True))
-        return temp, restore
-
-    def _export_vr_gltf(self, rw, path: str) -> str:
-        """Write the VR render window to *path* as glTF. A .glb target is packed into
-        a single binary file; any other extension writes a single self-contained
-        .gltf (inline base64 buffers). The per-system perfusion summary is embedded
-        in asset.extras. Returns the path actually written. Temporary coloured
-        territory surfaces are added for the export (the live territory is in the DVR
-        volume, which glTF can't carry) and removed afterwards."""
-        import os
-        import json
-        import base64
-        import struct
-        import tempfile
-        import shutil
-        from vtkmodules.vtkIOExport import vtkGLTFExporter
-        summary = getattr(self, "_terr_summary_text", "") or ""
-        want_glb = path.lower().endswith(".glb")
-        # The on-screen perfusion territory is painted into the DVR VOLUME (a GPU
-        # label-map mask), which glTF can't carry — so build temporary coloured
-        # SURFACE meshes from the territory label volume, add them to the VR renderer
-        # for the export, and remove them afterwards. Without this only the coronary
-        # tubes + target markers would export (the user saw "no coloured regions").
-        key = getattr(self, "_pending_vr_export_key", None)
-        tmp_actors = []
-        restore = []
-        try:
-            if key is not None:
-                tmp_actors = self._vr_terr_export_actors(key)
-                # Coronary tubes colour via CELL-data scalars, which glTF can't carry
-                # (they exported BLACK). Swap in temp actors with the colours baked
-                # into POINT data (per-vessel colours kept) for the export.
-                c_tmp, restore = self._vr_coro_export_prep(key)
-                tmp_actors = list(tmp_actors) + c_tmp
-            return self._do_export_vr_gltf(rw, path, want_glb, summary)
-        finally:
-            if key is not None:
-                try:
-                    pren = self.pane[key].ren
-                    for ac in tmp_actors:
-                        pren.RemoveActor(ac)
-                except Exception:                        # noqa: BLE001
-                    pass
-                for fn in restore:
-                    try:
-                        fn()
-                    except Exception:                    # noqa: BLE001
-                        pass
-
-    def _do_export_vr_gltf(self, rw, path, want_glb, summary):
-        import os
-        import json
-        import base64
-        import struct
-        import tempfile
-        import shutil
-        from vtkmodules.vtkIOExport import vtkGLTFExporter
-        if not want_glb:
-            # Single self-contained .gltf (inline base64 buffers).
-            exp = vtkGLTFExporter()
-            exp.SetRenderWindow(rw)
-            exp.InlineDataOn()
-            exp.SaveNormalOn()
-            exp.SetFileName(path)
-            exp.Write()
-            self._gltf_embed_extras(path, summary)
-            return path
-        # GLB: export to a temp .gltf + .bin (external buffer), then pack into one
-        # binary container. Falls back to a self-contained .gltf if the exporter did
-        # not produce the expected single external buffer.
-        tmpdir = tempfile.mkdtemp(prefix="mdv_glb_")
-        try:
-            tmp_gltf = os.path.join(tmpdir, "scene.gltf")
-            exp = vtkGLTFExporter()
-            exp.SetRenderWindow(rw)
-            exp.InlineDataOff()
-            exp.SaveNormalOn()
-            exp.SetFileName(tmp_gltf)
-            exp.Write()
-            with open(tmp_gltf, encoding="utf-8") as f:
-                gltf = json.load(f)
-            bufs = gltf.get("buffers") or []
-            uri0 = str(bufs[0].get("uri", "")) if len(bufs) == 1 else ""
-            bin_path = os.path.join(tmpdir, uri0) if uri0 else ""
-            if len(bufs) != 1 or not uri0 or uri0.startswith("data:") \
-                    or not os.path.isfile(bin_path):
-                # Unexpected shape → self-contained .gltf fallback next to the target.
-                alt = os.path.splitext(path)[0] + ".gltf"
-                exp2 = vtkGLTFExporter()
-                exp2.SetRenderWindow(rw)
-                exp2.InlineDataOn()
-                exp2.SaveNormalOn()
-                exp2.SetFileName(alt)
-                exp2.Write()
-                self._gltf_embed_extras(alt, summary)
-                return alt
-            with open(bin_path, "rb") as f:
-                bin_data = f.read()
-            bufs[0].pop("uri", None)
-            bufs[0]["byteLength"] = len(bin_data)
-            gltf.setdefault("asset", {}).setdefault("extras", {})
-            if summary:
-                gltf["asset"]["extras"]["perfusion_summary"] = summary
-            gltf["asset"]["extras"]["generator"] = "Multi-DICOMviewer"
-            json_bytes = json.dumps(gltf, separators=(",", ":")).encode("utf-8")
-            json_bytes += b" " * ((4 - len(json_bytes) % 4) % 4)      # pad: spaces
-            bin_pad = (4 - len(bin_data) % 4) % 4
-            bin_data = bin_data + b"\x00" * bin_pad                   # pad: zeros
-            total = 12 + 8 + len(json_bytes) + 8 + len(bin_data)
-            with open(path, "wb") as f:
-                f.write(struct.pack("<III", 0x46546C67, 2, total))   # 'glTF', v2, len
-                f.write(struct.pack("<II", len(json_bytes), 0x4E4F534A))  # JSON chunk
-                f.write(json_bytes)
-                f.write(struct.pack("<II", len(bin_data), 0x004E4942))    # BIN chunk
-                f.write(bin_data)
-            return path
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    @staticmethod
-    def _gltf_embed_extras(path: str, summary: str) -> None:
-        """Add the perfusion summary to a written .gltf's asset.extras (best-effort)."""
-        import json
-        try:
-            with open(path, encoding="utf-8") as f:
-                gltf = json.load(f)
-            gltf.setdefault("asset", {}).setdefault("extras", {})
-            if summary:
-                gltf["asset"]["extras"]["perfusion_summary"] = summary
-            gltf["asset"]["extras"]["generator"] = "Multi-DICOMviewer"
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(gltf, f, ensure_ascii=False, separators=(",", ":"))
-        except (OSError, ValueError):
-            pass
 
     def _vr_busy_frame(self, p, i: int) -> None:
         """Render a CHEAP VR frame (volume still hidden) showing the static busy
