@@ -10639,6 +10639,20 @@ class CTViewer(CPRMixin, AbstractViewer):
                 cc = [cc[0] / 255.0, cc[1] / 255.0, cc[2] / 255.0] + cc[3:]
             cols01.append(tuple(cc))
 
+        # Territory target markers (sphere + number label), same data the VR draws.
+        targets = []
+        for tg in (getattr(self, "_coro_targets", None) or []):
+            P = tg.get("point")
+            if P is None:
+                continue
+            hexc = tg.get("color") or "#ea9999"
+            r, g, b = _hex_to_rgb(hexc)
+            targets.append({"point": np.asarray(P, float).reshape(3),
+                            "color": (r / 255.0, g / 255.0, b / 255.0, 1.0),
+                            "color_hex": hexc if str(hexc).startswith("#")
+                            else "#%02x%02x%02x" % (r, g, b),
+                            "n": str(tg.get("n", "")), "radius": 2.6})
+
         meta = self._lv_series_meta() if hasattr(self, "_lv_series_meta") else {}
         parts = [str(meta.get("date", "") or ""),
                  ("Se" + str(meta.get("series_number")))
@@ -10660,12 +10674,19 @@ class CTViewer(CPRMixin, AbstractViewer):
             ("Se" + str(meta.get("series_number")))
             if meta.get("series_number") else ""] if s)
         summary = getattr(self, "_terr_summary_text", "") or ""
+        tgt_summary = getattr(self, "_tgt_summary_text", "") or ""
+        try:
+            pbasis = np.asarray(self._pbasis, float).tolist()
+        except Exception:                                # noqa: BLE001
+            pbasis = None
 
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import vr_html_export as vx
             out, stats = vx.export_vr_html(
                 path, lab, cols01, self._dims, vessels,
+                targets=targets, summary_tr=summary, summary_br=tgt_summary,
+                pbasis=pbasis,
                 title=t("Multi-DICOMviewer VR"),
                 subtitle=subtitle,
                 extras={"perfusion_summary": summary,
@@ -10686,9 +10707,10 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         QMessageBox.information(
             self.window(), t("VR書き出し"),
-            t("書き出しました: {p}\nテリトリー {a} / 血管 {b}",
+            t("書き出しました: {p}\nテリトリー {a} / 血管 {b} / ターゲット {c}",
               p=os.path.basename(out),
-              a=stats.get("territories", 0), b=stats.get("vessels", 0)))
+              a=stats.get("territories", 0), b=stats.get("vessels", 0),
+              c=stats.get("targets", 0)))
 
     def _terr_bar_sync(self) -> None:
         """Show the Territory bar (and hide the LV + Coronary bars, grey the 2D
