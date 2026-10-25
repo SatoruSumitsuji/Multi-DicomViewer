@@ -22,6 +22,13 @@ numpy>=2.0
 # has no VTK, so it MUST be declared here or Auto-Endo/壁厚 silently fail.
 scipy>=1.11
 
+# VR 3D export (Territory bar 「VR書き出し」 → self-contained HTML / .glb).
+# Windows builds the export mesh with VTK (vtkFlyingEdges3D); the Mac build has
+# no VTK, so core/vr_html_export.py uses scikit-image's marching_cubes to turn
+# the territory label volume into a smooth surface. Without it the VR export
+# button reports that scikit-image must be installed.
+scikit-image>=0.22
+
 # Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
 pylibjpeg>=2.0
 pylibjpeg-libjpeg>=2.1

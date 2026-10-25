@@ -10523,21 +10523,18 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._terr_thicksax_btn.clicked.connect(
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
-        # VR書き出し (glTF/GLB) is Windows/VTK-only: the pygfx VR is a flat 2-D
-        # composite (baked QImage + 2-D overlays), so there is no 3-D scene to
-        # export. Keep the button for layout parity but disabled, with a tooltip
-        # explaining why.
+        # VR書き出し: the Mac VR is a flat 2-D composite with no 3-D scene to grab,
+        # so (unlike Windows' vtkGLTFExporter) we REBUILD the geometry from the data
+        # — territory label volume → smooth iso-surfaces (marching cubes + Taubin),
+        # coronary centrelines → swept tubes — and emit a self-contained HTML (spin
+        # in any browser, offline) or .glb. Shared core.vr_html_export.
         row.addSpacing(24)
         self._terr_export_btn = FitButton(t("VR書き出し"))
-        self._terr_export_btn.setEnabled(False)
-        # macOS greys a disabled text button only faintly, so make "inactive"
-        # unmistakable with a muted text colour (the button is permanently
-        # disabled until a pygfx glTF exporter exists, so overriding the native
-        # look here is safe — it is never checked/pressed).
-        self._terr_export_btn.setStyleSheet("color:#9a9a9a;")
         self._terr_export_btn.setHelpToolTip(t(
-            "VR の 3D 書き出し (.glb / glTF) は Windows 版のみ対応です。Mac 版の VR は "
-            "2D合成画像のため、書き出せる3Dシーンがありません。"))
+            "VR モデル（灌流テリトリーの色付き曲面＋冠動脈チューブ）を、ブラウザで回せる "
+            "自己完結 HTML（または .glb）として書き出します。marching cubes + 平滑化で "
+            "3D メッシュを生成します（scikit-image が必要）。"))
+        self._terr_export_btn.clicked.connect(self._terr_export_html)
         row.addWidget(self._terr_export_btn)
         # Mode-switch buttons: leave the Territory review to EDIT the LV or the
         # coronary tree, then come back (re-enter Territory re-computes).
@@ -10585,6 +10582,113 @@ class CTViewer(CPRMixin, AbstractViewer):
     def _terr_toggle_thick(self, mode) -> None:
         self._lvv_set_thick_mode(mode)
         self._terr_bar_sync()
+
+    def _terr_export_html(self) -> None:
+        """Export the VR model (perfusion-territory coloured surfaces + coronary
+        tubes) as a SELF-CONTAINED .html (drag to spin, works offline in any
+        browser) — or a .glb. Mac has no VTK, so instead of grabbing a 3-D scene
+        we rebuild the geometry from the data via the shared pipeline: the
+        territory label volume → smooth iso-surfaces (marching cubes + Taubin),
+        the coronary overlay centrelines → swept tubes. Needs scikit-image."""
+        import os
+        import traceback
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox, QApplication
+        from PyQt6.QtCore import Qt as _Qt
+
+        lab = getattr(self, "_terr_mask_vol", None)
+        colors = getattr(self, "_terr_colors", None)
+        if lab is None or not colors:
+            QMessageBox.information(
+                self.window(), t("VR書き出し"),
+                t("テリトリーの VR モデルがありません。先に CT Territory を表示してください。"))
+            return
+        try:
+            import skimage  # noqa: F401
+        except Exception:                                # noqa: BLE001
+            QMessageBox.warning(
+                self.window(), t("VR書き出し"),
+                t("3D 書き出しには scikit-image が必要です。ターミナルで次を実行してください:\n"
+                  "  pip3 install scikit-image\n（または pip3 install -r requirements-mac.txt）"))
+            return
+
+        # Coronary tubes from the same overlay the VR draws (skip the grey /
+        # unconnected #888888 lines the VR also hides).
+        vessels = []
+        cp = getattr(self, "_coro_params", None) or {}
+        base_d = max(0.1, float(cp.get("tube_diameter_mm", 1.0)))
+        lm_ratio = float(cp.get("lm_ratio", 1.5))
+        for ves in (getattr(self, "_coro_overlay", None) or []):
+            pts = ves.get("points")
+            if pts is None or len(pts) < 2:
+                continue
+            if (not ves.get("root")
+                    or str(ves.get("color", "")).lower() in ("#888888", "#888")):
+                continue
+            r, g, b = _hex_to_rgb(ves.get("color"))
+            diam = base_d * (lm_ratio if ves.get("role") == "LM" else 1.0)
+            vessels.append({"points": np.asarray(pts, float),
+                            "color": (r / 255.0, g / 255.0, b / 255.0, 1.0),
+                            "radius": max(0.3, diam * 0.5),
+                            "name": str(ves.get("name", "vessel"))})
+
+        # Territory colours → 0..1 RGBA (they already are, but guard 0..255).
+        cols01 = []
+        for c in colors:
+            cc = [float(x) for x in c]
+            if max(cc[:3]) > 1.5:
+                cc = [cc[0] / 255.0, cc[1] / 255.0, cc[2] / 255.0] + cc[3:]
+            cols01.append(tuple(cc))
+
+        meta = self._lv_series_meta() if hasattr(self, "_lv_series_meta") else {}
+        parts = [str(meta.get("date", "") or ""),
+                 ("Se" + str(meta.get("series_number")))
+                 if meta.get("series_number") else ""]
+        stem = "_".join(s for s in parts if s) or "territory"
+        stem += "_VR"
+        src = getattr(self, "_src_dir", "") or ""
+        default = os.path.join(src, stem + ".html") \
+            if src and os.path.isdir(src) else stem + ".html"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("VR を書き出し (HTML / GLB)"), default,
+            t("自己完結 HTML (*.html);;glTF Binary (*.glb)"))
+        if not path:
+            return
+
+        subtitle = " / ".join(s for s in [
+            str(meta.get("date", "") or ""),
+            str(meta.get("patient", "") or ""),
+            ("Se" + str(meta.get("series_number")))
+            if meta.get("series_number") else ""] if s)
+        summary = getattr(self, "_terr_summary_text", "") or ""
+
+        QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+        try:
+            from multi_dicomviewer.core import vr_html_export as vx
+            out, stats = vx.export_vr_html(
+                path, lab, cols01, self._dims, vessels,
+                title=t("Multi-DICOMviewer VR"),
+                subtitle=subtitle,
+                extras={"perfusion_summary": summary,
+                        "generator": "Multi-DICOMviewer"})
+        except Exception as exc:                         # noqa: BLE001
+            QApplication.restoreOverrideCursor()
+            traceback.print_exc()
+            QMessageBox.warning(self.window(), t("VR書き出し"),
+                                t("書き出しに失敗しました: {e}", e=str(exc)))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if out is None:
+            QMessageBox.information(
+                self.window(), t("VR書き出し"),
+                t("書き出せるテリトリー / 血管がありませんでした。"))
+            return
+        QMessageBox.information(
+            self.window(), t("VR書き出し"),
+            t("書き出しました: {p}\nテリトリー {a} / 血管 {b}",
+              p=os.path.basename(out),
+              a=stats.get("territories", 0), b=stats.get("vessels", 0)))
 
     def _terr_bar_sync(self) -> None:
         """Show the Territory bar (and hide the LV + Coronary bars, grey the 2D
