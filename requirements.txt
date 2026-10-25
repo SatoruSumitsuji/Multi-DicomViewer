@@ -12,6 +12,13 @@ numpy>=2.0
 # failed there without it).
 scipy>=1.11
 
+# VR 3D export (Territory bar 「VR書き出し」 → self-contained HTML / .glb).
+# Both platforms now use the shared core/vr_html_export.py pipeline, which turns
+# the territory label volume into a smooth surface with scikit-image's
+# marching_cubes (the former Windows VTK glTF exporter was removed). Without it
+# the VR export button reports that scikit-image must be installed.
+scikit-image>=0.22
+
 # Compressed DICOM transfer syntaxes (XA cine is often JPEG / JPEG-LS / JPEG2000)
 pylibjpeg>=2.0
 pylibjpeg-libjpeg>=2.1
