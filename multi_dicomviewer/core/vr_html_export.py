@@ -246,6 +246,31 @@ def tube_mesh(polyline, radius, *, sides=_TUBE_SIDES):
     return verts.astype(np.float32), np.asarray(faces, np.int64)
 
 
+def sphere_mesh(center, radius, *, n_lat=12, n_lon=18):
+    """A small UV sphere (for a Territory target marker). Returns (verts, faces)
+    in world mm, centred on *center*."""
+    cx, cy, cz = (float(c) for c in center)
+    r = float(radius)
+    lat = np.linspace(0.0, np.pi, n_lat + 1)
+    lon = np.linspace(0.0, 2 * np.pi, n_lon, endpoint=False)
+    TH, LO = np.meshgrid(lat, lon, indexing="ij")        # (n_lat+1, n_lon)
+    X = cx + r * np.sin(TH) * np.cos(LO)
+    Y = cy + r * np.sin(TH) * np.sin(LO)
+    Z = cz + r * np.cos(TH)
+    verts = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()]).astype(np.float32)
+    faces = []
+    for i in range(n_lat):
+        for j in range(n_lon):
+            j2 = (j + 1) % n_lon
+            a = i * n_lon + j
+            b = i * n_lon + j2
+            c = (i + 1) * n_lon + j
+            d = (i + 1) * n_lon + j2
+            faces.append([a, c, d])
+            faces.append([a, d, b])
+    return verts, np.asarray(faces, np.int64)
+
+
 # ===========================================================================
 # GLB writer (pure numpy)
 # ===========================================================================
@@ -381,16 +406,37 @@ def _webgl_asset(name: str) -> str:
         return f.read()
 
 
+def _esc(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
 def self_contained_html(glb_bytes: bytes, *, title="Multi-DICOMviewer VR",
-                        subtitle="", bg="#0b0d10") -> str:
-    """Wrap *glb_bytes* in one offline HTML with an orbit viewer (drag to
-    rotate, scroll to zoom, double-click to reset, Spin toggle)."""
+                        subtitle="", bg="#0b0d10", summary_tr="",
+                        summary_br="", targets=(), pbasis=None) -> str:
+    """Wrap *glb_bytes* in one offline HTML with an orbit viewer.
+
+    Reproduces the in-app VR corner readouts: *summary_tr* (top-right, the
+    per-system perfusion summary), *summary_br* (bottom-right, the per-target
+    list), the Territory *targets* as number labels that track their 3-D marker,
+    and — when *pbasis* (3×3 volume→patient) is given — a LIVE LAO/RAO · CRA/CAU
+    readout that updates as the model turns. Controls: drag=rotate, wheel=zoom,
+    double-click / 視点リセット=reset, 自動回転 toggle, 背景 cycle."""
     three_js = _webgl_asset("three.min.js")
     orbit_js = _webgl_asset("OrbitControls.js")
     gltf_js = _webgl_asset("GLTFLoader.js")
     glb_b64 = base64.b64encode(glb_bytes).decode("ascii")
-    sub = subtitle.replace("<", "&lt;").replace(">", "&gt;")
-    ttl = title.replace("<", "&lt;").replace(">", "&gt;")
+    sub = _esc(subtitle)
+    ttl = _esc(title)
+    tr_html = _esc(summary_tr)
+    br_html = _esc(summary_br)
+    tg_json = json.dumps([
+        {"x": float(t["point"][0]), "y": float(t["point"][1]),
+         "z": float(t["point"][2]), "n": str(t.get("n", "")),
+         "color": t.get("color_hex", "#ea9999")}
+        for t in (targets or []) if t.get("point") is not None])
+    pb_json = json.dumps([[float(x) for x in row] for row in pbasis]) \
+        if pbasis is not None else "null"
 
     return f"""<!doctype html>
 <html lang="ja">
@@ -402,32 +448,49 @@ def self_contained_html(glb_bytes: bytes, *, title="Multi-DICOMviewer VR",
   html,body{{margin:0;height:100%;background:{bg};color:#e8e8e8;
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}}
   #c{{position:fixed;inset:0}}
-  #hud{{position:fixed;top:10px;left:12px;font-size:13px;line-height:1.5;
-    text-shadow:0 1px 3px #000;pointer-events:none;max-width:60vw}}
-  #hud b{{font-size:15px}}
+  .hud{{position:fixed;text-shadow:0 1px 3px #000,0 0 2px #000;pointer-events:none;
+    white-space:pre;font-size:13px;line-height:1.45}}
+  #tl{{top:10px;left:12px;max-width:52vw}}
+  #tl b{{font-size:15px}}
+  #tr{{top:10px;right:12px;text-align:left;color:#ffd900;font-family:monospace;
+    font-weight:bold;max-width:52vw}}
+  #br{{bottom:40px;right:12px;text-align:left;color:#ffd900;font-family:monospace;
+    font-weight:bold;max-width:52vw}}
+  #angio{{bottom:12px;left:50%;transform:translateX(-50%);color:#ffd900;
+    font-family:monospace;font-size:17px;font-weight:bold}}
+  #labels{{position:fixed;inset:0;pointer-events:none;overflow:hidden}}
+  #labels span{{position:absolute;font-family:monospace;font-weight:bold;
+    font-size:15px;text-shadow:0 1px 3px #000,0 0 2px #000,1px 0 2px #000;
+    transform:translate(8px,-20px);white-space:nowrap}}
   #bar{{position:fixed;bottom:12px;left:12px;display:flex;gap:8px}}
   #bar button{{background:#1f2630;color:#e8e8e8;border:1px solid #39434f;
     border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer}}
   #bar button:hover{{background:#2b3440}}
   #bar button.on{{background:#2d5fa8;border-color:#3f7ad0}}
-  #tip{{position:fixed;bottom:12px;right:14px;font-size:12px;color:#9aa4b0;
-    text-shadow:0 1px 3px #000}}
+  #tip{{position:fixed;top:10px;left:50%;transform:translateX(-50%);font-size:12px;
+    color:#9aa4b0;text-shadow:0 1px 3px #000}}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><b>{ttl}</b><br>{sub}</div>
+<div id="labels"></div>
+<div class="hud" id="tl"><b>{ttl}</b>{(chr(10) + sub) if sub else ""}</div>
+<div class="hud" id="tr">{tr_html}</div>
+<div class="hud" id="br">{br_html}</div>
+<div class="hud" id="angio"></div>
+<div id="tip">ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動</div>
 <div id="bar">
   <button id="spin" class="on">自動回転: ON</button>
   <button id="reset">視点リセット</button>
   <button id="bgbtn">背景</button>
 </div>
-<div id="tip">ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動</div>
 <script>{three_js}</script>
 <script>{orbit_js}</script>
 <script>{gltf_js}</script>
 <script>
 const GLB_B64 = "{glb_b64}";
+const TARGETS = {tg_json};
+const PBASIS = {pb_json};
 function b64ToArrayBuffer(b64){{
   const bin = atob(b64); const len = bin.length;
   const bytes = new Uint8Array(len);
@@ -453,27 +516,38 @@ const fill = new THREE.DirectionalLight(0xffffff, 0.45); fill.position.set(-1,-0
 const rim = new THREE.DirectionalLight(0xffffff, 0.35); rim.position.set(0,1,-1);
 scene.add(key); scene.add(fill); scene.add(rim);
 
+const home = new THREE.Vector3(100,60,120);
+const modelCenter = new THREE.Vector3();   // model centre offset (subtracted)
+let modelRadius = 100;
+
+// Target number labels (DOM, track their 3-D marker).
+const labelBox = document.getElementById('labels');
+const labelEls = TARGETS.map(t=>{{
+  const el = document.createElement('span');
+  el.textContent = t.n; el.style.color = t.color;
+  labelBox.appendChild(el); return el;
+}});
+
 const loader = new THREE.GLTFLoader();
 loader.parse(b64ToArrayBuffer(GLB_B64), '', (gltf)=>{{
   const obj = gltf.scene;
-  // Centre + frame the model.
   const box = new THREE.Box3().setFromObject(obj);
-  const c = box.getCenter(new THREE.Vector3());
+  box.getCenter(modelCenter);
   const size = box.getSize(new THREE.Vector3());
-  obj.position.sub(c);
+  obj.position.sub(modelCenter);
   scene.add(obj);
-  const radius = 0.5*Math.max(size.x,size.y,size.z) || 100;
-  const dist = radius / Math.sin((45*Math.PI/180)/2);
+  modelRadius = 0.5*Math.max(size.x,size.y,size.z) || 100;
+  const dist = modelRadius / Math.sin((45*Math.PI/180)/2);
   camera.position.set(dist*0.7, dist*0.4, dist*0.9);
-  camera.near = radius/100; camera.far = radius*100; camera.updateProjectionMatrix();
+  camera.near = modelRadius/100; camera.far = modelRadius*100;
+  camera.updateProjectionMatrix();
   controls.target.set(0,0,0); controls.update();
   home.copy(camera.position);
 }}, (err)=>{{
-  document.getElementById('hud').innerHTML += '<br><span style="color:#ff8">読み込みエラー</span>';
+  document.getElementById('tl').innerHTML += '\\n<span style="color:#ff8">読み込みエラー</span>';
   console.error(err);
 }});
 
-const home = new THREE.Vector3(100,60,120);
 function resize(){{
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setSize(w,h,false); camera.aspect=w/h; camera.updateProjectionMatrix();
@@ -485,19 +559,56 @@ document.getElementById('spin').onclick = (e)=>{{
   e.target.classList.toggle('on', controls.autoRotate);
   e.target.textContent = '自動回転: ' + (controls.autoRotate?'ON':'OFF');
 }};
-document.getElementById('reset').onclick = ()=>{{
-  camera.position.copy(home); controls.target.set(0,0,0); controls.update();
-}};
-renderer.domElement.addEventListener('dblclick', ()=>{{
-  camera.position.copy(home); controls.target.set(0,0,0); controls.update();
-}});
+function resetView(){{ camera.position.copy(home); controls.target.set(0,0,0); controls.update(); }}
+document.getElementById('reset').onclick = resetView;
+renderer.domElement.addEventListener('dblclick', resetView);
 document.getElementById('bgbtn').onclick = ()=>{{
   bgIdx = (bgIdx+1)%bgColors.length;
   scene.background = new THREE.Color(bgColors[bgIdx]);
 }};
+
+// --- C-arm LAO/RAO · CRA/CAU readout (same math as the app) ----------------
+const angioEl = document.getElementById('angio');
+function updateAngio(){{
+  if(!PBASIS){{ return; }}
+  // viewing normal = toward the camera (world) = app's "back"
+  const d = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+  const nx = PBASIS[0][0]*d.x + PBASIS[0][1]*d.y + PBASIS[0][2]*d.z;
+  const ny = PBASIS[1][0]*d.x + PBASIS[1][1]*d.y + PBASIS[1][2]*d.z;
+  const nz = PBASIS[2][0]*d.x + PBASIS[2][1]*d.y + PBASIS[2][2]*d.z;
+  const axial = Math.hypot(nx, ny);
+  const prim = axial<1e-9 ? 0 : Math.round(Math.atan2(nx, -ny)*180/Math.PI);
+  const sec = Math.round(Math.atan2(nz, axial)*180/Math.PI);
+  const lao = prim>=0 ? ('LAO'+prim) : ('RAO'+(-prim));
+  const cra = sec>=0 ? ('CRA'+sec) : ('CAU'+(-sec));
+  angioEl.textContent = lao+' '+cra;
+}}
+
+// --- target number labels --------------------------------------------------
+const _p = new THREE.Vector3();
+function updateLabels(){{
+  const w = window.innerWidth, h = window.innerHeight;
+  const viewDir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+  for(let i=0;i<TARGETS.length;i++){{
+    const t = TARGETS[i];
+    _p.set(t.x-modelCenter.x, t.y-modelCenter.y, t.z-modelCenter.z);
+    // Hide a marker on the far side of the heart (approx: its outward dir
+    // from the model centre points away from the camera).
+    const facing = _p.x*viewDir.x + _p.y*viewDir.y + _p.z*viewDir.z;
+    const proj = _p.clone().project(camera);
+    const onscreen = proj.z<1 && Math.abs(proj.x)<1.05 && Math.abs(proj.y)<1.05;
+    if(facing < -0.15*_p.length() || !onscreen){{ labelEls[i].style.display='none'; continue; }}
+    labelEls[i].style.display='block';
+    labelEls[i].style.left = ((proj.x*0.5+0.5)*w)+'px';
+    labelEls[i].style.top  = ((-proj.y*0.5+0.5)*h)+'px';
+  }}
+}}
+
 (function loop(){{
   requestAnimationFrame(loop);
   controls.update();
+  updateAngio();
+  updateLabels();
   renderer.render(scene, camera);
 }})();
 </script>
@@ -510,7 +621,7 @@ document.getElementById('bgbtn').onclick = ()=>{{
 # High-level orchestration (shared by both viewers)
 # ===========================================================================
 def build_vr_glb(label_vol, colors, spacing_xyz, vessels=(), *,
-                 territory_alpha=1.0, generator="Multi-DICOMviewer",
+                 targets=(), territory_alpha=1.0, generator="Multi-DICOMviewer",
                  extras=None):
     """Build GLB bytes from a territory label volume + coronary centrelines.
 
@@ -519,9 +630,11 @@ def build_vr_glb(label_vol, colors, spacing_xyz, vessels=(), *,
     *spacing_xyz*: (sx, sy, sz) mm/voxel.
     *vessels*    : iterable of dicts ``{"points":(N,3) world mm, "color":rgba,
                    "radius":mm, "name":str}`` for coronary tubes.
+    *targets*    : iterable of dicts ``{"point":(x,y,z) world mm, "color":rgba,
+                   "radius":mm, "n":str}`` → a coloured marker sphere each.
     Returns ``(glb_bytes, stats)`` where stats lists what was built."""
     prims = []
-    stats = {"territories": 0, "vessels": 0, "verts": 0, "faces": 0}
+    stats = {"territories": 0, "vessels": 0, "targets": 0, "verts": 0, "faces": 0}
     lab = np.rint(np.asarray(label_vol)).astype(np.int32) if label_vol is not None else None
     if lab is not None and colors:
         for i, c in enumerate(colors, 1):
@@ -561,25 +674,48 @@ def build_vr_glb(label_vol, colors, spacing_xyz, vessels=(), *,
         stats["vessels"] += 1
         stats["verts"] += len(verts)
         stats["faces"] += len(faces)
+    for tg in (targets or []):
+        P = tg.get("point")
+        if P is None:
+            continue
+        r = float(tg.get("radius", 2.5))
+        verts, faces = sphere_mesh(np.asarray(P, float).reshape(3), r)
+        col = tg.get("color", (0.92, 0.6, 0.6, 1.0))
+        col = [float(col[0]), float(col[1]), float(col[2]),
+               float(col[3]) if len(col) > 3 else 1.0]
+        prims.append({"positions": verts, "indices": faces, "color": col,
+                      "name": "target_" + str(tg.get("n", "")), "blend": False,
+                      "double_sided": True, "roughness": 0.4, "metallic": 0.0})
+        stats["targets"] += 1
+        stats["verts"] += len(verts)
+        stats["faces"] += len(faces)
     if not prims:
         return None, stats
     return build_glb(prims, generator=generator, extras=extras), stats
 
 
 def export_vr_html(path, label_vol, colors, spacing_xyz, vessels=(), *,
+                   targets=(), summary_tr="", summary_br="", pbasis=None,
                    title="Multi-DICOMviewer VR", subtitle="", extras=None):
     """Full pipeline → write a self-contained ``.html`` (or ``.glb`` if *path*
-    ends in .glb). Returns ``(written_path, stats)`` or ``(None, stats)`` when
-    there was nothing to export."""
+    ends in .glb).
+
+    *targets* items carry both the 3-D marker (``point``, ``color`` rgba,
+    ``radius``) and its label (``n``, ``color_hex``). *summary_tr*/*summary_br*
+    are the top-right / bottom-right readout texts; *pbasis* (3×3 volume→patient)
+    drives the live LAO/CRA readout. Returns ``(written_path, stats)`` or
+    ``(None, stats)`` when there was nothing to export."""
     glb, stats = build_vr_glb(label_vol, colors, spacing_xyz, vessels,
-                              extras=extras)
+                              targets=targets, extras=extras)
     if glb is None:
         return None, stats
     if str(path).lower().endswith(".glb"):
         with open(path, "wb") as f:
             f.write(glb)
         return path, stats
-    html = self_contained_html(glb, title=title, subtitle=subtitle)
+    html = self_contained_html(glb, title=title, subtitle=subtitle,
+                               summary_tr=summary_tr, summary_br=summary_br,
+                               targets=targets, pbasis=pbasis)
     with open(path, "w", encoding="utf-8") as f:
         f.write(html)
     return path, stats
