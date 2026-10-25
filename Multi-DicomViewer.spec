@@ -65,6 +65,16 @@ try:
 except Exception:
     cv2_datas, cv2_binaries, cv2_hidden = [], [], []
 
+# --- scikit-image (VR 3D export → marching_cubes; Mac build only, Windows uses
+#     VTK). Lazy submodule loading + a compiled _marching_cubes extension that
+#     PyInstaller misses without collect_all. Guarded so a build environment
+#     without scikit-image (e.g. current Windows) still packages — the VR export
+#     then reports it must be installed. ---
+try:
+    ski_datas, ski_binaries, ski_hidden = collect_all("skimage")
+except Exception:
+    ski_datas, ski_binaries, ski_hidden = [], [], []
+
 # --- pydicom encoders/handlers (plugin discovery) ---
 pyd_datas, pyd_binaries, pyd_hidden = collect_all("pydicom")
 
@@ -75,7 +85,14 @@ iiof_datas, iiof_binaries, iiof_hidden = collect_all("imageio_ffmpeg")
 
 datas = (
     ct_datas + plj_datas + pllj_datas + plop_datas + ic_datas + cv2_datas
+    + ski_datas
     + pyd_datas + iio_datas + iiof_datas
+    # Vendored three.js viewer (three.min.js + OrbitControls + GLTFLoader),
+    # inlined into the self-contained VR-export HTML (core/vr_html_export.py).
+    + [(
+        "multi_dicomviewer/resources/webgl/*.js",
+        "multi_dicomviewer/resources/webgl",
+    )]
     # Resources shipped with the app — the DICOM-aware Rupture-Predictor
     # HTML is launched from Tools and must be present in the bundle.
     # Preserve the source-tree path so the dev and bundle layouts match.
@@ -94,7 +111,8 @@ datas = (
 )
 binaries = (
     ct_binaries + plj_binaries + pllj_binaries + plop_binaries
-    + ic_binaries + cv2_binaries + pyd_binaries + iio_binaries + iiof_binaries
+    + ic_binaries + cv2_binaries + ski_binaries + pyd_binaries
+    + iio_binaries + iiof_binaries
 )
 hiddenimports = (
     ct_hidden
@@ -103,6 +121,7 @@ hiddenimports = (
     + plop_hidden
     + ic_hidden
     + cv2_hidden
+    + ski_hidden
     + pyd_hidden
     + iio_hidden
     + iiof_hidden
