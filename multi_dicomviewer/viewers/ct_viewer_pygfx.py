@@ -12235,6 +12235,14 @@ class CTViewer(CPRMixin, AbstractViewer):
               "the left-atrium side and snap the two basal ends onto the MV "
               "plane line."))
         self._lv_fit_mv_btn.clicked.connect(self._lv_fit_mv)
+        # HU補正: snap the traced Epi border to the epicardial edge in the CT where
+        # the HU gradient is clear; leave it on the manual spline where the HU
+        # difference is small (inferior wall). Shared core.lv_epi_autocontour.
+        self._lv_husnap_btn = FitButton(t("HU補正"))
+        self._lv_husnap_btn.setHelpToolTip(
+            t("Epi 線を CT 値の心外膜エッジに自動適合します（前壁・側壁・下壁で HU 差が "
+              "明瞭な所）。HU 差が小さい所は手動線のまま。実行後に長軸で add point 微修正を。"))
+        self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
         self._lv_redo_btn = FitButton(t("Clear"))
@@ -12242,9 +12250,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn = FitButton(t("Exit"))
         self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
         for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
-                  self._lv_fit_mv_btn, self._lv_redo_btn, self._lv_exit_btn,
-                  self._lv_region_btn, self._lv_border_btn, self._lv_vol_btn,
-                  self._lv_stl_btn):
+                  self._lv_fit_mv_btn, self._lv_husnap_btn, self._lv_redo_btn,
+                  self._lv_exit_btn, self._lv_region_btn, self._lv_border_btn,
+                  self._lv_vol_btn, self._lv_stl_btn):
             r2t.addWidget(b)
         row2.addWidget(self._lv_grp_r2_trace)
         row2.addWidget(self._lv_grp_r2_blood)     # built by _build_lvv_bar
@@ -12349,7 +12357,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
-            self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn]
+            self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn,
+            self._lv_husnap_btn]
         # Explicit INITIAL group visibility (no sub-mode active): the idempotent
         # _vis() can't take effect at build time (isVisible() is False before the
         # parent is shown). The initial state is the clean 2-row selector — every
@@ -13661,7 +13670,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         axis_dir = np.asarray(ax.axis, float)
         axis_dir = axis_dir / (np.linalg.norm(axis_dir) or 1.0)
         radial0 = np.asarray(ax.radial0, float)
-        n_planes = 6
+        n_planes = 8
         along_base = float((np.asarray(mv[0], float) - apex) @ axis_dir)
         if along_base <= 6.0:
             QMessageBox.information(
@@ -15414,7 +15423,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lvv_deactivate()            # contour LV and LV Vol are exclusive
-        self._lv = {"model": LVModel(n_planes=6), "phase": "align",
+        self._lv = {"model": LVModel(n_planes=8), "phase": "align",
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
@@ -17830,6 +17839,42 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._lv_result_lines = lines
                 self._lv_sync_buttons()
         self._lv_update_text()
+
+    def _lv_hu_snap_epi(self) -> None:
+        """HU補正: snap the traced Epi border to the epicardial edge in the CT
+        where the HU gradient is clear (前壁/側壁/下壁), leaving it on the manual
+        spline where the HU difference is small (inferior wall). Then the user
+        refines on the long axis. Shared core.lv_epi_autocontour."""
+        from PyQt6.QtWidgets import QMessageBox, QApplication
+        from PyQt6.QtCore import Qt as _Qt
+        lv = getattr(self, "_lv", None)
+        model = lv.get("model") if lv else None
+        if (self._vol is None or model is None
+                or getattr(model, "epi_axis", None) is None
+                or not getattr(model, "epi_planes", None)):
+            QMessageBox.information(
+                self.window(), t("Epi HU補正"),
+                t("先に Epi をトレースしてください（MV / AoV / Apex 設定後）。"))
+            return
+        QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+        try:
+            from multi_dicomviewer.core import lv_epi_autocontour as ea
+            stats = ea.refine_epi_model(self._vol, self._dims, model)
+            try:
+                model.build()
+            except Exception:                            # noqa: BLE001
+                pass
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._lv_invalidate_volume()
+        self._lv_rebuild_measures()
+        self._lv_redraw_all()
+        QMessageBox.information(
+            self.window(), t("Epi HU補正"),
+            t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
+              "HU 差が小さい所は手動線のままです。長軸で add point 微修正してください。",
+              p=stats.get("planes", 0), n=stats.get("refined_pts", 0),
+              w=stats.get("mean_weight", 0.0)))
 
     def _lv_rebuild_measures(self) -> None:
         lv = self._lv
