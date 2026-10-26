@@ -270,6 +270,11 @@ def _tris_pd(tris) -> vtkPolyData:
 
 #: Idle measure-vertex dot size (physical px, VTK PointSize).
 _MEAS_PT_PX = 11.0
+#: CrossLine CENTRE grab radius, in normalised pane space (1 = centre→edge).
+#: A press within this circle of the crosshair intersection grabs the centre to
+#: drag / recentre the cross-section. Sized a touch larger than the green ▲ /
+#: yellow ○ centre markers so the centre is easy to catch.
+_CROSS_CENTER_R = 0.08
 #: Off-plane hollow-ring OUTER radius (physical px). Kept a touch SMALLER than
 #: the in-plane dot's radius (_MEAS_PT_PX/2) so the in-range filled dot reads as
 #: the more prominent of the two.
@@ -1474,8 +1479,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._owner._measure_release()
         # Commit an intersection recentre: the point held under the cursor
         # during the drag now jumps to the image centre (the background was
-        # fixed while dragging). Done on RELEASE only.
-        if self._cross and self._owner._cross_mode == "center":
+        # fixed while dragging). Done on RELEASE only, and ONLY if the centre was
+        # actually DRAGGED — a plain click in the centre zone must not recentre
+        # (that would fight the double-click recentre and jump the view on a
+        # stray click); _gesture_moved is True only once _cross_move ran.
+        if (self._cross and self._owner._cross_mode == "center"
+                and getattr(self._owner, "_gesture_moved", False)):
             self._owner._recenter(
                 self._which, e.position().x(), e.position().y())
         self._meas_drag = False
@@ -21589,6 +21598,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
+        # Central CIRCULAR zone around the intersection → grab the crosshair
+        # CENTRE and drag it to move / recentre the cross-section. Bringing the
+        # cursor within this circle (radius = _CROSS_CENTER_R, sized to the green
+        # ▲ / yellow ○ centre markers) catches the centre. A plain click here
+        # no-ops (see mouseReleaseEvent — only a DRAG recentres), so a
+        # double-click still recentres to the clicked point without moving twice.
+        if math.hypot(rx, ry) < _CROSS_CENTER_R:
+            return (True, "H", "center")
         band = 0.05                           # perpendicular catch = 2.5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
@@ -21598,10 +21615,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return (False, None, None)
-        # The central square (BOTH bands overlap = the crossline INTERSECTION).
-        # Recentring is now DOUBLE-CLICK ONLY (unified, per request), so the
-        # intersection is no longer a click/drag grab — fall through to the tool
-        # here. The lines themselves (only one band) keep move / rotate.
+        # Near the intersection both bands overlap, but that region is already
+        # the circular centre zone handled above; a single caught band out here
+        # is the line itself → move (inner half) / rotate (outer half).
         if on_h and on_v:
             return (False, None, None)
         # The ▲ markers sit on the HORIZONTAL crossline → green-▲ line.
