@@ -111,6 +111,12 @@ from multi_dicomviewer.ui.measure_style_menu import (
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
 _SPIN_SIGN = 1.0
 
+#: CrossLine CENTRE grab radius, in normalised pane space (1 = centre→edge). A
+#: press within this circle of the crosshair intersection grabs the centre to
+#: drag / recentre the cross-section; a subtle ring marks it. Parity with the
+#: VTK viewer (0.08 × 2/3).
+_CROSS_CENTER_R = 0.053
+
 # Slab-MIP level-of-detail. The slab MIP is a CPU max-over-N-oblique-planes
 # image (see _compute_slab_qimage); cost scales with sample columns² × planes.
 # At rest we build it full quality; DURING an interactive drag/page we build a
@@ -1310,7 +1316,11 @@ class _Overlay(QWidget):
         p.setPen(hi_pen if (both or hl_line == "V") else base_pen)
         p.drawLine(S(ccx - half * uv[0], ccy - half * uv[1]),
                    S(ccx + half * uv[0], ccy + half * uv[1]))
-        if hi is not None and hi[1] in ("rotate", "move", "center"):
+        if hi is not None and hi[1] == "center":
+            # Centre grab: a subtle RING at the H/V intersection (no move arrows),
+            # sized to the grab circle (_CROSS_CENTER_R). Parity with VTK.
+            self._paint_center_ring(p, S, ccx, ccy, v._ps[key])
+        elif hi is not None and hi[1] in ("rotate", "move"):
             self._paint_gesture_arrow(p, S, ccx, ccy, v._ps[key],
                                       uh, uv, hi[0], hi[1], w, h)
 
@@ -1404,6 +1414,23 @@ class _Overlay(QWidget):
             by = (-tx) * sa + (-ty) * ca
             out.append([tip, (tip[0] + bx * hs, tip[1] + by * hs)])
         return out
+
+    def _paint_center_ring(self, p, S, ccx, ccy, ps):
+        """A subtle RING at the crosshair intersection — the 'grab the CENTRE to
+        move it' handle shown (instead of the move arrows) while the centre zone
+        is caught. Radius = the centre grab circle (_CROSS_CENTER_R·ps), so it
+        also shows how big the catch zone is. Dim amber + light halo."""
+        r = _CROSS_CENTER_R * ps
+        n = 36
+        pts = [S(ccx + r * math.cos(2.0 * math.pi * i / n),
+                 ccy + r * math.sin(2.0 * math.pi * i / n))
+               for i in range(n + 1)]
+        poly = QPolygonF(pts)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(0, 0, 0, 100), 2.2))          # light halo
+        p.drawPolyline(poly)
+        p.setPen(QPen(QColor(255, 217, 0, 115), 1.0))      # dim amber (~45%)
+        p.drawPolyline(poly)
 
     def _paint_gesture_arrow(self, p, S, ccx, ccy, ps, uh, uv, line, mode,
                              w=None, h=None):
@@ -3716,7 +3743,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._cpr_rot_end()
         # Commit an intersection recentre: the point held under the cursor during
         # the drag jumps to the image centre in both panes (done on RELEASE).
-        if self._cross_grab and self._cross_mode == "center":
+        if (self._cross_grab and self._cross_mode == "center"
+                and getattr(self, "_gesture_moved", False)):
             self._recenter(key, ev["x"], ev["y"])
         # Commit the drag (Zoom/Move/Rotate/Spin/Thick/W-L or a centreline
         # move·rotate) as one Ctrl+Z step. A click/double-click recentre records
@@ -7558,6 +7586,12 @@ class CTViewer(CPRMixin, AbstractViewer):
         uh = _ndir(math.cos(a), math.sin(a))          # along the H crossline
         uv = _ndir(-math.sin(a), math.cos(a))         # along the V crossline
         rx, ry = (sx - cx) / hx, (sy - cy) / hy
+        # Central CIRCULAR zone around the intersection → grab the crosshair
+        # CENTRE and drag it to move / recentre. A plain click no-ops (release
+        # gated on _gesture_moved), so the double-click recentre still works and
+        # nothing moves twice. Parity with the VTK viewer.
+        if math.hypot(rx, ry) < _CROSS_CENTER_R:
+            return (True, "C", "center")        # "C" = the intersection (both axes)
         band = 0.05                           # perpendicular catch = 2.5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
@@ -7567,9 +7601,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         on_h, on_v = d_to_h < band, d_to_v < band
         if not (on_h or on_v):
             return (False, None, None)
-        # BOTH bands overlap → the crossline INTERSECTION. Recentring is now
-        # DOUBLE-CLICK ONLY (unified, per request), so the intersection is no
-        # longer a click/drag grab — fall through to the tool here.
+        # Near the centre both bands overlap, but that is the circular centre zone
+        # handled above; a single caught band out here is the line itself.
         if on_h and on_v:
             return (False, None, None)
         grab_h = on_h
