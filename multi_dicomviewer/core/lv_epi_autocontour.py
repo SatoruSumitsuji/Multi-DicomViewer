@@ -268,29 +268,25 @@ _SAX_LEVEL_FRACS = (0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 1.0)
 
 
 def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
-                          level_fracs=_SAX_LEVEL_FRACS, locked_pts=None):
-    """Short-axis SPLINE correction of the Epi surface (circle/ellipse removed).
+                          level_fracs=_SAX_LEVEL_FRACS):
+    """Short-axis SPLINE correction of the Epi surface — PURELY GEOMETRIC (no HU).
 
-    Takes short-axis rings at *level_fracs* of the apex→base length (default: the
-    7-level, apex-/base-dense scheme in ``_SAX_LEVEL_FRACS``). On each ring cast
-    rays at the model's meridian angles, detect the epicardial edge
-    (``detect_epi_radius``), blend it with the current (manual) radius by the
-    detection confidence, and low-pass the ring circumferentially (keeps the true
-    shape, keeps the manual line where the HU edge is weak). The rings become the
-    contour's control points directly — so the long-axis pane shows only ~6 edit
-    points per wall, not a dense polyline. The apex tip stays manual; a ring with
-    too little signal (or a meridian with none) falls back to the manual radius,
-    so a poor ring never corrupts the surface.
-
-    *locked_pts* ((N,3) world mm, optional): points the user MOVED BY HAND. Each
-    pins the nearest (ring level, meridian) control point to its EXACT position,
-    so re-running the correction never re-snaps a hand-edited point back to the HU
-    edge — the manual move is preserved while the rest of the surface is still
-    corrected. Returns a stats dict."""
-    prm = prm or EpiSnapParams()
-    stats = {"mode": "spline", "levels": 0, "planes": 0, "locked": 0}
+    The user traces/edits the Epi on the long axis (incl. the long-axis range
+    handle); this harmonises the result CIRCUMFERENTIALLY. At short-axis rings at
+    *level_fracs* of the apex→base length (default: the 7-level, apex-/base-dense
+    scheme ``_SAX_LEVEL_FRACS``) it samples the CURRENT contour radius at each
+    meridian (so every hand edit is INCLUDED as input, not re-detected) and
+    low-passes the ring circumferentially (keep harmonics 0..*harmonics*) → a
+    smooth closed short-axis shape. A manually moved point is thus blended with
+    its neighbours (the user asked for this), not pinned. The rings become the
+    contour's control points directly → the long-axis pane shows only ~6 edit
+    points per wall, not a dense polyline. The apex tip stays as traced. No HU:
+    accuracy comes from the manual trace + long-axis editing, which the HU
+    detector could not match. *vol*/*dims* are unused (kept for signature
+    parity). Returns a stats dict."""
+    stats = {"mode": "spline-geom", "levels": 0, "planes": 0}
     axis = getattr(model, "epi_axis", None)
-    if vol is None or axis is None or len(getattr(model, "epi_contours", {})) < 3:
+    if axis is None or len(getattr(model, "epi_contours", {})) < 3:
         return stats
     thetas = model.meridian_angles()                  # uniform ring angles
     nth = len(thetas)
@@ -299,52 +295,26 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
     if not amaxs:
         return stats
     amax = float(np.median(amaxs))
-    fracs = [float(f) for f in level_fracs]
-    ring_fracs = [f for f in fracs if f > 1e-6]       # non-apex correction rings
+    ring_fracs = [float(f) for f in level_fracs if f > 1e-6]   # non-apex rings
     levels = amax * np.asarray(ring_fracs)
-    ring = np.full((len(levels), nth), np.nan)        # corrected radius per level/θ
+    ring = np.full((len(levels), nth), np.nan)
 
     def _col(th):
         return int(np.argmin([abs(((t - th + 180.0) % 360.0) - 180.0)
                               for t in thetas]))
 
-    # Hand-moved points → pin the nearest (level, meridian) cell to the exact 3-D
-    # point (overrides detection AND the fit on re-run, so the manual move stays).
-    lock_cell = {}
-    for P in (locked_pts or []):
-        al_l, r_l, th_l = axis.project(np.asarray(P, float))
-        if r_l < 1e-3 or len(levels) == 0:
-            continue
-        li = int(np.argmin(np.abs(levels - al_l)))
-        lock_cell[(li, _col(th_l))] = np.asarray(P, float)
-    stats["locked"] = len(lock_cell)
-
     for li, al in enumerate(levels):
-        rdet = np.full(nth, np.nan)
-        wdet = np.zeros(nth)
-        rprior = np.full(nth, np.nan)
-        for ti, th in enumerate(thetas):
-            rp = _prior_radius(model, th, al)
-            if rp is None:
-                continue
-            rprior[ti] = rp
-            re, w = detect_epi_radius(vol, dims, axis, th, al, rp, prm)
-            rdet[ti], wdet[ti] = re, w
-        conf = np.isfinite(rdet) & (wdet > 0)
-        if int(conf.sum()) >= max(5, nth // 3):
-            rb = np.where(conf,
-                          wdet * rdet + (1.0 - wdet) * np.where(
-                              np.isfinite(rprior), rprior, rdet),
-                          rprior)
-            rb = _fill_nan_periodic(rb)
-            if np.isfinite(rb).all():
-                ring[li] = _smooth_ring(np.asarray(thetas), rb, harmonics)
-                stats["levels"] += 1
-        # Any level/meridian not corrected falls back to the manual radius.
-        miss = ~np.isfinite(ring[li])
-        ring[li][miss] = np.where(np.isfinite(rprior[miss]), rprior[miss], np.nan)
-        ring[li] = _fill_nan_periodic(ring[li])
+        r = np.array([(_prior_radius(model, th, al)
+                       if _prior_radius(model, th, al) is not None else np.nan)
+                      for th in thetas], float)
+        r = _fill_nan_periodic(r)
+        if not np.isfinite(r).all():
+            continue
+        ring[li] = _smooth_ring(np.asarray(thetas), r, harmonics)
+        stats["levels"] += 1
 
+    if stats["levels"] < 1:
+        return stats
     apex_pt = (np.asarray(model.epi_apex, float)
                if getattr(model, "epi_apex", None) is not None
                else np.asarray(axis.apex, float))
@@ -353,17 +323,10 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
         cphi, copp = _col(phi), _col(opp)
 
         def _wall(th, ci):
-            out = []
-            for li in range(len(levels)):
-                if (li, ci) in lock_cell:            # hand-moved → exact point
-                    out.append(lock_cell[(li, ci)])
-                elif np.isfinite(ring[li, ci]):
-                    out.append(axis.to_world(th, max(0.0, float(ring[li, ci])),
-                                             levels[li]))
-            return out
+            return [axis.to_world(th, max(0.0, float(ring[li, ci])), levels[li])
+                    for li in range(len(levels)) if np.isfinite(ring[li, ci])]
 
-        wall_phi = _wall(phi, cphi)
-        wall_opp = _wall(opp, copp)
+        wall_phi, wall_opp = _wall(phi, cphi), _wall(opp, copp)
         if len(wall_phi) < 2 or len(wall_opp) < 2:
             continue
         pts3d = (list(reversed(wall_phi))            # base → near-apex (φ wall)
