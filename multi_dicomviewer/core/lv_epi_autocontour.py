@@ -119,25 +119,37 @@ def detect_epi_radius(vol, dims, axis, theta_deg, along, r0, prm):
     # INNER side ≥ myo_floor AND OUTER side ≤ outside_ceil. This excludes the
     # endocardial edge (blood→myocardium: outer is still soft tissue) and the
     # inferior wall against liver (outer ~50 HU > ceil → stays manual).
-    best_i, best_sc, best_dm = -1, -np.inf, 0.0
-    for i in range(1, n - 1):
-        if abs(rs[i] - r0) > prm.max_move_mm:
-            continue
+    def _edge_dm(i):
         hu_in = float(np.median(hus[max(0, i - win):i + 1]))
         hu_out = float(np.median(hus[i:min(n, i + win + 1)]))
         if hu_in < prm.myo_floor_hu or hu_out > prm.outside_ceil_hu:
-            continue
+            return None
         dm = hu_in - hu_out
-        if dm <= 0.0:
+        return dm if dm > 0.0 else None
+
+    cands = []                                   # (i, dm) valid myo→outside edges
+    for i in range(1, n - 1):
+        if abs(rs[i] - r0) > prm.max_move_mm:
             continue
-        # Locate by steepness (per-step drop), biased toward the traced radius.
-        sc = float(drop[i]) - prm.prox_w * abs(rs[i] - r0)
-        if sc > best_sc:
-            best_sc, best_i, best_dm = sc, i, dm
-    if best_i < 0:
+        dm = _edge_dm(i)
+        if dm is not None:
+            cands.append((i, dm))
+    if not cands:
         return r0, 0.0
-    w = _smoothstep(best_dm, prm.drop_lo_hu, prm.drop_hi_hu)
-    return float(rs[best_i]), float(w)
+    # Pick the INNERMOST real myocardium→fat transition (drop ≥ drop_lo), NOT the
+    # globally steepest one — the epicardium (myo→pericardial fat, ~100-150 HU)
+    # sits INSIDE the far, much larger fat→lung / pleura drop (~600 HU), which
+    # otherwise won the old steepness score and flung the border outward. The endo
+    # edge (outer still soft tissue) was already excluded by _edge_dm.
+    strong = [c for c in cands if c[1] >= prm.drop_lo_hu]
+    i0 = min((strong or cands), key=lambda c: rs[c[0]])[0]
+    # Localise within that innermost edge to its STEEPEST step so we land ON the
+    # transition (the median-window first-crossing sits ~1 mm inside it).
+    near = [c for c in cands if abs(c[0] - i0) <= win]
+    i_e = max(near, key=lambda c: float(drop[c[0]]))[0]
+    dm_e = _edge_dm(i_e) or 0.0
+    w = _smoothstep(dm_e, prm.drop_lo_hu, prm.drop_hi_hu)
+    return float(rs[i_e]), float(w)
 
 
 def refine_epi_plane(vol, dims, axis, pts3d, prm=None):
