@@ -12276,6 +12276,14 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Epi 線を CT 値の心外膜エッジに自動適合します（前壁・側壁・下壁で HU 差が "
               "明瞭な所）。HU 差が小さい所は手動線のまま。実行後に長軸で add point 微修正を。"))
         self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
+        # 短軸スプライン補正: purely geometric circumferential smoothing of the
+        # current Epi contour (includes hand edits), no HU. Shared core.
+        self._lv_saxspl_btn = FitButton(t("スプライン補正"))
+        self._lv_saxspl_btn.setHelpToolTip(
+            t("短軸の各断面（心尖〜心基部を7断面）で Epi を周方向スプラインで整えます"
+              "（純幾何・HU不使用）。手動編集を含めて平滑化するので、手で整えた長軸の"
+              "形がそのまま全周に反映されます。点数は少なめ。何度でも再適用できます。"))
+        self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
         self._lv_redo_btn = FitButton(t("Clear"))
@@ -12283,7 +12291,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_exit_btn = FitButton(t("Exit"))
         self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
         for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
-                  self._lv_fit_mv_btn, self._lv_husnap_btn, self._lv_redo_btn,
+                  self._lv_fit_mv_btn, self._lv_husnap_btn, self._lv_saxspl_btn,
+                  self._lv_redo_btn,
                   self._lv_exit_btn, self._lv_region_btn, self._lv_border_btn,
                   self._lv_vol_btn, self._lv_stl_btn):
             r2t.addWidget(b)
@@ -12384,14 +12393,15 @@ class CTViewer(CPRMixin, AbstractViewer):
         row2.addStretch(1)
         for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
                   self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
-                  self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn):
+                  self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn,
+                  self._lv_husnap_btn, self._lv_saxspl_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
             self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn,
-            self._lv_husnap_btn]
+            self._lv_husnap_btn, self._lv_saxspl_btn]
         # Explicit INITIAL group visibility (no sub-mode active): the idempotent
         # _vis() can't take effect at build time (isVisible() is False before the
         # parent is shown). The initial state is the clean 2-row selector — every
@@ -15417,9 +15427,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         # HU補正 (Epi edge snap): needs a traced EPI border in contour phase. It
         # is the one _lv_bar_btns member with no other per-state setEnabled, so
         # without this it stayed disabled after any LV exit and did nothing.
+        _epi_ok = bool(contour and len(lv["model"].epi_contours) >= 3)
         if getattr(self, "_lv_husnap_btn", None) is not None:
-            self._lv_husnap_btn.setEnabled(
-                bool(contour and len(lv["model"].epi_contours) >= 3))
+            self._lv_husnap_btn.setEnabled(_epi_ok)
+        if getattr(self, "_lv_saxspl_btn", None) is not None:
+            self._lv_saxspl_btn.setEnabled(_epi_ok)
         # Fit MV needs a traced border AND a common MV plane to converge onto.
         if getattr(self, "_lv_fit_mv_btn", None) is not None:
             _fm = self._lv["model"] if self._lv is not None else None
@@ -17931,6 +17943,48 @@ class CTViewer(CPRMixin, AbstractViewer):
               "HU 差が小さい所は手動線のままです。長軸で add point 微修正してください。",
               p=stats.get("planes", 0), n=stats.get("refined_pts", 0),
               w=stats.get("mean_weight", 0.0)))
+
+    def _lv_sax_spline(self) -> None:
+        """短軸スプライン補正: purely geometric circumferential smoothing of the
+        current Epi contour (hand edits INCLUDED, no HU). Few output points,
+        re-runnable. Shared core.lv_epi_autocontour.refine_epi_short_axis."""
+        from PyQt6.QtWidgets import QMessageBox, QApplication
+        from PyQt6.QtCore import Qt as _Qt
+        title = t("Epi スプライン補正")
+        lv = getattr(self, "_lv", None)
+        if lv is not None and lv.get("phase") == "contour":
+            self._lv_capture_current()
+        model = lv.get("model") if lv else None
+        if (self._vol is None or model is None
+                or getattr(model, "epi_axis", None) is None
+                or len(getattr(model, "epi_contours", {})) < 3):
+            QMessageBox.information(
+                self.window(), title,
+                t("先に Epi をトレースしてください（3 面以上）。"))
+            return
+        QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
+        try:
+            from multi_dicomviewer.core import lv_epi_autocontour as ea
+            stats = ea.refine_epi_short_axis(self._vol, self._dims, model)
+            try:
+                model.build()
+            except Exception:                            # noqa: BLE001
+                pass
+        finally:
+            QApplication.restoreOverrideCursor()
+        if not stats.get("planes"):
+            QMessageBox.information(
+                self.window(), title,
+                t("短軸スプライン補正を適用できませんでした（先に Epi を 3 面以上）。"))
+            return
+        self._lv_invalidate_volume()
+        self._lv_rebuild_measures()
+        self._lv_redraw_all()
+        QMessageBox.information(
+            self.window(), title,
+            t("短軸スプライン補正：{L} 断面を周方向に整え、{p} 面の Epi 輪郭を"
+              "更新しました（手動編集を含めて平滑化、HU は使用しません）。",
+              L=stats.get("levels", 0), p=stats.get("planes", 0)))
 
     def _lv_rebuild_measures(self) -> None:
         lv = self._lv
