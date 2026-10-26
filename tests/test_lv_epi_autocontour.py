@@ -120,50 +120,55 @@ def _traced_model(true_epi_r=24.0, r_trace=19.0):
     return m, vol, dims
 
 
-def test_short_axis_spline_grows_outward():
-    m, vol, dims = _traced_model()
-    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    stats = ea.refine_epi_short_axis(vol, dims, m)
+def _bumped_model(bump_r=30.0, base_r=19.0):
+    """A traced model whose θ=0 meridian is bumped OUT to *bump_r* (a hand edit),
+    the rest a uniform *base_r* circle — for the geometric (HU-free) short-axis
+    spline tests."""
+    from multi_dicomviewer.core.lv_measure import LVModel
+    axis = _axis()
+    m = LVModel(n_planes=8)
+    m.set_axis_from_frame(origin=np.array([60.0, 60.0, 10.0]),
+                          axis_dir=np.array([0.0, 0.0, 1.0]),
+                          radial0=np.array([1.0, 0.0, 0.0]), which="epi")
+    m.set_apex_point("epi", axis.to_world(0.0, 0.0, 0.0))
+    for phi in m.plane_angles():
+        rp = bump_r if abs(phi) < 1e-6 else base_r      # θ=0 wall bumped out
+        pos = [axis.to_world(phi, rp, a) for a in (8, 16, 24, 30)]
+        apex = [axis.to_world(phi, 0.0, 0.0)]
+        neg = [axis.to_world((phi + 180) % 360, base_r, a) for a in (30, 24, 16, 8)]
+        m.set_long_axis_contour(phi, np.array(pos + apex + neg), which="epi")
+    return m, axis
+
+
+def test_short_axis_geometric_smooths_bump():
+    # No HU: the correction circumferentially smooths the CURRENT contour, so a
+    # single hand-bumped meridian is reduced (blended) but still above baseline,
+    # and its neighbours are pulled out a little (influence spread).
+    m, _axis = _bumped_model(bump_r=30.0, base_r=19.0)
+    before0 = m.epi_contours[0.0][:, 1].max()           # ~30
+    stats = ea.refine_epi_short_axis(None, None, m)
     assert stats["planes"] == 8 and stats["levels"] > 0
-    grew = sum(1 for k, prof in m.epi_contours.items()
-               if prof[:, 1].max() > before.get(k, 0.0) + 1.0)
-    assert grew >= 6, f"spline should pull most meridians to ~24, got {grew}"
+    after0 = m.epi_contours[0.0][:, 1].max()
+    assert 19.5 < after0 < before0, f"bump should smooth, got {after0:.1f}"
+    neigh = sorted(k for k in m.epi_contours if 1e-6 < k < 180.0)[0]
+    assert m.epi_contours[neigh][:, 1].max() > 19.3, "neighbour should feel the bump"
     # Sparse output: ~6 ring points per wall + the shared apex (not a dense line).
     for phi in m.plane_angles():
         assert len(m.epi_planes[phi % 360.0]) <= 15, "contour should be sparse"
 
 
-def test_short_axis_safe_without_edges():
-    # A uniform (no-edge) volume must not blow up the contours — keep manual.
-    m, _vol, dims = _traced_model()
-    flat = np.full_like(_vol, 50.0)                # soft tissue everywhere, no drop
-    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    ea.refine_epi_short_axis(flat, dims, m)
-    for k, prof in m.epi_contours.items():
-        assert prof[:, 1].max() <= before[k] + 1.5, "no-edge case must stay ~manual"
-
-
-def test_short_axis_lock_preserves_manual_point():
-    # A hand-moved point (passed as a lock) must survive a re-run instead of
-    # being re-snapped to the HU edge.
-    m, vol, dims = _traced_model()
-    ea.refine_epi_short_axis(vol, dims, m)        # body ~24 mm
-    axis = m.epi_axis
-    P = axis.to_world(0.0, 20.0, 15.0)            # hand-moved INWARD at θ=0, along 15
-    stats = ea.refine_epi_short_axis(vol, dims, m, locked_pts=[P])
-    assert stats["locked"] == 1
-    prof = m.epi_contours[0.0]                    # (along, radius) on the θ=0 wall
-    i = int(np.argmin(np.abs(prof[:, 0] - 15.0)))
-    assert abs(prof[i, 1] - 20.0) < 1.5, \
-        f"locked radius {prof[i, 1]:.1f} not preserved (re-snapped?)"
+def test_short_axis_geometric_keeps_a_circle():
+    # A uniform circle stays a circle (smoothing a constant ring is a no-op).
+    m, _vol, dims = _traced_model(r_trace=19.0)
+    ea.refine_epi_short_axis(None, None, m)
+    for prof in m.epi_contours.values():
+        assert abs(prof[:, 1].max() - 19.0) < 1.0, "circle should be preserved"
 
 
 def test_short_axis_rerun_is_stable():
-    # Re-running the correction on an already-corrected contour must stay ~stable
-    # (idempotent-ish), not keep growing.
-    m, vol, dims = _traced_model()
-    ea.refine_epi_short_axis(vol, dims, m)
+    m, _axis = _bumped_model()
+    ea.refine_epi_short_axis(None, None, m)
     first = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    ea.refine_epi_short_axis(vol, dims, m)
+    ea.refine_epi_short_axis(None, None, m)
     for k, prof in m.epi_contours.items():
-        assert abs(prof[:, 1].max() - first[k]) <= 1.5, "re-run should be stable"
+        assert abs(prof[:, 1].max() - first[k]) <= 1.0, "re-run should be stable"

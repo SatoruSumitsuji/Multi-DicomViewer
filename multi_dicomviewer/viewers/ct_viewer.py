@@ -4385,9 +4385,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         # dense) — confidence-blended + circumferentially smoothed. Re-runnable.
         self._lv_saxspl_btn = FitButton(t("スプライン補正"))
         self._lv_saxspl_btn.setHelpToolTip(
-            t("短軸の各断面（心尖〜心基部を7断面）で Epi を信頼度ブレンド＋周方向"
-              "スプラインで整えます（形状に忠実、点数は少なめ）。HU 差が小さい所は"
-              "手動線を保持、心尖は手動のまま。手で動かした後も再適用できます。"))
+            t("短軸の各断面（心尖〜心基部を7断面）で Epi を周方向スプラインで整えます"
+              "（純幾何・HU不使用）。手動編集を含めて平滑化するので、手で整えた長軸の"
+              "形がそのまま全周に反映されます。点数は少なめ。何度でも再適用できます。"))
         self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.setHelpToolTip(
@@ -14727,30 +14727,6 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].colors_mask.Modified()
             self.pane[k].render()
 
-    def _lv_record_epi_lock(self, key, mi, vi) -> None:
-        """Remember a HAND-MOVED Epi border point so a later スプライン補正 keeps it
-        (pins that control point instead of re-snapping it to the HU edge). Only a
-        point that ACTUALLY moved (≥0.5 mm vs the pre-drag snapshot), on the Epi
-        border of the LV pane, is locked."""
-        before = getattr(self, "_lv_edit_before", None)
-        if (self._lv is None or vi is None or not isinstance(before, dict)
-                or key != self._lv.get("pane")
-                or not (0 <= mi < len(self._measures.get(key, [])))):
-            return
-        m = self._measures[key][mi]
-        tag = m.get("_lv")
-        p3 = m.get("pts3d")
-        if (tag is None or tag[1] != "epi" or not p3
-                or not (0 <= vi < len(p3))):
-            return
-        bpts = before.get("pts3d")
-        if (bpts and 0 <= vi < len(bpts)
-                and float(np.linalg.norm(np.asarray(p3[vi], float)
-                                         - np.asarray(bpts[vi], float))) < 0.5):
-            return                                   # no real move → don't lock
-        self._lv.setdefault("epi_locks", []).append(
-            np.asarray(p3[vi], float).copy())
-
     def _lv_live_recapture(self, key, m) -> None:
         """Feed an EDITED endo/epi border on the LV pane back into the model, so
         the edit persists — crucially in the plane-by-plane TRACING phase too, not
@@ -14814,11 +14790,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._edit:
             key = self._edit["key"]
             mi = self._edit.get("mi")
-            vi = self._edit.get("vi")
             self._edit = None
             if (mi is not None and 0 <= mi < len(self._measures[key])):
                 self._lv_live_recapture(key, self._measures[key][mi])
-                self._lv_record_epi_lock(key, mi, vi)
             self._redraw_meas(key)
             # Commit an LV-border DRAG (snapshot stashed at mouse-press) as one
             # undo/redo step, now that the final dragged points are known.
@@ -17428,7 +17402,6 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["vol_endo_ml"] = None
         lv["vol_epi_ml"] = None
         lv["husnap_done"] = False            # fresh border → no re-run warning
-        lv["epi_locks"] = []                 # drop hand-moved spline locks
         self._lv_clear_measured_mask()       # drop the red region + _lv_region_comp
         if getattr(self, "_lv_region_btn", None) is not None:
             self._lv_region_btn.setChecked(False)
@@ -18441,9 +18414,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
-            stats = ea.refine_epi_short_axis(
-                self._vol, self._dims, model,
-                locked_pts=lv.get("epi_locks"))      # keep hand-moved points
+            stats = ea.refine_epi_short_axis(self._vol, self._dims, model)
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18453,18 +18424,16 @@ class CTViewer(CPRMixin, AbstractViewer):
         if not stats.get("planes"):
             QMessageBox.information(
                 self.window(), title,
-                t("補正できる短軸エッジが十分に検出できませんでした（手動線のまま）。"))
+                t("短軸スプライン補正を適用できませんでした（先に Epi を 3 面以上）。"))
             return
         self._lv_invalidate_volume()
         self._lv_rebuild_measures()
         self._redraw_all_lv()
         QMessageBox.information(
             self.window(), title,
-            t("短軸スプライン補正：{L} 断面を処理し、{p} 面の Epi 輪郭を更新しました"
-              "（手動移動 {k} 点は保持）。\n心尖は手動のままです。手で動かした後、"
-              "もう一度押しても手動点は動きません。",
-              L=stats.get("levels", 0), p=stats.get("planes", 0),
-              k=stats.get("locked", 0)))
+            t("短軸スプライン補正：{L} 断面を周方向に整え、{p} 面の Epi 輪郭を"
+              "更新しました（手動編集を含めて平滑化、HU は使用しません）。",
+              L=stats.get("levels", 0), p=stats.get("planes", 0)))
 
     def _lv_rebuild_measures(self) -> None:
         """(Re)create the per-plane Endo/Epi border measures on the LV pane from
