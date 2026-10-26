@@ -143,6 +143,21 @@ def test_short_axis_safe_without_edges():
         assert prof[:, 1].max() <= before[k] + 1.5, "no-edge case must stay ~manual"
 
 
+def test_short_axis_lock_preserves_manual_point():
+    # A hand-moved point (passed as a lock) must survive a re-run instead of
+    # being re-snapped to the HU edge.
+    m, vol, dims = _traced_model()
+    ea.refine_epi_short_axis(vol, dims, m)        # body ~24 mm
+    axis = m.epi_axis
+    P = axis.to_world(0.0, 20.0, 15.0)            # hand-moved INWARD at θ=0, along 15
+    stats = ea.refine_epi_short_axis(vol, dims, m, locked_pts=[P])
+    assert stats["locked"] == 1
+    prof = m.epi_contours[0.0]                    # (along, radius) on the θ=0 wall
+    i = int(np.argmin(np.abs(prof[:, 0] - 15.0)))
+    assert abs(prof[i, 1] - 20.0) < 1.5, \
+        f"locked radius {prof[i, 1]:.1f} not preserved (re-snapped?)"
+
+
 def test_short_axis_rerun_is_stable():
     # Re-running the correction on an already-corrected contour must stay ~stable
     # (idempotent-ish), not keep growing.
