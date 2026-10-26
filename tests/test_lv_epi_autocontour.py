@@ -101,3 +101,53 @@ def test_refine_model_updates_contours():
         if k in before and prof[:, 1].max() > before[k][:, 1].max() + 1.0:
             grew += 1
     assert grew >= 6, f"expected most meridians to grow outward, got {grew}"
+
+
+def _traced_model(true_epi_r=24.0, r_trace=19.0):
+    from multi_dicomviewer.core.lv_measure import LVModel
+    axis = _axis()
+    vol, dims = _volume(true_epi_r=true_epi_r)
+    m = LVModel(n_planes=8)
+    m.set_axis_from_frame(origin=np.array([60.0, 60.0, 10.0]),
+                          axis_dir=np.array([0.0, 0.0, 1.0]),
+                          radial0=np.array([1.0, 0.0, 0.0]), which="epi")
+    m.set_apex_point("epi", axis.to_world(0.0, 0.0, 0.0))
+    for phi in m.plane_angles():
+        pos = [axis.to_world(phi, r_trace, a) for a in (8, 16, 24, 30)]
+        apex = [axis.to_world(phi, 0.0, 0.0)]
+        neg = [axis.to_world((phi + 180) % 360, r_trace, a) for a in (30, 24, 16, 8)]
+        m.set_long_axis_contour(phi, np.array(pos + apex + neg), which="epi")
+    return m, vol, dims
+
+
+def test_short_axis_ellipse_grows_outward():
+    m, vol, dims = _traced_model()
+    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
+    stats = ea.refine_epi_short_axis(vol, dims, m, mode="ellipse")
+    assert stats["planes"] == 8 and stats["levels"] > 0
+    grew = sum(1 for k, prof in m.epi_contours.items()
+               if prof[:, 1].max() > before.get(k, 0.0) + 1.0)
+    assert grew >= 6, f"ellipse should pull most meridians to ~24, got {grew}"
+    # And the fitted body radius should be near the true 24 mm (not the 19 trace).
+    rmax = max(prof[:, 1].max() for prof in m.epi_contours.values())
+    assert 22.0 <= rmax <= 26.0, f"ellipse body radius {rmax:.1f} off"
+
+
+def test_short_axis_spline_grows_outward():
+    m, vol, dims = _traced_model()
+    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
+    stats = ea.refine_epi_short_axis(vol, dims, m, mode="spline")
+    assert stats["planes"] == 8 and stats["levels"] > 0
+    grew = sum(1 for k, prof in m.epi_contours.items()
+               if prof[:, 1].max() > before.get(k, 0.0) + 1.0)
+    assert grew >= 6, f"spline should pull most meridians to ~24, got {grew}"
+
+
+def test_short_axis_safe_without_edges():
+    # A uniform (no-edge) volume must not blow up the contours — keep manual.
+    m, _vol, dims = _traced_model()
+    flat = np.full_like(_vol, 50.0)                # soft tissue everywhere, no drop
+    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
+    ea.refine_epi_short_axis(flat, dims, m, mode="ellipse")
+    for k, prof in m.epi_contours.items():
+        assert prof[:, 1].max() <= before[k] + 1.5, "no-edge case must stay ~manual"
