@@ -20368,9 +20368,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         if hi is not None:
             if hi[1] == "rotate":
                 p.set_rot_arrow(self._rot_arrow_pd(key, hi[0]))
+            elif hi[1] == "center":
+                # Centre grab: a RING at the intersection (no move arrows), kept
+                # glued to the crosshair centre as it is dragged.
+                p.set_rot_arrow(self._center_ring_pd(key))
             else:
-                # move / center: keep the straight arrows glued to the moving
-                # crosshair centre so they FOLLOW a translate drag too.
+                # move: keep the straight arrows glued to the moving crosshair
+                # centre so they FOLLOW a translate drag too.
                 p.set_rot_arrow(self._move_arrow_pd(key, hi[0]))
 
         # Persistent up/down move hint on the Epi movable SECTION line (the
@@ -21605,7 +21609,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         # no-ops (see mouseReleaseEvent — only a DRAG recentres), so a
         # double-click still recentres to the clicked point without moving twice.
         if math.hypot(rx, ry) < _CROSS_CENTER_R:
-            return (True, "H", "center")
+            return (True, "C", "center")        # "C" = the intersection (both axes)
         band = 0.05                           # perpendicular catch = 2.5% screen/side
         mid = 0.50                            # inner half → move, outer → rotate
         d_to_h = abs(rx * uh[1] - ry * uh[0])
@@ -21708,14 +21712,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             pr.SetOpacity(0.5)
         p.show_rot_arrow(False)
         if line == "C":
-            # Intersection (recentre) zone = 2-AXIS MOVE: light up BOTH crosslines
-            # and show straight double-arrows on BOTH axes.
+            # Intersection (centre) zone: light up BOTH crosslines and mark the
+            # centre with a RING — the 'grab the centre to move it' handle. No
+            # move arrows here (per request: a circle at the H/V intersection,
+            # the up/down arrows hidden).
             for _src, act in p.cross:
                 pr = act.GetProperty()
                 pr.SetColor(*self._CROSS_HI)
                 pr.SetLineWidth(1.6)
                 pr.SetOpacity(1.0)
-            p.set_rot_arrow(self._move_arrow_pd(which, "C"))
+            p.set_rot_arrow(self._center_ring_pd(which))
             p.show_rot_arrow(True)
         elif line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
@@ -21812,6 +21818,16 @@ class CTViewer(CPRMixin, AbstractViewer):
                 polylines += self._arrow_barbs(b, a, hs)
                 polylines += self._arrow_barbs(a, b, hs)
         return _polylines_pd(polylines)
+
+    def _center_ring_pd(self, which) -> vtkPolyData:
+        """A RING at the crosshair intersection — the 'grab the CENTRE to move
+        it' handle shown (instead of the move arrows) while the centre zone is
+        caught. Radius matches the centre grab circle (_CROSS_CENTER_R of the
+        half-view), so the ring also shows how big the catch zone is."""
+        ccx, ccy = self._cc(which)
+        ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
+        r = _CROSS_CENTER_R * ps
+        return _polylines_pd([self._circle_poly(ccx, ccy, r, n=36)])
 
     def _cross_move(self, which, sx, sy):
         """Crosshair drag (move / rotate / recentre the reslice). Wraps the impl
