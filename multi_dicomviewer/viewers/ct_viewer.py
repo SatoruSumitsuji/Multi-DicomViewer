@@ -273,8 +273,8 @@ _MEAS_PT_PX = 11.0
 #: CrossLine CENTRE grab radius, in normalised pane space (1 = centre→edge).
 #: A press within this circle of the crosshair intersection grabs the centre to
 #: drag / recentre the cross-section. Sized a touch larger than the green ▲ /
-#: yellow ○ centre markers so the centre is easy to catch.
-_CROSS_CENTER_R = 0.08
+#: yellow ○ centre markers so the centre is easy to catch. (0.08 × 2/3.)
+_CROSS_CENTER_R = 0.053
 #: Off-plane hollow-ring OUTER radius (physical px). Kept a touch SMALLER than
 #: the in-plane dot's radius (_MEAS_PT_PX/2) so the in-range filled dot reads as
 #: the more prominent of the two.
@@ -21722,12 +21722,25 @@ class CTViewer(CPRMixin, AbstractViewer):
                 pr.SetLineWidth(1.6)
                 pr.SetOpacity(1.0)
             p.set_rot_arrow(self._center_ring_pd(which))
+            # Keep the centre ring SUBTLE: dim amber, thin, semi-transparent,
+            # with a light halo (the move/rotate arrows restore the bold style).
+            p.rot_arrow.GetProperty().SetColor(*self._CROSS_BASE)
+            p.rot_arrow.GetProperty().SetLineWidth(1.0)
+            p.rot_arrow.GetProperty().SetOpacity(0.45)
+            p.rot_arrow_halo.GetProperty().SetLineWidth(2.2)
+            p.rot_arrow_halo.GetProperty().SetOpacity(0.4)
             p.show_rot_arrow(True)
         elif line is not None:
             pr = p.cross[0 if line == "H" else 1][1].GetProperty()
             pr.SetColor(*self._CROSS_HI)
             pr.SetLineWidth(1.6)
             pr.SetOpacity(1.0)
+            # Bold arrow style (restored in case we came from the dim centre ring).
+            p.rot_arrow.GetProperty().SetColor(0.8, 0.8, 0.0)
+            p.rot_arrow.GetProperty().SetLineWidth(1.6)
+            p.rot_arrow.GetProperty().SetOpacity(1.0)
+            p.rot_arrow_halo.GetProperty().SetLineWidth(4.2)
+            p.rot_arrow_halo.GetProperty().SetOpacity(1.0)
             # rotate = curved arcs; move = straight double-arrows on the axis.
             if mode == "rotate":
                 p.set_rot_arrow(self._rot_arrow_pd(which, line))
