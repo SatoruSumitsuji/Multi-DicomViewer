@@ -270,6 +270,10 @@ def _tris_pd(tris) -> vtkPolyData:
 
 #: Idle measure-vertex dot size (physical px, VTK PointSize).
 _MEAS_PT_PX = 11.0
+#: CPR cross-section centre grab radius (Qt-logical px). Sized to the centre
+#: marker (yellow dot / hollow ring) + direction ▲ so the centreline centre can
+#: be caught by bringing the cursor within this circle of the pane centre.
+_CPR_GRAB_PX = 14.0
 #: Off-plane hollow-ring OUTER radius (physical px). Kept a touch SMALLER than
 #: the in-plane dot's radius (_MEAS_PT_PX/2) so the in-range filled dot reads as
 #: the more prominent of the two.
@@ -1129,6 +1133,22 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._owner._cpr_drag = k
                 self._owner._cpr_drag_move(
                     e.position().x(), e.position().y())   # jump to the click
+                self._last = e.position()
+                self._cross = False
+                self._meas_drag = False
+                return
+            # Interpolated section (between edit points): there is no draggable
+            # dot, only the hollow centre ring. A click WITHIN the centre-marker
+            # radius PINS a new control point at this section's spline centre and
+            # grabs it, so the centreline centre is movable from ANY section — not
+            # only when it sits exactly on an edit point. A click AWAY from the
+            # centre falls through to the view tool below (rotate / page / zoom).
+            cx, cy = self._owner._world_to_qt("A", 0.0, 0.0)
+            if ((cx - e.position().x()) ** 2 + (cy - e.position().y()) ** 2
+                    <= _CPR_GRAB_PX ** 2
+                    and self._owner._cpr_pin_center_and_grab()):
+                self._owner._cpr_drag_move(
+                    e.position().x(), e.position().y())   # follow the click
                 self._last = e.position()
                 self._cross = False
                 self._meas_drag = False
@@ -20097,9 +20117,10 @@ class CTViewer(CPRMixin, AbstractViewer):
         Only EDIT (control) points are editable. When the current section sits
         exactly on a control point, draw a FILLED yellow dot the user can drag
         in-plane to re-centre it. On an interpolated section (between control
-        points) draw a HOLLOW yellow ring at the spline centre — a visible cue
-        that it is NOT editable here; use Alt+F / Alt+A to step to a control
-        point, or right-click ▸ Add Point to insert one."""
+        points) draw a HOLLOW yellow ring at the spline centre — a cue that this
+        is a spline point; clicking within the centre radius pins a control point
+        here and grabs it (_cpr_pin_center_and_grab), so the centre is movable
+        from any section. Alt+F / Alt+A step to an existing control point."""
         p = self.pane["A"]
         p3 = self._cpr_ctrl_pts3d()
         filled = []
@@ -20137,10 +20158,25 @@ class CTViewer(CPRMixin, AbstractViewer):
             return False
         for ci, (du, dv) in self._cpr_marker_pts:
             mx, my = self._world_to_qt("A", du, dv)
-            if (mx - sx) ** 2 + (my - sy) ** 2 <= 14.0 ** 2:
+            if (mx - sx) ** 2 + (my - sy) ** 2 <= _CPR_GRAB_PX ** 2:
                 self._cpr_drag = ci
                 return True
         return False
+
+    def _cpr_pin_center_and_grab(self) -> bool:
+        """Pin a new control (edit) point at the CURRENT section's spline centre
+        and start dragging it. Lets the centreline centre be moved from an
+        interpolated section (where there is otherwise no draggable handle);
+        the caller then drags it with ``_cpr_drag_move``. Returns True on success."""
+        if self._cpr is None or self._cpr_at_ctrl() is not None:
+            return False
+        o, _u, _vv, _n = self._cpr_frame()       # 3-D centreline point of this slice
+        self._cpr_add_ctrl_at(o)                 # pin it (rebuild lands ON the point)
+        k = self._cpr_at_ctrl()
+        if k is None:
+            return False
+        self._cpr_drag = k
+        return True
 
     def _cpr_drag_move(self, sx, sy):
         """Move the grabbed control point IN the cross-section plane (its along-
