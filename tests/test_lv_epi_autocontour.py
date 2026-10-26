@@ -120,27 +120,17 @@ def _traced_model(true_epi_r=24.0, r_trace=19.0):
     return m, vol, dims
 
 
-def test_short_axis_ellipse_grows_outward():
-    m, vol, dims = _traced_model()
-    before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    stats = ea.refine_epi_short_axis(vol, dims, m, mode="ellipse")
-    assert stats["planes"] == 8 and stats["levels"] > 0
-    grew = sum(1 for k, prof in m.epi_contours.items()
-               if prof[:, 1].max() > before.get(k, 0.0) + 1.0)
-    assert grew >= 6, f"ellipse should pull most meridians to ~24, got {grew}"
-    # And the fitted body radius should be near the true 24 mm (not the 19 trace).
-    rmax = max(prof[:, 1].max() for prof in m.epi_contours.values())
-    assert 22.0 <= rmax <= 26.0, f"ellipse body radius {rmax:.1f} off"
-
-
 def test_short_axis_spline_grows_outward():
     m, vol, dims = _traced_model()
     before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    stats = ea.refine_epi_short_axis(vol, dims, m, mode="spline")
+    stats = ea.refine_epi_short_axis(vol, dims, m)
     assert stats["planes"] == 8 and stats["levels"] > 0
     grew = sum(1 for k, prof in m.epi_contours.items()
                if prof[:, 1].max() > before.get(k, 0.0) + 1.0)
     assert grew >= 6, f"spline should pull most meridians to ~24, got {grew}"
+    # Sparse output: ~6 ring points per wall + the shared apex (not a dense line).
+    for phi in m.plane_angles():
+        assert len(m.epi_planes[phi % 360.0]) <= 15, "contour should be sparse"
 
 
 def test_short_axis_safe_without_edges():
@@ -148,6 +138,17 @@ def test_short_axis_safe_without_edges():
     m, _vol, dims = _traced_model()
     flat = np.full_like(_vol, 50.0)                # soft tissue everywhere, no drop
     before = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
-    ea.refine_epi_short_axis(flat, dims, m, mode="ellipse")
+    ea.refine_epi_short_axis(flat, dims, m)
     for k, prof in m.epi_contours.items():
         assert prof[:, 1].max() <= before[k] + 1.5, "no-edge case must stay ~manual"
+
+
+def test_short_axis_rerun_is_stable():
+    # Re-running the correction on an already-corrected contour must stay ~stable
+    # (idempotent-ish), not keep growing.
+    m, vol, dims = _traced_model()
+    ea.refine_epi_short_axis(vol, dims, m)
+    first = {k: v[:, 1].max() for k, v in m.epi_contours.items()}
+    ea.refine_epi_short_axis(vol, dims, m)
+    for k, prof in m.epi_contours.items():
+        assert abs(prof[:, 1].max() - first[k]) <= 1.5, "re-run should be stable"
