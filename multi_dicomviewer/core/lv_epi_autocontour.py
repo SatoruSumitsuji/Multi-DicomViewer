@@ -233,35 +233,6 @@ def _fill_nan_periodic(r):
     return r
 
 
-def _fit_centered_ellipse(theta_deg, r, w):
-    """Weighted CENTRED-ellipse fit (centre = the LV axis):
-    ``1/r² = A·cos²θ + B·sin²θ + 2H·cosθ·sinθ`` (linear in A,B,H).
-    Returns a callable ``r_of(theta_deg)`` or None (too few points / not a
-    positive-definite ellipse)."""
-    th = np.radians(np.asarray(theta_deg, float))
-    r = np.asarray(r, float)
-    w = np.asarray(w, float)
-    ok = np.isfinite(r) & (r > 1e-3) & (w > 0)
-    if int(ok.sum()) < 5:
-        return None
-    c, s = np.cos(th[ok]), np.sin(th[ok])
-    M = np.column_stack([c * c, s * s, 2.0 * c * s])
-    y = 1.0 / (r[ok] ** 2)
-    sw = np.sqrt(w[ok])
-    try:
-        coef, *_ = np.linalg.lstsq(M * sw[:, None], y * sw, rcond=None)
-    except Exception:                                 # noqa: BLE001
-        return None
-    A, B, H = float(coef[0]), float(coef[1]), float(coef[2])
-    if A <= 1e-9 or B <= 1e-9 or (A * B - H * H) <= 1e-9:
-        return None                                   # not a real ellipse
-    def r_of(td):
-        a = np.radians(np.asarray(td, float))
-        q = A * np.cos(a) ** 2 + B * np.sin(a) ** 2 + 2.0 * H * np.cos(a) * np.sin(a)
-        return 1.0 / np.sqrt(np.maximum(q, 1e-9))
-    return r_of
-
-
 def _smooth_ring(theta_deg, r, harmonics):
     """Periodic circumferential low-pass of a UNIFORMLY-sampled ring r(θ): keep
     harmonics 0..*harmonics* (drops high-frequency noise, keeps the D-shape).
@@ -276,44 +247,50 @@ def _smooth_ring(theta_deg, r, harmonics):
     return np.fft.irfft(F, n)
 
 
-def refine_epi_short_axis(vol, dims, model, mode="ellipse", prm=None,
-                          n_levels=14, apical_cap_mm=10.0, ramp_mm=5.0,
-                          n_out=48, harmonics=4):
-    """Short-axis correction of the Epi surface.
+#: Short-axis correction levels as fractions apex(0)→base(1). The construction:
+#: 4 equal divisions, then HALVE the apical-most and basal-most segments again —
+#: so the rings sit denser near the apex and the base. 7 levels total; fraction
+#: 0 is the apex tip (radius 0), the other 6 are the correction rings. This gives
+#: a SPARSE contour (≈6 edit points per wall + apex) instead of a dense polyline.
+_SAX_LEVEL_FRACS = (0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 1.0)
 
-    Between an apical cap and the base, take *n_levels* short-axis rings. On each
-    ring cast rays at the model's meridian angles, detect the epicardial edge
-    (``detect_epi_radius``) and fit it:
-      * ``mode="ellipse"`` → a weighted centred-ellipse (robust; bridges the weak
-        septal LV-RV edge);
-      * ``mode="spline"``  → a confidence-blended, circumferentially smoothed
-        closed curve (follows the true shape, keeps the manual line where the HU
-        edge is weak).
-    The ring radii are lofted vertically and written back into the meridian
-    contours. The apical cap stays MANUAL (rings too small to be reliable). Every
-    per-level / per-meridian step falls back to the current (manual) line on
-    failure, so a poor ring never corrupts the surface. Returns a stats dict.
-    """
+
+def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
+                          level_fracs=_SAX_LEVEL_FRACS):
+    """Short-axis SPLINE correction of the Epi surface (circle/ellipse removed).
+
+    Takes short-axis rings at *level_fracs* of the apex→base length (default: the
+    7-level, apex-/base-dense scheme in ``_SAX_LEVEL_FRACS``). On each ring cast
+    rays at the model's meridian angles, detect the epicardial edge
+    (``detect_epi_radius``), blend it with the current (manual) radius by the
+    detection confidence, and low-pass the ring circumferentially (keeps the true
+    shape, keeps the manual line where the HU edge is weak). The rings become the
+    contour's control points directly — so the long-axis pane shows only ~6 edit
+    points per wall, not a dense polyline. The apex tip stays manual; a ring with
+    too little signal (or a meridian with none) falls back to the manual radius,
+    so a poor ring never corrupts the surface. Re-runnable: it always re-blends
+    from the CURRENT contour, so hand-moved points are respected where the edge
+    is weak and re-snapped where it is clear. Returns a stats dict."""
     prm = prm or EpiSnapParams()
-    stats = {"mode": mode, "levels": 0, "planes": 0}
+    stats = {"mode": "spline", "levels": 0, "planes": 0}
     axis = getattr(model, "epi_axis", None)
     if vol is None or axis is None or len(getattr(model, "epi_contours", {})) < 3:
         return stats
     thetas = model.meridian_angles()                  # uniform ring angles
     nth = len(thetas)
-    amins, amaxs = [], []
-    for th in thetas:
-        pr = _prior_profile(model, th)
-        if pr is not None:
-            amins.append(float(pr[0][0]))
-            amaxs.append(float(pr[0][-1]))
+    amaxs = [float(_prior_profile(model, th)[0][-1])
+             for th in thetas if _prior_profile(model, th) is not None]
     if not amaxs:
         return stats
     amax = float(np.median(amaxs))
-    a_lo = max(0.0, float(np.min(amins)))
-    cap = min(float(apical_cap_mm), 0.6 * amax)
-    levels = np.linspace(cap, amax, int(max(3, n_levels)))
-    ring = np.full((len(levels), nth), np.nan)        # fitted radius per level/θ
+    fracs = [float(f) for f in level_fracs]
+    ring_fracs = [f for f in fracs if f > 1e-6]       # non-apex correction rings
+    levels = amax * np.asarray(ring_fracs)
+    ring = np.full((len(levels), nth), np.nan)        # corrected radius per level/θ
+
+    def _col(th):
+        return int(np.argmin([abs(((t - th + 180.0) % 360.0) - 180.0)
+                              for t in thetas]))
 
     for li, al in enumerate(levels):
         rdet = np.full(nth, np.nan)
@@ -327,70 +304,35 @@ def refine_epi_short_axis(vol, dims, model, mode="ellipse", prm=None,
             re, w = detect_epi_radius(vol, dims, axis, th, al, rp, prm)
             rdet[ti], wdet[ti] = re, w
         conf = np.isfinite(rdet) & (wdet > 0)
-        if int(conf.sum()) < max(5, nth // 3):
-            continue                                  # too little signal → keep manual
-        if mode == "ellipse":
-            fit = _fit_centered_ellipse(np.asarray(thetas)[conf],
-                                        rdet[conf], wdet[conf])
-            if fit is None:
-                continue
-            rfit = fit(np.asarray(thetas))
-            wlev = float(np.mean(wdet[conf]))         # level confidence
-            ring[li] = np.where(np.isfinite(rprior),
-                                wlev * rfit + (1.0 - wlev) * rprior, rfit)
-        else:                                         # spline (confidence blend + low-pass)
+        if int(conf.sum()) >= max(5, nth // 3):
             rb = np.where(conf,
                           wdet * rdet + (1.0 - wdet) * np.where(
                               np.isfinite(rprior), rprior, rdet),
                           rprior)
             rb = _fill_nan_periodic(rb)
-            if not np.isfinite(rb).all():
-                continue
-            ring[li] = _smooth_ring(np.asarray(thetas), rb, harmonics)
-        stats["levels"] += 1
+            if np.isfinite(rb).all():
+                ring[li] = _smooth_ring(np.asarray(thetas), rb, harmonics)
+                stats["levels"] += 1
+        # Any level/meridian not corrected falls back to the manual radius.
+        miss = ~np.isfinite(ring[li])
+        ring[li][miss] = np.where(np.isfinite(rprior[miss]), rprior[miss], np.nan)
+        ring[li] = _fill_nan_periodic(ring[li])
 
-    valid = [li for li in range(len(levels)) if np.isfinite(ring[li]).any()]
-    if len(valid) < 2:
-        return stats
-    lv_al = levels[valid]
     apex_pt = (np.asarray(model.epi_apex, float)
                if getattr(model, "epi_apex", None) is not None
                else np.asarray(axis.apex, float))
-    along_out = np.linspace(a_lo, amax, int(n_out))
-
-    def _col(th):
-        return int(np.argmin([abs(((t - th + 180.0) % 360.0) - 180.0)
-                              for t in thetas]))
-
-    def _r_at(th, a):
-        ti = _col(th)
-        col = ring[valid, ti]
-        m = np.isfinite(col)
-        r_fit = (float(np.interp(a, lv_al[m], col[m]))
-                 if (int(m.sum()) >= 2 and cap <= a <= amax) else None)
-        r_pri = _prior_radius(model, th, a)
-        if a < cap or r_fit is None:
-            return r_pri
-        if a < cap + ramp_mm and r_pri is not None:   # smooth the cap seam
-            t = (a - cap) / ramp_mm
-            return (1.0 - t) * r_pri + t * r_fit
-        return r_fit
-
     for phi in model.plane_angles():
         opp = (phi + 180.0) % 360.0
-        wall_a, wall_b = [], []
-        for a in along_out:
-            ra = _r_at(phi, a)
-            if ra is not None:
-                wall_a.append(axis.to_world(phi, max(0.0, ra), a))
-            rb = _r_at(opp, a)
-            if rb is not None:
-                wall_b.append(axis.to_world(opp, max(0.0, rb), a))
-        if len(wall_a) < 2 or len(wall_b) < 2:
+        cphi, copp = _col(phi), _col(opp)
+        wall_phi = [axis.to_world(phi, max(0.0, float(ring[li, cphi])), levels[li])
+                    for li in range(len(levels)) if np.isfinite(ring[li, cphi])]
+        wall_opp = [axis.to_world(opp, max(0.0, float(ring[li, copp])), levels[li])
+                    for li in range(len(levels)) if np.isfinite(ring[li, copp])]
+        if len(wall_phi) < 2 or len(wall_opp) < 2:
             continue
-        pts3d = (list(reversed(wall_a))              # base → apex (φ wall)
-                 + [apex_pt]
-                 + wall_b)                           # apex → base (φ+180 wall)
+        pts3d = (list(reversed(wall_phi))            # base → near-apex (φ wall)
+                 + [apex_pt]                         # apex tip (shared)
+                 + wall_opp)                         # near-apex → base (φ+180 wall)
         model.set_long_axis_contour(float(phi), np.asarray(pts3d, float),
                                     which="epi")
         stats["planes"] += 1

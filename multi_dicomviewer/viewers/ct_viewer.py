@@ -4380,21 +4380,15 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Epi 線を CT 値の心外膜エッジに自動適合します（前壁・側壁・下壁で HU 差が "
               "明瞭な所）。HU 差が小さい所は手動線のまま。実行後に長軸で add point 微修正を。"))
         self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
-        # Short-axis corrections (additional modes): regularise the Epi surface on
-        # a stack of short-axis rings — 円形補正 = weighted ellipse fit per ring;
-        # スプライン補正 = confidence-blended, circumferentially smoothed ring.
-        self._lv_saxell_btn = FitButton(t("円形補正"))
-        self._lv_saxell_btn.setHelpToolTip(
-            t("短軸の各断面で Epi を楕円フィットして整えます（基部〜心尖を複数断面に分割、"
-              "心尖側は手動のまま）。弱いエッジ（中隔側）も滑らかに橋渡し。"))
-        self._lv_saxell_btn.clicked.connect(
-            lambda: self._lv_sax_correct("ellipse"))
+        # Short-axis spline correction (additional mode): regularise the Epi
+        # surface on a sparse stack of short-axis rings (7 levels, apex-/base-
+        # dense) — confidence-blended + circumferentially smoothed. Re-runnable.
         self._lv_saxspl_btn = FitButton(t("スプライン補正"))
         self._lv_saxspl_btn.setHelpToolTip(
-            t("短軸の各断面で Epi を信頼度ブレンド＋周方向スプラインで整えます（形状に"
-              "忠実。HU 差が小さい所は手動線を保持、心尖側は手動のまま）。"))
-        self._lv_saxspl_btn.clicked.connect(
-            lambda: self._lv_sax_correct("spline"))
+            t("短軸の各断面（心尖〜心基部を7断面）で Epi を信頼度ブレンド＋周方向"
+              "スプラインで整えます（形状に忠実、点数は少なめ）。HU 差が小さい所は"
+              "手動線を保持、心尖は手動のまま。手で動かした後も再適用できます。"))
+        self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.setHelpToolTip(
             t("Export the reconstructed surface as STL (mm scale)"))
@@ -4408,7 +4402,7 @@ class CTViewer(CPRMixin, AbstractViewer):
             t("Leave this sub-mode back to the LV selector (MV/AoV are kept)"))
         self._lv_exit_btn.clicked.connect(self._lv_submode_exit)
         for b in (self._lv_epi_draw_btn, self._lv_save_btn, self._lv_load_btn,
-                  self._lv_fit_mv_btn, self._lv_husnap_btn, self._lv_saxell_btn,
+                  self._lv_fit_mv_btn, self._lv_husnap_btn,
                   self._lv_saxspl_btn, self._lv_redo_btn,
                   self._lv_exit_btn, self._lv_region_btn, self._lv_border_btn,
                   self._lv_vol_btn, self._lv_stl_btn):
@@ -4577,14 +4571,14 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
                   self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
                   self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn,
-                  self._lv_husnap_btn, self._lv_saxell_btn, self._lv_saxspl_btn):
+                  self._lv_husnap_btn, self._lv_saxspl_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
             self._lv_next_btn, self._lv_sax_btn, self._lv_vol_btn,
             self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
             self._lv_stl_btn, self._lv_exit_btn, self._lv_epi_draw_btn,
-            self._lv_husnap_btn, self._lv_saxell_btn, self._lv_saxspl_btn]
+            self._lv_husnap_btn, self._lv_saxspl_btn]
         self._lvv_ctrl_btns = [
             self._lvv_apex_btn, self._lvv_aov_btn, self._lvv_mv_btn,
             self._lvv_thr_btn, self._lvv_calc_btn, self._lvv_save_btn,
@@ -10191,10 +10185,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         _epi_ok = bool(contour and len(m.epi_contours) >= 3)
         if getattr(self, "_lv_husnap_btn", None) is not None:
             self._lv_husnap_btn.setEnabled(_epi_ok)
-        for _b in (getattr(self, "_lv_saxell_btn", None),
-                   getattr(self, "_lv_saxspl_btn", None)):
-            if _b is not None:
-                _b.setEnabled(_epi_ok)
+        if getattr(self, "_lv_saxspl_btn", None) is not None:
+            self._lv_saxspl_btn.setEnabled(_epi_ok)
         # Fit MV needs a traced border AND a common MV plane to converge onto.
         if getattr(self, "_lv_fit_mv_btn", None) is not None:
             self._lv_fit_mv_btn.setEnabled(
@@ -18400,14 +18392,14 @@ class CTViewer(CPRMixin, AbstractViewer):
               p=stats.get("planes", 0), n=stats.get("refined_pts", 0),
               w=stats.get("mean_weight", 0.0)))
 
-    def _lv_sax_correct(self, mode: str) -> None:
-        """短軸補正: regularise the Epi surface on a stack of short-axis rings —
-        mode "ellipse" (円形補正) fits a weighted ellipse per ring; "spline"
-        (スプライン補正) uses a confidence-blended, smoothed ring. Apical cap stays
-        manual. Shared core.lv_epi_autocontour.refine_epi_short_axis."""
+    def _lv_sax_spline(self) -> None:
+        """短軸スプライン補正: regularise the Epi surface on a SPARSE stack of
+        short-axis rings (7 levels apex→base, apex-/base-dense) with a confidence-
+        blended, circumferentially smoothed fit. Few output points (≈6 per wall +
+        apex). Re-runnable after hand edits. core.refine_epi_short_axis."""
         from PyQt6.QtWidgets import QMessageBox, QApplication
         from PyQt6.QtCore import Qt as _Qt
-        title = t("Epi 円形補正") if mode == "ellipse" else t("Epi スプライン補正")
+        title = t("Epi スプライン補正")
         lv = getattr(self, "_lv", None)
         if lv is not None and lv.get("phase") == "contour":
             self._lv_capture_current()
@@ -18422,7 +18414,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
-            stats = ea.refine_epi_short_axis(self._vol, self._dims, model, mode=mode)
+            stats = ea.refine_epi_short_axis(self._vol, self._dims, model)
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18439,9 +18431,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_all_lv()
         QMessageBox.information(
             self.window(), title,
-            t("短軸{m}補正：{L} 断面を処理し、{p} 面の Epi 輪郭を更新しました。\n"
-              "心尖側は手動のままです。必要なら長軸で add point 微修正を。",
-              m=(t("円形") if mode == "ellipse" else t("スプライン")),
+            t("短軸スプライン補正：{L} 断面を処理し、{p} 面の Epi 輪郭を更新しました。\n"
+              "心尖は手動のままです。手で動かした後、もう一度押せば再補正できます。",
               L=stats.get("levels", 0), p=stats.get("planes", 0)))
 
     def _lv_rebuild_measures(self) -> None:
