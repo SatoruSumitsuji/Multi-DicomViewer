@@ -30,13 +30,16 @@ from multi_dicomviewer.core.lv_measure import _cr_densify_3d
 @dataclass
 class EpiSnapParams:
     """Tuning for the Epi HU-snap (all mm unless noted)."""
-    search_in_mm: float = 9.0      # how far INWARD of the trace to look
-    search_out_mm: float = 9.0     # how far OUTWARD of the trace to look
+    search_in_mm: float = 6.0      # how far INWARD of the trace to look
+    search_out_mm: float = 6.0     # how far OUTWARD of the trace to look
     step_mm: float = 0.5           # radial sampling step
     smooth_mm: float = 1.5         # 1-D smoothing of the HU profile before d/dr
     plaus_mm: float = 2.5          # window each side of a candidate edge for the drop
     r_min_mm: float = 5.0          # below this radius (apex region) keep the manual line
-    max_move_mm: float = 9.0       # reject an edge farther than this from the trace
+    max_move_mm: float = 4.0       # reject an edge farther than this from the trace —
+    #                                keeps HU補正 a LOCAL snap near the rough Epi line, so
+    #                                it can't drift out to the pericardium / PV / lung
+    #                                (combined with the innermost-edge choice below).
     myo_floor_hu: float = -20.0    # INNER side must be ≥ this (soft tissue = myocardium)
     outside_ceil_hu: float = 0.0   # OUTER side must be ≤ this (fat / lung). Liver (~50)
     #                                is above it → inferior wall stays manual (by design).
