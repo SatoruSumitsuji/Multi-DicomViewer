@@ -42,8 +42,9 @@ def _volume(true_epi_r=24.0, ambiguous_x_neg=False):
 def test_snaps_outward_to_wall_edge():
     axis = _axis()
     vol, dims = _volume(true_epi_r=24.0)
-    # A radial point traced at r=19 on the +x meridian, mid-level (along=20).
-    along, theta, r_trace = 20.0, 0.0, 19.0
+    # A radial point traced at r=21 on the +x meridian (3 mm inside the 24 mm
+    # wall — within the tighter max_move), mid-level (along=20).
+    along, theta, r_trace = 20.0, 0.0, 21.0
     r_edge, w = ea.detect_epi_radius(vol, dims, axis, theta, along, r_trace,
                                      ea.EpiSnapParams())
     assert w > 0.6, f"expected a confident edge, got w={w}"
@@ -63,11 +64,11 @@ def test_refine_plane_moves_points_outward():
     axis = _axis()
     vol, dims = _volume(true_epi_r=24.0)
     # A rough Epi polyline on the x-z plane: base(+x) -> apex -> base(-x),
-    # traced a few mm INSIDE the true epicardium (r≈19).
+    # traced ~3 mm INSIDE the true epicardium (r≈21, within the tighter max_move).
     along_levels = [8, 14, 20, 26, 30]
-    pos = [axis.to_world(0.0, 19.0, a) for a in along_levels]      # +x wall
+    pos = [axis.to_world(0.0, 21.0, a) for a in along_levels]      # +x wall
     apex = [axis.to_world(0.0, 0.0, 0.0)]
-    neg = [axis.to_world(180.0, 19.0, a) for a in reversed(along_levels)]  # -x wall
+    neg = [axis.to_world(180.0, 21.0, a) for a in reversed(along_levels)]  # -x wall
     trace = np.array(pos + apex + neg)
     out, n_ref, meanw = ea.refine_epi_plane(vol, dims, axis, trace)
     assert n_ref > 0 and meanw > 0.5
@@ -86,11 +87,11 @@ def test_refine_model_updates_contours():
                           axis_dir=np.array([0.0, 0.0, 1.0]),
                           radial0=np.array([1.0, 0.0, 0.0]), which="epi")
     m.set_apex_point("epi", axis.to_world(0.0, 0.0, 0.0))
-    # Trace all 8 planes a few mm inside the true epicardium.
+    # Trace all 8 planes ~3 mm inside the true epicardium (within max_move).
     for phi in m.plane_angles():
-        pos = [axis.to_world(phi, 19.0, a) for a in (8, 16, 24, 30)]
+        pos = [axis.to_world(phi, 21.0, a) for a in (8, 16, 24, 30)]
         apex = [axis.to_world(phi, 0.0, 0.0)]
-        neg = [axis.to_world((phi + 180) % 360, 19.0, a) for a in (30, 24, 16, 8)]
+        neg = [axis.to_world((phi + 180) % 360, 21.0, a) for a in (30, 24, 16, 8)]
         m.set_long_axis_contour(phi, np.array(pos + apex + neg), which="epi")
     before = {k: v.copy() for k, v in m.epi_contours.items()}
     stats = ea.refine_epi_model(vol, dims, m)
