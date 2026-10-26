@@ -4560,7 +4560,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         # Plain-button disabled-grey + the button lists the sync methods use.
         for b in (self._lv_epi_draw_btn, self._lv_prev_btn, self._lv_next_btn,
                   self._lv_redo_btn, self._lv_save_btn, self._lv_stl_btn,
-                  self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn):
+                  self._lv_load_btn, self._lv_exit_btn, self._lv_fit_mv_btn,
+                  self._lv_husnap_btn):
             b.setStyleSheet(self._BTN_DIS)
         self._lv_bar_btns = [
             self._lv_setaxis_btn, self._lv_trace_btn, self._lv_prev_btn,
@@ -10167,6 +10168,13 @@ class CTViewer(CPRMixin, AbstractViewer):
         for b in (self._lv_vol_btn, self._lv_wall_btn, self._lv_redo_btn,
                   self._lv_save_btn, self._lv_stl_btn):
             b.setEnabled(data_ok)
+        # HU補正 (Epi edge snap): needs a traced EPI border in contour phase. It
+        # is the one _lv_bar_btns member with no other per-state setEnabled, so
+        # without this it stayed disabled after any LV exit (bar disabled, never
+        # re-enabled) and clicking it did nothing.
+        if getattr(self, "_lv_husnap_btn", None) is not None:
+            self._lv_husnap_btn.setEnabled(
+                bool(contour and len(m.epi_contours) >= 3))
         # Fit MV needs a traced border AND a common MV plane to converge onto.
         if getattr(self, "_lv_fit_mv_btn", None) is not None:
             self._lv_fit_mv_btn.setEnabled(
@@ -18325,6 +18333,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox, QApplication
         from PyQt6.QtCore import Qt as _Qt
         lv = getattr(self, "_lv", None)
+        # Commit the plane the user is tracing right now so the LATEST border is
+        # included (plane-step captures earlier planes, but the current one may
+        # still be an un-committed draft).
+        if lv is not None and lv.get("phase") == "contour":
+            self._lv_capture_current()
         model = lv.get("model") if lv else None
         if (self._vol is None or model is None
                 or getattr(model, "epi_axis", None) is None
