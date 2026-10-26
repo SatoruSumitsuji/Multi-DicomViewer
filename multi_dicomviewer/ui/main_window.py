@@ -3969,6 +3969,24 @@ class MainWindow(QMainWindow):
             pass
         return sorted(out)
 
+    def _folder_lv_analysis_files(self, folder: str) -> list:
+        """Every LV-analysis JSON (MV / AoV / Apex / Epi / Bld) found under
+        *folder* (recursively), sorted — so dropping the FOLDER that holds the
+        saved MV / AoV / Apex files applies them exactly like dropping the files
+        themselves (open the source CT by UID — an already-loaded CT applies at
+        once — and overlay)."""
+        import os
+        out = []
+        try:
+            for root, _dirs, names in os.walk(folder):
+                for nm in names:
+                    if (nm.lower().endswith(".json")
+                            and self._is_lv_analysis_json(os.path.join(root, nm))):
+                        out.append(os.path.join(root, nm))
+        except OSError:
+            pass
+        return sorted(out)
+
     def _open_cpr_files(self, paths: list) -> None:
         """Drop a .cpr.json onto the shell → open the source 3-D CT and show the
         short-axis centreline on it. Only ONE short-axis shows at a time, so a
@@ -6605,6 +6623,21 @@ class MainWindow(QMainWindow):
             if loaded_cpr and w is not None and hasattr(w, "_set_overlay"):
                 w._set_overlay(True)
         dirs = [d for d in dirs if d not in cpr_dirs]
+        # A dropped FOLDER that holds LV-analysis JSONs (MV / AoV / Apex / Epi /
+        # Bld) → apply them like dropping the files (open the source CT by UID, an
+        # already-loaded CT applies at once) and DON'T DICOM-scan that folder (a
+        # JSON-only analysis folder has no DICOM → it would dead-end in the "no
+        # DICOM files" warning). Mirrors the CPR-folder handling above.
+        if not dicom_only and dirs:
+            lv_dirs, lv_folder_files = [], []
+            for d in list(dirs):
+                lvs = self._folder_lv_analysis_files(d)
+                if lvs:
+                    lv_dirs.append(d)
+                    lv_folder_files.extend(lvs)
+            if lv_folder_files:
+                self._open_lv_analysis_files(lv_folder_files)
+            dirs = [d for d in dirs if d not in lv_dirs]
         if not dirs and not files:
             return
         if dirs:
