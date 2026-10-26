@@ -14727,6 +14727,30 @@ class CTViewer(CPRMixin, AbstractViewer):
             self.pane[k].colors_mask.Modified()
             self.pane[k].render()
 
+    def _lv_record_epi_lock(self, key, mi, vi) -> None:
+        """Remember a HAND-MOVED Epi border point so a later スプライン補正 keeps it
+        (pins that control point instead of re-snapping it to the HU edge). Only a
+        point that ACTUALLY moved (≥0.5 mm vs the pre-drag snapshot), on the Epi
+        border of the LV pane, is locked."""
+        before = getattr(self, "_lv_edit_before", None)
+        if (self._lv is None or vi is None or not isinstance(before, dict)
+                or key != self._lv.get("pane")
+                or not (0 <= mi < len(self._measures.get(key, [])))):
+            return
+        m = self._measures[key][mi]
+        tag = m.get("_lv")
+        p3 = m.get("pts3d")
+        if (tag is None or tag[1] != "epi" or not p3
+                or not (0 <= vi < len(p3))):
+            return
+        bpts = before.get("pts3d")
+        if (bpts and 0 <= vi < len(bpts)
+                and float(np.linalg.norm(np.asarray(p3[vi], float)
+                                         - np.asarray(bpts[vi], float))) < 0.5):
+            return                                   # no real move → don't lock
+        self._lv.setdefault("epi_locks", []).append(
+            np.asarray(p3[vi], float).copy())
+
     def _lv_live_recapture(self, key, m) -> None:
         """Feed an EDITED endo/epi border on the LV pane back into the model, so
         the edit persists — crucially in the plane-by-plane TRACING phase too, not
@@ -14790,9 +14814,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         if self._edit:
             key = self._edit["key"]
             mi = self._edit.get("mi")
+            vi = self._edit.get("vi")
             self._edit = None
             if (mi is not None and 0 <= mi < len(self._measures[key])):
                 self._lv_live_recapture(key, self._measures[key][mi])
+                self._lv_record_epi_lock(key, mi, vi)
             self._redraw_meas(key)
             # Commit an LV-border DRAG (snapshot stashed at mouse-press) as one
             # undo/redo step, now that the final dragged points are known.
@@ -17402,6 +17428,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["vol_endo_ml"] = None
         lv["vol_epi_ml"] = None
         lv["husnap_done"] = False            # fresh border → no re-run warning
+        lv["epi_locks"] = []                 # drop hand-moved spline locks
         self._lv_clear_measured_mask()       # drop the red region + _lv_region_comp
         if getattr(self, "_lv_region_btn", None) is not None:
             self._lv_region_btn.setChecked(False)
@@ -18414,7 +18441,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
-            stats = ea.refine_epi_short_axis(self._vol, self._dims, model)
+            stats = ea.refine_epi_short_axis(
+                self._vol, self._dims, model,
+                locked_pts=lv.get("epi_locks"))      # keep hand-moved points
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18431,9 +18460,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._redraw_all_lv()
         QMessageBox.information(
             self.window(), title,
-            t("短軸スプライン補正：{L} 断面を処理し、{p} 面の Epi 輪郭を更新しました。\n"
-              "心尖は手動のままです。手で動かした後、もう一度押せば再補正できます。",
-              L=stats.get("levels", 0), p=stats.get("planes", 0)))
+            t("短軸スプライン補正：{L} 断面を処理し、{p} 面の Epi 輪郭を更新しました"
+              "（手動移動 {k} 点は保持）。\n心尖は手動のままです。手で動かした後、"
+              "もう一度押しても手動点は動きません。",
+              L=stats.get("levels", 0), p=stats.get("planes", 0),
+              k=stats.get("locked", 0)))
 
     def _lv_rebuild_measures(self) -> None:
         """(Re)create the per-plane Endo/Epi border measures on the LV pane from
