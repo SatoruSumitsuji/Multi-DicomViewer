@@ -3603,8 +3603,12 @@ class CTViewer(CPRMixin, AbstractViewer):
 
         stem = self._terr_export_stem()
         src = getattr(self, "_src_dir", "") or ""
-        default = os.path.join(src, stem + ".html") \
-            if src and os.path.isdir(src) else stem + ".html"
+        # Default to the PARENT of the CT's own folder (per request), falling back
+        # to the CT folder itself then the bare filename.
+        parent = os.path.dirname(os.path.normpath(src)) if src else ""
+        base = parent if (parent and os.path.isdir(parent)) else src
+        default = os.path.join(base, stem + ".html") \
+            if base and os.path.isdir(base) else stem + ".html"
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("VR を書き出し (HTML / GLB)"), default,
             t("自己完結 HTML (*.html);;glTF Binary (*.glb)"))
