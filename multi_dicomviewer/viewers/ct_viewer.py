@@ -17389,6 +17389,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         lv["vol_done"] = False
         lv["vol_endo_ml"] = None
         lv["vol_epi_ml"] = None
+        lv["husnap_done"] = False            # fresh border → no re-run warning
         self._lv_clear_measured_mask()       # drop the red region + _lv_region_comp
         if getattr(self, "_lv_region_btn", None) is not None:
             self._lv_region_btn.setChecked(False)
@@ -18346,6 +18347,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("Epi HU補正"),
                 t("先に Epi をトレースしてください（MV / AoV / Apex 設定後）。"))
             return
+        # Re-run warning: once HU補正 has run, a second pass re-blends from the
+        # CURRENT (hand-edited) border, so a hand correction placed near a CLEAR
+        # HU edge is pulled back to that edge (small-drop edits — inferior wall —
+        # are kept). Warn every time after the first (reset on Clear/Load/Exit).
+        if lv.get("husnap_done"):
+            if QMessageBox.question(
+                    self.window(), t("Epi HU補正"),
+                    t("すでに HU補正を実行済みです。再実行すると、明瞭なエッジ付近で"
+                      "行った手補正がエッジ側へ戻る場合があります（下壁など落差の"
+                      "小さい手補正は保持されます）。続けますか？")) \
+                    != QMessageBox.StandardButton.Yes:
+                return
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
@@ -18359,6 +18372,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_invalidate_volume()
         self._lv_rebuild_measures()
         self._redraw_all_lv()
+        lv["husnap_done"] = True                 # arm the re-run warning
         QMessageBox.information(
             self.window(), t("Epi HU補正"),
             t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
