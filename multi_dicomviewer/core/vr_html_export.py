@@ -449,25 +449,25 @@ def self_contained_html(glb_bytes: bytes, *, title="Multi-DICOMviewer VR",
     font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;overflow:hidden}}
   #c{{position:fixed;inset:0}}
   .hud{{position:fixed;text-shadow:0 1px 3px #000,0 0 2px #000;pointer-events:none;
-    white-space:pre;font-size:13px;line-height:1.45}}
+    white-space:pre;font-size:19.5px;line-height:1.45}}
   #tl{{top:10px;left:12px;max-width:52vw}}
-  #tl b{{font-size:15px}}
+  #tl b{{font-size:22.5px}}
   #tr{{top:10px;right:12px;text-align:left;color:#ffd900;font-family:monospace;
     font-weight:bold;max-width:52vw}}
   #br{{bottom:40px;right:12px;text-align:left;color:#ffd900;font-family:monospace;
     font-weight:bold;max-width:52vw}}
   #angio{{bottom:12px;left:50%;transform:translateX(-50%);color:#ffd900;
-    font-family:monospace;font-size:17px;font-weight:bold}}
+    font-family:monospace;font-size:25.5px;font-weight:bold}}
   #labels{{position:fixed;inset:0;pointer-events:none;overflow:hidden}}
   #labels span{{position:absolute;font-family:monospace;font-weight:bold;
-    font-size:15px;text-shadow:0 1px 3px #000,0 0 2px #000,1px 0 2px #000;
+    font-size:22.5px;text-shadow:0 1px 3px #000,0 0 2px #000,1px 0 2px #000;
     transform:translate(8px,-20px);white-space:nowrap}}
   #bar{{position:fixed;bottom:12px;left:12px;display:flex;gap:8px}}
   #bar button{{background:#1f2630;color:#e8e8e8;border:1px solid #39434f;
-    border-radius:7px;padding:7px 13px;font-size:13px;cursor:pointer}}
+    border-radius:7px;padding:7px 13px;font-size:19.5px;cursor:pointer}}
   #bar button:hover{{background:#2b3440}}
   #bar button.on{{background:#2d5fa8;border-color:#3f7ad0}}
-  #tip{{position:fixed;top:10px;left:50%;transform:translateX(-50%);font-size:12px;
+  #tip{{position:fixed;top:10px;left:50%;transform:translateX(-50%);font-size:18px;
     color:#9aa4b0;text-shadow:0 1px 3px #000}}
 </style>
 </head>
