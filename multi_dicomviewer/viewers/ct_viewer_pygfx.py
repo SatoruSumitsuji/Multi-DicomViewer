@@ -15414,6 +15414,12 @@ class CTViewer(CPRMixin, AbstractViewer):
                   self._lv_wall_btn, self._lv_redo_btn, self._lv_save_btn,
                   self._lv_stl_btn):
             b.setEnabled(contour)
+        # HU補正 (Epi edge snap): needs a traced EPI border in contour phase. It
+        # is the one _lv_bar_btns member with no other per-state setEnabled, so
+        # without this it stayed disabled after any LV exit and did nothing.
+        if getattr(self, "_lv_husnap_btn", None) is not None:
+            self._lv_husnap_btn.setEnabled(
+                bool(contour and len(lv["model"].epi_contours) >= 3))
         # Fit MV needs a traced border AND a common MV plane to converge onto.
         if getattr(self, "_lv_fit_mv_btn", None) is not None:
             _fm = self._lv["model"] if self._lv is not None else None
@@ -16842,6 +16848,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._draft = None
         self._lv_result_lines = []
         self._lv["plane_idx"] = 0
+        self._lv["husnap_done"] = False          # fresh border → no re-run warning
         if self._lv.get("sax") is not None:
             self._lv_leave_sax()
         self._lv_apply_target(self._lv.get("pass"))
@@ -17881,6 +17888,9 @@ class CTViewer(CPRMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMessageBox, QApplication
         from PyQt6.QtCore import Qt as _Qt
         lv = getattr(self, "_lv", None)
+        # Commit the plane being traced now so the LATEST border is included.
+        if lv is not None and lv.get("phase") == "contour":
+            self._lv_capture_current()
         model = lv.get("model") if lv else None
         if (self._vol is None or model is None
                 or getattr(model, "epi_axis", None) is None
@@ -17889,6 +17899,18 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self.window(), t("Epi HU補正"),
                 t("先に Epi をトレースしてください（MV / AoV / Apex 設定後）。"))
             return
+        # Re-run warning: a second pass re-blends from the CURRENT (hand-edited)
+        # border, so a hand correction near a CLEAR HU edge is pulled back to it
+        # (small-drop edits — inferior wall — are kept). Warn every time after the
+        # first (reset on Clear/Load/Exit).
+        if lv.get("husnap_done"):
+            if QMessageBox.question(
+                    self.window(), t("Epi HU補正"),
+                    t("すでに HU補正を実行済みです。再実行すると、明瞭なエッジ付近で"
+                      "行った手補正がエッジ側へ戻る場合があります（下壁など落差の"
+                      "小さい手補正は保持されます）。続けますか？")) \
+                    != QMessageBox.StandardButton.Yes:
+                return
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
@@ -17902,6 +17924,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._lv_invalidate_volume()
         self._lv_rebuild_measures()
         self._lv_redraw_all()
+        lv["husnap_done"] = True                 # arm the re-run warning
         QMessageBox.information(
             self.window(), t("Epi HU補正"),
             t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
