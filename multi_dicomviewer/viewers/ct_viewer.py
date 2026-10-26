@@ -18444,6 +18444,22 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._measures[pane] = [mm for mm in self._measures[pane]
                                 if mm.get("_lv") is None]
         angs = m.plane_angles()
+        # Show only the CURRENT plane's border on the long-axis pane — the other
+        # planes/passes lie on different meridians and would fan out across this
+        # view (the "multiple borders" the user saw). Mirror the hidden rule used
+        # by _lv_show_plane (contour) / SAX entry so rebuild never leaves them all
+        # visible. The pass filter differs by mode (contour: active pass; SAX:
+        # sax_which / show-both).
+        cur_idx = lv.get("plane_idx", 0)
+        if lv.get("sax") is not None:
+            _w = lv.get("sax_which")
+            _show_both = _w not in ("endo", "epi")
+            def _is_hidden(idx, which):
+                return (idx != cur_idx) or (not _show_both and which != _w)
+        else:
+            _pass = lv.get("pass")
+            def _is_hidden(idx, which):
+                return (idx != cur_idx) or (which != _pass)
         for which, store, col in (("endo", m.endo_planes, "#ff4040"),
                                   ("epi", m.epi_planes, "#40c040")):
             for phi, pts3d in store.items():
@@ -18459,7 +18475,8 @@ class CTViewer(CPRMixin, AbstractViewer):
                     "id": self._meas_seq, "type": "polyline",
                     "pts3d": p3,
                     "pts": [self._world3d_to_out(pane, P) for P in p3],
-                    "color": col, "smooth": True, "_lv": (idx, which)})
+                    "color": col, "smooth": True, "_lv": (idx, which),
+                    "hidden": _is_hidden(idx, which)})
 
     def _lv_exit_confirm(self) -> None:
         """'Exit LV' button → confirm before leaving LV analysis."""
