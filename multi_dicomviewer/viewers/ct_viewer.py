@@ -1310,6 +1310,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # lines, grabbing the centreline always wins. Hover feedback (the vivid
         # highlight + rotate arrow, see _hover_cross) tells the user, before the
         # click, whether the press will pan/tool, parallel-move or rotate.
+        # ▲ handle: a press on the green ▲ (the companion's section-direction
+        # marker) starts a drag that snaps the COMPANION to the 90° orthogonal
+        # view — crosshair stays fixed, only the ▲ moves. Wins over the crossline.
+        if self._owner._tri_grab(self._which, e.position().x(), e.position().y()):
+            self._cross = False
+            self._last = e.position()
+            return
         self._cross = self._owner._cross_press(
             self._which, e.position().x(), e.position().y()
         )
@@ -1417,6 +1424,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                     self._which, e.position().x(), e.position().y())
             return
         p = e.position()
+        if self._owner._tri_drag is not None:
+            self._owner._tri_drag_move(self._which, p.x(), p.y())
+            self._last = p
+            return
         if self._cross:
             self._owner._cross_move(self._which, p.x(), p.y())
             self._last = p
@@ -1432,6 +1443,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if self._owner._tri_drag is not None:
+            # Released without reaching the orthogonal snap → no change.
+            self._owner._tri_drag_cancel(self._which)
+            self._last = None
+            self._owner._gesture_commit()        # nothing moved → records nothing
+            return
         if self._vr_tgt_drag is not None:
             n = self._vr_tgt_drag
             self._vr_tgt_drag = None             # clear FIRST → no re-entrant move
@@ -3103,6 +3120,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._cross_prev = 0.0               # CrossLine-rotate prev angle
         self._spin_prev = None               # SPIN wheel previous angle
         self._cross_mode = "rotate"          # "rotate" | "move"
+        self._tri_drag = None                # dragging a ▲ handle → 90° companion
         self._cross_axis = None              # locked move axis (2-D unit)
         self._cross_ppt = (0.0, 0.0)         # prev world point (move mode)
         # Hover/drag centreline highlight: which pane is mid-drag, and the
@@ -21660,6 +21678,98 @@ class CTViewer(CPRMixin, AbstractViewer):
         self._pc[other] = P - (off_u * np.asarray(u2f, float)
                                + off_v * np.asarray(v2f, float))
 
+    # ---- ▲ handle: drag the companion's section-direction marker to the ----
+    #      orthogonal axis → snap the COMPANION pane to the 90° view. --------
+    _TRI_PICK_PX = 16.0        # grab radius around a ▲ (Qt-logical px)
+    _TRI_SNAP_DEG = 15.0       # snap when the drag is within this of ±90°
+
+    def _tri_centers(self, which):
+        """The two ▲ marker centres (world/output coords) of *which* pane's
+        crosshair — on the H crossline at ±d along uh."""
+        ccx, ccy = self._cc(which)
+        ps = self.pane[which].ren.GetActiveCamera().GetParallelScale()
+        d = 0.255 * ps
+        a = math.radians(self._cross_ang[which])
+        uh = (math.cos(a), math.sin(a))
+        return [(ccx + s * d * uh[0], ccy + s * d * uh[1]) for s in (1.0, -1.0)]
+
+    def _tri_pick(self, which, sx, sy):
+        """True if (sx, sy) is on a ▲ handle of *which* pane (crosshair visible,
+        not LV-suppressed)."""
+        if self._image is None or self._lv_cross_suppressed():
+            return False
+        p = self.pane[which]
+        if not (p.cross and p.cross[0][1].GetVisibility()):
+            return False
+        for wx, wy in self._tri_centers(which):
+            mx, my = self._world_to_qt(which, wx, wy)
+            if (mx - sx) ** 2 + (my - sy) ** 2 <= self._TRI_PICK_PX ** 2:
+                return True
+        return False
+
+    def _tri_grab(self, which, sx, sy) -> bool:
+        """Start a ▲ drag if the press lands on a ▲ handle. The crosshair stays
+        fixed; only the ▲ follows the cursor until it snaps to the orthogonal."""
+        if not self._tri_pick(which, sx, sy):
+            return False
+        self._tri_drag = {"which": which, "ang0": float(self._cross_ang[which])}
+        return True
+
+    def _draw_tri_preview(self, which, ang_deg):
+        """Redraw ONLY the ▲ pair at *ang_deg* (crosshair lines unchanged) — the
+        live feedback while the handle is dragged off the H line."""
+        p = self.pane[which]
+        ccx, ccy = self._cc(which)
+        ps = p.ren.GetActiveCamera().GetParallelScale()
+        sz, d, z = 0.024 * ps, 0.255 * ps, 0.6
+        a = math.radians(ang_deg)
+        uh = np.array([math.cos(a), math.sin(a)])
+        uv = np.array([-math.sin(a), math.cos(a)])
+        cc = np.array([ccx, ccy])
+
+        def pt(aa, bb):
+            v = cc + aa * uh + bb * uv
+            return (float(v[0]), float(v[1]), z)
+
+        apex_sgn = ((-1.0 if which == "A" else 1.0)
+                    * getattr(self, "_apex_flip", {}).get(which, 1.0))
+        p.tri_mapper.SetInputData(_tris_pd([
+            (pt(aa, apex_sgn * sz), pt(aa - 0.6 * sz, 0.0), pt(aa + 0.6 * sz, 0.0))
+            for aa in (d, -d)]))
+        p.render()
+
+    def _tri_drag_move(self, which, sx, sy):
+        """While dragging a ▲: slide it to the cursor angle; when it reaches the
+        orthogonal axis (±90° from the H line) SNAP there and rotate the COMPANION
+        pane 90° about the shared axis (this pane's image is unchanged)."""
+        td = self._tri_drag
+        if td is None or td["which"] != which:
+            return
+        ccx, ccy = self._cc(which)
+        wx, wy = self._disp_to_world(which, sx, sy)
+        rx, ry = wx - ccx, wy - ccy
+        if abs(rx) < 1e-6 and abs(ry) < 1e-6:
+            return
+        cur = math.degrees(math.atan2(ry, rx))
+        delta = ((cur - td["ang0"]) + 180.0) % 360.0 - 180.0   # signed, −180..180
+        for target in (90.0, -90.0):
+            if abs(delta - target) <= self._TRI_SNAP_DEG:
+                self._tri_drag = None
+                self._cross_ang[which] = (self._cross_ang[which] + target) % 360.0
+                self._rotate_companion_by(which, target)       # companion → 90°
+                self._gesture_moved = True                     # one Ctrl+Z step
+                self._view_initial = False
+                self._refresh()
+                return
+        self._draw_tri_preview(which, cur)                     # not snapped → follow
+
+    def _tri_drag_cancel(self, which):
+        """Released without reaching the orthogonal snap → no change; restore the
+        ▲ to the (unchanged) H line."""
+        self._tri_drag = None
+        self._update_cross(which)
+        self.pane[which].render()
+
     def _cross_zone(self, which, sx, sy):
         """Classify a screen point (sx, sy) against *which* pane's crosshair.
 
@@ -21786,6 +21896,9 @@ class CTViewer(CPRMixin, AbstractViewer):
             return
         if self._lv_cross_suppressed():           # no crosshair to preview
             self._set_cross_highlight(which, None, None)
+            return
+        if self._tri_pick(which, sx, sy):         # over a ▲ handle → its own grab,
+            self._set_cross_highlight(which, None, None)   # not a move/rotate hint
             return
         caught, line, mode = self._cross_zone(which, sx, sy)
         if caught:
