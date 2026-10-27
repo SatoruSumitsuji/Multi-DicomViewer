@@ -1444,10 +1444,15 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
 
     def mouseReleaseEvent(self, e):
         if self._owner._tri_drag is not None:
-            # Released without reaching the orthogonal snap → no change.
-            self._owner._tri_drag_cancel(self._which)
+            # End the ▲ gesture. If it snapped (locked) the 90° rotation is already
+            # applied → just commit it; if it was released before snapping, restore
+            # the ▲ (no change). Either way the next press starts fresh.
+            _locked = self._owner._tri_drag.get("locked", False)
+            self._owner._tri_drag = None
+            if not _locked:
+                self._owner._tri_restore(self._which)
             self._last = None
-            self._owner._gesture_commit()        # nothing moved → records nothing
+            self._owner._gesture_commit()        # commits the rotation if snapped
             return
         if self._vr_tgt_drag is not None:
             n = self._vr_tgt_drag
@@ -21745,6 +21750,11 @@ class CTViewer(CPRMixin, AbstractViewer):
         td = self._tri_drag
         if td is None or td["which"] != which:
             return
+        if td.get("locked"):
+            return                        # snap applied → ignore the rest of this
+            #                               drag (don't let it spill to the tool /
+            #                               move the background). A new press after
+            #                               release runs the default behaviour.
         ccx, ccy = self._cc(which)
         wx, wy = self._disp_to_world(which, sx, sy)
         rx, ry = wx - ccx, wy - ccy
@@ -21754,7 +21764,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         delta = ((cur - td["ang0"]) + 180.0) % 360.0 - 180.0   # signed, −180..180
         for target in (90.0, -90.0):
             if abs(delta - target) <= self._TRI_SNAP_DEG:
-                self._tri_drag = None
+                td["locked"] = True       # consume the rest of the drag
                 self._cross_ang[which] = (self._cross_ang[which] + target) % 360.0
                 self._rotate_companion_by(which, target)       # companion → 90°
                 self._gesture_moved = True                     # one Ctrl+Z step
@@ -21763,10 +21773,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 return
         self._draw_tri_preview(which, cur)                     # not snapped → follow
 
-    def _tri_drag_cancel(self, which):
-        """Released without reaching the orthogonal snap → no change; restore the
-        ▲ to the (unchanged) H line."""
-        self._tri_drag = None
+    def _tri_restore(self, which):
+        """Redraw the ▲ at the real (unchanged) H line — used when a drag is
+        released before it snapped (no change applied)."""
         self._update_cross(which)
         self.pane[which].render()
 
