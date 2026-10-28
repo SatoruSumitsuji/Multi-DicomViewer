@@ -126,12 +126,6 @@ hiddenimports = (
     + iio_hidden
     + iiof_hidden
     + ["multi_dicomviewer"]
-    # The CI-written build stamp (git hash shown in the title bar). It is
-    # imported dynamically (from multi_dicomviewer import _build), so name it
-    # explicitly — but only when it exists, so a dev build without the stamp
-    # doesn't emit a missing-module warning.
-    + (["multi_dicomviewer._build"]
-       if pathlib.Path("multi_dicomviewer/_build.py").exists() else [])
 )
 
 a = Analysis(
