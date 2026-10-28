@@ -3,7 +3,7 @@
 import functools
 import os
 import subprocess
-import sys  # noqa: F401  (kept for platform-specific config if needed)
+import sys
 
 # macOS now renders CT via the pygfx (wgpu→Metal) viewer, so the Mac build
 # ships full CT again — same app name and no CT block on every platform.
@@ -14,43 +14,77 @@ APP_VERSION = "5.0.0"
 def _run_git(root, *args, timeout=5):
     """Return the stripped stdout of `git -C root <args>`, or None on any
     failure (git missing, not a repo, timeout)."""
+    # CREATE_NO_WINDOW: under pythonw (the .bat launcher) there is no console,
+    # so each git.exe would otherwise allocate a fresh one of its own.
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         out = subprocess.run(
             ["git", "-C", root, *args],
             capture_output=True, text=True, timeout=timeout,
+            stdin=subprocess.DEVNULL, creationflags=flags,
         )
         return out.stdout.strip() if out.returncode == 0 else None
     except Exception:                                    # noqa: BLE001
         return None
 
 
+def _read_git_head(root):
+    """(short_hash, branch) read straight from the .git directory — no git
+    process — or None. Fallback for when running git fails (not on PATH in
+    the launcher's environment, console/spawn trouble under pythonw, …).
+    Handles a worktree/submodule ``.git`` file and packed refs."""
+    def _read(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return None
+
+    gitdir = os.path.join(root, ".git")
+    if os.path.isfile(gitdir):                     # worktree: "gitdir: <path>"
+        txt = _read(gitdir) or ""
+        if not txt.startswith("gitdir:"):
+            return None
+        gitdir = os.path.normpath(os.path.join(root, txt[7:].strip()))
+    head = _read(os.path.join(gitdir, "HEAD"))
+    if not head:
+        return None
+    if not head.startswith("ref:"):                # detached HEAD
+        return head[:7], "HEAD"
+    ref = head[4:].strip()
+    common = _read(os.path.join(gitdir, "commondir"))
+    common = os.path.normpath(os.path.join(gitdir, common)) if common else gitdir
+    h = None
+    for d in dict.fromkeys((gitdir, common)):
+        h = _read(os.path.join(d, *ref.split("/")))
+        if h:
+            break
+    if not h:
+        for line in (_read(os.path.join(common, "packed-refs")) or "").splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == ref:
+                h = parts[0]
+                break
+    if not h:
+        return None
+    branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+    return h[:7], branch
+
+
 def _git_build_info():
     """(short_hash, branch, dirty) from the source checkout, or None when
-    not running from a git repo (e.g. a frozen build). *dirty* is None when
-    it couldn't be determined (e.g. `git status` timed out) — distinct from
-    False (confirmed clean)."""
+    not running from a git repo. *dirty* is None when it couldn't be
+    determined (e.g. `git status` failed/timed out) — distinct from False
+    (confirmed clean)."""
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     h = _run_git(root, "rev-parse", "--short", "HEAD")
     if not h:
-        return None
+        info = _read_git_head(root)
+        return (*info, None) if info else None
     branch = _run_git(root, "rev-parse", "--abbrev-ref", "HEAD") or ""
     status = _run_git(root, "status", "--porcelain")
     dirty = None if status is None else bool(status)
     return h, branch, dirty
-
-
-def _baked_build_info():
-    """(short_hash, branch, dirty) from a build stamp CI writes at package
-    time (multi_dicomviewer/_build.py), or None when absent."""
-    try:
-        from multi_dicomviewer import _build   # written by CI; absent in dev
-    except Exception:                                    # noqa: BLE001
-        return None
-    h = getattr(_build, "BUILD_HASH", "")
-    if not h:
-        return None
-    return h, getattr(_build, "BUILD_BRANCH", ""), \
-        bool(getattr(_build, "BUILD_DIRTY", False))
 
 
 def _source_mtime():
@@ -81,13 +115,16 @@ def build_string():
     dirty, e.g. ``v1.11.4 (feature/x @ a1b2c3d* src 07-06 15:42:03)``. The
     timestamp advances with every edit, so you can tell whether a relaunch
     picked up the latest changes — which the hash+``*`` alone cannot show.
-    Shown in the window title. Falls back to a baked CI stamp (frozen
-    builds), then the bare version. Cached — computed once per process."""
+    Shown in the window title. A frozen (PyInstaller) build ALWAYS gets the
+    bare version — the hash is a dev-only aid and must never reach the
+    distributed exe/app. Cached — computed once per process."""
     base = f"v{APP_VERSION}"
-    info = _git_build_info() or _baked_build_info()
+    if getattr(sys, "frozen", False):
+        return base
+    info = _git_build_info()
     src = _source_mtime()
     if not info:
-        # No git and no baked stamp — the source mtime is the only build id
+        # No git info — the source mtime is the only build id
         # we have, so always show it (this is the git-not-on-PATH case).
         return f"{base} src {src}" if src else base
     h, branch, dirty = info
