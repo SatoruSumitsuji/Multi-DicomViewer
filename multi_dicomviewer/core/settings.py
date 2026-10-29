@@ -226,9 +226,32 @@ def save_language(code: str) -> None:
     except OSError:
         pass
 
-#: Modalities that get their own persisted tag list. Anything else
-#: falls into "OTHER" so the auto-recall still works for NM/OCT/etc.
-TAG_MODALITIES = ("XA", "IVUS", "CT", "OTHER")
+#: Modalities (検査種別) that get their own persisted tag list. Anything else
+#: falls into "OTHER" so the auto-recall still works for NM/US/etc. OCT / OFDI
+#: are shown by the IVUS viewer but keep a list of their own.
+TAG_MODALITIES = ("XA", "IVUS", "OCT", "CT", "OTHER")
+
+#: Raw DICOM Modality codes bucketed as "OCT" (intravascular OCT / OFDI).
+OCT_LIKE_MODALITIES = frozenset({"OCT", "IVOCT", "OFDI"})
+
+
+def tag_bucket(kind: str, raw_modality: str = "") -> str:
+    """The TAG_MODALITIES bucket for a viewer/series of *kind* ("XA"/"IVUS"/
+    "CT"/…) whose DICOM Modality is *raw_modality* (splits OCT off IVUS)."""
+    kind = str(kind or "").upper()
+    if kind == "IVUS" and str(raw_modality or "").upper() in OCT_LIKE_MODALITIES:
+        return "OCT"
+    return kind if kind in TAG_MODALITIES else "OTHER"
+
+
+def _per_modality(by_mod: dict) -> dict:
+    """Clean a stored ``{modality: [str]}`` dict. A file written before OCT had
+    its own bucket (no "OCT" key) seeds OCT from IVUS, which it used to share."""
+    out = {mod: [k for k in (by_mod.get(mod) or []) if isinstance(k, str) and k]
+           for mod in TAG_MODALITIES}
+    if "OCT" not in by_mod:
+        out["OCT"] = list(out["IVUS"])
+    return out
 
 
 def _parse(text: str):
@@ -245,10 +268,7 @@ def _parse(text: str):
         raise ValueError("malformed settings file")
     by_mod = data.get("tag_keywords_by_modality")
     if isinstance(by_mod, dict):
-        return {
-            mod: [k for k in (by_mod.get(mod) or []) if isinstance(k, str) and k]
-            for mod in TAG_MODALITIES
-        }
+        return _per_modality(by_mod)
     kws = data.get("tag_keywords")
     if isinstance(kws, list):
         return [k for k in kws if isinstance(k, str) and k]
@@ -349,9 +369,7 @@ def load_export_fields_by_modality() -> dict:
     if not isinstance(by_mod, dict):
         return empty
     out = {}
-    for mod in TAG_MODALITIES:
-        raw = [f for f in (by_mod.get(mod) or [])
-                if isinstance(f, str) and f]
+    for mod, raw in _per_modality(by_mod).items():
         flat: list[str] = []
         seen: set[str] = set()
         for f in raw:
@@ -986,3 +1004,89 @@ def save_anon_profile(tags, emptify_private: bool) -> None:
         )
     except OSError:
         pass
+
+
+# ------------------------------------------- whole-settings Export / Import
+#: The settings files carried by the Settings dialog's Export / Import (one
+#: bundle file → the same settings on another PC). ivus_color.json is left out
+#: on purpose: it is keyed by SeriesInstanceUID (per-case data, not a pref).
+SETTINGS_BUNDLE_FILES = (
+    TAG_CONDITIONS_PATH, EXPORT_FIELDS_PATH, ANON_PROFILE_PATH,
+    DISPLAY_QUALITY_PATH, ADVANCED_QUALITY_PATH, LANGUAGE_PATH,
+    DICOMFOLDER_SORT_PATH, DICOMFOLDER_OPTIONS_PATH, LIVE_CAPS_PATH,
+    CT_COLORMAP_PATH, CORONARY_PARAMS_PATH, MOUSE_GRID_PATH,
+    LV_ENDO_PATH, LV_WALL_BANDS_PATH,
+)
+SETTINGS_BUNDLE_FORMAT = "Multi-DicomViewer settings"
+SETTINGS_BUNDLE_DEFAULT_NAME = "Settings.txt"
+
+
+def snapshot_settings() -> dict:
+    """Raw bytes of every bundled settings file (None = absent), so a caller
+    can save temporarily and put everything back with restore_settings."""
+    snap = {}
+    for p in SETTINGS_BUNDLE_FILES:
+        try:
+            snap[p] = p.read_bytes()
+        except OSError:
+            snap[p] = None
+    return snap
+
+
+def restore_settings(snap: dict) -> None:
+    """Put back a snapshot_settings() result (absent files are removed)."""
+    for p, data in snap.items():
+        try:
+            if data is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.write_bytes(data)
+        except OSError:
+            pass
+
+
+def export_settings_bundle(path: str) -> int:
+    """Write every bundled settings file into ONE file at *path* (JSON text).
+    A file not saved yet is recorded as null, so importing it resets that
+    setting to the default. Returns how many files had saved content."""
+    from datetime import datetime
+    files = {}
+    for p in SETTINGS_BUNDLE_FILES:
+        try:
+            files[p.name] = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            files[p.name] = None
+    payload = {
+        "format": SETTINGS_BUNDLE_FORMAT,
+        "version": 1,
+        "exported": datetime.now().isoformat(timespec="seconds"),
+        "settings": files,
+    }
+    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                          encoding="utf-8")
+    return sum(1 for v in files.values() if v is not None)
+
+
+def import_settings_bundle(path: str) -> int:
+    """Replace the local settings with those in the bundle at *path*. Raises
+    ValueError (or OSError) on a file that is not a settings bundle, BEFORE
+    anything is written. Returns how many settings files were written."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("format") != SETTINGS_BUNDLE_FORMAT \
+            or not isinstance(data.get("settings"), dict):
+        raise ValueError("not a Multi-DicomViewer settings file")
+    files = data["settings"]
+    known = {p.name: p for p in SETTINGS_BUNDLE_FILES}
+    SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for name, body in files.items():
+        p = known.get(name)
+        if p is None:                       # unknown entry (newer app) — skip
+            continue
+        if body is None:                    # unset on the source PC → default
+            p.unlink(missing_ok=True)
+            continue
+        p.write_text(json.dumps(body, ensure_ascii=False, indent=2),
+                     encoding="utf-8")
+        n += 1
+    return n

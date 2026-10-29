@@ -70,7 +70,8 @@ class SettingsDialog(QDialog):
 
     def __init__(self, caps: dict, quality: dict, on_ct_color,
                  on_advanced=None, parent=None, lv_endo=None, lv_wall=None,
-                 coronary=None, mouse_grid=None):
+                 coronary=None, mouse_grid=None, on_export=None,
+                 on_import=None):
         super().__init__(parent)
         self.setWindowTitle(t("Settings"))
         # Native min / max / close buttons top-right (this also gives, for free,
@@ -84,6 +85,8 @@ class SettingsDialog(QDialog):
             | Qt.WindowType.WindowCloseButtonHint)
         self._on_ct_color = on_ct_color
         self._on_advanced = on_advanced
+        self._on_export = on_export
+        self._on_import = on_import
         # Wider + scrollable: the sections stack vertically and there are now many,
         # so the content scrolls inside a fixed-size, comfortably wide dialog.
         self.setMinimumWidth(560)
@@ -436,12 +439,30 @@ class SettingsDialog(QDialog):
         mgv.addLayout(_lines_row)
         root.addWidget(gb_mg)
 
+        # Bottom row: Export / Import (whole settings, one file) at the left,
+        # OK / Cancel at the right.
+        bottom = QHBoxLayout()
+        exp_btn = QPushButton(t("Export"))
+        exp_btn.setToolTip(t(
+            "すべての設定（この画面の内容 + 検査種別ごとの DICOM タグ表示項目など）を"
+            "1つの設定ファイルに書き出します。別の PC で Import すると同じ設定になります。"))
+        exp_btn.setEnabled(callable(on_export))
+        exp_btn.clicked.connect(lambda: self._on_export(self))
+        imp_btn = QPushButton(t("Import"))
+        imp_btn.setToolTip(t(
+            "Export した設定ファイルを読み込み、すべての設定をその内容に置き換えます。"))
+        imp_btn.setEnabled(callable(on_import))
+        imp_btn.clicked.connect(lambda: self._on_import(self))
+        bottom.addWidget(exp_btn)
+        bottom.addWidget(imp_btn)
+        bottom.addStretch(1)
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
             | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
-        outer.addWidget(btns)
+        bottom.addWidget(btns)
+        outer.addLayout(bottom)
 
     def _on_ct_count_changed(self, val: int) -> None:
         """Confirm before enabling multiple live CT panes — the memory/GPU load

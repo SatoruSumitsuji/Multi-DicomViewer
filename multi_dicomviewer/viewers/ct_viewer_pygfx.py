@@ -66,6 +66,7 @@ from rendercanvas.pyqt6 import RenderCanvas
 from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.cpr_mixin import CPRMixin
+from multi_dicomviewer.viewers.ct_mode_bar import CTModeBarMixin
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.dicom_io import LoadedSeries
@@ -2646,7 +2647,7 @@ class _ColorMapDialog(QDialog):
 
 
 # --------------------------------------------------------------- viewer
-class CTViewer(CPRMixin, AbstractViewer):
+class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
     handles_modality = "CT"
     #: emitted by the series-navigation buttons ("first"/"prev"/"next"/"last")
     #: — the shell steps through this study's CT series (angio-style F/A nav)
@@ -3107,6 +3108,8 @@ class CTViewer(CPRMixin, AbstractViewer):
         lay.addWidget(plane_bar)
         lay.addWidget(self._build_lv_bar())     # unified bar (builds the lvv bar)
         lay.addWidget(self._build_terr_bar())   # CT Territory review bar (hidden until a review)
+        # Row 3 (under the LV / Territory bar): the loaded FullLv / corotree.
+        lay.addWidget(self._build_ct_files_line())
         lay.addWidget(self._build_seek_bar())
         lay.addWidget(self._build_cpr_bar())
 
@@ -4258,6 +4261,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             b.clicked.connect(lambda _c, k=key: self._set_mode(k))
             self._mode_btns[key] = b
             row.addWidget(b)
+        # 標準 / LV / CoronaryTree / Territory work-mode switch (shared mixin).
+        self._build_ct_mode_buttons(row)
         row.addStretch(1)
         for b in bar.findChildren(QPushButton):
             b.setMinimumWidth(min(b.sizeHint().width(), 56))
@@ -4557,10 +4562,9 @@ class CTViewer(CPRMixin, AbstractViewer):
                 # greyed/disabled tool is clearly distinguishable (VTK parity).
                 b.setStyleSheet("")
         # CenterLine button: greyed + unclickable while the LV crosshair is
-        # SUPPRESSED (apex placed → tracing) and in 2-D; auto-re-enables.
+        # SUPPRESSED (apex placed → tracing); enabled in 2-D too; auto-re-enables.
         if getattr(self, "_cl_btn", None) is not None:
-            self._cl_btn.setEnabled(
-                (not is2d) and not self._lv_cross_suppressed())
+            self._cl_btn.setEnabled(not self._lv_cross_suppressed())
             self._style_cl()
         # WB reverse (grayscale invert) and the slab-thickness spin are disabled
         # throughout LV mode (thin slices, fixed grayscale).
@@ -4648,8 +4652,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         if getattr(self, "_terr_bar", None) is not None:
             self._terr_bar_sync()
         self._slab_spin.setEnabled(not is2d)
-        self._cl_btn.setEnabled(
-            (not is2d) and not self._lv_cross_suppressed())
+        self._cl_btn.setEnabled(not self._lv_cross_suppressed())
         self._style_cl()
         for b in self._side_btns.values():
             b.setEnabled(not is2d)
@@ -4669,7 +4672,8 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._thick = {"A": 0.0, "B": 0.0}
             self._roll = {"A": 0.0, "B": 0.0}
             self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
-            self._cl_on = False                      # no crosshair in 2-D
+            # 2-D: the crosshair follows the CenterLine toggle, like 3-D.
+            self._cl_on = self._cl_btn.isChecked()
             # Snap the slice plane onto the nearest native slice so no z
             # interpolation occurs (the image is the acquired slice as-is).
             nz = self._vol.shape[0]
@@ -7698,6 +7702,13 @@ class CTViewer(CPRMixin, AbstractViewer):
             self._center = np.asarray(self._center, float) + du * u + dv * v
             if mode != "center":
                 self._pc[other] = np.asarray(self._center, float).copy()
+            else:
+                # Centre drag: the companion follows along its own normal only
+                # (same as the local gesture — reslices, no pan).
+                on = np.asarray(self._frame[other][2], float)
+                pco = np.asarray(self._pc[other], float)
+                self._pc[other] = pco + float(
+                    np.dot(np.asarray(self._center, float) - pco, on)) * on
         if abs(dang) > 1e-12:
             self._cross_ang[which] = self._cross_ang[which] + dang
             self._rotate_companion_by(which, dang)
@@ -7711,12 +7722,21 @@ class CTViewer(CPRMixin, AbstractViewer):
         other = "B" if which == "A" else "A"
         if self._cross_mode == "center":
             # Intersection drag: the crosshair centre FOLLOWS the cursor while
-            # the background images stay put (only _center moves, not _pc); the
+            # the dragged pane's image stays put (its _pc doesn't move); the
             # actual recentre happens on release (see _on_up → _recenter).
             self._center = self._pc[which] + wx * u + wy * v
             self._clamp_center()
+            # The companion reslices LIVE through the moving centre (like the
+            # ▲-line move / rotate): slide its plane along its OWN normal only, so
+            # it cuts through the new point without panning its image. The full
+            # recentre of both panes still happens on release.
+            on = np.asarray(self._frame[other][2], float)
+            pco = np.asarray(self._pc[other], float)
+            self._pc[other] = pco + float(np.dot(self._center - pco, on)) * on
             self._view_initial = False
-            self._refresh()
+            # The companion now reslices every move → the coarse interactive
+            # refresh, like the ▲-line move / rotate (crisps up when it settles).
+            self._refresh(lod=True)
             return
         if self._cross_mode == "move":
             a = math.radians(self._cross_ang[which])
@@ -9986,7 +10006,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         return self._lv_cross_suppressed()
 
     def _style_cl(self):
-        if not self._cl_btn.isEnabled():          # suppressed / 2-D → greyed out
+        if not self._cl_btn.isEnabled():          # suppressed → greyed out
             self._cl_btn.setStyleSheet(
                 "background:#e6e6e6;color:#a8a8a8;border:1px solid #d8d8d8;")
             return
@@ -10485,6 +10505,7 @@ class CTViewer(CPRMixin, AbstractViewer):
                 or not hasattr(self, "_coro_group_widgets"):
             return
         ctx = getattr(self, "_bottom_ctx", "both")
+        self.refresh_ct_mode_bar()
         sig = (ctx, getattr(self, "_coro_file_name", ""),
                getattr(self, "_lv_file_name", ""))
         changed = sig != getattr(self, "_file_ctx_sig", None)
@@ -10569,44 +10590,16 @@ class CTViewer(CPRMixin, AbstractViewer):
             "3D メッシュを生成します（scikit-image が必要）。"))
         self._terr_export_btn.clicked.connect(self._terr_export_html)
         row.addWidget(self._terr_export_btn)
-        # Mode-switch buttons: leave the Territory review to EDIT the LV or the
-        # coronary tree, then come back (re-enter Territory re-computes).
-        row.addSpacing(18)
-        self._terr_lv_btn = FitButton(t("LVモード"))
-        self._terr_lv_btn.setHelpToolTip(t(
-            "LV 編集モードへ移動：MV / AoV / Apex / Epi / Blood-Endo を編集できる画面"))
-        self._terr_lv_btn.clicked.connect(self._terr_to_lv_mode)
-        row.addWidget(self._terr_lv_btn)
-        self._terr_coro_btn = FitButton(t("CoronaryTreeモード"))
-        self._terr_coro_btn.setHelpToolTip(t(
-            "CoronaryTree 編集モードへ移動：領域色・Epi・Blood・Endo・LVD を消し、冠動脈 "
-            "CPR 線だけを表示して CPR 線を編集できる画面"))
-        self._terr_coro_btn.clicked.connect(self._terr_to_coronary_mode)
-        row.addWidget(self._terr_coro_btn)
         row.addStretch(1)
         outer.addWidget(row_host)
-        # Linked source files (set by the shell when a Territory review opens):
-        # 元ファイル: FullLv: x.FullLv.json ＋ Tree: y.corotree.json
-        self._terr_src_lbl = QLabel("")
-        self._terr_src_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
-        outer.addWidget(self._terr_src_lbl)
         self._terr_bar.setVisible(False)
         return self._terr_bar
 
     def set_territory_source_names(self, full_name: str = "",
                                    tree_name: str = "") -> None:
-        """Shell hook: name the TWO source files this Territory result was built
-        from, shown on the line under the Territory bar. Either part is omitted when
-        its name is empty; both empty clears the line."""
-        lbl = getattr(self, "_terr_src_lbl", None)
-        if lbl is None:
-            return
-        parts = []
-        if full_name:
-            parts.append(t("FullLv: {n}", n=full_name))
-        if tree_name:
-            parts.append(t("Tree: {n}", n=tree_name))
-        lbl.setText(t("元ファイル") + ": " + " ＋ ".join(parts) if parts else "")
+        """Shell hook (a Territory review just opened): the source file names
+        now show on the row-3 readout, so just refresh it."""
+        self.refresh_ct_mode_bar()
 
     def _terr_toggle_blood(self) -> None:
         self._lvv_toggle_blood()
@@ -10754,6 +10747,7 @@ class CTViewer(CPRMixin, AbstractViewer):
         button) during a FullLv review; restore otherwise. Reflects the current
         Blood / 壁厚 overlay state on the toggles."""
         terr = bool(getattr(self, "_territory_display", False))
+        self.refresh_ct_mode_bar()
         # The Territory / Coronary / LV editing bars are ALL MPR-only — hide every
         # one of them in 2-D native-slice (cine) view.
         is2d = (getattr(self, "_mode", "3D") == "2D")
@@ -10783,46 +10777,6 @@ class CTViewer(CPRMixin, AbstractViewer):
                 self._apply_file_context()
             except Exception:                            # noqa: BLE001
                 pass
-
-    def _mdv_shell(self, attr: str = "territory_to_lv_mode"):
-        """The MainWindow shell. self.window() is usually it, but walk up the parent
-        chain too in case the pane nests this viewer so self.window() returns an
-        intermediate widget (then the Territory mode-switch buttons would silently
-        no-op). Identified by the shell-only method *attr*."""
-        w = self
-        for _ in range(16):
-            if w is None:
-                break
-            if hasattr(w, attr):
-                return w
-            try:
-                w = w.parent()
-            except Exception:                            # noqa: BLE001
-                break
-        win = self.window()
-        return win if (win is not None and hasattr(win, attr)) else None
-
-    def _terr_to_lv_mode(self) -> None:
-        """Territory bar 「LVモード」: leave the review and open the LV editing bar
-        with the FullLv loaded editable (via the shell, which holds the FullLv)."""
-        shell = self._mdv_shell("territory_to_lv_mode")
-        if shell is not None:
-            try:
-                shell.territory_to_lv_mode()
-            except Exception:                            # noqa: BLE001
-                import traceback
-                traceback.print_exc()
-
-    def _terr_to_coronary_mode(self) -> None:
-        """Territory bar 「CoronaryTreeモード」: leave the review, hide every LV /
-        territory overlay and show ONLY the coronary CPR lines for editing."""
-        shell = self._mdv_shell("territory_to_coronary_mode")
-        if shell is not None:
-            try:
-                shell.territory_to_coronary_mode()
-            except Exception:                            # noqa: BLE001
-                import traceback
-                traceback.print_exc()
 
     def exit_territory_review(self) -> None:
         """Leave the VR / perfusion-territory review back to the normal 3-D MPR:
