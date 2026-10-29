@@ -116,6 +116,8 @@ def main() -> int:
     ap.add_argument("folder")
     ap.add_argument("--present", choices=("bitmap", "screen"), default="bitmap")
     ap.add_argument("--steps", type=int, default=40)
+    ap.add_argument("--cpu-slab", action="store_true",
+                    help="force the old CPU slab MIP (to compare with the GPU one)")
     ap.add_argument("--no-manual", action="store_true",
                     help="quit right after the scripted run (no manual phase)")
     ap.add_argument("--size", default="1600x1000",
@@ -140,9 +142,16 @@ def main() -> int:
     wrap(M._PygfxPane, "render", "pane.render (GPU+present)")
     wrap(M, "_compute_slab_qimage", "slab MIP (CPU)", main_only=True)
     wrap(M._Overlay, "paintEvent", "overlay paint (QPainter)")
+    try:
+        from multi_dicomviewer.viewers import gpu_slab
+        wrap(gpu_slab.GpuSlab, "mip", "slab MIP (GPU)")
+    except ImportError:
+        gpu_slab = None
 
     loaded = find_largest_ct(args.folder)
     v = M.CTViewer()
+    if args.cpu_slab:
+        v._gpu_slab_error = "forced off (--cpu-slab)"
     w, h = (int(x) for x in args.size.lower().split("x"))
     v.resize(w, h)
     v.setWindowTitle(f"mac_perf_probe — present={args.present}")
@@ -230,6 +239,15 @@ def main() -> int:
             settle(); time.sleep(0.02)
 
     def slab_tiers():
+        if v._gpu_slab is not None:
+            p = v._slab_params("B", gpu=True)
+            ts = []
+            for _ in range(10):
+                t0 = time.perf_counter()
+                v._build_slab_qimage("B")
+                ts.append((time.perf_counter() - t0) * 1000)
+            out(f"    slab 5 mm GPU    iw={p['iw']:4d} ih={p['ih']:4d} "
+                f"(+W/L->QImage): median {statistics.median(ts):7.1f} ms/pane")
         T.reset()
         v._thick = {"A": 5.0, "B": 5.0}
         v._refresh(); settle()
@@ -244,6 +262,10 @@ def main() -> int:
             out(f"    slab 5 mm {tier:6s} iw={p['iw']:4d} ih={p['ih']:4d} "
                 f"planes<={p['max_planes']:3d}: median {statistics.median(ts):7.1f} ms/pane")
 
+    v._thick = {"A": 5.0, "B": 5.0}
+    v._refresh(); settle()
+    out(f"slab MIP path: {'GPU' if v._gpu_slab is not None else 'CPU'}"
+        + (f"  ({v._gpu_slab_error})" if v._gpu_slab_error else ""))
     out("-" * 72)
     present_only()
     for label, th in (("thin/thin", {"A": 0.0, "B": 0.0}),
