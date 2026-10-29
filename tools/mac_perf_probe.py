@@ -118,6 +118,8 @@ def main() -> int:
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--cpu-slab", action="store_true",
                     help="force the old CPU slab MIP (to compare with the GPU one)")
+    ap.add_argument("--quality", choices=("high", "adaptive", "low"),
+                    help="CT quality mode for this run only (settings untouched)")
     ap.add_argument("--no-manual", action="store_true",
                     help="quit right after the scripted run (no manual phase)")
     ap.add_argument("--size", default="1600x1000",
@@ -152,6 +154,8 @@ def main() -> int:
     v = M.CTViewer()
     if args.cpu_slab:
         v._gpu_slab_error = "forced off (--cpu-slab)"
+    if args.quality:
+        v._ct_quality = args.quality
     w, h = (int(x) for x in args.size.lower().split("x"))
     v.resize(w, h)
     v.setWindowTitle(f"mac_perf_probe — present={args.present}")

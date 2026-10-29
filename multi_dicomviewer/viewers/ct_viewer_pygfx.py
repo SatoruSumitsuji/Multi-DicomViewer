@@ -130,9 +130,12 @@ _SLAB_IW_LOD = 200      # ...during an interactive drag/page (coarse but smooth)
 _SLAB_IW_NATIVE = 1000  # ...the crisp settle build (off-thread, ~native res)
 _SLAB_PLANES_FULL = 64  # MIP plane cap at rest
 _SLAB_PLANES_LOD = 8    # ...during an interactive drag/page
-# GPU slab MIP (gpu_slab.GpuSlab): fast enough to build at the pane's PHYSICAL
-# resolution with every plane on every frame, so it has one tier and the LOD /
-# async-settle machinery above only runs on the CPU fallback.
+# GPU slab MIP (gpu_slab.GpuSlab): fast enough to build with every plane on
+# every frame. It is built at the pane's PHYSICAL resolution, except that an
+# interactive (lod) frame uses the LOGICAL resolution — 1/4 the pixels on a
+# Retina (devicePixelRatio 2) screen — and is crisped up synchronously when the
+# interaction settles. CT quality 'high' never passes lod (always physical),
+# 'low' always does (always logical); on a dpr-1 screen both are the same.
 _SLAB_IW_GPU = 2048     # sample-column cap (physical pixels)
 _SLAB_PLANES_GPU = 512  # MIP plane cap
 
@@ -3070,6 +3073,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._slab_gen = 0               # generation token for async slab builds
         self._gpu_slab = None            # gpu_slab.GpuSlab, built on first THICK
         self._gpu_slab_error = None      # set once the GPU path fails → CPU only
+        self._gpu_slab_coarse = set()    # panes showing a logical-res GPU slab
         self._lod_wake.connect(self._lod_settle)
         self._slab_done.connect(self._on_slab_done)
         self._vr_done.connect(self._on_vr_done)
@@ -6775,7 +6779,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         return self._world_to_screen(key, ccx, ccy)
 
     # ----------------------------------------------------- slab-MIP (CPU)
-    def _slab_params(self, key, lod=False, native=False, gpu=False) -> dict:
+    def _slab_params(self, key, lod=False, native=False, gpu=False,
+                     hires=True) -> dict:
         """Snapshot (on the GUI thread) everything _compute_slab_qimage needs:
         a plain dict of numpy/scalars + the (read-only, shared) volume — no Qt
         widget access — so the build can run on a worker thread.
@@ -6783,13 +6788,14 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         Three quality tiers: lod (coarse, during a drag), full (the immediate
         at-rest paint), and native (the off-thread settle build at ~2× the pane
         pixels so the STATIC slab is crisp on a Retina display). gpu=True is
-        the GPU build's single tier: physical pixels, every plane."""
+        the GPU build: every plane, at physical pixels (hires) or at the
+        logical pane size (hires=False, the interactive Retina tier)."""
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
         if gpu:
-            iw = min(_SLAB_IW_GPU,
-                     max(1, int(round(pw * pane.canvas.devicePixelRatioF()))))
+            dpr = pane.canvas.devicePixelRatioF() if hires else 1.0
+            iw = min(_SLAB_IW_GPU, max(1, int(round(pw * dpr))))
         elif lod:
             iw = min(pw, _SLAB_IW_LOD)
         elif native:
@@ -6816,18 +6822,23 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         }
 
     def _build_slab_qimage(self, key, lod=False):
-        """Synchronous slab MIP → QImage. On the GPU (the normal case) this is
-        the final full-resolution image whatever *lod* says; on the CPU
-        fallback *lod* picks the coarse tier and the async worker crisps it."""
+        """Synchronous slab MIP → QImage. On the GPU (the normal case) *lod*
+        drops to the logical resolution (only coarser on a Retina screen; the
+        key is then marked in _gpu_slab_coarse for the settle crisp-up); on the
+        CPU fallback *lod* picks the coarse tier and the async worker crisps it."""
+        self._gpu_slab_coarse.discard(key)
         gs = self._gpu_slab_get()
         if gs is not None:
             try:
-                p = self._slab_params(key, gpu=True)
+                p = self._slab_params(key, gpu=True, hires=not lod)
+                if lod and p["iw"] < self._slab_params(key, gpu=True)["iw"]:
+                    self._gpu_slab_coarse.add(key)
                 step = max(1e-3, min(p["dims"]))
                 nplanes = int(max(1, min(p["max_planes"],
                                          round(p["thick"] / step))))
                 return _slab_mip_qimage(gs.mip(p, nplanes), p)
             except Exception as exc:                     # noqa: BLE001
+                self._gpu_slab_coarse.discard(key)
                 self._gpu_slab_disable(exc)
         return _compute_slab_qimage(self._slab_params(key, lod=lod))
 
@@ -6947,6 +6958,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             else:
                 p.mesh.visible = True
                 self._mip_img[key] = None
+                self._gpu_slab_coarse.discard(key)
             # LV Vol voxel tints follow the plane on any view change (recentre /
             # move / rotate / spin / page), so rebuild them whenever the pane is
             # refreshed while in LV Vol mode — OR while the contour-LV measured
@@ -6965,9 +6977,11 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # resolution rebuild so the STATIC image crisps up once interaction
         # settles — for the coarse interactive frames AND the immediate full
         # paint. In 'low' mode the user asked for always-coarse, so skip the
-        # crisp settle. A GPU slab is already full resolution: nothing to owe.
-        if (self._ct_quality != "low" and self._gpu_slab is None
-                and any(self._thick[k] > 0 for k in ("A", "B"))):
+        # crisp settle. A GPU slab is owed one only when this frame was built at
+        # the coarser logical resolution (Retina, interactive).
+        owed = (self._gpu_slab_coarse if self._gpu_slab is not None
+                else any(self._thick[k] > 0 for k in ("A", "B")))
+        if self._ct_quality != "low" and owed:
             self._lod_pending = True
             self._arm_lod()
         else:
@@ -7039,6 +7053,17 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             return
         self._cancel_lod()
         self._lod_pending = False
+        if self._gpu_slab is not None:
+            # GPU: the physical-resolution rebuild takes milliseconds, so do it
+            # right here on the GUI thread (overlay repaint only, no GPU slice).
+            self._slab_gen += 1
+            for k in list(self._gpu_slab_coarse):
+                if self._thick[k] > 0 and self._vol is not None:
+                    self._mip_img[k] = self._build_slab_qimage(k)
+                    self._overlay[k].update()
+                else:
+                    self._gpu_slab_coarse.discard(k)
+            return
         params = {k: self._slab_params(k, native=True)
                   for k in ("A", "B") if self._thick[k] > 0}
         if not params:
