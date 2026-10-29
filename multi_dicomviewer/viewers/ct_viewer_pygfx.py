@@ -130,6 +130,11 @@ _SLAB_IW_LOD = 200      # ...during an interactive drag/page (coarse but smooth)
 _SLAB_IW_NATIVE = 1000  # ...the crisp settle build (off-thread, ~native res)
 _SLAB_PLANES_FULL = 64  # MIP plane cap at rest
 _SLAB_PLANES_LOD = 8    # ...during an interactive drag/page
+# GPU slab MIP (gpu_slab.GpuSlab): fast enough to build at the pane's PHYSICAL
+# resolution with every plane on every frame, so it has one tier and the LOD /
+# async-settle machinery above only runs on the CPU fallback.
+_SLAB_IW_GPU = 2048     # sample-column cap (physical pixels)
+_SLAB_PLANES_GPU = 512  # MIP plane cap
 
 _TOOLS = ("ZOOM", "MOVE", "ROTATE", "SPIN", "PAGING", "THICK", "WL")
 #: Button captions carry the keyboard shortcut so it's discoverable on-screen.
@@ -377,7 +382,19 @@ def _compute_slab_qimage(p):
     """Pure slab-MIP → RGB QImage from a snapshot dict (NO Qt-widget / no self
     access), so the heavy full-quality rebuild can run on a worker thread. The
     snapshot is taken on the GUI thread by CTViewerPygfx._slab_params; this is
-    the same maths as the inline path, only parameterised."""
+    the same maths as the inline path, only parameterised. Returns None if
+    p["cancel"] (optional) reports the build was superseded mid-way."""
+    mip = _slab_mip_cpu(p)
+    if mip is None:
+        return None
+    return _slab_mip_qimage(mip, p)
+
+
+def _slab_mip_cpu(p):
+    """Float32 (ih, iw) max-over-N-oblique-planes HU image for the snapshot
+    *p*. gpu_slab.GpuSlab computes the same thing in a shader. p["cancel"], if
+    given, is polled between planes so a superseded worker build stops early
+    instead of burning CPU the live drag needs."""
     u, v, n = p["u"], p["v"], p["n"]
     pc = p["pc"]
     sx, sy, sz = p["dims"]
@@ -402,7 +419,10 @@ def _compute_slab_qimage(p):
             if nplanes > 1 else np.array([0.0]))
     nz, ny, nx = vol.shape
     mip = np.full((ih, iw), -np.inf, np.float32)
+    cancel = p.get("cancel")
     for t in offs:
+        if cancel is not None and cancel():
+            return None
         vx = (bx + t * n[0]) / sx
         vy = (by + t * n[1]) / sy
         vz = (bz + t * n[2]) / sz
@@ -411,6 +431,12 @@ def _compute_slab_qimage(p):
                | (vz < 0) | (vz > nz - 1))
         np.putmask(hu, oob, _HU_LO)
         mip = np.maximum(mip, hu)
+    return mip
+
+
+def _slab_mip_qimage(mip, p):
+    """W/L (or the colour-band LUT) applied to a float slab MIP → RGB QImage."""
+    ih, iw = mip.shape
     if p["color"]:
         lut = _band_lut_array(p["bands"], p["opacity"], p["win"], p["lvl"])
         idx = np.clip((mip - _HU_LO) / (_HU_HI - _HU_LO) * 511.0,
@@ -3037,6 +3063,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lod_due = None             # monotonic deadline for the rebuild
         self._lod_thread = None          # single reusable debounce worker
         self._slab_gen = 0               # generation token for async slab builds
+        self._gpu_slab = None            # gpu_slab.GpuSlab, built on first THICK
+        self._gpu_slab_error = None      # set once the GPU path fails → CPU only
         self._lod_wake.connect(self._lod_settle)
         self._slab_done.connect(self._on_slab_done)
         self._vr_done.connect(self._on_vr_done)
@@ -5319,6 +5347,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._cancel_lod()
         self._lod_pending = False
         self._lvv_reset_state()
+        if self._gpu_slab is not None:
+            self._gpu_slab.release()
         self._vol = None
         self._header = None
         self._measures = {"A": [], "B": []}
@@ -6717,18 +6747,22 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         return self._world_to_screen(key, ccx, ccy)
 
     # ----------------------------------------------------- slab-MIP (CPU)
-    def _slab_params(self, key, lod=False, native=False) -> dict:
+    def _slab_params(self, key, lod=False, native=False, gpu=False) -> dict:
         """Snapshot (on the GUI thread) everything _compute_slab_qimage needs:
         a plain dict of numpy/scalars + the (read-only, shared) volume — no Qt
         widget access — so the build can run on a worker thread.
 
         Three quality tiers: lod (coarse, during a drag), full (the immediate
         at-rest paint), and native (the off-thread settle build at ~2× the pane
-        pixels so the STATIC slab is crisp on a Retina display)."""
+        pixels so the STATIC slab is crisp on a Retina display). gpu=True is
+        the GPU build's single tier: physical pixels, every plane."""
         pane = self.pane[key]
         pw = max(1, pane.canvas.width())
         ph = max(1, pane.canvas.height())
-        if lod:
+        if gpu:
+            iw = min(_SLAB_IW_GPU,
+                     max(1, int(round(pw * pane.canvas.devicePixelRatioF()))))
+        elif lod:
             iw = min(pw, _SLAB_IW_LOD)
         elif native:
             iw = min(_SLAB_IW_NATIVE, pw * 2)
@@ -6744,7 +6778,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             "pw": pw, "ph": ph, "iw": iw, "ih": ih,
             "ps": float(self._ps[key]), "roll": float(self._roll[key]),
             "thick": float(self._thick[key]), "vol": self._vol,
-            "max_planes": _SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL,
+            "max_planes": (_SLAB_PLANES_GPU if gpu else
+                           _SLAB_PLANES_LOD if lod else _SLAB_PLANES_FULL),
             "color": bool(self._color),
             "invert": bool(self._invert),
             "bands": [dict(b) for b in self._bands],
@@ -6753,9 +6788,43 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         }
 
     def _build_slab_qimage(self, key, lod=False):
-        """Synchronous slab MIP → QImage (used by the non-interactive refresh).
-        Interactive full-quality rebuilds go through the async worker instead."""
+        """Synchronous slab MIP → QImage. On the GPU (the normal case) this is
+        the final full-resolution image whatever *lod* says; on the CPU
+        fallback *lod* picks the coarse tier and the async worker crisps it."""
+        gs = self._gpu_slab_get()
+        if gs is not None:
+            try:
+                p = self._slab_params(key, gpu=True)
+                step = max(1e-3, min(p["dims"]))
+                nplanes = int(max(1, min(p["max_planes"],
+                                         round(p["thick"] / step))))
+                return _slab_mip_qimage(gs.mip(p, nplanes), p)
+            except Exception as exc:                     # noqa: BLE001
+                self._gpu_slab_disable(exc)
         return _compute_slab_qimage(self._slab_params(key, lod=lod))
+
+    def _gpu_slab_get(self):
+        """The GPU slab builder, created on first use; None once it has failed
+        (then the CPU path is used for the rest of the session)."""
+        if self._gpu_slab_error is not None:
+            return None
+        if self._gpu_slab is None:
+            try:
+                from multi_dicomviewer.viewers.gpu_slab import GpuSlab
+                self._gpu_slab = GpuSlab(_HU_LO)
+            except Exception as exc:                     # noqa: BLE001
+                self._gpu_slab_disable(exc)
+                return None
+        return self._gpu_slab
+
+    def _gpu_slab_disable(self, exc):
+        self._gpu_slab_error = f"{type(exc).__name__}: {exc}"
+        if self._gpu_slab is not None:
+            try:
+                self._gpu_slab.release()
+            except Exception:                            # noqa: BLE001
+                pass
+        self._gpu_slab = None
 
     def _fit_pane(self, key):
         """Fit the volume content (projected onto the plane) to the viewport
@@ -6864,12 +6933,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 self._terr_img[key] = None
             p.render()
             self._overlay[key].update()
-        # Whenever a slab is on screen, (re)arm the off-thread NATIVE-resolution
-        # rebuild so the STATIC image crisps up once interaction settles — for
-        # the coarse interactive frames AND the immediate full paint. In 'low'
-        # mode the user asked for always-coarse, so skip the crisp settle.
-        if self._ct_quality != "low" and any(self._thick[k] > 0
-                                             for k in ("A", "B")):
+        # Whenever a CPU slab is on screen, (re)arm the off-thread NATIVE-
+        # resolution rebuild so the STATIC image crisps up once interaction
+        # settles — for the coarse interactive frames AND the immediate full
+        # paint. In 'low' mode the user asked for always-coarse, so skip the
+        # crisp settle. A GPU slab is already full resolution: nothing to owe.
+        if (self._ct_quality != "low" and self._gpu_slab is None
+                and any(self._thick[k] > 0 for k in ("A", "B"))):
             self._lod_pending = True
             self._arm_lod()
         else:
@@ -6911,9 +6981,21 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         """Qt fires this right before the event loop blocks (goes idle). If an
         interactive coarse slab is owed a full-quality rebuild, do it now so the
         crisp-up is instant when it fires; the background thread wake is the
-        guaranteed backstop for when it (or the loop) stays parked."""
-        if self._lod_pending and self._vol is not None:
-            self._lod_settle()
+        guaranteed backstop for when it (or the loop) stays parked.
+
+        The loop also goes idle in the short gaps BETWEEN the moves of one drag
+        / wheel burst, so wait for the debounce deadline and for the button to
+        be released: starting the ~2 s native build in every gap (then throwing
+        it away on the next move) stole the CPU the live drag needed (Mac probe:
+        31 discarded builds in 40 drag steps)."""
+        if not self._lod_pending or self._vol is None:
+            return
+        due = self._lod_due
+        if due is not None and time.monotonic() < due:
+            return
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            return
+        self._lod_settle()
 
     def _lod_settle(self):
         """Build the slab at full quality OFF the GUI thread, then swap it in.
@@ -6935,6 +7017,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             return
         self._slab_gen += 1
         gen = self._slab_gen
+        # A newer refresh bumps _slab_gen: the worker then stops between MIP
+        # planes instead of finishing a build nobody will show.
+        for pr in params.values():
+            pr["cancel"] = lambda: self._slab_gen != gen
         threading.Thread(target=self._slab_compute_worker,
                          args=(gen, params), daemon=True).start()
 
