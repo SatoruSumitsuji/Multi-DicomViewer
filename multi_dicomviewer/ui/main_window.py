@@ -892,10 +892,13 @@ class ViewerPane(QFrame):
         viewer = self._viewer_for(loaded.modality)
         if viewer is None:
             mod = loaded.modality.value
-            self._show_message(
-                t("{mod} viewer is not implemented.\n"
-                  "(Supported: XA, CT, IVUS/OCT/OFDI.)", mod=mod)
-            )
+            # A viewer that exists but failed to build has already shown its
+            # real error (_viewer_for) — don't mask it as "not implemented".
+            if loaded.modality not in _VIEWER_FACTORY:
+                self._show_message(
+                    t("{mod} viewer is not implemented.\n"
+                      "(Supported: XA, CT, IVUS/OCT/OFDI.)", mod=mod)
+                )
             self._cur_viewer = None
             self._set_pane_title(t("{mod} (unsupported)", mod=mod))
             return
@@ -2356,6 +2359,7 @@ class MainWindow(QMainWindow):
                 self.tabifyDockWidget(self._studies_dock, w)
             self._corotree_win = w
             w.resize(360, 520)
+            w.treeChanged.connect(self.refresh_ct_mode_bars)
         if not w.isVisible():
             w.show()
         if w.isFloating():
@@ -3348,8 +3352,133 @@ class MainWindow(QMainWindow):
     # a one-way glTF/GLB export (the Territory bar's 書き出し button) instead. So the
     # drop handler, the link resolver and the save hook are all gone.
 
+    # ------------------------------------------------- CT work-mode switch
+    # The CT viewer's row-1 mode buttons (標準 / LV / CoronaryTree / Territory, see
+    # viewers/ct_mode_bar.py) ask ct_mode_state which files are loaded for THEIR CT
+    # and request a switch via ct_set_mode. The Coronary Tree dock holds the data.
+    def _pane_of_viewer(self, viewer):
+        for p in self._panes:
+            try:
+                if p.current_viewer() is viewer or viewer in p.all_viewers():
+                    return p
+            except Exception:                            # noqa: BLE001
+                pass
+        return None
+
+    def ct_mode_state(self, viewer) -> dict:
+        """{"full": <.FullLv.json name>, "tree": <.corotree.json name>} for the CT
+        *viewer* shows — "" for a side that isn't loaded. A side counts as loaded
+        only while the Coronary Tree dock is open and holds it for THIS CT (the
+        dock-closed rule: no dock → plain CT): FullLv = the bundle's FullLv data;
+        corotree = a .corotree.json path AND a tree with ≥1 vessel."""
+        import os
+        out = {"full": "", "tree": ""}
+        w = getattr(self, "_corotree_win", None)
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        if w is None or not uid or self._corotree_dock_hidden():
+            return out
+        try:
+            if w.full_lv_for_series(uid):
+                name = os.path.basename(w.full_lv_path_for_series(uid) or "")
+                out["full"] = name or t("(ファイル名なし)")
+            path = w.corotree_path_for_series(uid) or ""
+            if (path.lower().endswith(".corotree.json")
+                    and w.tree_vessels_for_series(uid)):
+                out["tree"] = os.path.basename(path)
+        except Exception:                                # noqa: BLE001
+            pass
+        return out
+
+    def refresh_ct_mode_bars(self) -> None:
+        """Re-sync every CT pane's mode buttons + file readout (after a FullLv /
+        corotree load, a tree edit, or a CT becoming shown)."""
+        for p in self._panes:
+            try:
+                for v in p.all_viewers():
+                    if hasattr(v, "refresh_ct_mode_bar"):
+                        v.refresh_ct_mode_bar()
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def ct_set_mode(self, mode: str, viewer) -> None:
+        """A CT viewer's mode button was clicked. Make its pane / CT the active
+        one (the switches act on the active pane + the dock's active bundle), then
+        run the switch. Every switch re-opens the CT through the same path a file
+        drop uses, so the result matches a fresh drop."""
+        pane = self._pane_of_viewer(viewer)
+        if pane is None:
+            return
+        self._set_active_pane(pane)
+        uid = pane.shown_series_uid() or ""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and uid:
+            u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+            if u and hasattr(w, "_use_uid"):
+                try:
+                    w._use_uid(u)                        # this CT's bundle → active
+                except Exception:                        # noqa: BLE001
+                    pass
+        state = self.ct_mode_state(viewer)
+        if mode == "lv" and state["full"]:
+            self.territory_to_lv_mode()
+        elif mode == "coronary" and state["tree"]:
+            self.territory_to_coronary_mode()
+        elif mode == "territory" and state["full"] and state["tree"]:
+            self._ct_mode_to_territory()
+        elif mode == "standard":
+            self._ct_mode_to_standard(pane, uid)
+
+    def _ct_mode_to_territory(self) -> None:
+        """「Territoryモード」: both files are loaded → advance to the Territory (VR)
+        review exactly as dropping the pair does — re-run the corotree drop path
+        (it recovers this CT's FullLv and, with both present, applies it)."""
+        import os
+        w = getattr(self, "_corotree_win", None)
+        path = (getattr(w, "_last_path", "") or "") if w is not None else ""
+        if path and os.path.isfile(path):
+            self._open_coronary_tree_file(path, to_territory=True)
+            return
+        # The corotree file vanished from disk: apply the docked pair in place.
+        uid = w.active_uid() if (w is not None and hasattr(w, "active_uid")) else ""
+        full = getattr(w, "_full_lv_data", None) if w is not None else None
+        if uid and full:
+            if hasattr(w, "_set_overlay"):
+                w._set_overlay(True)
+            self._poll_full_lv_apply(uid, full, 0)
+
+    def _ct_mode_to_standard(self, pane, uid: str) -> None:
+        """「標準モード」: show the CT plain — no LV / coronary / territory overlay —
+        by re-opening it FRESH (the same dispose + re-open the other switches use,
+        so no VR / LV state lingers). The loaded FullLv / corotree stay docked, so
+        LV / CoronaryTree / Territory remain one click away."""
+        from PyQt6.QtCore import QTimer
+        if not uid:
+            return
+        w = getattr(self, "_corotree_win", None)
+        if w is not None:
+            # Overlay + 領域色 OFF so the re-opened CT doesn't get them pushed back.
+            for fn, arg in (("_set_overlay", False), ("set_territory_color", False)):
+                if hasattr(w, fn):
+                    try:
+                        getattr(w, fn)(arg)
+                    except Exception:                    # noqa: BLE001
+                        pass
+        # Same UID-independent VR-resume block as LVモード / CoronaryTreeモード, so
+        # the fresh CT can't bounce back into the Territory review.
+        self._territory_mode_switching = True
+        QTimer.singleShot(
+            20000, lambda: setattr(self, "_territory_mode_switching", False))
+        try:
+            self._free_pane_ct_for_reload(pane)
+        except Exception:                                # noqa: BLE001
+            pass
+        # Defer the re-open one loop pass so the freed viewer's GL context goes
+        # first (re-decoding while it lives exhausts the GPU → black pane).
+        QTimer.singleShot(0, lambda u=uid: self._coronary_display_uid(u))
+
     def territory_to_lv_mode(self) -> None:
-        """Territory bar 「LVモード」: come back to the EDITABLE LV view by RE-OPENING
+        """「LVモード」 (CT mode buttons): come back to the EDITABLE LV view by RE-OPENING
         the 3-D CT fresh (same 'open anew' approach as CoronaryTreeモード, user
         request) rather than an in-place VR teardown. Dispose the VR/territory CT
         viewer, then re-open the CT and apply the editable LV via the SAME path as a
@@ -3437,7 +3566,7 @@ class MainWindow(QMainWindow):
                 pass
 
     def territory_to_coronary_mode(self) -> None:
-        """Territory bar 「CoronaryTreeモード」: come back to the plain Coronary-Tree
+        """「CoronaryTreeモード」 (CT mode buttons): come back to the plain Coronary-Tree
         view by RE-OPENING the 3-D CT + its .corotree.json FRESH — not an in-place
         VR teardown. The in-place switch (exit VR → rebuild MPR) was unreliable (it
         left the right pane black / mixed state); the user asked for a clean 'open
@@ -3518,11 +3647,13 @@ class MainWindow(QMainWindow):
         # multi-case case, e.g. dropping case-2's corotree onto case-2's LV while
         # case-1 was active) → the pair still advances to Territory.
         pre_full = {}
+        pre_full_path = {}           # …and its .FullLv.json path (for the readout)
         try:
             for _u, _b in getattr(w, "_by_uid", {}).items():
                 _fl0 = _b.get("full_lv")
                 if _fl0 is not None:
                     pre_full[str(_u).split("#", 1)[0]] = _fl0
+                    pre_full_path[str(_u).split("#", 1)[0]] =                         _b.get("full_lv_path", "") or ""
         except Exception:                                # noqa: BLE001
             pass
         if not w.load_file(path):
@@ -3545,7 +3676,9 @@ class MainWindow(QMainWindow):
             recovered = pre_full.get(uid.split("#", 1)[0])
             if recovered is not None:
                 try:
-                    w.load_full_lv(recovered)            # re-install (load_file cleared it)
+                    w.load_full_lv(                      # re-install (load_file cleared it)
+                        recovered,
+                        src_path=pre_full_path.get(uid.split("#", 1)[0], ""))
                     full = recovered
                 except Exception:                        # noqa: BLE001
                     pass
@@ -3743,6 +3876,7 @@ class MainWindow(QMainWindow):
             w._full_lv_path = (paths[0] if paths else "") or ""
         except Exception:                                # noqa: BLE001
             pass
+        self.refresh_ct_mode_bars()
         fname = os.path.basename(paths[0]) if paths else ""
         # load_full_lv switched the active bundle to this FullLv's CT, so w._tree is
         # that CT's tree. BOTH present (tree with vessels + this FullLv) → Territory.
@@ -3894,7 +4028,7 @@ class MainWindow(QMainWindow):
         already in a review or one without the LV port (e.g. pygfx)."""
         if getattr(series, "modality", None) != Modality.CT:
             return
-        # Territory bar 「LVモード」/「CoronaryTreeモード」 is switching THIS app to a
+        # A CT mode button (LV / CoronaryTree / 標準) is switching THIS app to a
         # single-side view (dispose + re-open the CT). Refuse EVERY VR resume until
         # that finishes — a plain boolean, so it can't miss the way the
         # series_uid-keyed edit-pending mark did on Mac (which let the fresh CT bounce
@@ -5907,6 +6041,9 @@ class MainWindow(QMainWindow):
         self._refresh_active_pane_border()
         self._sync_xa_shortcuts()
         self._follow_active_pane()
+        # Catch-all for dock-side changes with no signal (dock closed / reopened,
+        # tree saved, FullLv loaded from the panel): re-sync on pane activation.
+        self.refresh_ct_mode_bars()
 
     def _refresh_active_pane_border(self) -> None:
         """Highlight the active pane — EXCEPT in SyncView, where operations drive
@@ -6977,7 +7114,7 @@ class MainWindow(QMainWindow):
         per-modality tag/export-field memory keys consistently."""
         mod = getattr(series, "modality", None)
         val = getattr(mod, "value", None) or str(mod or "")
-        return val if val in settings.TAG_MODALITIES else "OTHER"
+        return settings.tag_bucket(val, getattr(series, "dicom_modality", ""))
 
     @staticmethod
     def _label_dicom_tags(series, identifiers: list) -> list:
@@ -7712,6 +7849,7 @@ class MainWindow(QMainWindow):
             # holds this CT's FullLv — so a re-drop after deleting the series (dock
             # now empty) comes up as a plain editable CT, not a resurrected VR.
             self._maybe_resume_territory_review(series, pane)
+        self.refresh_ct_mode_bars()      # shown_series_uid is set only now
         self.statusBar().showMessage(t("Loaded {label}", label=series.label))
 
     def _clear_all(self) -> None:
@@ -7865,7 +8003,13 @@ class MainWindow(QMainWindow):
     def _modality_of(viewer) -> str:
         """Classify *viewer* into one of the persisted-list buckets."""
         m = getattr(viewer, "handles_modality", "") or "OTHER"
-        return m if m in settings.TAG_MODALITIES else "OTHER"
+        raw = ""
+        if m == "IVUS" and hasattr(viewer, "current_header"):
+            try:     # OCT / OFDI open in the IVUS viewer but keep their own list
+                raw = getattr(viewer.current_header(), "Modality", "") or ""
+            except Exception:                            # noqa: BLE001
+                raw = ""
+        return settings.tag_bucket(m, raw)
 
     def _migrate_tag_idents(self, viewer) -> None:
         """Self-heal legacy raw private-tag literals in *viewer*'s modality
@@ -7908,7 +8052,18 @@ class MainWindow(QMainWindow):
         if viewer is None and self._active is not None:
             viewer = self._active.current_viewer()
         mod = self._modality_of(viewer) if viewer is not None else "OTHER"
-        return list(self._tag_keywords_by_modality.get(mod, []))
+        kws = list(self._tag_keywords_by_modality.get(mod, []))
+        # No selection saved yet (fresh install / no tag_conditions.json) → show
+        # the same starter tags the Mac viewer and the tag dialog use, instead of
+        # an empty overlay that looks like "DICOM Info does nothing".
+        if not kws and viewer is not None and hasattr(viewer, "current_header"):
+            try:
+                header = viewer.current_header()
+            except Exception:                            # noqa: BLE001
+                header = None
+            if header is not None:
+                kws = default_overlay_keywords(header)
+        return kws
 
     def _apply_overlay_hidden(self, hidden: bool) -> None:
         """Core: push the (possibly empty) overlay to every viewer.
@@ -8016,7 +8171,8 @@ class MainWindow(QMainWindow):
 
     def _open_settings(self) -> None:
         """Top-bar Settings button: display count + angio image quality + CT
-        colour map, in one popup. Saved and applied live on OK."""
+        colour map, in one popup. Saved and applied live on OK. Export / Import
+        (bottom-left) carry ALL the settings in one file."""
         from multi_dicomviewer.ui.settings_dialog import SettingsDialog
         caps = {"CT": self._live_cap[Modality.CT],
                 "XA": self._live_cap[Modality.XA]}
@@ -8025,53 +8181,45 @@ class MainWindow(QMainWindow):
         lv_wall = settings.load_lv_wall_bands()
         coronary = settings.load_coronary_params()
         mouse_grid = settings.load_mouse_grid()
+        self._settings_imported = False
         dlg = SettingsDialog(caps, quality, self._open_ct_color,
                              on_advanced=self._open_advanced_quality,
                              parent=self, lv_endo=lv_endo, lv_wall=lv_wall,
-                             coronary=coronary, mouse_grid=mouse_grid)
+                             coronary=coronary, mouse_grid=mouse_grid,
+                             on_export=self._export_all_settings,
+                             on_import=self._import_all_settings)
         if dlg.exec() != dlg.DialogCode.Accepted:
+            if self._settings_imported:
+                # Re-open on the imported values (the old dialog showed the
+                # pre-import ones), so the user sees what they now have.
+                QTimer.singleShot(0, self._open_settings)
             return
-        # Display count: persist + apply (over-cap panes sleep now; keep=active
-        # so the focused pane is never the one demoted).
-        vals = dlg.caps()
-        settings.save_live_caps(vals)
-        self._live_cap = {Modality.CT: vals["CT"], Modality.XA: vals["XA"]}
-        self._live_bytes_budget = self._ct_budget_for_cap()   # scale with cap
-        self._enforce_live_caps(keep=self._active)
-        # Angio quality: merge into the persisted prefs, then push to every
-        # loaded XA viewer (updates its canvases + S-Cine/S-Zoom/Denoise
-        # buttons) so the change takes effect without reopening the series.
+        layout_ok = self._save_settings_dialog(dlg)
+        self._apply_saved_settings()
+        if not layout_ok:
+            QMessageBox.information(
+                self, t("マウス操作グリッド"),
+                t("各セルに操作を割り当ててください（配置は保存しませんでした）。"))
+        self.statusBar().showMessage(
+            t("Settings saved (CT {ct} / Angio {xa} live)",
+              ct=self._live_cap[Modality.CT], xa=self._live_cap[Modality.XA]))
+
+    @staticmethod
+    def _save_settings_dialog(dlg) -> bool:
+        """Persist the Settings dialog's values (no live apply). Returns False
+        when the mouse-grid layout was invalid (that part is then not saved)."""
+        settings.save_live_caps(dlg.caps())
         q = settings.load_display_quality()
         q.update(dlg.quality())
         settings.save_display_quality(q)
-        for v in self._all_loaded_viewers():
-            if hasattr(v, "reload_display_quality"):
-                v.reload_display_quality()
-        # LV Auto-Endo advanced params: persist + tell CT viewers to re-read
-        # (drops any cached params + invalidates a built Endo so a re-press
-        # rebuilds with the new shape/resolution).
         settings.save_lv_endo_params(dlg.lv_endo())
-        for v in self._all_loaded_viewers():
-            if hasattr(v, "_lv_endo_adv_refresh"):
-                v._lv_endo_adv_refresh()
-        # LV wall-thickness colour bands: persist + repaint any live 壁厚 map.
         settings.save_lv_wall_bands(dlg.lv_wall())
-        for v in self._all_loaded_viewers():
-            if hasattr(v, "_lv_wall_bands_refresh"):
-                v._lv_wall_bands_refresh()
-        # Coronary Tree / Territory appearance: persist + apply live (VR tube /
-        # LM ratio / halo on the viewers, colours on the panel's overlay/territory).
         settings.save_coronary_params(dlg.coronary())
-        for v in self._all_loaded_viewers():
-            if hasattr(v, "coronary_params_refresh"):
-                v.coronary_params_refresh()
-        cw = getattr(self, "_corotree_win", None)
-        if cw is not None and hasattr(cw, "coronary_params_refresh"):
-            cw.coronary_params_refresh()
-        # Mouse-operation grid: persist (keep the toggle state) + live-apply. The
-        # timing values are saved regardless of layout validity; the layout is
-        # saved when every cell is a valid action (duplicates allowed, e.g. the
-        # combined play/seek cell can appear more than once).
+        # Mouse-operation grid: keep the toggle state; the timing values are
+        # saved regardless of layout validity; the layout is saved when every
+        # cell is a valid action (duplicates allowed, e.g. the combined
+        # play/seek cell can appear more than once).
+        mouse_grid = settings.load_mouse_grid()
         mouse_grid["reveal_ms"] = dlg.mouse_grid_reveal_ms()
         mouse_grid["display_ms"] = dlg.mouse_grid_display_ms()
         mouse_grid["lines"] = dlg.mouse_grid_lines()
@@ -8081,16 +8229,107 @@ class MainWindow(QMainWindow):
         if layout_ok:
             mouse_grid["layout"] = new_layout
         settings.save_mouse_grid(mouse_grid)
-        for v in self._all_loaded_viewers():
+        return layout_ok
+
+    def _apply_saved_settings(self, all_files: bool = False) -> None:
+        """Push the persisted settings to the running app. *all_files* (after an
+        Import) also re-reads what the Settings dialog doesn't edit: DICOM-tag
+        overlay / Export-field lists, anonymize profile, CT colour map, language."""
+        # Display count (over-cap panes sleep now; keep=active so the focused
+        # pane is never the one demoted).
+        self._live_cap = self._load_live_caps()
+        self._live_bytes_budget = self._ct_budget_for_cap()   # scale with cap
+        self._enforce_live_caps(keep=self._active)
+        viewers = self._all_loaded_viewers()
+        for v in viewers:
+            # Angio quality (+ Advanced) -> canvases + S-Cine/S-Zoom/Denoise.
+            if hasattr(v, "reload_display_quality"):
+                v.reload_display_quality()
+            # LV Auto-Endo params (drops a built Endo so a re-press rebuilds).
+            if hasattr(v, "_lv_endo_adv_refresh"):
+                v._lv_endo_adv_refresh()
+            # LV wall-thickness colour bands -> repaint any live 壁厚 map.
+            if hasattr(v, "_lv_wall_bands_refresh"):
+                v._lv_wall_bands_refresh()
+            # Coronary Tree / Territory appearance (VR tube / LM ratio / halo).
+            if hasattr(v, "coronary_params_refresh"):
+                v.coronary_params_refresh()
             if hasattr(v, "reload_mouse_grid"):
                 v.reload_mouse_grid()
-        if not layout_ok:
-            QMessageBox.information(
-                self, t("マウス操作グリッド"),
-                t("各セルに操作を割り当ててください（配置は保存しませんでした）。"))
-        self.statusBar().showMessage(
-            t("Settings saved (CT {ct} / Angio {xa} live)",
-              ct=vals["CT"], xa=vals["XA"]))
+        cw = getattr(self, "_corotree_win", None)
+        if cw is not None and hasattr(cw, "coronary_params_refresh"):
+            cw.coronary_params_refresh()
+        if not all_files:
+            return
+        cm = settings.load_ct_colormap()
+        for v in viewers:
+            if hasattr(v, "apply_global_colormap"):
+                v.apply_global_colormap(cm["bands"], cm["opacity"],
+                                        cm["smooth_mm"])
+        _anon = settings.load_anon_profile()
+        if _anon is not None:
+            self._anon_tags, self._anon_emptify_private = _anon
+        else:
+            self._anon_tags = list(anonymize.DEFAULT_ANON_TAGS)
+            self._anon_emptify_private = anonymize.DEFAULT_EMPTIFY_PRIVATE
+        anonymize.set_anon_profile(self._anon_tags, self._anon_emptify_private)
+        self._export_fields_by_modality = (
+            settings.load_export_fields_by_modality())
+        self._tag_keywords_by_modality = settings.load_tag_keywords_by_modality()
+        for v in self._tag_viewers():
+            v.set_tag_keywords(self._effective_kw(v))
+        lang = settings.load_language(i18n.get_language())
+        if lang != i18n.get_language():
+            i18n.set_language(lang)
+            self.retranslate_ui()
+
+    def _export_all_settings(self, dlg) -> None:
+        """Settings > Export: write ALL settings into one file. The values now
+        in the dialog are included without committing them (the files are
+        saved just for the export and then put back, so Cancel still cancels)."""
+        path, _ = QFileDialog.getSaveFileName(
+            dlg, t("Export settings"), settings.SETTINGS_BUNDLE_DEFAULT_NAME,
+            t("Settings file") + " (*.txt);;" + t("All files") + " (*)")
+        if not path:
+            return
+        snap = settings.snapshot_settings()
+        try:
+            self._save_settings_dialog(dlg)
+            settings.export_settings_bundle(path)
+        except (OSError, TypeError, ValueError) as exc:
+            QMessageBox.critical(dlg, t("Export failed"), str(exc))
+            return
+        finally:
+            settings.restore_settings(snap)
+        QMessageBox.information(
+            dlg, t("Export settings"),
+            t("設定を書き出しました:\n{p}", p=path))
+
+    def _import_all_settings(self, dlg) -> None:
+        """Settings > Import: replace ALL settings with an exported file, apply
+        them live, and re-open Settings on the imported values."""
+        path, _ = QFileDialog.getOpenFileName(
+            dlg, t("Import settings"), "",
+            t("Settings file") + " (*.txt *.json);;" + t("All files") + " (*)")
+        if not path:
+            return
+        ans = QMessageBox.question(
+            dlg, t("Import settings"),
+            t("現在の設定をすべて、このファイルの内容に置き換えます。よろしいですか？\n{p}",
+              p=path))
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            settings.import_settings_bundle(path)
+        except (OSError, ValueError) as exc:
+            QMessageBox.critical(
+                dlg, t("Import failed"),
+                t("Multi-DicomViewer の設定ファイルではありません。") + f"\n{exc}")
+            return
+        self._apply_saved_settings(all_files=True)
+        self._settings_imported = True
+        dlg.reject()
+        self.statusBar().showMessage(t("設定をインポートしました: {p}", p=path))
 
     def _all_loaded_viewers(self) -> list:
         """Every cached viewer across all panes (deduplicated)."""
