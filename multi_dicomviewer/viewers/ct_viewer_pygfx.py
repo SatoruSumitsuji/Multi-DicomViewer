@@ -1362,14 +1362,19 @@ class _Overlay(QWidget):
         # persists through ROTATE/SPIN and reset. (Parity with VTK 948d500.)
         apex_sgn = ((-1.0 if key == "A" else 1.0)
                     * getattr(v, "_apex_flip", {}).get(key, 1.0))
+        # While a ▲ handle is dragged it follows the cursor angle (the lines
+        # stay put) until it snaps — see CTViewer._tri_drag_move.
+        ta = math.radians(v._tri_paint_ang(key))
+        th_ = (math.cos(ta), math.sin(ta))
+        tv_ = (-math.sin(ta), math.cos(ta))
         p.setBrush(QColor(0, 242, 64))
         p.setPen(Qt.PenStyle.NoPen)
         for sgn in (1.0, -1.0):
-            ax = ccx + sgn * d * uh[0]
-            ay = ccy + sgn * d * uh[1]
-            apex = S(ax + apex_sgn * sz * uv[0], ay + apex_sgn * sz * uv[1])
-            b1 = S(ax - 0.6 * sz * uh[0], ay - 0.6 * sz * uh[1])
-            b2 = S(ax + 0.6 * sz * uh[0], ay + 0.6 * sz * uh[1])
+            ax = ccx + sgn * d * th_[0]
+            ay = ccy + sgn * d * th_[1]
+            apex = S(ax + apex_sgn * sz * tv_[0], ay + apex_sgn * sz * tv_[1])
+            b1 = S(ax - 0.6 * sz * th_[0], ay - 0.6 * sz * th_[1])
+            b2 = S(ax + 0.6 * sz * th_[0], ay + 0.6 * sz * th_[1])
             p.drawPolygon(QPolygonF([apex, b1, b2]))
 
         # Yellow ○ direction marker on the section (horizontal) line — a slightly
@@ -3091,6 +3096,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._rclick_timer.setSingleShot(True)
         self._rclick_timer.timeout.connect(self._rclick_timeout)
         self._cross_grab = False             # current drag is a crosshair grab
+        self._tri_drag = None                # dragging a ▲ handle → 90° companion
         self._cross_mode = "rotate"          # "rotate" | "move"
         self._cross_axis = None              # locked move axis (2-D unit)
         self._cross_ppt = (0.0, 0.0)         # prev world point (move mode)
@@ -3574,6 +3580,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # tool). Snapshot for Ctrl+Z now; committed as one step on release.
         if self._drag_btn == 1:
             self._gesture_begin()
+        # ▲ handle: a press on the green ▲ (the companion's section-direction
+        # marker) starts a drag that snaps the COMPANION to the 90° orthogonal
+        # view — crosshair stays fixed, only the ▲ moves. Wins over the crossline.
+        if self._drag_btn == 1 and self._tri_grab(key, x, y):
+            self._cross_grab = False
+            self._last = (x, y)
+            return
         # Pressing within the (now 5%) crosshair grab band grabs the centreline
         # (MOVE/ROTATE), overriding the tool — for ALL tools incl. SPIN. The band
         # is small, so SPIN still owns the drag everywhere off the lines; on the
@@ -3687,6 +3700,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 return
             self._hover_cross(key, x, y)      # no button → preview centreline grab
             return
+        if self._tri_drag is not None:
+            self._tri_drag_move(key, x, y)
+            self._last = (x, y)
+            return
         if self._cross_grab:
             self._cross_move(key, x, y)
             self._last = (x, y)
@@ -3766,6 +3783,16 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             self._drag_btn = None
             self._last = None
             return
+        # End a ▲ gesture. If it snapped (locked) the 90° rotation is already
+        # applied → just commit it; if it was released before snapping, restore
+        # the ▲ (no change). Either way the next press starts fresh.
+        if self._tri_drag is not None:
+            self._tri_drag = None
+            self._overlay[key].update()          # ▲ back on the (real) H line
+            self._gesture_commit()               # commits the rotation if snapped
+            self._drag_btn = None
+            self._last = None
+            return
         if self._meas_on and self._meas_drag:
             self._measure_release()
         # End any short-axis marker drag / dial rotation.
@@ -3810,6 +3837,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         holding the grab, diverting clicks away from the toolbar buttons."""
         self._drag_btn = None
         self._cross_grab = False
+        self._tri_drag = None
         self._meas_drag = False
         self._vr_drag = None
         self._alt_tool = False
@@ -7700,6 +7728,85 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         mode = "move" if along <= mid else "rotate"
         return (True, "H" if grab_h else "V", mode)
 
+    # ---- ▲ handle: drag the companion's section-direction marker to the ----
+    #      orthogonal axis → snap the COMPANION pane to the 90° view. --------
+    #      (Ported from the VTK viewer.)
+    _TRI_PICK_PX = 16.0        # grab radius around a ▲ (Qt-logical px)
+    _TRI_SNAP_DEG = 15.0       # snap when the drag is within this of ±90°
+
+    def _tri_centers(self, which):
+        """The two ▲ marker centres (output coords) of *which* pane's
+        crosshair — on the H crossline at ±d along uh (as _paint_cross)."""
+        ccx, ccy = self._cc(which)
+        d = 0.255 * self._ps[which]
+        a = math.radians(self._cross_ang[which])
+        uh = (math.cos(a), math.sin(a))
+        return [(ccx + s * d * uh[0], ccy + s * d * uh[1]) for s in (1.0, -1.0)]
+
+    def _tri_pick(self, which, sx, sy):
+        """True if (sx, sy) is on a ▲ handle of *which* pane (crosshair shown,
+        not LV-suppressed, not the CPR / VR pane)."""
+        if (self._vol is None or not self._cl_on
+                or self._lv_cross_suppressed()
+                or self._lv_cross_paint_suppressed()
+                or self._vr_on.get(which)
+                or (self._cpr is not None and which == "A")):
+            return False
+        for wx, wy in self._tri_centers(which):
+            mx, my = self._world_to_screen(which, wx, wy)
+            if (mx - sx) ** 2 + (my - sy) ** 2 <= self._TRI_PICK_PX ** 2:
+                return True
+        return False
+
+    def _tri_grab(self, which, sx, sy) -> bool:
+        """Start a ▲ drag if the press lands on a ▲ handle. The crosshair stays
+        fixed; only the ▲ follows the cursor until it snaps to the orthogonal."""
+        if not self._tri_pick(which, sx, sy):
+            return False
+        self._tri_drag = {"which": which, "ang0": float(self._cross_ang[which]),
+                          "ang": None}
+        return True
+
+    def _tri_paint_ang(self, which):
+        """Angle (deg) to paint *which*'s ▲ pair at: the cursor angle while a ▲
+        drag is following it, else the real crossline angle."""
+        td = self._tri_drag
+        if (td is not None and td["which"] == which and not td.get("locked")
+                and td.get("ang") is not None):
+            return td["ang"]
+        return self._cross_ang[which]
+
+    def _tri_drag_move(self, which, sx, sy):
+        """While dragging a ▲: slide it to the cursor angle; when it reaches the
+        orthogonal axis (±90° from the H line) SNAP there and rotate the COMPANION
+        pane 90° about the shared axis (this pane's image is unchanged)."""
+        td = self._tri_drag
+        if td is None or td["which"] != which:
+            return
+        if td.get("locked"):
+            return                        # snap applied → ignore the rest of this
+            #                               drag (don't let it spill to the tool /
+            #                               move the background). A new press after
+            #                               release runs the default behaviour.
+        ccx, ccy = self._cc(which)
+        wx, wy = self._disp_to_world(which, sx, sy)
+        rx, ry = wx - ccx, wy - ccy
+        if abs(rx) < 1e-6 and abs(ry) < 1e-6:
+            return
+        cur = math.degrees(math.atan2(ry, rx))
+        delta = ((cur - td["ang0"]) + 180.0) % 360.0 - 180.0   # signed, −180..180
+        for target in (90.0, -90.0):
+            if abs(delta - target) <= self._TRI_SNAP_DEG:
+                td["locked"] = True       # consume the rest of the drag
+                self._cross_ang[which] = (self._cross_ang[which] + target) % 360.0
+                self._rotate_companion_by(which, target)       # companion → 90°
+                self._gesture_moved = True                     # one Ctrl+Z step
+                self._view_initial = False
+                self._refresh()
+                return
+        td["ang"] = cur                                        # not snapped → follow
+        self._overlay[which].update()
+
     def _cross_press(self, which, sx, sy) -> bool:
         """Arm a MOVE/ROTATE crosshair gesture (above the tool) if the press
         lands ON the crosshair; else False. Locks the vivid highlight for the
@@ -7746,6 +7853,11 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # VTK viewer's _hover_cross, which clears the highlight and returns here.
         if self._lv_cross_suppressed():
             if self._cross_hi.get(which) is not None:
+                self._cross_hi[which] = None
+                self._overlay[which].update()
+            return
+        if self._tri_pick(which, sx, sy):         # over a ▲ handle → its own grab,
+            if self._cross_hi.get(which) is not None:   # not a move/rotate hint
                 self._cross_hi[which] = None
                 self._overlay[which].update()
             return
