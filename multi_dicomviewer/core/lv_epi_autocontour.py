@@ -264,12 +264,13 @@ def _smooth_ring(theta_deg, r, harmonics):
 
 #: Short-axis correction levels as fractions apex(0)→base(1). The construction:
 #: 4 equal divisions, then HALVE the apical-most and basal-most segments again,
-#: plus one more between the last ring and the MV plane (fraction 1 — the basal
-#: terminal the border converges to) so that corner isn't cut straight. The rings
-#: sit denser near the apex and the base. 8 levels total; fraction
-#: 0 is the apex tip (radius 0), the other 7 are the correction rings. This gives
-#: a SPARSE contour (≈7 edit points per wall + apex) instead of a dense polyline.
-_SAX_LEVEL_FRACS = (0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0)
+#: plus one more at each end: between the last ring and the MV plane (fraction 1 —
+#: the basal terminal the border converges to) and between the first ring and the
+#: apex tip, so those corners aren't cut straight. The rings sit denser near the
+#: apex and the base. 9 levels total; fraction 0 is the apex tip (radius 0), the
+#: other 8 are the correction rings. This gives
+#: a SPARSE contour (≈8 edit points per wall + apex) instead of a dense polyline.
+_SAX_LEVEL_FRACS = (0.0, 0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0)
 
 
 def _edit_tol_mm(amax):
@@ -313,13 +314,13 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
 
     The user traces/edits the Epi on the long axis (incl. the long-axis range
     handle); this harmonises the result CIRCUMFERENTIALLY. At short-axis rings at
-    *level_fracs* of the apex→base length (default: the 8-level, apex-/base-dense
+    *level_fracs* of the apex→base length (default: the 9-level, apex-/base-dense
     scheme ``_SAX_LEVEL_FRACS``) it samples the CURRENT contour radius at each
     meridian (so every hand edit is INCLUDED as input, not re-detected) and
     low-passes the ring circumferentially (keep harmonics 0..*harmonics*) → a
     smooth closed short-axis shape. A manually moved point is thus blended with
     its neighbours (the user asked for this), not pinned. The rings become the
-    contour's control points directly → the long-axis pane shows only ~7 edit
+    contour's control points directly → the long-axis pane shows only ~8 edit
     points per wall, not a dense polyline. The apex tip stays as traced. No HU:
     accuracy comes from the manual trace + long-axis editing, which the HU
     detector could not match. *vol*/*dims* are unused (kept for signature

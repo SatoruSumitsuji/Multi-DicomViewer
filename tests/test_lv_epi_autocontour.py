@@ -154,9 +154,9 @@ def test_short_axis_geometric_smooths_bump():
     assert 19.5 < after0 < before0, f"bump should smooth, got {after0:.1f}"
     neigh = sorted(k for k in m.epi_contours if 1e-6 < k < 180.0)[0]
     assert m.epi_contours[neigh][:, 1].max() > 19.3, "neighbour should feel the bump"
-    # Sparse output: ~6 ring points per wall + the shared apex (not a dense line).
+    # Sparse output: ~8 ring points per wall + the shared apex (not a dense line).
     for phi in m.plane_angles():
-        assert len(m.epi_planes[phi % 360.0]) <= 15, "contour should be sparse"
+        assert len(m.epi_planes[phi % 360.0]) <= 17, "contour should be sparse"
 
 
 def test_short_axis_geometric_keeps_a_circle():
@@ -188,30 +188,30 @@ def _add_point(m, axis, phi, along, r):
 
 
 def test_short_axis_keep_edits_adds_ring_for_added_point():
-    # HU＋spline → default 7 rings; an add-point between two rings is then the
+    # HU＋spline → default 8 rings; an add-point between two rings is then the
     # spline INPUT on the re-run (its own ring), not resampled away.
     m, axis = _bumped_model(bump_r=19.0, base_r=19.0)          # plain circle
     st = ea.refine_epi_short_axis(None, None, m)
-    assert st["levels"] == 7 and st["extra_levels"] == 0
+    assert st["levels"] == 8 and st["extra_levels"] == 0
     amax = max(m.epi_sax_levels)
     a_new = 0.375 * amax                                        # between rings
     _add_point(m, axis, 0.0, a_new, 27.0)
     old = ea.refine_epi_short_axis(None, None, LVModel.from_dict(m.to_dict()))
     st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
-    assert old["levels"] == 7
-    assert st["levels"] == 8 and st["extra_levels"] == 1
+    assert old["levels"] == 8
+    assert st["levels"] == 9 and st["extra_levels"] == 1
     prof = m.epi_contours[0.0]
     j = int(np.argmin(np.abs(prof[:, 0] - a_new)))
     assert abs(prof[j, 0] - a_new) < 1.0, "a ring at the added point's height"
     assert prof[j, 1] > 20.0, "the hand edit must survive the spline"
     # The added ring is remembered: a further re-run keeps it, no new rings.
     st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
-    assert st["levels"] == 8 and st["extra_levels"] == 1
+    assert st["levels"] == 9 and st["extra_levels"] == 1
     # …and round-trips through Save / Load.
     m2 = LVModel.from_dict(m.to_dict())
     assert m2.epi_sax_extra == m.epi_sax_extra
     st = ea.refine_epi_short_axis(None, None, m2, keep_edits=True)
-    assert st["levels"] == 8
+    assert st["levels"] == 9
 
 
 def test_short_axis_keep_edits_no_edit_no_ring():
@@ -223,24 +223,25 @@ def test_short_axis_keep_edits_no_edit_no_ring():
     pts[1] = axis.to_world(0.0, 25.0, a1)
     m.set_long_axis_contour(0.0, pts, which="epi")
     st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
-    assert st["levels"] == 7 and st["extra_levels"] == 0
+    assert st["levels"] == 8 and st["extra_levels"] == 0
     assert m.epi_contours[0.0][:, 1].max() > 20.0
 
 
 def test_short_axis_keep_edits_without_previous_run_is_default():
     m, _axis = _bumped_model()
     st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
-    assert st["levels"] == 7 and st["extra_levels"] == 0
+    assert st["levels"] == 8 and st["extra_levels"] == 0
 
 
 def test_short_axis_default_has_ring_between_last_ring_and_mv():
-    # Default rings: one more between 0.875 and the MV plane (the basal terminal).
+    # Default rings: one more between 0.875 and the MV plane (the basal terminal)
+    # and one more between the apex tip and 0.125.
     m, _axis = _bumped_model(bump_r=19.0, base_r=19.0)
     st = ea.refine_epi_short_axis(None, None, m)
-    assert st["levels"] == 7
+    assert st["levels"] == 8
     amax = max(m.epi_sax_levels)
     fr = [round(x / amax, 4) for x in m.epi_sax_levels]
-    assert fr == [0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0]
-    # 7 rings per wall + the shared apex.
+    assert fr == [0.0625, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0]
+    # 8 rings per wall + the shared apex.
     for phi in m.plane_angles():
-        assert len(m.epi_planes[phi % 360.0]) == 15
+        assert len(m.epi_planes[phi % 360.0]) == 17

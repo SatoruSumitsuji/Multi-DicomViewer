@@ -12452,18 +12452,18 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # HU＋スプライン補正: snap the traced Epi border to the epicardial edge in
         # the CT where the HU gradient is clear (manual spline where the HU
         # difference is small — inferior wall), then run the short-axis spline on
-        # the default 7 rings in one go. Shared core.lv_epi_autocontour.
+        # the default 8 rings in one go. Shared core.lv_epi_autocontour.
         self._lv_husnap_btn = FitButton(t("HU＋スプライン補正"))
         self._lv_husnap_btn.setHelpToolTip(
             t("Epi 線を CT 値の心外膜エッジに自動適合し（HU 差が明瞭な所。小さい所は"
-              "手動線のまま）、続けて短軸スプライン補正（心尖を除く 7 断面）まで一気に"
+              "手動線のまま）、続けて短軸スプライン補正（心尖を除く 8 断面）まで一気に"
               "行います。その後は長軸で点の移動・add point をして「スプライン補正」を。"))
         self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
         # 短軸スプライン補正: purely geometric circumferential smoothing of the
         # current Epi contour (includes hand edits), no HU. Shared core.
         self._lv_saxspl_btn = FitButton(t("スプライン補正"))
         self._lv_saxspl_btn.setHelpToolTip(
-            t("長軸で点を動かした・add point した後の再補正です。既定の 7 断面に加えて、"
+            t("長軸で点を動かした・add point した後の再補正です。既定の 8 断面に加えて、"
               "編集した点がある高さの断面も短軸スプライン補正の対象にするので、手補正が"
               "そのまま反映されます（純幾何・HU 不使用）。何度でも再適用できます。"))
         self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
@@ -18104,7 +18104,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if QMessageBox.question(
                     self.window(), t("Epi HU＋スプライン補正"),
                     t("すでに HU＋スプライン補正を実行済みです。再実行すると、明瞭なエッジ付近で"
-                      "行った手補正がエッジ側へ戻り、スプライン補正の断面も既定の 7 断面に"
+                      "行った手補正がエッジ側へ戻り、スプライン補正の断面も既定の 8 断面に"
                       "戻ります（下壁など落差の小さい手補正は保持されます）。続けますか？")) \
                     != QMessageBox.StandardButton.Yes:
                 return
@@ -18113,7 +18113,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             from multi_dicomviewer.core import lv_epi_autocontour as ea
             stats = ea.refine_epi_model(self._vol, self._dims, model)
             # …then straight into the short-axis spline on the DEFAULT rings
-            # (apex excluded, 7 levels) → sparse edit points, not a dense line.
+            # (apex excluded, 8 levels) → sparse edit points, not a dense line.
             sp = ea.refine_epi_short_axis(self._vol, self._dims, model)
             try:
                 model.build()
