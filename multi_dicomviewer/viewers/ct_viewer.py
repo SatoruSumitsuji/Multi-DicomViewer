@@ -14116,6 +14116,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                         # component is discarded.
                         P = self._lv_project_to_mv(P)
                     else:
+                        P = self._lv_lock_section(
+                            P, m["pts3d"][e["vi"]], m["_lv"])
                         side = self._lv_border_side(m, e["vi"])
                         P = self._lv_clamp_border_point(P, m["_lv"], side)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
@@ -17432,6 +17434,20 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         n = n / (np.linalg.norm(n) or 1.0)
         P = np.asarray(P, float)
         return P - float((P - c) @ n) * n
+
+    def _lv_lock_section(self, P, P_before, tag):
+        """Epi border on the long axis, once the short-axis sections exist (after
+        the spline): a dragged point stays IN ITS SECTION - only the radial moves,
+        its along-axis position is kept. To put a point on another section, Add
+        Point. Before the spline (rough trace) and for Endo the drag stays free."""
+        if self._lv is None or tag is None or tag[1] != "epi":
+            return P
+        model = self._lv["model"]
+        ax = model.epi_axis
+        if ax is None or model.epi_sax_levels is None:
+            return P
+        P = np.asarray(P, float)
+        return P + float((np.asarray(P_before, float) - P) @ ax.axis) * ax.axis
 
     def _lv_clamp_border_point(self, P, tag, side, s_min: float = 2.5):
         """Keep an LV-border point on its own wall: clamp its in-plane radial so
