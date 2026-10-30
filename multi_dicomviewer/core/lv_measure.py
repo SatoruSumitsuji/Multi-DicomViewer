@@ -173,6 +173,11 @@ class LVModel:
         # stashed here so "Endo → Trace" can restore it. None = not promoted.
         # {"axis": LVAxis, "contours": {θ:(T,2)}, "planes": {φ:(N,3)}, "apex": p}
         self.endo_orig: dict | None = None
+        # Epi short-axis spline levels (along mm) of the last スプライン補正 run,
+        # and the subset added for long-axis edits — the re-run keeps those
+        # rings and adds rings for points edited since (lv_epi_autocontour).
+        self.epi_sax_levels: list[float] | None = None
+        self.epi_sax_extra: list[float] = []
 
     # ------------------------------------------------------------------- axis
     def _axis_for(self, which: str) -> "LVAxis | None":
@@ -191,6 +196,8 @@ class LVModel:
         self.epi_planes.clear()
         self.endo_apex = self.epi_apex = None
         self.endo = self.epi = None
+        self.epi_sax_levels = None
+        self.epi_sax_extra = []
 
     def set_axis_from_frame(self, origin, axis_dir, radial0,
                             which: str | None = None) -> None:
@@ -215,6 +222,8 @@ class LVModel:
             self.epi_planes.clear()
             self.epi_apex = None
             self.epi = None
+            self.epi_sax_levels = None
+            self.epi_sax_extra = []
         self.axis = self._axis_for(which) if which else self.epi_axis
 
     def set_apex_point(self, which: str, p3d) -> None:
@@ -443,6 +452,9 @@ class LVModel:
             "epi_planes": {f"{k:g}": np.asarray(v, float).reshape(-1, 3).tolist()
                            for k, v in self.epi_planes.items()},
         }
+        if self.epi_sax_levels is not None:
+            d["epi_sax_levels"] = [float(x) for x in self.epi_sax_levels]
+            d["epi_sax_extra"] = [float(x) for x in self.epi_sax_extra]
         if self.endo_orig is not None:
             o = self.endo_orig
             d["endo_orig"] = {
@@ -479,6 +491,9 @@ class LVModel:
             m.set_apex_point("endo", d["endo_apex"])
         if d.get("epi_apex") is not None:
             m.set_apex_point("epi", d["epi_apex"])
+        if d.get("epi_sax_levels") is not None:
+            m.epi_sax_levels = [float(x) for x in d["epi_sax_levels"]]
+            m.epi_sax_extra = [float(x) for x in d.get("epi_sax_extra") or []]
         # v4: rebuild the stashed original independent-axis Endo trace, if any,
         # so 'Endo → Trace' can still restore it after reload.
         eo = d.get("endo_orig")

@@ -5242,7 +5242,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 self._lv_btn.setChecked(False)
                 self._lv_wall_btn.setChecked(False)
                 self._lv_sax_btn.setChecked(False)
-                self._lv_plane_lbl.setText("0/6")
+                self._lv_plane_lbl.setText("0/8")
                 self._lv_sync_buttons()          # reset colours + grey the bar
         # A new series → drop any LV Vol state (landmarks/Epi/mask are in the
         # previous series' voxel coordinates).
@@ -11285,7 +11285,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         box.setWindowTitle(t("Epi"))
         box.setIcon(QMessageBox.Icon.Information)
         box.setText(t(
-            "Trace the Epi border on the 6 planes, then refine it on the short "
+            "Trace the Epi border on the 8 planes, then refine it on the short "
             "axis (SAX). The apex + long axis are already set."))
         b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Cancel)
@@ -12374,7 +12374,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
         self._lv_prev_btn.clicked.connect(lambda: self._lv_step_plane(-1))
         gt.addWidget(self._lv_prev_btn)
-        self._lv_plane_lbl = QLabel("0/6")
+        self._lv_plane_lbl = QLabel("0/8")
         self._lv_plane_lbl.setMinimumWidth(78)
         fl = self._lv_plane_lbl.font(); fl.setBold(True)
         self._lv_plane_lbl.setFont(fl)
@@ -12403,7 +12403,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         r2t.setContentsMargins(0, 0, 0, 0); r2t.setSpacing(4)
         self._lv_epi_draw_btn = FitButton(t("Draw"))
         self._lv_epi_draw_btn.setHelpToolTip(
-            t("Begin the Epi trace: trace the border on 6 planes, then refine on "
+            t("Begin the Epi trace: trace the border on 8 planes, then refine on "
               "SAX (the apex + long axis are already set). Unlocks Trace / plane "
               "/ SAX."))
         self._lv_epi_draw_btn.clicked.connect(self._lv_epi_draw)
@@ -12449,21 +12449,23 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
               "the left-atrium side and snap the two basal ends onto the MV "
               "plane line."))
         self._lv_fit_mv_btn.clicked.connect(self._lv_fit_mv)
-        # HU補正: snap the traced Epi border to the epicardial edge in the CT where
-        # the HU gradient is clear; leave it on the manual spline where the HU
-        # difference is small (inferior wall). Shared core.lv_epi_autocontour.
-        self._lv_husnap_btn = FitButton(t("HU補正"))
+        # HU＋スプライン補正: snap the traced Epi border to the epicardial edge in
+        # the CT where the HU gradient is clear (manual spline where the HU
+        # difference is small — inferior wall), then run the short-axis spline on
+        # the default 7 rings in one go. Shared core.lv_epi_autocontour.
+        self._lv_husnap_btn = FitButton(t("HU＋スプライン補正"))
         self._lv_husnap_btn.setHelpToolTip(
-            t("Epi 線を CT 値の心外膜エッジに自動適合します（前壁・側壁・下壁で HU 差が "
-              "明瞭な所）。HU 差が小さい所は手動線のまま。実行後に長軸で add point 微修正を。"))
+            t("Epi 線を CT 値の心外膜エッジに自動適合し（HU 差が明瞭な所。小さい所は"
+              "手動線のまま）、続けて短軸スプライン補正（心尖を除く 7 断面）まで一気に"
+              "行います。その後は長軸で点の移動・add point をして「スプライン補正」を。"))
         self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
         # 短軸スプライン補正: purely geometric circumferential smoothing of the
         # current Epi contour (includes hand edits), no HU. Shared core.
         self._lv_saxspl_btn = FitButton(t("スプライン補正"))
         self._lv_saxspl_btn.setHelpToolTip(
-            t("短軸の各断面（心尖〜心基部を7断面）で Epi を周方向スプラインで整えます"
-              "（純幾何・HU不使用）。手動編集を含めて平滑化するので、手で整えた長軸の"
-              "形がそのまま全周に反映されます。点数は少なめ。何度でも再適用できます。"))
+            t("長軸で点を動かした・add point した後の再補正です。既定の 7 断面に加えて、"
+              "編集した点がある高さの断面も短軸スプライン補正の対象にするので、手補正が"
+              "そのまま反映されます（純幾何・HU 不使用）。何度でも再適用できます。"))
         self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
         self._lv_stl_btn = FitButton(t("STL"))
         self._lv_stl_btn.clicked.connect(self._lv_export_stl)
@@ -17035,6 +17037,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv["model"].endo_planes.clear()
         self._lv["model"].epi_planes.clear()
         self._lv["model"].endo_orig = None          # drop the promotion stash
+        self._lv["model"].epi_sax_levels = None     # and the spline-level memory
+        self._lv["model"].epi_sax_extra = []
         self._lv_reset_undo()
         self._measures[pane] = [m for m in self._measures[pane]
                                 if m.get("type") != "polyline"]
@@ -18089,7 +18093,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 or getattr(model, "epi_axis", None) is None
                 or not getattr(model, "epi_planes", None)):
             QMessageBox.information(
-                self.window(), t("Epi HU補正"),
+                self.window(), t("Epi HU＋スプライン補正"),
                 t("先に Epi をトレースしてください（MV / AoV / Apex 設定後）。"))
             return
         # Re-run warning: a second pass re-blends from the CURRENT (hand-edited)
@@ -18098,16 +18102,19 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # first (reset on Clear/Load/Exit).
         if lv.get("husnap_done"):
             if QMessageBox.question(
-                    self.window(), t("Epi HU補正"),
-                    t("すでに HU補正を実行済みです。再実行すると、明瞭なエッジ付近で"
-                      "行った手補正がエッジ側へ戻る場合があります（下壁など落差の"
-                      "小さい手補正は保持されます）。続けますか？")) \
+                    self.window(), t("Epi HU＋スプライン補正"),
+                    t("すでに HU＋スプライン補正を実行済みです。再実行すると、明瞭なエッジ付近で"
+                      "行った手補正がエッジ側へ戻り、スプライン補正の断面も既定の 7 断面に"
+                      "戻ります（下壁など落差の小さい手補正は保持されます）。続けますか？")) \
                     != QMessageBox.StandardButton.Yes:
                 return
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
             stats = ea.refine_epi_model(self._vol, self._dims, model)
+            # …then straight into the short-axis spline on the DEFAULT rings
+            # (apex excluded, 7 levels) → sparse edit points, not a dense line.
+            sp = ea.refine_epi_short_axis(self._vol, self._dims, model)
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18119,11 +18126,12 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_redraw_all()
         lv["husnap_done"] = True                 # arm the re-run warning
         QMessageBox.information(
-            self.window(), t("Epi HU補正"),
+            self.window(), t("Epi HU＋スプライン補正"),
             t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
-              "HU 差が小さい所は手動線のままです。長軸で add point 微修正してください。",
+              "続けて短軸スプライン補正：{L} 断面で整えました。\n"
+              "長軸で点の移動・add point をしたら「スプライン補正」を押してください。",
               p=stats.get("planes", 0), n=stats.get("refined_pts", 0),
-              w=stats.get("mean_weight", 0.0)))
+              w=stats.get("mean_weight", 0.0), L=sp.get("levels", 0)))
 
     def _lv_sax_spline(self) -> None:
         """短軸スプライン補正: purely geometric circumferential smoothing of the
@@ -18146,7 +18154,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
-            stats = ea.refine_epi_short_axis(self._vol, self._dims, model)
+            stats = ea.refine_epi_short_axis(self._vol, self._dims, model,
+                                             keep_edits=True)
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18163,9 +18172,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_redraw_all()
         QMessageBox.information(
             self.window(), title,
-            t("短軸スプライン補正：{L} 断面を周方向に整え、{p} 面の Epi 輪郭を"
-              "更新しました（手動編集を含めて平滑化、HU は使用しません）。",
-              L=stats.get("levels", 0), p=stats.get("planes", 0)))
+            t("短軸スプライン補正：{L} 断面（うち長軸の編集点による追加 {a}）を"
+              "周方向に整え、{p} 面の Epi 輪郭を更新しました（HU は使用しません）。",
+              L=stats.get("levels", 0), a=stats.get("extra_levels", 0),
+              p=stats.get("planes", 0)))
 
     def _lv_rebuild_measures(self) -> None:
         lv = self._lv
@@ -18263,7 +18273,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_sax_btn.setChecked(False)
         self._lv_btn.setChecked(False)      # internal mode flag off
         self._lv_sync_buttons()             # reset colours + grey out the bar
-        self._lv_plane_lbl.setText("0/6")
+        self._lv_plane_lbl.setText("0/8")
         if self._meas_on:
             self._meas_btn.setChecked(False)
             self._toggle_measure()

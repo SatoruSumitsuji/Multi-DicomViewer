@@ -263,31 +263,76 @@ def _smooth_ring(theta_deg, r, harmonics):
 
 
 #: Short-axis correction levels as fractions apex(0)→base(1). The construction:
-#: 4 equal divisions, then HALVE the apical-most and basal-most segments again —
-#: so the rings sit denser near the apex and the base. 7 levels total; fraction
-#: 0 is the apex tip (radius 0), the other 6 are the correction rings. This gives
-#: a SPARSE contour (≈6 edit points per wall + apex) instead of a dense polyline.
-_SAX_LEVEL_FRACS = (0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 1.0)
+#: 4 equal divisions, then HALVE the apical-most and basal-most segments again,
+#: plus one more between the last ring and the MV plane (fraction 1 — the basal
+#: terminal the border converges to) so that corner isn't cut straight. The rings
+#: sit denser near the apex and the base. 8 levels total; fraction
+#: 0 is the apex tip (radius 0), the other 7 are the correction rings. This gives
+#: a SPARSE contour (≈7 edit points per wall + apex) instead of a dense polyline.
+_SAX_LEVEL_FRACS = (0.0, 0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0)
+
+
+def _edit_tol_mm(amax):
+    """Along distance (mm) within which a control point counts as sitting ON a
+    short-axis level (i.e. not a long-axis edit that needs its own ring)."""
+    return max(1.5, 0.03 * float(amax))
+
+
+def _merge_levels(vals, tol):
+    """Sort + merge along values closer than *tol* (cluster mean)."""
+    out = []
+    for v in sorted(float(x) for x in vals):
+        if out and v - out[-1][-1] <= tol:
+            out[-1].append(v)
+        else:
+            out.append([v])
+    return [float(np.mean(c)) for c in out]
+
+
+def _edited_levels(model, amax, prev_levels):
+    """Along positions of the long-axis control points that do NOT sit on a
+    level of the previous spline run (*prev_levels*) — points the user added
+    (add point) or slid along the axis since. Apex tip / above-base excluded."""
+    tol = _edit_tol_mm(amax)
+    prev = np.asarray(prev_levels, float)
+    hits = []
+    for prof in model.epi_contours.values():
+        a = np.asarray(prof, float).reshape(-1, 2)[:, 0]
+        for al in a:
+            if al <= tol or al > amax - tol * 0.5:
+                continue                       # apex tip / the base ring
+            if len(prev) and np.min(np.abs(prev - al)) <= tol:
+                continue                       # unmoved point on an old level
+            hits.append(float(al))
+    return _merge_levels(hits, tol)
 
 
 def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
-                          level_fracs=_SAX_LEVEL_FRACS):
+                          level_fracs=_SAX_LEVEL_FRACS, keep_edits=False):
     """Short-axis SPLINE correction of the Epi surface — PURELY GEOMETRIC (no HU).
 
     The user traces/edits the Epi on the long axis (incl. the long-axis range
     handle); this harmonises the result CIRCUMFERENTIALLY. At short-axis rings at
-    *level_fracs* of the apex→base length (default: the 7-level, apex-/base-dense
+    *level_fracs* of the apex→base length (default: the 8-level, apex-/base-dense
     scheme ``_SAX_LEVEL_FRACS``) it samples the CURRENT contour radius at each
     meridian (so every hand edit is INCLUDED as input, not re-detected) and
     low-passes the ring circumferentially (keep harmonics 0..*harmonics*) → a
     smooth closed short-axis shape. A manually moved point is thus blended with
     its neighbours (the user asked for this), not pinned. The rings become the
-    contour's control points directly → the long-axis pane shows only ~6 edit
+    contour's control points directly → the long-axis pane shows only ~7 edit
     points per wall, not a dense polyline. The apex tip stays as traced. No HU:
     accuracy comes from the manual trace + long-axis editing, which the HU
     detector could not match. *vol*/*dims* are unused (kept for signature
-    parity). Returns a stats dict."""
-    stats = {"mode": "spline-geom", "levels": 0, "planes": 0}
+    parity). Returns a stats dict.
+
+    *keep_edits* (the re-run after long-axis hand edits): besides the default
+    rings, add a ring at the along position of every control point the user
+    added / slid along the axis since the previous run (and keep the rings added
+    by earlier re-runs), so those edits are spline INPUT rather than being
+    resampled away between the default rings. The levels used are remembered on
+    the model (``epi_sax_levels`` / ``epi_sax_extra``); without a previous run
+    keep_edits falls back to the default rings."""
+    stats = {"mode": "spline-geom", "levels": 0, "planes": 0, "extra_levels": 0}
     axis = getattr(model, "epi_axis", None)
     if axis is None or len(getattr(model, "epi_contours", {})) < 3:
         return stats
@@ -300,6 +345,17 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
     amax = float(np.median(amaxs))
     ring_fracs = [float(f) for f in level_fracs if f > 1e-6]   # non-apex rings
     levels = amax * np.asarray(ring_fracs)
+    extra = []
+    prev = getattr(model, "epi_sax_levels", None)
+    if keep_edits and prev is not None:
+        tol = _edit_tol_mm(amax)
+        edits = _edited_levels(model, amax, prev)
+        extra = [float(e) for e in (list(getattr(model, "epi_sax_extra", None)
+                                         or []) + edits)
+                 if tol < e <= amax - tol * 0.5]
+        extra = [e for e in _merge_levels(extra, tol)
+                 if np.min(np.abs(levels - e)) > tol]
+        levels = np.asarray(sorted(list(levels) + extra), float)
     ring = np.full((len(levels), nth), np.nan)
 
     def _col(th):
@@ -338,4 +394,8 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
         model.set_long_axis_contour(float(phi), np.asarray(pts3d, float),
                                     which="epi")
         stats["planes"] += 1
+    if stats["planes"]:
+        model.epi_sax_levels = [float(x) for x in levels]
+        model.epi_sax_extra = list(extra)
+        stats["extra_levels"] = len(extra)
     return stats
