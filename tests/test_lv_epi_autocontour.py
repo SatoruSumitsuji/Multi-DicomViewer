@@ -10,6 +10,7 @@ import pytest
 
 from multi_dicomviewer.core.lv_axis import LVAxis
 from multi_dicomviewer.core import lv_epi_autocontour as ea
+from multi_dicomviewer.core.lv_measure import LVModel
 
 
 def _axis():
@@ -173,3 +174,73 @@ def test_short_axis_rerun_is_stable():
     ea.refine_epi_short_axis(None, None, m)
     for k, prof in m.epi_contours.items():
         assert abs(prof[:, 1].max() - first[k]) <= 1.0, "re-run should be stable"
+
+
+def _add_point(m, axis, phi, along, r):
+    """Hand edit: insert a long-axis control point on plane *phi*'s φ wall."""
+    pts = [np.asarray(p, float) for p in m.epi_planes[phi % 360.0]]
+    new = axis.to_world(phi, r, along)
+    al = [float((p - axis.apex) @ axis.axis) for p in pts]
+    api = int(np.argmin(al))                      # φ wall = base → apex, before api
+    i = next((j for j in range(api) if al[j] < along), api)
+    pts.insert(i, new)
+    m.set_long_axis_contour(phi, np.array(pts), which="epi")
+
+
+def test_short_axis_keep_edits_adds_ring_for_added_point():
+    # HU＋spline → default 7 rings; an add-point between two rings is then the
+    # spline INPUT on the re-run (its own ring), not resampled away.
+    m, axis = _bumped_model(bump_r=19.0, base_r=19.0)          # plain circle
+    st = ea.refine_epi_short_axis(None, None, m)
+    assert st["levels"] == 7 and st["extra_levels"] == 0
+    amax = max(m.epi_sax_levels)
+    a_new = 0.375 * amax                                        # between rings
+    _add_point(m, axis, 0.0, a_new, 27.0)
+    old = ea.refine_epi_short_axis(None, None, LVModel.from_dict(m.to_dict()))
+    st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
+    assert old["levels"] == 7
+    assert st["levels"] == 8 and st["extra_levels"] == 1
+    prof = m.epi_contours[0.0]
+    j = int(np.argmin(np.abs(prof[:, 0] - a_new)))
+    assert abs(prof[j, 0] - a_new) < 1.0, "a ring at the added point's height"
+    assert prof[j, 1] > 20.0, "the hand edit must survive the spline"
+    # The added ring is remembered: a further re-run keeps it, no new rings.
+    st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
+    assert st["levels"] == 8 and st["extra_levels"] == 1
+    # …and round-trips through Save / Load.
+    m2 = LVModel.from_dict(m.to_dict())
+    assert m2.epi_sax_extra == m.epi_sax_extra
+    st = ea.refine_epi_short_axis(None, None, m2, keep_edits=True)
+    assert st["levels"] == 8
+
+
+def test_short_axis_keep_edits_no_edit_no_ring():
+    # A radial-only move ON a ring adds no ring (it is already sampled there).
+    m, axis = _bumped_model(bump_r=19.0, base_r=19.0)
+    ea.refine_epi_short_axis(None, None, m)
+    pts = np.array(m.epi_planes[0.0], float)
+    a1 = float((pts[1] - axis.apex) @ axis.axis)
+    pts[1] = axis.to_world(0.0, 25.0, a1)
+    m.set_long_axis_contour(0.0, pts, which="epi")
+    st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
+    assert st["levels"] == 7 and st["extra_levels"] == 0
+    assert m.epi_contours[0.0][:, 1].max() > 20.0
+
+
+def test_short_axis_keep_edits_without_previous_run_is_default():
+    m, _axis = _bumped_model()
+    st = ea.refine_epi_short_axis(None, None, m, keep_edits=True)
+    assert st["levels"] == 7 and st["extra_levels"] == 0
+
+
+def test_short_axis_default_has_ring_between_last_ring_and_mv():
+    # Default rings: one more between 0.875 and the MV plane (the basal terminal).
+    m, _axis = _bumped_model(bump_r=19.0, base_r=19.0)
+    st = ea.refine_epi_short_axis(None, None, m)
+    assert st["levels"] == 7
+    amax = max(m.epi_sax_levels)
+    fr = [round(x / amax, 4) for x in m.epi_sax_levels]
+    assert fr == [0.125, 0.25, 0.5, 0.75, 0.875, 0.9375, 1.0]
+    # 7 rings per wall + the shared apex.
+    for phi in m.plane_angles():
+        assert len(m.epi_planes[phi % 360.0]) == 15
