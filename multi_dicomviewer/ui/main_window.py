@@ -3732,11 +3732,14 @@ class MainWindow(QMainWindow):
             return False
         return cls._lv_analysis_kind(data) is not None
 
-    def _open_lv_analysis_files(self, paths: list) -> None:
+    def _open_lv_analysis_files(self, paths: list, pane=None) -> None:
         """Drop the LV-analysis JSONs (MV / AoV / Apex / Epi / Bld) onto the shell
-        → open the source 3-D CT and overlay every analysis result on it. The CT
-        is found by UID, else the dropped folder is scanned, else the user picks
-        it; then the files are applied once the volume is shown."""
+        → open the source 3-D CT and overlay every analysis result on it. A pane
+        (or another pane) already showing that CT applies at once. An empty pane
+        → the CT is found by UID, else the dropped folder is scanned, else the
+        user picks it. A pane showing anything else is never replaced silently:
+        the user names the CT's folder or cancels. *pane*: where it was dropped
+        (None = outside the panes → the active pane)."""
         import os
         import json
         files: dict = {}
@@ -3757,50 +3760,251 @@ class MainWindow(QMainWindow):
                 src_dir = data.get("src_dir", "") or ""
             if not drop_dir:
                 drop_dir = os.path.dirname(p)
-        if not files or not uid:
+        if not files:
             return
-        from PyQt6.QtWidgets import QFileDialog
-        if self.case_series_loaded(uid):
-            self._poll_lv_apply(uid, files, 0)
-            return
+        from multi_dicomviewer.core import full_lv
+        meta = next((d["series"] for d in files.values() if d.get("series")), {})
         # Prefer the CT's OWN folder (src_dir) so ONLY the CT is scanned — not the
         # whole case folder (which would also index XA / IVUS / OT / SR). Fall back
         # to the dropped folder for older files that have no src_dir, then a prompt.
-        scan = src_dir if (src_dir and os.path.isdir(src_dir)) else ""
-        if not scan and drop_dir and os.path.isdir(drop_dir):
-            scan = drop_dir
-        if scan:
-            self.case_open_folders([scan], dicom_only=True)
+        cands = [d for d in dict.fromkeys((src_dir, drop_dir))
+                 if d and os.path.isdir(d)]
+        label = full_lv.format_label(meta)
+        if self._lv_shown_pane(uid) is not None:         # on screen → no question
             self._poll_lv_apply(uid, files, 0)
             return
+        target = pane if pane is not None else self._active
+        if target is None or self._lv_pane_empty(target):
+            self._lv_find_ct(uid, files, cands, label, drop_dir, meta=meta)
+            return
+        # Start the dialog at the saved CT folder: confirmed, but barely any hunting.
+        if self._lv_ask_ct_folder(uid, target, label):
+            self._lv_pick_ct_folder(uid, files, label, cands[0] if cands else "",
+                                    target, meta)
+        else:
+            self.statusBar().showMessage(t("LV データの適用を中止しました。"))
+
+    def _lv_shown_pane(self, uid: str):
+        """The on-screen pane showing series *uid* (base-vs-'#' tolerant), or None."""
+        if not uid:
+            return None
+        base = uid.split("#", 1)[0]
+        for p in self._shown_panes():
+            if (p.shown_series_uid() or "").split("#", 1)[0] == base:
+                return p
+        return None
+
+    def _lv_pane_empty(self, pane) -> bool:
+        """Nothing shown in *pane* and nothing on its way there."""
+        return not pane.shown_series_uid() and pane not in self._loads
+
+    def _lv_ask_ct_folder(self, uid: str, target, label: str) -> bool:
+        """The dropped-on pane holds some other image: ask for the source CT's
+        folder rather than replacing it. True = the user wants to pick the folder."""
+        shown = target.shown_series_uid() or ""
+        se = self._series_by_uid.get(shown)
+        if se is not None and se.modality != Modality.CT:
+            head = t("このペインの画像は、このファイルの元の3DCTではありません（{c}）。", c=label)
+        elif not uid or shown.split("#", 1)[0] == "NO_SERIES":
+            head = t("このペインのCTが元の3DCTか確認できません（{c}）。", c=label)
+        else:
+            head = t("このペインのCTは、このファイルの元の3DCTではありません（{c}）。", c=label)
+        box = QMessageBox(self)
+        box.setWindowTitle(t("LV"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(head + t("元の3DCTのフォルダを指定するか、キャンセルしてください。"))
+        folder_btn = box.addButton(t("フォルダ表示"), QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is folder_btn
+
+    def _lv_pick_ct_folder(self, uid: str, files: dict, label: str, start: str,
+                           target, meta: dict) -> None:
+        """The user names the source CT's folder, asked again until the CT is there
+        or they cancel. It opens beside what is on screen: in an empty pane if there
+        is one, else it replaces the *target* pane."""
+        from PyQt6.QtWidgets import QFileDialog
         folder = QFileDialog.getExistingDirectory(
-            self, t("この解析の元となった3DCTフォルダを選択してください"))
-        if folder:
-            self.case_open_folders([folder], dicom_only=True)
+            self, t("元の3DCTフォルダを選択してください（{c}）", c=label), start)
+        if not folder:
+            self.statusBar().showMessage(t("LV データの適用を中止しました。"))
+            return
+
+        def _scanned():
+            if uid:
+                chosen = uid if self.case_series_loaded(uid) else ""
+            else:
+                chosen = self._lv_choose_ct_series(folder, meta)
+            if chosen is None:                           # cancelled
+                self.statusBar().showMessage(t("LV データの適用を中止しました。"))
+                return
+            if not chosen:
+                QMessageBox.information(
+                    self, t("LV"),
+                    t("選んだフォルダに元の3DCTが見つかりませんでした（{c}）。", c=label))
+                self._lv_pick_ct_folder(uid, files, label, folder, target, meta)
+                return
+            if self._lv_shown_pane(chosen) is None:
+                self._set_active_pane(next(
+                    (p for p in self._shown_panes() if self._lv_pane_empty(p)), target))
+            self._poll_lv_apply(chosen, files, 0)
+
+        self._lv_scan_then(folder, _scanned)
+
+    def _lv_find_ct(self, uid: str, files: dict, cands: list, label: str,
+                    start: str = "", picked: bool = False, meta=None) -> None:
+        """Locate the source CT of the dropped LV files and apply them: already
+        loaded → the *cands* folders in turn → the USER picks a folder, asked again
+        until the CT is found or they cancel. A file with no series UID can't
+        identify its CT, so the user chooses the series. *picked*: the last scan
+        was a folder the user chose."""
+        from PyQt6.QtWidgets import QFileDialog
+        if uid and self.case_series_loaded(uid):
             self._poll_lv_apply(uid, files, 0)
+            return
+
+        def _again(was_picked=False):
+            self._lv_find_ct(uid, files, cands, label, start, was_picked, meta)
+
+        if cands:
+            self._lv_scan_then(cands.pop(0), _again)
+            return
+        if not uid:
+            chosen = self._lv_choose_ct_series(meta=meta)
+            if chosen is None:                           # cancelled
+                self.statusBar().showMessage(t("LV データの適用を中止しました。"))
+                return
+            if chosen:
+                self._poll_lv_apply(chosen, files, 0)
+                return
+        elif picked:
+            QMessageBox.information(
+                self, t("LV"),
+                t("選んだフォルダに元の3DCTが見つかりませんでした（{c}）。", c=label))
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            t("元の3DCTが見つかりません（{c}）。元の3DCTフォルダを選択してください",
+              c=label), start)
+        if not folder:
+            self.statusBar().showMessage(t("LV データの適用を中止しました。"))
+            return
+        self._lv_scan_then(folder, lambda: _again(True))
+
+    def _lv_scan_then(self, folder: str, then) -> None:
+        """Scan *folder* for DICOM, then call *then* once the scan has finished.
+        An empty folder is not reported here — the caller moves on or asks."""
+        from PyQt6.QtCore import QTimer
+        self._lv_quiet_no_dicom = True
+        self.case_open_folders([folder], dicom_only=True)
+
+        def _wait():
+            if self._scans:
+                QTimer.singleShot(200, _wait)
+                return
+            self._lv_quiet_no_dicom = False
+            then()
+
+        QTimer.singleShot(200, _wait)
+
+    def _lv_choose_ct_series(self, folder: str = "", meta=None):
+        """Ask which CT series a UID-less LV file belongs to: any loaded CT, or
+        with *folder* only those from it (a single one needs no asking). Returns
+        its UID, "" to look in another folder instead (or none there), or None if
+        cancelled. A UID-less pair can't be proven: the date / name / series number
+        the file recorded are compared, and a difference must be confirmed."""
+        from PyQt6.QtWidgets import QInputDialog
+        root = [os.path.normcase(os.path.abspath(folder)).rstrip(os.sep)] if folder else []
+        rows = [(f"{st.date}  Se{se.number}  {se.description}  "
+                 f"({se.image_count})", se.series_uid, p, st, se)
+                for p in self._patients.values()
+                for st in p.studies.values()
+                for se in st.series.values() if se.modality == Modality.CT
+                and (not folder or self._series_root(se, root) is not None)]
+        if not rows:
+            return ""
+        if folder and len(rows) == 1:
+            row = rows[0]
+        else:
+            other = t("別のフォルダから探す…")
+            names = [r[0] for r in rows] + ([] if folder else [other])
+            name, ok = QInputDialog.getItem(
+                self, t("元の3DCTを選択"),
+                t("このファイルには元の3DCTの情報がありません。適用するCTを選んでください"
+                  "（別のCTに適用すると位置が合いません）。"), names, 0, False)
+            if not ok:
+                return None
+            if name == other:
+                return ""
+            row = rows[names.index(name)]
+        diff = self._lv_meta_diff(meta or {}, row[2], row[3], row[4])
+        if diff and QMessageBox.question(
+                self, t("LV"),
+                t("ファイルの記録と選んだCTが一致しません（{d}）。"
+                  "別のCTに適用すると位置が合いません。適用しますか？",
+                  d=" / ".join(diff)),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes:
+            return None
+        return row[1]
+
+    @staticmethod
+    def _lv_meta_diff(meta: dict, patient, study, series) -> list:
+        """What the LV file recorded about its CT that *series* contradicts. A
+        field missing on either side can't contradict."""
+        def _name(s):
+            s = str(s or "").split("^")[0]
+            return "".join(s.split())
+        out = []
+        date = str(meta.get("date") or "")
+        if date and study.date and date != study.date:
+            out.append(t("日付 {a} ≠ {b}", a=date, b=study.date))
+        name, cur = _name(meta.get("patient")), _name(patient.name)
+        if name and cur and name not in cur and cur not in name:
+            out.append(t("症例名 {a} ≠ {b}", a=meta.get("patient"), b=patient.name))
+        sn = str(meta.get("series_number") or "")
+        if sn and series.number is not None and sn != str(series.number):
+            out.append(t("Se {a} ≠ {b}", a=sn, b=series.number))
+        return out
 
     def _poll_lv_apply(self, uid: str, files: dict, attempt: int = 0) -> None:
         """Wait for the CT to be shown + decoded, then apply the LV overlays."""
         from PyQt6.QtCore import QTimer
         shown = self._coronary_display_uid(uid)
+        # The CT may sit in a frozen still (over the live cap): wake it up, once.
+        if attempt == 0 and shown and self._active is not None \
+                and self._active.is_still():
+            self._promote_pane(self._active)
         v = self._active.current_viewer() if self._active is not None else None
         # Volume decoded? VTK exposes _image, pygfx exposes _vol.
         ready = v is not None and (getattr(v, "_image", None) is not None
                                    or getattr(v, "_vol", None) is not None)
+        # …and it is THIS CT, not the one the pane showed before this one decoded.
+        if ready and hasattr(v, "_lv_series_meta"):
+            cur_meta = v._lv_series_meta()
+            if cur_meta:
+                cur = str(cur_meta.get("series_uid") or "NO_SERIES")
+                ready = cur.split("#", 1)[0] == uid.split("#", 1)[0]
         if shown and ready and hasattr(v, "apply_lv_analysis"):
             try:
                 v.apply_lv_analysis(files)
-            except Exception:                            # noqa: BLE001
-                pass
+            except Exception as exc:                     # noqa: BLE001
+                QMessageBox.warning(
+                    self, t("LV"),
+                    t("LV データの適用に失敗しました: {e}", e=str(exc)))
             # Backstop: clear any FullLv edit-pending mark for this CT (a drop whose
             # CT was already loaded never fires _maybe_resume_territory_review).
             pend = getattr(self, "_full_lv_edit_pending", None)
             if pend:
                 pend.discard((uid or "").split("#", 1)[0])
             return
-        if attempt < 40:                                 # ~12 s
+        if attempt < 400:                                # ~2 min (a large CT)
             QTimer.singleShot(
                 300, lambda: self._poll_lv_apply(uid, files, attempt + 1))
+            return
+        QMessageBox.warning(
+            self, t("LV"),
+            t("3DCT の表示を待ちましたが準備できず、LV データを適用できませんでした。"
+              "CT を表示してから、もう一度ドロップしてください。"))
 
     def _poll_set_bottom_ctx(self, uid: str, ctx: str, name: str,
                              attempt: int = 0) -> None:
@@ -6727,7 +6931,7 @@ class MainWindow(QMainWindow):
         lv_files = [p for p in paths
                     if os.path.isfile(p) and self._is_lv_analysis_json(p)]
         if lv_files:
-            self._open_lv_analysis_files(lv_files)
+            self._open_lv_analysis_files(lv_files, open_in_pane)
         paths = [p for p in paths if p not in lv_files]
         # Peel off a short-axis .cpr.json drop → open its source CT + draw the
         # centreline (only one short-axis shows at a time).
@@ -6773,7 +6977,7 @@ class MainWindow(QMainWindow):
                     lv_dirs.append(d)
                     lv_folder_files.extend(lvs)
             if lv_folder_files:
-                self._open_lv_analysis_files(lv_folder_files)
+                self._open_lv_analysis_files(lv_folder_files, open_in_pane)
             dirs = [d for d in dirs if d not in lv_dirs]
         if not dirs and not files:
             return
@@ -6893,10 +7097,11 @@ class MainWindow(QMainWindow):
         if not new_uids:
             self.statusBar().showMessage(
                 t("No displayable DICOM files were found."))
-            QMessageBox.information(
-                self, t("No DICOM files"),
-                t("The dropped folder/file(s) contained no displayable DICOM."),
-            )
+            if not getattr(self, "_lv_quiet_no_dicom", False):
+                QMessageBox.information(
+                    self, t("No DICOM files"),
+                    t("The dropped folder/file(s) contained no displayable DICOM."),
+                )
             return
         # Accumulate: a new folder adds its studies; previously loaded
         # ones stay in the info panel.
