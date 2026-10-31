@@ -136,9 +136,9 @@ def _restart() -> int:
 
 def _make_splash() -> QSplashScreen:
     """In-code splash (no image asset) shown the instant Qt is up: app name,
-    version, a one-line description and the contact address. The SAME content is
+    version, a one-line description, terms of use and contact. The SAME content is
     shown on every platform while the heavy DICOM stack imports."""
-    pm = QPixmap(480, 280)
+    pm = QPixmap(480, 340)
     pm.fill(QColor(28, 30, 36))
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -156,7 +156,10 @@ def _make_splash() -> QSplashScreen:
     line(48, APP_NAME, 22, QColor(236, 239, 245), bold=True)
     line(96, f"v{APP_VERSION}", 11, QColor(150, 200, 255))
     line(142, "研究用DICOMビューワ", 13, QColor(210, 214, 222))
-    line(186, "問い合わせ先：satoru@sumi2g.sakura.ne.jp",
+    line(178, "研究・教育用", 12, QColor(255, 200, 90), bold=True)
+    line(206, "本アプリの使用による不具合の責任は使用者にあります",
+         11, QColor(255, 200, 90), bold=True)
+    line(248, "問い合わせ先：satoru@sumi2g.sakura.ne.jp",
          11, QColor(170, 176, 186))
     # Loading hint, bottom.
     f = QFont()
