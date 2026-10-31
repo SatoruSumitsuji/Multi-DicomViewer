@@ -365,7 +365,7 @@ class LVModel:
                 for P in (p[0], p[-1]):
                     s = float((P - ax.apex) @ e_s)
                     key = (phi % 360.0) if s >= 0.0 else ((phi + 180.0) % 360.0)
-                    if key not in best:
+                    if key not in best and float((P - ax.apex) @ ax.axis) < along0:
                         best[key] = (abs(s), P, key)
         if len(best) < 3:
             return None

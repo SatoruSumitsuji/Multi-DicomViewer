@@ -395,6 +395,17 @@ def test_move_replaces_only_the_nearest_section_in_range():
                 assert min(abs(a - lv_)) < 1e-6
 
 
+def test_section_at_the_apex_converges_to_the_apex():
+    m = _section_model()
+    ax = m.epi_axis
+    sp = m.short_axis_border_pts(0.0, "epi", ref_axis=ax, all_walls=True)
+    assert sp is not None
+    assert np.max(np.linalg.norm(sp - ax.apex, axis=1)) < 1e-6, "no MV terminal shown"
+    sp = m.short_axis_border_pts(1.0, "epi", ref_axis=ax, all_walls=True)
+    assert len(sp) == 16
+    assert np.max(np.abs((sp - ax.apex) @ ax.axis - 1.0)) < 1e-6
+
+
 def test_small_along_move_only_changes_the_radial():
     m = _section_model()
     lv0 = list(m.epi_sax_levels)
