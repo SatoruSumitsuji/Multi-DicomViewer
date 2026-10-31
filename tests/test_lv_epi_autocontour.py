@@ -10,7 +10,7 @@ import pytest
 
 from multi_dicomviewer.core.lv_axis import LVAxis
 from multi_dicomviewer.core import lv_epi_autocontour as ea
-from multi_dicomviewer.core.lv_measure import LVModel
+from multi_dicomviewer.core.lv_measure import LVModel, mv_terminal_point
 
 
 def _axis():
@@ -245,3 +245,181 @@ def test_short_axis_default_has_ring_between_last_ring_and_mv():
     # 8 rings per wall + the shared apex.
     for phi in m.plane_angles():
         assert len(m.epi_planes[phi % 360.0]) == 17
+
+
+def _trace_model(amax=80.0, radius=25.0):
+    """Hand-traced-looking 8-plane Epi: a cylinder of *radius*, apex to *amax*."""
+    ax = _axis()
+    m = LVModel(n_planes=8)
+    m.set_axis_from_frame(ax.apex, ax.axis, ax.radial0, which="epi")
+    ax = m.epi_axis
+    m.set_apex_point("epi", ax.apex)
+    A = np.linspace(amax / 8.0, amax, 8)
+    for phi in m.plane_angles():
+        pos = [ax.to_world(phi, radius, a) for a in A]
+        neg = [ax.to_world(phi + 180.0, radius, a) for a in A]
+        m.set_long_axis_contour(phi, np.array(list(reversed(pos)) + [ax.apex] + neg),
+                                which="epi")
+    return m
+
+
+def _section_model(amax=80.0, radius=25.0):
+    """8-plane Epi after the spline, MV plane ⟂ the axis at *amax*."""
+    m = _trace_model(amax=amax, radius=radius)
+    c = np.asarray(m.epi_axis.apex, float) + amax * np.asarray(m.epi_axis.axis, float)
+    ea.refine_epi_short_axis(None, None, m, mv_plane=(c, np.asarray(m.epi_axis.axis, float)))
+    return m
+
+
+def _al(m, P):
+    return float((np.asarray(P, float) - m.epi_axis.apex) @ m.epi_axis.axis)
+
+
+def _interior_levels(m, phi=0.0):
+    """Along of the interior control points of each wall of a plane."""
+    Q = np.asarray(m.epi_planes[phi], float)
+    api = int(np.argmin(np.linalg.norm(Q - np.asarray(m.epi_apex, float), axis=1)))
+    return ([_al(m, P) for P in Q[1:api]][::-1], [_al(m, P) for P in Q[api + 1:-1]], api)
+
+
+def _drag(m, phi, vi, da, dr=0.0):
+    """Move control point *vi* in the model, then apply the section rule."""
+    Q = np.asarray(m.epi_planes[phi], float).copy()
+    a0 = _al(m, Q[vi])
+    e_s = m.epi_axis.meridian_dir(phi)
+    s = float((Q[vi] - m.epi_axis.apex) @ e_s)
+    Q[vi] = Q[vi] + da * np.asarray(m.epi_axis.axis, float) + dr * np.sign(s) * e_s
+    m.set_long_axis_contour(phi, Q, which="epi")
+    return ea.move_epi_section(m, phi, vi, a0)
+
+
+def test_mv_terminal_half_radial_on_tilted_plane():
+    m = _trace_model(amax=80.0, radius=25.0)
+    ax = m.epi_axis
+    n = np.asarray(ax.axis, float) + 0.2 * np.asarray(ax.radial0, float)
+    n = n / np.linalg.norm(n)
+    c = np.asarray(ax.apex, float) + 80.0 * np.asarray(ax.axis, float)
+    for th in (0.0, 180.0, 45.0):
+        ref = ax.to_world(th, 24.0, 70.0)
+        P = mv_terminal_point(ax, th, c, n, ref)
+        assert abs(float((P - c) @ n)) < 1e-9, "on the MV plane"
+        s = float((P - ax.apex) @ ax.meridian_dir(th))
+        assert abs(s - 12.0) < 1e-9, "half the radial, on the wall's side"
+
+
+def test_spline_terminals_follow_the_mv_rule():
+    m = _section_model()
+    ax = m.epi_axis
+    for phi in m.plane_angles():
+        Q = np.asarray(m.epi_planes[phi], float)
+        e_s = ax.meridian_dir(phi)
+        for end, nb in ((Q[0], Q[1]), (Q[-1], Q[-2])):
+            assert abs(_al(m, end) - 80.0) < 1e-6
+            assert abs(abs(float((end - ax.apex) @ e_s))
+                       - 0.5 * abs(float((nb - ax.apex) @ e_s))) < 1e-6
+
+
+def test_move_far_from_any_section_adds_one_keeping_16_points():
+    m = _section_model()
+    n0 = len(m.epi_sax_levels)
+    wa, wb, api = _interior_levels(m)
+    # the wall-B point on the 1/4 ring (20 mm) → 30 mm: >5 mm from 20 and 40
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 20.0)))
+    r = _drag(m, 0.0, vi, 10.0)
+    assert r["moved"] and r["removed"] is None and abs(r["level"] - 30.0) < 1e-6
+    assert len(m.epi_sax_levels) == n0 + 1
+    assert any(abs(x - 30.0) < 1e-6 for x in m.epi_sax_levels)
+    for lv_ in (20.0, 30.0):                      # new section + the one it left
+        sp = m.short_axis_border_pts(lv_, "epi", ref_axis=m.epi_axis)
+        assert sp is not None and len(sp) == 16, (lv_, None if sp is None else len(sp))
+    for phi in m.plane_angles():
+        wa, wb, _ = _interior_levels(m, phi)
+        assert min(abs(np.asarray(wa) - 30.0)) < 1e-6
+        assert min(abs(np.asarray(wb) - 30.0)) < 1e-6
+        assert min(abs(np.asarray(wa) - 20.0)) < 1e-6
+        assert min(abs(np.asarray(wb) - 20.0)) < 1e-6
+
+
+def test_move_within_5mm_replaces_the_nearest_section():
+    m = _section_model()
+    n0 = len(m.epi_sax_levels)
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
+    r = _drag(m, 0.0, vi, 3.0)                    # its own ring (40) is the nearest
+    assert r["moved"] and abs(r["removed"] - 40.0) < 1e-6
+    assert len(m.epi_sax_levels) == n0
+    assert not any(abs(x - 40.0) < 1e-6 for x in m.epi_sax_levels)
+    for phi in m.plane_angles():
+        wa, wb, _ = _interior_levels(m, phi)
+        for w in (wa, wb):
+            assert min(abs(np.asarray(w) - 43.0)) < 1e-6
+            assert min(abs(np.asarray(w) - 40.0)) > 1.0, "the old section is gone"
+    # A neighbour within 5 mm of the target goes, the point's own ring stays.
+    m = _section_model()
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
+    r = _drag(m, 0.0, vi, 17.0)                   # 57 → the 60 ring is 3 mm away
+    assert abs(r["removed"] - 60.0) < 1e-6
+    assert any(abs(x - 40.0) < 1e-6 for x in m.epi_sax_levels), "own ring kept"
+    wa, wb, _ = _interior_levels(m, 0.0)
+    assert min(abs(np.asarray(wb) - 40.0)) < 1e-6, "…with a curve point on this wall"
+
+
+def test_small_along_move_only_changes_the_radial():
+    m = _section_model()
+    lv0 = list(m.epi_sax_levels)
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
+    Q0 = np.asarray(m.epi_planes[0.0], float).copy()
+    r = _drag(m, 0.0, vi, 0.6, dr=4.0)
+    assert not r["moved"] and m.epi_sax_levels == lv0
+    Q = np.asarray(m.epi_planes[0.0], float)
+    assert abs(_al(m, Q[vi]) - _al(m, Q0[vi])) < 1e-9, "stays on its section"
+    assert np.linalg.norm(Q[vi] - Q0[vi]) > 3.5
+
+
+def test_apex_and_terminals_are_not_sections():
+    m = _section_model()
+    _, _, api = _interior_levels(m)
+    n = len(m.epi_planes[0.0])
+    for vi in (0, n - 1, api):
+        assert ea.move_epi_section(m, 0.0, vi, 10.0) is None
+    # A target right beside the apex / MV never erases them and stays inside.
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 72.0)))
+    r = _drag(m, 0.0, vi, 30.0)
+    assert r["level"] <= 79.0 + 1e-6
+    assert abs(max(m.epi_sax_levels) - 80.0) < 1e-6, "the MV level stays"
+
+
+def test_replaced_section_is_not_revived_by_the_spline_rerun():
+    m = _section_model()
+    c = np.asarray(m.epi_axis.apex, float) + 80.0 * np.asarray(m.epi_axis.axis, float)
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
+    _drag(m, 0.0, vi, 3.0)
+    st = ea.refine_epi_short_axis(None, None, m, keep_edits=True,
+                                  mv_plane=(c, np.asarray(m.epi_axis.axis, float)))
+    assert st["levels"] == 8 and st["extra_levels"] == 1
+    assert not any(abs(x - 40.0) < 1.0 for x in m.epi_sax_levels)
+    assert any(abs(x - 43.0) < 1e-6 for x in m.epi_sax_levels)
+
+
+def test_hu_done_round_trips():
+    m = _section_model()
+    assert m.epi_hu_done is False
+    m.epi_hu_done = True
+    assert LVModel.from_dict(m.to_dict()).epi_hu_done is True
+
+
+def test_all_walls_shows_a_wall_ending_below_the_level():
+    m = _section_model()
+    ax = m.epi_axis
+    Q = np.asarray(m.epi_planes[0.0], float).copy()
+    wa, wb, api = _interior_levels(m)
+    Q = np.vstack([Q[:-2], Q[-1] - 15.0 * np.asarray(ax.axis, float)])   # a short wall
+    m.set_long_axis_contour(0.0, Q, which="epi")
+    sp = m.short_axis_border_pts(72.0, "epi", ref_axis=ax)
+    full = m.short_axis_border_pts(72.0, "epi", ref_axis=ax, all_walls=True)
+    assert len(sp) == 15 and len(full) == 16
+    assert m.short_axis_border_pts(200.0, "epi", ref_axis=ax, all_walls=True) is None

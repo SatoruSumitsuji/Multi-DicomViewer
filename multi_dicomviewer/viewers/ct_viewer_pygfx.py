@@ -1596,7 +1596,8 @@ class _Overlay(QWidget):
                             else ((phi + 180.0) % 360.0)
                 border_sm, mark = {}, []
                 for which in v._lv_sax_borders():   # single pass, or both
-                    sp = lv["model"].short_axis_border_pts(along0, which)
+                    sp = lv["model"].short_axis_border_pts(
+                        along0, which, all_walls=True)
                     if sp is None or len(sp) < 3:
                         continue
                     xy = [v._world3d_to_out(key, P) for P in sp]
@@ -9517,8 +9518,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                     if e["vi"] in (0, npts - 1):
                         P = self._lv_project_to_mv(P)
                     else:
-                        P = self._lv_lock_section(
-                            P, m["pts3d"][e["vi"]], m["_lv"])
+                        P = self._lv_lock_apex_point(
+                            P, m["pts3d"][e["vi"]], m, e["vi"])
                         side = self._lv_border_side(m, e["vi"])
                         P = self._lv_clamp_border_point(P, m["_lv"], side)
                     m["pts"][e["vi"]] = self._world3d_to_out(e["key"], P)
@@ -9558,19 +9559,95 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         s = float((np.asarray(m["pts3d"][vi], float) - ax.apex) @ e_s)
         return 1.0 if s >= 0.0 else -1.0
 
-    def _lv_lock_section(self, P, P_before, tag):
+    def _lv_lock_apex_point(self, P, P_before, m, vi):
         """Epi border on the long axis, once the short-axis sections exist (after
-        the spline): a dragged point stays IN ITS SECTION - only the radial moves,
-        its along-axis position is kept. To put a point on another section, Add
-        Point. Before the spline (rough trace) and for Endo the drag stays free."""
+        the spline): every point moves freely (the section rule applies on release,
+        _lv_epi_section_release) except the APEX point, which keeps its along-axis
+        position. Before the spline (rough trace) and for Endo the drag stays free."""
+        tag = m.get("_lv")
         if self._lv is None or tag is None or tag[1] != "epi":
             return P
         model = self._lv["model"]
         ax = model.epi_axis
-        if ax is None or model.epi_sax_levels is None:
+        if ax is None or model.epi_sax_levels is None or model.epi_apex is None:
+            return P
+        api = int(np.argmin(np.linalg.norm(np.asarray(m["pts3d"], float)
+                                           - np.asarray(model.epi_apex, float),
+                                           axis=1)))
+        if vi != api:
             return P
         P = np.asarray(P, float)
         return P + float((np.asarray(P_before, float) - P) @ ax.axis) * ax.axis
+
+    def _lv_section_snap(self, model, key=None, pts3d=None):
+        """Restorable state of the Epi sections. *key*/*pts3d*: the plane whose
+        pre-drag points replace what the model holds now."""
+        planes = {phi: np.asarray(p, float).copy()
+                  for phi, p in model.epi_planes.items()}
+        if key is not None:
+            planes[key] = np.asarray(pts3d, float).reshape(-1, 3)
+        return {"planes": planes, "sax": self._lv.get("sax"),
+                "levels": list(model.epi_sax_levels or []),
+                "extra": list(model.epi_sax_extra)}
+
+    def _lv_section_restore(self, snap) -> bool:
+        if self._lv is None or self._lv.get("phase") != "contour":
+            return False
+        model = self._lv["model"]
+        for phi, pts in snap["planes"].items():
+            model.set_long_axis_contour(phi, pts, which="epi")
+        model.epi_sax_levels = list(snap["levels"])
+        model.epi_sax_extra = list(snap["extra"])
+        if self._lv.get("sax") is not None and snap.get("sax") is not None:
+            self._lv["sax"] = snap["sax"]
+        self._lv_section_refresh()
+        return True
+
+    def _lv_section_refresh(self) -> None:
+        """Redraw both panes after the Epi sections changed."""
+        pane = self._lv["pane"]
+        self._lv_rebuild_measures()
+        self._lv_invalidate_volume()
+        if self._lv_sax_active():
+            self._lv_reslice_short()
+        self._redraw_meas(pane)
+        self._lv_redraw_all()
+
+    def _lv_epi_section_release(self, key, mi, vi, before) -> bool:
+        """An Epi point was dropped on the long-axis pane after the spline: apply
+        the section rule (core move_epi_section), follow the section on the
+        short-axis pane and record it all as one undo step. False when this drag
+        is not a section move (rough trace, Endo, apex, MV terminal)."""
+        lv = self._lv
+        if (lv is None or key != lv.get("pane") or before is None or vi is None
+                or not 0 <= mi < len(self._measures[key])):
+            return False
+        m = self._measures[key][mi]
+        tag = m.get("_lv")
+        model = lv["model"]
+        if (tag is None or tag[1] != "epi" or model.epi_sax_levels is None
+                or model.epi_axis is None
+                or len(before["pts3d"]) != len(m.get("pts3d") or [])
+                or not 0 <= vi < len(before["pts3d"])):
+            return False
+        from multi_dicomviewer.core.lv_epi_autocontour import move_epi_section
+        ax = model.epi_axis
+        angs = model.plane_angles()
+        phi = angs[tag[0] % len(angs)]
+        P0 = np.asarray(before["pts3d"][vi], float)
+        if np.allclose(P0, np.asarray(m["pts3d"][vi], float)):
+            return False                         # a click, not a drag
+        undo = self._lv_section_snap(model, phi % 360.0, before["pts3d"])
+        res = move_epi_section(model, phi, vi, float((P0 - ax.apex) @ ax.axis))
+        if res is None:
+            return False
+        if res["moved"] and self._lv_sax_active():
+            lv["sax"] = res["level"]             # show the section just made
+        self._lv_section_refresh()
+        redo = self._lv_section_snap(model)
+        self._undo_record(lambda s=undo: self._lv_section_restore(s),
+                          lambda s=redo: self._lv_section_restore(s))
+        return True
 
     def _lv_clamp_border_point(self, P, tag, side, s_min: float = 2.5):
         """Keep an LV-border point on its own wall: clamp its in-plane radial so
@@ -9633,6 +9710,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if self._edit:
             key = self._edit["key"]
             mi = self._edit.get("mi")
+            vi = self._edit.get("vi")
             self._edit = None
             self._redraw_meas(key)
             if self._lv_sax_active():        # revert the green SAX crossing
@@ -9640,7 +9718,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             # Commit an LV-border DRAG (snapshot stashed at press) as one step.
             if getattr(self, "_lv_edit_before", None) is not None \
                     and mi is not None:
-                self._lv_record_border(self._lv_edit_before, key, mi)
+                if not self._lv_epi_section_release(
+                        key, mi, vi, self._lv_edit_before):
+                    self._lv_record_border(self._lv_edit_before, key, mi)
             self._lv_edit_before = None
             # Commit a general-Measure handle/move DRAG as one undo step (only if
             # the shape/point actually moved).
@@ -10031,6 +10111,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         m = self._measures[which][mi]
         menu = QMenu(self)
         add_pt = menu.addAction(t("Add point"))
+        _tag = m.get("_lv")
+        if (_tag is not None and _tag[1] == "epi" and self._lv is not None
+                and self._lv["model"].epi_sax_levels is not None):
+            add_pt.setVisible(False)             # sections: drag the point
         spline_act = None
         cpr_act = None
         if m["type"] == "polyline":
@@ -12473,13 +12557,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_husnap_btn.setHelpToolTip(
             t("Epi 線を CT 値の心外膜エッジに自動適合し（HU 差が明瞭な所。小さい所は"
               "手動線のまま）、続けて短軸スプライン補正（心尖を除く 8 断面）まで一気に"
-              "行います。その後は長軸で点の移動・add point をして「スプライン補正」を。"))
+              "行います。その後は長軸で点を動かして「スプライン補正」を。"))
         self._lv_husnap_btn.clicked.connect(self._lv_hu_snap_epi)
         # 短軸スプライン補正: purely geometric circumferential smoothing of the
         # current Epi contour (includes hand edits), no HU. Shared core.
         self._lv_saxspl_btn = FitButton(t("スプライン補正"))
         self._lv_saxspl_btn.setHelpToolTip(
-            t("長軸で点を動かした・add point した後の再補正です。既定の 8 断面に加えて、"
+            t("長軸で点を動かした後の再補正です。既定の 8 断面に加えて、"
               "編集した点がある高さの断面も短軸スプライン補正の対象にするので、手補正が"
               "そのまま反映されます（純幾何・HU 不使用）。何度でも再適用できます。"))
         self._lv_saxspl_btn.clicked.connect(self._lv_sax_spline)
@@ -15562,6 +15646,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if apexb is not None:
                 apexb.setStyleSheet(self._BTN_DIS)
             self._lv_vol_btn.setStyleSheet(self._LV_STY["vol_todo"])
+            if getattr(self, "_lv_husnap_btn", None) is not None:
+                self._lv_husnap_btn.setStyleSheet(self._BTN_DIS)
             self._lv_set_bar_enabled(False)
             self._lv_exit_btn.setEnabled(False)
             self._refresh_tool_availability()        # restore WB reverse / tools
@@ -15629,6 +15715,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         _epi_ok = bool(contour and len(lv["model"].epi_contours) >= 3)
         if getattr(self, "_lv_husnap_btn", None) is not None:
             self._lv_husnap_btn.setEnabled(_epi_ok)
+            self._lv_husnap_btn.setStyleSheet(
+                ("QPushButton{background:#e0a030;color:black;}" + self._BTN_DIS)
+                if lv["model"].epi_hu_done else self._BTN_DIS)
         if getattr(self, "_lv_saxspl_btn", None) is not None:
             self._lv_saxspl_btn.setEnabled(_epi_ok)
         # Fit MV needs a traced border AND a common MV plane to converge onto.
@@ -16329,8 +16418,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._frame[la] = (u, v, n)
         # Centre the long-axis pane on the LEVEL point (on the axis at lv['sax']),
         # not the mid-axis, so the movable cross-section (level) line sits at the
-        # pane's VERTICAL centre on SAX entry (requested layout).
-        self._pc[la] = ax.apex + float(lv["sax"]) * ax.axis
+        # pane's VERTICAL centre on SAX ENTRY only. Afterwards the centre stays:
+        # it is on the axis, so ◀ ▶ rotate the image in place.
+        if not lv.get("fitted_sax", False):
+            self._pc[la] = ax.apex + float(lv["sax"]) * ax.axis
         self._cross_ang[la] = 0.0
         # The reference long-axis pane is resliced on the SAX axis. For a single
         # pass show only that border; for 'both' (Endo promoted onto the Epi
@@ -16461,7 +16552,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
     def _lv_update_sax_label(self) -> None:
         rng = self._lv_level_range()
         pos = (float(self._lv["sax"]) - rng[0]) if rng else 0.0
-        self._lv_plane_lbl.setText(t("SAX {mm:.0f}mm", mm=pos))
+        angs = self._lv["model"].plane_angles()
+        idx = self._lv["plane_idx"] % len(angs)
+        self._lv_plane_lbl.setText(
+            f"{idx + 1}/{len(angs)}  " + t("SAX {mm:.0f}mm", mm=pos))
 
     def _lv_reslice_short(self) -> None:
         lv = self._lv
@@ -16620,6 +16714,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # on-plane terminal to a plane whose basal endpoint the user had since
         # DRAGGED toward the long axis (the distance guard can't tell them
         # apart). A freshly (re)traced plane is re-armed in _lv_capture_current.
+        from multi_dicomviewer.core.lv_measure import mv_terminal_point
         snapped = self._lv.setdefault("base_snapped", set())
         before = self._lv_geom_snap()
         moved = False
@@ -16645,7 +16740,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 if e_s is None:
                     return None
                 s = float(np.sign(float((P_end - apex) @ e_s))) or 1.0
-                b = c + 5.0 * s * e_s
+                b = (mv_terminal_point(ax, phi, c, n, P_end) if pas == "epi"
+                     else c + 5.0 * s * e_s)
                 return None if np.linalg.norm(b - P_end) < eps_mm else b
 
             pre = _base5(P[0]) if a0 > thr else None
@@ -16701,7 +16797,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         sa = float(np.sign((apex - c) @ n)) or 1.0
         eps = 1e-6
 
-        def _snap_to_mv_line(P, phi):
+        from multi_dicomviewer.core.lv_measure import mv_terminal_point
+
+        def _snap_to_mv_line(P, phi, P_ref=None):
             # Place the basal endpoint 5 mm RADIAL from the LV long axis, on P's own
             # wall side, at the MV-centre (base) level: c + 5·s·e_s (e_s = meridian
             # unit radial dir ⟂ axis, c = MV centre on the axis). Exactly 5 mm
@@ -16713,6 +16811,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 return P
             e_s = e_s / ne
             s = float(np.sign(float((P - apex) @ e_s))) or 1.0   # P's wall side
+            if pas == "epi" and P_ref is not None:
+                return mv_terminal_point(ax, phi, c, n, P_ref)
             return c + 5.0 * s * e_s
 
         before = self._lv_geom_snap()
@@ -16728,9 +16828,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             a0 = float((Pk[0] - apex) @ axis)
             aL = float((Pk[-1] - apex) @ axis)
             if a0 > thr:
-                Pk[0] = _snap_to_mv_line(Pk[0], phi)
+                Pk[0] = _snap_to_mv_line(Pk[0], phi, Pk[1])
             if aL > thr:
-                Pk[-1] = _snap_to_mv_line(Pk[-1], phi)
+                Pk[-1] = _snap_to_mv_line(Pk[-1], phi, Pk[-2])
             if len(Pk) != len(P) or not np.allclose(Pk, P):
                 m.set_long_axis_contour(phi, Pk, which=pas)
                 changed = True
@@ -17061,10 +17161,11 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._draft = None
         self._lv_result_lines = []
         self._lv["plane_idx"] = 0
-        self._lv["husnap_done"] = False          # fresh border → no re-run warning
+        self._lv["model"].epi_hu_done = False   # fresh border → no re-run warning
         if self._lv.get("sax") is not None:
             self._lv_leave_sax()
         self._lv_apply_target(self._lv.get("pass"))
+        self._lv_sync_buttons()
         self._lv_show_plane()
         self._redraw_meas(pane)
 
@@ -18116,13 +18217,16 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # border, so a hand correction near a CLEAR HU edge is pulled back to it
         # (small-drop edits — inferior wall — are kept). Warn every time after the
         # first (reset on Clear/Load/Exit).
-        if lv.get("husnap_done"):
-            if QMessageBox.question(
-                    self.window(), t("Epi HU＋スプライン補正"),
-                    t("すでに HU＋スプライン補正を実行済みです。再実行すると、明瞭なエッジ付近で"
-                      "行った手補正がエッジ側へ戻り、スプライン補正の断面も既定の 8 断面に"
-                      "戻ります（下壁など落差の小さい手補正は保持されます）。続けますか？")) \
-                    != QMessageBox.StandardButton.Yes:
+        if model.epi_hu_done:
+            box = QMessageBox(self.window())
+            box.setWindowTitle(t("Epi HU＋スプライン補正"))
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setText(t("一度HU補正済みです。再試行すると用手修正された内容が"
+                          "上書きされます。"))
+            again = box.addButton(t("再施行"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(t("キャンセル"), QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is not again:
                 return
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
@@ -18130,7 +18234,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             stats = ea.refine_epi_model(self._vol, self._dims, model)
             # …then straight into the short-axis spline on the DEFAULT rings
             # (apex excluded, 8 levels) → sparse edit points, not a dense line.
-            sp = ea.refine_epi_short_axis(self._vol, self._dims, model)
+            sp = ea.refine_epi_short_axis(self._vol, self._dims, model,
+                                          mv_plane=self._lv_mv_plane())
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18138,14 +18243,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         finally:
             QApplication.restoreOverrideCursor()
         self._lv_invalidate_volume()
-        self._lv_rebuild_measures()
-        self._lv_redraw_all()
-        lv["husnap_done"] = True                 # arm the re-run warning
+        model.epi_hu_done = True                 # button colour + re-run warning
+        self._lv_after_spline(model)
         QMessageBox.information(
             self.window(), t("Epi HU＋スプライン補正"),
             t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
               "続けて短軸スプライン補正：{L} 断面で整えました。\n"
-              "長軸で点の移動・add point をしたら「スプライン補正」を押してください。",
+              "長軸で点を動かしたら「スプライン補正」を押してください。",
               p=stats.get("planes", 0), n=stats.get("refined_pts", 0),
               w=stats.get("mean_weight", 0.0), L=sp.get("levels", 0)))
 
@@ -18171,7 +18275,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
             stats = ea.refine_epi_short_axis(self._vol, self._dims, model,
-                                             keep_edits=True)
+                                             keep_edits=True,
+                                             mv_plane=self._lv_mv_plane())
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -18184,14 +18289,35 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 t("短軸スプライン補正を適用できませんでした（先に Epi を 3 面以上）。"))
             return
         self._lv_invalidate_volume()
-        self._lv_rebuild_measures()
-        self._lv_redraw_all()
+        self._lv_after_spline(model)
         QMessageBox.information(
             self.window(), title,
-            t("短軸スプライン補正：{L} 断面（うち長軸の編集点による追加 {a}）を"
+            t("短軸スプライン補正：{L} 断面（うち既定以外 {a}）を"
               "周方向に整え、{p} 面の Epi 輪郭を更新しました（HU は使用しません）。",
               L=stats.get("levels", 0), a=stats.get("extra_levels", 0),
               p=stats.get("planes", 0)))
+
+    def _lv_mv_plane(self):
+        """(c, n) of the MV plane for the spline's terminals, or None."""
+        mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return None
+        n = np.asarray(mv[1], float)
+        return (np.asarray(mv[0], float), n / (float(np.linalg.norm(n)) or 1.0))
+
+    def _lv_after_spline(self, model) -> None:
+        """Show the spline's result NOW (not at the next mouse click): the edit
+        points on the long-axis pane, both panes, the button. Its terminals are
+        final, so the once-per-plane MV extension must not add another."""
+        lv = self._lv
+        lv.setdefault("base_snapped", set()).update(
+            ("epi", round(float(phi), 4)) for phi in model.epi_planes)
+        self._lv_rebuild_measures()
+        if self._lv_sax_active():
+            self._lv_reslice_short()
+        self._redraw_meas(lv["pane"])
+        self._lv_redraw_all()
+        self._lv_sync_buttons()
 
     def _lv_rebuild_measures(self) -> None:
         lv = self._lv
@@ -18204,7 +18330,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # every plane/pass fans out across the view ("multiple borders"). Mirror
         # the hidden rule used on plane-step / SAX entry (pass filter differs by
         # mode).
-        cur_idx = lv.get("plane_idx", 0)
+        cur_idx = lv.get("plane_idx", 0) % max(1, len(angs))
         if lv.get("sax") is not None:
             _w = lv.get("sax_which")
             _show_both = _w not in ("endo", "epi")
