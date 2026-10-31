@@ -24,6 +24,26 @@ from .lv_axis import LVAxis
 from .lv_surface import LV_LEVEL_STEP_MM, LV_RING_POINTS, LVSurface
 
 
+def mv_terminal_point(ax, theta, c, n, p_ref, min_r: float = 1.0) -> np.ndarray:
+    """Basal terminal of a long-axis border wall: ON the MV plane (point *c*,
+    normal *n*), in the wall's meridian plane (*theta*), at HALF the radial of
+    *p_ref* (the wall's last point before the terminal) from the LV long axis, on
+    p_ref's side. Solved along the axis, so a tilted MV plane is honoured; an MV
+    plane nearly parallel to the axis falls back to c's along level. *min_r* only
+    guards a degenerate reference on the axis itself."""
+    apex, axis = np.asarray(ax.apex, float), np.asarray(ax.axis, float)
+    e_s = np.asarray(ax.meridian_dir(theta), float)
+    c, n = np.asarray(c, float), np.asarray(n, float)
+    s = float((np.asarray(p_ref, float) - apex) @ e_s)
+    r = (1.0 if s >= 0.0 else -1.0) * max(0.5 * abs(s), float(min_r))
+    an = float(axis @ n)
+    if abs(an) > 0.2:
+        along = float(((c - apex) @ n - r * float(e_s @ n)) / an)
+    else:
+        along = float((c - apex) @ axis)
+    return apex + along * axis + r * e_s
+
+
 def _cr_densify_3d(pts: np.ndarray, per_seg: int = 8) -> np.ndarray:
     """Centripetal Catmull-Rom densification of an OPEN (N,3) polyline — the SAME
     spline the viewer draws the long-axis border with. Intersecting the DENSE
@@ -178,6 +198,8 @@ class LVModel:
         # rings and adds rings for points edited since (lv_epi_autocontour).
         self.epi_sax_levels: list[float] | None = None
         self.epi_sax_extra: list[float] = []
+        # HU＋スプライン補正 has run on this Epi (button colour + re-run warning).
+        self.epi_hu_done: bool = False
 
     # ------------------------------------------------------------------- axis
     def _axis_for(self, which: str) -> "LVAxis | None":
@@ -198,6 +220,7 @@ class LVModel:
         self.endo = self.epi = None
         self.epi_sax_levels = None
         self.epi_sax_extra = []
+        self.epi_hu_done = False
 
     def set_axis_from_frame(self, origin, axis_dir, radial0,
                             which: str | None = None) -> None:
@@ -224,6 +247,7 @@ class LVModel:
             self.epi = None
             self.epi_sax_levels = None
             self.epi_sax_extra = []
+            self.epi_hu_done = False
         self.axis = self._axis_for(which) if which else self.epi_axis
 
     def set_apex_point(self, which: str, p3d) -> None:
@@ -274,7 +298,8 @@ class LVModel:
         return (lo, hi) if hi > lo else None
 
     def short_axis_border_pts(self, along0: float, which: str = "endo",
-                              ref_axis: "LVAxis | None" = None):
+                              ref_axis: "LVAxis | None" = None,
+                              all_walls: bool = False):
         """The border points (3-D volume mm) where the traced *which* border
         crosses the short-axis plane at axial position *along0* along *ref_axis*
         (the SAX reference axis — the EPI axis, so BOTH borders show on the same
@@ -285,7 +310,12 @@ class LVModel:
         every segment straddling along0 yields one crossing right on the drawn
         border. Bin the crossings by θ around ref_axis (2×n_planes bins), keep
         the OUTERMOST per bin (drops papillary/wiggle inner crossings), and
-        return them θ-ordered so a closed spline can be drawn through them."""
+        return them θ-ordered so a closed spline can be drawn through them.
+
+        *all_walls* (display, same-axis only): a wall whose basal end stops short
+        of this level (tilted MV plane) shows its terminal point instead of
+        dropping out, so EVERY edit point of the section stays visible. A level
+        no wall reaches stays empty."""
         ax = ref_axis if ref_axis is not None else self.axis
         if ax is None:
             return None
@@ -328,6 +358,15 @@ class LVModel:
                     key = int(round(ordv / 360.0 * max(6, 2 * self.n_planes)))
                 if key not in best or rad > best[key][0]:
                     best[key] = (rad, P, ordv)
+        if all_walls and same_axis and best:
+            for phi, pts3d in planes.items():
+                e_s = ax.meridian_dir(phi)
+                p = np.asarray(pts3d, float).reshape(-1, 3)
+                for P in (p[0], p[-1]):
+                    s = float((P - ax.apex) @ e_s)
+                    key = (phi % 360.0) if s >= 0.0 else ((phi + 180.0) % 360.0)
+                    if key not in best:
+                        best[key] = (abs(s), P, key)
         if len(best) < 3:
             return None
         order = sorted(best.values(), key=lambda t: t[2])   # by meridian / θ
@@ -455,6 +494,8 @@ class LVModel:
         if self.epi_sax_levels is not None:
             d["epi_sax_levels"] = [float(x) for x in self.epi_sax_levels]
             d["epi_sax_extra"] = [float(x) for x in self.epi_sax_extra]
+        if self.epi_hu_done:
+            d["epi_hu_done"] = True
         if self.endo_orig is not None:
             o = self.endo_orig
             d["endo_orig"] = {
@@ -494,6 +535,7 @@ class LVModel:
         if d.get("epi_sax_levels") is not None:
             m.epi_sax_levels = [float(x) for x in d["epi_sax_levels"]]
             m.epi_sax_extra = [float(x) for x in d.get("epi_sax_extra") or []]
+        m.epi_hu_done = bool(d.get("epi_hu_done", False))
         # v4: rebuild the stashed original independent-axis Endo trace, if any,
         # so 'Endo → Trace' can still restore it after reload.
         eo = d.get("endo_orig")

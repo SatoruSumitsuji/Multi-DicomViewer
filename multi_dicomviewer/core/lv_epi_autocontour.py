@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from multi_dicomviewer.core.lv_measure import _cr_densify_3d
+from multi_dicomviewer.core.lv_measure import _cr_densify_3d, mv_terminal_point
 
 
 @dataclass
@@ -299,7 +299,7 @@ def _edited_levels(model, amax, prev_levels):
     hits = []
     for prof in model.epi_contours.values():
         a = np.asarray(prof, float).reshape(-1, 2)[:, 0]
-        for al in a:
+        for al in a[:-1]:                      # the last one is the MV terminal
             if al <= tol or al > amax - tol * 0.5:
                 continue                       # apex tip / the base ring
             if len(prev) and np.min(np.abs(prev - al)) <= tol:
@@ -309,7 +309,8 @@ def _edited_levels(model, amax, prev_levels):
 
 
 def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
-                          level_fracs=_SAX_LEVEL_FRACS, keep_edits=False):
+                          level_fracs=_SAX_LEVEL_FRACS, keep_edits=False,
+                          mv_plane=None):
     """Short-axis SPLINE correction of the Epi surface — PURELY GEOMETRIC (no HU).
 
     The user traces/edits the Epi on the long axis (incl. the long-axis range
@@ -326,13 +327,16 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
     detector could not match. *vol*/*dims* are unused (kept for signature
     parity). Returns a stats dict.
 
-    *keep_edits* (the re-run after long-axis hand edits): besides the default
-    rings, add a ring at the along position of every control point the user
-    added / slid along the axis since the previous run (and keep the rings added
-    by earlier re-runs), so those edits are spline INPUT rather than being
-    resampled away between the default rings. The levels used are remembered on
-    the model (``epi_sax_levels`` / ``epi_sax_extra``); without a previous run
-    keep_edits falls back to the default rings."""
+    *keep_edits* (the re-run after long-axis hand edits): keep the rings of the
+    previous run (so one replaced by move_epi_section stays gone) and add a ring
+    at the along position of any control point not on one of them, so those edits
+    are spline INPUT rather than being resampled away. The levels used are
+    remembered on the model (``epi_sax_levels``; ``epi_sax_extra`` = those off the
+    default rings); without a previous run keep_edits falls back to the default
+    rings.
+
+    *mv_plane* ((c, n) of the MV plane): each wall's basal terminal is placed by
+    mv_terminal_point instead of on the base ring."""
     stats = {"mode": "spline-geom", "levels": 0, "planes": 0, "extra_levels": 0}
     axis = getattr(model, "epi_axis", None)
     if axis is None or len(getattr(model, "epi_contours", {})) < 3:
@@ -350,13 +354,14 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
     prev = getattr(model, "epi_sax_levels", None)
     if keep_edits and prev is not None:
         tol = _edit_tol_mm(amax)
-        edits = _edited_levels(model, amax, prev)
-        extra = [float(e) for e in (list(getattr(model, "epi_sax_extra", None)
-                                         or []) + edits)
-                 if tol < e <= amax - tol * 0.5]
-        extra = [e for e in _merge_levels(extra, tol)
-                 if np.min(np.abs(levels - e)) > tol]
-        levels = np.asarray(sorted(list(levels) + extra), float)
+        default = levels
+        kept = [float(x) for x in sorted(prev)[:-1] if x < amax - tol * 0.5]
+        edits = [e for e in _edited_levels(model, amax, prev)
+                 if tol < e <= amax - tol * 0.5
+                 and (not kept or np.min(np.abs(np.asarray(kept) - e)) > tol)]
+        inner = sorted(kept + edits)
+        extra = [x for x in inner if np.min(np.abs(default - x)) > tol]
+        levels = np.asarray(inner + [amax], float)
     ring = np.full((len(levels), nth), np.nan)
 
     def _col(th):
@@ -383,8 +388,14 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
         cphi, copp = _col(phi), _col(opp)
 
         def _wall(th, ci):
-            return [axis.to_world(th, max(0.0, float(ring[li, ci])), levels[li])
-                    for li in range(len(levels)) if np.isfinite(ring[li, ci])]
+            w = [axis.to_world(th, max(0.0, float(ring[li, ci])), levels[li])
+                 for li in range(len(levels)) if np.isfinite(ring[li, ci])]
+            if mv_plane is not None and len(w) >= 2:
+                end = mv_terminal_point(axis, th, mv_plane[0], mv_plane[1], w[-2])
+                a_end = float((end - axis.apex) @ axis.axis)
+                w = [P for P in w[:-1]
+                     if float((P - axis.apex) @ axis.axis) < a_end - 0.5] + [end]
+            return w
 
         wall_phi, wall_opp = _wall(phi, cphi), _wall(opp, copp)
         if len(wall_phi) < 2 or len(wall_opp) < 2:
@@ -400,3 +411,126 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
         model.epi_sax_extra = list(extra)
         stats["extra_levels"] = len(extra)
     return stats
+
+
+#: Along distance (mm) within which a wall's control point IS a given section.
+_SECTION_MATCH_MM = 0.5
+
+
+def _epi_apex_index(model, axis, pts):
+    """Index of the apex vertex of an Epi polyline (as set_long_axis_contour)."""
+    if model.epi_apex is not None:
+        return int(np.argmin(np.linalg.norm(
+            pts - np.asarray(model.epi_apex, float), axis=1)))
+    return int(np.argmin((pts - axis.apex) @ axis.axis))
+
+
+def _wall_radial_at(axis, e_s, wall, along):
+    """Signed radial of a wall's DISPLAYED curve at *along*, None if outside it."""
+    p = _cr_densify_3d(np.asarray(wall, float))
+    a = (p - axis.apex) @ axis.axis
+    s = (p - axis.apex) @ e_s
+    o = np.argsort(a)
+    if along < a[o[0]] or along > a[o[-1]]:
+        return None
+    return float(np.interp(along, a[o], s[o]))
+
+
+def move_epi_section(model, plane_angle, vi, along_before, merge_mm=5.0,
+                     still_mm=1.0):
+    """A long-axis Epi edit point was dragged (the sections exist: after the
+    spline). The point is already at its new place in ``epi_planes``; give the
+    move its section, so every wall keeps one point per section:
+
+    * moved less than *still_mm* along the axis → it stays on its section (only
+      the radial changed), so a hand tremor doesn't shift a whole section;
+    * else a section is made at the new along position: the dragged point plus,
+      on every other wall, a point on that wall's displayed curve;
+    * the existing section nearest the new position, if within *merge_mm*, is
+      replaced by it (the curves are sampled first, so its edits carry over);
+    * the section the point left, if it survives, gets a curve point on the
+      dragged wall. The apex and the MV terminals are never sections.
+
+    Returns {"moved", "level", "removed"} or None when this is not a section point."""
+    ax = model.epi_axis
+    levels = model.epi_sax_levels
+    key = float(plane_angle) % 360.0
+    Q = model.epi_planes.get(key)
+    if ax is None or not levels or len(levels) < 2 or Q is None:
+        return None
+    Q = np.asarray(Q, float).reshape(-1, 3)
+    api = _epi_apex_index(model, ax, Q)
+    if vi in (0, len(Q) - 1, api) or not 0 <= vi < len(Q):
+        return None
+
+    def _al(P):
+        return float((np.asarray(P, float) - ax.apex) @ ax.axis)
+
+    drag_end = Q[0] if vi < api else Q[-1]
+    a0 = float(along_before)
+    a = float(np.clip(_al(Q[vi]), 1.0, max(1.0, _al(drag_end) - 1.0)))
+    if abs(a - a0) < still_mm:
+        Q = Q.copy()
+        Q[vi] = Q[vi] + (a0 - _al(Q[vi])) * ax.axis
+        model.set_long_axis_contour(key, Q, which="epi")
+        return {"moved": False, "level": a0, "removed": None}
+    P_new = Q[vi] + (a - _al(Q[vi])) * ax.axis
+    inner = sorted(float(x) for x in levels)[:-1]
+    base = max(float(x) for x in levels)
+    removed = None
+    if inner:
+        near = min(inner, key=lambda x: abs(x - a))
+        if abs(near - a) <= merge_mm:
+            removed = near
+    source = None
+    if inner:
+        near = min(inner, key=lambda x: abs(x - a0))
+        if abs(near - a0) <= _SECTION_MATCH_MM and near != removed:
+            source = near
+
+    def _rewall(idx, e_s, dragged):
+        """Wall *idx* (apex first, terminal last) with the new section applied."""
+        W = [P.copy() for P in Q_i[idx]]
+        pts = list(W[1:-1])
+        if dragged:
+            pts = [Q_i[j].copy() for j in idx[1:-1] if j != vi]
+            W_src = [W[0]] + pts + [W[-1]]
+        else:
+            W_src = W
+        add = []
+        if dragged:
+            add.append(P_new)
+            if source is not None:
+                s = _wall_radial_at(ax, e_s, W_src, source)
+                if s is not None:
+                    add.append(ax.apex + source * ax.axis + s * e_s)
+        elif _al(W[-1]) > a + _SECTION_MATCH_MM:
+            s = _wall_radial_at(ax, e_s, W_src, a)
+            if s is not None:
+                add.append(ax.apex + a * ax.axis + s * e_s)
+        if removed is not None and pts:
+            j = int(np.argmin([abs(_al(P) - removed) for P in pts]))
+            if abs(_al(pts[j]) - removed) <= _SECTION_MATCH_MM:
+                del pts[j]
+        return [W[0]] + sorted(pts + add, key=_al) + [W[-1]]
+
+    for phi in list(model.epi_planes):
+        Q_i = np.asarray(model.epi_planes[phi], float).reshape(-1, 3)
+        ai = _epi_apex_index(model, ax, Q_i)
+        if not 0 < ai < len(Q_i) - 1:
+            continue                     # no two walls: nothing to section
+        e_s = ax.meridian_dir(phi)
+        ia = list(range(ai, -1, -1))     # apex → first end
+        ib = list(range(ai, len(Q_i)))   # apex → last end
+        same = float(phi) % 360.0 == key
+        wa = _rewall(ia, e_s, same and vi < ai)
+        wb = _rewall(ib, e_s, same and vi > ai)
+        model.set_long_axis_contour(
+            float(phi), np.asarray(wa[::-1] + wb[1:], float), which="epi")
+    new_inner = sorted([x for x in inner if x != removed] + [a])
+    fracs = base * np.asarray([f for f in _SAX_LEVEL_FRACS if f > 1e-6])
+    tol = _edit_tol_mm(base)
+    model.epi_sax_levels = new_inner + [base]
+    model.epi_sax_extra = [x for x in new_inner
+                           if np.min(np.abs(fracs - x)) > tol]
+    return {"moved": True, "level": a, "removed": removed}
