@@ -320,27 +320,39 @@ def test_spline_terminals_follow_the_mv_rule():
 
 
 def test_move_far_from_any_section_adds_one_keeping_16_points():
-    m = _section_model()
+    m = _section_model(amax=120.0)                # rings 30, 60: a gap over 2 x 10 mm
     n0 = len(m.epi_sax_levels)
     wa, wb, api = _interior_levels(m)
-    # the wall-B point on the 1/4 ring (20 mm) → 30 mm: >5 mm from 20 and 40
-    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 20.0)))
-    r = _drag(m, 0.0, vi, 10.0)
-    assert r["moved"] and r["removed"] is None and abs(r["level"] - 30.0) < 1e-6
+    # the wall-B point on the 1/4 ring (30 mm) → 45 mm: >10 mm from 30 and 60
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 30.0)))
+    r = _drag(m, 0.0, vi, 15.0)
+    assert r["moved"] and r["removed"] is None and abs(r["level"] - 45.0) < 1e-6
     assert len(m.epi_sax_levels) == n0 + 1
-    assert any(abs(x - 30.0) < 1e-6 for x in m.epi_sax_levels)
-    for lv_ in (20.0, 30.0):                      # new section + the one it left
+    assert any(abs(x - 45.0) < 1e-6 for x in m.epi_sax_levels)
+    for lv_ in (30.0, 45.0):                      # new section + the one it left
         sp = m.short_axis_border_pts(lv_, "epi", ref_axis=m.epi_axis)
         assert sp is not None and len(sp) == 16, (lv_, None if sp is None else len(sp))
     for phi in m.plane_angles():
         wa, wb, _ = _interior_levels(m, phi)
+        assert min(abs(np.asarray(wa) - 45.0)) < 1e-6
+        assert min(abs(np.asarray(wb) - 45.0)) < 1e-6
         assert min(abs(np.asarray(wa) - 30.0)) < 1e-6
         assert min(abs(np.asarray(wb) - 30.0)) < 1e-6
-        assert min(abs(np.asarray(wa) - 20.0)) < 1e-6
-        assert min(abs(np.asarray(wb) - 20.0)) < 1e-6
 
 
-def test_move_within_5mm_replaces_the_nearest_section():
+def test_move_6mm_from_a_section_replaces_it():
+    m = _section_model(amax=110.0)                # rings 27.5, 55
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 55.0)))
+    r = _drag(m, 0.0, vi, -6.0)                   # 49: the point's own ring goes
+    assert abs(r["removed"] - 55.0) < 1e-6
+    assert not any(abs(x - 55.0) < 1e-6 for x in m.epi_sax_levels)
+    for w in _interior_levels(m, 0.0)[:2]:
+        assert min(abs(np.asarray(w) - 49.0)) < 1e-6
+        assert min(abs(np.asarray(w) - 55.0)) > 1.0
+
+
+def test_move_within_range_replaces_the_section():
     m = _section_model()
     n0 = len(m.epi_sax_levels)
     wa, wb, api = _interior_levels(m)
@@ -354,7 +366,7 @@ def test_move_within_5mm_replaces_the_nearest_section():
         for w in (wa, wb):
             assert min(abs(np.asarray(w) - 43.0)) < 1e-6
             assert min(abs(np.asarray(w) - 40.0)) > 1.0, "the old section is gone"
-    # A neighbour within 5 mm of the target goes, the point's own ring stays.
+    # A neighbour within range of the target goes, the point's own ring stays.
     m = _section_model()
     wa, wb, api = _interior_levels(m)
     vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
@@ -363,6 +375,24 @@ def test_move_within_5mm_replaces_the_nearest_section():
     assert any(abs(x - 40.0) < 1e-6 for x in m.epi_sax_levels), "own ring kept"
     wa, wb, _ = _interior_levels(m, 0.0)
     assert min(abs(np.asarray(wb) - 40.0)) < 1e-6, "…with a curve point on this wall"
+
+
+def test_move_replaces_only_the_nearest_section_in_range():
+    m = _section_model()
+    n0 = len(m.epi_sax_levels)
+    wa, wb, api = _interior_levels(m)
+    vi = api + 1 + int(np.argmin(np.abs(np.asarray(wb) - 40.0)))
+    r = _drag(m, 0.0, vi, 28.0)                   # 68: rings 60, 70 and 75 are in range
+    assert abs(r["removed"] - 70.0) < 1e-6
+    assert len(m.epi_sax_levels) == n0, "one out, one in; own ring (28 mm away) stays"
+    for lv_ in (40.0, 60.0, 68.0, 75.0):
+        assert any(abs(x - lv_) < 1e-6 for x in m.epi_sax_levels), lv_
+    for phi in m.plane_angles():
+        for w in _interior_levels(m, phi)[:2]:
+            a = np.asarray(w)
+            assert min(abs(a - 70.0)) > 1.0
+            for lv_ in (60.0, 68.0, 75.0):
+                assert min(abs(a - lv_)) < 1e-6
 
 
 def test_small_along_move_only_changes_the_radial():
