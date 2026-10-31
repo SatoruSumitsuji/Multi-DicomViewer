@@ -436,7 +436,7 @@ def _wall_radial_at(axis, e_s, wall, along):
     return float(np.interp(along, a[o], s[o]))
 
 
-def move_epi_section(model, plane_angle, vi, along_before, merge_mm=5.0,
+def move_epi_section(model, plane_angle, vi, along_before, merge_mm=10.0,
                      still_mm=1.0):
     """A long-axis Epi edit point was dragged (the sections exist: after the
     spline). The point is already at its new place in ``epi_planes``; give the
@@ -446,8 +446,9 @@ def move_epi_section(model, plane_angle, vi, along_before, merge_mm=5.0,
       the radial changed), so a hand tremor doesn't shift a whole section;
     * else a section is made at the new along position: the dragged point plus,
       on every other wall, a point on that wall's displayed curve;
-    * the existing section nearest the new position, if within *merge_mm*, is
-      replaced by it (the curves are sampled first, so its edits carry over);
+    * the one existing section nearest the new position (it may be the one the
+      point left), if within *merge_mm*, is replaced by it (the curves are sampled
+      first, so its edits carry over); any others in that range stay;
     * the section the point left, if it survives, gets a curve point on the
       dragged wall. The apex and the MV terminals are never sections.
 
