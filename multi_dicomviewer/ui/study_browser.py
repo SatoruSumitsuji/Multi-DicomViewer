@@ -351,6 +351,8 @@ class StudyBrowser(QTreeWidget):
     #: Series "UnHide (show this series)" → un-hide just the given series
     #: ([Series]).
     unhide_series_requested = pyqtSignal(list)
+    #: header click changed _sort_global: the list must be rebuilt
+    sort_changed = pyqtSignal()
 
     #: Selected-row highlight: bright blue for a normal series (stays
     #: bright even when the tree loses focus — Qt would otherwise dim it
@@ -461,8 +463,12 @@ class StudyBrowser(QTreeWidget):
         self.update()
 
     def _on_header_clicked(self, col: int) -> None:
+        # Qt has already moved the indicator by its own rule before this slot
+        # runs, so sortIndicatorChanged fires with the OLD _sort_global (a rebuild
+        # from it leaves the rows one click behind the mark). Hence sort_changed.
         key = getattr(self, "_sort_cols", {}).get(col)
         if key is None:                       # Type/Description/Path
+            self._show_sort_indicator()       # the rows did not change
             return
         # Sort ALL studies alike — no selection needed. The FIRST explicit click
         # (or a new column) sorts ASCENDING; re-clicking the SAME column after
@@ -476,8 +482,14 @@ class StudyBrowser(QTreeWidget):
             asc = not asc
         self._user_sorted = True
         self._sort_global = (key, asc)
-        # Emits sortIndicatorChanged -> StudyPanel rebuilds tree+thumbs
-        # (keeping any current selection).
+        self._show_sort_indicator()
+        # StudyPanel rebuilds tree+thumbs (keeping any current selection).
+        self.sort_changed.emit()
+
+    def _show_sort_indicator(self) -> None:
+        """Put the header's mark on the column and direction of _sort_global."""
+        mode, asc = self._sort_global
+        col = next(c for c, k in self._sort_cols.items() if k == mode)
         self.header().setSortIndicator(
             col,
             Qt.SortOrder.AscendingOrder if asc
@@ -1307,9 +1319,7 @@ class StudyPanel(QWidget):
         self.tree.unhide_series_requested.connect(self._on_unhide_series)
         # Re-sort the thumbnail grid whenever the tree's header sort
         # changes (keep the two views in lock-step).
-        self.tree.header().sortIndicatorChanged.connect(
-            lambda *_: self._resort_thumbs()
-        )
+        self.tree.sort_changed.connect(self._resort_thumbs)
 
         #: thumbnail icon edge in px (driven by the size slider).
         #: Open at the slider's minimum so more series fit on screen by
