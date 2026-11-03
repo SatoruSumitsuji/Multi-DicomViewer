@@ -3868,6 +3868,17 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if self._lod_pending:
             self._lod_settle()
 
+    def _after_mouse_release(self, fn, _tries: int = 0) -> None:
+        """Run *fn* once no mouse button is held (polled every 20 ms, max ~3 s).
+        For handlers that may open a modal from a PRESS-time signal (macOS
+        customContextMenuRequested): a modal exec() during the press swallows
+        the release and leaves Qt's button state stuck for the canvas."""
+        held = QApplication.mouseButtons() != Qt.MouseButton.NoButton
+        if held and _tries < 150:
+            QTimer.singleShot(20, lambda: self._after_mouse_release(fn, _tries + 1))
+            return
+        fn()
+
     def _reset_pointer_state(self):
         """Clear stale drag/gesture flags and release any stuck Qt mouse grab —
         the recovery for a lost pointer-up that otherwise leaves the canvas
@@ -12436,8 +12447,14 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_mv_btn.clicked.connect(lambda: self._lv_enter_valve("mitral"))
         self._lv_mv_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
+        # Right-click handlers run AFTER the button is released: macOS fires
+        # the context-menu signal on the PRESS, and the MV chooser's modal
+        # exec() then swallowed the release, leaving Qt believing a button was
+        # still held — every later canvas press got no move/release (frozen
+        # drags, dead toolbar), as traced with MDV_INPUT_DEBUG.
         self._lv_mv_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_valve("mitral"))
+            lambda _p: self._after_mouse_release(
+                lambda: self._lv_rclick_valve("mitral")))
         row1.addWidget(self._lv_mv_btn)
         self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
@@ -12447,7 +12464,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_aov_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lv_aov_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_valve("aortic"))
+            lambda _p: self._after_mouse_release(
+                lambda: self._lv_rclick_valve("aortic")))
         row1.addWidget(self._lv_aov_btn)
         # ---- Common APEX selector (third prerequisite; axis = apex → MV centre).
         self._lv_apex_sel_btn = FitButton(t("Apex"))
@@ -12459,7 +12477,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex_sel_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lv_apex_sel_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_apex())
+            lambda _p: self._after_mouse_release(self._lv_rclick_apex))
         row1.addWidget(self._lv_apex_sel_btn)
         row1.addSpacing(8)
         # ---- Sub-mode selector: Epi → Blood/Endo (Endo merged into Blood/Endo).
@@ -12471,7 +12489,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_epi_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lv_epi_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_epi())
+            lambda _p: self._after_mouse_release(self._lv_rclick_epi))
         row1.addWidget(self._lv_epi_btn)
         row1.addWidget(self._lvv_start_btn)      # "Blood/Endo" (built in lvv bar)
         # FullLV: bundle the loaded EpiLv + the Blood/Endo (BldLv) analysis into
@@ -12814,7 +12832,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lvv_start_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lvv_start_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_blood())
+            lambda _p: self._after_mouse_release(self._lv_rclick_blood))
         # Blood per-mode Apex is RETIRED — the COMMON apex (Apex selector) is
         # seeded on entry. Hidden placeholder keeps references safe.
         self._lvv_apex_btn = FitButton(t("Apex"))
@@ -12921,7 +12939,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lvv_lvd_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lvv_lvd_btn.customContextMenuRequested.connect(
-            lambda _p: self._lvv_lvd_reset())
+            lambda _p: self._after_mouse_release(self._lvv_lvd_reset))
         # Auto-Endo の 方式 (method) + per-method shape knob (膨らみ / 肉柱 …) USED to
         # live here (parity with the Windows viewer). Both moved to Settings → LV
         # Auto-Endo (方式 and 膨らみ, above 凹み判定(弦長)) — irrelevant to almost
