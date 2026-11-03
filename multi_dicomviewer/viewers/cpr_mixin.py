@@ -157,6 +157,73 @@ class CPRMixin:
                             return p3        # the canonical CPR-source trace
         return best
 
+    # ---- Auto-tracking (core.cpr_autotrack) ------------------------------
+    def _cpr_auto_on(self) -> bool:
+        """Auto toggle (Draw row). Default ON: the clicked trace points become
+        start / via / end of a lumen-following centreline."""
+        return bool(getattr(self, "_cpr_auto", True))
+
+    def _cpr_auto_apply(self, m) -> None:
+        """Replace trace measure *m*'s clicked ``pts3d`` with an auto-tracked
+        centreline through the contrast lumen (start → via… → end), BEFORE the
+        short-axis is built from it. Leaves *m* unchanged when Auto is off, when
+        there is no volume, or when tracking fails (the clicked line is then used
+        as before). Stores the low-contrast gaps in ``self._cpr_auto_gaps``."""
+        self._cpr_auto_gaps = []
+        if not self._cpr_auto_on():
+            return
+        vol = getattr(self, "_vol", None)
+        p3 = m.get("pts3d")
+        if vol is None or not p3 or len(p3) < 2:
+            return
+        from multi_dicomviewer.core.cpr_autotrack import trace_vessel
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.QtCore import Qt
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        except Exception:                                    # noqa: BLE001
+            QApplication = None
+        try:
+            res = trace_vessel(vol, tuple(float(d) for d in self._dims),
+                               [np.asarray(q, float) for q in p3])
+        except Exception:                                    # noqa: BLE001
+            res = None
+        finally:
+            if QApplication is not None:
+                QApplication.restoreOverrideCursor()
+        if res is None or not res.ok or len(res.ctrl_mm) < 2:
+            return
+        src = None
+        for k in ("A", "B"):
+            if any(mm is m for mm in self._measures.get(k, [])):
+                src = k
+        m["pts3d"] = [list(map(float, q)) for q in res.ctrl_mm]
+        if src is not None and hasattr(self, "_world3d_to_out"):
+            m["pts"] = [self._world3d_to_out(src, q) for q in res.ctrl_mm]
+        m["_cpr_auto"] = True
+        self._cpr_auto_gaps = list(res.gaps)
+
+    def _cpr_auto_report(self) -> None:
+        """After an auto-tracked CPR is built: tell the user about stretches
+        where the trace crossed low contrast (stenosis / occlusion / calcium) so
+        they check them. Deferred — a modal shown inside the finishing click
+        swallows its release on macOS."""
+        gaps = list(getattr(self, "_cpr_auto_gaps", []) or [])
+        if not gaps:
+            return
+        txt = ", ".join(f"{a:.0f}–{b:.0f} mm" for a, b in gaps)
+
+        def show():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self, t("Short-axis"),
+                t("自動トレースが造影の弱い区間を通過しました（始点からの距離）: "
+                  "{gaps}\n狭窄・閉塞・石灰化の可能性があります。短軸で確認し、"
+                  "必要なら編集点を修正してください。").format(gaps=txt))
+        defer = getattr(self, "_after_mouse_release", None)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, (lambda: defer(show)) if defer else show)
+
     #: Fit lumen-snap parameters (contrast CTA): a control point is moved to the
     #: HU-weighted centroid of voxels in [LO, HI] HU within a RADIUS-mm disc of the
     #: vessel's SHORT-AXIS cross-section; if there is NO in-range voxel within the

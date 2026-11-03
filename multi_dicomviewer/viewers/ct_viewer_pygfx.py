@@ -9884,6 +9884,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if (self._coronary_mpr_pending and d["type"] == "polyline"
                 and self._lv is None and self._mode == "3D" and len(pts) >= 2):
             self._coronary_mpr_pending = False
+            # Auto: the clicked points become start / via / end of a centreline
+            # traced through the contrast lumen (core.cpr_autotrack).
+            self._cpr_auto_apply(self._measures[d["pane"]][-1])
             # Measure stays ON but IDLE through the CPR build (set in _enter_cpr),
             # so the drawn line can be right-click-Hidden without re-enabling it —
             # matching the Polyline→CPR route.
@@ -9891,6 +9894,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if self._cpr is not None:
                 self._cpr_fit()                  # auto-Fit on CPR creation
                 self._cpr_jump_ctrl_end(False)   # start at the most proximal edit point (|◀)
+                self._cpr_auto_report()          # flag low-contrast stretches
 
     def _measure_finish_draft(self):
         d = self._draft
@@ -18647,6 +18651,20 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_snap_btn.toggled.connect(
             lambda on: setattr(self, "_snap_lumen", bool(on)))
         row.addWidget(self._cpr_snap_btn)
+        # Auto: the clicked trace points (start, optional via points, end) are
+        # joined by a centreline traced through the contrast lumen (green = on).
+        self._cpr_auto_btn = FitButton(t("Auto"))
+        self._cpr_auto_btn.setCheckable(True)
+        self._cpr_auto_btn.setChecked(self._cpr_auto_on())
+        self._cpr_auto_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_auto_btn.setHelpToolTip(t(
+            "自動トレース：始点と終点（必要なら途中の点も）をクリックして右クリックで"
+            "確定すると、その間を造影された血管の中心に沿って自動でつなぎます。"
+            "オフにすると、クリックした点をそのまま結びます"))
+        self._cpr_auto_btn.toggled.connect(
+            lambda on: setattr(self, "_cpr_auto", bool(on)))
+        row.addWidget(self._cpr_auto_btn)
         # 腔除外: seed a bright chamber (LV/RV) to exclude from the lumen snap.
         self._cpr_excl_btn = FitButton(t("腔除外"))
         self._cpr_excl_btn.setCheckable(True)
