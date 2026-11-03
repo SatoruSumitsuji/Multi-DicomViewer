@@ -195,6 +195,11 @@ jobs:
                 "Multi-DicomViewer" ../Multi-DicomViewer-macos.zip
 
       # Artifact name is what GitHub shows in the run's UI.
+      # Keep artifacts only 3 days: every run stores ~400 MB (both zips) and
+      # Actions storage is billed per GB-hour against the account's small free
+      # allowance (the default 90-day retention exhausted it and blocked
+      # Actions). Release downloads are NOT affected — the tagged-build step
+      # below attaches the zips to the GitHub Release, which is stored separately.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -203,6 +208,7 @@ jobs:
             dist/Multi-DicomViewer-windows.zip
             dist/Multi-DicomViewer-macos.zip
           if-no-files-found: ignore
+          retention-days: 3
 
       # ----- On a v* tag: also attach the zips to a GitHub Release -----
       # A semver PRE-RELEASE tag (one with a hyphen, e.g. v4.4.0-beta.1 /
