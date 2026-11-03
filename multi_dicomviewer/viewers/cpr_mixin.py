@@ -163,12 +163,128 @@ class CPRMixin:
         start / via / end of a lumen-following centreline."""
         return bool(getattr(self, "_cpr_auto", True))
 
+    _CPR_AUTO_STAGE = {
+        "enhance": "血管を強調中",
+        "path": "経路を探索中",
+        "center": "中心を補正中",
+        "ctrl": "編集点を配置中",
+    }
+
+    def _cpr_finish_trace(self, pane, m) -> None:
+        """A Draw trace was finished: (Auto) trace it through the lumen in the
+        background, then build the short-axis from it. Shared by both viewers'
+        _commit_draft. With Auto off this runs synchronously, as before."""
+        def build():
+            lst = self._measures.get(pane, [])
+            mi = next((i for i, mm in enumerate(lst) if mm is m), None)
+            if mi is None:                     # trace deleted / Exit meanwhile
+                return
+            self._enter_cpr(pane, mi)
+            if self._cpr is not None:
+                # Fit (fixed HU 200–700 disc, 2.5 mm) can pull a THIN auto-traced
+                # point onto a neighbouring vein; the auto trace is already
+                # centred sub-voxel, so only a hand-clicked trace is auto-Fitted.
+                if not m.get("_cpr_auto"):
+                    self._cpr_fit()
+                self._cpr_jump_ctrl_end(False)   # most proximal edit point (|◀)
+                self._cpr_auto_report()          # flag low-contrast stretches
+        self._cpr_auto_run(m, build)
+
+    def _cpr_auto_run(self, m, on_done) -> None:
+        """Run the auto trace for trace measure *m* in a worker thread with a
+        small non-modal "Auto-Trace中…" progress window (stage + bar + Cancel),
+        then apply it to *m* and call *on_done* on the GUI thread. Calls
+        *on_done* right away when Auto is off / not applicable. Non-modal on
+        purpose: a modal shown from the finishing click swallows its release on
+        macOS (the dead-mouse bug)."""
+        self._cpr_auto_gaps = []
+        vol = getattr(self, "_vol", None)
+        p3 = m.get("pts3d")
+        if (not self._cpr_auto_on() or vol is None or not p3 or len(p3) < 2):
+            on_done()
+            return
+        if getattr(self, "_cpr_auto_busy", False):
+            return                                   # one trace at a time
+        import threading
+        from PyQt6.QtCore import QTimer, Qt
+        from PyQt6.QtWidgets import QProgressDialog
+        from multi_dicomviewer.core.cpr_autotrack import (TraceCancelled,
+                                                          trace_vessel)
+        self._cpr_auto_busy = True
+        st = {"stage": "enhance", "i": 1, "n": max(1, len(p3) - 1),
+              "frac": 0.0, "res": None, "done": False, "cancel": False}
+
+        def prog(stage, i, n, frac):
+            st.update(stage=stage, i=i, n=n, frac=frac)
+            return not st["cancel"]
+
+        dims = tuple(float(d) for d in self._dims)
+        clicks = [np.asarray(q, float) for q in p3]
+
+        def work():
+            try:
+                st["res"] = trace_vessel(vol, dims, clicks, progress=prog)
+            except TraceCancelled:
+                st["res"] = None
+            except Exception as e:                           # noqa: BLE001
+                import traceback
+                st["res"] = None
+                st["error"] = "".join(traceback.format_exception(e))
+            finally:
+                st["done"] = True
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle(t("Auto-Trace"))
+        dlg.setWindowModality(Qt.WindowModality.NonModal)
+        dlg.setRange(0, 100)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False); dlg.setAutoReset(False)
+        dlg.setCancelButtonText(t("Cancel"))
+        dlg.setMinimumWidth(320)
+
+        def label():
+            stage = t(self._CPR_AUTO_STAGE.get(st["stage"], ""))
+            seg = (t("区間 {i}/{n}").format(i=st["i"], n=st["n"]) + "　"
+                   if st["n"] > 1 and st["stage"] in ("enhance", "path") else "")
+            return t("Auto-Trace中…") + "\n" + seg + stage
+        dlg.setLabelText(label())
+        dlg.canceled.connect(lambda: st.update(cancel=True))
+        dlg.show()
+        threading.Thread(target=work, daemon=True).start()
+        timer = QTimer(self)
+
+        def poll():
+            if not st["done"] and dlg.wasCanceled():
+                st["cancel"] = True              # worker stops at its next stage
+            if not st["done"]:
+                dlg.setValue(int(round(100 * st["frac"])))
+                dlg.setLabelText(label())
+                return
+            timer.stop()
+            cancelled = bool(st["cancel"])       # read BEFORE closing: closing a
+            try:                                 # QProgressDialog emits canceled()
+                dlg.canceled.disconnect()
+            except TypeError:
+                pass
+            dlg.close(); dlg.deleteLater()
+            st["cancel"] = cancelled
+            self._cpr_auto_busy = False
+            res = st["res"]
+            if st.get("error"):
+                import sys
+                print("Auto-Trace failed:", st["error"], file=sys.stderr)
+            if st["cancel"]:
+                return                  # cancelled: leave the clicked trace as is
+            if res is not None and res.ok and len(res.ctrl_mm) >= 2:
+                self._cpr_auto_store(m, res)
+            on_done()
+        timer.timeout.connect(poll)
+        timer.start(60)
+
     def _cpr_auto_apply(self, m) -> None:
-        """Replace trace measure *m*'s clicked ``pts3d`` with an auto-tracked
-        centreline through the contrast lumen (start → via… → end), BEFORE the
-        short-axis is built from it. Leaves *m* unchanged when Auto is off, when
-        there is no volume, or when tracking fails (the clicked line is then used
-        as before). Stores the low-contrast gaps in ``self._cpr_auto_gaps``."""
+        """Synchronous variant of the auto trace (headless tests / scripts):
+        replace *m*'s clicked ``pts3d`` with the lumen-following centreline.
+        Leaves *m* unchanged when Auto is off, there is no volume, or tracking
+        fails. Stores the low-contrast gaps in ``self._cpr_auto_gaps``."""
         self._cpr_auto_gaps = []
         if not self._cpr_auto_on():
             return
@@ -178,21 +294,16 @@ class CPRMixin:
             return
         from multi_dicomviewer.core.cpr_autotrack import trace_vessel
         try:
-            from PyQt6.QtWidgets import QApplication
-            from PyQt6.QtCore import Qt
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        except Exception:                                    # noqa: BLE001
-            QApplication = None
-        try:
             res = trace_vessel(vol, tuple(float(d) for d in self._dims),
                                [np.asarray(q, float) for q in p3])
         except Exception:                                    # noqa: BLE001
             res = None
-        finally:
-            if QApplication is not None:
-                QApplication.restoreOverrideCursor()
         if res is None or not res.ok or len(res.ctrl_mm) < 2:
             return
+        self._cpr_auto_store(m, res)
+
+    def _cpr_auto_store(self, m, res) -> None:
+        """Write a successful TraceResult into trace measure *m*."""
         src = None
         for k in ("A", "B"):
             if any(mm is m for mm in self._measures.get(k, [])):

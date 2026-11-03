@@ -110,8 +110,14 @@ chk("gaps: the 3 mm stenosis is reported",
     any(a - 2.0 <= s_sten + 1.5 <= b + 2.0 for a, b in res.gaps), f"{res.gaps}")
 chk("gaps: no spurious gaps (<= 2)", len(res.gaps) <= 2, f"{res.gaps}")
 step = np.linalg.norm(np.diff(res.ctrl_mm, axis=0), axis=1)
-chk("ctrl: spacing ~5 mm (last may be shorter)",
-    np.all(step[:-1] > 4.0) and np.all(step < 6.0), f"{step.round(1)}")
+chk("ctrl: adaptive spacing within 1.2-5 mm",
+    np.all(step > 1.1) and np.all(step < 5.2), f"{step.round(1)}")
+from multi_dicomviewer.core.centerline import CenterLine
+d_cl, _ = tree.query(CenterLine.from_points(res.ctrl_mm, step_mm=0.2).points)
+chk("ctrl: the CPR spline through them follows the vessel "
+    "(mean < 0.2, max < 1.0 mm incl. the invisible stenosis lumen)",
+    d_cl.mean() < 0.2 and d_cl.max() < 1.0,
+    f"mean {d_cl.mean():.2f} max {d_cl.max():.2f}")
 chk("ctrl: starts and ends at the path ends",
     np.allclose(res.ctrl_mm[0], res.path_mm[0])
     and np.allclose(res.ctrl_mm[-1], res.path_mm[-1]))

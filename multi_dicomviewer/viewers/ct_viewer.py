@@ -14937,17 +14937,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if (self._coronary_mpr_pending and d["type"] == "polyline"
                 and self._lv is None and self._mode == "3D" and len(pts) >= 2):
             self._coronary_mpr_pending = False
-            # Auto: the clicked points become start / via / end of a centreline
-            # traced through the contrast lumen (core.cpr_autotrack).
-            self._cpr_auto_apply(self._measures[d["pane"]][-1])
-            # Measure stays ON but IDLE through the CPR build (set in _enter_cpr),
-            # so the drawn line can be right-click-Hidden without re-enabling it —
-            # matching the Polyline→CPR route.
-            self._enter_cpr(d["pane"], len(self._measures[d["pane"]]) - 1)
-            if self._cpr is not None:
-                self._cpr_fit()                  # auto-Fit on CPR creation
-                self._cpr_jump_ctrl_end(False)   # start at the most proximal edit point (|◀)
-                self._cpr_auto_report()          # flag low-contrast stretches
+            # Auto (default): the clicked points become start / via / end of a
+            # centreline traced through the contrast lumen in the background
+            # ("Auto-Trace中…" window), then the short-axis is built (Fit only for
+            # a hand-clicked trace). Measure stays ON but IDLE through the CPR
+            # build (set in _enter_cpr), so the drawn line can be right-click-
+            # Hidden without re-enabling it — matching the Polyline→CPR route.
+            self._cpr_finish_trace(d["pane"], self._measures[d["pane"]][-1])
 
     def _measure_finish_draft(self):
         d = self._draft
