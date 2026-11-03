@@ -312,4 +312,6 @@ def main(argv: list[str]) -> int:
         splash.finish(win)
 
     QTimer.singleShot(remaining_ms, _reveal)
+    from multi_dicomviewer.ui import input_debug   # MDV_INPUT_DEBUG=1 only
+    input_debug.install(app)
     return app.exec()

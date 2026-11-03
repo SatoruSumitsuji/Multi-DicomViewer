@@ -102,6 +102,7 @@ from multi_dicomviewer.core.measure_geom import (
     smooth_closed as _smooth_closed,
     smooth_open as _smooth_open,
 )
+from multi_dicomviewer.ui import input_debug as _input_debug
 from multi_dicomviewer.ui.viewer_base import AbstractViewer
 from multi_dicomviewer.ui.study_browser import FitButton
 from multi_dicomviewer.ui.compare_options import CompareOptionsDialog
@@ -3305,7 +3306,29 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         c.add_event_handler(lambda ev, k=key: self._on_dblclick(k, ev), "double_click")
         c.add_event_handler(lambda ev, k=key: self._on_resize(k, ev), "resize")
 
+    def _input_state(self) -> str:
+        """Gesture/mode flags for MDV_INPUT_DEBUG traces (no image/patient data)."""
+        g = lambda n: getattr(self, n, None)              # noqa: E731
+        return (f"tool={g('_tool')} meas_on={g('_meas_on')} "
+                f"meas_type={g('_meas_type')!r} drag_btn={g('_drag_btn')} "
+                f"cross_grab={g('_cross_grab')} meas_drag={g('_meas_drag')} "
+                f"alt_tool={g('_alt_tool')} tri_drag={g('_tri_drag')} "
+                f"cmp_on={g('_cmp_on')} vr_on={g('_vr_on')} "
+                f"cpr={'set' if g('_cpr') is not None else None} "
+                f"lv={'set' if g('_lv') is not None else None} "
+                f"valve_edit={g('_lv_valve_edit')} apex_edit={g('_lv_apex_edit')} "
+                f"sax={self._lv_sax_active() if hasattr(self, '_lv_sax_active') else '?'} "
+                f"lv_line_drag={g('_lv_line_drag')} lv_apex_drag={g('_lv_apex_drag')} "
+                f"cpr_excl={g('_cpr_exclude_seeding')} "
+                f"coro_target={g('_coro_target_mode')} "
+                f"draft={'set' if g('_draft') else None} "
+                f"center_angle={g('_center_angle_target') is not None}")
+
     def _on_down(self, key, ev):
+        if _input_debug.ENABLED:
+            _input_debug.log(f"down {key} btn={ev.get('button')} "
+                             f"mods={ev.get('modifiers')} | {self._input_state()}")
+            self._dbg_moves = 0
         self._set_active(key)
         # Auto-recover from a lost pointer-up: if a previous gesture left state
         # behind (drag off-pane, or an event dropped while the GUI thread was
@@ -3601,6 +3624,12 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
 
     def _on_move(self, key, ev):
         x, y = ev["x"], ev["y"]
+        if _input_debug.ENABLED and ev.get("buttons"):
+            n = getattr(self, "_dbg_moves", 0)
+            if n < 3:                       # first few moves of each drag only
+                self._dbg_moves = n + 1
+                _input_debug.log(f"move {key} buttons={ev.get('buttons')} | "
+                                 f"{self._input_state()}")
         # SAFETY NET (macOS dead-buttons self-recovery): a TRUE hover — no mouse
         # button currently held (rendercanvas gives ev["buttons"], empty on hover)
         # — must never carry drag/grab state. If it does (a modal opened from a
@@ -3737,6 +3766,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._drag(key, dx, dy, shift, x, y, ctrl=ctrl)
 
     def _on_up(self, key, ev):
+        if _input_debug.ENABLED:
+            _input_debug.log(f"up {key} btn={ev.get('button')} | "
+                             f"{self._input_state()}")
         # End a Target-marker drag on the VR. Clear state FIRST (no re-entrant
         # move), then — only if it actually moved — report phase 'end' so the
         # panel asks whether to recompute at the drop (a plain click does nothing).
