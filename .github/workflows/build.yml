@@ -35,10 +35,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Python 3.13
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -201,7 +201,7 @@ jobs:
       # Actions). Release downloads are NOT affected — the tagged-build step
       # below attaches the zips to the GitHub Release, which is stored separately.
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Multi-DicomViewer-${{ runner.os }}
           path: |
@@ -216,7 +216,7 @@ jobs:
       # the stable "Latest" badge; a plain vX.Y.Z tag becomes the full release.
       - name: Attach to Release (tagged builds only)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/Multi-DicomViewer-windows.zip
