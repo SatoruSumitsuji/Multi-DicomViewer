@@ -10407,6 +10407,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                                    QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Cancel)
             box.exec()
+            QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
             clicked = box.clickedButton()
             if clicked is b_load:
                 self._lv_load_valve(which)
@@ -10521,6 +10522,13 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                                    QMessageBox.ButtonRole.ActionRole)
             box.addButton(QMessageBox.StandardButton.Cancel)
             box.exec()
+            # macOS: after this modal closes the canvas can keep the mouse grab,
+            # so the next drag (e.g. moving the image to place the apex) gets no
+            # events and the view seems frozen. Release it DEFERRED (the modal's
+            # teardown re-grabs after a synchronous reset) on EVERY path — the
+            # Show button and the selector click reach here too, not only the
+            # right-click (_lv_rclick_valve) that already had this recovery.
+            QTimer.singleShot(0, self._reset_pointer_state)
             clicked = box.clickedButton()
             if clicked is None or clicked not in (b_asis, b_perp):
                 return
