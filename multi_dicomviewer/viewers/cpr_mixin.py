@@ -917,6 +917,289 @@ class CPRMixin:
         elif chosen is a_clr:
             self._cpr_sel_clear()
 
+    # ---- VR始点: pick the vessel's PROXIMAL start on a VR pane -------------
+    # The left pane A shows a heart VR while Draw is armed; a click (no drag)
+    # on it picks the vessel point under the cursor as the trace's FIRST point,
+    # the map pane B jumps there (Slab MIP through it) and the user clicks the
+    # distal points on B as usual. The trace drawn so far is overlaid on the VR
+    # so it stays clear which vessel is being followed. Backends provide
+    # _cpr_vr_ray(key, sx, sy, dvr) and the VR line drawing.
+
+    #: Same CTA opacity ramp as the VR transfer function (HU, alpha), so the
+    #: pick lands on the surface the user actually SEES.
+    _CPR_VR_OP_HU = np.array([-1000.0, 80.0, 150.0, 250.0, 400.0, 600.0,
+                              1000.0, 2000.0])
+    _CPR_VR_OP_A = np.array([0.0, 0.0, 0.03, 0.12, 0.35, 0.60, 0.85, 0.95])
+    #: Heart crop radius (mm) around the map-pane centre for the start VR —
+    #: keeps the aortic root / ostia / AV grooves, drops most of the chest wall.
+    _CPR_VR_CROP_MM = 70.0
+
+    def _cpr_vr_active(self) -> bool:
+        return bool(getattr(self, "_cpr_vr_on", False))
+
+    def _cpr_vr_pick_ok(self, key) -> bool:
+        """A plain click on VR pane *key* picks the trace start point."""
+        return (self._cpr_vr_active() and key == "A"
+                and bool(getattr(self, "_vr_on", {}).get(key))
+                and self._cpr is None)
+
+    def _cpr_vr_crop_mask(self):
+        """Bool [z,y,x] sphere of _CPR_VR_CROP_MM around the start-VR centre (the
+        map pane's centre when VR始点 was pressed). Not the LV-Epi shell on
+        purpose: that drops the aortic root, LM/RCA ostia and the right AV
+        groove — exactly where the proximal start is."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return None
+        c = getattr(self, "_cpr_vr_center", None)
+        if c is None:
+            return None
+        sx, sy, sz = (float(d) for d in self._dims)
+        R = float(self._CPR_VR_CROP_MM)
+        nz, ny, nx = vol.shape
+        ci = (float(c[2]) / sz, float(c[1]) / sy, float(c[0]) / sx)
+        lo = [max(0, int(math.floor(ci[0] - R / sz))),
+              max(0, int(math.floor(ci[1] - R / sy))),
+              max(0, int(math.floor(ci[2] - R / sx)))]
+        hi = [min(nz, int(math.ceil(ci[0] + R / sz)) + 1),
+              min(ny, int(math.ceil(ci[1] + R / sy)) + 1),
+              min(nx, int(math.ceil(ci[2] + R / sx)) + 1)]
+        mask = np.zeros(vol.shape, bool)
+        if any(h <= l for l, h in zip(lo, hi)):
+            return mask
+        zz, yy, xx = np.ogrid[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+        d2 = (((zz * sz) - float(c[2])) ** 2 + ((yy * sy) - float(c[1])) ** 2
+              + ((xx * sx) - float(c[0])) ** 2)
+        mask[lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]] = d2 <= R * R
+        return mask
+
+    def _cpr_vr_first_hit(self, O, D, mask=None, shift=0.0, step=0.5):
+        """March the ray O + t·D (volume mm) front-to-back through the HU volume
+        with the VR opacity ramp (slid by *shift* HU, as the VR W/L does) and
+        return the point where the accumulated opacity first reaches 0.25 —
+        the visible surface under the cursor — or None if the ray hits nothing.
+        Voxels outside *mask* (the VR crop) are transparent."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return None
+        O = np.asarray(O, float)
+        D = np.asarray(D, float)
+        nd = float(np.linalg.norm(D))
+        if nd < 1e-9:
+            return None
+        D = D / nd
+        dims = np.asarray(self._dims, float)
+        nz, ny, nx = vol.shape
+        hi = np.array([nx - 1, ny - 1, nz - 1], float) * dims
+        t0, t1 = 0.0, np.inf
+        for i in range(3):                       # clip the ray to the volume box
+            if abs(D[i]) < 1e-12:
+                if O[i] < 0.0 or O[i] > hi[i]:
+                    return None
+                continue
+            ta = (0.0 - O[i]) / D[i]
+            tb = (hi[i] - O[i]) / D[i]
+            t0 = max(t0, min(ta, tb))
+            t1 = min(t1, max(ta, tb))
+        if not np.isfinite(t1) or t1 <= t0:
+            return None
+        ts = np.arange(t0, t1, float(step))
+        if len(ts) == 0:
+            return None
+        P = O[None, :] + ts[:, None] * D[None, :]
+        ix = np.clip(np.rint(P[:, 0] / dims[0]).astype(np.intp), 0, nx - 1)
+        iy = np.clip(np.rint(P[:, 1] / dims[1]).astype(np.intp), 0, ny - 1)
+        iz = np.clip(np.rint(P[:, 2] / dims[2]).astype(np.intp), 0, nz - 1)
+        hu = vol[iz, iy, ix].astype(float)
+        if mask is not None:
+            m = np.asarray(mask)
+            if m.shape == vol.shape:
+                hu = np.where(m[iz, iy, ix] > 0, hu, -1000.0)
+        a = np.interp(hu, self._CPR_VR_OP_HU + float(shift), self._CPR_VR_OP_A)
+        a = np.clip(a * (float(step) / 0.8), 0.0, 1.0)
+        acc = 1.0 - np.cumprod(1.0 - a)
+        k = int(np.argmax(acc >= 0.25))
+        if acc[k] < 0.25:
+            return None
+        return P[k]
+
+    def _cpr_vr_pick_start(self, key, sx, sy, dvr=None) -> bool:
+        """VR click → the vessel point under (sx, sy) becomes the trace start.
+        The visible surface hit is snapped along the view ray to the centre of
+        the vessel-sized lumen there (a chamber-sized run is ignored, so a click
+        on a chamber wall stays on the surface for the user to check)."""
+        ray = self._cpr_vr_ray(key, sx, sy, dvr)
+        if ray is None:
+            return False
+        O, D, mask, shift = ray
+        P0 = self._cpr_vr_first_hit(O, D, mask=mask, shift=shift)
+        if P0 is None:
+            return False
+        P = self._cpr_vr_snap(P0, D)
+        self._cpr_vr_set_start(P)
+        return True
+
+    def _cpr_vr_snap(self, P0, D, max_lumen_mm=6.0, floor_hu=150.0):
+        """Visible-surface hit *P0* → the vessel's lumen centre. First along the
+        view ray *D*: the bright run just behind the surface, if it is VESSEL-
+        sized (≤ *max_lumen_mm* deep — a chamber / aorta is deeper, then *P0*
+        is kept so a chamber click is not dragged inside). Then a local 3-D
+        HU-weighted centroid (r 2.5 mm) pulls a click on the vessel's flank
+        onto its axis. (Not the MPR _snap_to_lumen: its in-plane cavity guard
+        reads a vessel lying ACROSS the view as a cavity.)"""
+        P0 = np.asarray(P0, float)
+        D = np.asarray(D, float)
+        D = D / max(1e-9, float(np.linalg.norm(D)))
+        step = 0.25
+        ds = np.arange(-1.0, 10.0 + step, step)
+        hu = self._hu_along(P0, D, ds)
+        if hu is None:
+            return P0
+        peak = float(hu.max())
+        if peak < floor_hu:
+            return P0
+        thr = max(floor_hu, 0.5 * peak)
+        bright = hu >= thr
+        i0 = int(np.argmax(ds >= 0.0))
+        idx = np.where(bright[i0:])[0]
+        if len(idx) == 0:
+            return P0
+        i = i0 + int(idx[0])
+        while i > 0 and bright[i - 1]:
+            i -= 1
+        j = i
+        while j < len(ds) and bright[j]:
+            j += 1
+        if float(ds[j - 1] - ds[i]) > max_lumen_mm or j >= len(ds):
+            return P0                             # chamber-deep → keep the surface
+        w = hu[i:j] - thr + 1e-3
+        P = P0 + float(np.dot(w, ds[i:j]) / float(w.sum())) * D
+        return self._cpr_vr_centroid(P, thr)
+
+    def _cpr_vr_centroid(self, P, thr, r_mm=2.5, iters=2):
+        """HU-weighted centroid of the ≥*thr* voxels within *r_mm* of *P*
+        (twice) — re-centres a point on a tube's axis. Skipped where the
+        neighbourhood is mostly bright (a cavity, not a vessel)."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return np.asarray(P, float)
+        dims = np.asarray(self._dims, float)
+        nz, ny, nx = vol.shape
+        P = np.asarray(P, float)
+        for _ in range(int(iters)):
+            c = P / dims
+            rv = np.ceil(r_mm / dims).astype(int)
+            x0, x1 = max(0, int(c[0]) - rv[0]), min(nx, int(c[0]) + rv[0] + 2)
+            y0, y1 = max(0, int(c[1]) - rv[1]), min(ny, int(c[1]) + rv[1] + 2)
+            z0, z1 = max(0, int(c[2]) - rv[2]), min(nz, int(c[2]) + rv[2] + 2)
+            if x1 <= x0 or y1 <= y0 or z1 <= z0:
+                break
+            sub = vol[z0:z1, y0:y1, x0:x1].astype(float)
+            zz, yy, xx = np.mgrid[z0:z1, y0:y1, x0:x1]
+            X = xx * dims[0]
+            Y = yy * dims[1]
+            Z = zz * dims[2]
+            inside = ((X - P[0]) ** 2 + (Y - P[1]) ** 2 + (Z - P[2]) ** 2
+                      <= r_mm * r_mm)
+            br = inside & (sub >= thr)
+            n_in = int(inside.sum())
+            if n_in == 0 or not br.any() or br.sum() > 0.75 * n_in:
+                break
+            w = (sub - thr + 1.0)[br]
+            P = np.array([float((X[br] * w).sum() / w.sum()),
+                          float((Y[br] * w).sum() / w.sum()),
+                          float((Z[br] * w).sum() / w.sum())])
+        return P
+
+    def _cpr_vr_set_start(self, P) -> None:
+        """Make *P* the first point of the trace on the map pane B: B's plane is
+        centred on it (Slab MIP through the start) and the draft polyline starts
+        there. A trace already in progress keeps its later points and only gets
+        its start replaced (re-pick the start without losing the distal clicks)."""
+        P = np.asarray(P, float)
+        self._cpr_vr_start = P.copy()
+        self._cpr_recenter_map_pane("B", P)
+        d = getattr(self, "_draft", None)
+        if (d is not None and d.get("pane") == "B"
+                and d.get("type") == "polyline" and d.get("pts3d")
+                and len(d["pts3d"]) == len(d.get("pts", [])) >= 2):
+            d["pts3d"][0] = P
+        else:
+            d = {"type": "polyline", "pane": "B", "pts": [(0.0, 0.0)],
+                 "pts3d": [P]}
+            self._draft = d
+            self._draft_redo = []
+        d["pts"] = [self._world3d_to_out("B", Q) for Q in d["pts3d"]]
+        self._refresh(reset_cam=False)
+        self._redraw_geom("B")
+        self._cpr_vr_line_update()
+        if hasattr(self, "_set_active"):
+            self._set_active("B")
+        if hasattr(self, "_flash_active_frame"):
+            self._flash_active_frame()
+
+    def _cpr_vr_line_pts(self):
+        """(points, start) to overlay on the start VR: the trace being drawn on
+        B (3-D clicks) and the picked start point; ([], None) when off."""
+        if not self._cpr_vr_active():
+            return [], None
+        d = getattr(self, "_draft", None)
+        pts = []
+        if (d is not None and d.get("pane") == "B"
+                and d.get("type") == "polyline" and d.get("pts3d")):
+            pts = [np.asarray(q, float) for q in d["pts3d"]]
+        start = getattr(self, "_cpr_vr_start", None)
+        if pts:
+            start = pts[0]
+        return pts, start
+
+    def _cpr_vr_toggle(self) -> None:
+        """VR始点 button: show (or hide) the heart VR on the left pane for
+        picking the vessel's proximal start. Arms Draw if needed."""
+        if self._cpr_vr_active():
+            self._cpr_vr_stop()
+            return
+        if getattr(self, "_vol", None) is None or self._mode != "3D":
+            self._cpr_vr_sync_btn()
+            return
+        if not getattr(self, "_coronary_mpr_pending", False):
+            self._coronary_draw()                # arms Measure + Polyline
+        if not getattr(self, "_coronary_mpr_pending", False):
+            self._cpr_vr_sync_btn()
+            return
+        self._cpr_vr_on = True
+        self._cpr_vr_start = None
+        self._cpr_vr_center = np.asarray(self._pc["B"], float).copy()
+        if hasattr(self, "set_side"):
+            self.set_side("Bi")
+        try:
+            self._vr_set("A", True)              # crop: _cpr_vr_crop_mask
+        except Exception:                        # noqa: BLE001
+            self._cpr_vr_on = False
+            raise
+        finally:
+            self._cpr_vr_sync_btn()
+        self._cpr_vr_line_update()
+
+    def _cpr_vr_stop(self) -> None:
+        """Leave the start VR (CPR built / Draw disarmed / Exit / button)."""
+        if not self._cpr_vr_active():
+            return
+        self._cpr_vr_on = False
+        self._cpr_vr_start = None
+        self._cpr_vr_line_update()               # clears the VR overlay line
+        if getattr(self, "_vr_on", {}).get("A"):
+            self._vr_set("A", False)
+        self._cpr_vr_sync_btn()
+
+    def _cpr_vr_sync_btn(self) -> None:
+        b = getattr(self, "_cpr_vr_btn", None)
+        if b is None:
+            return
+        b.blockSignals(True)
+        b.setChecked(self._cpr_vr_active())
+        b.blockSignals(False)
+
     def _cpr_apply_xform(self):
         """Rebuild the CPR display axes u, v from the base frame (u0, v0), the
         cumulative Rt90/Flip transform T, and the continuous rotation ``rot``

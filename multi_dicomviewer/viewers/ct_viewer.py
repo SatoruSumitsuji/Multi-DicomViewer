@@ -1076,6 +1076,7 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                     and self._owner._vr_pick_target(self._which, x, y)):
                 return
             self._vr_drag = True
+            self._vr_press_xy = (x, y)            # click (no drag) = VR始点 pick
             self._last = e.position()
             return
         # VR: a RIGHT-click on a Target marker opens its menu (territory
@@ -1498,6 +1499,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         if self._vr_drag:
             self._vr_drag = False
             self._last = None
+            # VR始点: a click that did not drag picks the vessel start point.
+            _p0 = getattr(self, "_vr_press_xy", None)
+            self._vr_press_xy = None
+            _x, _y = e.position().x(), e.position().y()
+            if (_p0 is not None and self._owner._cpr_vr_pick_ok(self._which)
+                    and abs(_x - _p0[0]) + abs(_y - _p0[1]) <= 4.0):
+                self._owner._cpr_vr_pick_start(self._which, _x, _y)
+                return
             # Rotation stopped → refresh the VR C-arm readout (LAO/RAO·CRA/CAU).
             try:
                 self._owner._vr_update_angle(self._which)
@@ -3756,6 +3765,18 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
+        # VR始点: a heart VR on the left pane to pick the vessel's proximal start
+        # (where it is hard to tell on the MPR which vessel is which).
+        self._cpr_vr_btn = FitButton(t("VR始点"))
+        self._cpr_vr_btn.setCheckable(True)
+        self._cpr_vr_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_vr_btn.setHelpToolTip(t(
+            "左ペインに心臓のVRを表示し、血管の近位部（始点）をクリックで指定します"
+            "（ドラッグは回転）。右ペインがその点を通るSlab MIPに移動するので、"
+            "続けて遠位側をクリックしてください。描いた線はVR上にも表示されます"))
+        self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
+        row.addWidget(self._cpr_vr_btn)
         # Fit: rebuild the short-axis from the (edited) control points, keeping
         # the display state — so an in-place Measure edit of the centreline is
         # followed by the cross-section without a Save→Exit→Load round-trip.
@@ -3952,6 +3973,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             # so it's obvious Draw is active / a CPR is being created.
             self._cpr_draw_btn.setStyleSheet(
                 self._LV_STY["trace"] if pend else self._LV_STY["off"])
+        if getattr(self, "_cpr_vr_btn", None) is not None:
+            self._cpr_vr_btn.setEnabled(self._mode == "3D")
+            self._cpr_vr_sync_btn()
         # One selected mode at a time across CPR + the LV mode buttons: sync the
         # CPR button, then (CPR-aware) restyle the whole LV mode row so entering
         # CPR greys out MV/AoV/Apex/Epi/Blood/FullLV — not just MV/AoV/Apex as
@@ -11481,6 +11505,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if (d is not None and d.get("pane") == key and d.get("pts3d")
                     and len(d["pts3d"]) == len(d["pts"])):
                 d["pts"] = [self._world3d_to_out(key, P) for P in d["pts3d"]]
+        if key == "B" and self._cpr_vr_active():
+            self._cpr_vr_line_update()           # the trace so far, on the VR
         p = self.pane[key]
         # Scale the measurement line widths by the render-window DPR so they
         # render at the intended on-screen thickness on scaled displays.
@@ -12705,8 +12731,91 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         None → no crop (full CT)."""
         if self._vol is None:
             return None
+        if self._cpr_vr_active():                # VR始点: heart sphere (keeps ostia)
+            return self._cpr_vr_crop_mask()
         return (self._vr_shell_mask() if getattr(self, "_vr_shell", True)
                 else self._vr_epi_full_mask())
+
+    # ---- VR始点 (backend part; shared logic in CPRMixin) ------------------
+    def _cpr_vr_ray(self, key, sx, sy, dvr=None):
+        """(origin, dir, crop mask, opacity HU shift) of the view ray under the
+        click (sx, sy) on VR pane *key*, in VOLUME mm (the pts3d frame) — the
+        VTK perspective camera unprojected, then undone through the VR
+        orientation matrix the volume renders under. None if not in VR."""
+        if not self._vr_on.get(key):
+            return None
+        p = self.pane[key]
+        ren = p.ren
+        dpr = max(1.0, p.canvas.devicePixelRatioF())
+        _W, H = ren.GetRenderWindow().GetSize()
+        vx, vy = sx * dpr, H - sy * dpr
+        ends = []
+        for z in (0.0, 1.0):
+            ren.SetDisplayPoint(float(vx), float(vy), z)
+            ren.DisplayToWorld()
+            w = np.asarray(ren.GetWorldPoint(), float)
+            if abs(w[3]) < 1e-12:
+                return None
+            ends.append(w[:3] / w[3])
+        M = self._vr_xform.get(key)
+        Mi = np.linalg.inv(np.asarray(M, float)) if M is not None else np.eye(4)
+        a = Mi @ np.array([*ends[0], 1.0])
+        b = Mi @ np.array([*ends[1], 1.0])
+        O, F = a[:3] / a[3], b[:3] / b[3]
+        mask = self._vr_mask_arr.get(key)
+        return O, F - O, mask, self._vr_shift(key)
+
+    def _cpr_vr_line_update(self) -> None:
+        """Draw the trace being built (and the picked start) on the start VR as
+        a 2-D overlay pinned to world points — always on top, so the vessel
+        being followed stays visible over the heart surface."""
+        p = self.pane["A"]
+        pts, start = self._cpr_vr_line_pts()
+        act = getattr(p, "cpr_vr_act", None)
+        if not pts and start is None:
+            if act is not None:
+                act.SetVisibility(False)
+                p.render()
+            return
+        if act is None:
+            from vtkmodules.vtkRenderingCore import (vtkActor2D, vtkCoordinate,
+                                                     vtkPolyDataMapper2D)
+            coord = vtkCoordinate()
+            coord.SetCoordinateSystemToWorld()
+            mp = vtkPolyDataMapper2D()
+            mp.SetTransformCoordinate(coord)
+            act = vtkActor2D()
+            act.SetMapper(mp)
+            pr = act.GetProperty()
+            pr.SetColor(1.0, 0.88, 0.0)
+            pr.SetLineWidth(3.0)
+            pr.SetPointSize(11.0)
+            p.ren.AddViewProp(act)
+            p.cpr_vr_act = act
+            p.cpr_vr_coord = coord
+        M = self._vr_xform.get("A")
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        P = [np.asarray(q, float) for q in (pts or [start])]
+        vp = vtkPoints()
+        for q in P:
+            w = Mm @ np.array([q[0], q[1], q[2], 1.0])
+            vp.InsertNextPoint(float(w[0] / w[3]), float(w[1] / w[3]),
+                               float(w[2] / w[3]))
+        verts = vtkCellArray()
+        verts.InsertNextCell(1)
+        verts.InsertCellPoint(0)                 # the start point as a dot
+        lines = vtkCellArray()
+        if len(P) >= 2:
+            lines.InsertNextCell(len(P))
+            for i in range(len(P)):
+                lines.InsertCellPoint(i)
+        pd = vtkPolyData()
+        pd.SetPoints(vp)
+        pd.SetVerts(verts)
+        pd.SetLines(lines)
+        act.GetMapper().SetInputData(pd)
+        act.SetVisibility(bool(self._vr_on.get("A")))
+        p.render()
 
     def _mask_to_vtk_binary(self, mask):
         """A bool [z,y,x] mask → a uint8 vtkImageData binary mask for the GPU
@@ -12990,6 +13099,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # Exit VR on any pane still in it — _vr_set(False) restores the hidden MPR
         # props and hides every VR volume / tube / halo / cap / territory / target /
         # summary actor, and clears the territory-review layout flag.
+        try:
+            self._cpr_vr_stop()                          # VR始点 (+ its line)
+        except Exception:                                # noqa: BLE001
+            self._cpr_vr_on = False
         for k in ("A", "B"):
             try:
                 if self._vr_on.get(k):
@@ -12997,6 +13110,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 pass
         self._vr_xform = {"A": np.eye(4), "B": np.eye(4)}   # drop VR orientation
+        getattr(self, "_vr_view_saved", {}).pop("A", None)   # VR始点 view (old series)
         # Drop the overlay / territory / target DATA + summaries.
         self._coro_overlay = None
         self._coro_overlay_vr = None
@@ -13265,6 +13379,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if vol is not None and getattr(p, "vr_mapper", None) is not None:
             self._vr_apply_volume_xform(key, M)
         self._vr_coro_depth_lift(key)                # float near-side tubes to the front
+        if key == "A" and self._cpr_vr_active() \
+                and getattr(p, "cpr_vr_act", None) is not None:
+            self._cpr_vr_line_update()               # VR始点 line follows Rt90/Flip
 
     def _vr_coro_depth_lift(self, key) -> None:
         """Nudge the coronary tube / target actors a few mm TOWARD the camera on VR
@@ -19649,6 +19766,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._coronary_mode = True
         if getattr(self, "_coronary_mpr_pending", False):   # armed → disarm
             self._coronary_mpr_pending = False
+            self._cpr_vr_stop()                      # VR始点 only while tracing
             self._coronary_sync_ui()
             return
         self._view_initial = False                   # don't auto-refit on the
@@ -19674,6 +19792,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
         self._cpr_exclude_seeding = False
         self._cpr_drop_source()                      # delete the Polyline data
@@ -19724,6 +19843,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         *keep_view* (the right-click ▸ 編集 resume) does NOT re-fit the map camera
         on entry, so the LAO/CRA angle the user adjusted to pick this CPR is kept
         instead of jumping back to a default (LAO0/CRA0) MPR."""
+        # The VR始点 VR on pane A ends here: A becomes the cross-section.
+        self._cpr_vr_stop()
         # Remember the MPR view we're tracing on so re-Draw (see _coronary_draw)
         # can return to THIS exact image instead of a reset MPR.
         self._cpr_prev_view = self._view_snapshot()

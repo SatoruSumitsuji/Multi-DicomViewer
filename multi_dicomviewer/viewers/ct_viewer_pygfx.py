@@ -1095,6 +1095,27 @@ class _Overlay(QWidget):
                 p, QRectF(mx + 8, my - 18, 60, 18),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 str(tg.get("n", "")), tcol, width=1.2)
+        # VR始点: the trace being drawn on the map pane + the picked start,
+        # always on top (no occlusion) so the followed vessel stays visible.
+        if key == "A" and v._cpr_vr_active():
+            lpts, start = v._cpr_vr_line_pts()
+            P = lpts or ([start] if start is not None else [])
+            if P:
+                sx, sy, _d = project(P)
+                if len(P) >= 2:
+                    run = QPolygonF([QPointF(float(sx[k]), float(sy[k]))
+                                     for k in range(len(P))])
+                    p.setPen(QPen(QColor(0, 0, 0, 170), 5.0,
+                                  Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                  Qt.PenJoinStyle.RoundJoin))
+                    p.drawPolyline(run)
+                    p.setPen(QPen(QColor(255, 224, 0), 2.6,
+                                  Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                                  Qt.PenJoinStyle.RoundJoin))
+                    p.drawPolyline(run)
+                p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
+                p.setBrush(QColor(255, 224, 0))
+                p.drawEllipse(QPointF(float(sx[0]), float(sy[0])), 5.5, 5.5)
         p.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_vr_readouts(self, p, key, w, h) -> None:
@@ -3387,6 +3408,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 self._reset_pointer_state()
                 return
             self._vr_drag = key
+            # VR始点: a click (no drag) picks the start — remember WHICH image
+            # (DVR stop-frame / GPU MIP) the user clicked on, before it swaps.
+            self._vr_press = (key, x, y, bool(self._vr_dvr_shown.get(key)))
             # Dragging resumes the fast GPU MIP; the CPU DVR stop-frame comes back
             # on release (see _on_up → _vr_schedule_dvr).
             if self._vr_dvr_shown.get(key):
@@ -3827,6 +3851,17 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             self._vr_drag = None
             self._drag_btn = None
             self._last = None
+            # VR始点: a click that did not drag picks the vessel start point (on
+            # the image that was shown at the press), then the DVR settles back.
+            vp = getattr(self, "_vr_press", None)
+            self._vr_press = None
+            if (vp is not None and vp[0] == k and self._cpr_vr_pick_ok(k)
+                    and abs(ev["x"] - vp[1]) + abs(ev["y"] - vp[2]) <= 4.0):
+                try:
+                    self._cpr_vr_pick_start(k, vp[1], vp[2], dvr=vp[3])
+                except Exception:                        # noqa: BLE001
+                    import traceback
+                    traceback.print_exc()
             if self.pane[k].vr_volume is None:
                 self._vr_refresh(k, lod=False)
             else:
@@ -3934,6 +3969,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_line_drag = None
         self._lv_apex_drag = None
         self._cpr_band = None
+        self._vr_press = None
         try:
             gw = QWidget.mouseGrabber()
             if gw is not None:
@@ -5342,6 +5378,11 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             return
         self._loaded_uid = new_uid
         self._undo_clear()                   # fresh Ctrl+Z history for the series
+        try:                                 # VR始点 belongs to the old volume
+            self._cpr_vr_stop()
+        except Exception:                    # noqa: BLE001
+            self._cpr_vr_on = False
+        getattr(self, "_vr_saved", {}).pop("A", None)
 
         # A genuinely new series → leave any LV mode and clear its state (the
         # borders/axis are tied to the previous series' volume coordinates).
@@ -6005,6 +6046,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         the septal territory + coronary (A); else Epi+shell / Epi interior."""
         if self._vol is None:
             return None
+        if self._cpr_vr_active():                # VR始点: heart sphere (keeps ostia)
+            return self._cpr_vr_crop_mask()
         lv = self._vr_lv_myo_mask()
         if lv is not None:
             return lv
@@ -6461,6 +6504,57 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         sy = (0.5 - ny * 0.5) * ph      # NDC y-up → screen y-down
         return sx, sy, w
 
+    # ---- VR始点 (backend part; shared logic in CPRMixin) ------------------
+    def _cpr_vr_ray(self, key, sx, sy, dvr=None):
+        """(origin, dir, crop mask, opacity HU shift) of the view ray under the
+        click (sx, sy) on VR pane *key*, in volume mm. *dvr* says which image
+        was on screen at the press: the CPU DVR stop-frame (parallel
+        _vr_basis) or the GPU MIP (perspective vr_cam, texture mirrored for
+        Flip-H/V → the ray is un-mirrored). None if not in VR."""
+        if not self._vr_on.get(key) or self._vol is None:
+            return None
+        p = self.pane[key]
+        if dvr is None:
+            dvr = bool(self._vr_dvr_shown.get(key))
+        mask = self._vr_mask
+        shift = self._wl_of(key)[1] - 300.0
+        dims = np.asarray(self._dims, float)
+        if dvr or p.vr_cam is None or p.vr_volume is None:
+            ctr, right, up, back, halfW, halfH, pw, ph = self._vr_basis(key)
+            u = (float(sx) / pw - 0.5) * 2.0 * halfW
+            v = (0.5 - float(sy) / ph) * 2.0 * halfH
+            L = float(np.linalg.norm(
+                np.asarray(self._vol.shape[::-1], float) * dims)) or 1.0
+            O = ctr + u * right + v * up + back * L
+            return O, -np.asarray(back, float), mask, shift
+        cam = p.vr_cam
+        pw = max(1, p.canvas.width())
+        ph = max(1, p.canvas.height())
+        try:
+            Minv = np.linalg.inv(np.asarray(cam.camera_matrix, float))
+            C = np.asarray(cam.world.position, float).reshape(3).copy()
+        except Exception:                                # noqa: BLE001
+            return None
+        h = Minv @ np.array([float(sx) / pw * 2.0 - 1.0,
+                             1.0 - float(sy) / ph * 2.0, 1.0, 1.0])
+        if abs(h[3]) < 1e-12:
+            return None
+        F = h[:3] / h[3]
+        fh, fv = self._vr_flip.get(key, [False, False])
+        for e in (C, F):
+            if fh:
+                e[0] = (self._vol.shape[2] - 1) * dims[0] - e[0]
+            if fv:
+                e[1] = (self._vol.shape[1] - 1) * dims[1] - e[1]
+        return C, F - C, mask, shift
+
+    def _cpr_vr_line_update(self) -> None:
+        """The VR始点 trace overlay is painted by _paint_vr_coronary."""
+        try:
+            self._overlay["A"].update()
+        except Exception:                                # noqa: BLE001
+            pass
+
     def _vr_gesture(self, key, dx, dy, mode, shift=False) -> None:
         """One VR drag step. mode: 'rotate' (trackball, plain drag) or — when
         Alt+Left-drag applies the SELECTED toolbar tool — 'move' (pan), 'zoom'
@@ -6662,8 +6756,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 t("VR作成中"), t("VR作成中"), self._vr_crop_mask)
             self._vr_gpu_enable(key)              # GPU volume (real-time)
             # Orient the LEFT (non-VR) pane to the LV short-axis so Paging steps
-            # through LV levels and it stays ON the LV (Windows parity).
-            self._vr_orient_left_sax("A" if key != "A" else "B")
+            # through LV levels and it stays ON the LV (Windows parity). Not for
+            # VR始点: the other pane is the trace's Slab MIP — keep it as is.
+            if not self._cpr_vr_active():
+                self._vr_orient_left_sax("A" if key != "A" else "B")
             # Make the VR pane active so the toolbar greys for IT (Rotate enabled
             # on the VR pane; the left SAX pane disables Rotate) — must precede the
             # tool default or _refresh_tool_availability would fall ROTATE back.
@@ -9274,6 +9370,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
     def _redraw_geom(self, key):
         self._reproject_traces(key)
         self._overlay[key].update()
+        if key == "B" and self._cpr_vr_active():
+            self._cpr_vr_line_update()           # the trace so far, on the VR
 
     def _redraw_meas(self, key):
         self._reproject_traces(key)
@@ -18708,6 +18806,18 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
+        # VR始点: a heart VR on the left pane to pick the vessel's proximal start
+        # (where it is hard to tell on the MPR which vessel is which).
+        self._cpr_vr_btn = FitButton(t("VR始点"))
+        self._cpr_vr_btn.setCheckable(True)
+        self._cpr_vr_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_vr_btn.setHelpToolTip(t(
+            "左ペインに心臓のVRを表示し、血管の近位部（始点）をクリックで指定します"
+            "（ドラッグは回転）。右ペインがその点を通るSlab MIPに移動するので、"
+            "続けて遠位側をクリックしてください。描いた線はVR上にも表示されます"))
+        self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
+        row.addWidget(self._cpr_vr_btn)
         # Fit: rebuild the short-axis from the (edited) control points, keeping
         # the display state — follows an in-place Measure edit of the centreline
         # without a Save→Exit→Load round-trip.
@@ -18914,6 +19024,9 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             # so it's obvious Draw is active / a CPR is being created.
             self._cpr_draw_btn.setStyleSheet(
                 self._LV_STY["trace"] if pend else self._BTN_DIS)
+        if getattr(self, "_cpr_vr_btn", None) is not None:
+            self._cpr_vr_btn.setEnabled(self._mode == "3D")
+            self._cpr_vr_sync_btn()
         # One selected mode at a time across CPR + the LV mode buttons: sync the
         # CPR button, then (CPR-aware) restyle the whole LV mode row so entering
         # CPR greys out MV/AoV/Apex/Epi/Blood/FullLV — not just MV/AoV/Apex as
@@ -18960,6 +19073,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._coronary_mode = True
         if getattr(self, "_coronary_mpr_pending", False):
             self._coronary_mpr_pending = False
+            self._cpr_vr_stop()                      # VR始点 only while tracing
             self._coronary_sync_ui()
             return
         self._view_initial = False                   # don't auto-refit (keep img)
@@ -18982,6 +19096,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         DELETE the traced centreline polyline, and hide the row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
         self._cpr_exclude_seeding = False
         self._cpr_drop_source()
@@ -19044,6 +19159,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         *keep_view* (the right-click ▸ 編集 resume) does NOT re-fit the map camera
         on entry, so the LAO/CRA angle the user adjusted is kept instead of
         jumping back to a default (LAO0/CRA0) MPR."""
+        # The VR始点 VR on pane A ends here: A becomes the cross-section.
+        self._cpr_vr_stop()
         # Remember the MPR view we're tracing on so re-Draw returns to THIS image.
         self._cpr_prev_view = self._view_snapshot()
         # Fresh CPR entry: no tree-vessel being resumed yet (the resume caller
