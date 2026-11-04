@@ -1095,6 +1095,26 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._cross = False
             self._meas_drag = False
             return
+        # CPR MAP pane (edit mode): Shift+drag = rubber-band select edit points
+        # (Shift+click toggles one); a plain click drops the selection and goes
+        # on as usual. A right-click with a selection → its bulk-edit menu.
+        if o._cpr_map_edit_ok(self._which):
+            _px, _py = e.position().x(), e.position().y()
+            if e.button() == Qt.MouseButton.LeftButton:
+                if e.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    o._cpr_band_start(self._which, _px, _py)
+                    self._last = None
+                    self._cross = False
+                    self._meas_drag = False
+                    return
+                o._cpr_sel_clear()
+            elif (e.button() == Qt.MouseButton.RightButton
+                    and o._cpr_sel_get()):
+                self._last = None
+                self._cross = False
+                self._meas_drag = False
+                o._cpr_sel_menu(self._which, _px, _py)
+                return
         # Short-axis (CPR) pane: a left-press on a control-point marker grabs it
         # to fine-tune the pseudo-centre in the cross-section (highest priority).
         if (e.button() == Qt.MouseButton.LeftButton
@@ -1324,6 +1344,9 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = e.position()
 
     def mouseMoveEvent(self, e):
+        if getattr(self._owner, "_cpr_band", None) is not None:
+            self._owner._cpr_band_move(e.position().x(), e.position().y())
+            return
         # VR: dragging a grabbed Target marker re-picks the nearest vessel point
         # under the cursor and moves the Target there (along the tree).
         if self._vr_tgt_drag is not None:
@@ -1444,6 +1467,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         self._last = p
 
     def mouseReleaseEvent(self, e):
+        if getattr(self._owner, "_cpr_band", None) is not None:
+            self._owner._cpr_band_move(e.position().x(), e.position().y())
+            self._owner._cpr_band_end()
+            self._last = None
+            return
         if self._owner._tri_drag is not None:
             # End the ▲ gesture. If it snapped (locked) the 90° rotation is already
             # applied → just commit it; if it was released before snapping, restore
@@ -11657,6 +11685,11 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                     draft_col = ((211, 47, 47) if self._lv["target"] == "endo"
                                  else (46, 139, 87))
             handles += list(d["pts"])
+        # CPR map pane: Shift+drag rubber-band rectangle (cyan).
+        _band = self._cpr_band_world_rect(key)
+        if _band is not None:
+            polylines.append(_band)
+            outline_colors.append((0, 220, 255, 255))
         p.meas_mapper.SetInputData(
             _colored_multi_pd(polylines, outline_colors)
         )
@@ -11690,7 +11723,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         # Off-plane pseudo-centres → hollow 50% yellow rings (中抜き). Ring
         # radius tracks the pane's parallel scale so the on-screen size stays
         # constant across zoom (same trick the ▲ markers use).
-        if off_pts:
+        sel_pts = self._cpr_sel_world_pts(key)   # CPR map: selected edit points
+        if off_pts or sel_pts:
             ps_off = p.ren.GetActiveCamera().GetParallelScale()
             # Size the hollow ring's OUTER edge to _CPR_RING_OUTER_PX — kept a
             # little smaller than the in-plane dot's radius (_MEAS_PT_PX/2) so
@@ -11702,9 +11736,14 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             h_phys = max(1.0, p.canvas.height() * dpr)
             ring_r_px = max(1.0, _CPR_RING_OUTER_PX - 1.2 * dpr)
             ring_r_world = ring_r_px * (2.0 * ps_off) / h_phys
-            rings = _ring_polylines(off_pts, ring_r_world)
-            p.meas_pts_off_mapper.SetInputData(
-                _colored_multi_pd(rings, [(255, 217, 0, 128)] * len(rings)))
+            rings = _ring_polylines(off_pts, ring_r_world) if off_pts else []
+            cols = [(255, 217, 0, 128)] * len(rings)
+            if sel_pts:
+                # Selected (Shift+drag) edit points: a larger magenta ring.
+                srings = _ring_polylines(sel_pts, ring_r_world * 2.0)
+                rings = list(rings) + list(srings)
+                cols += [(255, 60, 255, 255)] * len(srings)
+            p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())
         # Fully off-plane segments → dotted (点線) at 50%.
@@ -13912,6 +13951,10 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if self._lv_sax_active() and self._measures[which][hit[0]].get("_lv"):
                 self._redraw_lv(self._lv["sax_pane"])
                 self.pane[self._lv["sax_pane"]].render()
+            # CPR map pane: clicking an edit point shows ITS short-axis section in
+            # the left pane at once (no ◀ ▶ stepping needed).
+            if self._cpr_is_src(which, hit[0]):
+                self._cpr_goto_ctrl(hit[1])
             return True
         # A Center-Angle marker point can be dragged just like a polygon vertex.
         ca_hit = None if lv_drawing else self._pick_center_angle(which, sx, sy)
@@ -14226,6 +14269,12 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                         mid=int(m["id"])))
         except Exception:                               # noqa: BLE001
             pass
+        # Undo/redo of a CPR map-pane edit → the short-axis follows the points.
+        if self._cpr is not None and self._cpr.get("src") == pane:
+            try:
+                self._cpr_rebuild()
+            except Exception:                           # noqa: BLE001
+                pass
         self._redraw_meas(pane)
 
     def _meas_record(self, pane, before) -> None:
@@ -14814,13 +14863,18 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             if self._meas_edit_before is not None:
                 bpane, bsnap = self._meas_edit_before
                 self._meas_edit_before = None
-                if self._meas_edit_moved:
+                moved = self._meas_edit_moved
+                if moved:
                     self._meas_record(bpane, bsnap)
                     # Points changed → refresh this figure's Measure History
                     # entry in place (same figure number, new value).
                     if mi is not None and 0 <= mi < len(self._measures[key]):
                         self._emit_measure_update(key, self._measures[key][mi])
                 self._meas_edit_moved = False
+                # CPR map pane: a dragged edit point → rebuild the short-axis
+                # and show that point's section.
+                if moved and vi is not None and self._cpr_is_src(key, mi):
+                    self._cpr_map_point_moved(vi)
             return
         # Line press-drag-release: a real drag commits the 2-point line; a press
         # with (almost) no movement reverts to a 1-point draft so the classic
@@ -15218,6 +15272,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if del_pt is not None and chosen is del_pt:
             self._delete_point(which, mi, vi)
             _mr_changed = True
+            if self._cpr_is_src(which, mi):      # short-axis follows the edit
+                self._cpr_edit_rebuild()
         elif cpr_edit_act is not None and chosen is cpr_edit_act:
             self._enter_cpr(which, mi)           # re-enter the short-axis to edit
             return                               # _enter_cpr redraws itself
@@ -15325,6 +15381,8 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if chosen is add_pt:
             self._add_point(which, mi, sx, sy)
             _mr_changed = True
+            if self._cpr_is_src(which, mi):      # short-axis → the new point
+                self._cpr_map_added_point(which, sx, sy)
         elif cpr_act is not None and chosen is cpr_act:
             was_create = not m.get("_cpr_src")   # create vs Resume (edit)
             self._enter_cpr(which, mi)
@@ -20808,14 +20866,41 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 and not getattr(self, "_sync_view_applying", False)):
             self.sync_view_op.emit("active", {"which": which})
 
-    def _update_active_frames(self):
-        """Yellow border around the active CT pane (transparent on the
+    def _update_active_frames(self, flash: bool = False):
+        """Red border around the active CT pane (transparent on the
         other, same width so the layout doesn't shift)."""
         for key, f in self._frames.items():
             colr = "#ff2020" if key == self._active_pane else "transparent"
+            if flash and key == self._active_pane:
+                colr = "#ffe000"
             f.setStyleSheet(
                 "QFrame#ctpane { border: 3px solid %s; }" % colr
             )
+
+    def _set_tool_by_key(self, name):
+        """Tool hotkey: select the tool and, only if it really became the
+        active tool, blink the active pane's frame (red ↔ yellow ×2) so the
+        switch is noticed. No blink = not switched (tool disabled here, or
+        the key never reached the viewer)."""
+        self._set_tool(name)
+        if getattr(self, "_tool", None) == name:
+            self._flash_active_frame()
+
+    def _flash_active_frame(self, blinks: int = 2, ms: int = 110):
+        self._frame_flash_gen = getattr(self, "_frame_flash_gen", 0) + 1
+        gen = self._frame_flash_gen
+
+        def step(i):
+            if gen != self._frame_flash_gen:       # superseded by a newer flash
+                return
+            try:
+                self._update_active_frames(flash=(i % 2 == 0))
+            except RuntimeError:                   # widget deleted meanwhile
+                return
+            if i + 1 < 2 * blinks:
+                QTimer.singleShot(ms, lambda: step(i + 1))
+
+        step(0)
 
     def _sync_slab_spin(self):
         self._slab_spin.blockSignals(True)
@@ -22470,6 +22555,6 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                 return
         tool = _TOOL_KEYS.get(e.key())
         if tool:
-            self._set_tool(tool)
+            self._set_tool_by_key(tool)
         else:
             super().keyPressEvent(e)

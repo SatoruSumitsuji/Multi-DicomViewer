@@ -660,6 +660,263 @@ class CPRMixin:
         self._cpr_set_ctrl(m, src, p3)
         self._cpr_edit_rebuild()
 
+    # ---- MAP-pane edit points: click → show its section, Shift+drag select,
+    #      bulk Delete / Fit / Smooth (shared by both viewers) ----------------
+    def _cpr_src_measure(self):
+        """The active CPR's source trace measure on the map pane, or None."""
+        c = self._cpr
+        if c is None:
+            return None
+        src, mi = c.get("src"), c.get("src_mi")
+        if src not in ("A", "B") or mi is None \
+                or not (0 <= mi < len(self._measures.get(src, []))):
+            return None
+        return self._measures[src][mi]
+
+    def _cpr_is_src(self, which, mi) -> bool:
+        c = self._cpr
+        return (c is not None and which == c.get("src")
+                and mi == c.get("src_mi"))
+
+    def _cpr_map_edit_ok(self, which) -> bool:
+        """Map-pane bulk editing is live: a CPR is open, *which* is its map
+        (long-axis) pane, Measure is ON (handles shown) with no draw type."""
+        c = self._cpr
+        return (c is not None and which == c.get("src") and which != "A"
+                and bool(getattr(self, "_meas_on", False))
+                and not getattr(self, "_meas_type", None)
+                and getattr(self, "_mode", "3D") == "3D"
+                and self._cpr_src_measure() is not None)
+
+    def _cpr_goto_ctrl(self, k) -> None:
+        """Show control point *k*'s short-axis section in the left pane (a
+        click on that edit point on the map pane — no ◀ ▶ stepping needed).
+        The map is NOT panned, so the point stays under the cursor."""
+        c = self._cpr
+        if c is None:
+            return
+        idxs = self._cpr_ctrl_indices()
+        if not (0 <= k < len(idxs)):
+            return
+        if c["idx"] != int(idxs[k]):
+            c["idx"] = int(idxs[k])
+            self._cpr_sync_bar()
+            self._refresh()
+            try:
+                self.cpr_index_changed.emit(self._cpr_disp(c["idx"]))
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _cpr_map_point_moved(self, k) -> None:
+        """A map-pane drag of edit point *k* finished: rebuild the centreline
+        from the edited points and land the short-axis ON that point."""
+        if self._cpr is None:
+            return
+        self._cpr_rebuild()
+        self._cpr_goto_ctrl(k)
+
+    def _cpr_map_added_point(self, which, sx, sy) -> None:
+        """A map-pane 'Add point' on the CPR line: rebuild, then show the new
+        point's section (the edit point nearest the click)."""
+        if self._cpr is None:
+            return
+        self._cpr_rebuild()
+        m = self._cpr_src_measure()
+        if m is None:
+            return
+        best, bk = float("inf"), None
+        for k, q in enumerate(m.get("pts") or []):
+            qx, qy = self._cpr_screen_xy(which, q)
+            d = math.hypot(qx - sx, qy - sy)
+            if d < best:
+                best, bk = d, k
+        if bk is not None:
+            self._cpr_goto_ctrl(bk)
+
+    def _cpr_screen_xy(self, which, q):
+        """Screen px of output-plane point *q* on pane *which* (either viewer)."""
+        f = getattr(self, "_world_to_screen", None) or self._world_to_qt
+        return f(which, q[0], q[1])
+
+    def _cpr_sel_get(self):
+        """Selected map edit-point indices, dropped if the point count changed
+        since they were picked (an Add/Delete/rebuild elsewhere)."""
+        sel = getattr(self, "_cpr_sel", None) or set()
+        m = self._cpr_src_measure()
+        n = len(m.get("pts3d") or []) if m is not None else 0
+        if not sel or n != getattr(self, "_cpr_sel_n", -1):
+            self._cpr_sel = set()
+            return set()
+        return {k for k in sel if 0 <= k < n}
+
+    def _cpr_sel_set(self, sel) -> None:
+        m = self._cpr_src_measure()
+        self._cpr_sel = set(sel)
+        self._cpr_sel_n = len(m.get("pts3d") or []) if m is not None else 0
+
+    def _cpr_sel_clear(self) -> bool:
+        """Clear the selection; True if there was one (caller redraws)."""
+        had = bool(getattr(self, "_cpr_sel", None))
+        self._cpr_sel = set()
+        if had and self._cpr is not None:
+            self._redraw_geom(self._cpr.get("src"))
+        return had
+
+    def _cpr_band_start(self, which, sx, sy) -> None:
+        self._cpr_band = [which, float(sx), float(sy), float(sx), float(sy)]
+
+    def _cpr_band_move(self, sx, sy) -> None:
+        b = getattr(self, "_cpr_band", None)
+        if b is None:
+            return
+        b[3], b[4] = float(sx), float(sy)
+        self._redraw_geom(b[0])
+
+    def _cpr_band_end(self) -> None:
+        """Shift+drag released: select the edit points inside the rectangle
+        (replacing the selection). A Shift+CLICK (no real drag) toggles the
+        single point under the cursor instead."""
+        b = getattr(self, "_cpr_band", None)
+        self._cpr_band = None
+        if b is None:
+            return
+        which, x0, y0, x1, y1 = b
+        m = self._cpr_src_measure()
+        if m is None:
+            self._redraw_geom(which)
+            return
+        pts = m.get("pts") or []
+        sel = set(self._cpr_sel_get())
+        if abs(x1 - x0) < 4 and abs(y1 - y0) < 4:
+            best, bk = 12.0, None
+            for k, q in enumerate(pts):
+                qx, qy = self._cpr_screen_xy(which, q)
+                d = math.hypot(qx - x1, qy - y1)
+                if d < best:
+                    best, bk = d, k
+            if bk is not None:
+                sel ^= {bk}
+        else:
+            lx, hx = min(x0, x1), max(x0, x1)
+            ly, hy = min(y0, y1), max(y0, y1)
+            sel = set()
+            for k, q in enumerate(pts):
+                qx, qy = self._cpr_screen_xy(which, q)
+                if lx <= qx <= hx and ly <= qy <= hy:
+                    sel.add(k)
+        self._cpr_sel_set(sel)
+        self._redraw_geom(which)
+
+    def _cpr_band_world_rect(self, key):
+        """The rubber-band rectangle as a closed output-plane polyline on pane
+        *key* (for drawing), or None."""
+        b = getattr(self, "_cpr_band", None)
+        if b is None or b[0] != key:
+            return None
+        _, x0, y0, x1, y1 = b
+        cs = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        return [tuple(self._disp_to_world(key, x, y)) for x, y in cs]
+
+    def _cpr_sel_world_pts(self, key):
+        """Output-plane positions of the selected edit points on pane *key*."""
+        c = self._cpr
+        if c is None or key != c.get("src"):
+            return []
+        m = self._cpr_src_measure()
+        sel = self._cpr_sel_get()
+        if m is None or not sel:
+            return []
+        pts = m.get("pts") or []
+        return [pts[k] for k in sorted(sel) if k < len(pts)]
+
+    @staticmethod
+    def _cpr_smooth_pts(p3, sel, iters: int = 3, lam: float = 0.5):
+        """Smooth the selected control points: each moves *lam* of the way to
+        its neighbours' chord (at its own arc fraction, so points slide toward
+        a straighter course rather than along it). Unselected points and the
+        two vessel ends stay fixed, so the section blends into its neighbours."""
+        P = np.array([np.asarray(q, float) for q in p3])
+        n = len(P)
+        idx = sorted(k for k in sel if 0 < k < n - 1)
+        for _ in range(int(iters)):
+            Q = P.copy()
+            for k in idx:
+                a, b = P[k - 1], P[k + 1]
+                d1 = float(np.linalg.norm(P[k] - a))
+                d2 = float(np.linalg.norm(b - P[k]))
+                f = d1 / (d1 + d2) if (d1 + d2) > 1e-9 else 0.5
+                Q[k] = P[k] + lam * ((a + f * (b - a)) - P[k])
+            P = Q
+        return [P[k] for k in range(n)]
+
+    def _cpr_sel_apply(self, op: str) -> None:
+        """Bulk edit of the selected map edit points — 'delete' / 'fit' (snap
+        to the contrast-lumen centre) / 'smooth' — as ONE Ctrl+Z step, then
+        rebuild the short-axis (display state kept)."""
+        from PyQt6.QtWidgets import QMessageBox
+        c = self._cpr
+        m = self._cpr_src_measure()
+        sel = self._cpr_sel_get()
+        if c is None or m is None or not sel:
+            return
+        src = c["src"]
+        p3 = [np.asarray(q, float) for q in (m.get("pts3d") or [])]
+        n = len(p3)
+        before = self._meas_pane_snap(src)
+        keep_sel = True
+        if op == "delete":
+            new = [q for k, q in enumerate(p3) if k not in sel]
+            if len(new) < 2:
+                QMessageBox.information(
+                    self, t("Short-axis"),
+                    t("At least 2 edit points are required "
+                      "(cannot delete any more)."))
+                return
+            keep_sel = False
+        elif op == "fit":
+            new = list(p3)
+            for k in sel:
+                new[k] = self._cpr_snap_ctrl_to_lumen(
+                    p3[k], self._cpr_fit_tangent(p3, k))
+        elif op == "smooth":
+            new = self._cpr_smooth_pts(p3, sel)
+        else:
+            return
+        self._cpr_set_ctrl(m, src, new)
+        self._cpr_edit_rebuild()
+        if keep_sel and len(new) == n:
+            self._cpr_sel_set(sel)          # keep it: Smooth / Fit can repeat
+        else:
+            self._cpr_sel = set()
+        self._meas_record(src, before)
+        self._redraw_meas(src)
+
+    def _cpr_sel_menu(self, which, sx, sy) -> None:
+        """Right-click on the map pane while edit points are selected."""
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+        sel = self._cpr_sel_get()
+        if not sel:
+            return
+        menu = QMenu(self)
+        a_del = menu.addAction(t("選択した編集点を削除 ({n}点)", n=len(sel)))
+        a_fit = menu.addAction(t("選択した編集点を内腔中心へ補正 (Fit)"))
+        a_smo = menu.addAction(t("選択区間をスムージング"))
+        menu.addSeparator()
+        a_clr = menu.addAction(t("選択解除"))
+        chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+            QPoint(int(sx), int(sy))))
+        if hasattr(self, "_reset_pointer_state"):
+            self._reset_pointer_state()
+        if chosen is a_del:
+            self._cpr_sel_apply("delete")
+        elif chosen is a_fit:
+            self._cpr_sel_apply("fit")
+        elif chosen is a_smo:
+            self._cpr_sel_apply("smooth")
+        elif chosen is a_clr:
+            self._cpr_sel_clear()
+
     def _cpr_apply_xform(self):
         """Rebuild the CPR display axes u, v from the base frame (u0, v0), the
         cumulative Rt90/Flip transform T, and the continuous rotation ``rot``
