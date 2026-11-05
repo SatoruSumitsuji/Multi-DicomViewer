@@ -41,18 +41,21 @@ def _table_path(code: str) -> str:
 
 
 def _table(code: str) -> dict:
-    """The {english: translated} map for *code*, loaded once. English (and
-    any missing/broken table) is the empty map → t() returns its key."""
+    """The {source: translated} map for *code*, loaded once. A missing/broken
+    table is the empty map → t() returns its key.
+
+    Keys are the source string as written in the code — English for most of
+    the UI, Japanese for parts written in Japanese first. ``en.json`` maps
+    those Japanese-source keys to English (English keys need no entry)."""
     if code not in _tables:
         tbl: dict = {}
-        if code != "en":
-            try:
-                with open(_table_path(code), encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    tbl = {str(k): str(v) for k, v in loaded.items()}
-            except Exception:      # noqa: BLE001 — missing table ⇒ English
-                tbl = {}
+        try:
+            with open(_table_path(code), encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                tbl = {str(k): str(v) for k, v in loaded.items()}
+        except Exception:          # noqa: BLE001 — missing table ⇒ keys
+            tbl = {}
         _tables[code] = tbl
     return _tables[code]
 
@@ -81,6 +84,9 @@ def get_language() -> str:
 def t(text: str, **kwargs) -> str:
     """Translate *text* (English key) to the active language, filling any
     ``{name}`` placeholders from *kwargs*. Unknown keys fall back to the
-    English source."""
-    s = _table(_lang).get(text, text)
+    source — except that a Japanese-source key outside Japanese goes through
+    the English table first, so no Japanese is left on a non-Japanese UI."""
+    s = _table(_lang).get(text)
+    if s is None:
+        s = text if _lang == "ja" else _table("en").get(text, text)
     return s.format(**kwargs) if kwargs else s

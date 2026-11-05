@@ -778,7 +778,7 @@ class CoronaryTreeWindow(SnapDock):
         msg = t("CPRフォルダで更新しますか?\n追加 {a} 本 / 更新 {u} 本 / 削除 {d} 本",
                 a=len(to_add), u=len(to_update), d=len(to_remove))
         if rem_names:
-            shown = "・".join(rem_names[:12]) + (" …" if len(rem_names) > 12 else "")
+            shown = t("・").join(rem_names[:12]) + (" …" if len(rem_names) > 12 else "")
             msg += "\n" + t("削除される血管: {names}", names=shown)
             msg += "\n" + t("（削除された親の子は未接続に戻ります）")
         if QMessageBox.question(self, t("CPRフォルダで更新"), msg) \
@@ -2623,7 +2623,7 @@ class CoronaryTreeWindow(SnapDock):
         if refreshed:
             self._hint.setText(
                 t("読込みました: {p}（{n}本の血管を最新の .cpr.json で更新: {names}）",
-                  p=path, n=len(refreshed), names="・".join(refreshed[:8])))
+                  p=path, n=len(refreshed), names=t("・").join(refreshed[:8])))
         else:
             self._hint.setText(t("読込みました: {p}", p=path))
         return True

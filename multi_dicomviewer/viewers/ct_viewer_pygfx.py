@@ -15680,7 +15680,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                     self.window(), t("LV"),
                     t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
                       "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
-                      "ドロップしてください。", m="・".join(missing)))
+                      "ドロップしてください。", m=t("・").join(missing)))
                 return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")

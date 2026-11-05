@@ -132,7 +132,7 @@ def _fmt_offset(sec) -> str:
     try:
         total = float(sec)
     except (TypeError, ValueError):
-        return "0秒"
+        return t("{n}秒", n=0)
     sign = "−" if total < 0 else "＋"
     s = abs(total)
     d = int(s // 86400); s -= d * 86400
@@ -140,12 +140,12 @@ def _fmt_offset(sec) -> str:
     m = int(s // 60);    s -= m * 60
     out = ""
     if d:
-        out += f"{d}日"
+        out += t("{n}日", n=d)
     if h:
-        out += f"{h}時間"
+        out += t("{n}時間", n=h)
     if m:
-        out += f"{m}分"
-    out += f"{int(round(s))}秒"
+        out += t("{n}分", n=m)
+    out += t("{n}秒", n=int(round(s)))
     return sign + out
 
 

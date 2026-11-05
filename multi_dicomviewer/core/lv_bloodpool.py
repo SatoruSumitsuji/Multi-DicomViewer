@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from multi_dicomviewer.i18n import t
+
 
 def _seed_component(mask: np.ndarray, seed_ijk) -> np.ndarray:
     """Boolean array: the connected component of *mask* containing *seed_ijk*
@@ -277,8 +279,8 @@ def bloodpool_volume_epi(vol, spacing_xyz, epi_ring_pts, epi_contains, planes,
         # component = the LV cavity (papillary holes are filled downstream).
         if not mask.any():
             return {"error": "seed_out", "reason": "hu",
-                    "msg": ("no in-range blood inside the Epi surface — "
-                            "adjust the 下限/上限 HU range")}
+                    "msg": t("no in-range blood inside the Epi surface — "
+                             "adjust the 下限/上限 HU range")}
         comp = _largest_component(mask)
     else:
         si = (int(round(seed_xyz[2] / sz)) - z0,

@@ -21,6 +21,8 @@ Shape::
 """
 from __future__ import annotations
 
+from multi_dicomviewer.i18n import t
+
 #: File-format marker + version (see the module docstring on why this exists).
 FORMAT = "MDV-FullLV"
 VERSION = 1
@@ -104,8 +106,8 @@ def format_label(meta: dict, prefix: str = "") -> str:
     if len(parts) == 3:                                  # all present → no ID
         return head + " ".join(parts)
     if parts:                                            # some missing → + ID
-        return head + " ".join(parts) + " / " + (short or "(ID不明)")
-    return head + (short or "(未指定)")                   # nothing → ID only
+        return head + " ".join(parts) + " / " + (short or t("(ID不明)"))
+    return head + (short or t("(未指定)"))                # nothing → ID only
 
 
 def label_meta(data) -> dict:

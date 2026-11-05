@@ -6464,7 +6464,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         role, on, tip = self._LVV_KNOB_ROLE.get(
             method, self._LVV_KNOB_ROLE["hull_smooth"])
         if getattr(self, "_lvv_close_lbl", None) is not None:
-            self._lvv_close_lbl.setText(t(role) if role != "—" else "肉柱")
+            self._lvv_close_lbl.setText(t(role) if role != "—" else t("肉柱"))
             self._lvv_close_lbl.setEnabled(on)
         self._lvv_close_spin.setEnabled(on)
         self._lvv_close_spin.setToolTip(t(tip))
@@ -9942,7 +9942,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
                     self.window(), t("LV"),
                     t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
                       "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
-                      "ドロップしてください。", m="・".join(missing)))
+                      "ドロップしてください。", m=t("・").join(missing)))
                 return False
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")             # overlays only draw in 3-D MPR

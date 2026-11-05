@@ -35,6 +35,8 @@ import struct
 
 import numpy as np
 
+from multi_dicomviewer.i18n import get_language, t as _t
+
 # --- tuning defaults -------------------------------------------------------
 _MASK_BLUR_SIGMA_VOX = 0.8      # Gaussian blur (voxels) before marching cubes
 _TAUBIN_ITERS = 12             # mesh smoothing passes
@@ -437,9 +439,17 @@ def self_contained_html(glb_bytes: bytes, *, title="Multi-DICOMviewer VR",
         for t in (targets or []) if t.get("point") is not None])
     pb_json = json.dumps([[float(x) for x in row] for row in pbasis]) \
         if pbasis is not None else "null"
+    # UI strings of the exported page, in the app's current language.
+    s_tip = _esc(_t("ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動"))
+    s_spin = _t("自動回転: ")
+    s_reset = _esc(_t("視点リセット"))
+    s_bg = _esc(_t("背景"))
+    s_err = _esc(_t("読み込みエラー"))
+    js_spin = json.dumps(s_spin)
+    lang = get_language()
 
     return f"""<!doctype html>
-<html lang="ja">
+<html lang="{lang}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -478,11 +488,11 @@ def self_contained_html(glb_bytes: bytes, *, title="Multi-DICOMviewer VR",
 <div class="hud" id="tr">{tr_html}</div>
 <div class="hud" id="br">{br_html}</div>
 <div class="hud" id="angio"></div>
-<div id="tip">ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動</div>
+<div id="tip">{s_tip}</div>
 <div id="bar">
-  <button id="spin" class="on">自動回転: ON</button>
-  <button id="reset">視点リセット</button>
-  <button id="bgbtn">背景</button>
+  <button id="spin" class="on">{_esc(s_spin)}ON</button>
+  <button id="reset">{s_reset}</button>
+  <button id="bgbtn">{s_bg}</button>
 </div>
 <script>{three_js}</script>
 <script>{orbit_js}</script>
@@ -544,7 +554,7 @@ loader.parse(b64ToArrayBuffer(GLB_B64), '', (gltf)=>{{
   controls.target.set(0,0,0); controls.update();
   home.copy(camera.position);
 }}, (err)=>{{
-  document.getElementById('tl').innerHTML += '\\n<span style="color:#ff8">読み込みエラー</span>';
+  document.getElementById('tl').innerHTML += '\\n<span style="color:#ff8">{s_err}</span>';
   console.error(err);
 }});
 
@@ -557,7 +567,7 @@ window.addEventListener('resize', resize); resize();
 document.getElementById('spin').onclick = (e)=>{{
   controls.autoRotate = !controls.autoRotate;
   e.target.classList.toggle('on', controls.autoRotate);
-  e.target.textContent = '自動回転: ' + (controls.autoRotate?'ON':'OFF');
+  e.target.textContent = {js_spin} + (controls.autoRotate?'ON':'OFF');
 }};
 function resetView(){{ camera.position.copy(home); controls.target.set(0,0,0); controls.update(); }}
 document.getElementById('reset').onclick = resetView;

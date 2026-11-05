@@ -155,11 +155,20 @@ def _make_splash() -> QSplashScreen:
 
     line(48, APP_NAME, 22, QColor(236, 239, 245), bold=True)
     line(96, f"v{APP_VERSION}", 11, QColor(150, 200, 255))
-    line(142, "研究用DICOMビューワ", 13, QColor(210, 214, 222))
-    line(178, "研究・教育用", 12, QColor(255, 200, 90), bold=True)
-    line(206, "本アプリの使用による不具合の責任は使用者にあります",
+    # The saved UI language is applied before the splash is drawn.
+    try:
+        from multi_dicomviewer import i18n
+        from multi_dicomviewer.core import settings
+        i18n.set_language(settings.load_language())
+        from multi_dicomviewer.i18n import t
+    except Exception:                        # noqa: BLE001 — never block start
+        def t(s, **_k):
+            return s
+    line(142, t("研究用DICOMビューワ"), 13, QColor(210, 214, 222))
+    line(178, t("研究・教育用"), 12, QColor(255, 200, 90), bold=True)
+    line(206, t("本アプリの使用による不具合の責任は使用者にあります"),
          11, QColor(255, 200, 90), bold=True)
-    line(248, "問い合わせ先：satoru@sumi2g.sakura.ne.jp",
+    line(248, t("問い合わせ先：") + "satoru@sumi2g.sakura.ne.jp",
          11, QColor(170, 176, 186))
     # Loading hint, bottom.
     f = QFont()
@@ -168,7 +177,7 @@ def _make_splash() -> QSplashScreen:
     p.setPen(QColor(120, 126, 136))
     p.drawText(rect.adjusted(0, 0, 0, -16),
                Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom,
-               "起動中… / Loading…")
+               t("起動中…"))
     p.end()
     splash = QSplashScreen(pm)
     splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
