@@ -171,11 +171,14 @@ chk("overlay: nothing when VR始点 is off", h._cpr_vr_line_pts() == ([], None))
 
 # ---- pick gate
 h._cpr_vr_on = True
-chk("pick gate: VR pane A in VR始点", h._cpr_vr_pick_ok("A"))
+chk("pick gate: off (VR表示 is for checking only)", not h._cpr_vr_pick_ok("A"))
+h._CPR_VR_PICK = True
+chk("pick gate: VR pane A when the pick is enabled", h._cpr_vr_pick_ok("A"))
 chk("pick gate: not pane B", not h._cpr_vr_pick_ok("B"))
 h._cpr = {"cl": None}
 chk("pick gate: not once a CPR is built", not h._cpr_vr_pick_ok("A"))
 h._cpr = None
+h._CPR_VR_PICK = False
 h._cpr_vr_on = False
 
 # ---- heart-sphere crop
@@ -219,11 +222,16 @@ h._coronary_draw = lambda: (calls.append("draw"),
                             setattr(h, "_coronary_mpr_pending", True))
 h._vr_set = lambda k, on: (calls.append(("vr", k, on)), h._vr_on.__setitem__(k, on))
 h._vr_on = {"A": False, "B": False}
+h._center = np.asarray(h._pc["B"], float) + np.array([3.0, -2.0, 1.5])
+h._vr_view_saved = {"A": {"cam": "old"}}
+h._vr_pan = {"A": [5.0, -4.0], "B": [0.0, 0.0]}
 h._cpr_vr_toggle()
 chk("toggle on: arms Draw, VR on pane A", calls[:2] == ["draw", ("vr", "A", True)]
     and h._cpr_vr_active())
-chk("toggle on: crop centred on the map pane centre",
-    np.allclose(h._cpr_vr_center, h._pc["B"]))
+chk("toggle on: VR centred on the centreline crossing",
+    np.allclose(h._cpr_vr_center, h._center))
+chk("toggle on: last VR camera / pan dropped (fresh, centred view)",
+    "A" not in h._vr_view_saved and list(h._vr_pan["A"]) == [0.0, 0.0])
 h._cpr_vr_toggle()
 chk("toggle off: VR off, state cleared", calls[-1] == ("vr", "A", False)
     and not h._cpr_vr_active() and h._cpr_vr_start is None)

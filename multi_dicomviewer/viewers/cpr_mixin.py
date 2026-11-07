@@ -948,12 +948,16 @@ class CPRMixin:
     #: keeps the aortic root / ostia / AV grooves, drops most of the chest wall.
     _CPR_VR_CROP_MM = 70.0
 
+    _CPR_VR_PICK = False
+
     def _cpr_vr_active(self) -> bool:
         return bool(getattr(self, "_cpr_vr_on", False))
 
     def _cpr_vr_pick_ok(self, key) -> bool:
-        """A plain click on VR pane *key* picks the trace start point."""
-        return (self._cpr_vr_active() and key == "A"
+        """A plain click on VR pane *key* picks the trace start point — OFF:
+        VR表示 is for checking the CPR line's position only; the line is set on
+        the map pane B (set _CPR_VR_PICK = True to bring the pick back)."""
+        return (self._CPR_VR_PICK and self._cpr_vr_active() and key == "A"
                 and bool(getattr(self, "_vr_on", {}).get(key))
                 and self._cpr is None)
 
@@ -1232,7 +1236,17 @@ class CPRMixin:
             return
         self._cpr_vr_on = True
         self._cpr_vr_start = None
-        self._cpr_vr_center = np.asarray(self._pc["B"], float).copy()
+        # Centre the VR on the centreline crossing (as seen on the map pane B),
+        # fresh every time: drop the last VR camera pose / pan of pane A.
+        ctr = getattr(self, "_center", None)
+        if ctr is None or not np.all(np.isfinite(np.asarray(ctr, float))):
+            ctr = self._pc["B"]
+        self._cpr_vr_center = np.asarray(ctr, float).copy()
+        getattr(self, "_vr_view_saved", {}).pop("A", None)
+        pan = getattr(self, "_vr_pan", None)
+        if isinstance(pan, dict) and "A" in pan:
+            pan["A"] = type(pan["A"])((0.0, 0.0)) if isinstance(
+                pan["A"], (list, tuple)) else (0.0, 0.0)
         if hasattr(self, "set_side"):
             self.set_side("Bi")
         try:

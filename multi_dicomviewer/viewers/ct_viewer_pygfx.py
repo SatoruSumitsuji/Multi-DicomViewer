@@ -6075,12 +6075,25 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         m = self._vr_mask
         if m is None:                       # cheap path, no np.where
             return self._bounds
+        # VR始点: frame on the centreline crossing (bounds re-centred on it,
+        # grown so the whole crop still fits) — CPU DVR, GPU MIP and overlay
+        # all centre through this.
+        c = getattr(self, "_cpr_vr_center", None) if self._cpr_vr_active() else None
+        ck = None if c is None else tuple(float(x) for x in c)
         cache = getattr(self, "_vr_fb_cache", None)
-        if cache is not None and cache[0] is m:   # same mask object → reuse
+        if (cache is not None and cache[0] is m
+                and (len(cache) < 3 or cache[2] == ck)):   # same mask + centre
             return cache[1]
         wb = self._mask_world_bounds(m)
         bounds = wb if wb is not None else self._bounds
-        self._vr_fb_cache = (m, bounds)
+        if ck is not None and np.all(np.isfinite(ck)):
+            out = []
+            for i in range(3):
+                lo, hi = float(bounds[2 * i]), float(bounds[2 * i + 1])
+                h = max(ck[i] - lo, hi - ck[i], 1.0)
+                out += [ck[i] - h, ck[i] + h]
+            bounds = tuple(out)
+        self._vr_fb_cache = (m, bounds, ck)
         return bounds
 
     def _vr_basis(self, key):
@@ -18815,14 +18828,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row.addWidget(self._cpr_draw_btn)
         # VR始点: a heart VR on the left pane to pick the vessel's proximal start
         # (where it is hard to tell on the MPR which vessel is which).
-        self._cpr_vr_btn = FitButton(t("VR始点"))
+        self._cpr_vr_btn = FitButton(t("VR表示"))
         self._cpr_vr_btn.setCheckable(True)
         self._cpr_vr_btn.setStyleSheet(
             "QPushButton:checked{background:#2e8b57;color:white;}")
         self._cpr_vr_btn.setHelpToolTip(t(
-            "左ペインに心臓のVRを表示し、血管の近位部（始点）をクリックで指定します"
-            "（ドラッグは回転）。右ペインがその点を通るSlab MIPに移動するので、"
-            "続けて遠位側をクリックしてください。描いた線はVR上にも表示されます"))
+            "左ペインに、右ペインの十字の交点を中心とした心臓のVRを表示します"
+            "（ドラッグで回転）。描いているCPR線がVR上にも表示されるので、"
+            "位置の確認に使います。CPR線は右ペインで設定します。"))
         self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
         row.addWidget(self._cpr_vr_btn)
         # Fit: rebuild the short-axis from the (edited) control points, keeping

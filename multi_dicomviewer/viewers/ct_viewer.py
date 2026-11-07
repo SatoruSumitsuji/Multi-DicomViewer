@@ -3768,14 +3768,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row.addWidget(self._cpr_draw_btn)
         # VR始点: a heart VR on the left pane to pick the vessel's proximal start
         # (where it is hard to tell on the MPR which vessel is which).
-        self._cpr_vr_btn = FitButton(t("VR始点"))
+        self._cpr_vr_btn = FitButton(t("VR表示"))
         self._cpr_vr_btn.setCheckable(True)
         self._cpr_vr_btn.setStyleSheet(
             "QPushButton:checked{background:#2e8b57;color:white;}")
         self._cpr_vr_btn.setHelpToolTip(t(
-            "左ペインに心臓のVRを表示し、血管の近位部（始点）をクリックで指定します"
-            "（ドラッグは回転）。右ペインがその点を通るSlab MIPに移動するので、"
-            "続けて遠位側をクリックしてください。描いた線はVR上にも表示されます"))
+            "左ペインに、右ペインの十字の交点を中心とした心臓のVRを表示します"
+            "（ドラッグで回転）。描いているCPR線がVR上にも表示されるので、"
+            "位置の確認に使います。CPR線は右ペインで設定します。"))
         self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
         row.addWidget(self._cpr_vr_btn)
         # Fit: rebuild the short-axis from the (edited) control points, keeping
