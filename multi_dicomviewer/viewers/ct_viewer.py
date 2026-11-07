@@ -94,6 +94,7 @@ from multi_dicomviewer.config import CT_WL_PRESETS
 from multi_dicomviewer.core import settings
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.viewers.cpr_mixin import CPRMixin
+from multi_dicomviewer.viewers.valve_auto_mixin import ValveAutoMixin
 from multi_dicomviewer.viewers.ct_mode_bar import CTModeBarMixin
 from multi_dicomviewer.core.dicom_io import LoadedSeries
 from multi_dicomviewer.core.dicom_tags import overlay_lines
@@ -2831,7 +2832,7 @@ class _ColorMapDialog(QDialog):
 
 
 # --------------------------------------------------------------- viewer
-class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
+class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     handles_modality = "CT"
     #: emitted by the series-navigation buttons ("first"/"prev"/"next"/"last")
     #: — the shell steps through this study's CT series (angio-style F/A nav)
@@ -4526,11 +4527,17 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_grp_r2_valve_edit = QWidget()
         r2ve = QHBoxLayout(self._lv_grp_r2_valve_edit)
         r2ve.setContentsMargins(0, 0, 0, 0); r2ve.setSpacing(4)
+        self._lv_ve_auto_btn = FitButton(t("Auto"))
+        self._lv_ve_auto_btn.setHelpToolTip(t(
+            "十字の交点を弁のだいたいの位置に置いて押すと、弁輪面を自動で設定します"
+            "（MVは心尖部も使います）。ずれていれば Draw → Set で修正します。"))
+        self._lv_ve_auto_btn.clicked.connect(self._lv_valve_auto)
         self._lv_ve_draw_btn = FitButton(t("Draw"))
         self._lv_ve_draw_btn.setHelpToolTip(
             t("Draw the valve annulus as an Ellipse (Shift = true circle), then "
               "press Confirm."))
         self._lv_ve_draw_btn.clicked.connect(self._lv_valve_draw)
+        r2ve.addWidget(self._lv_ve_auto_btn)
         r2ve.addWidget(self._lv_ve_draw_btn)
         self._lv_ve_confirm_btn = FitButton(t("Set"))
         self._lv_ve_confirm_btn.setHelpToolTip(
@@ -4566,7 +4573,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
         r2ve.addWidget(self._lv_ve_exit_btn)
-        for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+        for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                   self._lv_ve_save_btn, self._lv_ve_load_btn,
                   self._lv_ve_clear_btn, self._lv_ve_show_btn,
                   self._lv_ve_exit_btn):
@@ -5489,7 +5496,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
             _vis(self._lv_grp_r2_valve_edit, ve is not None)
             if ve is not None:
                 has = self._lv_valves.get(ve) is not None
-                for b in (self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
+                for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                           self._lv_ve_load_btn, self._lv_ve_exit_btn):
                     b.setEnabled(True)
                 self._lv_ve_save_btn.setEnabled(has)
@@ -7636,6 +7643,7 @@ class CTViewer(CPRMixin, CTModeBarMixin, AbstractViewer):
         if getattr(btn, "_mdv_soft_off", False):
             return                                # greyed → left-click no-op
         self._lv_valve_edit = which
+        self._lv_valve_auto_seed = None
         self._lv_update_submode_ui()
 
     def _lv_exit_valve(self) -> None:
