@@ -444,6 +444,59 @@ def _adaptive_ctrl(Pd, prm: TraceParams):
     return pts_at(np.asarray(knots))
 
 
+def thin_ctrl(path_mm, ctrl_mm, keep_mm, spacing_mm):
+    """Thin the auto-trace control points *ctrl_mm* to about *spacing_mm*
+    apart along the dense path *path_mm*. The points nearest to *keep_mm*
+    (the hand-clicked start / via / end) are always kept; an auto point is
+    dropped when it is closer than *spacing_mm* (along the path) to the last
+    kept point or to the next kept click. Points that are already farther
+    apart stay; no point is added. Returns an (M, 3) array in path order."""
+    P = np.asarray(path_mm, float)
+    C = np.asarray(ctrl_mm, float)
+    if len(P) < 2 or len(C) < 2 or float(spacing_mm) <= 0.0:
+        return C
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(P, axis=0),
+                                                        axis=1))])
+    from scipy.spatial import cKDTree
+    tree = cKDTree(P)
+
+    def arc(Q):
+        return s[tree.query(np.asarray(Q, float).reshape(-1, 3))[1]]
+    sc = arc(C)
+    # Start / end clicks = the path ends (the trace starts / ends there); the
+    # via clicks are kept at their nearest arc position.
+    vias = (list(arc(np.asarray(keep_mm, float)[1:-1]))
+            if keep_mm is not None and len(keep_mm) > 2 else [])
+    lo, hi = float(min(sc[0], 0.0)), float(max(sc[-1], s[-1]))
+    keep = sorted(set([lo, hi] + [float(k) for k in vias if lo < k < hi]))
+    sp = float(spacing_mm)
+    out = []                                  # (arc, point, is_click)
+    # Clicks are placed on the path at their arc position; the end ctrl points
+    # are the path ends, so they coincide with the start / end clicks.
+    for k in keep:
+        out.append((k, None, True))
+    for a, q in zip(sc, C):
+        out.append((float(a), q, False))
+    out.sort(key=lambda e: (e[0], not e[2]))
+    res, last = [], None
+    kept_arcs = np.array(keep)
+    for a, q, is_click in out:
+        if is_click:
+            if last is not None and abs(a - last) < 1e-6:
+                continue
+            res.append(np.array([np.interp(a, s, P[:, i]) for i in range(3)]))
+            last = a
+            continue
+        if last is not None and a - last < sp:
+            continue
+        nxt = kept_arcs[kept_arcs > a + 1e-6]
+        if len(nxt) and float(nxt[0]) - a < sp:
+            continue
+        res.append(np.asarray(q, float))
+        last = a
+    return np.asarray(res, float)
+
+
 class TraceCancelled(Exception):
     """Raised inside trace_vessel when the progress callback asks to stop."""
 

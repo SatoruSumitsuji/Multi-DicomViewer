@@ -126,9 +126,22 @@ CORONARY_PARAMS_DEFAULT = {
     },
     "target_colors": ["#e06666", "#f6b26b", "#e78ac3",
                       "#9b59b6", "#3d85c6", "#6aa84f"],
+    #: 自動CPR編集点距離: the Auto-Trace edit points are thinned to about this
+    #: spacing (mm) along the vessel; the hand-clicked points always stay.
+    "cpr_ctrl_mm": 3,
 }
 CORONARY_TUBE_MIN, CORONARY_TUBE_MAX, CORONARY_TUBE_STEP = 0.5, 4.0, 0.5
 CORONARY_LM_MIN, CORONARY_LM_MAX, CORONARY_LM_STEP = 1.0, 2.0, 0.1
+CPR_CTRL_MM_CHOICES = (1, 2, 3, 4, 5)
+
+
+def _clean_cpr_ctrl_mm(v) -> int:
+    """自動CPR編集点距離 → one of CPR_CTRL_MM_CHOICES (default when invalid)."""
+    try:
+        i = int(round(float(v)))
+    except (TypeError, ValueError):
+        return int(CORONARY_PARAMS_DEFAULT["cpr_ctrl_mm"])
+    return i if i in CPR_CTRL_MM_CHOICES else int(CORONARY_PARAMS_DEFAULT["cpr_ctrl_mm"])
 
 #: How many panes of a modality may hold their full data (volume / clip) live
 #: at once before the least-recently-used one is frozen to a memory-light still.
@@ -850,6 +863,7 @@ def load_coronary_params() -> dict:
         "territory_opacity": CORONARY_PARAMS_DEFAULT["territory_opacity"],
         "line_colors": dict(CORONARY_PARAMS_DEFAULT["line_colors"]),
         "target_colors": list(CORONARY_PARAMS_DEFAULT["target_colors"]),
+        "cpr_ctrl_mm": CORONARY_PARAMS_DEFAULT["cpr_ctrl_mm"],
     }
     try:
         data = json.loads(CORONARY_PARAMS_PATH.read_text(encoding="utf-8"))
@@ -890,6 +904,8 @@ def load_coronary_params() -> dict:
                 if i < len(tc):
                     out["target_colors"][i] = _clean_hex(
                         tc[i], out["target_colors"][i])
+        if "cpr_ctrl_mm" in data:
+            out["cpr_ctrl_mm"] = _clean_cpr_ctrl_mm(data.get("cpr_ctrl_mm"))
     return out
 
 
@@ -900,7 +916,7 @@ def save_coronary_params(params: dict) -> None:
         merged = load_coronary_params()          # start from a clean/clamped base
         for k in ("tube_diameter_mm", "lm_ratio", "halo_color",
                   "halo_opacity", "territory_opacity", "line_colors",
-                  "target_colors"):
+                  "target_colors", "cpr_ctrl_mm"):
             if k in p:
                 merged[k] = p[k]
         # Re-sanitise through load-shaped clamping by round-tripping the fields.
@@ -924,6 +940,7 @@ def save_coronary_params(params: dict) -> None:
                            if i < len(merged.get("target_colors") or []) else None,
                            CORONARY_PARAMS_DEFAULT["target_colors"][i])
                 for i in range(6)],
+            "cpr_ctrl_mm": _clean_cpr_ctrl_mm(merged.get("cpr_ctrl_mm")),
         }
         CORONARY_PARAMS_PATH.parent.mkdir(parents=True, exist_ok=True)
         CORONARY_PARAMS_PATH.write_text(

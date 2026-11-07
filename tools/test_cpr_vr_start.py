@@ -191,6 +191,27 @@ exp = 4.0 / 3.0 * np.pi * R ** 3 / S ** 3
 chk("crop: clipped by the volume (≤ full sphere)", 0 < vox <= exp * 1.02,
     f"{vox} vs {exp:.0f}")
 
+# ---- Epi band crop (Epi loaded → only the band around the Epi boundary)
+nz_, ny_, nx_ = h._vol.shape
+zz_, yy_, xx_ = np.ogrid[0:nz_, 0:ny_, 0:nx_]
+c_ = np.array([nz_, ny_, nx_]) // 2
+Repi = 20.0                                       # mm
+epi_ = (((zz_ - c_[0]) * S) ** 2 + ((yy_ - c_[1]) * S) ** 2
+        + ((xx_ - c_[2]) * S) ** 2) <= Repi ** 2
+h._vr_epi_full_mask = lambda: epi_
+bm = h._cpr_vr_crop_mask()
+IN, OUT = h._CPR_VR_EPI_IN_MM, h._CPR_VR_EPI_OUT_MM
+row = lambda mm: bm[c_[0], c_[1], c_[2] + int(round(mm / S))]
+chk("epi band: Epi centre (deep inside) excluded", not row(0))
+chk("epi band: just inside the Epi boundary kept", row(Repi - IN + 1))
+chk("epi band: deeper than the inner rim excluded", not row(Repi - IN - 1.5))
+chk("epi band: just outside the boundary kept", row(Repi + OUT - 1))
+chk("epi band: beyond the outer band excluded", not row(Repi + OUT + 1.5))
+h._vr_epi_full_mask = lambda: None
+chk("epi band: no Epi → sphere fallback",
+    np.array_equal(h._cpr_vr_crop_mask(), cm))
+del h._vr_epi_full_mask
+
 # ---- toggle / stop bookkeeping (backend calls faked)
 calls = []
 h._coronary_mpr_pending = False

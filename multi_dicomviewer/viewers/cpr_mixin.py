@@ -308,9 +308,23 @@ class CPRMixin:
         for k in ("A", "B"):
             if any(mm is m for mm in self._measures.get(k, [])):
                 src = k
-        m["pts3d"] = [list(map(float, q)) for q in res.ctrl_mm]
+        ctrl = np.asarray(res.ctrl_mm, float)
+        # 自動CPR編集点距離 (Settings): thin the auto edit points to that spacing,
+        # always keeping the hand-clicked start / via / end (m's pts3d are still
+        # the clicks here).
+        try:
+            from multi_dicomviewer.core import settings
+            from multi_dicomviewer.core.cpr_autotrack import thin_ctrl
+            sp = float(settings.load_coronary_params().get("cpr_ctrl_mm", 3))
+            clicks = [np.asarray(q, float) for q in (m.get("pts3d") or [])]
+            th = thin_ctrl(res.path_mm, ctrl, clicks, sp)
+            if len(th) >= 2:
+                ctrl = th
+        except Exception:                        # noqa: BLE001
+            pass
+        m["pts3d"] = [list(map(float, q)) for q in ctrl]
         if src is not None and hasattr(self, "_world3d_to_out"):
-            m["pts"] = [self._world3d_to_out(src, q) for q in res.ctrl_mm]
+            m["pts"] = [self._world3d_to_out(src, q) for q in ctrl]
         m["_cpr_auto"] = True
         self._cpr_auto_gaps = list(res.gaps)
 
@@ -944,10 +958,59 @@ class CPRMixin:
                 and self._cpr is None)
 
     def _cpr_vr_crop_mask(self):
-        """Bool [z,y,x] sphere of _CPR_VR_CROP_MM around the start-VR centre (the
-        map pane's centre when VR始点 was pressed). Not the LV-Epi shell on
-        purpose: that drops the aortic root, LM/RCA ostia and the right AV
-        groove — exactly where the proximal start is."""
+        """Crop for the start VR. With the Epi model loaded: only the band near
+        the Epi boundary (_cpr_vr_epi_band — where the coronaries run), so the
+        chest wall / lungs / far chambers don't hide the vessels. Without Epi:
+        a sphere of _CPR_VR_CROP_MM around the start-VR centre (the map pane's
+        centre when VR始点 was pressed)."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return None
+        band = self._cpr_vr_epi_band()
+        if band is not None and band.any():
+            return band
+        return self._cpr_vr_sphere_mask()
+
+    #: Epi band for the start VR: from _CPR_VR_EPI_IN_MM inside the Epi
+    #: boundary to _CPR_VR_EPI_OUT_MM outside it (epicardial fat + coronaries).
+    _CPR_VR_EPI_IN_MM = 3.0
+    _CPR_VR_EPI_OUT_MM = 8.0
+
+    def _cpr_vr_epi_band(self):
+        """Bool [z,y,x] band around the loaded Epi boundary (in/out mm above);
+        None when no Epi region / no scipy."""
+        f = getattr(self, "_vr_epi_full_mask", None)
+        epi = f() if callable(f) else None
+        if epi is None:
+            return None
+        epi = np.asarray(epi, bool)
+        zs, ys, xs = np.where(epi)
+        if len(zs) == 0:
+            return None
+        try:
+            from scipy.ndimage import distance_transform_edt
+        except Exception:                        # noqa: BLE001
+            return None
+        sx, sy, sz = (float(d) for d in self._dims)
+        out_mm = float(self._CPR_VR_EPI_OUT_MM)
+        in_mm = float(self._CPR_VR_EPI_IN_MM)
+        mz = int(np.ceil(out_mm / sz)) + 2
+        my = int(np.ceil(out_mm / sy)) + 2
+        mx = int(np.ceil(out_mm / sx)) + 2
+        z0, z1 = max(0, zs.min() - mz), min(epi.shape[0], zs.max() + mz + 1)
+        y0, y1 = max(0, ys.min() - my), min(epi.shape[1], ys.max() + my + 1)
+        x0, x1 = max(0, xs.min() - mx), min(epi.shape[2], xs.max() + mx + 1)
+        sub = epi[z0:z1, y0:y1, x0:x1]
+        smp = (sz, sy, sx)
+        d_out = distance_transform_edt(~sub, sampling=smp)
+        d_in = distance_transform_edt(sub, sampling=smp)
+        band = ((~sub) & (d_out <= out_mm)) | (sub & (d_in <= in_mm))
+        full = np.zeros(epi.shape, bool)
+        full[z0:z1, y0:y1, x0:x1] = band
+        return full
+
+    def _cpr_vr_sphere_mask(self):
+        """Bool [z,y,x] sphere of _CPR_VR_CROP_MM around the start-VR centre."""
         vol = getattr(self, "_vol", None)
         if vol is None:
             return None

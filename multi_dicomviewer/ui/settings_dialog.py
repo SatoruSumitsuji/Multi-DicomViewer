@@ -350,6 +350,18 @@ class SettingsDialog(QDialog):
         _grid_w = QWidget()
         _grid_w.setLayout(grid)
         coform.addRow(t("領域色（系統 / ターゲット）"), _grid_w)
+        # 自動CPR編集点距離: Auto-Trace edit points thinned to this spacing
+        self._cpr_ctrl_combo = QComboBox()
+        for mm in settings.CPR_CTRL_MM_CHOICES:
+            self._cpr_ctrl_combo.addItem(f"{mm} mm", int(mm))
+        cur_mm = int(cp.get("cpr_ctrl_mm",
+                            settings.CORONARY_PARAMS_DEFAULT["cpr_ctrl_mm"]))
+        self._cpr_ctrl_combo.setCurrentIndex(
+            max(0, self._cpr_ctrl_combo.findData(cur_mm)))
+        self._cpr_ctrl_combo.setToolTip(t(
+            "自動トレース後の編集点をこの間隔に間引きます。"
+            "手動で置いた始点・終点・途中の点は必ず残ります。"))
+        coform.addRow(t("自動CPR編集点距離"), self._cpr_ctrl_combo)
         root.addWidget(gb_coro)
 
         # ---- マウス操作グリッド（XA/IVUS） --------------------------------
@@ -548,6 +560,7 @@ class SettingsDialog(QDialog):
             "halo_opacity": float(self._coro_halo_op.currentData()),
             "line_colors": {r: b.hex for r, b in self._coro_line_btns.items()},
             "target_colors": [b.hex for b in self._coro_target_btns],
+            "cpr_ctrl_mm": int(self._cpr_ctrl_combo.currentData()),
         }
 
     def lv_wall(self) -> dict:
