@@ -138,6 +138,26 @@ def build(LV_PEAK, LEAFLETS):
         leaf = ((r < Ra) & (np.abs(h - (hs - 5.0 * (1.0 - r / Ra))) < 0.6)
                 & ~aorta)
         vol[leaf] = 110.0
+    else:          # diastole: CLOSED aortic valve — three cusps meeting at the
+        # centre. Bellies from the hinge (ta≈1 at the wall) up to the
+        # coaptation centre (ta≈8), 1.4 mm thick; the coaptation zones = a
+        # Y of apposed leaflets (2.6 mm) at the commissure angles, ta 6–12.
+        Qa = Pw - C_ao.astype(np.float32)
+        ta = Qa @ n_ao.astype(np.float32)
+        aa = Qa @ u_ao.astype(np.float32)
+        ba = Qa @ w_ao.astype(np.float32)
+        ra = np.sqrt(aa * aa + ba * ba)
+        psi = np.arctan2(ba, aa)
+        belly = (np.abs(ta - (1.0 + 7.0 * (1.0 - np.clip(ra / R_ann, 0, 1)) ** 1.5))
+                 < 0.7) & (ra < R_ann + 2.0)
+        coapt = np.zeros_like(belly)
+        for c0 in (np.pi / 3, np.pi, -np.pi / 3):          # commissures
+            dpsi = np.angle(np.exp(1j * (psi - c0)))
+            coapt |= ((np.abs(ra * np.sin(dpsi)) < 1.3) & (np.cos(dpsi) > 0)
+                      & (ra < R_ann + 3.0) & (ta > 6.0 - 5.0 * ra / R_ann)
+                      & (ta < 12.0))
+        vol[(belly | coapt) & aorta] = 110.0
+        del Qa, ta, aa, ba, ra, psi
 
 
     return vol
@@ -182,7 +202,9 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
             f"{res.radius:.1f} mm, {len(res.points)} pts, {dt:.1f}s")
 
 for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
-    for click in (C_ao + 7.0 * n_ao + 3.0 * u_ao, C_ao + 2.0 * n_ao - 3.0 * w_ao):
+    for click in (C_ao + 7.0 * n_ao + 3.0 * u_ao, C_ao + 2.0 * n_ao - 3.0 * w_ao,
+                  C_ao + 8.0 * n_ao,                 # ON the coaptation centre
+                  C_ao + 5.0 * n_ao + 6.0 * u_ao):   # inside one cusp's sinus
         t0 = time.time()
         res = detect_aov(v, dims, click)
         dt = time.time() - t0

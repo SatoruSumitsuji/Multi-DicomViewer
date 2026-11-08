@@ -140,7 +140,7 @@ def _ray_extent(hu, step, gap_mm, lead_mm=2.0):
 
 
 def _cross_section(vol, dims, c, n, thr, rmax=24.0, nray=48, step=0.5,
-                   gap_mm=1.2):
+                   gap_mm=1.2, lead_mm=2.0):
     """Ray-cast lumen cross-section in the plane (c, n): area (mm²), centroid,
     fraction of rays that did not close within rmax, radii."""
     u, w = _frame(n)
@@ -149,7 +149,7 @@ def _cross_section(vol, dims, c, n, thr, rmax=24.0, nray=48, step=0.5,
     rs = np.arange(0.0, rmax + 1e-6, step)
     P = c + D[:, None, :] * rs[None, :, None]
     hu = _sample(vol, dims, P) >= thr
-    rad, opn = _ray_extent(hu, step, gap_mm)
+    rad, opn = _ray_extent(hu, step, gap_mm, lead_mm)
     area = 0.5 * float(np.sum(rad ** 2)) * (2 * np.pi / nray)
     cen = np.asarray(c, float)
     if rad.max() > 0:
@@ -182,14 +182,14 @@ def _dirs_cone(n0, max_deg, count):
 
 
 def _min_area_dir(vol, dims, c, thr, n0=None, max_deg=90.0, count=120,
-                  rmax=24.0):
+                  rmax=24.0, lead_mm=2.0):
     """Tube axis at c = the plane normal with the smallest cross-section."""
     if n0 is None:
         n0 = np.array([0.0, 0.0, 1.0])
     best, bn = np.inf, _unit(n0)
     for d in _dirs_cone(n0, max_deg, count):
         a, _c, opn, _r = _cross_section(vol, dims, c, d, thr, rmax=rmax,
-                                        nray=32, step=0.7)
+                                        nray=32, step=0.7, lead_mm=lead_mm)
         a = a * (1.0 + 2.0 * opn)                # open rays = not a tube here
         if a < best:
             best, bn = a, _unit(d)
@@ -197,15 +197,66 @@ def _min_area_dir(vol, dims, c, thr, n0=None, max_deg=90.0, count=120,
 
 
 # ---------------------------------------------------------------------- AoV
+#: AoV: closed leaflets (diastole) split the root into three cusp pockets and
+#: the coaptation Y runs through the centre, where the click usually is. The
+#: blood mask is CLOSED in 3-D first, filling dark sheets up to ~2×this thick.
+_AOV_CLOSE_MM = 1.5
+_AOV_ROI_MM = 55.0                        # half-size of the local (closed) ROI
+_AOV_ROI_STEP = 0.6                       # its isotropic grid (mm)
+#: Dark run at the section centre skipped (the leaflets' thick coaptation
+#: centre — nodules — that the closing leaves; 2 mm elsewhere).
+_AOV_LEAD_MM = 4.0
+
+
+def _closed_blood_roi(vol, dims, c, thr):
+    """(roi, origin_mm): blood mask around c on an isotropic grid, 3-D closed
+    by _AOV_CLOSE_MM (leaflets / coaptation filled), as 0 / 1000 float32 so the
+    usual HU sampling with thr = 500 reads it."""
+    st = _AOV_ROI_STEP
+    g = np.arange(-_AOV_ROI_MM, _AOV_ROI_MM + 1e-6, st)
+    o = np.asarray(c, float) - _AOV_ROI_MM
+    Z, Y, X = np.meshgrid(g, g, g, indexing="ij")
+    P = np.stack([X + c[0], Y + c[1], Z + c[2]], axis=-1)
+    blood = _sample(vol, dims, P) >= thr
+    del P, X, Y, Z
+    r = _AOV_CLOSE_MM / st
+    # Closing by distance transforms (dilate r, then erode r) — exact ball.
+    dil = ndimage.distance_transform_edt(~blood) <= r
+    pad = int(np.ceil(r)) + 1                # keep the ROI edge from eroding
+    dil = np.pad(dil, pad, mode="edge")
+    closed = ndimage.distance_transform_edt(dil) > r
+    closed = closed[pad:-pad, pad:-pad, pad:-pad] | blood
+    roi = np.where(closed, 1000.0, 0.0).astype(np.float32)
+    return roi, o
+
+
 def detect_aov(vol, dims, click_mm, lv_hint_mm=None) -> ValveResult:
     """Aortic annulus plane from a rough click in / near the aortic root.
     *lv_hint_mm* (optional, e.g. the MV centre or apex) tells which way along
-    the root the LV is; otherwise the side that opens into a chamber is."""
+    the root the LV is; otherwise the side that opens into a chamber is.
+
+    Runs on a local, 3-D-closed blood mask so a CLOSED valve (leaflets and the
+    coaptation Y through the centre) reads as one lumen, not three pockets."""
     vol = np.asarray(vol)
     c = np.asarray(click_mm, float)
     thr = blood_threshold(vol, dims, c)
     c = _snap_into_blood(vol, dims, c, thr)
-    n = _min_area_dir(vol, dims, c, thr)
+    roi, o = _closed_blood_roi(vol, dims, c, thr)
+    st = (_AOV_ROI_STEP,) * 3
+    hint = None if lv_hint_mm is None else np.asarray(lv_hint_mm, float) - o
+    res = _detect_aov_core(roi, st, c - o, 500.0, hint)
+    res.center = np.asarray(res.center, float) + o
+    if len(res.points):
+        res.points = np.asarray(res.points, float) + o
+    return res
+
+
+def _detect_aov_core(vol, dims, c, thr, lv_hint_mm) -> ValveResult:
+    c = np.asarray(c, float)
+
+    def _cs(*a, **k):                    # closed valve: thick coaptation centre
+        return _cross_section(*a, lead_mm=_AOV_LEAD_MM, **k)
+    n = _min_area_dir(vol, dims, c, thr, lead_mm=_AOV_LEAD_MM)
     # The smallest section is only a first guess (the sinus bulge biases it).
     # Refine on the root's centreline: the centroids of PARALLEL sections of a
     # tube lie on its axis whatever their tilt, so a line through them is the
@@ -216,13 +267,13 @@ def detect_aov(vol, dims, click_mm, lv_hint_mm=None) -> ValveResult:
             p = c.copy()
             for _k in range(12):                 # ±12 mm: the root, not the LV
                 p = p + sgn * 1.0 * n
-                _a, cen, opn, _r = _cross_section(vol, dims, p, n, thr,
+                _a, cen, opn, _r = _cs(vol, dims, p, n, thr,
                                                   nray=32, step=0.6)
                 if opn > _TUBE_OPEN:             # left the tube (LV / chamber)
                     break
                 p = cen
                 cens.append(p.copy())
-        _a, c0, _o, _r = _cross_section(vol, dims, c, n, thr, nray=32, step=0.6)
+        _a, c0, _o, _r = _cs(vol, dims, c, n, thr, nray=32, step=0.6)
         cens.append(c0)
         Cn = np.asarray(cens)
         if len(Cn) < 6:
@@ -237,14 +288,14 @@ def detect_aov(vol, dims, click_mm, lv_hint_mm=None) -> ValveResult:
         n = n_new
         if done:
             break
-    a0, c, _o, _r = _cross_section(vol, dims, c, n, thr)
+    a0, c, _o, _r = _cs(vol, dims, c, n, thr)
 
     def walk(sign, n_steps=30, ds=1.0):
         prof = []
         p, d = c.copy(), n * sign
         for k in range(n_steps):
             p = p + ds * d
-            a, cen, opn, _r = _cross_section(vol, dims, p, d, thr)
+            a, cen, opn, _r = _cs(vol, dims, p, d, thr)
             if opn < 0.5:
                 p = p + 0.7 * (cen - p)          # follow the lumen centre
             prof.append(((k + 1) * ds * sign, a, p.copy(), d * sign, opn))
@@ -307,7 +358,7 @@ def detect_aov(vol, dims, click_mm, lv_hint_mm=None) -> ValveResult:
     cand = mid[As[mid] <= lim]
     i_ann = int(cand.max()) if len(cand) else i_min
     _s, _a, p, d, _o = prof[i_ann]
-    a, cen, _o, rad = _cross_section(vol, dims, p, d, thr)
+    a, cen, _o, rad = _cs(vol, dims, p, d, thr)
     u, w = _frame(d)
     th = np.linspace(0.0, 2 * np.pi, len(rad), endpoint=False)
     pts = p + (np.cos(th)[:, None] * u + np.sin(th)[:, None] * w) * rad[:, None]
