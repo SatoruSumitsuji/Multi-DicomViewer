@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """MV+Apex / AoV — Auto step (shared by the VTK and pygfx CT viewers).
 
-The first Auto press asks 画像設定 / 点設定 / キャンセル: 画像設定 keeps the
-normal image controls until Auto is pressed again, which goes to 点設定.
+Auto asks 画像設定 / 点設定 / キャンセル: 画像設定 keeps the normal image
+controls; Auto again brings the same choice back (adjust again, or 点設定).
 点設定 arms a CLICK pick on the image (a click = press + release without a
 drag; drags still run the selected tool). The MV-centre click shows an orange
 +, the apex-vicinity click a green + (both kept a few seconds after the
@@ -84,9 +84,11 @@ class ValveAutoMixin:
     _LV_PICK_SHOW_MS = 3000                  # click markers kept after the result
 
     def _lv_valve_auto(self) -> None:
-        """Auto: first press asks 画像設定 / 点設定 / キャンセル. 画像設定 leaves
-        the image controls normal until Auto is pressed again (→ 点設定);
-        点設定 arms the click pick. Auto while the pick is armed cancels."""
+        """Auto asks 画像設定 / 点設定 / キャンセル — on the first press AND on
+        every press during 画像設定, so the image can be adjusted as often as
+        needed. 画像設定 keeps the normal image controls; 点設定 arms the click
+        pick; キャンセル during 画像設定 ends the procedure. Auto while the pick
+        is armed cancels."""
         which = getattr(self, "_lv_valve_edit", None) or "mitral"
         if getattr(self, "_vol", None) is None:
             return
@@ -94,22 +96,23 @@ class ValveAutoMixin:
         if seed is not None and seed[1] != "prep":
             self._lv_pick_cancel()
             return
-        if seed is None:
-            choice = self._lv_auto_choice(which)
-            if choice is None:
-                return
-            if choice == "prep":
-                self._lv_valve_auto_seed = (which, "prep", None)
-                self._lvv_prompt(t(
-                    "画像を調整してから、もう一度 Auto を押すと {p} に進みます。"
-                    "（Esc で中止）").format(
-                        p=t("MV点設定") if which == "mitral" else t("AoV点設定")))
-                return
+        choice = self._lv_auto_choice(which)
+        if choice is None:
+            if seed is not None:                 # キャンセル during 画像設定
+                self._lv_pick_cancel()
+            return
+        if choice == "prep":
+            self._lv_valve_auto_seed = (which, "prep", None)
+            self._lvv_prompt(t(
+                "画像を調整してから、もう一度 Auto を押してください。選択画面で "
+                "{p} を選ぶと点の設定に進みます。（Esc で中止）").format(
+                    p=t("MV点設定") if which == "mitral" else t("AoV点設定")))
+            return
         self._lv_pick_arm(which)
 
     def _lv_auto_choice(self, which):
-        """The first Auto press: 'prep' (adjust the image first), 'pick' (set
-        the points now) or None (cancel)."""
+        """'prep' (adjust the image first), 'pick' (set the points now) or
+        None (cancel)."""
         from PyQt6.QtWidgets import QMessageBox
         pick_lbl = t("MV点設定") if which == "mitral" else t("AoV点設定")
         box = QMessageBox(self.window())
@@ -119,13 +122,13 @@ class ValveAutoMixin:
             box.setText(t(
                 "MV+Apex の Auto を始めます。\n\n画像設定：先に観察する左室長軸像を"
                 "調整します（Rotate / Paging などが普段どおり使えます）。調整後に"
-                "もう一度 Auto を押すと MV点設定 に進みます。\n\nMV点設定：すぐに "
+                "もう一度 Auto を押すと、この選択画面に戻ります。\n\nMV点設定：すぐに "
                 "MV 中心近傍 → 心尖近傍 の順にクリックします。"))
         else:
             box.setText(t(
                 "AoV の Auto を始めます。\n\n画像設定：先に AoV の短軸像を調整します"
                 "（Rotate / Paging などが普段どおり使えます）。調整後にもう一度 Auto "
-                "を押すと AoV点設定 に進みます。\n\nAoV点設定：すぐに AoV 中心近傍を"
+                "を押すと、この選択画面に戻ります。\n\nAoV点設定：すぐに AoV 中心近傍を"
                 "クリックします。"))
         b_prep = box.addButton(t("画像設定"), QMessageBox.ButtonRole.ActionRole)
         b_pick = box.addButton(pick_lbl, QMessageBox.ButtonRole.AcceptRole)
