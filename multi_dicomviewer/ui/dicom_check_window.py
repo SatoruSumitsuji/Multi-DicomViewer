@@ -81,6 +81,7 @@ class _ScanWorker(QThread):
         total = len(all_files)
         out: list[tuple[str, str, int]] = []
         total_size = dcm_files = dcm_size = non_files = non_size = 0
+        dir_files = dir_size = 0          # DICOMDIRs (DICOM files, not images)
         for i, fp in enumerate(all_files):
             if self._abort:
                 return
@@ -98,6 +99,9 @@ class _ScanWorker(QThread):
                 non_files += 1
                 non_size += size
             is_dicomdir = name.upper() == "DICOMDIR"
+            if is_dcm and is_dicomdir:
+                dir_files += 1
+                dir_size += size
             if (not is_dcm) or (is_dicomdir and self._inc):
                 out.append((os.path.relpath(fp, self._root), fp, size))
             if i % 50 == 0 or i == total - 1:
@@ -105,7 +109,9 @@ class _ScanWorker(QThread):
         if not self._abort:
             stats = {"total_files": total, "total_size": total_size,
                      "dcm_files": dcm_files, "dcm_size": dcm_size,
-                     "non_files": non_files, "non_size": non_size}
+                     "non_files": non_files, "non_size": non_size,
+                     "dir_files": dir_files, "dir_size": dir_size,
+                     "dir_offered": bool(self._inc)}
             self.done.emit(out, stats)
 
 
@@ -125,6 +131,7 @@ class DicomCheckPanel(QWidget):
         self._root: str | None = None
         self._worker: _ScanWorker | None = None
         self._guard = False                        # re-entrancy for itemChanged
+        self._stat_base = ""                       # result line before "Selected"
 
         root = QVBoxLayout(self)
 
@@ -229,6 +236,7 @@ class DicomCheckPanel(QWidget):
         self._path_lbl.setText(t("No folder selected."))
         self._summary_lbl.setText("")
         self._stat_lbl.setText("")
+        self._stat_base = ""
         self._bar.setVisible(False)
         self._all_btn.setEnabled(False)
         self._none_btn.setEnabled(False)
@@ -249,6 +257,7 @@ class DicomCheckPanel(QWidget):
         self._summary_lbl.setText("")
         self._tree.clear()
         self._stat_lbl.setText("")
+        self._stat_base = ""
         self._set_busy(True)
         self._bar.setVisible(True)
         self._bar.setRange(0, 0)                   # indeterminate while counting
@@ -268,27 +277,49 @@ class DicomCheckPanel(QWidget):
                       stats: dict | None = None) -> None:
         self._bar.setVisible(False)
         self._set_busy(False)
+        stats = stats or {}
+        nn = int(stats.get("non_files", 0))
+        dd = int(stats.get("dir_files", 0))
         if stats:
-            self._summary_lbl.setText(t(
+            summary = t(
                 "Total {tn} files {ts},  non-DICOM {nn} files {ns},  "
                 "DICOM {dn} files {ds}",
                 tn=stats.get("total_files", 0),
                 ts=_human(stats.get("total_size", 0)),
-                nn=stats.get("non_files", 0),
+                nn=nn,
                 ns=_human(stats.get("non_size", 0)),
                 dn=stats.get("dcm_files", 0),
-                ds=_human(stats.get("dcm_size", 0))))
+                ds=_human(stats.get("dcm_size", 0)))
+            if dd:
+                # DICOMDIRs carry the DICM magic (counted as DICOM here) but are
+                # index files, not images: the sorter below skips them, and the
+                # list above offers them for deletion when the box is ticked —
+                # say so, so the three counts add up.
+                summary += t(
+                    "  (DICOM = images {im} + DICOMDIR {dd} ({dds}))",
+                    im=int(stats.get("dcm_files", 0)) - dd, dd=dd,
+                    dds=_human(stats.get("dir_size", 0)))
+            self._summary_lbl.setText(summary)
         self._populate(items)
         has = bool(items)
         self._all_btn.setEnabled(has)
         self._none_btn.setEnabled(has)
         if not has:
+            self._stat_base = ""
             self._stat_lbl.setText(t("No non-DICOM files found. ✅"))
         else:
             total_bytes = sum(s for _r, _f, s in items)
-            self._stat_lbl.setText(t(
-                "{n} non-DICOM file(s) found  ({size}). Selected: 0",
-                n=len(items), size=_human(total_bytes)))
+            if dd and stats.get("dir_offered") and len(items) == nn + dd:
+                self._stat_base = t(
+                    "{n} file(s) listed for deletion ({size}): non-DICOM {nn} "
+                    "+ DICOMDIR {dd}.", n=len(items), size=_human(total_bytes),
+                    nn=nn, dd=dd)
+            else:
+                self._stat_base = t(
+                    "{n} non-DICOM file(s) found  ({size}).",
+                    n=len(items), size=_human(total_bytes))
+            self._stat_lbl.setText(
+                self._stat_base + "  " + t("Selected: {n}", n=0))
 
     def _set_busy(self, busy: bool) -> None:
         self._pick_btn.setEnabled(not busy)
@@ -370,10 +401,9 @@ class DicomCheckPanel(QWidget):
     def _update_selected_count(self) -> None:
         n = len(self._checked_files())
         self._del_btn.setEnabled(n > 0)
-        txt = self._stat_lbl.text()
-        base = txt.split("  Selected:")[0].split(". Selected:")[0]
-        sep = "  Selected:" if "non-DICOM" in base else "Selected:"
-        self._stat_lbl.setText(f"{base}{sep} {n}")
+        if self._stat_base:
+            self._stat_lbl.setText(
+                self._stat_base + "  " + t("Selected: {n}", n=n))
 
     # ------------------------------------------------------------- delete
     def _delete(self) -> None:

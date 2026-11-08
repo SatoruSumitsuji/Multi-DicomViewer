@@ -1,4 +1,5 @@
 {
+  "  (DICOM = images {im} + DICOMDIR {dd} ({dds}))": "  (DICOM = images {im} + DICOMDIR {dd} ({dds}))",
   " 失敗: {e} 件。": " Failed: {e}.",
   " 未接続 {u} 本（5mm以内に幹/枝がありません。近い枝を先に接続するか、右クリックで親を指定）。": " Unconnected: {u} (no trunk/branch within 5 mm. Connect a nearby branch first, or right-click to set the parent).",
   " 未読込/特定不可で残した行: {k} 件（「状態更新」後に再実行）。": " Rows left because not loaded/unidentifiable: {k} (re-run after 'Refresh status').",
@@ -106,6 +107,7 @@
   "Press LV-Blood表示 (or Auto-Endo表示) first to compute the blood pool, then 壁厚.": "Press LV-Blood (or Endo-Border(Auto)) first to compute the blood pool, then Wall thickness.",
   "ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if needed, then press CalcVol.": "ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from the ROI (min {mn:.0f} / max {mx:.0f}). Adjust Lower/Upper if needed, then press CalcVol.",
   "SciPy is not installed, so Auto-Endo / 壁厚 cannot run. In the app's environment run:\n\n    pip3 install scipy\n\nthen reopen and retry.": "SciPy is not installed, so Auto-Endo / Wall thickness cannot run. In the app's environment run:\n\n    pip3 install scipy\n\nthen reopen and retry.",
+  "Selected: {n}": "Selected: {n}",
   "Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. Press → choose 計測 (measure at the current section) or 断面設定後計測 (set the section first, then press again). Once set, the button toggles the line; right-click to re-set the level.": "Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. Press → choose 'Measure' (measure at the current section) or 'Set plane, then measure' (set the section first, then press again). Once set, the button toggles the line; right-click to re-set the level.",
   "Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. Press → 計測 (measure at the current section) or 断面設定後計測 (set the section first, then press again). Right-click to re-set.": "Show the LV diameter (LVD) at a MANUAL mitral-leaflet-tip level. Press → 'Measure' (measure at the current section) or 'Set plane, then measure' (set the section first, then press again). Right-click to re-set.",
   "SyncView終了": "End SyncView",
@@ -135,6 +137,8 @@
   "{m} 個のファイルを CasePresentation-Erase へ移動しました。": "Moved {m} file(s) to CasePresentation-Erase.",
   "{m} 個のフォルダを読み込み中… 完了後に「状態更新」を押すと[表示]が有効になります。": "Loading {m} folder(s)… When done, press 'Refresh status' to enable [Show].",
   "{name} とその下流の枝 {k} 本を削除しますか? (元のCPRファイルは残ります)": "Delete {name} and its {k} downstream branch(es)? (The original CPR files are kept)",
+  "{n} file(s) listed for deletion ({size}): non-DICOM {nn} + DICOMDIR {dd}.": "{n} file(s) listed for deletion ({size}): non-DICOM {nn} + DICOMDIR {dd}.",
+  "{n} non-DICOM file(s) found  ({size}).": "{n} non-DICOM file(s) found  ({size}).",
   "{n} 個のファイルを元の場所に戻しました（読込完了後に表示できます）。": "Restored {n} file(s) to their original location (can be shown once loading completes).",
   "{n} 本 / ルート {r} / 未接続 {u}": "{n} vessels / root {r} / unconnected {u}",
   "{n} 本を読込（役割を設定して「接続」→「ツリー表示」）。": "Loaded {n} vessel(s) (set roles, then 'Connect' → 'Show tree').",
