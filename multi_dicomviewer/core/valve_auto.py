@@ -646,3 +646,61 @@ def detect_apex(vol, dims, mv_center, mv_normal) -> ApexResult:
     else:
         e_d, p_d = rs[r[0]], rs[r[1]]
     return ApexResult(c + p_d * dv, c + e_d * dv, float(p_d - e_d))
+
+
+#: detect_mv_refined: a fit with fewer hinge points than this (of the 16
+#: half-planes) is treated as suspect — typically the search started off the
+#: annulus centre and locked onto part of it — and is retried from seeds around
+#: the click; the result with the most hinge points wins.
+_MV_MIN_PTS = 12
+_MV_RETRY_MM = 6.0
+
+
+def _mv_refine_once(vol, dims, mv_mm, apex_mm, rounds):
+    res = detect_mv(vol, dims, mv_mm, apex_mm)
+    apex = None
+    for _ in range(int(rounds)):
+        if not res.ok:
+            break
+        a = detect_apex(vol, dims, res.center, res.normal)
+        if not a.ok or float(np.linalg.norm(a.apex - res.center)) < 20.0:
+            break
+        apex = a
+        nxt = detect_mv(vol, dims, res.center, a.apex)
+        if not nxt.ok:
+            break
+        moved = float(np.linalg.norm(nxt.center - res.center))
+        res = nxt
+        if moved < 0.3:
+            break
+    return res, apex
+
+
+def _mv_quality(res):
+    if res is None or not res.ok:
+        return (-1, 0.0)
+    return (len(res.points), float(np.mean(res.weights)) if len(res.weights) else 0.0)
+
+
+def detect_mv_refined(vol, dims, mv_mm, apex_mm, rounds=3):
+    """detect_mv, then re-run it seeded by its own result: the centre from the
+    fitted plane and the rough apex replaced by detect_apex on that plane, until
+    the centre settles (< 0.3 mm). Removes the dependence on where the user put
+    the rough apex (only its side matters). A suspect fit (< _MV_MIN_PTS hinge
+    points) is retried from 6 seeds _MV_RETRY_MM around the click, across the
+    rough axis; the fit with the most hinge points is kept. Returns
+    (ValveResult, ApexResult or None — the apex on the final plane)."""
+    vol = np.asarray(vol)
+    mv = np.asarray(mv_mm, float)
+    best = _mv_refine_once(vol, dims, mv, apex_mm, rounds)
+    if _mv_quality(best[0])[0] >= _MV_MIN_PTS:
+        return best
+    u, w = _frame(_unit(mv - np.asarray(apex_mm, float)))
+    for ang in np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False):
+        seed = mv + _MV_RETRY_MM * (np.cos(ang) * u + np.sin(ang) * w)
+        cand = _mv_refine_once(vol, dims, seed, apex_mm, rounds)
+        if _mv_quality(cand[0]) > _mv_quality(best[0]):
+            best = cand
+        if _mv_quality(best[0])[0] >= 16:
+            break                                  # every hinge found: done
+    return best

@@ -1,20 +1,23 @@
 # -*- coding: utf-8 -*-
-"""MV / AoV plane — Auto step (shared by the VTK and pygfx CT viewers).
+"""MV+Apex / AoV — Auto step (shared by the VTK and pygfx CT viewers).
 
-The valve-edit row's Auto button reads the rough position from the centreline
-CROSSING (self._center, as Apex → Set does) and fits the plane with
-core.valve_auto:
+Auto arms a CLICK pick on the image (a click = press + release without a
+drag; drags still run the selected tool, so the view stays adjustable):
 
-* AoV: two presses — (1) Auto → "put the crossing near the AoV centre",
-  (2) Auto → detect (crossing in / near the aortic root).
-* MV:  three presses, each prompted — (1) Auto → "put the crossing near the
-  MV centre", (2) Auto → MV centre recorded, "put the crossing near the LV
-  apex", (3) Auto → detect. The rough apex seeds the first rotation axis only
-  (not stored as the Apex — the Epi step still sets that against the MV
-  plane).
+* MV+Apex: (1) click near the MV centre on a long-axis view, (2) click near
+  the LV apex → detect_mv_refined (MV → apex → MV … until it settles; the apex
+  click only gives the LV side) sets the MV plane AND the common apex at once.
+  Between the two clicks Rotate / Paging / the centreline drag are blocked so
+  both points sit on the same image.
+* AoV: one click near the AoV centre (short-axis view) → detect_aov.
 
-The result goes through _lv_apply_valve_data (same ring / caches as Load) and
-is marked unsaved. Manual correction = the existing Draw → Set.
+While a procedure runs (waiting for a click, or detecting) the Auto button has
+an orange frame; Esc or Auto again cancels. Results go through
+_lv_apply_valve_data (same ring / caches as Load) and are marked unsaved.
+Manual correction = Draw → Set (MV / AoV) and Apex Set (crossing).
+
+MV+Apex Save / Load / Clear / Hide act on both: an .MVLv.json and an
+.ApxLv.json of the same name in one folder.
 """
 from __future__ import annotations
 
@@ -23,63 +26,233 @@ import numpy as np
 from multi_dicomviewer.i18n import t
 
 
+#: The Auto button while its procedure runs (waiting for the next press, or
+#: detecting): an orange frame, so "an Auto procedure is in progress" shows.
+_AUTO_RUN_STY = ("QPushButton{background:#fff3e0;border:2px solid #f57c00;"
+                 "border-radius:3px;padding:1px 6px;}")
+
+
+class _AutoRunning:
+    def __init__(self, host, btn):
+        self.host, self.btn = host, btn
+
+    def __enter__(self):
+        self.host._lv_auto_mark(self.btn, True)
+        return self
+
+    def __exit__(self, *exc):
+        self.host._lv_auto_mark(self.btn, self.host._lv_valve_auto_seed_v
+                                is not None and self.btn is getattr(
+                                    self.host, "_lv_ve_auto_btn", None))
+        return False
+
+
 class ValveAutoMixin:
-    _lv_valve_auto_seed = None               # (which, "mv"|"apex", MV-centre mm)
+    _lv_valve_auto_seed_v = None             # (which, "mv"|"apex"|"aov", MV mm)
+
+    @property
+    def _lv_valve_auto_seed(self):
+        return self._lv_valve_auto_seed_v
+
+    @_lv_valve_auto_seed.setter
+    def _lv_valve_auto_seed(self, v):
+        # Every step change (start, next press, done, valve entered / left)
+        # passes here, so the Auto button's "running" frame follows it.
+        self._lv_valve_auto_seed_v = v
+        self._lv_auto_mark(getattr(self, "_lv_ve_auto_btn", None), v is not None)
+
+    def _lv_auto_running(self, btn):
+        return _AutoRunning(self, btn)
+
+    def _lv_auto_mark(self, btn, on) -> None:
+        if btn is None:
+            return
+        dis = getattr(self, "_BTN_DIS", "")
+        btn.setStyleSheet((_AUTO_RUN_STY + dis) if on else dis)
+        try:
+            btn.repaint()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------ pick
+    _LV_PICK_COLOR = "#ff9800"
 
     def _lv_valve_auto(self) -> None:
+        """Auto: arm the click pick (or cancel it when it is already armed)."""
         which = getattr(self, "_lv_valve_edit", None) or "mitral"
-        vol = getattr(self, "_vol", None)
-        P = getattr(self, "_center", None)
-        if vol is None or P is None:
+        if getattr(self, "_vol", None) is None:
             return
-        P = np.asarray(P, float).copy()
-        vname = "MV" if which == "mitral" else "AoV"
-        from multi_dicomviewer.core import valve_auto as va
-        dims = tuple(float(d) for d in self._dims)
+        if self._lv_pick_active():
+            self._lv_pick_cancel()
+            return
+        # Measure would take the clicks as drawing → off while picking.
+        if getattr(self, "_meas_on", False) and hasattr(self, "_meas_btn"):
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_pick_xy = None
         if which == "aortic":
-            # Two presses: 1st asks for the crossing at the AoV centre, 2nd runs.
-            seed = self._lv_valve_auto_seed
-            if seed is None or seed[0] != which:
-                self._lv_valve_auto_seed = (which, "aov", None)
-                self._lvv_prompt(t(
-                    "AoV中心近傍にセンターライン交点を合わせてAutoを押してください。"))
-                return
-            self._lv_valve_auto_seed = None
-            mv = (self._lv_valves.get("mitral") if hasattr(self, "_lv_valves")
-                  else None)
-            hint = np.asarray(mv[0], float) if mv is not None else None
-            res = self._run_busy(t("Auto"), t("{v}面を検出中…").format(v=vname),
-                                 lambda: va.detect_aov(vol, dims, P, lv_hint_mm=hint))
+            self._lv_valve_auto_seed = (which, "aov", None)
+            self._lvv_prompt(t("AoVの短軸を表示し、その中心近傍をクリックしてください。"))
         else:
-            # Three presses, each step prompted:
-            #   1st: ask for the crossing at the MV centre
-            #   2nd: record the MV centre, ask for the crossing at the LV apex
-            #   3rd: record the apex (rough; not stored as the Apex) → detect.
-            seed = self._lv_valve_auto_seed
-            if seed is None or seed[0] != which:
-                self._lv_valve_auto_seed = (which, "mv", None)
+            self._lv_valve_auto_seed = (which, "mv", None)
+            self._lvv_prompt(t(
+                "左室長軸の観察画像で、まずMV中心近傍（MVの楕円の中央付近）をクリック"
+                "し、次に心尖近傍をクリックしてください。"))
+
+    def _lv_pick_active(self) -> bool:
+        seed = self._lv_valve_auto_seed
+        return (seed is not None
+                and seed[0] == getattr(self, "_lv_valve_edit", None))
+
+    def _lv_pick_locked(self) -> bool:
+        """Between the MV and the apex click: the image must stay the same, so
+        Rotate / Paging / the centreline drag are blocked (Zoom / Move / WL
+        still work)."""
+        return self._lv_pick_active() and self._lv_valve_auto_seed[1] == "apex"
+
+    def _lv_pick_blocks_tool(self, tool) -> bool:
+        return self._lv_pick_locked() and tool in ("ROTATE", "PAGING")
+
+    def _lv_pick_cancel(self, prompt=True) -> None:
+        self._lv_valve_auto_seed = None
+        self._lv_pick_xy = None
+        self._lv_pick_marker_clear()
+        if prompt:
+            self._lvv_prompt(t("Auto を中止しました。"))
+
+    def _lv_pick_escape(self) -> bool:
+        """Esc while picking → cancel. True when consumed."""
+        if self._lv_pick_active():
+            self._lv_pick_cancel()
+            return True
+        return False
+
+    def _lv_pick_press(self, pane, x, y) -> None:
+        self._lv_pick_xy = ((pane, float(x), float(y))
+                            if self._lv_pick_active() else None)
+
+    def _lv_pick_release(self, pane, x, y) -> bool:
+        """A left release that did not drag (≤ 4 px) since its press = a pick."""
+        p = getattr(self, "_lv_pick_xy", None)
+        self._lv_pick_xy = None
+        if (p is None or p[0] != pane or not self._lv_pick_active()
+                or abs(float(x) - p[1]) + abs(float(y) - p[2]) > 4.0):
+            return False
+        wx, wy = self._disp_to_world(pane, x, y)
+        P = np.asarray(self._out_to_world3d(pane, wx, wy), float)
+        self._lv_pick_point(P)
+        return True
+
+    def _lv_pick_point(self, P) -> None:
+        seed = self._lv_valve_auto_seed
+        if seed is None:
+            return
+        which, stage = seed[0], seed[1]
+        P = np.asarray(P, float)
+        if stage == "aov":
+            self._lv_run_aov_auto(P)
+        elif stage == "mv":
+            self._lv_valve_auto_seed = (which, "apex", P.copy())
+            self._lv_pick_marker(P)
+            self._lvv_prompt(t("心尖近傍をクリックしてください。"))
+        else:
+            mv_p = np.asarray(seed[2], float)
+            if float(np.linalg.norm(mv_p - P)) < 20.0:
                 self._lvv_prompt(t(
-                    "MV中心近傍にセンターライン交点を合わせてAutoを押してください。"))
+                    "心尖部がMV中心に近すぎます。心尖近傍をクリックしてください。"))
                 return
-            if seed[1] == "mv":
-                self._lv_valve_auto_seed = (which, "apex", P)
-                self._lvv_prompt(t(
-                    "LV心尖近傍にセンターラインの交点を合わせてAutoを押してください。"))
-                return
-            mv_p, apex_p = np.asarray(seed[2], float), P
-            if float(np.linalg.norm(mv_p - apex_p)) < 20.0:
-                self._lvv_prompt(t(
-                    "心尖部がMV中心に近すぎます。LV心尖近傍にセンターラインの交点を"
-                    "合わせてAutoを押してください。"))
-                return
-            self._lv_valve_auto_seed = None
-            res = self._run_busy(t("Auto"), t("{v}面を検出中…").format(v=vname),
-                                 lambda: va.detect_mv(vol, dims, mv_p, apex_p))
+            self._lv_run_mv_apex_auto(mv_p, P)
+
+    def _lv_pick_marker(self, P) -> None:
+        self._lv_pick_marker_clear()
+        q = tuple(map(float, P))
+        for k in ("A", "B"):
+            self._meas_seq += 1
+            self._measures[k].append({
+                "id": self._meas_seq, "type": "point",
+                "pts": [self._world3d_to_out(k, q)], "pts3d": [q],
+                "color": self._LV_PICK_COLOR, "_lv_pick": True})
+            self._redraw_meas(k)
+
+    def _lv_pick_marker_clear(self) -> None:
+        meas = getattr(self, "_measures", None)
+        if not meas:
+            return
+        for k in ("A", "B"):
+            ms = meas.get(k, [])
+            if any(m.get("_lv_pick") for m in ms):
+                meas[k] = [m for m in ms if not m.get("_lv_pick")]
+                self._redraw_meas(k)
+
+    # ------------------------------------------------------------ detect
+    def _lv_run_aov_auto(self, P) -> None:
+        from multi_dicomviewer.core import valve_auto as va
+        vol = self._vol
+        dims = tuple(float(d) for d in self._dims)
+        mv = self._lv_valves.get("mitral") if hasattr(self, "_lv_valves") else None
+        hint = np.asarray(mv[0], float) if mv is not None else None
+        with self._lv_auto_running(self._lv_ve_auto_btn):
+            res = self._run_busy(
+                t("Auto"), t("{v}面を検出中…").format(v="AoV"),
+                lambda: va.detect_aov(vol, dims, P, lv_hint_mm=hint))
+        self._lv_valve_auto_seed = None
         if res is None or not res.ok:
             self._lvv_prompt(t(
-                "{v}面を自動で検出できませんでした。十字の交点を{v}の近くに置いて"
-                "やり直すか、Draw → Set で手動設定してください。").format(v=vname))
+                "AoV面を自動で検出できませんでした。Auto をもう一度押してAoV中心を"
+                "クリックし直すか、Draw → Set で手動設定してください。"))
             return
+        self._lv_set_valve_result("aortic", res)
+        self._lvv_prompt(t(
+            "AoV面を自動設定しました（半径 {r:.1f} mm）。確認して、ずれていれば "
+            "Draw → Set で修正してください。").format(r=float(res.radius)))
+
+    def _lv_run_mv_apex_auto(self, mv_p, apex_p) -> None:
+        from multi_dicomviewer.core import valve_auto as va
+        vol = self._vol
+        dims = tuple(float(d) for d in self._dims)
+
+        def work():
+            res, apex = va.detect_mv_refined(vol, dims, mv_p, apex_p)
+            if res.ok and apex is None:          # refinement stopped early
+                a = va.detect_apex(vol, dims, res.center, res.normal)
+                apex = a if a.ok else None
+            return res, apex
+
+        with self._lv_auto_running(self._lv_ve_auto_btn):
+            out = self._run_busy(t("Auto"), t("MV面と心尖部を検出中…"), work)
+        self._lv_valve_auto_seed = None
+        self._lv_pick_marker_clear()
+        res, apex = out if out is not None else (None, None)
+        if res is None or not res.ok:
+            self._lvv_prompt(t(
+                "MV面を自動で検出できませんでした。Auto をもう一度押してクリックし"
+                "直すか、Draw → Set で手動設定してください。"))
+            return
+        self._lv_set_valve_result("mitral", res)
+        if apex is not None:
+            self._lv_apex = np.asarray(apex.apex, float).copy()
+            self._lv_apex_shown = True
+        # Check view: MV face-on (left) and edge-on along the long axis (right).
+        if hasattr(self, "_lv_view_mv_perpendicular"):
+            self._lv_view_mv_perpendicular(reset_cam=False)
+            for k in ("A", "B"):
+                self._redraw_meas(k)
+        self._lv_apex_marker_draw()
+        self._lv_update_submode_ui()
+        if apex is None:
+            self._lvv_prompt(t(
+                "MV面を自動設定しました（半径 {r:.1f} mm）が、心尖部は検出できません"
+                "でした。交点を心尖部に合わせて Apex Set で設定してください。").format(
+                    r=float(res.radius)))
+            return
+        self._lvv_prompt(t(
+            "MV面（半径 {r:.1f} mm）と心尖部（MV 中心から {d:.0f} mm、壁厚 "
+            "{w:.1f} mm）を自動設定しました。確認して、ずれていれば MV は Draw → "
+            "Set、心尖部は交点を合わせて Apex Set で修正してください。").format(
+                r=float(res.radius), d=float(np.linalg.norm(apex.apex - res.center)),
+                w=float(apex.wall_mm)))
+
+    def _lv_set_valve_result(self, which, res) -> None:
         self._lv_apply_valve_data(which, {
             "c": [float(x) for x in res.center],
             "n": [float(x) for x in res.normal],
@@ -87,9 +260,186 @@ class ValveAutoMixin:
         self._lv_valve_saved_sig[which] = None          # auto result: unsaved
         self._lv_valve_auto_contour(which, res)
         self._lv_update_submode_ui()
-        self._lvv_prompt(t(
-            "{v}面を自動設定しました（半径 {r:.1f} mm）。確認して、ずれていれば "
-            "Draw → Set で修正してください。").format(v=vname, r=float(res.radius)))
+
+    # --------------------------------------------- MV+Apex Save/Load/Clear/Hide
+    def _lv_apex_payload(self) -> dict:
+        return {"type": "apex",
+                "series": (self._lv_series_meta()
+                           if hasattr(self, "_lv_series_meta") else {}),
+                "src_dir": (self._lv_series_dir()
+                            if hasattr(self, "_lv_series_dir") else ""),
+                "apex": list(map(float, np.asarray(self._lv_apex, float)))}
+
+    def _lv_mv_payload(self) -> dict:
+        c, n, r = self._lv_valves["mitral"]
+        return {"type": "valve", "valve": "mitral",
+                "series": (self._lv_series_meta()
+                           if hasattr(self, "_lv_series_meta") else {}),
+                "src_dir": (self._lv_series_dir()
+                            if hasattr(self, "_lv_series_dir") else ""),
+                "c": list(map(float, c)), "n": list(map(float, n)),
+                "r": float(r)}
+
+    @staticmethod
+    def _lv_mvapex_stem(path) -> str:
+        """'…/case.MVLv.json' → '…/case' (any case of the suffix)."""
+        low = path.lower()
+        for suf in (".mvlv.json", ".apxlv.json", ".json"):
+            if low.endswith(suf):
+                return path[: len(path) - len(suf)]
+        return path
+
+    def _lv_mvapex_save(self) -> None:
+        """Save MV + apex: one dialog, two files of the same name side by side
+        (.MVLv.json and .ApxLv.json). Only the MV is written when no apex."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if self._lv_valves.get("mitral") is None:
+            QMessageBox.information(self.window(), t("LV"),
+                                    t("Set the {w} plane first.").format(w="MV"))
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
+                else "valve")
+        default = os.path.join(d, stem + ".MVLv.json") if d else stem + ".MVLv.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self.window(), t("Save MV + Apex"), default,
+            "MV plane (*.MVLv.json);;JSON (*.json)")
+        if not path:
+            return
+        base = self._lv_mvapex_stem(path)
+        files = [(base + ".MVLv.json", self._lv_mv_payload())]
+        if getattr(self, "_lv_apex", None) is not None:
+            files.append((base + ".ApxLv.json", self._lv_apex_payload()))
+        try:
+            for fp, data in files:
+                if hasattr(self, "_unlink_case_variant"):
+                    self._unlink_case_variant(fp)
+                with open(fp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, ensure_ascii=False)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Save failed: {err}", err=str(exc)))
+            return
+        self._lv_remember_dir(files[0][0])
+        self._lv_valve_saved_sig["mitral"] = self._lv_valve_sig("mitral")
+        names = "\n".join(os.path.basename(fp) for fp, _d in files)
+        msg = t("Saved: {p}", p=names)
+        if len(files) == 1:
+            msg += "\n\n" + t("心尖部が未設定のため、MV だけ保存しました。")
+        QMessageBox.information(self.window(), t("LV"), msg)
+
+    def _lv_mvapex_load(self) -> None:
+        """Load an .MVLv.json (or .ApxLv.json) and its same-name partner."""
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import json
+        import os
+        if getattr(self, "_vol", None) is None:
+            return
+        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("Load MV + Apex"), d,
+            "MV / Apex (*.MVLv.json *.ApxLv.json);;JSON (*.json)")
+        if not path:
+            return
+        base = self._lv_mvapex_stem(path)
+        folder = os.path.dirname(base) or "."
+        name = os.path.basename(base).lower()
+
+        def find(suffix):
+            try:
+                for f in os.listdir(folder):
+                    if f.lower() == name + suffix:
+                        return os.path.join(folder, f)
+            except OSError:
+                pass
+            return None
+
+        mv_fp, ax_fp = find(".mvlv.json"), find(".apxlv.json")
+        if path.lower().endswith(".json") and not (mv_fp or ax_fp):
+            mv_fp = path                                 # a plain .json: as MV
+        try:
+            loaded = {}
+            for kind, fp in (("mv", mv_fp), ("apex", ax_fp)):
+                if fp:
+                    with open(fp, encoding="utf-8") as f:
+                        loaded[kind] = json.load(f)
+            cur = (self._lv_series_meta().get("series_uid", "")
+                   if hasattr(self, "_lv_series_meta") else "")
+            if any((dd.get("series") or {}).get("series_uid", "") not in ("", cur)
+                   for dd in loaded.values()) and cur:
+                if QMessageBox.question(
+                        self.window(), t("LV"),
+                        t("This valve file was saved for a DIFFERENT series — it "
+                          "may not line up. Load anyway?")) \
+                        != QMessageBox.StandardButton.Yes:
+                    return
+            if "mv" in loaded:
+                self._lv_apply_valve_data("mitral", loaded["mv"])
+            if "apex" in loaded:
+                self._lv_apply_apex_data(loaded["apex"])
+            self._lv_remember_dir(path)
+        except Exception as exc:                        # noqa: BLE001
+            QMessageBox.warning(self.window(), t("LV"),
+                                t("Load failed: {err}", err=str(exc)))
+            return
+        got = [os.path.basename(fp) for fp in (mv_fp, ax_fp) if fp]
+        msg = t("Loaded: {p}", p="\n".join(got))
+        if "apex" not in loaded:
+            msg += "\n\n" + t("同じ名前の .ApxLv.json がないため、心尖部は読み込んでいません。")
+        if "mv" not in loaded:
+            msg += "\n\n" + t("同じ名前の .MVLv.json がないため、MV は読み込んでいません。")
+        QMessageBox.information(self.window(), t("LV"), msg)
+
+    def _lv_mvapex_clear(self) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        has_mv = self._lv_valves.get("mitral") is not None
+        has_ax = getattr(self, "_lv_apex", None) is not None
+        if not (has_mv or has_ax):
+            self._lvv_prompt(t("No {v} plane on the image to clear.").format(
+                v="MV"))
+            return
+        if QMessageBox.question(
+                self.window(), t("LV"),
+                t("MV 面と心尖部を画像から消しますか？保存したファイルは残ります。")) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        if has_mv:
+            self._lv_valves["mitral"] = None
+            self._lv_valve_shown["mitral"] = True
+            self._lv_valve_saved_sig["mitral"] = None
+            for k in ("A", "B"):
+                self._measures[k] = [m for m in self._measures.get(k, [])
+                                     if m.get("_lv_valve") != "mitral"]
+                self._redraw_meas(k)
+            self._lv_on_valve_changed("mitral")
+        if has_ax:
+            self._lv_apex = None
+            self._lv_apex_marker_draw()
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+
+    def _lv_mvapex_toggle(self) -> None:
+        """Hide / Show MV + apex together (the apex follows the MV ring)."""
+        if self._lv_valves.get("mitral") is not None:
+            self._lv_toggle_valve_visibility("mitral")
+            shown = self._lv_valve_shown.get("mitral", True)
+        else:
+            shown = not getattr(self, "_lv_apex_shown", True)
+        if getattr(self, "_lv_apex", None) is not None:
+            self._lv_apex_shown = shown
+            self._lv_apex_marker_draw()
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+
+    def _lv_mvapex_rclick(self) -> None:
+        if getattr(self, "_vol", None) is None or (
+                self._lv_valves.get("mitral") is None
+                and getattr(self, "_lv_apex", None) is None):
+            self._lvv_prompt(t("Set the {v} plane first.").format(v="MV"))
+            return
+        self._lv_mvapex_toggle()
 
     def _lv_apex_auto(self) -> None:
         """Apex row → Auto: the epicardial LV apex from the set MV plane (the
@@ -106,8 +456,9 @@ class ValveAutoMixin:
         from multi_dicomviewer.core import valve_auto as va
         dims = tuple(float(d) for d in self._dims)
         c, n = np.asarray(mv[0], float), np.asarray(mv[1], float)
-        res = self._run_busy(t("Auto"), t("心尖部を検出中…"),
-                             lambda: va.detect_apex(vol, dims, c, n))
+        with self._lv_auto_running(getattr(self, "_lv_ax_auto_btn", None)):
+            res = self._run_busy(t("Auto"), t("心尖部を検出中…"),
+                                 lambda: va.detect_apex(vol, dims, c, n))
         if res is None or not res.ok:
             self._lvv_prompt(t(
                 "心尖部を自動で検出できませんでした。センターラインの交点を心尖部に"

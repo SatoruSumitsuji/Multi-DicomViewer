@@ -981,10 +981,9 @@ class CPRMixin:
     _CPR_VR_EPI_OUT_MM = 8.0
 
     def _cpr_vr_epi_band(self):
-        """Bool [z,y,x] band around the loaded Epi boundary (in/out mm above);
-        None when no Epi region / no scipy."""
-        f = getattr(self, "_vr_epi_full_mask", None)
-        epi = f() if callable(f) else None
+        """Bool [z,y,x] band around the Epi boundary (in/out mm above); None
+        when no Epi is available / no scipy."""
+        epi = self._cpr_vr_epi_region()
         if epi is None:
             return None
         epi = np.asarray(epi, bool)
@@ -1011,6 +1010,62 @@ class CPRMixin:
         band = ((~sub) & (d_out <= out_mm)) | (sub & (d_in <= in_mm))
         full = np.zeros(epi.shape, bool)
         full[z0:z1, y0:y1, x0:x1] = band
+        return full
+
+    def _cpr_vr_epi_region(self):
+        """Full-volume bool [z,y,x] Epi interior for the VR表示 crop, from
+        whichever Epi exists: a loaded EpiLv / FullLv with a packed 'region'
+        (_vr_epi_full_mask), else the Epi SURFACE — the one kept after the Epi
+        pass (traced, or loaded without a region) or the live Epi pass — packed
+        on the fly (valve-clipped, coarse grid; cached per surface). Without the
+        surface fallback a traced Epi fell back to the 70 mm sphere = the whole
+        chest ("Epi があるのに範囲が広すぎる")."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return None
+        f = getattr(self, "_vr_epi_full_mask", None)
+        epi = f() if callable(f) else None
+        if epi is not None and np.asarray(epi).any():
+            return epi
+        surf = getattr(self, "_lvv_epi_surf", None)
+        if surf is None:
+            lv = getattr(self, "_lv", None)
+            m = lv.get("model") if isinstance(lv, dict) else None
+            surf = getattr(m, "epi", None) if m is not None else None
+        if surf is None:
+            return None
+        cache = getattr(self, "_cpr_vr_epi_cache", None)
+        if cache is not None and cache[0] is surf and cache[1] == vol.shape:
+            return cache[2]
+        lvv = getattr(self, "_lvv", None) or {}
+        valves = getattr(self, "_lv_valves", None) or {}
+        mv = valves.get("mitral") or lvv.get("mitral")
+        av = valves.get("aortic") or lvv.get("aortic")
+        apex = lvv.get("apex")
+        for cand in (getattr(self, "_lvv_epi_apex", None),
+                     getattr(self, "_lv_apex", None),
+                     getattr(getattr(surf, "axis", None), "apex", None)):
+            if apex is None and cand is not None:
+                apex = cand
+        if apex is None:
+            mv = av = None                       # no side to keep → no clipping
+            apex = np.zeros(3)
+        try:
+            comp, bb, _v, _vm = surf.inside_mask_volumes(
+                tuple(float(d) for d in self._dims), vol.shape,
+                None if mv is None else (np.asarray(mv[0], float),
+                                         np.asarray(mv[1], float)),
+                None if av is None else (np.asarray(av[0], float),
+                                         np.asarray(av[1], float)),
+                np.asarray(apex, float))
+        except Exception:                        # noqa: BLE001
+            return None
+        if comp is None:
+            return None
+        z0, z1, y0, y1, x0, x1 = (int(x) for x in bb)
+        full = np.zeros(vol.shape, bool)
+        full[z0:z1, y0:y1, x0:x1] = comp
+        self._cpr_vr_epi_cache = (surf, vol.shape, full)
         return full
 
     def _cpr_vr_sphere_mask(self):

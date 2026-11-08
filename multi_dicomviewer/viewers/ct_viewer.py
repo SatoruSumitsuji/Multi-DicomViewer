@@ -1036,6 +1036,11 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
     def mousePressEvent(self, e):
         self._owner._set_active(self._which)
         o = self._owner
+        # MV+Apex / AoV Auto: remember a left press — its release without a drag
+        # is the pick (see mouseReleaseEvent); drags still run the tool.
+        if (e.button() == Qt.MouseButton.LeftButton
+                and not o._vr_on.get(self._which)):
+            o._lv_pick_press(self._which, e.position().x(), e.position().y())
         # Coronary Tree / Territory: a LEFT-press ON a coronary overlay line (MPR
         # centreline or VR tube) selects that vessel's row in the panel (highlights
         # the branch / CPR line). Non-consuming side-effect — the normal gesture
@@ -1327,6 +1332,13 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # tool: Zoom/Move/Rotate/Spin/Thick/Paging). Snapshot for Ctrl+Z now;
         # the gesture is committed as one step on release.
         self._owner._gesture_begin()
+        # MV+Apex Auto, between the two clicks: the image must not change, so
+        # no centreline move / rotate and no ▲ snap — only the tool drag (whose
+        # Rotate / Paging _drag blocks).
+        if self._owner._lv_pick_locked():
+            self._cross = False
+            self._last = e.position()
+            return
         # Pressing within the (5%) crosshair grab band grabs the centreline
         # (reslice move / rotate), overriding the tool — for ALL tools. The
         # centreline gesture is deliberately ABOVE every tool button: on the
@@ -1556,6 +1568,10 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # move·rotate) as one Ctrl+Z step. A click/double-click recentre records
         # itself (it leaves _gesture_moved False), so this won't double-record.
         self._owner._gesture_commit()
+        # MV+Apex / AoV Auto: a click (no drag) places the next point.
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._owner._lv_pick_release(
+                self._which, e.position().x(), e.position().y())
         # LV Vol (Blood/Endo): dragging the RIGHT long-axis section left the LEFT
         # pane's reslice updated in data but not repainted until it got its own
         # mouse event (the companion pane's widget didn't present) — so the left
@@ -1618,6 +1634,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
         # the point TWICE (the 2nd click lands on the already-recentred image).
         if self._which == "A" and self._owner._cpr is not None:
             return
+        if self._owner._lv_pick_active():
+            return                       # MV+Apex / AoV Auto: clicks are picks
         self._owner._recenter(self._which, e.position().x(), e.position().y())
 
     def wheelEvent(self, e):
@@ -4052,17 +4070,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
         # and the Blood region's basal bound. Saved to their own MVLv.json /
         # AoVLv.json (single source, one per 3DCT phase). ----
-        self._lv_mv_btn = FitButton(t("MV"))
-        self._lv_mv_btn.setHelpToolTip(
-            t("Set the COMMON MV plane (shared by Epi / Blood-Endo): opens the "
-              "MV step — Draw an Ellipse (Shift = true circle) → Confirm, or "
-              "Load a saved MV plane. Right-click to hide / show it (works while "
-              "tracing too)."))
+        self._lv_mv_btn = FitButton(t("MV+Apex"))
+        self._lv_mv_btn.setHelpToolTip(t(
+            "MV 面と心尖部（Epi / Blood-Endo 共通）を設定します。Auto で MV 中心と"
+            "心尖を順にクリックすると両方を自動設定します。右クリックで表示 ⇔ "
+            "非表示（トレース中も可）。"))
         self._lv_mv_btn.clicked.connect(lambda: self._lv_enter_valve("mitral"))
         self._lv_mv_btn.setContextMenuPolicy(
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lv_mv_btn.customContextMenuRequested.connect(
-            lambda _p: self._lv_rclick_valve("mitral"))
+            lambda _p: self._lv_mvapex_rclick())
         row1.addWidget(self._lv_mv_btn)
         self._lv_aov_btn = FitButton(t("AoV"))
         self._lv_aov_btn.setHelpToolTip(
@@ -4089,6 +4106,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             Qt.ContextMenuPolicy.CustomContextMenu)
         self._lv_apex_sel_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_rclick_apex())
+        # Merged into MV+Apex (the apex is set with the MV) — kept hidden so
+        # the old references stay harmless.
+        self._lv_apex_sel_btn.setVisible(False)
         row1.addWidget(self._lv_apex_sel_btn)
         row1.addSpacing(8)
 
@@ -4162,8 +4182,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex_btn.clicked.connect(self._lv_confirm_apex_trace)
         self._lv_trace_btn = FitButton(t("Trace"))
         self._lv_trace_btn.setHelpToolTip(
-            t("Trace this pass's border (set the apex with the Apex button "
-              "first)"))
+            t("Trace this pass's border (set the apex with MV+Apex first)"))
         self._lv_trace_btn.clicked.connect(self._lv_start_trace)
         gt.addWidget(self._lv_trace_btn)
         self._lv_prev_btn = FitButton(t("◀ Prev plane (A)"))
@@ -4529,8 +4548,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         r2ve.setContentsMargins(0, 0, 0, 0); r2ve.setSpacing(4)
         self._lv_ve_auto_btn = FitButton(t("Auto"))
         self._lv_ve_auto_btn.setHelpToolTip(t(
-            "十字の交点を弁のだいたいの位置に置いて押すと、弁輪面を自動で設定します"
-            "（MVは心尖部も使います）。ずれていれば Draw → Set で修正します。"))
+            "押してから画像をクリックすると自動設定します（MV+Apex：MV 中心→心尖の"
+            "2 点、AoV：中心の 1 点）。実行中は枠がオレンジになり、Esc か Auto で"
+            "中止します。"))
         self._lv_ve_auto_btn.clicked.connect(self._lv_valve_auto)
         self._lv_ve_draw_btn = FitButton(t("Draw"))
         self._lv_ve_draw_btn.setHelpToolTip(
@@ -4544,20 +4564,42 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             t("Set the valve plane from the drawn Ellipse."))
         self._lv_ve_confirm_btn.clicked.connect(self._lv_valve_confirm)
         r2ve.addWidget(self._lv_ve_confirm_btn)
+        # MV+Apex only: the apex's manual correction (crossing → Apex Set).
+        self._lv_ve_apex_set_btn = FitButton(t("Apex Set"))
+        self._lv_ve_apex_set_btn.setHelpToolTip(
+            t("Set the LV apex at the current centreline crossing."))
+        self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set)
+        r2ve.addWidget(self._lv_ve_apex_set_btn)
+        self._lv_ve_apex_repos_btn = FitButton(t("RePosition"))
+        self._lv_ve_apex_repos_btn.setHelpToolTip(
+            t("Drop the set apex so you can move the crossing and Set again."))
+        self._lv_ve_apex_repos_btn.clicked.connect(self._lv_apex_reposition)
+        r2ve.addWidget(self._lv_ve_apex_repos_btn)
         self._lv_ve_save_btn = FitButton(t("Save"))
-        self._lv_ve_save_btn.setHelpToolTip(t("Save this valve plane to a file."))
+        self._lv_ve_save_btn.setHelpToolTip(t(
+            "Save this valve plane to a file. (MV+Apex: .MVLv.json and "
+            ".ApxLv.json of the same name.)"))
         self._lv_ve_save_btn.clicked.connect(
-            lambda: self._lv_save_valve(self._lv_valve_edit or "mitral"))
+            lambda: self._lv_mvapex_save()
+            if (self._lv_valve_edit or "mitral") == "mitral"
+            else self._lv_save_valve(self._lv_valve_edit))
         r2ve.addWidget(self._lv_ve_save_btn)
         self._lv_ve_load_btn = FitButton(t("Load"))
-        self._lv_ve_load_btn.setHelpToolTip(t("Load a saved valve plane."))
+        self._lv_ve_load_btn.setHelpToolTip(t(
+            "Load a saved valve plane. (MV+Apex: the .MVLv.json and the "
+            ".ApxLv.json of the same name.)"))
         self._lv_ve_load_btn.clicked.connect(
-            lambda: self._lv_load_valve(self._lv_valve_edit or "mitral"))
+            lambda: self._lv_mvapex_load()
+            if (self._lv_valve_edit or "mitral") == "mitral"
+            else self._lv_load_valve(self._lv_valve_edit))
         r2ve.addWidget(self._lv_ve_load_btn)
         self._lv_ve_clear_btn = FitButton(t("Clear"))
         self._lv_ve_clear_btn.setHelpToolTip(
             t("Remove this valve plane from the image (saved files are kept)."))
-        self._lv_ve_clear_btn.clicked.connect(self._lv_valve_clear)
+        self._lv_ve_clear_btn.clicked.connect(
+            lambda: self._lv_mvapex_clear()
+            if (self._lv_valve_edit or "mitral") == "mitral"
+            else self._lv_valve_clear())
         r2ve.addWidget(self._lv_ve_clear_btn)
         # Hide/Show toggle: the label follows the plane's visibility (Hide when
         # shown, Show when hidden). The same toggle is on the MV/AoV buttons'
@@ -4566,13 +4608,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_show_btn.setHelpToolTip(
             t("Hide / show this valve's ring on the image (the plane is kept)."))
         self._lv_ve_show_btn.clicked.connect(
-            lambda: self._lv_toggle_valve_visibility(
-                self._lv_valve_edit or "mitral"))
+            lambda: self._lv_mvapex_toggle()
+            if (self._lv_valve_edit or "mitral") == "mitral"
+            else self._lv_toggle_valve_visibility(self._lv_valve_edit))
         r2ve.addWidget(self._lv_ve_show_btn)
         self._lv_ve_exit_btn = FitButton(t("Exit"))
         self._lv_ve_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
         r2ve.addWidget(self._lv_ve_exit_btn)
+        for b in (self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn):
+            b.setStyleSheet(self._BTN_DIS)
         for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                   self._lv_ve_save_btn, self._lv_ve_load_btn,
                   self._lv_ve_clear_btn, self._lv_ve_show_btn,
@@ -4659,7 +4704,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # NOTE: _lv_endo_btn is a hidden internal flag (merged into Blood/Endo) —
         # excluded so it is never force-shown.
         self._lv_selectors = [self._lv_cap, self._lv_mv_btn, self._lv_aov_btn,
-                              self._lv_apex_sel_btn, self._lv_epi_btn,
+                              self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]
         # LV sub-mode operation groups — force-hidden in CoronaryTreeモード (no LV
@@ -5129,7 +5174,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._lv is None or self._lv_current_submode() != "epi":
             return
         if self._lv_apex is None:
-            self._lvv_prompt(t("Set the common Apex first (the Apex button)."))
+            self._lvv_prompt(t("Set the common apex first (MV+Apex: Auto, or Apex Set)."))
             return
         box = QMessageBox(self.window())
         box.setWindowTitle(t("Epi"))
@@ -5506,13 +5551,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                           self._lv_ve_load_btn, self._lv_ve_exit_btn):
                     b.setEnabled(True)
+                mvx = ve == "mitral"                 # MV+Apex step
+                has_ax = mvx and self._lv_apex is not None
+                for b in (self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn):
+                    b.setVisible(mvx)
+                self._lv_ve_apex_set_btn.setEnabled(mvx)
+                self._lv_ve_apex_repos_btn.setEnabled(has_ax)
                 self._lv_ve_save_btn.setEnabled(has)
-                self._lv_ve_clear_btn.setEnabled(has)
-                self._lv_ve_show_btn.setEnabled(has)
+                self._lv_ve_clear_btn.setEnabled(has or has_ax)
+                self._lv_ve_show_btn.setEnabled(has or has_ax)
                 # Label follows visibility: Hide when shown, Show when hidden.
-                self._lv_ve_show_btn.setText(
-                    t("Hide") if self._lv_valve_shown.get(ve, True)
-                    else t("Show"))
+                shown = (self._lv_valve_shown.get(ve, True) if has
+                         else getattr(self, "_lv_apex_shown", True))
+                self._lv_ve_show_btn.setText(t("Hide") if shown else t("Show"))
         # A group's visibility changed → re-lay-out the bar NOW so a row that was
         # collapsed (empty row 2 in the initial state) appears on the FIRST click,
         # and a row that was hidden collapses immediately (no leftover gap).
@@ -8051,9 +8102,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Keep the valve-edit row's Hide/Show toggle in step with visibility.
         if ve is not None and getattr(self, "_lv_ve_show_btn", None) is not None:
             has = self._lv_valves.get(ve) is not None
-            self._lv_ve_show_btn.setEnabled(has)
-            self._lv_ve_show_btn.setText(
-                t("Hide") if self._lv_valve_shown.get(ve, True) else t("Show"))
+            has_ax = ve == "mitral" and self._lv_apex is not None
+            self._lv_ve_show_btn.setEnabled(has or has_ax)
+            shown = (self._lv_valve_shown.get(ve, True) if has
+                     else getattr(self, "_lv_apex_shown", True))
+            self._lv_ve_show_btn.setText(t("Hide") if shown else t("Show"))
         # Apex selector: same convention (red); highlighted while being placed.
         abtn = getattr(self, "_lv_apex_sel_btn", None)
         if abtn is not None:
@@ -12906,7 +12959,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Turn Volume Rendering on/off for pane *key* (contrast-CTA preset)."""
         if self._image is None:
             return
-        p = self.pane[key]
+        p = self._vr_pane_reset_if_on(key, on)
         on = bool(on)
         self._vr_on[key] = on
         cam = p.ren.GetActiveCamera()
@@ -13062,6 +13115,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             else:
                 cam.ParallelProjectionOn()
             self._vr_prev_cam[key] = None
+            # The clipping range is still the VR's (perspective, around the heart
+            # in world mm): reset it for the 2-D image, else the restored MPR /
+            # short-axis plane can sit outside it and the pane stays BLACK.
+            p.ren.ResetCameraClippingRange()
         if getattr(p, "vr_busy_text", None) is not None:
             p.vr_busy_text.SetVisibility(False)     # clean final frame (VR is ready)
         p.render()
@@ -13072,6 +13129,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._refresh_tool_availability()
                 self._terr_bar_sync()               # restore the LV / Coronary bars
         self._sync_vr_btn()
+
+    def _vr_pane_reset_if_on(self, key, on):
+        """VR ON for a pane that is ALREADY in VR (e.g. the top VR button was on
+        and then VR表示 was pressed): end that VR first. A second ON would record
+        the already-hidden MPR props as 'nothing hidden' and the VR camera as the
+        'MPR camera', so VR off could never bring the image back (black pane)."""
+        if on and self._vr_on.get(key):
+            self._vr_set(key, False)
+        return self.pane[key]
 
     def _vr_toggle(self, key) -> None:
         self._vr_set(key, not self._vr_on.get(key))
@@ -16428,8 +16494,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # The LV long axis is now DETERMINISTIC (apex → MV centre), set by the
             # Apex button — not captured from the view. Point the user there.
             self._lvv_prompt(t(
-                "Set the apex first: move the centreline crossing onto the "
-                "apex, then press 'Apex' (the LV long axis = apex→MV centre)."))
+                "Set the apex first with MV+Apex: Auto, or move the centreline "
+                "crossing onto the apex and press Apex Set (the LV long axis = "
+                "apex→MV centre)."))
             return
         if ph == "ready":
             m = lv["model"]
@@ -20354,6 +20421,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 # skipped here, which is why the ▲ used to keep its huge pre-CPR
                 # world size). Also draws the editable control-point markers.
                 self._draw_cpr_overlay()
+                p.ren.ResetCameraClippingRange()     # keep the section in range
                 p.render()
                 continue
             p.reslice.SetResliceAxes(self._matrix(key))
@@ -20654,6 +20722,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
         cam.SetParallelScale(max(1e-3, self._cpr["half"]))
+        cam.ParallelProjectionOn()               # 2-D section (VR may have left
+        p.ren.ResetCameraClippingRange()         # perspective + its clipping)
         p.render()
 
     def _content_half_on_plane(self, key):
@@ -21669,6 +21739,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # replay a peer's operation with the SAME tool regardless of what this
         # viewer's tool happens to be set to.
         t = tool if tool is not None else self._tool
+        # MV+Apex Auto between its two clicks: keep the same image.
+        if self._lv_pick_blocks_tool(t):
+            return
         # LV short-axis is a DERIVED view: a Paging drag moves the cross-section
         # LEVEL; ROTATE is blocked because tilting the reslice FRAME would
         # corrupt the locked short-axis / long-axis geometry (use ◀ ▶ to rotate
@@ -21868,6 +21941,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
 
     def _wheel(self, which, delta):
         if self._image is None:
+            return
+        if self._lv_pick_locked():          # MV+Apex Auto: keep the same image
             return
         # LV-CoSync: paging steps ALONG the LV long axis and is broadcast to the
         # peer CT (Diastole/Systole). Takes priority so both views page together.
@@ -22681,6 +22756,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Arrow keys are handled by QShortcuts (see __init__) so a focused
         # spin-box / combo / slider can't swallow them; only letter tool keys
         # and C (ColorMap) are handled here.
+        if e.key() == Qt.Key.Key_Escape and self._lv_pick_escape():
+            return                               # MV+Apex / AoV Auto cancelled
         if (e.key() == Qt.Key.Key_V
                 and (e.modifiers() & Qt.KeyboardModifier.ControlModifier)):
             self._paste_measure()                 # paste a copied measure (new #)
