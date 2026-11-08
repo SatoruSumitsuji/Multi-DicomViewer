@@ -115,6 +115,9 @@ class ValveAutoMixin:
             return
         self._lv_apex = np.asarray(res.apex, float).copy()
         self._lv_apex_shown = True
+        # Move the crossing onto the apex so both panes pass through it and the
+        # marker shows right away (the result is checked without hunting).
+        self._lv_goto_point(self._lv_apex)
         self._lv_apex_marker_draw()
         self._lv_update_submode_ui()
         self._lvv_prompt(t(
@@ -122,6 +125,28 @@ class ValveAutoMixin:
             "壁厚 {w:.1f} mm）。確認して、ずれていれば交点を合わせて Set で修正して"
             "ください。").format(
                 d=float(np.linalg.norm(res.apex - c)), w=float(res.wall_mm)))
+
+    def _lv_goto_point(self, P) -> None:
+        """Move the centreline crossing to the 3-D point P (pane orientations
+        kept), like a click-recentre: both panes reslice through P and centre on
+        it. One Ctrl+Z step."""
+        if getattr(self, "_center", None) is None:
+            return
+        before = self._view_snapshot() if hasattr(self, "_view_snapshot") else None
+        self._center = np.asarray(P, float).copy()
+        self._clamp_center()
+        self._pc = {"A": self._center.copy(), "B": self._center.copy()}
+        self._view_initial = False
+        if hasattr(self, "_center_camera"):                  # VTK viewer
+            for k in ("A", "B"):
+                self._center_camera(k)
+        elif isinstance(getattr(self, "_pan", None), dict):  # pygfx viewer
+            self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
+        self._refresh()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if before is not None and hasattr(self, "_undo_view"):
+            self._undo_view(before, self._view_snapshot())
 
     #: Detected annulus points (the saddle contour the plane was fitted to),
     #: drawn as a thin outline next to the fitted circle so a wrong hinge shows.
