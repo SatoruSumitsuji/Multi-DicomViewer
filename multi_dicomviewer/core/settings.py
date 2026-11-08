@@ -475,7 +475,18 @@ _DQ_DEFAULTS = {
     "xa_smooth": False,       # Angio/IVUS: high-quality (Lanczos) upscaling
     "xa_denoise": False,      # Angio/IVUS: edge-preserving noise reduction
     "ct_quality_mode": "adaptive",   # Mac 3DCT: high | adaptive | low
+    "tool_toast_ms": 500,     # CT 計測モード変更表示時間 (0 = off … 1000)
 }
+#: 計測モード変更表示時間 choices (ms): 0 (表示なし) … 1.0 s in 0.1 s steps.
+TOOL_TOAST_MS_CHOICES = tuple(range(0, 1001, 100))
+
+
+def _clean_tool_toast_ms(v) -> int:
+    try:
+        ms = int(round(float(v) / 100.0)) * 100
+    except (TypeError, ValueError):
+        return _DQ_DEFAULTS["tool_toast_ms"]
+    return max(0, min(1000, ms))
 
 
 def load_display_quality() -> dict:
@@ -493,6 +504,9 @@ def load_display_quality() -> dict:
                 elif k == "ct_quality_mode":
                     if v in CT_QUALITY_MODES:
                         out[k] = v
+                elif k == "tool_toast_ms":
+                    if v is not None and not isinstance(v, bool):
+                        out[k] = _clean_tool_toast_ms(v)
             # Migrate the legacy boolean (ct_full_quality=True → always high).
             if data.get("ct_quality_mode") not in CT_QUALITY_MODES \
                     and data.get("ct_full_quality") is True:
@@ -511,6 +525,8 @@ def save_display_quality(prefs: dict) -> None:
             v = prefs.get(k, dv)
             if k == "ct_quality_mode":
                 out[k] = v if v in CT_QUALITY_MODES else dv
+            elif k == "tool_toast_ms":
+                out[k] = _clean_tool_toast_ms(v)
             else:
                 out[k] = bool(v)
         out["version"] = 1

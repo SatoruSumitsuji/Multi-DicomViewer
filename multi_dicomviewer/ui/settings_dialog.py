@@ -170,6 +170,27 @@ class SettingsDialog(QDialog):
         clay.addStretch(1)
         root.addWidget(gb_c)
 
+        # ---- CT 計測モード変更表示 ------------------------------------------
+        # A tool key (Z / V / R …) shows "Zoom適応" etc. centred on the active
+        # pane for this long; 0 = no caption (the frame still blinks).
+        gb_tt = QGroupBox(t("CT 計測モード"))
+        ttform = QFormLayout(gb_tt)
+        self._tool_toast_combo = QComboBox()
+        for _ms in settings.TOOL_TOAST_MS_CHOICES:
+            self._tool_toast_combo.addItem(
+                t("0 秒（表示なし）") if _ms == 0
+                else t("{s:.1f} 秒", s=_ms / 1000.0), _ms)
+        _tt = int(quality.get("tool_toast_ms",
+                              settings._DQ_DEFAULTS["tool_toast_ms"]))
+        _ti = self._tool_toast_combo.findData(_tt)
+        self._tool_toast_combo.setCurrentIndex(
+            _ti if _ti >= 0 else self._tool_toast_combo.findData(500))
+        self._tool_toast_combo.setToolTip(t(
+            "キー（Z / V / R など）で計測モードを切り替えたとき、選択中のペイン"
+            "中央に「Zoom適応」などを表示する時間。0 秒で表示しません。"))
+        ttform.addRow(t("計測モード変更表示時間"), self._tool_toast_combo)
+        root.addWidget(gb_tt)
+
         # ---- CT image quality (Mac 3DCT only) -----------------------------
         gb_ctq = QGroupBox(t("CT Image Quality (Only Mac)"))
         ctqlay = QVBoxLayout(gb_ctq)
@@ -519,6 +540,7 @@ class SettingsDialog(QDialog):
             if rb.isChecked():
                 out["ct_quality_mode"] = val
                 break
+        out["tool_toast_ms"] = int(self._tool_toast_combo.currentData())
         return out
 
     def lv_endo(self) -> dict:

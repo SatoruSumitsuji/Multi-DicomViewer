@@ -19,9 +19,14 @@ LV walls meet at the AV junction; the annular plane is the least-squares plane
 of the (saddle-shaped) annulus (Lopes et al., Front Bioeng Biotechnol 2022;
 long-axis rotation around an MV-centre / apex axis as in Hashimoto et al.,
 Struct Heart 2022). Long-axis half-planes are rotated around the current axis;
-in each the blood pool's outer boundary R(h) (distance from the axis at height
-h along it, thin leaflets bridged) has its WAIST at the AV junction — that
-corner is the hinge point. A robust weighted plane fit gives the new axis
+in each, the hinge is where the THICK LV myocardium (apex side) gives way to
+the THIN LA wall (base side) — the AV junction — read from the soft-tissue
+thickness just outside the blood pool (up to the AV-groove / epicardial fat or
+the next blood pool) at each height; the pool's outer edge there is the hinge
+point. (The pool's narrowest point is NOT used: in systole the LV base is no
+wider than the annulus and papillary muscles / trabeculae narrow the LV pool
+more — that picked the annulus too far apex-ward on real CT.) Thin leaflets
+are filled by a 2-D closing first. A robust weighted plane fit gives the new axis
 (its normal) and centre, and the rotation is repeated, so the rough apex only
 seeds the first pass. Two phases: run each one (the first result can seed the
 other: pass it as mv_mm / apex_mm = centre ∓ normal).
@@ -349,30 +354,78 @@ def _hinges(vol, dims, c, n, thr, H, n_half=16, rmax=40.0, step=0.5,
     for th in np.linspace(0.0, np.pi, max(1, n_half // 2), endpoint=False):
         e = np.cos(th) * u + np.sin(th) * w
         P = (c + hs[:, None, None] * n + rr[None, :, None] * e)        # (H, 2R, 3)
-        inside = _sample(vol, dims, P) >= thr
+        hu = _sample(vol, dims, P)
+        inside = hu >= thr
         m = np.pad(inside, pad, mode="edge")
         m = ndimage.binary_closing(m, structure=st)[pad:-pad, pad:-pad]
-        halves.append((e, m[:, i0:]))
-        halves.append((-e, m[:, i0::-1]))
-    for e, inside in halves:
+        halves.append((e, m[:, i0:], hu[:, i0:]))
+        halves.append((-e, m[:, i0::-1], hu[:, i0::-1]))
+    win = max(4, int(round(_WALL_WIN_MM / step)))
+    for e, inside, hu in halves:
         R, opn = _ray_extent(inside, step, gap_mm, lead_mm=4.0)
         R = ndimage.median_filter(R, 5, mode="nearest")
-        okr = (R >= 6.0) & ~opn
-        if okr.sum() < 5:
+        Tw = _wall_thickness(inside, hu, R, step)
+        Tw = ndimage.median_filter(Tw, 3, mode="nearest")
+        # The hinge = where the THICK LV myocardium (below, apex side) gives way
+        # to the THIN LA wall (above): the AV junction. (The blood pool's waist
+        # is not reliable there — in systole the LV base is no wider than the
+        # annulus, and papillary muscles / trabeculae narrow the LV pool more.)
+        best, k_best = -np.inf, None
+        for k in range(win, len(hs) - win):
+            if R[k] < 6.0 or opn[k]:
+                continue
+            lv_t = float(np.median(Tw[k - win:k]))
+            la_t = float(np.median(Tw[k + 1:k + 1 + win]))
+            if lv_t < _WALL_LV_MM or la_t > _WALL_LA_MM:
+                continue
+            sc = (lv_t - la_t) - 0.1 * abs(float(hs[k]))
+            if sc > best:
+                best, k_best = sc, k
+        if k_best is None:
             continue
-        # The waist: the narrowest blood extent, kept near the current plane.
-        score = np.where(okr, R + 0.25 * np.abs(hs), np.inf)
-        k = int(np.argmin(score))
-        la = R[hs > hs[k]]
-        lv = R[hs < hs[k]]
-        if len(la) == 0 or len(lv) == 0:
-            continue
-        depth = 0.5 * (float(la.max()) + float(lv.max())) - float(R[k])
-        if depth < 1.0:
-            continue                             # no waist in this half-plane
-        pts.append(c + hs[k] * n + R[k] * e)
-        wts.append(float(np.clip(depth / 6.0, 0.15, 1.0)))
+        k = k_best
+        rk = float(np.median(R[max(0, k - 2):k + 3]))
+        pts.append(c + hs[k] * n + rk * e)
+        wts.append(float(np.clip((best + 0.1 * abs(float(hs[k]))) / 6.0,
+                                 0.15, 1.0)))
     return np.asarray(pts, float).reshape(-1, 3), np.asarray(wts, float)
+
+
+#: Hinge search (MV): wall thickness = the soft tissue just outside the blood
+#: pool, up to fat (epicardial / AV-groove, < _FAT_HU) or another blood pool.
+_FAT_HU = -20.0
+_WALL_LV_MM = 5.0        # LV myocardium below the annulus is at least this thick
+_WALL_LA_MM = 4.0        # the LA wall above it is at most this thick
+_WALL_WIN_MM = 5.0       # each side's median window along the axis
+
+
+def _wall_thickness(inside, hu, R, step, fat_run_mm=1.5, blood_run_mm=2.0):
+    """Per row (height h): soft-tissue thickness from the pool's outer edge R
+    to the first fat run (≥ fat_run_mm) or blood run (≥ blood_run_mm)."""
+    nh, nr = inside.shape
+    fr = max(1, int(round(fat_run_mm / step)))
+    br = max(1, int(round(blood_run_mm / step)))
+    fat = hu < _FAT_HU
+    out = np.zeros(nh)
+    for i in range(nh):
+        j0 = int(round(R[i] / step)) + 1
+        if j0 >= nr:
+            out[i] = 0.0
+            continue
+        f = fat[i, j0:]
+        b = inside[i, j0:]
+        stop = len(f)
+        # first index starting a run of fr fat / br blood samples
+        if len(f) >= fr:
+            cf = np.convolve(f.astype(int), np.ones(fr, int), "valid") >= fr
+            if cf.any():
+                stop = min(stop, int(np.argmax(cf)))
+        if len(b) >= br:
+            cb = np.convolve(b.astype(int), np.ones(br, int), "valid") >= br
+            if cb.any():
+                stop = min(stop, int(np.argmax(cb)))
+        out[i] = stop * step
+    return out
 
 
 def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
@@ -390,10 +443,14 @@ def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
         H = 18.0 if it == 0 else 10.0
         P, W = _hinges(vol, dims, c, n, thr, H)
         if len(P) < 6:
+            if it > 0:                           # keep the last good fit
+                break
             return ValveResult(c, n, 15.0, points=P, weights=W, ok=False,
                                message="mitral annulus not found")
         keep = np.ones(len(P), bool)
-        for _ in range(3):                       # robust: drop outliers
+        # Robust: drop outliers — not on the first pass, whose half-planes are
+        # still oblique to the annulus (its spread is expected, not outliers).
+        for _ in range(3 if it > 0 else 0):
             cc, nn, res = _plane_fit(P[keep], W[keep])
             rr = np.linalg.norm((P - cc) - np.outer((P - cc) @ nn, nn), axis=1)
             med_r = float(np.median(rr[keep]))

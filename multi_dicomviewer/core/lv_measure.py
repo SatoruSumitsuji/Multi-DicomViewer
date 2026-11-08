@@ -871,6 +871,39 @@ class LVModel:
             surf.apex_world = apex
         return surf
 
+    def epi_mv_plane(self, mv):
+        """(mv_used, shift_mm) for the EPI volume: the MV plane moved PARALLEL
+        toward the left atrium just far enough that no traced Epi point (any of
+        the long-axis planes) lies on its atrial side — the epicardial base
+        (AV groove) sits atrial of the annulus, so cutting Epi at the annulus
+        plane itself trimmed the drawn border. Endo / Blood keep the plain MV
+        plane. *mv* is (center, normal[, r]) or None; returned unchanged with
+        shift 0 when nothing protrudes."""
+        if mv is None or not self.epi_planes:
+            return mv, 0.0
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9:
+            return mv, 0.0
+        n = n / nn
+        apex = self.epi_apex
+        if apex is None and self.epi_axis is not None:
+            apex = self.epi_axis.apex
+        if apex is None:
+            return mv, 0.0
+        sa = float(np.sign(float((np.asarray(apex, float) - c) @ n))) or 1.0
+        pts = [np.asarray(p, float).reshape(-1, 3) for p in self.epi_planes.values()]
+        pts = [p for p in pts if len(p)]
+        if not pts:
+            return mv, 0.0
+        P = np.vstack(pts)
+        d = float(np.max(-((P - c) @ n) * sa))       # atrial protrusion (mm)
+        if d <= 0.05:
+            return mv, 0.0
+        c2 = c - sa * d * n                          # toward the atrium
+        return (c2, mv[1], *tuple(mv[2:])), d
+
     def volume_ml_valves(self, spacing: float, which: str, mv=None, aov=None
                          ) -> float | None:
         """Endo/Epi volume (mL): the FAITHFUL ⟂-LV-axis surface (built to its
@@ -878,7 +911,10 @@ class LVModel:
         trace) clipped by the MV (and, if set, AoV) plane on the apex side. Since
         the basal ends are snapped onto the MV plane while tracing, the clip
         follows the mitral annulus and the region never exceeds the drawn border.
-        *mv*/*aov* are (center, normal[, r]) tuples or None. None if not built."""
+        *mv*/*aov* are (center, normal[, r]) tuples or None. None if not built.
+        Epi uses epi_mv_plane (MV moved atrially past the drawn Epi base)."""
+        if which == "epi":
+            mv = self.epi_mv_plane(mv)[0]
         planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
         if not planes:
             surf = self.endo if which == "endo" else self.epi
@@ -895,6 +931,8 @@ class LVModel:
         """Boolean voxel mask (comp, bbox) of the region volume_ml_valves counts —
         the faithful surface clipped by the MV (+AoV) plane — on the native DICOM
         grid, for the red overlay. (None, None) if not built/empty."""
+        if which == "epi":
+            mv = self.epi_mv_plane(mv)[0]
         planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
         surf = self._full_surface(which) if planes else (
             self.endo if which == "endo" else self.epi)
@@ -910,7 +948,9 @@ class LVModel:
         """ONE rasterization → (comp, bbox, vol_ml, vol_mv_only_ml) for Calc Vol
         (mask + both volumes in a single `contains` pass). See
         LVSurface.inside_mask_volumes."""
-        surf = self._full_surface(which) if (mv is not None or aov is not None) \
+        if which == "epi":
+            mv = self.epi_mv_plane(mv)[0]
+        surf =self._full_surface(which) if (mv is not None or aov is not None) \
             else (self.endo if which == "endo" else self.epi)
         if surf is None:
             return None, None, None, None

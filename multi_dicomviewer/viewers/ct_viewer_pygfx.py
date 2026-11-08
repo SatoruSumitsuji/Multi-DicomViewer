@@ -4798,6 +4798,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._set_tool(name)
         if getattr(self, "_tool", None) == name:
             self._flash_active_frame()
+            from multi_dicomviewer.ui.pane_toast import show_tool_toast
+            show_tool_toast(self, name)          # "Zoom適応" centred, Settings time
 
     def _flash_active_frame(self, blinks: int = 2, ms: int = 110):
         self._frame_flash_gen = getattr(self, "_frame_flash_gen", 0) + 1
@@ -18059,6 +18061,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_result_lines = [
             t("Endo-LV Volume: {v:.1f} mL", v=vol_ml) if pas == "endo"
             else t("Epi-LV Volume: {v:.1f} mL", v=vol_ml)]
+        if pas == "epi":
+            # Epi is cut by the MV plane moved atrially past the drawn Epi base
+            # (LVModel.epi_mv_plane) — say by how much.
+            _sh = m.epi_mv_plane(mv)[1]
+            if _sh > 0.05:
+                self._lv_result_lines.append(
+                    t("MV面を心房側へ {d:.1f} mm 移動", d=_sh))
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the numbers so Save can persist them and Load can redisplay —
         # under the ACTIVE pass's key (Endo → vol_endo_ml, Epi → vol_epi_ml).

@@ -18101,6 +18101,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Only the volume itself — the AoV-trim diagnostic is hidden to keep the
         # result block clean (just Endo-/Epi-LV Volume).
         self._lv_result_lines = [label.format(v=vol_ml)]
+        if pas == "epi":
+            # Epi is cut by the MV plane moved atrially past the drawn Epi base
+            # (LVModel.epi_mv_plane) — say by how much.
+            _sh = m.epi_mv_plane(mv)[1]
+            if _sh > 0.05:
+                self._lv_result_lines.append(
+                    t("MV面を心房側へ {d:.1f} mm 移動", d=_sh))
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the number so Save can persist it and Load can redisplay.
         if pas == "endo":
@@ -21014,6 +21021,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._set_tool(name)
         if getattr(self, "_tool", None) == name:
             self._flash_active_frame()
+            from multi_dicomviewer.ui.pane_toast import show_tool_toast
+            show_tool_toast(self, name)          # "Zoom適応" centred, Settings time
 
     def _flash_active_frame(self, blinks: int = 2, ms: int = 110):
         self._frame_flash_gen = getattr(self, "_frame_flash_gen", 0) + 1
