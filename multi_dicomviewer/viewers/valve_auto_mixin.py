@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
 """MV+Apex / AoV — Auto step (shared by the VTK and pygfx CT viewers).
 
-Auto arms a CLICK pick on the image (a click = press + release without a
-drag; drags still run the selected tool, so the view stays adjustable):
+The first Auto press asks 画像設定 / 点設定 / キャンセル: 画像設定 keeps the
+normal image controls until Auto is pressed again, which goes to 点設定.
+点設定 arms a CLICK pick on the image (a click = press + release without a
+drag; drags still run the selected tool). The MV-centre click shows an orange
++, the apex-vicinity click a green + (both kept a few seconds after the
+result):
 
 * MV+Apex: (1) click near the MV centre on a long-axis view, (2) click near
   the LV apex → detect_mv_refined (MV → apex → MV … until it settles; the apex
@@ -75,21 +79,70 @@ class ValveAutoMixin:
             pass
 
     # ------------------------------------------------------------ pick
-    _LV_PICK_COLOR = "#ff9800"
+    _LV_PICK_COLOR = "#ff9800"               # MV-centre click
+    _LV_PICK_APEX_COLOR = "#33dd33"          # apex-vicinity click (green +)
+    _LV_PICK_SHOW_MS = 3000                  # click markers kept after the result
 
     def _lv_valve_auto(self) -> None:
-        """Auto: arm the click pick (or cancel it when it is already armed)."""
+        """Auto: first press asks 画像設定 / 点設定 / キャンセル. 画像設定 leaves
+        the image controls normal until Auto is pressed again (→ 点設定);
+        点設定 arms the click pick. Auto while the pick is armed cancels."""
         which = getattr(self, "_lv_valve_edit", None) or "mitral"
         if getattr(self, "_vol", None) is None:
             return
-        if self._lv_pick_active():
+        seed = self._lv_valve_auto_seed if self._lv_auto_pending() else None
+        if seed is not None and seed[1] != "prep":
             self._lv_pick_cancel()
             return
+        if seed is None:
+            choice = self._lv_auto_choice(which)
+            if choice is None:
+                return
+            if choice == "prep":
+                self._lv_valve_auto_seed = (which, "prep", None)
+                self._lvv_prompt(t(
+                    "画像を調整してから、もう一度 Auto を押すと {p} に進みます。"
+                    "（Esc で中止）").format(
+                        p=t("MV点設定") if which == "mitral" else t("AoV点設定")))
+                return
+        self._lv_pick_arm(which)
+
+    def _lv_auto_choice(self, which):
+        """The first Auto press: 'prep' (adjust the image first), 'pick' (set
+        the points now) or None (cancel)."""
+        from PyQt6.QtWidgets import QMessageBox
+        pick_lbl = t("MV点設定") if which == "mitral" else t("AoV点設定")
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Auto"))
+        box.setIcon(QMessageBox.Icon.Question)
+        if which == "mitral":
+            box.setText(t(
+                "MV+Apex の Auto を始めます。\n\n画像設定：先に観察する左室長軸像を"
+                "調整します（Rotate / Paging などが普段どおり使えます）。調整後に"
+                "もう一度 Auto を押すと MV点設定 に進みます。\n\nMV点設定：すぐに "
+                "MV 中心近傍 → 心尖近傍 の順にクリックします。"))
+        else:
+            box.setText(t(
+                "AoV の Auto を始めます。\n\n画像設定：先に AoV の短軸像を調整します"
+                "（Rotate / Paging などが普段どおり使えます）。調整後にもう一度 Auto "
+                "を押すと AoV点設定 に進みます。\n\nAoV点設定：すぐに AoV 中心近傍を"
+                "クリックします。"))
+        b_prep = box.addButton(t("画像設定"), QMessageBox.ButtonRole.ActionRole)
+        b_pick = box.addButton(pick_lbl, QMessageBox.ButtonRole.AcceptRole)
+        b_cancel = box.addButton(t("キャンセル"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_prep)
+        box.setEscapeButton(b_cancel)
+        box.exec()
+        c = box.clickedButton()
+        return "prep" if c is b_prep else "pick" if c is b_pick else None
+
+    def _lv_pick_arm(self, which) -> None:
         # Measure would take the clicks as drawing → off while picking.
         if getattr(self, "_meas_on", False) and hasattr(self, "_meas_btn"):
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lv_pick_xy = None
+        self._lv_pick_marker_clear()
         if which == "aortic":
             self._lv_valve_auto_seed = (which, "aov", None)
             self._lvv_prompt(t("AoVの短軸を表示し、その中心近傍をクリックしてください。"))
@@ -99,10 +152,15 @@ class ValveAutoMixin:
                 "左室長軸の観察画像で、まずMV中心近傍（MVの楕円の中央付近）をクリック"
                 "し、次に心尖近傍をクリックしてください。"))
 
-    def _lv_pick_active(self) -> bool:
+    def _lv_auto_pending(self) -> bool:
+        """An Auto procedure runs for the valve being edited (画像設定 or pick)."""
         seed = self._lv_valve_auto_seed
         return (seed is not None
                 and seed[0] == getattr(self, "_lv_valve_edit", None))
+
+    def _lv_pick_active(self) -> bool:
+        """Clicks on the image are picks (not during 画像設定)."""
+        return self._lv_auto_pending() and self._lv_valve_auto_seed[1] != "prep"
 
     def _lv_pick_locked(self) -> bool:
         """Between the MV and the apex click: the image must stay the same, so
@@ -121,8 +179,8 @@ class ValveAutoMixin:
             self._lvv_prompt(t("Auto を中止しました。"))
 
     def _lv_pick_escape(self) -> bool:
-        """Esc while picking → cancel. True when consumed."""
-        if self._lv_pick_active():
+        """Esc while an Auto procedure runs → cancel. True when consumed."""
+        if self._lv_auto_pending():
             self._lv_pick_cancel()
             return True
         return False
@@ -161,18 +219,55 @@ class ValveAutoMixin:
                 self._lvv_prompt(t(
                     "心尖部がMV中心に近すぎます。心尖近傍をクリックしてください。"))
                 return
+            # Show the apex-vicinity click (green +) BEFORE the detection runs,
+            # so it is clear the click was taken.
+            self._lv_pick_marker(P, self._LV_PICK_APEX_COLOR, keep=True)
+            self._lv_pick_repaint()
             self._lv_run_mv_apex_auto(mv_p, P)
 
-    def _lv_pick_marker(self, P) -> None:
-        self._lv_pick_marker_clear()
+    def _lv_pick_marker(self, P, color=None, keep=False) -> None:
+        """'+' marker at a picked point on both panes (keep=True adds it next
+        to the markers already there)."""
+        if not keep:
+            self._lv_pick_marker_clear()
         q = tuple(map(float, P))
         for k in ("A", "B"):
             self._meas_seq += 1
             self._measures[k].append({
                 "id": self._meas_seq, "type": "point",
                 "pts": [self._world3d_to_out(k, q)], "pts3d": [q],
-                "color": self._LV_PICK_COLOR, "_lv_pick": True})
+                "color": color or self._LV_PICK_COLOR, "_lv_pick": True})
             self._redraw_meas(k)
+
+    def _lv_pick_repaint(self) -> None:
+        """Paint the panes now (the detection that follows blocks the loop)."""
+        for k in ("A", "B"):
+            try:
+                pn = self.pane[k]
+                if hasattr(pn, "render"):
+                    pn.render()
+                if hasattr(self, "_overlay"):
+                    self._overlay[k].repaint()
+            except Exception:                            # noqa: BLE001
+                pass
+        try:
+            from PyQt6.QtWidgets import QApplication
+            QApplication.processEvents()
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def _lv_pick_marker_clear_later(self) -> None:
+        """Keep the click markers a moment after the result, then remove them
+        (unless a new Auto has started meanwhile)."""
+        from PyQt6.QtCore import QTimer
+        tok = object()
+        self._lv_pick_clear_tok = tok
+
+        def fire():
+            if (getattr(self, "_lv_pick_clear_tok", None) is tok
+                    and not self._lv_auto_pending()):
+                self._lv_pick_marker_clear()
+        QTimer.singleShot(self._LV_PICK_SHOW_MS, fire)
 
     def _lv_pick_marker_clear(self) -> None:
         meas = getattr(self, "_measures", None)
@@ -221,7 +316,7 @@ class ValveAutoMixin:
         with self._lv_auto_running(self._lv_ve_auto_btn):
             out = self._run_busy(t("Auto"), t("MV面と心尖部を検出中…"), work)
         self._lv_valve_auto_seed = None
-        self._lv_pick_marker_clear()
+        self._lv_pick_marker_clear_later()
         res, apex = out if out is not None else (None, None)
         if res is None or not res.ok:
             self._lvv_prompt(t(
