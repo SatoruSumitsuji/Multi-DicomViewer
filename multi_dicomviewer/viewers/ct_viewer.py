@@ -4587,6 +4587,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_grp_r2_apex = QWidget()
         r2ax = QHBoxLayout(self._lv_grp_r2_apex)
         r2ax.setContentsMargins(0, 0, 0, 0); r2ax.setSpacing(4)
+        self._lv_ax_auto_btn = FitButton(t("Auto"))
+        self._lv_ax_auto_btn.setHelpToolTip(t(
+            "MV 面から心尖部（心外膜側、MV 中心から最も遠い心外膜点）を自動で設定"
+            "します。ずれていれば交点を合わせて Set で修正します。"))
+        self._lv_ax_auto_btn.clicked.connect(self._lv_apex_auto)
         self._lv_ax_set_btn = FitButton(t("Set"))
         self._lv_ax_set_btn.setHelpToolTip(
             t("Set the LV apex at the current centreline crossing."))
@@ -4613,7 +4618,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ax_exit_btn = FitButton(t("Exit"))
         self._lv_ax_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ax_exit_btn.clicked.connect(self._lv_exit_apex)
-        for b in (self._lv_ax_set_btn, self._lv_ax_repos_btn,
+        for b in (self._lv_ax_auto_btn, self._lv_ax_set_btn, self._lv_ax_repos_btn,
                   self._lv_ax_save_btn, self._lv_ax_load_btn,
                   self._lv_ax_clear_btn, self._lv_ax_hide_btn,
                   self._lv_ax_exit_btn):
@@ -5481,6 +5486,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if ax:
                 has_apex = self._lv_apex is not None
                 self._lv_ax_set_btn.setEnabled(True)
+                self._lv_ax_auto_btn.setEnabled(
+                    self._lv_valves.get("mitral") is not None)
                 self._lv_ax_exit_btn.setEnabled(True)
                 self._lv_ax_load_btn.setEnabled(True)
                 self._lv_ax_repos_btn.setEnabled(has_apex)
@@ -7462,6 +7469,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex_edit = True
         msg = t("Set the apex, or load Apex data. To set it, move the centreline "
                 "crossing onto the correct apex position and press Set.")
+        if self._lv_valves.get("mitral") is not None:
+            msg += "\n\n" + t(
+                "MV 面が設定済みなので、Auto で心尖部を自動設定できます。")
         if self._lv_valves.get("mitral") is None:
             msg += "\n\n" + t(
                 "(The MV plane is not set yet. The LV long axis is apex → MV "

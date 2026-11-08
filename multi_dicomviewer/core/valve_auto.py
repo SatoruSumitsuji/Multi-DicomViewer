@@ -530,3 +530,119 @@ def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
     area = 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
     return ValveResult(c, n, float(np.sqrt(max(area, 1.0) / np.pi)),
                        points=pts, weights=wts)
+
+
+# -------------------------------------------------------------------- Apex
+#: Apex (detect_apex): rays from the MV centre into the LV, within a cone around
+#: the MV normal. Along each ray: the LV cavity (blood; short dark gaps —
+#: trabeculae / papillary tips — bridged when blood follows), then the
+#: myocardium, then epicardial fat / lung (< _FAT_HU) = the epicardium. The
+#: apex = the epicardial point FARTHEST from the MV centre (the classic LV apex
+#: definition); the long axis apex → MV centre therefore passes through the MV
+#: centre. A ray whose wall runs into another blood pool (RV) or into tissue
+#: with no fat for > _APEX_WALL_MAX_MM (diaphragm / liver) gives no epicardium.
+_APEX_CONE_DEG = 35.0
+_APEX_RMAX_MM = 150.0
+_APEX_GAP_MM = 6.0
+_APEX_WALL_MAX_MM = 18.0
+
+
+@dataclass
+class ApexResult:
+    apex: np.ndarray                        # (3,) mm, epicardial apex
+    endo: np.ndarray                        # (3,) mm, endocardial apex (same ray)
+    wall_mm: float
+    ok: bool = True
+    message: str = ""
+
+
+def _apex_ray(hu_row, blood_row, step):
+    """(endo_idx, epi_idx) along one ray, or None."""
+    K = len(hu_row)
+    if not blood_row[0]:
+        return None
+    gap = int(round(_APEX_GAP_MM / step))
+    fat = hu_row < _FAT_HU
+    fr = max(1, int(round(1.5 / step)))
+    br = max(1, int(round(2.0 / step)))
+    # cavity end: last blood sample before a dark run > gap (or any fat)
+    e, i = 0, 0
+    while i < K:
+        if blood_row[i]:
+            e = i
+            i += 1
+            continue
+        nxt = np.flatnonzero(blood_row[i:i + gap + 1])
+        if len(nxt) == 0 or fat[i:i + int(nxt[0])].any():
+            break
+        i += int(nxt[0])
+    j0 = e + 1
+    wmax = int(round(_APEX_WALL_MAX_MM / step))
+    seg_f = fat[j0:j0 + wmax + fr]
+    seg_b = blood_row[j0:j0 + wmax + br]
+    epi = None
+    if len(seg_f) >= fr:
+        cf = np.convolve(seg_f.astype(int), np.ones(fr, int), "valid") >= fr
+        if cf.any():
+            epi = int(np.argmax(cf))
+    if len(seg_b) >= br:
+        cb = np.convolve(seg_b.astype(int), np.ones(br, int), "valid") >= br
+        if cb.any() and (epi is None or int(np.argmax(cb)) < epi):
+            return None                          # another chamber (RV) first
+    if epi is None or epi > wmax or epi < 1:
+        return None
+    return e, j0 + epi
+
+
+def _apex_side(vol, dims, c, n, thr, step=0.5, count=360):
+    """Valid rays on the side of +n: list of (dist_epi, dir, endo_d, epi_d)."""
+    D = _dirs_cone(n, _APEX_CONE_DEG, count)
+    rs = np.arange(0.0, _APEX_RMAX_MM + 1e-6, step)
+    P = c + D[:, None, :] * rs[None, :, None]
+    hu = _sample(vol, dims, P)
+    out = []
+    for k in range(len(D)):
+        r = _apex_ray(hu[k], hu[k] >= thr, step)
+        if r is not None:
+            out.append((rs[r[1]], D[k], rs[r[0]], rs[r[1]]))
+    return out
+
+
+def detect_apex(vol, dims, mv_center, mv_normal) -> ApexResult:
+    """Epicardial LV apex from the MV plane: the farthest epicardial point from
+    the MV centre within _APEX_CONE_DEG of the MV normal. The normal's sign is
+    not trusted (a manual Set may point either way): both sides are tried and
+    the longer one (the LV, ~80–100 mm vs the LA, ~50 mm) is used."""
+    vol = np.asarray(vol)
+    c = np.asarray(mv_center, float)
+    n = _unit(mv_normal)
+    thr = blood_threshold(vol, dims, c)
+    c = _snap_into_blood(vol, dims, c, thr)
+    best = None
+    for s in (-1.0, 1.0):
+        rays = _apex_side(vol, dims, c, s * n, thr)
+        if len(rays) < 3:
+            continue
+        d = np.array([r[0] for r in rays])
+        score = float(np.percentile(d, 90))
+        if best is None or score > best[0]:
+            best = (score, rays, d)
+    if best is None:
+        return ApexResult(c, c, 0.0, ok=False, message="LV apex not found")
+    _score, rays, d = best
+    # Average the directions of the farthest rays (a flat apical dome gives
+    # several nearly equal maxima), then read that ray again.
+    top = d >= float(d.max()) - 2.0
+    dirs = np.array([r[1] for r in rays])[top]
+    w = d[top] - (float(d.max()) - 2.0) + 0.5
+    dv = _unit((dirs * w[:, None]).sum(axis=0))
+    step = 0.5
+    rs = np.arange(0.0, _APEX_RMAX_MM + 1e-6, step)
+    hu = _sample(vol, dims, c + dv[None, :] * rs[:, None])
+    r = _apex_ray(hu, hu >= thr, step)
+    if r is None:                                # fall back to the farthest ray
+        k = int(np.argmax(d))
+        dv, e_d, p_d = rays[k][1], rays[k][2], rays[k][3]
+    else:
+        e_d, p_d = rs[r[0]], rs[r[1]]
+    return ApexResult(c + p_d * dv, c + e_d * dv, float(p_d - e_d))

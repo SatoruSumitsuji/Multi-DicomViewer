@@ -91,6 +91,38 @@ class ValveAutoMixin:
             "{v}面を自動設定しました（半径 {r:.1f} mm）。確認して、ずれていれば "
             "Draw → Set で修正してください。").format(v=vname, r=float(res.radius)))
 
+    def _lv_apex_auto(self) -> None:
+        """Apex row → Auto: the epicardial LV apex from the set MV plane (the
+        farthest epicardial point from the MV centre, near the MV normal), set
+        as the COMMON apex just like Set at the crossing."""
+        vol = getattr(self, "_vol", None)
+        if vol is None:
+            return
+        mv = self._lv_valves.get("mitral") if hasattr(self, "_lv_valves") else None
+        if mv is None:
+            self._lvv_prompt(t("心尖部の自動設定には MV 面が必要です。先に MV を設定して"
+                               "ください。"))
+            return
+        from multi_dicomviewer.core import valve_auto as va
+        dims = tuple(float(d) for d in self._dims)
+        c, n = np.asarray(mv[0], float), np.asarray(mv[1], float)
+        res = self._run_busy(t("Auto"), t("心尖部を検出中…"),
+                             lambda: va.detect_apex(vol, dims, c, n))
+        if res is None or not res.ok:
+            self._lvv_prompt(t(
+                "心尖部を自動で検出できませんでした。センターラインの交点を心尖部に"
+                "合わせて Set で設定してください。"))
+            return
+        self._lv_apex = np.asarray(res.apex, float).copy()
+        self._lv_apex_shown = True
+        self._lv_apex_marker_draw()
+        self._lv_update_submode_ui()
+        self._lvv_prompt(t(
+            "心尖部（心外膜側）を自動設定しました（MV 中心から {d:.0f} mm、心尖部の"
+            "壁厚 {w:.1f} mm）。確認して、ずれていれば交点を合わせて Set で修正して"
+            "ください。").format(
+                d=float(np.linalg.norm(res.apex - c)), w=float(res.wall_mm)))
+
     #: Detected annulus points (the saddle contour the plane was fitted to),
     #: drawn as a thin outline next to the fitted circle so a wrong hinge shows.
     _LV_VALVE_AUTO_COLOR = "#ff66ff"
