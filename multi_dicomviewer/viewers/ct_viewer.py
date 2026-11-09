@@ -3974,10 +3974,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_exit_btn.setEnabled(True)
         if getattr(self, "_cpr_save_btn", None) is not None:
             self._cpr_save_btn.setEnabled(cpr and not pend)
+        # Save / Save&Exit: enabled whenever a CPR line is set — also after VR表示
+        # or Draw left its short-axis (Save rebuilds it first).
         if getattr(self, "_cpr_register_btn", None) is not None:
-            self._cpr_register_btn.setEnabled(cpr and not pend)
+            self._cpr_register_btn.setEnabled(self._cpr_can_save())
         if getattr(self, "_cpr_save_exit_btn", None) is not None:
-            self._cpr_save_exit_btn.setEnabled(cpr and not pend)
+            self._cpr_save_exit_btn.setEnabled(self._cpr_can_save())
         if getattr(self, "_cpr_overwrite_btn", None) is not None:
             self._cpr_overwrite_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_fit_btn", None) is not None:
@@ -10541,7 +10543,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for name in _TOOLS:
             b = FitButton(_TOOL_LABELS[name])
             b.setCheckable(True)
-            b.clicked.connect(lambda _c, n=name: self._set_tool(n))
+            # Same path as the tool key: blink + "<Tool>適応" caption — also when
+            # the tool is already selected, so the current mode is always shown.
+            b.clicked.connect(lambda _c, n=name: self._set_tool_by_key(n))
             self._tool_btns[name] = b
             row2.addWidget(b)
 
@@ -15595,6 +15599,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 cpr_act = menu.addAction(
                     t("このCPR線を短軸で再計算 (ReCalc)") if m.get("_cpr_src")
                     else t("この線で短軸CPRを作成 (Coronary)"))
+        # Resume trace / Auto-Trace / Save on the CPR line (shared, CPRMixin).
+        line_acts = self._cpr_line_menu_add(menu, which, mi)
         # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
         # checkable auto-snap toggle for future clicks.
         snap_now_act = snap_auto_act = None
@@ -15632,6 +15638,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
             return
+        if self._cpr_line_menu_run(chosen, line_acts, which, mi, sx, sy):
+            return                               # each redraws itself
         _mr_before = None if m.get("_lv") else self._meas_pane_snap(which)
         _mr_changed = False
         if chosen is add_pt:
@@ -19925,6 +19933,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # Draw snapped back to it (losing the user's rotate/zoom). Re-take the
             # snapshot from the current view so Draw traces on the SAME image.
             self._cpr_prev_view = self._view_snapshot()
+            self._cpr_park()                         # Save can rebuild it later
             self._exit_cpr(keep_view=True)           # keep the current image
         if not self._meas_on:                        # left-drag now traces
             self._meas_btn.setChecked(True)

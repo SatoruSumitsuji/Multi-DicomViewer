@@ -109,6 +109,11 @@ class CPRMixin:
         (so Save&Exit can follow through), False when cancelled / nothing to save."""
         import os
         from PyQt6.QtWidgets import QMessageBox
+        # A set CPR line whose short-axis was left (VR表示 / Draw) → rebuild it
+        # first, so Save works at any time once a CPR line is set.
+        if self._cpr is None and self._cpr_parked_target() is not None:
+            if not self._cpr_ensure_built():
+                return False
         path = self._cpr_save()                  # Save As prompt → path, or None
         if not path:                             # cancelled / nothing to save
             return False
@@ -140,6 +145,190 @@ class CPRMixin:
         viewers; _coronary_exit is each viewer's own."""
         if self._cpr_register_to_tree():
             self._coronary_exit()
+
+    # ---- a set CPR line stays saveable after its short-axis is left ----------
+    def _cpr_park(self) -> None:
+        """Remember the built short-axis (its source line + display state +
+        tree-vessel name) before Draw / VR表示 leaves it, so Save can rebuild it
+        exactly. Called by each viewer's _coronary_draw before _exit_cpr."""
+        c = self._cpr
+        if c is None:
+            return
+        src, mi = c.get("src"), c.get("src_mi")
+        lst = self._measures.get(src, []) if src in ("A", "B") else []
+        if mi is None or not (0 <= mi < len(lst)):
+            return
+        self._cpr_parked = {
+            "m": lst[mi],
+            "data": self._cpr_state_dict(),
+            "vid": getattr(self, "_coro_edit_vid", "") or "",
+            "sug": getattr(self, "_cpr_suggested_name", "") or "",
+        }
+
+    def _cpr_find_measure(self, m):
+        """(pane, index) of measure object *m*, or None."""
+        for k in ("A", "B"):
+            for i, mm in enumerate(self._measures.get(k, [])):
+                if mm is m:
+                    return k, i
+        return None
+
+    def _cpr_parked_target(self):
+        """(pane, index) of the parked CPR line if it is still there with ≥2 3-D
+        points, else None."""
+        pk = getattr(self, "_cpr_parked", None)
+        if not pk:
+            return None
+        hit = self._cpr_find_measure(pk.get("m"))
+        if hit is None:
+            return None
+        p3 = self._measures[hit[0]][hit[1]].get("pts3d")
+        return hit if p3 and len(p3) >= 2 else None
+
+    def _cpr_can_save(self) -> bool:
+        """Save / Save&Exit enabled: a short-axis is built, or a set CPR line
+        whose short-axis was left (VR表示 / Draw) is still there."""
+        return self._cpr is not None or self._cpr_parked_target() is not None
+
+    def _cpr_ensure_built(self, target=None) -> bool:
+        """Make sure a short-axis is built for CPR line *target* (pane, index) —
+        default the parked line — so it can be saved. Rebuilds it (the parked
+        rotation / flip / FOV / position / vessel name restored) when needed.
+        A trace being drawn is dropped after asking. False = cancelled / none."""
+        c = self._cpr
+        if target is None:
+            if c is not None:
+                return True
+            target = self._cpr_parked_target()
+            if target is None:
+                return False
+        k, i = target
+        if (c is not None and c.get("src") == k and c.get("src_mi") == i):
+            return True
+        d = getattr(self, "_draft", None)
+        if d is not None and d.get("pts"):
+            from PyQt6.QtWidgets import QMessageBox
+            r = QMessageBox.question(
+                self.window(), t("Short-axis"),
+                t("描画中のトレースを破棄して、設定済みのCPR線を保存しますか？"))
+            if r != QMessageBox.StandardButton.Yes:
+                return False
+        self._draft = None
+        m = self._measures[k][i]
+        pk = getattr(self, "_cpr_parked", None) or {}
+        parked = pk.get("m") is m
+        data = (pk.get("data") or {}) if parked else {}
+        if c is not None:
+            self._exit_cpr(keep_view=True)
+        self._cpr_vr_stop()
+        self._enter_cpr(k, i, ref_up=data.get("ref_up"), keep_view=True)
+        c = self._cpr
+        if c is None:
+            return False
+        st = data.get("state") or {}
+        if st:
+            T = st.get("T")
+            if T:
+                c["T"] = np.array([[float(T[0][0]), float(T[0][1])],
+                                   [float(T[1][0]), float(T[1][1])]], float)
+            c["rot"] = float(st.get("rot", 0.0))
+            c["reversed"] = bool(st.get("reversed", False))
+            c["half"] = float(st.get("half", c.get("half", 25.0)))
+            c["idx"] = int(min(max(int(st.get("idx", c["idx"])), 0),
+                               c["cl"].n - 1))
+            if getattr(self, "_cpr_rev_btn", None) is not None:
+                self._cpr_rev_btn.setChecked(c["reversed"])
+            self._cpr_apply_xform()
+            self._cpr_sync_bar()
+        if parked:
+            self._coro_edit_vid = pk.get("vid", "")
+            self._cpr_suggested_name = pk.get("sug", "")
+        for kk in ("A", "B"):
+            self._redraw_meas(kk)
+        self._refresh(reset_cam=False)
+        return True
+
+    # ---- CPR line right-click: Resume trace / Auto-Trace / Save --------------
+    def _cpr_line_menu_add(self, menu, which, mi) -> dict:
+        """Add 「Resume trace」「Auto-Trace」「Save」 to a polyline's outline
+        right-click menu (after the CPR item). Returns {name: QAction}."""
+        m = self._measures[which][mi]
+        acts = {}
+        if m.get("type") != "polyline" or m.get("_lv") is not None:
+            return acts
+        if len(m.get("pts") or []) >= 2:
+            acts["resume"] = menu.addAction(t("Resume trace"))
+        p3 = m.get("pts3d")
+        coronary = (getattr(self, "_coronary_mode", False)
+                    or self._cpr is not None)
+        if self._mode == "3D" and coronary and p3 and len(p3) >= 2:
+            acts["auto"] = menu.addAction(t("Auto-Trace"))
+            acts["save"] = menu.addAction(t("Save"))
+        return acts
+
+    def _cpr_line_menu_run(self, chosen, acts, which, mi, sx, sy) -> bool:
+        """Run a 「Resume trace / Auto-Trace / Save」 pick. True = handled."""
+        if chosen is None or not acts:
+            return False
+        if chosen is acts.get("resume"):
+            vi = self._cpr_line_near_end(which, mi, sx, sy)
+            c = self._cpr
+            if c is not None and c.get("src") == which and c.get("src_mi") == mi:
+                self._exit_cpr(keep_view=True)
+            self._resume_trace(which, mi, vi)
+            return True
+        if chosen is acts.get("auto"):
+            self._cpr_line_auto(which, mi)
+            return True
+        if chosen is acts.get("save"):
+            if self._cpr_ensure_built((which, mi)):
+                self._cpr_register_to_tree()
+            return True
+        return False
+
+    def _cpr_line_near_end(self, which, mi, sx, sy) -> int:
+        """Vertex index of the polyline end (0 or last) nearer the click."""
+        m = self._measures[which][mi]
+        p3 = m.get("pts3d")
+        if (p3 and len(p3) == len(m["pts"]) and self._mode == "3D"
+                and hasattr(self, "_world3d_to_out")):
+            ends = [self._world3d_to_out(which, np.asarray(p3[j], float))
+                    for j in (0, -1)]
+        else:
+            ends = [m["pts"][0], m["pts"][-1]]
+        try:
+            wx, wy = self._disp_to_world(which, sx, sy)
+        except Exception:                        # noqa: BLE001
+            return len(m["pts"]) - 1
+        d0 = math.hypot(ends[0][0] - wx, ends[0][1] - wy)
+        d1 = math.hypot(ends[1][0] - wx, ends[1][1] - wy)
+        return 0 if d0 < d1 else len(m["pts"]) - 1
+
+    def _cpr_line_auto(self, which, mi) -> None:
+        """Right-click 「Auto-Trace」: trace this line's points (start / via /
+        end) through the lumen now — even when it was drawn with Auto off —
+        then (re)build its short-axis."""
+        m = self._measures[which][mi]
+        c = self._cpr
+        was_src = (c is not None and c.get("src") == which
+                   and c.get("src_mi") == mi)
+        vid = getattr(self, "_coro_edit_vid", "") if was_src else ""
+        sug = getattr(self, "_cpr_suggested_name", "") if was_src else ""
+
+        def build():
+            hit = self._cpr_find_measure(m)
+            if hit is None:
+                return
+            if self._cpr is not None:
+                self._exit_cpr(keep_view=True)
+            self._enter_cpr(hit[0], hit[1], keep_view=True)
+            if self._cpr is not None:
+                if was_src:
+                    self._coro_edit_vid = vid
+                    self._cpr_suggested_name = sug
+                self._cpr_jump_ctrl_end(False)
+                self._cpr_auto_report()
+        self._cpr_auto_run(m, build, force=True)
 
     def _coronary_trace_ctrl(self):
         """3-D control points of the drawn coronary centreline polyline when no
@@ -190,17 +379,19 @@ class CPRMixin:
                 self._cpr_auto_report()          # flag low-contrast stretches
         self._cpr_auto_run(m, build)
 
-    def _cpr_auto_run(self, m, on_done) -> None:
+    def _cpr_auto_run(self, m, on_done, force: bool = False) -> None:
         """Run the auto trace for trace measure *m* in a worker thread with a
         small non-modal "Auto-Trace中…" progress window (stage + bar + Cancel),
         then apply it to *m* and call *on_done* on the GUI thread. Calls
         *on_done* right away when Auto is off / not applicable. Non-modal on
         purpose: a modal shown from the finishing click swallows its release on
-        macOS (the dead-mouse bug)."""
+        macOS (the dead-mouse bug). *force* (right-click 「Auto-Trace」) runs it
+        even with the Auto toggle off, and says so when tracking fails."""
         self._cpr_auto_gaps = []
         vol = getattr(self, "_vol", None)
         p3 = m.get("pts3d")
-        if (not self._cpr_auto_on() or vol is None or not p3 or len(p3) < 2):
+        if ((not force and not self._cpr_auto_on()) or vol is None
+                or not p3 or len(p3) < 2):
             on_done()
             return
         if getattr(self, "_cpr_auto_busy", False):
@@ -276,6 +467,11 @@ class CPRMixin:
                 return                  # cancelled: leave the clicked trace as is
             if res is not None and res.ok and len(res.ctrl_mm) >= 2:
                 self._cpr_auto_store(m, res)
+            elif force:
+                from PyQt6.QtWidgets import QMessageBox
+                QTimer.singleShot(0, lambda: QMessageBox.information(
+                    self, t("Auto-Trace"),
+                    t("自動トレースで血管を追跡できませんでした。点はそのままです。")))
             on_done()
         timer.timeout.connect(poll)
         timer.start(60)
