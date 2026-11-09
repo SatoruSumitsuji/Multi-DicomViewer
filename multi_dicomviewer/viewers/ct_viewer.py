@@ -3784,18 +3784,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
-        # VR始点: a heart VR on the left pane to pick the vessel's proximal start
-        # (where it is hard to tell on the MPR which vessel is which).
-        self._cpr_vr_btn = FitButton(t("VR表示"))
-        self._cpr_vr_btn.setCheckable(True)
-        self._cpr_vr_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._cpr_vr_btn.setHelpToolTip(t(
-            "左ペインに、右ペインの十字の交点を中心とした心臓のVRを表示します"
-            "（ドラッグで回転）。描いているCPR線がVR上にも表示されるので、"
-            "位置の確認に使います。CPR線は右ペインで設定します。"))
-        self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
-        row.addWidget(self._cpr_vr_btn)
+        # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
+        # _cpr_vr_build_group, built in _build_lv_bar.)
         # Fit: rebuild the short-axis from the (edited) control points, keeping
         # the display state — so an in-place Measure edit of the centreline is
         # followed by the cross-section without a Save→Exit→Load round-trip.
@@ -3996,7 +3986,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._LV_STY["trace"] if pend else self._LV_STY["off"])
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
-            self._cpr_vr_sync_btn()
+            self._cpr_vr_group_sync()
         # One selected mode at a time across CPR + the LV mode buttons: sync the
         # CPR button, then (CPR-aware) restyle the whole LV mode row so entering
         # CPR greys out MV/AoV/Apex/Epi/Blood/FullLV — not just MV/AoV/Apex as
@@ -4054,6 +4044,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_file_label.setStyleSheet("color:#b8860b;")
         self._coro_file_label.setVisible(False)
         row1.addWidget(self._coro_file_label)
+        # 「VR: [Open VR] [Set Epi-Data] <Epi file>」 (shared, CPRMixin).
+        self._cpr_vr_build_group(row1)
         self._coro_spacer_w = QWidget()      # the 12-px gap between the two groups
         self._coro_spacer_w.setFixedWidth(12)
         row1.addWidget(self._coro_spacer_w)
@@ -4871,6 +4863,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         lname = getattr(self, "_lv_file_name", "") or ""
         self._lv_file_label.setText(lname)
         self._lv_file_label.setVisible(show_lv and bool(lname))
+        self._cpr_vr_group_sync()                # 「VR:」 group + Epi file name
         # CPR reads as the active mode (amber) in CoronaryTreeモード.
         btn = self._coronary_mpr_btn
         base = getattr(self, "_cpr_base_style", None)
@@ -10107,6 +10100,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # DEFERRED (after this apply + the pane's GL settle) so it renders instead
         # of coming up black.
         self._territory_display = True
+        self._cpr_mark_full_lv()             # FullLv Epi → CPR VR; no EpiLv pick
         self._refresh_tool_availability()
         self._terr_bar_sync()                # swap LV/Coronary bars → Territory bar
         QTimer.singleShot(0, lambda: self._vr_set("B", True))
@@ -12842,6 +12836,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         being followed stays visible over the heart surface."""
         p = self.pane["A"]
         self._cpr_vr_cross_update()              # the right pane's crossing "+"
+        self._cpr_vr_set_update()                # the confirmed (unsaved) CPR line
         pts, start = self._cpr_vr_line_pts()
         act = getattr(p, "cpr_vr_act", None)
         if not pts and start is None:
@@ -12888,6 +12883,46 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         act.GetMapper().SetInputData(pd)
         act.SetVisibility(bool(self._vr_on.get("A")))
         p.render()
+
+    def _cpr_vr_set_update(self) -> None:
+        """VR表示: the confirmed, not-yet-saved CPR line (orange, on top) so it
+        can be checked on the VR before Save. No render here (caller renders)."""
+        p = self.pane["A"]
+        pts = self._cpr_vr_set_line_pts() if self._vr_on.get("A") else []
+        act = getattr(p, "cpr_vr_sact", None)
+        if len(pts) < 2:
+            if act is not None:
+                act.SetVisibility(False)
+            return
+        if act is None:
+            from vtkmodules.vtkRenderingCore import (vtkActor2D, vtkCoordinate,
+                                                     vtkPolyDataMapper2D)
+            coord = vtkCoordinate()
+            coord.SetCoordinateSystemToWorld()
+            mp = vtkPolyDataMapper2D()
+            mp.SetTransformCoordinate(coord)
+            act = vtkActor2D()
+            act.SetMapper(mp)
+            pr = act.GetProperty()
+            pr.SetColor(1.0, 0.55, 0.1)
+            pr.SetLineWidth(3.0)
+            p.ren.AddViewProp(act)
+            p.cpr_vr_sact = act
+        M = self._vr_xform.get("A")
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        vp = vtkPoints()
+        lines = vtkCellArray()
+        lines.InsertNextCell(len(pts))
+        for i, q in enumerate(pts):
+            w = Mm @ np.array([q[0], q[1], q[2], 1.0])
+            vp.InsertNextPoint(float(w[0] / w[3]), float(w[1] / w[3]),
+                               float(w[2] / w[3]))
+            lines.InsertCellPoint(i)
+        pd = vtkPolyData()
+        pd.SetPoints(vp)
+        pd.SetLines(lines)
+        act.GetMapper().SetInputData(pd)
+        act.SetVisibility(True)
 
     def _cpr_vr_cross_update(self) -> None:
         """VR表示: the map pane B's centreline crossing as a cyan "+" on the VR
@@ -13345,6 +13380,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Panel VR ▸ 表示/非表示 — show/hide the VR VOLUME *and* the LAD/LCX/RCA +
         Target colour regions, while KEEPING the Coronary Tree tubes + target
         markers so the tree still reads. The first turn-on builds the VR pipeline."""
+        if self._cpr_vr_active():
+            return          # Territory VR ≠ the CPR VR on pane A: leave it alone
         key = self._vr_pane_key()
         on = bool(on)
         if on and not self._vr_on.get(key):
@@ -20443,6 +20480,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 else:
                     if key == "A":
                         self._cpr_vr_cross_update()   # (hides a stale "+")
+                        self._cpr_vr_set_update()     # (and a stale CPR line)
                     self.pane[key].render()
                 continue
             p = self.pane[key]

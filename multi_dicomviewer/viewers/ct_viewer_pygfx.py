@@ -1110,6 +1110,19 @@ class _Overlay(QWidget):
                 p.drawLine(seg)
                 p.setPen(QPen(QColor(0, 230, 255), 2.2))
                 p.drawLine(seg)
+            # The confirmed, not-yet-saved CPR line (orange) — check it on the
+            # VR before Save.
+            spts = v._cpr_vr_set_line_pts()
+            if len(spts) >= 2:
+                xs, ys, _d = project(spts)
+                run = QPolygonF([QPointF(float(xs[k]), float(ys[k]))
+                                 for k in range(len(spts))])
+                p.setPen(QPen(QColor(0, 0, 0, 170), 5.0, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawPolyline(run)
+                p.setPen(QPen(QColor(255, 140, 26), 2.6, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawPolyline(run)
             lpts, start = v._cpr_vr_line_pts()
             P = lpts or ([start] if start is not None else [])
             if P:
@@ -6926,6 +6939,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 "shell_mm": float(getattr(self, "_vr_shell_mm", 10.0))}
 
     def set_vr_on(self, on: bool) -> None:
+        if self._cpr_vr_active():
+            return          # Territory VR ≠ the CPR VR on pane A: leave it alone
         key = self._vr_pane_key()
         on = bool(on)
         if on == bool(self._vr_on.get(key)):
@@ -6938,6 +6953,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         and does NOT restore the MPR slice (so the SlabMIP doesn't reappear);
         showing brings the volume back. If VR mode isn't up yet, 表示 turns it on
         for the first time."""
+        if self._cpr_vr_active():
+            return          # Territory VR ≠ the CPR VR on pane A: leave it alone
         key = self._vr_pane_key()
         on = bool(on)
         if not self._vr_on.get(key):
@@ -11161,6 +11178,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         lname = getattr(self, "_lv_file_name", "") or ""
         self._lv_file_label.setText(lname)
         self._lv_file_label.setVisible(show_lv and bool(lname))
+        self._cpr_vr_group_sync()                # 「VR:」 group + Epi file name
         btn = self._coronary_mpr_btn
         base = getattr(self, "_cpr_base_style", None)
         coro = getattr(self, "_cpr_coro_style", None)
@@ -12695,6 +12713,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_file_label.setStyleSheet("color:#b8860b;")
         self._coro_file_label.setVisible(False)
         row1.addWidget(self._coro_file_label)
+        # 「VR: [Open VR] [Set Epi-Data] <Epi file>」 (shared, CPRMixin).
+        self._cpr_vr_build_group(row1)
         self._coro_spacer_w = QWidget()          # the 12-px gap between the halves
         self._coro_spacer_w.setFixedWidth(12)
         row1.addWidget(self._coro_spacer_w)
@@ -15900,6 +15920,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Enter the Territory review: swap the Coronary/LV bar for the Territory bar
         # (LV-Blood / 壁厚 / mode-switch) + the 元ファイル line. (Windows parity.)
         self._territory_display = True
+        self._cpr_mark_full_lv()             # FullLv Epi → CPR VR; no EpiLv pick
         self._terr_bar_sync()
         # Auto-advance to VR on the right pane (parity with Windows: dropping the
         # corotree + FullLv goes straight to the VR review). Deferred so it runs
@@ -18935,18 +18956,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "crosshair to move·rotate the centreline — mid-trace, like LV-Epi."))
         self._cpr_draw_btn.clicked.connect(self._coronary_draw)
         row.addWidget(self._cpr_draw_btn)
-        # VR始点: a heart VR on the left pane to pick the vessel's proximal start
-        # (where it is hard to tell on the MPR which vessel is which).
-        self._cpr_vr_btn = FitButton(t("VR表示"))
-        self._cpr_vr_btn.setCheckable(True)
-        self._cpr_vr_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._cpr_vr_btn.setHelpToolTip(t(
-            "左ペインに、右ペインの十字の交点を中心とした心臓のVRを表示します"
-            "（ドラッグで回転）。描いているCPR線がVR上にも表示されるので、"
-            "位置の確認に使います。CPR線は右ペインで設定します。"))
-        self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
-        row.addWidget(self._cpr_vr_btn)
+        # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
+        # _cpr_vr_build_group, built in _build_lv_bar.)
         # Fit: rebuild the short-axis from the (edited) control points, keeping
         # the display state — follows an in-place Measure edit of the centreline
         # without a Save→Exit→Load round-trip.
@@ -19157,6 +19168,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._LV_STY["trace"] if pend else self._BTN_DIS)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
+            self._cpr_vr_group_sync()
             self._cpr_vr_sync_btn()
         # One selected mode at a time across CPR + the LV mode buttons: sync the
         # CPR button, then (CPR-aware) restyle the whole LV mode row so entering

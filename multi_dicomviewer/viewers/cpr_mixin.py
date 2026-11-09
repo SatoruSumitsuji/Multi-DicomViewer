@@ -101,6 +101,31 @@ class CPRMixin:
                 pts.round(4).tolist())
 
     def _cpr_register_to_tree(self) -> bool:
+        """Save (+ register) — then Hide All Result automatically, so the saved
+        line's edit points can't block a new CPR start point placed near them.
+        Save&Exit goes through here too."""
+        ok = self._cpr_register_to_tree_impl()
+        if ok:
+            self._cpr_hide_all_results()
+        return ok
+
+    def _cpr_hide_all_results(self) -> None:
+        """Hide every result shown now (= Hide All Result until nothing shows);
+        lines drawn later stay visible, Show All Result brings them back."""
+        items = self._hideall_items() if hasattr(self, "_hideall_items") else []
+        if not items:
+            return
+        for x in items:
+            x["_bulk_hidden"] = True
+        self._results_hidden = True
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+            if hasattr(self, "_redraw_compare"):
+                self._redraw_compare(k)
+        if hasattr(self, "_update_hideall_btn"):
+            self._update_hideall_btn()
+
+    def _cpr_register_to_tree_impl(self) -> bool:
         """「保存登録」button: SAVE the current short-axis to a .cpr.json first
         (the user names the file), THEN register that CPR into the Coronary Tree —
         routed to its source CT by series UID, with the file name as the vessel
@@ -1503,6 +1528,36 @@ class CPRMixin:
             start = pts[0]
         return pts, start
 
+    def _cpr_vr_set_line_pts(self):
+        """The CONFIRMED (right-click 確定) CPR line — not saved yet — as smooth
+        3-D centreline points for the VR overlay, so it can be checked on the VR
+        before Save. [] when the VR is off, there is no such line, or it is
+        hidden (after Save the Coronary Tree tube shows it instead)."""
+        if not self._cpr_vr_active():
+            return []
+        tgt = self._cpr_parked_target()
+        if tgt is None:
+            return []
+        m = self._measures[tgt[0]][tgt[1]]
+        if m.get("hidden") or m.get("_bulk_hidden"):
+            return []
+        ctrl = np.asarray(m["pts3d"], float)
+        key = (id(m), ctrl.tobytes())
+        cache = getattr(self, "_cpr_vr_set_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        try:
+            step = max(0.5, float(min(self._dims)))
+            cl = CenterLine.from_points(ctrl, step_mm=step)
+            pts = np.asarray(cl.points, float)
+        except Exception:                        # noqa: BLE001
+            pts = ctrl
+        if len(pts) > 400:                       # plenty for an on-screen line
+            pts = pts[np.linspace(0, len(pts) - 1, 400).round().astype(int)]
+        out = [np.asarray(q, float) for q in pts]
+        self._cpr_vr_set_cache = (key, out)
+        return out
+
     #: Half length (mm) of the centreline-crossing "+" drawn on the VR.
     _CPR_VR_CROSS_MM = 10.0
 
@@ -1549,8 +1604,10 @@ class CPRMixin:
         if not getattr(self, "_coronary_mpr_pending", False):
             self._cpr_vr_sync_btn()
             return
-        # Which Epi bounds the VR crop: a chosen EpiLv.json / none / cancel.
-        use = self._cpr_vr_epi_choice()
+        # Which Epi bounds the VR crop: asked only on the FIRST Open VR after a
+        # 3DCT load (EpiLv.json / なし / キャンセル); later ones reuse it. Change
+        # it any time with 「Set Epi-Data」. A loaded FullLv's Epi is always used.
+        use = self._cpr_vr_epi_for_open()
         if use is None:
             self._cpr_vr_sync_btn()
             return
@@ -1590,7 +1647,183 @@ class CPRMixin:
         m = lv.get("model") if isinstance(lv, dict) else None
         return getattr(m, "epi", None) is not None
 
-    def _cpr_vr_epi_choice(self):
+    def territory_vr_shown(self) -> bool:
+        """Coronary Tree ▸ Territory VR: whether that VR's image is on screen
+        now (the CPR VR on pane A does not count) — for the 表示/非表示 label."""
+        vr = getattr(self, "_vr_on", None) or {}
+        keys = [k for k in ("B", "A")
+                if vr.get(k) and not (k == "A" and self._cpr_vr_active())]
+        if not keys:
+            return False
+        k = keys[0]
+        if (getattr(self, "_vr_img_hidden", None) or {}).get(k):
+            return False                         # Mac: image hidden, VR kept
+        vol = getattr(self.pane[k], "vr_volume", None)
+        if vol is not None and hasattr(vol, "GetVisibility"):
+            return bool(vol.GetVisibility())     # Windows: volume hidden
+        return True
+
+    # ---- Epi data for the CPR VR: decided once per loaded 3DCT ----------------
+    @staticmethod
+    def _cpr_ref(obj):
+        """A weak reference to *obj* (so the old volume can be freed), or a
+        strong one when *obj* does not support weak references."""
+        import weakref
+        try:
+            return weakref.ref(obj)
+        except TypeError:
+            return lambda: obj
+
+    def _cpr_mark_full_lv(self) -> None:
+        """apply_full_lv: a FullLv.json (the upper-level data) is loaded for
+        this 3DCT — its Epi is used for the VR and EpiLv.json can't be chosen."""
+        self._full_lv_vol_ref = self._cpr_ref(getattr(self, "_vol", None))
+        self._full_lv_name = getattr(self, "_lv_file_name", "") or ""
+        self._cpr_vr_group_sync()
+
+    def _cpr_full_lv_on(self) -> bool:
+        r = getattr(self, "_full_lv_vol_ref", None)
+        vol = getattr(self, "_vol", None)
+        return (r is not None and vol is not None and r() is vol
+                and self._cpr_vr_epi_source() is not None)
+
+    def _cpr_vr_epi_record(self, use: bool) -> None:
+        """Remember the Epi choice for this 3DCT (until the next load)."""
+        src = self._cpr_vr_epi_source() if use else None
+        fn = getattr(self, "_cpr_vr_epi_file", None)
+        name = fn[0] if (use and fn is not None and fn[1] is src) else ""
+        self._cpr_vr_epi_dec = {
+            "vol": self._cpr_ref(getattr(self, "_vol", None)),
+            "mode": ("file" if name else "mem") if use else "none",
+            "name": name, "src": src}
+
+    def _cpr_vr_epi_status(self):
+        """(kind, file name) of the VR Epi for this 3DCT: kind "fulllv" (a
+        loaded FullLv.json), "file" (an EpiLv.json), "mem" (an Epi already in
+        memory), "none" (なし) or None (not decided yet → asked at Open VR)."""
+        if self._cpr_full_lv_on():
+            nm = getattr(self, "_lv_file_name", "") or ""
+            if nm:
+                self._full_lv_name = nm
+            return "fulllv", getattr(self, "_full_lv_name", "") or ""
+        dec = getattr(self, "_cpr_vr_epi_dec", None)
+        vol = getattr(self, "_vol", None)
+        if dec is None or vol is None or dec["vol"]() is not vol:
+            return None, ""
+        if dec["mode"] == "none":
+            return "none", ""
+        src = self._cpr_vr_epi_source()
+        if src is None:
+            return None, ""                      # the Epi was dropped → ask again
+        if src is dec["src"]:
+            return dec["mode"], dec["name"]
+        return "mem", ""                         # another Epi loaded / traced since
+
+    def _cpr_vr_epi_for_open(self):
+        """Open VR: True = crop with the Epi, False = なし, None = cancelled.
+        Asks only when nothing is decided for this 3DCT yet."""
+        kind, _n = self._cpr_vr_epi_status()
+        if kind in ("fulllv", "file", "mem"):
+            return True
+        if kind == "none":
+            return False
+        use = self._cpr_vr_epi_choice()
+        if use is not None:
+            self._cpr_vr_epi_record(use)
+        self._cpr_vr_group_sync()
+        return use
+
+    def _cpr_epi_set_clicked(self) -> None:
+        """「Set Epi-Data」: register / change the VR Epi (EpiLv.json or なし)
+        at any time; an open VR is re-cropped at once."""
+        from PyQt6.QtWidgets import QMessageBox
+        if self._cpr_full_lv_on():
+            QMessageBox.information(
+                self.window(), t("Set Epi-Data"),
+                t("FullLv.json が読み込み済みです。FullLv.json（上位データ）の Epi を"
+                  "使うため、EpiLv.json は選択できません。"))
+            return
+        use = self._cpr_vr_epi_choice(title=t("Set Epi-Data"))
+        if use is None:
+            return
+        self._cpr_vr_epi_record(use)
+        self._cpr_vr_no_epi = not use
+        self._cpr_vr_group_sync()
+        self._cpr_vr_refresh_crop()
+
+    def _cpr_vr_refresh_crop(self) -> None:
+        """Re-crop an open CPR VR after the Epi changed (keeps its view)."""
+        if not (self._cpr_vr_active()
+                and getattr(self, "_vr_on", {}).get("A")):
+            return
+        self._vr_set("A", False)
+        self._vr_set("A", True)
+        self._cpr_vr_line_update()
+        self._cpr_vr_sync_btn()
+
+    def _cpr_vr_build_group(self, row) -> None:
+        """「VR: [Open VR] [Set Epi-Data] <Epi file>」, right of Coronary: CPR
+        (row 2). Shown while the CPR mode is on."""
+        from PyQt6.QtWidgets import QLabel
+        from multi_dicomviewer.ui.study_browser import FitButton
+        cap = QLabel(t("VR:"))
+        f = cap.font(); f.setBold(True); cap.setFont(f)
+        row.addWidget(cap)
+        self._cpr_vr_btn = FitButton(t("Open VR"))
+        self._cpr_vr_btn.setCheckable(True)
+        self._cpr_vr_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_vr_btn.setHelpToolTip(t(
+            "左ペインに、右ペインの十字の交点を中心とした心臓のVRを表示します"
+            "（ドラッグで回転）。描いているCPR線がVR上にも表示されるので、"
+            "位置の確認に使います。CPR線は右ペインで設定します。"))
+        self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
+        row.addWidget(self._cpr_vr_btn)
+        self._cpr_epi_btn = FitButton(t("Set Epi-Data"))
+        self._cpr_epi_btn.setHelpToolTip(t(
+            "VRの切り抜きに使う Epi データ（EpiLv.json）を登録・変更します。"
+            "「なし」で未使用にできます。3DCTを読み込み直すまで保持されます。"))
+        self._cpr_epi_btn.clicked.connect(
+            lambda _=False: self._cpr_epi_set_clicked())
+        row.addWidget(self._cpr_epi_btn)
+        self._cpr_epi_lbl = QLabel("")
+        self._cpr_epi_lbl.setStyleSheet("color:#2e8b57;")
+        row.addWidget(self._cpr_epi_lbl)
+        self._cpr_vr_group = [cap, self._cpr_vr_btn, self._cpr_epi_btn,
+                              self._cpr_epi_lbl]
+        for w in self._cpr_vr_group:
+            w.setVisible(False)
+
+    def _cpr_vr_group_sync(self) -> None:
+        """Visibility / texts of the 「VR:」 group."""
+        ws = getattr(self, "_cpr_vr_group", None)
+        if not ws:
+            return
+        ctx = getattr(self, "_bottom_ctx", "both")
+        show = (ctx in ("both", "coronary")
+                and (getattr(self, "_coronary_mode", False)
+                     or getattr(self, "_cpr", None) is not None))
+        for w in ws:
+            w.setVisible(show)
+        kind, name = self._cpr_vr_epi_status()
+        if kind == "fulllv":
+            txt = t("FullLv.json読み込み済み") + (f"（{name}）" if name else "")
+        elif kind == "file":
+            txt = name
+        elif kind == "mem":
+            txt = t("読込済みEpi")
+        elif kind == "none":
+            txt = t("なし")
+        else:
+            txt = t("未登録")
+        self._cpr_epi_lbl.setText(txt)
+        self._cpr_epi_lbl.setStyleSheet(
+            "color:#2e8b57;" if kind in ("fulllv", "file", "mem")
+            else "color:#888888;")
+        self._cpr_epi_btn.setEnabled(kind != "fulllv")
+        self._cpr_vr_sync_btn()
+
+    def _cpr_vr_epi_choice(self, title=None):
         """VR表示: ask which Epi bounds the VR crop. True = use an Epi (the one
         in memory, or an EpiLv.json chosen now), False = なし (heart sphere
         only), None = キャンセル. A cancelled / failed file pick asks again."""
@@ -1598,7 +1831,7 @@ class CPRMixin:
         while True:
             have = self._cpr_vr_has_epi()
             box = QMessageBox(self.window())
-            box.setWindowTitle(t("VR表示"))
+            box.setWindowTitle(title or t("VR表示"))
             box.setIcon(QMessageBox.Icon.Question)
             msg = t("関連づいた EpiLv.json ファイルがある場合には選択してください。"
                     "ない場合は「なし」を選択してください。")
@@ -1667,6 +1900,7 @@ class CPRMixin:
                     and len(cache) > 4 and cache[4] == tag):
                 self._cpr_vr_band_cache = (src,) + tuple(cache[1:])
             self._cpr_vr_band_file = (tag, src)
+            self._cpr_vr_epi_file = (os.path.basename(path), src)
             return True
         except Exception as exc:                     # noqa: BLE001
             QMessageBox.warning(self.window(), t("VR表示"),
@@ -1691,6 +1925,12 @@ class CPRMixin:
         b.blockSignals(True)
         b.setChecked(self._cpr_vr_active())
         b.blockSignals(False)
+        txt = t("Close VR") if self._cpr_vr_active() else t("Open VR")
+        if getattr(b, "_full_text", b.text()) != txt:
+            b.setText(txt)
+            if hasattr(b, "refit"):              # re-fit once the row relaid out
+                from PyQt6.QtCore import QTimer
+                QTimer.singleShot(0, b.refit)
 
     def _cpr_apply_xform(self):
         """Rebuild the CPR display axes u, v from the base frame (u0, v0), the

@@ -347,11 +347,14 @@ class CoronaryTreeWindow(SnapDock):
         self._vr_shell_mode = False          # default 内腔VR (True = シェルVR)
         vr_row = QHBoxLayout()
         vr_row.setSpacing(3)
-        vr_lbl = QLabel(t("VR："))
+        # "Territory VR" — the right-pane VR of the Territory review, NOT the CPR
+        # VR (Open VR, left pane), so the two are not confused.
+        vr_lbl = QLabel(t("Territory VR："))
         vr_lbl.setStyleSheet("font-weight:bold;")
         vr_row.addWidget(vr_lbl)
         self._vr_show_btn = QPushButton(t("表示/非表示"))
-        self._vr_show_btn.setToolTip(t("右画面のVR (立体表示) を表示/非表示"))
+        self._vr_show_btn.setToolTip(t(
+            "Territory の右画面VR (立体表示) を表示/非表示。CPR の Open VR とは別です"))
         self._vr_show_btn.setStyleSheet("padding: 2px 6px;")
         self._vr_show_btn.clicked.connect(self._toggle_vr)
         vr_row.addWidget(self._vr_show_btn)
@@ -364,6 +367,14 @@ class CoronaryTreeWindow(SnapDock):
         vr_row.addStretch(1)
         outer.addLayout(vr_row)
         self._sync_vr_row()
+        # Keep the 表示/非表示 label in step with the viewer's ACTUAL Territory VR
+        # (it can change outside this window: FullLv auto-on, a new CT, Exit …).
+        from PyQt6.QtCore import QTimer
+        self._vr_state_timer = QTimer(self)
+        self._vr_state_timer.setInterval(700)
+        self._vr_state_timer.timeout.connect(
+            lambda: self.isVisible() and self._refresh_vr_state())
+        self._vr_state_timer.start()
         # Target row: set / show-hide / delete-last / delete-all.
         tgt_btns = _row(t("ターゲット："), [
             (t("設定"),
@@ -999,8 +1010,22 @@ class CoronaryTreeWindow(SnapDock):
             self._vr_shell_lbl.setEnabled(shell)
             self._vr_shell_spin.setEnabled(shell)
 
+    def _refresh_vr_state(self) -> None:
+        """Read the viewer's actual Territory VR state into the button label."""
+        sh = self._shell
+        if sh is None or not hasattr(sh, "coronary_vr_shown"):
+            return
+        try:
+            st = sh.coronary_vr_shown()
+        except Exception:                                   # noqa: BLE001
+            st = None
+        if st is not None and bool(st) != bool(getattr(self, "_vr_shown", True)):
+            self._vr_shown = bool(st)
+            self._sync_vr_row()
+
     def _toggle_vr(self) -> None:
         """VR ▸ 表示/非表示 — show or hide the right-pane Volume Rendering."""
+        self._refresh_vr_state()             # act on the REAL state, not a guess
         self._vr_shown = not bool(getattr(self, "_vr_shown", True))
         self._sync_vr_row()                  # relabel 表示 ⇄ 非表示
         if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):

@@ -3273,6 +3273,18 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
+    def coronary_vr_shown(self):
+        """Coronary Tree ▸ Territory VR: True/False = whether its VR image is on
+        screen on the source CT now; None = no source CT viewer."""
+        vs = [v for v in self._coronary_source_viewers()
+              if hasattr(v, "territory_vr_shown")]
+        if not vs:
+            return None
+        try:
+            return any(bool(v.territory_vr_shown()) for v in vs)
+        except Exception:                                # noqa: BLE001
+            return None
+
     def coronary_vr_shell(self, shell: bool) -> None:
         """Coronary Tree ▸ VR ▸ 内腔VR/シェルVR — switch the VR crop mode."""
         for v in self._coronary_source_viewers():
