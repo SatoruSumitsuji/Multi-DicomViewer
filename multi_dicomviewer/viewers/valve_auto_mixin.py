@@ -18,7 +18,7 @@ result):
 While a procedure runs (waiting for a click, or detecting) the Auto button has
 an orange frame; Esc or Auto again cancels. Results go through
 _lv_apply_valve_data (same ring / caches as Load) and are marked unsaved.
-Manual correction = Draw → Set (MV / AoV) and Apex Set (crossing).
+Manual correction = MV / AoV Draw → Set and Apex Set (crossing).
 
 MV+Apex Save / Load / Clear / Hide act on both: an .MVLv.json and an
 .ApxLv.json of the same name in one folder.
@@ -297,12 +297,12 @@ class ValveAutoMixin:
         if res is None or not res.ok:
             self._lvv_prompt(t(
                 "AoV面を自動で検出できませんでした。Auto をもう一度押してAoV中心を"
-                "クリックし直すか、Draw → Set で手動設定してください。"))
+                "クリックし直すか、AoV Draw → AoV Set で手動設定してください。"))
             return
         self._lv_set_valve_result("aortic", res)
         self._lvv_prompt(t(
             "AoV面を自動設定しました（半径 {r:.1f} mm）。確認して、ずれていれば "
-            "Draw → Set で修正してください。").format(r=float(res.radius)))
+            "AoV Draw → AoV Set で修正してください。").format(r=float(res.radius)))
 
     def _lv_run_mv_apex_auto(self, mv_p, apex_p) -> None:
         from multi_dicomviewer.core import valve_auto as va
@@ -324,7 +324,7 @@ class ValveAutoMixin:
         if res is None or not res.ok:
             self._lvv_prompt(t(
                 "MV面を自動で検出できませんでした。Auto をもう一度押してクリックし"
-                "直すか、Draw → Set で手動設定してください。"))
+                "直すか、MV Draw → MV Set で手動設定してください。"))
             return
         self._lv_set_valve_result("mitral", res)
         if apex is not None:
@@ -345,8 +345,8 @@ class ValveAutoMixin:
             return
         self._lvv_prompt(t(
             "MV面（半径 {r:.1f} mm）と心尖部（MV 中心から {d:.0f} mm、壁厚 "
-            "{w:.1f} mm）を自動設定しました。確認して、ずれていれば MV は Draw → "
-            "Set、心尖部は交点を合わせて Apex Set で修正してください。").format(
+            "{w:.1f} mm）を自動設定しました。確認して、ずれていれば MV は MV Draw → "
+            "MV Set、心尖部は交点を合わせて Apex Set で修正してください。").format(
                 r=float(res.radius), d=float(np.linalg.norm(apex.apex - res.center)),
                 w=float(apex.wall_mm)))
 
@@ -387,10 +387,74 @@ class ValveAutoMixin:
                 return path[: len(path) - len(suf)]
         return path
 
+    def _lv_mvapex_ask_target(self, folder, stem, has_apex):
+        """MV+Apex Save dialog: says the two files that will be written, lets
+        the user edit the NAME ONCE (no extension — both files share it) and
+        pick the folder. Returns (folder, name) or None (キャンセル)."""
+        import os
+        import re
+        from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QFileDialog,
+                                     QGridLayout, QLabel, QLineEdit,
+                                     QPushButton, QVBoxLayout)
+        dlg = QDialog(self.window())
+        dlg.setWindowTitle(t("Save MV + Apex"))
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel(
+            t("MV面（.MVLv.json）と心尖部（.ApxLv.json）の 2 つのファイルを、"
+              "同じ名前で同じフォルダに保存します。") if has_apex else
+            t("心尖部が未設定のため、MV面（.MVLv.json）だけを保存します。")))
+        g = QGridLayout()
+        g.addWidget(QLabel(t("ファイル名（拡張子なし）")), 0, 0)
+        name = QLineEdit(str(stem))
+        name.setMinimumWidth(380)
+        g.addWidget(name, 0, 1, 1, 2)
+        g.addWidget(QLabel(t("保存先フォルダ")), 1, 0)
+        fold = QLineEdit(str(folder or os.path.expanduser("~")))
+        g.addWidget(fold, 1, 1)
+        browse = QPushButton(t("参照…"))
+        g.addWidget(browse, 1, 2)
+        lay.addLayout(g)
+        preview = QLabel()
+        preview.setStyleSheet("color:#555;")
+        lay.addWidget(preview)
+        bb = QDialogButtonBox()
+        ok = bb.addButton(t("保存"), QDialogButtonBox.ButtonRole.AcceptRole)
+        bb.addButton(t("キャンセル"), QDialogButtonBox.ButtonRole.RejectRole)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        bad = re.compile(r'[\\/:*?"<>|]')
+
+        def clean():
+            return self._lv_mvapex_stem(os.path.basename(name.text().strip()))
+
+        def upd(*_a):
+            n = clean()
+            sufs = [".MVLv.json"] + ([".ApxLv.json"] if has_apex else [])
+            preview.setText(t("保存されるファイル：") + "\n" + "\n".join(
+                "  " + n + s for s in sufs))
+            ok.setEnabled(bool(n) and not bad.search(n)
+                          and os.path.isdir(fold.text().strip()))
+
+        def pick():
+            p = QFileDialog.getExistingDirectory(dlg, t("保存先フォルダ"),
+                                                 fold.text().strip())
+            if p:
+                fold.setText(p)
+        name.textChanged.connect(upd)
+        fold.textChanged.connect(upd)
+        browse.clicked.connect(pick)
+        upd()
+        name.setFocus()
+        name.selectAll()
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return fold.text().strip(), clean()
+
     def _lv_mvapex_save(self) -> None:
         """Save MV + apex: one dialog, two files of the same name side by side
         (.MVLv.json and .ApxLv.json). Only the MV is written when no apex."""
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from PyQt6.QtWidgets import QMessageBox
         import json
         import os
         if self._lv_valves.get("mitral") is None:
@@ -400,16 +464,20 @@ class ValveAutoMixin:
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "valve")
-        default = os.path.join(d, stem + ".MVLv.json") if d else stem + ".MVLv.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self.window(), t("Save MV + Apex"), default,
-            "MV plane (*.MVLv.json);;JSON (*.json)")
-        if not path:
+        has_apex = getattr(self, "_lv_apex", None) is not None
+        target = self._lv_mvapex_ask_target(d, stem, has_apex)
+        if not target:
             return
-        base = self._lv_mvapex_stem(path)
+        base = os.path.join(target[0], target[1])
         files = [(base + ".MVLv.json", self._lv_mv_payload())]
-        if getattr(self, "_lv_apex", None) is not None:
+        if has_apex:
             files.append((base + ".ApxLv.json", self._lv_apex_payload()))
+        exist = [os.path.basename(fp) for fp, _d in files if os.path.exists(fp)]
+        if exist and QMessageBox.question(
+                self.window(), t("LV"),
+                t("次のファイルは既にあります。上書きしますか？\n{f}").format(
+                    f="\n".join(exist))) != QMessageBox.StandardButton.Yes:
+            return
         try:
             for fp, data in files:
                 if hasattr(self, "_unlink_case_variant"):

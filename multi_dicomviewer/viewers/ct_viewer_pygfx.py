@@ -38,7 +38,8 @@ import numpy as np
 import pygfx as gfx
 import pylinalg as la
 from PyQt6.QtCore import (
-    QEvent, QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer, pyqtSignal,
+    QEvent, QLineF, QPoint, QPointF, QRect, QRectF, Qt, QThread, QTimer,
+    pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QCursor, QFont, QImage, QKeySequence, QPainter, QPainterPath, QPen,
@@ -1099,6 +1100,16 @@ class _Overlay(QWidget):
         # VR始点: the trace being drawn on the map pane + the picked start,
         # always on top (no occlusion) so the followed vessel stays visible.
         if key == "A" and v._cpr_vr_active():
+            # The map pane B's centreline crossing as a cyan "+" (where the
+            # right pane's crossing is, and which way its two lines run).
+            for P0, P1 in v._cpr_vr_cross_segs():
+                xs, ys, _d = project([P0, P1])
+                seg = QLineF(float(xs[0]), float(ys[0]),
+                             float(xs[1]), float(ys[1]))
+                p.setPen(QPen(QColor(0, 0, 0, 170), 4.5))
+                p.drawLine(seg)
+                p.setPen(QPen(QColor(0, 230, 255), 2.2))
+                p.drawLine(seg)
             lpts, start = v._cpr_vr_line_pts()
             P = lpts or ([start] if start is not None else [])
             if P:
@@ -7160,6 +7171,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Any refresh (interactive frame or full) supersedes an in-flight async
         # high-res slab build, so bump the generation to discard a late result.
         self._slab_gen += 1
+        if self._cpr_vr_active():
+            self._cpr_vr_line_update()   # VR: the crossing "+" follows pane B
         for key in ("A", "B"):
             if only is not None and key != only:
                 continue
@@ -12423,10 +12436,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     b.setEnabled(True)
                 mvx = ve == "mitral"                 # MV+Apex step
                 has_ax = mvx and self._lv_apex is not None
-                for b in (self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn):
-                    b.setVisible(mvx)
+                vname = "MV" if mvx else "AoV"
+                self._lv_ve_draw_btn.setText(f"{vname} {t('Draw')}")
+                self._lv_ve_confirm_btn.setText(f"{vname} {t('Set')}")
+                self._lv_ve_apex_set_btn.setVisible(mvx)
                 self._lv_ve_apex_set_btn.setEnabled(mvx)
-                self._lv_ve_apex_repos_btn.setEnabled(has_ax)
                 self._lv_ve_save_btn.setEnabled(has)
                 self._lv_ve_clear_btn.setEnabled(has or has_ax)
                 self._lv_ve_show_btn.setEnabled(has or has_ax)
@@ -12905,10 +12919,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_apex_set_btn.setHelpToolTip(
             t("Set the LV apex at the current centreline crossing."))
         self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set)
-        self._lv_ve_apex_repos_btn = FitButton(t("RePosition"))
-        self._lv_ve_apex_repos_btn.setHelpToolTip(
-            t("Drop the set apex so you can move the crossing and Set again."))
-        self._lv_ve_apex_repos_btn.clicked.connect(self._lv_apex_reposition)
+        # (No RePosition here: Apex Set at the moved crossing overwrites.)
         self._lv_ve_save_btn = FitButton(t("Save"))
         self._lv_ve_save_btn.clicked.connect(
             lambda: self._lv_mvapex_save()
@@ -12932,7 +12943,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_exit_btn = FitButton(t("Exit"))
         self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
         for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
-                  self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn,
+                  self._lv_ve_apex_set_btn,
                   self._lv_ve_save_btn, self._lv_ve_load_btn,
                   self._lv_ve_clear_btn, self._lv_ve_show_btn,
                   self._lv_ve_exit_btn):

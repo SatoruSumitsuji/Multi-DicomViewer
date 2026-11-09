@@ -11,7 +11,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QPoint, Qt, QTimer
 from PyQt6.QtWidgets import QLabel
 
-_toast: QLabel | None = None
+_toasts: list = []          # one label per pane shown at once (reused)
 _gen = 0
 
 #: CT tool id → caption word (the tool buttons' names without the key).
@@ -19,10 +19,33 @@ _TOOL_WORDS = {"ZOOM": "Zoom", "MOVE": "Move", "ROTATE": "Rotate",
                "SPIN": "Spin", "PAGING": "Paging", "THICK": "Thick", "WL": "WL"}
 
 
+def tool_differs_between_panes(viewer, tool: str) -> bool:
+    """True when *tool* does NOT act the same on the two CT panes, so the
+    caption should only go on the active pane:
+      - one pane is a VR (CPR VR表示 / Territory): a drag there turns the 3-D
+        model (Mac: always; Windows: Paging/Thick become Rotate, Rotate turns
+        the model instead of tilting the plane);
+      - a CPR is built: on the short-axis pane Rotate/Spin turn the section,
+        Paging steps along the centreline, Thick does not apply;
+      - Epi tracing: Move is off on the reference (non-trace) pane."""
+    vr = getattr(viewer, "_vr_on", None) or {}
+    if bool(vr.get("A")) != bool(vr.get("B")):
+        return True
+    if (getattr(viewer, "_cpr", None) is not None
+            and tool in ("ROTATE", "SPIN", "PAGING", "THICK")):
+        return True
+    lv = getattr(viewer, "_lv", None)
+    if (tool == "MOVE" and isinstance(lv, dict) and lv.get("pass") == "epi"
+            and lv.get("sax") is None):
+        return True
+    return False
+
+
 def show_tool_toast(viewer, tool: str) -> None:
     """CT viewers: after a tool key really switched the tool, show
-    "<Tool>適応" centred on the ACTIVE pane for the Settings time
-    (計測モード変更表示時間; 0 = off)."""
+    "<Tool>適応" centred on the panes for the Settings time
+    (計測モード変更表示時間; 0 = off) — on BOTH panes when the tool acts the
+    same on both, else on the active pane only."""
     from multi_dicomviewer.core import settings
     from multi_dicomviewer.i18n import t
     try:
@@ -32,51 +55,76 @@ def show_tool_toast(viewer, tool: str) -> None:
     if ms <= 0:
         return
     frames = getattr(viewer, "_frames", None) or {}
-    w = frames.get(getattr(viewer, "_active_pane", None))
+    act = getattr(viewer, "_active_pane", None)
+    if tool_differs_between_panes(viewer, tool):
+        keys = [act]
+    else:
+        keys = [k for k in ("A", "B") if k in frames]
     word = _TOOL_WORDS.get(tool, str(tool).capitalize())
-    show_pane_toast(w, t("{tool}適応", tool=word), ms)
+    show_pane_toast([frames.get(k) for k in keys], t("{tool}適応", tool=word),
+                    ms)
 
 
-def show_pane_toast(widget, text: str, ms: int) -> None:
-    """Show *text* centred over *widget* for *ms* milliseconds (0 = nothing).
-    A new toast replaces one still showing."""
-    global _toast, _gen
-    if widget is None or ms <= 0 or not text:
+def _new_label() -> QLabel:
+    lab = QLabel()
+    lab.setWindowFlags(Qt.WindowType.ToolTip
+                       | Qt.WindowType.FramelessWindowHint
+                       | Qt.WindowType.WindowStaysOnTopHint
+                       | Qt.WindowType.WindowDoesNotAcceptFocus)
+    lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    lab.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+    lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    lab.setStyleSheet(
+        "QLabel{background:rgba(0,0,0,170);color:#ffe000;"
+        "border:2px solid #ff2020;border-radius:8px;"
+        "padding:10px 22px;font-size:26px;font-weight:bold;}")
+    return lab
+
+
+def show_pane_toast(widgets, text: str, ms: int) -> None:
+    """Show *text* centred over each visible widget in *widgets* (one widget
+    or a list) for *ms* milliseconds (0 = nothing). A new toast replaces the
+    ones still showing."""
+    global _gen
+    if not isinstance(widgets, (list, tuple)):
+        widgets = [widgets]
+    if ms <= 0 or not text:
         return
-    try:
-        if not widget.isVisible():
-            return
-        if _toast is None:
-            lab = QLabel()
-            lab.setWindowFlags(Qt.WindowType.ToolTip
-                               | Qt.WindowType.FramelessWindowHint
-                               | Qt.WindowType.WindowStaysOnTopHint
-                               | Qt.WindowType.WindowDoesNotAcceptFocus)
-            lab.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            lab.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-            lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lab.setStyleSheet(
-                "QLabel{background:rgba(0,0,0,170);color:#ffe000;"
-                "border:2px solid #ff2020;border-radius:8px;"
-                "padding:10px 22px;font-size:26px;font-weight:bold;}")
-            _toast = lab
-        lab = _toast
-        lab.setText(text)
-        lab.adjustSize()
-        c = widget.mapToGlobal(QPoint(widget.width() // 2, widget.height() // 2))
-        lab.move(c.x() - lab.width() // 2, c.y() - lab.height() // 2)
-        lab.show()
-        lab.raise_()
-    except RuntimeError:                      # widget deleted meanwhile
+    shown = []
+    for w in widgets:
+        try:
+            if w is not None and w.isVisible():
+                shown.append(w)
+        except RuntimeError:                  # widget deleted meanwhile
+            pass
+    for lab in _toasts:                       # drop the previous toast(s)
+        try:
+            lab.hide()
+        except RuntimeError:
+            pass
+    if not shown:
         return
+    while len(_toasts) < len(shown):
+        _toasts.append(_new_label())
+    for w, lab in zip(shown, _toasts):
+        try:
+            lab.setText(text)
+            lab.adjustSize()
+            c = w.mapToGlobal(QPoint(w.width() // 2, w.height() // 2))
+            lab.move(c.x() - lab.width() // 2, c.y() - lab.height() // 2)
+            lab.show()
+            lab.raise_()
+        except RuntimeError:
+            continue
     _gen += 1
     gen = _gen
 
     def _hide():
-        if gen == _gen and _toast is not None:
-            try:
-                _toast.hide()
-            except RuntimeError:
-                pass
+        if gen == _gen:
+            for lab in _toasts:
+                try:
+                    lab.hide()
+                except RuntimeError:
+                    pass
 
     QTimer.singleShot(int(ms), _hide)

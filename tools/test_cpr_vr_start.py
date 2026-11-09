@@ -225,9 +225,17 @@ h._vr_on = {"A": False, "B": False}
 h._center = np.asarray(h._pc["B"], float) + np.array([3.0, -2.0, 1.5])
 h._vr_view_saved = {"A": {"cam": "old"}}
 h._vr_pan = {"A": [5.0, -4.0], "B": [0.0, 0.0]}
+h._cpr_vr_sync_btn = lambda: None
+h._cpr_vr_epi_choice = lambda: None              # キャンセル
+h._cpr_vr_toggle()
+chk("toggle: Epi choice キャンセル → VR stays off",
+    not h._cpr_vr_active() and ("vr", "A", True) not in calls)
+calls.clear()
+h._coronary_mpr_pending = False
+h._cpr_vr_epi_choice = lambda: True              # Epi を使う
 h._cpr_vr_toggle()
 chk("toggle on: arms Draw, VR on pane A", calls[:2] == ["draw", ("vr", "A", True)]
-    and h._cpr_vr_active())
+    and h._cpr_vr_active() and not h._cpr_vr_no_epi)
 chk("toggle on: VR centred on the centreline crossing",
     np.allclose(h._cpr_vr_center, h._center))
 chk("toggle on: last VR camera / pan dropped (fresh, centred view)",
@@ -238,6 +246,72 @@ chk("toggle off: VR off, state cleared", calls[-1] == ("vr", "A", False)
 h._cpr_vr_stop()
 chk("stop when off is a no-op", calls[-1] == ("vr", "A", False)
     and len(calls) == 3)
+
+# ---- 「なし」: the Epi is ignored → heart sphere only
+h._vr_epi_full_mask = lambda: epi_
+h._cpr_vr_epi_choice = lambda: False
+h._cpr_vr_toggle()
+chk("なし: VR on, no-Epi flag set", h._cpr_vr_active() and h._cpr_vr_no_epi)
+chk("なし: crop is the heart sphere even with an Epi",
+    np.array_equal(h._cpr_vr_crop_mask(), h._cpr_vr_sphere_mask()))
+
+# ---- the map pane B's centreline crossing "+" for the VR
+h._frame = {"B": (np.array([1.0, 0, 0]), np.array([0, 1.0, 0]),
+                  np.array([0, 0, 1.0]))}
+h._cross_ang = {"B": 30.0}
+segs = h._cpr_vr_cross_segs()
+L = h._CPR_VR_CROSS_MM
+mid = [0.5 * (a + b) for a, b in segs]
+dirs = [(b - a) / np.linalg.norm(b - a) for a, b in segs]
+chk("cross: two segments centred on the crossing",
+    len(segs) == 2 and all(np.allclose(m_, h._center) for m_ in mid))
+chk("cross: each ±L along B's centrelines (in B's plane, at 30°, 90° apart)",
+    all(abs(np.linalg.norm(b - a) - 2 * L) < 1e-9 for a, b in segs)
+    and np.allclose(dirs[0], [np.cos(np.radians(30)), np.sin(np.radians(30)), 0])
+    and abs(float(np.dot(dirs[0], dirs[1]))) < 1e-9
+    and all(abs(d_[2]) < 1e-9 for d_ in dirs))
+h._cpr_vr_toggle()
+chk("cross: nothing when the VR is off", h._cpr_vr_cross_segs() == [])
+
+# ---- the Epi band is built once per Epi and reused (also after CPR exit)
+h._cpr_vr_no_epi = False
+built = []
+_band = CPRMixin._cpr_vr_epi_band
+h._cpr_vr_epi_band = lambda: (built.append(1), _band(h))[1]
+d1 = {"region": {}}
+h._lvv_epi_model_dict = d1
+b1 = h._cpr_vr_crop_mask()
+b2 = h._cpr_vr_crop_mask()
+chk("band cache: built once, the same mask reused", len(built) == 1 and b2 is b1)
+h._lvv_epi_model_dict = {"region": {}}           # a different Epi loaded
+b3 = h._cpr_vr_crop_mask()
+chk("band cache: a new Epi rebuilds", len(built) == 2 and b3 is not b1)
+h._cpr_vr_no_epi = True
+chk("band cache: なし still gives the sphere", not np.array_equal(h._cpr_vr_crop_mask(), b3))
+h._cpr_vr_no_epi = False
+# The same EpiLv file chosen again → its band is kept (no rebuild).
+import json as _json, tempfile as _tf
+_fp = os.path.join(_tf.mkdtemp(), "c.EpiLv.json")
+with open(_fp, "w", encoding="utf-8") as _f:
+    _json.dump({"region": {}}, _f)
+from PyQt6.QtWidgets import QFileDialog as _QFD
+_QFD.getOpenFileName = staticmethod(lambda *a, **k: (_fp, ""))
+h.window = lambda: None
+h._lvv_apply_epi_data = lambda data: setattr(h, "_lvv_epi_model_dict", data)
+h._cpr_vr_load_epi_file()
+h._cpr_vr_crop_mask()
+n0 = len(built)
+h._lvv_epi_model_dict = None                     # e.g. LV Exit dropped the Epi
+h._cpr_vr_load_epi_file()                        # the same file again
+h._cpr_vr_crop_mask()
+chk("band cache: the same EpiLv file again → no rebuild", len(built) == n0)
+h._lvv_epi_model_dict = {"region": {}}           # another Epi in between
+h._cpr_vr_crop_mask()
+h._cpr_vr_load_epi_file()
+h._cpr_vr_crop_mask()
+chk("band cache: not mixed up with another Epi's band (rebuilt for the file)",
+    len(built) == n0 + 2)
+del h._vr_epi_full_mask
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)

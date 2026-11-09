@@ -4570,11 +4570,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             t("Set the LV apex at the current centreline crossing."))
         self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set)
         r2ve.addWidget(self._lv_ve_apex_set_btn)
-        self._lv_ve_apex_repos_btn = FitButton(t("RePosition"))
-        self._lv_ve_apex_repos_btn.setHelpToolTip(
-            t("Drop the set apex so you can move the crossing and Set again."))
-        self._lv_ve_apex_repos_btn.clicked.connect(self._lv_apex_reposition)
-        r2ve.addWidget(self._lv_ve_apex_repos_btn)
+        # (No RePosition here: Apex Set at the moved crossing overwrites.)
         self._lv_ve_save_btn = FitButton(t("Save"))
         self._lv_ve_save_btn.setHelpToolTip(t(
             "Save this valve plane to a file. (MV+Apex: .MVLv.json and "
@@ -4616,8 +4612,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_exit_btn.setHelpToolTip(t("Return to the LV selector."))
         self._lv_ve_exit_btn.clicked.connect(self._lv_exit_valve)
         r2ve.addWidget(self._lv_ve_exit_btn)
-        for b in (self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn):
-            b.setStyleSheet(self._BTN_DIS)
+        self._lv_ve_apex_set_btn.setStyleSheet(self._BTN_DIS)
         for b in (self._lv_ve_auto_btn, self._lv_ve_draw_btn, self._lv_ve_confirm_btn,
                   self._lv_ve_save_btn, self._lv_ve_load_btn,
                   self._lv_ve_clear_btn, self._lv_ve_show_btn,
@@ -5553,10 +5548,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     b.setEnabled(True)
                 mvx = ve == "mitral"                 # MV+Apex step
                 has_ax = mvx and self._lv_apex is not None
-                for b in (self._lv_ve_apex_set_btn, self._lv_ve_apex_repos_btn):
-                    b.setVisible(mvx)
+                vname = "MV" if mvx else "AoV"
+                self._lv_ve_draw_btn.setText(f"{vname} {t('Draw')}")
+                self._lv_ve_confirm_btn.setText(f"{vname} {t('Set')}")
+                self._lv_ve_apex_set_btn.setVisible(mvx)
                 self._lv_ve_apex_set_btn.setEnabled(mvx)
-                self._lv_ve_apex_repos_btn.setEnabled(has_ax)
                 self._lv_ve_save_btn.setEnabled(has)
                 self._lv_ve_clear_btn.setEnabled(has or has_ax)
                 self._lv_ve_show_btn.setEnabled(has or has_ax)
@@ -12841,12 +12837,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         a 2-D overlay pinned to world points — always on top, so the vessel
         being followed stays visible over the heart surface."""
         p = self.pane["A"]
+        self._cpr_vr_cross_update()              # the right pane's crossing "+"
         pts, start = self._cpr_vr_line_pts()
         act = getattr(p, "cpr_vr_act", None)
         if not pts and start is None:
             if act is not None:
                 act.SetVisibility(False)
-                p.render()
+            p.render()
             return
         if act is None:
             from vtkmodules.vtkRenderingCore import (vtkActor2D, vtkCoordinate,
@@ -12888,11 +12885,68 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         act.SetVisibility(bool(self._vr_on.get("A")))
         p.render()
 
+    def _cpr_vr_cross_update(self) -> None:
+        """VR表示: the map pane B's centreline crossing as a cyan "+" on the VR
+        (2-D overlay pinned to world points, always on top). No render here —
+        the caller (_cpr_vr_line_update) renders."""
+        p = self.pane["A"]
+        segs = self._cpr_vr_cross_segs() if self._vr_on.get("A") else []
+        act = getattr(p, "cpr_vr_xact", None)
+        if not segs:
+            if act is not None:
+                act.SetVisibility(False)
+            return
+        if act is None:
+            from vtkmodules.vtkRenderingCore import (vtkActor2D, vtkCoordinate,
+                                                     vtkPolyDataMapper2D)
+            coord = vtkCoordinate()
+            coord.SetCoordinateSystemToWorld()
+            mp = vtkPolyDataMapper2D()
+            mp.SetTransformCoordinate(coord)
+            act = vtkActor2D()
+            act.SetMapper(mp)
+            pr = act.GetProperty()
+            pr.SetColor(0.0, 0.9, 1.0)
+            pr.SetLineWidth(2.5)
+            pr.SetPointSize(7.0)
+            p.ren.AddViewProp(act)
+            p.cpr_vr_xact = act
+        M = self._vr_xform.get("A")
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        vp = vtkPoints()
+        lines = vtkCellArray()
+        for P0, P1 in segs:
+            for q in (P0, P1):
+                w = Mm @ np.array([q[0], q[1], q[2], 1.0])
+                vp.InsertNextPoint(float(w[0] / w[3]), float(w[1] / w[3]),
+                                   float(w[2] / w[3]))
+            lines.InsertNextCell(2)
+            lines.InsertCellPoint(vp.GetNumberOfPoints() - 2)
+            lines.InsertCellPoint(vp.GetNumberOfPoints() - 1)
+        c = 0.5 * (np.asarray(segs[0][0], float) + np.asarray(segs[0][1], float))
+        w = Mm @ np.array([c[0], c[1], c[2], 1.0])
+        vp.InsertNextPoint(float(w[0] / w[3]), float(w[1] / w[3]),
+                           float(w[2] / w[3]))
+        verts = vtkCellArray()
+        verts.InsertNextCell(1)
+        verts.InsertCellPoint(vp.GetNumberOfPoints() - 1)   # the crossing dot
+        pd = vtkPolyData()
+        pd.SetPoints(vp)
+        pd.SetLines(lines)
+        pd.SetVerts(verts)
+        act.GetMapper().SetInputData(pd)
+        act.SetVisibility(True)
+
     def _mask_to_vtk_binary(self, mask):
         """A bool [z,y,x] mask → a uint8 vtkImageData binary mask for the GPU
         volume mapper (0 = skip, 1 = render). Cropping this way keeps the REAL CT
         scalars, so there is no fake -1000 boundary surface (the earlier 'smooth
-        blob' — the mask edge was being rendered as an opaque shell)."""
+        blob' — the mask edge was being rendered as an opaque shell).
+        The SAME mask object (a cached VR表示 Epi band) returns the SAME image,
+        so the mapper does not re-upload the mask to the GPU."""
+        last = getattr(self, "_vr_mask_vtk_last", None)
+        if last is not None and last[0] is mask:
+            return last[1]
         sx, sy, sz = self._dims
         z, y, x = mask.shape
         flat = np.ascontiguousarray(mask.astype(np.uint8).ravel(order="C"))
@@ -12901,6 +12955,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         img.SetDimensions(x, y, z)
         img.SetSpacing(float(sx), float(sy), float(sz))
         img.GetPointData().SetScalars(arr)
+        self._vr_mask_vtk_last = (mask, img)
         return img
 
     def _label_to_vtk(self, lab):
@@ -20374,7 +20429,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if only is not None and key != only:
                 continue
             if self._vr_on.get(key):         # VR pane: no MPR reslice/overlays
-                self.pane[key].render()
+                if key == "A" and self._cpr_vr_active():
+                    self._cpr_vr_line_update()   # crossing "+" follows B (renders)
+                else:
+                    if key == "A":
+                        self._cpr_vr_cross_update()   # (hides a stale "+")
+                    self.pane[key].render()
                 continue
             p = self.pane[key]
             # Pane A in short-axis (CPR) mode: reslice the cross-section plane
