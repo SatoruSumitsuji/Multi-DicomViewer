@@ -21784,12 +21784,37 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
 
     def _center_camera(self, key):
         """Put world (0,0) (the crosshair/center) at the pane middle,
-        keeping the current zoom."""
+        keeping the current zoom. A VR pane instead re-aims its 3-D camera at
+        the crossing (the MPR move below would throw the perspective camera
+        off the volume → a black pane)."""
+        if self._vr_on.get(key):
+            self._vr_center_on(key, self._center)
+            return
         cam = self.pane[key].ren.GetActiveCamera()
         fx, fy, fz = cam.GetFocalPoint()
         px, py, pz = cam.GetPosition()
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
+
+    def _vr_center_on(self, key, P) -> None:
+        """Pan VR pane *key*'s camera so volume point *P* (mm) is at the pane
+        centre, keeping the view direction, distance (zoom) and Rt90/Flip."""
+        if P is None:
+            return
+        P = np.asarray(P, float)
+        if not np.all(np.isfinite(P)):
+            return
+        M = self._vr_xform.get(key)
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        w = Mm @ np.array([P[0], P[1], P[2], 1.0])
+        tgt = w[:3] / w[3]
+        p = self.pane[key]
+        cam = p.ren.GetActiveCamera()
+        off = (np.asarray(cam.GetPosition(), float)
+               - np.asarray(cam.GetFocalPoint(), float))
+        cam.SetFocalPoint(*tgt)
+        cam.SetPosition(*(tgt + off))
+        p.ren.ResetCameraClippingRange()
 
     def _drag(self, which, dx, dy, shift=False, sx=None, sy=None, ctrl=False,
               tool=None):

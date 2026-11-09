@@ -8309,6 +8309,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._pan = {"A": np.zeros(2), "B": np.zeros(2)}
         self._view_initial = False
         self._refresh()
+        # CPR VR表示: the VR (left pane) re-centres on the new crossing too —
+        # its frame is built symmetric about _cpr_vr_center (_vr_frame_bounds).
+        if self._cpr_vr_active() and self._vr_on.get("A"):
+            self._cpr_vr_center = np.asarray(self._center, float).copy()
+            self._vr_pan["A"] = [0.0, 0.0]
+            try:
+                self._vr_config_cam_gpu("A")
+                self.pane["A"].canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                self.pane["A"].render()
+            self._overlay["A"].update()
+            if hasattr(self, "_vr_schedule_dvr"):
+                self._vr_schedule_dvr("A")               # refresh the DVR frame
         if before is not None:
             self._undo_view(before, self._view_snapshot())
 
