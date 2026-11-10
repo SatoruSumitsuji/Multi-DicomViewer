@@ -19486,7 +19486,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "src_dir": (self._lv_series_dir()
                         if hasattr(self, "_lv_series_dir") else ""),
             **cpr,
-            **self._cpr_save_meta(),
+            **self._cpr_save_meta(cpr.get("ctrl")),
         }
 
     def _cpr_write(self, path, data) -> bool:

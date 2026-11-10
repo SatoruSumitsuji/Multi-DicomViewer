@@ -354,7 +354,7 @@ class CPRMixin:
         tgt = self._cpr_parked_target()
         return self._measures[tgt[0]][tgt[1]] if tgt is not None else None
 
-    def _cpr_save_meta(self) -> dict:
+    def _cpr_save_meta(self, ctrl=None) -> dict:
         """Extra .cpr.json fields: auto_traced (the line was auto-traced) and the
         hand-placed points it came from (ctrl_manual, for undoing an auto trace),
         plus the Coronary Tree names (detail_name / fix_name) when known."""
@@ -366,7 +366,24 @@ class CPRMixin:
             val = ((m.get("_cpr_names") or {}) if m is not None else {}).get(key)
             if val:
                 out[key] = val
+        # FinTrace ◯ survives a re-save only while the line is unchanged; a
+        # corrected line (points moved / added / removed) goes back to ×.
+        if (m is not None and m.get("_cpr_fin")
+                and self._cpr_same_ctrl(ctrl, m.get("_cpr_fin_ctrl"))):
+            out["fin_traced"] = True
         return out
+
+    @staticmethod
+    def _cpr_same_ctrl(a, b, tol_mm: float = 0.05) -> bool:
+        """The two control-point lists are the same line (within *tol_mm*)."""
+        if a is None or b is None:
+            return False
+        try:
+            a = np.asarray(a, float).reshape(-1, 3)
+            b = np.asarray(b, float).reshape(-1, 3)
+        except (TypeError, ValueError):
+            return False
+        return a.shape == b.shape and bool(np.all(np.abs(a - b) <= tol_mm))
 
     def _cpr_adopt_file_meta(self, data) -> None:
         """apply_cpr_data: carry a loaded / resumed .cpr.json's auto_traced,
@@ -385,6 +402,9 @@ class CPRMixin:
                  if isinstance(data.get(k), str) and data[k].strip()}
         if names:
             m["_cpr_names"] = names
+        if data.get("fin_traced"):
+            m["_cpr_fin"] = True
+            m["_cpr_fin_ctrl"] = data.get("ctrl")    # the line as it was marked
 
     def _cpr_vr_confirm(self, pane, m) -> None:
         """A trace finished (right-click) while VR表示 is open: keep the VR and

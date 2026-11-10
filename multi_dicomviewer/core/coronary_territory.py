@@ -67,6 +67,8 @@ class Vessel:
     ctrl: np.ndarray | None = None      # clicked control points (for redraw)
     #: the line was auto-traced (Auto on when drawn, or 一括AutoTrace / menu)
     auto_traced: bool = False
+    #: FinTrace column: the user marked the trace (Auto or Manual) as finished
+    fin_traced: bool = False
     #: Coronary Tree list columns DetailName / FixName (→ file name on rename)
     detail_name: str = ""
     fix_name: str = ""
@@ -375,6 +377,8 @@ class CoronaryTree:
                 d["ctrl"] = np.asarray(v.ctrl, float).round(4).tolist()
             if v.auto_traced:
                 d["auto_traced"] = True
+            if v.fin_traced:
+                d["fin_traced"] = True
             if v.detail_name:
                 d["detail_name"] = v.detail_name
             if v.fix_name:
@@ -407,6 +411,7 @@ class CoronaryTree:
                 ctrl=(np.asarray(d["ctrl"], float) if d.get("ctrl") is not None
                       else None),
                 auto_traced=bool(d.get("auto_traced", False)),
+                fin_traced=bool(d.get("fin_traced", False)),
                 detail_name=str(d.get("detail_name", "") or ""),
                 fix_name=str(d.get("fix_name", "") or ""),
                 ctrl_manual=(np.asarray(d["ctrl_manual"], float)

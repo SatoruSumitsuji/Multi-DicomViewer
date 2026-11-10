@@ -98,12 +98,17 @@ _CPR_STEP_MM = 0.5
 #: an existing vessel attaches to it. Was 3 mm; widened to 5 mm per user request.
 _CONNECT_TOL_MM = 5.0
 
-#: Vessel list columns: Vessel, Role, Branches, AutoTrace, DetailName, FixName,
-#: Myocardium. Every column but Vessel can be folded to a narrow "×" (header ×).
-_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_DETAIL, _C_FIX, _C_MYO = range(7)
-_N_COLS = 7
-_COL_DEFAULT_W = {_C_ROLE: 76, _C_BR: 76, _C_AUTO: 90, _C_DETAIL: 102,
-                  _C_FIX: 82, _C_MYO: 120}
+#: Vessel list columns: Vessel, Role, Branches, AutoTrace, FinTrace, DetailName,
+#: FixName, Myocardium. Every column but Vessel can be folded to a narrow "×"
+#: (header ×).
+_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_FIN, _C_DETAIL, _C_FIX, _C_MYO = range(8)
+_N_COLS = 8
+_COL_DEFAULT_W = {_C_ROLE: 76, _C_BR: 76, _C_AUTO: 90, _C_FIN: 84,
+                  _C_DETAIL: 102, _C_FIX: 82, _C_MYO: 120}
+#: AutoTrace / FinTrace cell marks
+_MARK_YES, _MARK_NO = "◯", "×"
+#: ui_state key of the folded columns (v2: FinTrace inserted → indices moved)
+_FOLD_KEY = "corotree_folded_cols2"
 _COL_FOLDED_W = 20
 _X_W = 14                                     # the "×" hit area at a header's right
 
@@ -403,8 +408,8 @@ class CoronaryTreeWindow(SnapDock):
         # DetailName+FixName and re-sync the folder.
         bulk_btns = _row(t("一括："), [
             (t("一括AutoTrace"),
-             t("AutoTrace が「未」の線をまとめて自動トレース（Vessel を選択中は"
-               "選択した行だけ）。結果は同じ .cpr.json に上書き"),
+             t("AutoTrace が × の線をまとめて自動トレース（FinTrace が ◯ の線は"
+               "除く。Vessel を選択中は選択した行だけ）。結果は同じ .cpr.json に上書き"),
              self._batch_auto_trace, False),
             (t("取消"), t("直前の一括AutoTraceを取り消し、手動の点に戻す"),
              self._batch_auto_undo, False),
@@ -533,7 +538,8 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.setColumnCount(_N_COLS)
         # Vessel, Role, Branches, AutoTrace, DetailName, FixName, Myocardium.
         self._col_labels = [t("血管"), t("役割"), t("分岐"), t("AutoTrace"),
-                            t("DetailName"), t("FixName"), t("心筋量")]
+                            t("FinTrace"), t("DetailName"), t("FixName"),
+                            t("心筋量")]
         hdr = _XHeader(self._tree_w)
         self._tree_w.setHeader(hdr)
         self._tree_w.setHeaderLabels(self._col_labels)
@@ -550,7 +556,7 @@ class CoronaryTreeWindow(SnapDock):
         self._col_delegate = _col_delegate_cls()(self._tree_w)
         self._tree_w.setItemDelegate(self._col_delegate)
         try:
-            folded = settings_mod.load_ui_state("corotree_folded_cols", []) or []
+            folded = settings_mod.load_ui_state(_FOLD_KEY, []) or []
         except Exception:                                # noqa: BLE001
             folded = []
         for c in folded:
@@ -777,6 +783,8 @@ class CoronaryTreeWindow(SnapDock):
     def _vessel_file_meta(v) -> dict:
         """Vessel *v*'s AutoTrace / ctrl_manual / names as .cpr.json fields."""
         out = {"auto_traced": bool(getattr(v, "auto_traced", False))}
+        if getattr(v, "fin_traced", False):
+            out["fin_traced"] = True
         if getattr(v, "ctrl_manual", None) is not None:
             out["ctrl_manual"] = np.asarray(v.ctrl_manual, float).round(4).tolist()
         if getattr(v, "detail_name", ""):
@@ -797,6 +805,10 @@ class CoronaryTreeWindow(SnapDock):
         if v is None or ctrl is None or len(ctrl) < 2:
             return False
         ctrl_arr = np.asarray(ctrl, float)
+        # A corrected line goes back to FinTrace × (the viewer wrote the file
+        # without fin_traced then); an unchanged re-save keeps ◯.
+        if not self._same_ctrl(v.ctrl, ctrl_arr):
+            v.fin_traced = False
         cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
         v.points = cl.points
         v.ctrl = ctrl_arr
@@ -1364,7 +1376,7 @@ class CoronaryTreeWindow(SnapDock):
         hdr.viewport().update()
         if save:
             try:
-                settings_mod.save_ui_state("corotree_folded_cols",
+                settings_mod.save_ui_state(_FOLD_KEY,
                                            sorted(hdr.folded))
             except Exception:                            # noqa: BLE001
                 pass
@@ -1379,6 +1391,8 @@ class CoronaryTreeWindow(SnapDock):
             return
         if "auto_traced" in data:
             v.auto_traced = bool(data.get("auto_traced"))
+        # The file is the record of FinTrace (◯ writes the key, × removes it).
+        v.fin_traced = bool(data.get("fin_traced"))
         for key in ("detail_name", "fix_name"):
             val = data.get(key)
             if isinstance(val, str) and val.strip():
@@ -1390,8 +1404,22 @@ class CoronaryTreeWindow(SnapDock):
             except Exception:                            # noqa: BLE001
                 pass
 
+    @staticmethod
+    def _same_ctrl(a, b, tol_mm: float = 0.05) -> bool:
+        if a is None or b is None:
+            return False
+        try:
+            a = np.asarray(a, float).reshape(-1, 3)
+            b = np.asarray(b, float).reshape(-1, 3)
+        except (TypeError, ValueError):
+            return False
+        return a.shape == b.shape and bool(np.all(np.abs(a - b) <= tol_mm))
+
     def _auto_text(self, v) -> str:
-        return t("済") if getattr(v, "auto_traced", False) else t("未")
+        return _MARK_YES if getattr(v, "auto_traced", False) else _MARK_NO
+
+    def _fin_text(self, v) -> str:
+        return _MARK_YES if getattr(v, "fin_traced", False) else _MARK_NO
 
     def _make_item(self, vid: str) -> QTreeWidgetItem:
         v = self._tree.vessels[vid]
@@ -1401,6 +1429,7 @@ class CoronaryTreeWindow(SnapDock):
         cols[_C_ROLE] = role_txt
         cols[_C_BR] = self._junction_text(vid)
         cols[_C_AUTO] = self._auto_text(v)
+        cols[_C_FIN] = self._fin_text(v)
         cols[_C_DETAIL] = v.detail_name or ""
         cols[_C_FIX] = v.fix_name or ""
         cols[_C_MYO] = self._myo_text(vid)
@@ -1413,9 +1442,11 @@ class CoronaryTreeWindow(SnapDock):
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
         it.setForeground(0, QColor(self._root_color(self._root_role(vid))))
-        it.setTextAlignment(_C_AUTO, int(Qt.AlignmentFlag.AlignCenter))
-        if not getattr(v, "auto_traced", False):
-            it.setForeground(_C_AUTO, QColor("#b00000"))
+        for c, on in ((_C_AUTO, getattr(v, "auto_traced", False)),
+                      (_C_FIN, getattr(v, "fin_traced", False))):
+            it.setTextAlignment(c, int(Qt.AlignmentFlag.AlignCenter))
+            it.setForeground(c, QColor("#1a7f37" if on else "#b00000"))
+        it.setToolTip(_C_FIN, t("FinTrace（トレース完了）：ダブルクリックで ◯/× を切替。複数行は Shift/Ctrl で選んで右クリック"))
         # Monospace 心筋量 column so the padded % / mL line up vertically.
         mf = QFont("Consolas")
         mf.setStyleHint(QFont.StyleHint.Monospace)
@@ -1519,6 +1550,16 @@ class CoronaryTreeWindow(SnapDock):
         if not vid:
             return
         self._activate_item_ct(item)
+        if _col == _C_FIN and _C_FIN not in self._tree_w.header().folded:
+            # FinTrace cell: toggle ◯/× — on every selected row when this row is
+            # part of a multi-selection (Shift / Ctrl), else just this one.
+            sel = self._selected_vids()
+            if vid not in sel:
+                sel = [vid]
+            v = self._tree.vessels.get(vid)
+            if v is not None:
+                self._set_fin_traced(sel, not v.fin_traced)
+            return
         self.vesselSelected.emit(vid)        # re-highlight the selected vessel
         self._push_overlay()
 
@@ -2464,12 +2505,19 @@ class CoronaryTreeWindow(SnapDock):
         sel = self._selected_vids()
         if vid is not None and vid not in sel:
             sel = [vid]
+        a_fin_on = menu.addAction(t("FinTrace を ◯ にする ({n}本)", n=len(sel)))
+        a_fin_off = menu.addAction(t("FinTrace を × にする ({n}本)", n=len(sel)))
+        a_fin_on.setEnabled(bool(sel))
+        a_fin_off.setEnabled(bool(sel))
         a_fix = menu.addAction(t("FixName を一括入力…"))
         a_fix.setEnabled(bool(sel))
         a_man = menu.addAction(t("手動の点に戻す"))
         a_man.setEnabled(any(self._tree.vessels[x].ctrl_manual is not None
                              for x in sel))
         chosen = menu.exec(self._tree_w.viewport().mapToGlobal(pos))
+        if chosen in (a_fin_on, a_fin_off):
+            self._set_fin_traced(sel, chosen is a_fin_on)
+            return
         if chosen is a_fix:
             self._set_fix_name_bulk(sel)
             return
@@ -2681,9 +2729,13 @@ class CoronaryTreeWindow(SnapDock):
         """Lines for 一括AutoTrace: the selected rows that aren't auto-traced, or
         (nothing selected) every not-yet-auto-traced line of the active CT."""
         sel = self._selected_vids()
-        vids = sel if sel else list(self._tree.vessels)
-        return [vid for vid in vids
-                if not self._tree.vessels[vid].auto_traced]
+        if sel:
+            return [vid for vid in sel
+                    if not self._tree.vessels[vid].auto_traced]
+        # Nothing selected: a line marked FinTrace ◯ (finished by hand) is left
+        # alone — select it explicitly to auto-trace it anyway.
+        return [vid for vid, v in self._tree.vessels.items()
+                if not v.auto_traced and not v.fin_traced]
 
     def _source_viewer(self):
         """The CT viewer showing this tree's source 3-D CT (for its volume)."""
@@ -2823,6 +2875,7 @@ class CoronaryTreeWindow(SnapDock):
             undo.append({"vid": vid, "ctrl": None if ves.ctrl is None
                          else np.asarray(ves.ctrl, float).copy(),
                          "auto": ves.auto_traced,
+                         "fin": ves.fin_traced,
                          "manual": None if ves.ctrl_manual is None
                          else np.asarray(ves.ctrl_manual, float).copy(),
                          "path": path, "file": old_file})
@@ -2830,10 +2883,12 @@ class CoronaryTreeWindow(SnapDock):
                 ves.ctrl_manual = np.asarray(clicks, float)
             self._set_vessel_ctrl(tree, vid, ctrl)
             ves.auto_traced = True
+            ves.fin_traced = False               # the line changed → FinTrace ×
             if old_file is not None:
                 nd = dict(old_file)
                 nd["ctrl"] = ctrl.round(4).tolist()
                 nd["auto_traced"] = True
+                nd.pop("fin_traced", None)
                 nd["ctrl_manual"] = np.asarray(ves.ctrl_manual,
                                                float).round(4).tolist()
                 st0 = dict(nd.get("state") or {})
@@ -2864,6 +2919,7 @@ class CoronaryTreeWindow(SnapDock):
         if rec["ctrl"] is not None:
             self._set_vessel_ctrl(tree, vid, rec["ctrl"])
         ves.auto_traced = bool(rec["auto"])
+        ves.fin_traced = bool(rec.get("fin", False))
         ves.ctrl_manual = rec["manual"]
         if rec.get("path") and rec.get("file") is not None:
             self._write_cpr(rec["path"], rec["file"])
@@ -2904,12 +2960,14 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             self._set_vessel_ctrl(tree, vid, ves.ctrl_manual)
             ves.auto_traced = False
+            ves.fin_traced = False               # the line changed → FinTrace ×
             ves.ctrl_manual = None
             path = b["paths"].get(vid, "") or ""
             d = self._read_cpr(path) if path else None
             if d is not None:
                 d["ctrl"] = np.asarray(ves.ctrl, float).round(4).tolist()
                 d["auto_traced"] = False
+                d.pop("fin_traced", None)
                 d.pop("ctrl_manual", None)
                 st0 = dict(d.get("state") or {})
                 st0["idx"] = 0
@@ -2922,6 +2980,30 @@ class CoronaryTreeWindow(SnapDock):
             self.treeChanged.emit()
             self._push_overlay()
             self._hint.setText(t("{n} 本を手動の点に戻しました。", n=n))
+
+    def _set_fin_traced(self, vids, on: bool) -> None:
+        """FinTrace ◯/× on the chosen rows; also written into each .cpr.json
+        (fin_traced) so a Folder Sync / reload keeps it."""
+        tree = self._tree
+        b = self._bundle()
+        n = 0
+        for vid in vids:
+            v = tree.vessels.get(vid)
+            if v is None:
+                continue
+            v.fin_traced = bool(on)
+            path = b["paths"].get(vid, "") or ""
+            d = self._read_cpr(path) if path else None
+            if d is not None and bool(d.get("fin_traced")) != bool(on):
+                if on:
+                    d["fin_traced"] = True
+                else:
+                    d.pop("fin_traced", None)
+                self._write_cpr(path, d)
+            n += 1
+        if n:
+            self._populate()
+            self.treeChanged.emit()
 
     def _set_fix_name_bulk(self, vids) -> None:
         """Right-click FixName を一括入力: the same FixName on the chosen rows."""

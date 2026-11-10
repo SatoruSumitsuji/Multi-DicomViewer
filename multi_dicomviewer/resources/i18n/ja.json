@@ -461,6 +461,7 @@
   "Files are not deleted; just removed from the list so they can no longer be viewed.": "ファイルは削除されません。一覧から除去され、表示できなくなるだけです。",
   "Filter by tag name / keyword / value": "タグ名 / キーワード / 値でフィルタ",
   "Filter:": "フィルタ:",
+  "FinTrace": "FinTrace",
   "Fine-tune denoise strength, sharpening and local contrast (applies while Denoise is on; live preview)": "ノイズ低減の強さ・シャープ・局所コントラストを微調整（Denoise ON時に適用・ライブプレビュー）",
   "Fine-tune the angio / IVUS enhancement. Applies only while 'Denoise' is ON in Settings. CT is not affected.": "アンギオ / IVUS の画質処理を微調整します。Settings の『Denoise』が ON の時のみ適用されます。CTは対象外です。",
   "First series — shortcut: Shift+A": "最初のシリーズ (Shift+A)",
