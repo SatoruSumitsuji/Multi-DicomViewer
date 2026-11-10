@@ -3130,7 +3130,8 @@ class MainWindow(QMainWindow):
         try:
             # keep_view: don't re-fit the cameras — the user adjusted the image to
             # pick this CPR and the angle must not jump/revert on 編集.
-            if v.apply_cpr_data({"ctrl": data["ctrl"]}, keep_view=True):
+            if v.apply_cpr_data({"ctrl": data["ctrl"], **(data.get("meta") or {})},
+                                keep_view=True):
                 self._coro_editing_vid = vid
                 try:
                     # Tell the viewer which tree vessel it is editing so (a) its
@@ -3272,6 +3273,14 @@ class MainWindow(QMainWindow):
                     v.set_vr_on(bool(on))
             except Exception:                            # noqa: BLE001
                 pass
+
+    def coronary_source_viewer(self, series_uid: str):
+        """Coronary Tree ▸ 一括AutoTrace: the CT viewer showing *series_uid*
+        (its volume is traced), or None when that CT isn't open."""
+        try:
+            return self._viewer_for_series(series_uid or "")
+        except Exception:                                # noqa: BLE001
+            return None
 
     def coronary_vr_shown(self):
         """Coronary Tree ▸ Territory VR: True/False = whether its VR image is on

@@ -104,9 +104,32 @@ class CPRMixin:
         """Save (+ register) — then Hide All Result automatically, so the saved
         line's edit points can't block a new CPR start point placed near them.
         Save&Exit goes through here too."""
-        ok = self._cpr_register_to_tree_impl()
+        m = None
+        try:
+            ok = self._cpr_register_to_tree_impl()
+            if ok:
+                m = self._cpr_source_measure()
+                if m is not None:
+                    m["_cpr_saved"] = getattr(self, "_cpr_last_path", "") or True
+        finally:
+            headless = getattr(self, "_cpr_headless", None) is not None
+            self._cpr_headless = None
+            if headless and self._cpr is None:   # no short-axis holds them
+                self._coro_edit_vid = ""
+                self._cpr_suggested_name = ""
         if ok:
+            if headless:
+                # Saved from VR表示 (no short-axis): the line is done — it turns
+                # light blue on the VR and Draw stays armed for the next vessel.
+                pk = getattr(self, "_cpr_parked", None)
+                if pk and pk.get("m") is m:
+                    self._cpr_parked = None
+                if not getattr(self, "_coronary_mpr_pending", False):
+                    self._coronary_draw()
             self._cpr_hide_all_results()
+            self._coronary_sync_ui()
+            if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
+                self._cpr_vr_line_update()
         return ok
 
     def _cpr_hide_all_results(self) -> None:
@@ -230,6 +253,26 @@ class CPRMixin:
         k, i = target
         if (c is not None and c.get("src") == k and c.get("src_mi") == i):
             return True
+        # VR表示 open: keep the VR — save the line WITHOUT building its short-axis
+        # (the short-axis is built when the VR is closed, or from the line's
+        # right-click 「この線で短軸CPRを作成」).
+        if c is None and self._cpr_vr_active():
+            m = self._measures[k][i]
+            pk = getattr(self, "_cpr_parked", None)
+            if not pk or pk.get("m") is not m:
+                self._cpr_parked = pk = {"m": m, "data": {}, "vid": "", "sug": ""}
+            hl = self._cpr_headless_state(k, m)
+            # A short-axis that was built before VR表示 keeps its display state
+            # (rotation / flip / FOV / position / RMF seed) and tree-vessel name.
+            pd = pk.get("data") or {}
+            if hl is not None and pd.get("state"):
+                hl["state"] = dict(pd["state"])
+                if pd.get("ref_up") is not None:
+                    hl["ref_up"] = list(pd["ref_up"])
+                self._coro_edit_vid = pk.get("vid", "")
+                self._cpr_suggested_name = pk.get("sug", "")
+            self._cpr_headless = hl
+            return hl is not None
         d = getattr(self, "_draft", None)
         if d is not None and d.get("pts"):
             from PyQt6.QtWidgets import QMessageBox
@@ -272,6 +315,148 @@ class CPRMixin:
             self._redraw_meas(kk)
         self._refresh(reset_cam=False)
         return True
+
+    # ---- VR表示 kept open: confirm / save without the short-axis -------------
+    def _cpr_headless_state(self, pane, m):
+        """The .cpr.json state dict of trace *m* as a FRESH short-axis would save
+        it (default display state), without building the short-axis — so a
+        line confirmed while the VR is open can be saved and the VR kept."""
+        p3 = m.get("pts3d")
+        if not p3 or len(p3) < 2:
+            return None
+        try:
+            ctrl = [np.asarray(P, float) for P in p3]
+            step = max(1e-3, float(min(self._dims)))
+            n = CenterLine.from_points(ctrl, step_mm=step).n
+            _u, _v, nrm = self._axes_for(pane)
+        except Exception:                        # noqa: BLE001
+            return None
+        if n < 2:
+            return None
+        return {
+            "ctrl": [list(map(float, P)) for P in ctrl],
+            "ref_up": list(map(float, np.asarray(nrm, float))),
+            "state": {"T": [[1.0, 0.0], [0.0, 1.0]], "rot": 0.0,
+                      "reversed": False, "half": 25.0, "idx": int(n // 2),
+                      "src": pane},
+        }
+
+    def _cpr_source_measure(self):
+        """The trace measure being saved: the built short-axis's source, else
+        the parked (confirmed) line. None if neither."""
+        c = self._cpr
+        if c is not None:
+            lst = self._measures.get(c.get("src"), [])
+            mi = c.get("src_mi")
+            if mi is not None and 0 <= mi < len(lst):
+                return lst[mi]
+            return None
+        tgt = self._cpr_parked_target()
+        return self._measures[tgt[0]][tgt[1]] if tgt is not None else None
+
+    def _cpr_save_meta(self) -> dict:
+        """Extra .cpr.json fields: auto_traced (the line was auto-traced) and the
+        hand-placed points it came from (ctrl_manual, for undoing an auto trace),
+        plus the Coronary Tree names (detail_name / fix_name) when known."""
+        m = self._cpr_source_measure()
+        out = {"auto_traced": bool(m is not None and m.get("_cpr_auto"))}
+        if m is not None and m.get("_cpr_manual"):
+            out["ctrl_manual"] = [list(map(float, q)) for q in m["_cpr_manual"]]
+        for key in ("detail_name", "fix_name"):
+            val = ((m.get("_cpr_names") or {}) if m is not None else {}).get(key)
+            if val:
+                out[key] = val
+        return out
+
+    def _cpr_adopt_file_meta(self, data) -> None:
+        """apply_cpr_data: carry a loaded / resumed .cpr.json's auto_traced,
+        ctrl_manual and names onto the rebuilt CPR line, so re-saving it keeps
+        them (the AutoTrace column must not fall back to 未 after an edit)."""
+        if not isinstance(data, dict):
+            return
+        m = self._cpr_source_measure()
+        if m is None:
+            return
+        if data.get("auto_traced"):
+            m["_cpr_auto"] = True
+        if data.get("ctrl_manual"):
+            m["_cpr_manual"] = [list(map(float, q)) for q in data["ctrl_manual"]]
+        names = {k: data[k] for k in ("detail_name", "fix_name")
+                 if isinstance(data.get(k), str) and data[k].strip()}
+        if names:
+            m["_cpr_names"] = names
+
+    def _cpr_vr_confirm(self, pane, m) -> None:
+        """A trace finished (right-click) while VR表示 is open: keep the VR and
+        don't build the short-axis — the line is confirmed (orange on the VR)
+        and Save / Save&Exit / the line's right-click Save store it. Draw stays
+        armed so the next vessel can be traced right away."""
+        m["smooth"] = True                       # a CPR line is always splined
+        m["_cpr_src"] = True                     # a CPR line (Exit removes it)
+        # Same as the short-axis route's auto-Fit for a hand-clicked trace: snap
+        # each point to the lumen centre of its cross-section (no short-axis
+        # needed for that part).
+        p3 = m.get("pts3d")
+        if not m.get("_cpr_auto") and p3 and len(p3) >= 2:
+            try:
+                p3f = [np.asarray(q, float) for q in p3]
+                sn = [self._cpr_snap_ctrl_to_lumen(P, self._cpr_fit_tangent(p3f, i))
+                      for i, P in enumerate(p3f)]
+                m["pts3d"] = [list(map(float, q)) for q in sn]
+                m["pts"] = [self._world3d_to_out(pane, q) for q in sn]
+            except Exception:                    # noqa: BLE001
+                pass
+        self._cpr_parked = {"m": m, "data": {}, "vid": "", "sug": ""}
+        if not getattr(self, "_coronary_mpr_pending", False):
+            self._coronary_draw()                # re-arm Draw (VR stays open)
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        self._coronary_sync_ui()
+        if hasattr(self, "_cpr_vr_line_update"):
+            self._cpr_vr_line_update()
+
+    def _cpr_vr_saved_lines(self):
+        """Saved CPR lines for the VR overlay (light blue): the Coronary Tree
+        vessels of this CT plus lines saved in this session — so the next
+        vessel can be set while seeing the ones already done. [] if VR off."""
+        if not self._cpr_vr_active():
+            return []
+        out = []
+        spec = (getattr(self, "_coro_overlay_vr", None)
+                or getattr(self, "_coro_overlay", None) or [])
+        for ves in spec:
+            p3 = ves.get("points")
+            if p3 is not None and len(p3) >= 2:
+                out.append(np.asarray(p3, float))
+        tgt = self._cpr_parked_target()
+        cur = self._measures[tgt[0]][tgt[1]] if tgt is not None else None
+        cache = getattr(self, "_cpr_vr_saved_cache", None)
+        if cache is None:
+            cache = self._cpr_vr_saved_cache = {}
+        for k in ("A", "B"):
+            for m in self._measures.get(k, []):
+                if m is cur or not m.get("_cpr_saved"):
+                    continue
+                p3 = m.get("pts3d")
+                if not p3 or len(p3) < 2:
+                    continue
+                ctrl = np.asarray(p3, float)
+                key = (id(m), ctrl.tobytes())
+                pts = cache.get(key)
+                if pts is None:
+                    try:
+                        step = max(0.5, float(min(self._dims)))
+                        pts = np.asarray(
+                            CenterLine.from_points(ctrl, step_mm=step).points,
+                            float)
+                    except Exception:            # noqa: BLE001
+                        pts = ctrl
+                    if len(pts) > 400:
+                        pts = pts[np.linspace(0, len(pts) - 1, 400)
+                                  .round().astype(int)]
+                    cache[key] = pts
+                out.append(pts)
+        return out
 
     # ---- CPR line right-click: Resume trace / Auto-Trace / Save --------------
     def _cpr_line_menu_add(self, menu, which, mi) -> dict:
@@ -344,6 +529,10 @@ class CPRMixin:
             hit = self._cpr_find_measure(m)
             if hit is None:
                 return
+            if self._cpr is None and self._cpr_vr_active():
+                self._cpr_vr_confirm(hit[0], m)  # VR表示 kept: re-confirm only
+                self._cpr_auto_report()
+                return
             if self._cpr is not None:
                 self._exit_cpr(keep_view=True)
             self._enter_cpr(hit[0], hit[1], keep_view=True)
@@ -392,6 +581,10 @@ class CPRMixin:
             lst = self._measures.get(pane, [])
             mi = next((i for i, mm in enumerate(lst) if mm is m), None)
             if mi is None:                     # trace deleted / Exit meanwhile
+                return
+            if self._cpr_vr_active():          # VR表示: keep it, confirm only
+                self._cpr_vr_confirm(pane, m)
+                self._cpr_auto_report()
                 return
             self._enter_cpr(pane, mi)
             if self._cpr is not None:
@@ -543,6 +736,10 @@ class CPRMixin:
                 ctrl = th
         except Exception:                        # noqa: BLE001
             pass
+        # Keep the hand-placed points (start / via / end) so 一括AutoTrace can be
+        # undone back to them (saved in the .cpr.json as ctrl_manual).
+        if not m.get("_cpr_manual") and m.get("pts3d"):
+            m["_cpr_manual"] = [list(map(float, q)) for q in m["pts3d"]]
         m["pts3d"] = [list(map(float, q)) for q in ctrl]
         if src is not None and hasattr(self, "_world3d_to_out"):
             m["pts"] = [self._world3d_to_out(src, q) for q in ctrl]
@@ -1595,6 +1792,13 @@ class CPRMixin:
         picking the vessel's proximal start. Arms Draw if needed."""
         if self._cpr_vr_active():
             self._cpr_vr_stop()
+            # Close VR with a confirmed (unsaved) line → its short-axis now, on
+            # the left pane (the VR kept it un-built while open).
+            if self._cpr is None and self._cpr_parked_target() is not None:
+                pk = self._cpr_parked or {}
+                m = pk.get("m")
+                if m is not None and not m.get("_cpr_saved"):
+                    self._cpr_ensure_built()
             return
         if getattr(self, "_vol", None) is None or self._mode != "3D":
             self._cpr_vr_sync_btn()
@@ -1789,10 +1993,109 @@ class CPRMixin:
         self._cpr_epi_lbl = QLabel("")
         self._cpr_epi_lbl.setStyleSheet("color:#2e8b57;")
         row.addWidget(self._cpr_epi_lbl)
+        # 回転連動: when ON, a VR rotation turns the right pane's slab MIP to the
+        # VR's viewing direction (on release). The centre always follows.
+        self._cpr_vr_rot_btn = FitButton(t("回転連動"))
+        self._cpr_vr_rot_btn.setCheckable(True)
+        self._cpr_vr_rot_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_vr_rot_btn.setHelpToolTip(t(
+            "ONにすると、VRを回転し終えたときに右ペインのスラブMIPの向きを"
+            "VRの見ている方向に合わせます。VRの中心の移動は常に右ペインに反映"
+            "されます。"))
+        try:
+            from multi_dicomviewer.core import settings as _st
+            on = bool(_st.load_ui_state("cpr_vr_rot_follow", False))
+        except Exception:                        # noqa: BLE001
+            on = False
+        self._cpr_vr_rot_btn.setChecked(on)
+        self._cpr_vr_rot_btn.toggled.connect(self._cpr_vr_rot_toggled)
+        row.addWidget(self._cpr_vr_rot_btn)
         self._cpr_vr_group = [cap, self._cpr_vr_btn, self._cpr_epi_btn,
-                              self._cpr_epi_lbl]
+                              self._cpr_epi_lbl, self._cpr_vr_rot_btn]
         for w in self._cpr_vr_group:
             w.setVisible(False)
+
+    def _cpr_vr_rot_toggled(self, on) -> None:
+        try:
+            from multi_dicomviewer.core import settings as _st
+            _st.save_ui_state("cpr_vr_rot_follow", bool(on))
+        except Exception:                        # noqa: BLE001
+            pass
+
+    def _cpr_vr_rot_follow_on(self) -> bool:
+        b = getattr(self, "_cpr_vr_rot_btn", None)
+        return bool(b is not None and b.isChecked())
+
+    def _cpr_vr_follow_begin(self) -> None:
+        """A drag starts on the CPR VR: remember its view (for _cpr_vr_follow)."""
+        try:
+            self._cpr_vr_press_view = (self._cpr_vr_view_world()
+                                       if self._cpr_vr_active() else None)
+        except Exception:                        # noqa: BLE001
+            self._cpr_vr_press_view = None
+
+    def _cpr_vr_follow(self) -> None:
+        """A VR drag on the CPR VR ended: the right pane's slab MIP follows it —
+        its centre (crossing) moves to the VR's centre (always), and with
+        回転連動 ON its plane turns to the VR's viewing direction (screen right /
+        up of the VR = the slab's right / up). Pane A's frame is re-coupled, so
+        closing the VR shows the matching orthogonal plane."""
+        if not self._cpr_vr_active() or not getattr(self, "_vr_on", {}).get("A"):
+            return
+        view = self._cpr_vr_view_world()
+        if view is None:
+            return
+        P, right, up = (np.asarray(x, float) for x in view)
+        if not np.all(np.isfinite(P)):
+            return
+        old_c = np.asarray(getattr(self, "_center", P), float)
+        # The crossing moves by how far the VR centre moved during THIS drag
+        # (a pure rotation about the centre leaves it where it is, even when the
+        # VR frame isn't centred exactly on the crossing).
+        v0 = getattr(self, "_cpr_vr_press_view", None)
+        self._cpr_vr_press_view = None
+        if v0 is not None:
+            P = old_c + (P - np.asarray(v0[0], float))
+        before = self._view_snapshot() if hasattr(self, "_view_snapshot") else None
+        moved = float(np.linalg.norm(P - old_c)) > 1e-3
+        turned = False
+        if self._cpr_vr_rot_follow_on():
+            rn, un = float(np.linalg.norm(right)), float(np.linalg.norm(up))
+            if rn > 1e-9 and un > 1e-9:
+                u = right / rn
+                v = up - float(np.dot(up, u)) * u
+                vn = float(np.linalg.norm(v))
+                if vn > 1e-9:
+                    v = v / vn
+                    n = np.cross(u, v)
+                    ou, ov, on = (np.asarray(a, float) for a in self._frame["B"])
+                    if not (np.allclose(u, ou, atol=1e-4)
+                            and np.allclose(v, ov, atol=1e-4)):
+                        self._frame["B"] = (u, v, n)
+                        turned = True
+        if not (moved or turned):
+            return
+        self._center = P.copy()
+        if hasattr(self, "_clamp_center"):
+            self._clamp_center()
+        if turned:
+            a = math.radians(float((getattr(self, "_cross_ang", None)
+                                    or {}).get("B", 0.0)))
+            u, v, _n = self._frame["B"]
+            cdir = np.asarray(u, float) * math.cos(a) + np.asarray(v, float) * math.sin(a)
+            try:
+                self._couple_companion("B", cdir)
+            except Exception:                    # noqa: BLE001
+                pass
+        self._cpr_vr_follow_apply()
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if before is not None and hasattr(self, "_undo_view"):
+            try:
+                self._undo_view(before, self._view_snapshot())
+            except Exception:                    # noqa: BLE001
+                pass
 
     def _cpr_vr_group_sync(self) -> None:
         """Visibility / texts of the 「VR:」 group."""

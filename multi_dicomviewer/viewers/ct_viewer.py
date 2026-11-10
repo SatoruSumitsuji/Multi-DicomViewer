@@ -1084,6 +1084,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             self._vr_drag = True
             self._vr_press_xy = (x, y)            # click (no drag) = VR始点 pick
             self._last = e.position()
+            if self._which == "A" and self._owner._cpr_vr_active():
+                self._owner._cpr_vr_follow_begin()   # slab MIP follows on release
             return
         # VR: a RIGHT-click on a Target marker opens its menu (territory
         # show/hide, delete) — same actions as the panel's per-target right-click.
@@ -1525,6 +1527,14 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                 self._owner._vr_update_angle(self._which)
             except Exception:                            # noqa: BLE001
                 pass
+            # CPR VR: the right pane's slab MIP follows the VR (centre always,
+            # direction with 回転連動) — once, on release.
+            if self._which == "A" and self._owner._cpr_vr_active():
+                try:
+                    self._owner._cpr_vr_follow()
+                except Exception:                        # noqa: BLE001
+                    import traceback
+                    traceback.print_exc()
             return
         if self._owner._lv_apex_drag is not None:
             self._owner._lv_apex_drag = None
@@ -11570,8 +11580,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if (d is not None and d.get("pane") == key and d.get("pts3d")
                     and len(d["pts3d"]) == len(d["pts"])):
                 d["pts"] = [self._world3d_to_out(key, P) for P in d["pts3d"]]
-        if key == "B" and self._cpr_vr_active():
-            self._cpr_vr_line_update()           # the trace so far, on the VR
         p = self.pane[key]
         # Scale the measurement line widths by the render-window DPR so they
         # render at the intended on-screen thickness on scaled displays.
@@ -11843,6 +11851,24 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._rebuild_labels(p, labels)
         self._redraw_coronary(key)
         p.render()
+        # The trace so far, on the VR — AFTER the map pane has painted, and on the
+        # next event-loop turn: the VR render is the slow one, so doing it first
+        # held back the start-point dot on the map (the "no reaction?" lag).
+        if key == "B" and self._cpr_vr_active():
+            self._cpr_vr_line_update_soon()
+
+    def _cpr_vr_line_update_soon(self) -> None:
+        """Coalesced, deferred _cpr_vr_line_update (several clicks/redraws in one
+        turn → one VR render)."""
+        if getattr(self, "_cpr_vr_line_pending", False):
+            return
+        self._cpr_vr_line_pending = True
+
+        def _run():
+            self._cpr_vr_line_pending = False
+            if self._cpr_vr_active():
+                self._cpr_vr_line_update()
+        QTimer.singleShot(0, _run)
 
     def set_coronary_overlay(self, spec) -> None:
         """Public (shell): set / clear the Coronary Tree overlay and redraw. A
@@ -11893,6 +11919,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     self.pane[k].render()
         except Exception:                                # noqa: BLE001
             pass
+        if self._cpr_vr_active():                # saved lines (light blue)
+            self._cpr_vr_line_update_soon()
         # Same CoronaryTreeモード re-evaluation as set_coronary_overlay: the VR spec
         # is pushed even while ツリー表示 is OFF, so it's the reliable "a tree is
         # docked for this CT" signal for greying the LV row.
@@ -12836,6 +12864,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         being followed stays visible over the heart surface."""
         p = self.pane["A"]
         self._cpr_vr_cross_update()              # the right pane's crossing "+"
+        self._cpr_vr_saved_update()              # saved CPR lines (light blue)
         self._cpr_vr_set_update()                # the confirmed (unsaved) CPR line
         pts, start = self._cpr_vr_line_pts()
         act = getattr(p, "cpr_vr_act", None)
@@ -12918,6 +12947,55 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             vp.InsertNextPoint(float(w[0] / w[3]), float(w[1] / w[3]),
                                float(w[2] / w[3]))
             lines.InsertCellPoint(i)
+        pd = vtkPolyData()
+        pd.SetPoints(vp)
+        pd.SetLines(lines)
+        act.GetMapper().SetInputData(pd)
+        act.SetVisibility(True)
+
+    def _cpr_vr_saved_update(self) -> None:
+        """VR表示: the SAVED CPR lines (light blue, on top) so the next vessel
+        is set while seeing the ones already done. No render (caller renders).
+        Added before the orange/yellow actors, so those stay on top."""
+        p = self.pane["A"]
+        lines_3d = self._cpr_vr_saved_lines() if self._vr_on.get("A") else []
+        act = getattr(p, "cpr_vr_saved_act", None)
+        if not lines_3d:
+            if act is not None:
+                act.SetVisibility(False)
+            return
+        if act is None:
+            from vtkmodules.vtkRenderingCore import (vtkActor2D, vtkCoordinate,
+                                                     vtkPolyDataMapper2D)
+            coord = vtkCoordinate()
+            coord.SetCoordinateSystemToWorld()
+            mp = vtkPolyDataMapper2D()
+            mp.SetTransformCoordinate(coord)
+            act = vtkActor2D()
+            act.SetMapper(mp)
+            pr = act.GetProperty()
+            pr.SetColor(0.45, 0.78, 1.0)
+            pr.SetLineWidth(2.5)
+            p.ren.AddViewProp(act)
+            p.cpr_vr_saved_act = act
+            for nm in ("cpr_vr_sact", "cpr_vr_act"):     # keep those on top
+                a = getattr(p, nm, None)
+                if a is not None:
+                    p.ren.RemoveViewProp(a)
+                    p.ren.AddViewProp(a)
+        M = self._vr_xform.get("A")
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        vp = vtkPoints()
+        lines = vtkCellArray()
+        for pts in lines_3d:
+            P = np.asarray(pts, float)
+            H = np.c_[P, np.ones(len(P))] @ Mm.T
+            W = H[:, :3] / H[:, 3:4]
+            start = vp.GetNumberOfPoints()
+            lines.InsertNextCell(len(W))
+            for i, q in enumerate(W):
+                vp.InsertNextPoint(float(q[0]), float(q[1]), float(q[2]))
+                lines.InsertCellPoint(start + i)
         pd = vtkPolyData()
         pd.SetPoints(vp)
         pd.SetLines(lines)
@@ -20148,11 +20226,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         control points + RMF seed + display state), or None (with a message) if
         there's nothing to save."""
         from PyQt6.QtWidgets import QMessageBox
-        if self._cpr is None:
+        # VR表示 kept open: the confirmed line is saved WITHOUT building its
+        # short-axis (CPRMixin._cpr_headless holds its state dict).
+        hl = getattr(self, "_cpr_headless", None) if self._cpr is None else None
+        if self._cpr is None and hl is None:
             QMessageBox.information(self.window(), t("Short-axis"),
                                    t("Open a short-axis (CPR) first."))
             return None
-        cpr = self._cpr_state_dict()
+        cpr = hl if hl is not None else self._cpr_state_dict()
         if cpr is None:
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("This short-axis has no centreline to save."))
@@ -20166,6 +20247,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "src_dir": (self._lv_series_dir()
                         if hasattr(self, "_lv_series_dir") else ""),
             **cpr,
+            **self._cpr_save_meta(),
         }
 
     def _cpr_write(self, path, data) -> bool:
@@ -20286,6 +20368,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             traceback.print_exc()
             return False
         if ok:
+            self._cpr_adopt_file_meta(data)      # AutoTrace / names kept on re-save
             self._refresh(reset_cam=not keep_view)
             self._view_initial = False           # lock the view (no resize refit)
         return bool(ok)
@@ -20481,6 +20564,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     if key == "A":
                         self._cpr_vr_cross_update()   # (hides a stale "+")
                         self._cpr_vr_set_update()     # (and a stale CPR line)
+                        self._cpr_vr_saved_update()   # (and stale saved lines)
                     self.pane[key].render()
                 continue
             p = self.pane[key]
@@ -21196,9 +21280,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             colr = "#ff2020" if key == self._active_pane else "transparent"
             if flash and key == self._active_pane:
                 colr = "#ffe000"
-            f.setStyleSheet(
-                "QFrame#ctpane { border: 3px solid %s; }" % colr
-            )
+            ss = "QFrame#ctpane { border: 3px solid %s; }" % colr
+            if f.styleSheet() != ss:           # a re-style per click costs a repolish
+                f.setStyleSheet(ss)
 
     def _set_tool_by_key(self, name):
         """Tool hotkey: select the tool and, only if it really became the
@@ -21842,6 +21926,46 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         px, py, pz = cam.GetPosition()
         cam.SetFocalPoint(0.0, 0.0, fz)
         cam.SetPosition(0.0, 0.0, pz)
+
+    def _cpr_vr_view_world(self):
+        """CPR VR (pane A) view in VOLUME mm: (centre = the camera focal point,
+        screen-right, screen-up) — the display frame is the volume through the
+        VR model matrix, so map the camera back through its inverse."""
+        p = self.pane["A"]
+        cam = p.ren.GetActiveCamera()
+        M = self._vr_xform.get("A")
+        Mm = np.asarray(M, float) if M is not None else np.eye(4)
+        try:
+            Mi = np.linalg.inv(Mm)
+        except np.linalg.LinAlgError:
+            return None
+        fp = np.asarray(cam.GetFocalPoint(), float)
+        pos = np.asarray(cam.GetPosition(), float)
+        up = np.asarray(cam.GetViewUp(), float)
+        dop = fp - pos
+        dn = float(np.linalg.norm(dop))
+        if dn < 1e-9:
+            return None
+        dop = dop / dn
+        right = np.cross(dop, up)
+        rn = float(np.linalg.norm(right))
+        if rn < 1e-9:
+            return None
+        right = right / rn
+        trueup = np.cross(right, dop)
+        c = Mi @ np.array([fp[0], fp[1], fp[2], 1.0])
+        R = Mi[:3, :3]
+        return c[:3] / c[3], R @ right, R @ trueup
+
+    def _cpr_vr_follow_apply(self) -> None:
+        """After _cpr_vr_follow set the crossing / frames: centre the map pane on
+        the crossing and redraw (the VR itself is left as the user set it)."""
+        c = np.asarray(self._center, float)
+        self._pc["A"] = c.copy()
+        self._pc["B"] = c.copy()
+        self._view_initial = False
+        self._center_camera("B")
+        self._refresh()
 
     def _vr_center_on(self, key, P) -> None:
         """Pan VR pane *key*'s camera so volume point *P* (mm) is at the pane

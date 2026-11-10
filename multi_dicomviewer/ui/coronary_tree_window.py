@@ -98,6 +98,78 @@ _CPR_STEP_MM = 0.5
 #: an existing vessel attaches to it. Was 3 mm; widened to 5 mm per user request.
 _CONNECT_TOL_MM = 5.0
 
+#: Vessel list columns: Vessel, Role, Branches, AutoTrace, DetailName, FixName,
+#: Myocardium. Every column but Vessel can be folded to a narrow "×" (header ×).
+_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_DETAIL, _C_FIX, _C_MYO = range(7)
+_N_COLS = 7
+_COL_DEFAULT_W = {_C_ROLE: 76, _C_BR: 76, _C_AUTO: 90, _C_DETAIL: 102,
+                  _C_FIX: 82, _C_MYO: 120}
+_COL_FOLDED_W = 20
+_X_W = 14                                     # the "×" hit area at a header's right
+
+
+class _XHeader(QHeaderView):
+    """Vessel-list header: each column but the first carries a "×" at its right
+    edge. Clicking it folds the column to a narrow "×"-only column (to see the
+    columns needed now in the narrow panel); clicking that "×" unfolds it."""
+
+    toggled = pyqtSignal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(Qt.Orientation.Horizontal, parent)
+        self.folded: set = set()
+        self.setSectionsClickable(True)
+        self.setMinimumSectionSize(_COL_FOLDED_W)   # allow the narrow "×" column
+
+    def _x_rect(self, idx):
+        from PyQt6.QtCore import QRect
+        x = self.sectionViewportPosition(idx)
+        w = self.sectionSize(idx)
+        if idx in self.folded:
+            return QRect(x, 0, w, self.height())
+        return QRect(x + w - _X_W - 2, 0, _X_W, self.height())
+
+    def paintSection(self, painter, rect, idx):
+        painter.save()
+        super().paintSection(painter, rect, idx)
+        painter.restore()
+        if idx == _C_NAME:
+            return
+        from PyQt6.QtCore import QRect
+        if idx in self.folded:
+            r = rect
+        else:
+            r = QRect(rect.right() - _X_W - 1, rect.top(), _X_W, rect.height())
+        painter.save()
+        painter.setPen(QColor("#b00000"))
+        f = painter.font()
+        f.setBold(True)
+        painter.setFont(f)
+        painter.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "×")
+        painter.restore()
+
+    def mousePressEvent(self, e):
+        idx = self.logicalIndexAt(e.position().toPoint())
+        if (idx > _C_NAME and e.button() == Qt.MouseButton.LeftButton
+                and self._x_rect(idx).contains(e.position().toPoint())):
+            self.toggled.emit(idx)
+            return
+        super().mousePressEvent(e)
+
+
+def _col_delegate_cls():
+    from PyQt6.QtWidgets import QStyledItemDelegate
+
+    class _ColDelegate(QStyledItemDelegate):
+        """Only DetailName / FixName are typed into (the item is editable so
+        those two can be; every other column refuses an editor)."""
+
+        def createEditor(self, parent, option, index):
+            if index.column() in (_C_DETAIL, _C_FIX):
+                return super().createEditor(parent, option, index)
+            return None
+    return _ColDelegate
+
 
 class CoronaryTreeWindow(SnapDock):
     """Dockable coronary-tree list. Float or dock into the left Studies frame."""
@@ -326,6 +398,23 @@ class CoronaryTreeWindow(SnapDock):
                "Ctrlで複数選択・Shiftで範囲選択（元のCPRファイルは残る）"),
              self._delete_selected, False),
         ])
+        # 一括 row: auto-trace every not-yet-auto-traced line (foreground, with
+        # a progress window) / undo the last batch / rename the files to
+        # DetailName+FixName and re-sync the folder.
+        bulk_btns = _row(t("一括："), [
+            (t("一括AutoTrace"),
+             t("AutoTrace が「未」の線をまとめて自動トレース（Vessel を選択中は"
+               "選択した行だけ）。結果は同じ .cpr.json に上書き"),
+             self._batch_auto_trace, False),
+            (t("取消"), t("直前の一括AutoTraceを取り消し、手動の点に戻す"),
+             self._batch_auto_undo, False),
+            (t("ファイル名更新"),
+             t("DetailName+FixName でファイル名（.cpr.json）と血管名を一括更新し、"
+               "フォルダ更新を実行"),
+             self._batch_rename, False),
+        ])
+        self._bulk_auto_btn, self._bulk_undo_btn, self._rename_btn = bulk_btns
+        self._last_batch = None              # undo record of the last 一括AutoTrace
         # Tree row: overlay toggle / save / load / clear.
         tree_btns = _row(t("ツリー："), [
             # Default state is OFF (overlay hidden), so the button shows the ACTION
@@ -441,15 +530,32 @@ class CoronaryTreeWindow(SnapDock):
         outer.addWidget(split, 1)
 
         self._tree_w = QTreeWidget()
-        self._tree_w.setColumnCount(4)
-        self._tree_w.setHeaderLabels(
-            [t("血管"), t("役割"), t("分岐"), t("心筋量")])
+        self._tree_w.setColumnCount(_N_COLS)
+        # Vessel, Role, Branches, AutoTrace, DetailName, FixName, Myocardium.
+        self._col_labels = [t("血管"), t("役割"), t("分岐"), t("AutoTrace"),
+                            t("DetailName"), t("FixName"), t("心筋量")]
+        hdr = _XHeader(self._tree_w)
+        self._tree_w.setHeader(hdr)
+        self._tree_w.setHeaderLabels(self._col_labels)
+        hdr.setStretchLastSection(False)
+        hdr.toggled.connect(self._toggle_col_fold)
+        self._tree_w.headerItem().setToolTip(
+            _C_ROLE, t("列名右の × で列を折りたたみ（× をもう一度押すと戻ります）"))
         # 血管 column auto-fits its contents so the full vessel name (now with the
         # @SeNN suffix) is always visible instead of being truncated at a fixed width.
-        self._tree_w.header().setSectionResizeMode(
-            0, QHeaderView.ResizeMode.ResizeToContents)
-        self._tree_w.setColumnWidth(1, 70)
-        self._tree_w.setColumnWidth(2, 70)
+        hdr.setSectionResizeMode(_C_NAME, QHeaderView.ResizeMode.ResizeToContents)
+        for c, w in _COL_DEFAULT_W.items():
+            self._tree_w.setColumnWidth(c, w)
+        self._col_w = dict(_COL_DEFAULT_W)       # width to restore on unfold
+        self._col_delegate = _col_delegate_cls()(self._tree_w)
+        self._tree_w.setItemDelegate(self._col_delegate)
+        try:
+            folded = settings_mod.load_ui_state("corotree_folded_cols", []) or []
+        except Exception:                                # noqa: BLE001
+            folded = []
+        for c in folded:
+            if isinstance(c, int) and _C_NAME < c < _N_COLS:
+                self._set_col_folded(c, True, save=False)
         # Ctrl = arbitrary multi-select, Shift = contiguous range (for 消去).
         self._tree_w.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -577,6 +683,7 @@ class CoronaryTreeWindow(SnapDock):
                 new_vid = self._unique_vid()
                 self._tree.add_vessel(new_vid, name or "vessel",
                                       "branch", cl.points, ctrl=ctrl)
+                self._apply_cpr_meta(self._tree.vessels[new_vid], data)
                 self._bundle()["paths"][new_vid] = p   # for in-place overwrite
                 added += 1
                 self._last_path = p
@@ -626,6 +733,7 @@ class CoronaryTreeWindow(SnapDock):
         cl = CenterLine.from_points(ctrl_arr, step_mm=_CPR_STEP_MM)
         new_vid = self._unique_vid()
         self._tree.add_vessel(new_vid, nm, "branch", cl.points, ctrl=ctrl_arr)
+        self._apply_cpr_meta(self._tree.vessels[new_vid], data)
         if path:
             self._bundle()["paths"][new_vid] = path   # enable in-place overwrite
         self._populate()
@@ -661,7 +769,21 @@ class CoronaryTreeWindow(SnapDock):
             "path": b["paths"].get(vid, "") or "",
             "series": dict(b.get("series") or {}),
             "src_dir": b.get("ct_dir", "") or "",
+            # kept on the re-edited line so its re-save doesn't lose them
+            "meta": self._vessel_file_meta(v),
         }
+
+    @staticmethod
+    def _vessel_file_meta(v) -> dict:
+        """Vessel *v*'s AutoTrace / ctrl_manual / names as .cpr.json fields."""
+        out = {"auto_traced": bool(getattr(v, "auto_traced", False))}
+        if getattr(v, "ctrl_manual", None) is not None:
+            out["ctrl_manual"] = np.asarray(v.ctrl_manual, float).round(4).tolist()
+        if getattr(v, "detail_name", ""):
+            out["detail_name"] = v.detail_name
+        if getattr(v, "fix_name", ""):
+            out["fix_name"] = v.fix_name
+        return out
 
     def update_vessel_cpr(self, vid: str, ctrl, path: str = "") -> bool:
         """Overwrite vessel *vid*'s centreline IN PLACE from edited control points
@@ -686,7 +808,7 @@ class CoronaryTreeWindow(SnapDock):
         self._hint.setText(t("「{n}」を上書き保存しました。", n=v.name))
         return True
 
-    def _resync_from_folder(self):
+    def _resync_from_folder(self, folder: str | None = None):
         """CPRフォルダで更新 — reconcile the ACTIVE CT's tree with a folder of
         per-vessel ``<name>.cpr.json`` files, KEEPING the existing roles/connections
         (which live only in the tree / .corotree.json, never in a .cpr.json):
@@ -713,10 +835,13 @@ class CoronaryTreeWindow(SnapDock):
         def _safe(nm):
             return re.sub(r'[\\/:*?"<>|]', "_", (nm or "").strip()).strip()
 
-        # 1) choose the folder (default: where this CT's vessels' .cpr.json live).
-        start = self._tree_save_dir()
-        folder = QFileDialog.getExistingDirectory(
-            self, t("CPRフォルダを選択（このCTの .cpr.json があるフォルダ）"), start)
+        # 1) choose the folder (default: where this CT's vessels' .cpr.json live);
+        #    ファイル名更新 passes the renamed files' folder (no dialog).
+        if not folder:
+            start = self._tree_save_dir()
+            folder = QFileDialog.getExistingDirectory(
+                self, t("CPRフォルダを選択（このCTの .cpr.json があるフォルダ）"),
+                start)
         if not folder:
             return
         # 2) scan *.cpr.json recursively; keep THIS CT's (or uid-less) files, and
@@ -751,7 +876,7 @@ class CoronaryTreeWindow(SnapDock):
                     continue
                 if safe in files:
                     dup += 1
-                files[safe] = {"ctrl": ctrl, "path": p}
+                files[safe] = {"ctrl": ctrl, "path": p, "data": cd}
         if not files:
             self._warn(t("このCTの .cpr.json がフォルダに見つかりませんでした。"))
             return
@@ -769,6 +894,7 @@ class CoronaryTreeWindow(SnapDock):
                     to_remove.append(vid)
                 continue
             matched.add(safe)
+            self._apply_cpr_meta(v, fd.get("data"))      # AutoTrace / names
             try:
                 ctrl_arr = np.asarray(fd["ctrl"], float)
             except Exception:                                # noqa: BLE001
@@ -782,6 +908,7 @@ class CoronaryTreeWindow(SnapDock):
             to_update.append((vid, ctrl_arr, fd["path"]))
         to_add = [(safe, files[safe]) for safe in files if safe not in matched]
         if not (to_update or to_remove or to_add):
+            self._populate()                     # AutoTrace / names may differ
             self._hint.setText(t("フォルダと一致しています（更新はありません）。"))
             return
         # 4) confirm — the removals are the only destructive part, so name them.
@@ -828,6 +955,7 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             new_vid = self._unique_vid()
             tree.add_vessel(new_vid, safe, "branch", cl.points, ctrl=ctrl_arr)
+            self._apply_cpr_meta(tree.vessels[new_vid], fd.get("data"))
             b["paths"][new_vid] = fd["path"]
         # 5d) a child whose PARENT geometry changed: re-derive its junction (index
         #     into the parent's resampled points) by snapping the child's proximal
@@ -1209,21 +1337,89 @@ class CoronaryTreeWindow(SnapDock):
         total_mm = float(np.linalg.norm(np.diff(p.points, axis=0), axis=1).sum())
         return f"@{pname} {round(100 * frac)}% / {frac * total_mm:.0f}mm"
 
+    # ---- column fold (×) ------------------------------------------------------
+    def _toggle_col_fold(self, col: int) -> None:
+        hdr = self._tree_w.header()
+        self._set_col_folded(col, col not in hdr.folded)
+
+    def _set_col_folded(self, col: int, fold: bool, save: bool = True) -> None:
+        """Fold column *col* to a narrow "×" (fold) or bring it back."""
+        hdr = self._tree_w.header()
+        hi = self._tree_w.headerItem()
+        if fold:
+            if col not in hdr.folded:
+                w = self._tree_w.columnWidth(col)
+                if w > _COL_FOLDED_W:
+                    self._col_w[col] = w
+            hdr.folded.add(col)
+            hi.setText(col, "")
+            self._tree_w.setColumnWidth(col, _COL_FOLDED_W)
+            hi.setToolTip(col, self._col_labels[col] + " — " + t("× で表示"))
+        else:
+            hdr.folded.discard(col)
+            hi.setText(col, self._col_labels[col])
+            self._tree_w.setColumnWidth(
+                col, self._col_w.get(col, _COL_DEFAULT_W.get(col, 70)))
+            hi.setToolTip(col, t("列名右の × で列を折りたたみ（× をもう一度押すと戻ります）"))
+        hdr.viewport().update()
+        if save:
+            try:
+                settings_mod.save_ui_state("corotree_folded_cols",
+                                           sorted(hdr.folded))
+            except Exception:                            # noqa: BLE001
+                pass
+
+    # ---- per-vessel .cpr.json info (AutoTrace / DetailName / FixName) ---------
+    @staticmethod
+    def _apply_cpr_meta(v, data) -> None:
+        """Copy a .cpr.json's auto_traced / detail_name / fix_name / ctrl_manual
+        onto vessel *v*. A field the file doesn't carry leaves *v* as it is (an
+        older file, or one re-saved before the names were set)."""
+        if not isinstance(data, dict):
+            return
+        if "auto_traced" in data:
+            v.auto_traced = bool(data.get("auto_traced"))
+        for key in ("detail_name", "fix_name"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                setattr(v, key, val.strip())
+        cm = data.get("ctrl_manual")
+        if cm:
+            try:
+                v.ctrl_manual = np.asarray(cm, float).reshape(-1, 3)
+            except Exception:                            # noqa: BLE001
+                pass
+
+    def _auto_text(self, v) -> str:
+        return t("済") if getattr(v, "auto_traced", False) else t("未")
+
     def _make_item(self, vid: str) -> QTreeWidgetItem:
         v = self._tree.vessels[vid]
         role_txt = v.role if v.role in ROOT_ROLES else t("枝")
-        it = QTreeWidgetItem([v.name, role_txt, self._junction_text(vid),
-                              self._myo_text(vid)])
+        cols = [""] * _N_COLS
+        cols[_C_NAME] = v.name
+        cols[_C_ROLE] = role_txt
+        cols[_C_BR] = self._junction_text(vid)
+        cols[_C_AUTO] = self._auto_text(v)
+        cols[_C_DETAIL] = v.detail_name or ""
+        cols[_C_FIX] = v.fix_name or ""
+        cols[_C_MYO] = self._myo_text(vid)
+        it = QTreeWidgetItem(cols)
         it.setData(0, _UID_ROLE, vid)
         it.setData(0, _CTUID_ROLE, self._active_uid)   # which CT this vessel is in
-        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        # Editable = DetailName / FixName only (the delegate refuses the rest).
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable
+                    | Qt.ItemFlag.ItemIsEditable)
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
         it.setForeground(0, QColor(self._root_color(self._root_role(vid))))
+        it.setTextAlignment(_C_AUTO, int(Qt.AlignmentFlag.AlignCenter))
+        if not getattr(v, "auto_traced", False):
+            it.setForeground(_C_AUTO, QColor("#b00000"))
         # Monospace 心筋量 column so the padded % / mL line up vertically.
         mf = QFont("Consolas")
         mf.setStyleHint(QFont.StyleHint.Monospace)
-        it.setFont(3, mf)
+        it.setFont(_C_MYO, mf)
         return it
 
     def _populate(self):
@@ -1242,7 +1438,7 @@ class CoronaryTreeWindow(SnapDock):
             tree = b["tree"]
             lbl = self._uid_label(uid, b.get("series"))   # live meta + embedded
             b["label"] = lbl                               # cache for relabel diff
-            grp = QTreeWidgetItem([lbl, "", "", ""])
+            grp = QTreeWidgetItem([lbl])
             grp.setData(0, _GRP_ROLE, uid)
             grp.setData(0, _CTUID_ROLE, uid)
             grp.setFlags(grp.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -1273,7 +1469,7 @@ class CoronaryTreeWindow(SnapDock):
             for r in sorted(tree.roots(), key=_root_key):
                 add_recursive(r, parent)
             if loose:
-                lg = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose)), "", "", ""])
+                lg = QTreeWidgetItem([t("（未接続 {n}）", n=len(loose))])
                 lg.setData(0, _CTUID_ROLE, uid)
                 lg.setForeground(0, QColor("#b00000"))
                 if parent is None:
@@ -1288,6 +1484,7 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.blockSignals(False)
         self._building = False
         self._refresh_hint()
+        self._refresh_bulk_btns()
 
     def _refresh_hint(self):
         n = len(self._tree.vessels)
@@ -1310,6 +1507,7 @@ class CoronaryTreeWindow(SnapDock):
     def _on_selection(self):
         self._activate_item_ct(self._tree_w.currentItem())
         self.vesselSelected.emit(self.selected_vid() or "")
+        self._refresh_bulk_btns()                # 一括AutoTrace counts the selection
 
     def _on_item_double_clicked(self, item, _col=0):
         """Double-click a vessel row → SELECT + highlight it on the image (rename is
@@ -1376,6 +1574,25 @@ class CoronaryTreeWindow(SnapDock):
 
     def _on_item_changed(self, item, _col):
         if self._building:
+            return
+        if _col in (_C_DETAIL, _C_FIX):
+            # DetailName / FixName typed in → kept on the vessel (saved in the
+            # .corotree.json; written to the .cpr.json by 一括ファイル名更新).
+            vid = item.data(0, _UID_ROLE)
+            uid = item.data(0, _CTUID_ROLE) or self._active_uid
+            b = self._by_uid.get(uid)
+            v = b["tree"].vessels.get(vid) if (b and vid) else None
+            if v is not None:
+                val = (item.text(_col) or "").strip()
+                setattr(v, "detail_name" if _col == _C_DETAIL else "fix_name",
+                        val)
+                if val != item.text(_col):
+                    self._tree_w.blockSignals(True)
+                    item.setText(_col, val)
+                    self._tree_w.blockSignals(False)
+                self._refresh_rename_btn()
+            return
+        if _col not in (0, -1):
             return
         grp_uid = item.data(0, _GRP_ROLE)
         if grp_uid and grp_uid in self._by_uid:
@@ -2242,7 +2459,23 @@ class CoronaryTreeWindow(SnapDock):
         for a in (a_rev, a_ren, a_par, a_del):
             a.setEnabled(vid is not None)
         role_menu.setEnabled(vid is not None)
+        menu.addSeparator()
+        # The selected rows (or just the clicked one) for the two bulk items.
+        sel = self._selected_vids()
+        if vid is not None and vid not in sel:
+            sel = [vid]
+        a_fix = menu.addAction(t("FixName を一括入力…"))
+        a_fix.setEnabled(bool(sel))
+        a_man = menu.addAction(t("手動の点に戻す"))
+        a_man.setEnabled(any(self._tree.vessels[x].ctrl_manual is not None
+                             for x in sel))
         chosen = menu.exec(self._tree_w.viewport().mapToGlobal(pos))
+        if chosen is a_fix:
+            self._set_fix_name_bulk(sel)
+            return
+        if chosen is a_man:
+            self._revert_manual(sel)
+            return
         if chosen in role_acts and vid is not None:
             self._tree.set_role(vid, role_acts[chosen])
             self._populate()
@@ -2417,6 +2650,391 @@ class CoronaryTreeWindow(SnapDock):
             self.treeChanged.emit()
 
     # ------------------------------------------------------------- files
+    # ---- 一括 row: AutoTrace / undo / rename ----------------------------------
+    def _refresh_bulk_btns(self) -> None:
+        """一括AutoTrace (n本) — the not-yet-auto-traced count (selection-aware);
+        取消 only after a batch; ファイル名更新 when a DetailName is filled."""
+        b = getattr(self, "_bulk_auto_btn", None)
+        if b is None:
+            return
+        n = len(self._batch_targets())
+        b.setText(t("一括AutoTrace ({n}本)", n=n))
+        b.setEnabled(n > 0)
+        self._bulk_undo_btn.setEnabled(bool(self._last_batch))
+        self._rename_btn.setEnabled(any(
+            (v.detail_name or "").strip()
+            for v in self._tree.vessels.values()))
+
+    _refresh_rename_btn = _refresh_bulk_btns
+
+    def _selected_vids(self) -> list:
+        """Vessel ids of the selected rows in the ACTIVE CT (group rows skipped)."""
+        out = []
+        for it in self._tree_w.selectedItems():
+            vid = it.data(0, _UID_ROLE)
+            if (vid and (it.data(0, _CTUID_ROLE) or "") == self._active_uid
+                    and vid in self._tree.vessels):
+                out.append(vid)
+        return out
+
+    def _batch_targets(self) -> list:
+        """Lines for 一括AutoTrace: the selected rows that aren't auto-traced, or
+        (nothing selected) every not-yet-auto-traced line of the active CT."""
+        sel = self._selected_vids()
+        vids = sel if sel else list(self._tree.vessels)
+        return [vid for vid in vids
+                if not self._tree.vessels[vid].auto_traced]
+
+    def _source_viewer(self):
+        """The CT viewer showing this tree's source 3-D CT (for its volume)."""
+        sh = self._shell
+        if sh is None or not hasattr(sh, "coronary_source_viewer"):
+            return None
+        try:
+            return sh.coronary_source_viewer(self._active_uid)
+        except Exception:                                # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _read_cpr(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else None
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _write_cpr(path, data) -> bool:
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+            return True
+        except OSError:
+            return False
+
+    def _set_vessel_ctrl(self, tree, vid, ctrl) -> None:
+        """Replace a vessel's centreline (ctrl + resampled points) and re-snap the
+        junction of each direct child onto the new line."""
+        v = tree.vessels[vid]
+        ctrl = np.asarray(ctrl, float)
+        v.ctrl = ctrl
+        v.points = CenterLine.from_points(ctrl, step_mm=_CPR_STEP_MM).points
+        for cv in tree.vessels.values():
+            if cv.parent == vid and cv.n and v.n:
+                d = np.linalg.norm(v.points - cv.points[0], axis=1)
+                cv.junction = int(np.argmin(d))
+
+    def _batch_auto_trace(self) -> None:
+        """一括AutoTrace: auto-trace every target line in turn (foreground; the
+        progress window can Cancel after the current line), overwrite each
+        .cpr.json (ctrl + auto_traced, the hand points kept as ctrl_manual) and
+        update the tree. 取消 restores the last batch."""
+        targets = self._batch_targets()
+        if not targets:
+            self._hint.setText(t("自動トレースが必要な線はありません。"))
+            return
+        v = self._source_viewer()
+        vol = getattr(v, "_vol", None) if v is not None else None
+        if vol is None:
+            self._warn(t("先にこのツリーの 3DCT を表示してください。"))
+            return
+        tree = self._tree
+        b = self._bundle()
+        if QMessageBox.question(
+                self, t("一括AutoTrace"),
+                t("{n} 本の線を自動トレースします。結果は各 .cpr.json に上書きします"
+                  "（「取消」で元に戻せます）。よろしいですか？", n=len(targets))) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        import threading
+        from PyQt6.QtCore import QEventLoop, QTimer
+        from PyQt6.QtWidgets import QProgressDialog
+        from multi_dicomviewer.core.cpr_autotrack import thin_ctrl, trace_vessel
+        dims = tuple(float(d) for d in v._dims)
+        try:
+            sp = float(settings_mod.load_coronary_params().get("cpr_ctrl_mm", 3))
+        except Exception:                                # noqa: BLE001
+            sp = 3.0
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle(t("一括AutoTrace"))
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setRange(0, 100 * len(targets))
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setAutoReset(False)
+        dlg.setCancelButtonText(t("Cancel"))
+        dlg.setMinimumWidth(340)
+        dlg.show()
+        undo, failed, done_names = [], [], []
+        cancelled = False
+        for k, vid in enumerate(targets):
+            if cancelled or vid not in tree.vessels:
+                break
+            ves = tree.vessels[vid]
+            clicks = ves.ctrl if ves.ctrl is not None and len(ves.ctrl) >= 2 \
+                else ves.points[[0, -1]]
+            clicks = [np.asarray(q, float) for q in clicks]
+            st = {"frac": 0.0, "res": None, "done": False}
+
+            def prog(stage, i, n, frac, _st=st):
+                _st["frac"] = frac
+                return True                      # finish the current line
+
+            def work(_st=st, _clicks=clicks):
+                try:
+                    _st["res"] = trace_vessel(vol, dims, _clicks, progress=prog)
+                except Exception:                        # noqa: BLE001
+                    _st["res"] = None
+                finally:
+                    _st["done"] = True
+            dlg.setLabelText(t("{i}/{n} 本：{name}", i=k + 1, n=len(targets),
+                               name=ves.name))
+            threading.Thread(target=work, daemon=True).start()
+            loop = QEventLoop()
+            tm = QTimer()
+            tm.setInterval(50)
+
+            def poll(_st=st, _k=k):
+                dlg.setValue(int(100 * _k + 100 * min(1.0, _st["frac"])))
+                if _st["done"]:
+                    loop.quit()
+            tm.timeout.connect(poll)
+            tm.start()
+            loop.exec()
+            tm.stop()
+            if dlg.wasCanceled():
+                cancelled = True                 # stop after this line
+            res = st["res"]
+            if res is None or not res.ok or len(res.ctrl_mm) < 2:
+                failed.append(ves.name)
+                continue
+            ctrl = np.asarray(res.ctrl_mm, float)
+            try:
+                th = thin_ctrl(res.path_mm, ctrl, clicks, sp)
+                if len(th) >= 2:
+                    ctrl = np.asarray(th, float)
+            except Exception:                            # noqa: BLE001
+                pass
+            path = b["paths"].get(vid, "") or ""
+            old_file = self._read_cpr(path) if path else None
+            undo.append({"vid": vid, "ctrl": None if ves.ctrl is None
+                         else np.asarray(ves.ctrl, float).copy(),
+                         "auto": ves.auto_traced,
+                         "manual": None if ves.ctrl_manual is None
+                         else np.asarray(ves.ctrl_manual, float).copy(),
+                         "path": path, "file": old_file})
+            if ves.ctrl_manual is None:
+                ves.ctrl_manual = np.asarray(clicks, float)
+            self._set_vessel_ctrl(tree, vid, ctrl)
+            ves.auto_traced = True
+            if old_file is not None:
+                nd = dict(old_file)
+                nd["ctrl"] = ctrl.round(4).tolist()
+                nd["auto_traced"] = True
+                nd["ctrl_manual"] = np.asarray(ves.ctrl_manual,
+                                               float).round(4).tolist()
+                st0 = dict(nd.get("state") or {})
+                st0["idx"] = 0                   # old index may not fit the new line
+                nd["state"] = st0
+                if not self._write_cpr(path, nd):
+                    failed.append(ves.name + " (" + t("保存失敗") + ")")
+            done_names.append(ves.name)
+        dlg.close()
+        dlg.deleteLater()
+        self._last_batch = {"uid": self._active_uid, "items": undo} if undo else None
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        msg = t("一括AutoTrace：{n} 本を自動トレースしました。", n=len(done_names))
+        if cancelled:
+            msg += " " + t("（キャンセルで中断）")
+        self._hint.setText(msg)
+        if failed:
+            self._warn(msg + "\n" + t("失敗：{n} 本（{names}）", n=len(failed),
+                                      names=t("・").join(failed[:12])))
+
+    def _restore_vessel(self, tree, b, rec) -> None:
+        vid = rec["vid"]
+        ves = tree.vessels.get(vid)
+        if ves is None:
+            return
+        if rec["ctrl"] is not None:
+            self._set_vessel_ctrl(tree, vid, rec["ctrl"])
+        ves.auto_traced = bool(rec["auto"])
+        ves.ctrl_manual = rec["manual"]
+        if rec.get("path") and rec.get("file") is not None:
+            self._write_cpr(rec["path"], rec["file"])
+
+    def _batch_auto_undo(self) -> None:
+        """取消: put the last 一括AutoTrace's lines back to their hand points (tree
+        + .cpr.json files exactly as before)."""
+        lb = self._last_batch
+        if not lb:
+            return
+        b = self._by_uid.get(lb["uid"])
+        if b is None:
+            self._last_batch = None
+            self._refresh_bulk_btns()
+            return
+        if QMessageBox.question(
+                self, t("一括AutoTrace"),
+                t("直前の一括AutoTrace（{n} 本）を取り消しますか？",
+                  n=len(lb["items"]))) != QMessageBox.StandardButton.Yes:
+            return
+        for rec in lb["items"]:
+            self._restore_vessel(b["tree"], b, rec)
+        self._last_batch = None
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(t("一括AutoTraceを取り消しました。"))
+
+    def _revert_manual(self, vids) -> None:
+        """Right-click 手動の点に戻す: back to the hand-placed points (AutoTrace →
+        未), the .cpr.json rewritten likewise."""
+        tree = self._tree
+        b = self._bundle()
+        n = 0
+        for vid in vids:
+            ves = tree.vessels.get(vid)
+            if ves is None or ves.ctrl_manual is None:
+                continue
+            self._set_vessel_ctrl(tree, vid, ves.ctrl_manual)
+            ves.auto_traced = False
+            ves.ctrl_manual = None
+            path = b["paths"].get(vid, "") or ""
+            d = self._read_cpr(path) if path else None
+            if d is not None:
+                d["ctrl"] = np.asarray(ves.ctrl, float).round(4).tolist()
+                d["auto_traced"] = False
+                d.pop("ctrl_manual", None)
+                st0 = dict(d.get("state") or {})
+                st0["idx"] = 0
+                d["state"] = st0
+                self._write_cpr(path, d)
+            n += 1
+        if n:
+            self._last_batch = None
+            self._populate()
+            self.treeChanged.emit()
+            self._push_overlay()
+            self._hint.setText(t("{n} 本を手動の点に戻しました。", n=n))
+
+    def _set_fix_name_bulk(self, vids) -> None:
+        """Right-click FixName を一括入力: the same FixName on the chosen rows."""
+        if not vids:
+            return
+        cur = next((self._tree.vessels[v].fix_name for v in vids
+                    if self._tree.vessels[v].fix_name), "")
+        txt, ok = QInputDialog.getText(
+            self, t("FixName"), t("{n} 本の FixName（例：@030）:", n=len(vids)),
+            text=cur)
+        if not ok:
+            return
+        for vid in vids:
+            self._tree.vessels[vid].fix_name = (txt or "").strip()
+        self._populate()
+
+    def _batch_rename(self) -> None:
+        """ファイル名更新: rename each line's .cpr.json (and its vessel) to
+        DetailName+FixName, write the names into the file, then run フォルダ更新
+        on that folder. A preview lists 旧名 → 新名; duplicates / existing files /
+        unusable characters / unknown files are reported and skipped."""
+        import re
+        tree = self._tree
+        b = self._bundle()
+        bad_chars = re.compile(r'[\\/:*?"<>|]')
+        plan, problems = [], []
+        new_names = {}
+        for vid, v in tree.vessels.items():
+            det = (v.detail_name or "").strip()
+            if not det:
+                continue
+            new = det + (v.fix_name or "").strip()
+            if bad_chars.search(new):
+                problems.append(t("{a}: 使えない文字", a=new))
+                continue
+            path = b["paths"].get(vid, "") or ""
+            if not path or not os.path.isfile(path):
+                problems.append(t("{a}: 元の .cpr.json が不明", a=v.name))
+                continue
+            new_names.setdefault(new.lower(), []).append(vid)
+            plan.append((vid, v.name, new, path))
+        dups = {k for k, vs in new_names.items() if len(vs) > 1}
+        final = []
+        for vid, old, new, path in plan:
+            if new.lower() in dups:
+                problems.append(t("{a}: 名前が重複", a=new))
+                continue
+            dst = os.path.join(os.path.dirname(path), new + ".cpr.json")
+            same = os.path.normcase(os.path.abspath(dst)) \
+                == os.path.normcase(os.path.abspath(path))
+            if old == new and same:
+                continue                         # already named so
+            if os.path.exists(dst) and not same:
+                problems.append(t("{a}: 同名ファイルが既にある", a=new + ".cpr.json"))
+                continue
+            final.append((vid, old, new, path, dst))
+        if not final:
+            msg = t("更新するファイル名はありません。")
+            if problems:
+                msg += "\n" + "\n".join(problems[:15])
+            self._warn(msg)
+            return
+        lines = [f"{o} → {n}" for _v, o, n, _p, _d in final]
+        msg = t("次の {n} 本のファイル名を更新します：", n=len(final)) + "\n" \
+            + "\n".join(lines[:25]) + ("\n…" if len(lines) > 25 else "")
+        if problems:
+            msg += "\n\n" + t("スキップ：") + "\n" + "\n".join(problems[:10])
+        lp = self._last_path or ""
+        tree_file = lp if (lp.lower().endswith(".corotree.json")
+                           and os.path.isfile(lp)) else ""
+        if tree_file:
+            msg += "\n\n" + t("（.corotree.json も上書き保存します）")
+        if QMessageBox.question(self, t("ファイル名更新"), msg) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        done, folders = 0, []
+        for vid, old, new, path, dst in final:
+            d = self._read_cpr(path)
+            if d is None:
+                problems.append(t("{a}: 読めません", a=os.path.basename(path)))
+                continue
+            v = tree.vessels[vid]
+            if v.detail_name:
+                d["detail_name"] = v.detail_name
+            if v.fix_name:
+                d["fix_name"] = v.fix_name
+            if not self._write_cpr(dst, d):
+                problems.append(t("{a}: 保存失敗", a=os.path.basename(dst)))
+                continue
+            if os.path.normcase(os.path.abspath(dst)) \
+                    != os.path.normcase(os.path.abspath(path)):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+            v.name = new
+            b["paths"][vid] = dst
+            done += 1
+            fd = os.path.dirname(dst)
+            if fd not in folders:
+                folders.append(fd)
+        if tree_file and done:
+            self._write_to(tree_file)
+        self._populate()
+        self.treeChanged.emit()
+        self._push_overlay()
+        self._hint.setText(t("{n} 本のファイル名を更新しました。", n=done))
+        if problems and done:
+            self._warn(t("{n} 本のファイル名を更新しました。", n=done) + "\n"
+                       + t("スキップ：") + "\n" + "\n".join(problems[:15]))
+        for fd in folders:                       # Folder Sync on the new names
+            self._resync_from_folder(folder=fd)
+
     def _warn(self, msg):
         QMessageBox.information(self, t("Coronary Tree"), msg)
 
@@ -2583,6 +3201,8 @@ class CoronaryTreeWindow(SnapDock):
                 ctrl_arr = np.asarray(ctrl, float)
             except Exception:                            # noqa: BLE001
                 continue
+            self._apply_cpr_meta(v, cd)                  # AutoTrace / names
+            self._bundle()["paths"].setdefault(vid, cand)
             # Only adopt when it ACTUALLY differs from the tree's current control
             # points (so an already-in-sync vessel isn't touched or falsely listed).
             cur = v.ctrl

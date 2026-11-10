@@ -65,11 +65,20 @@ class Vessel:
     parent: str | None = None           # parent vessel id (None for a root)
     junction: int | None = None         # sample index ON THE PARENT at the branch
     ctrl: np.ndarray | None = None      # clicked control points (for redraw)
+    #: the line was auto-traced (Auto on when drawn, or 一括AutoTrace / menu)
+    auto_traced: bool = False
+    #: Coronary Tree list columns DetailName / FixName (→ file name on rename)
+    detail_name: str = ""
+    fix_name: str = ""
+    #: hand-placed points the auto trace came from (undo of 一括AutoTrace)
+    ctrl_manual: np.ndarray | None = None
 
     def __post_init__(self):
         self.points = np.asarray(self.points, float).reshape(-1, 3)
         if self.ctrl is not None:
             self.ctrl = np.asarray(self.ctrl, float).reshape(-1, 3)
+        if self.ctrl_manual is not None:
+            self.ctrl_manual = np.asarray(self.ctrl_manual, float).reshape(-1, 3)
 
     @property
     def n(self) -> int:
@@ -364,6 +373,14 @@ class CoronaryTree:
                  "points": np.asarray(v.points, float).round(4).tolist()}
             if v.ctrl is not None:
                 d["ctrl"] = np.asarray(v.ctrl, float).round(4).tolist()
+            if v.auto_traced:
+                d["auto_traced"] = True
+            if v.detail_name:
+                d["detail_name"] = v.detail_name
+            if v.fix_name:
+                d["fix_name"] = v.fix_name
+            if v.ctrl_manual is not None:
+                d["ctrl_manual"] = np.asarray(v.ctrl_manual, float).round(4).tolist()
             vessels.append(d)
         out = {"format": "MDV-CoroTree", "version": 1,
                "type": "coronary-tree", "snap_tol_mm": float(snap_tol_mm),
@@ -388,7 +405,12 @@ class CoronaryTree:
                 junction=(None if d.get("junction") is None
                           else int(d["junction"])),
                 ctrl=(np.asarray(d["ctrl"], float) if d.get("ctrl") is not None
-                      else None))
+                      else None),
+                auto_traced=bool(d.get("auto_traced", False)),
+                detail_name=str(d.get("detail_name", "") or ""),
+                fix_name=str(d.get("fix_name", "") or ""),
+                ctrl_manual=(np.asarray(d["ctrl_manual"], float)
+                             if d.get("ctrl_manual") else None))
         return tree
 
 

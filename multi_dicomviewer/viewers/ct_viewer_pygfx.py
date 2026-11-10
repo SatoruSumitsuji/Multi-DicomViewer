@@ -1110,6 +1110,20 @@ class _Overlay(QWidget):
                 p.drawLine(seg)
                 p.setPen(QPen(QColor(0, 230, 255), 2.2))
                 p.drawLine(seg)
+            # SAVED CPR lines (light blue), under the orange/yellow ones — the
+            # next vessel is set while seeing the ones already done.
+            for lp in v._cpr_vr_saved_lines():
+                if len(lp) < 2:
+                    continue
+                xs, ys, _d = project(lp)
+                run = QPolygonF([QPointF(float(xs[k]), float(ys[k]))
+                                 for k in range(len(lp))])
+                p.setPen(QPen(QColor(0, 0, 0, 150), 4.5, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawPolyline(run)
+                p.setPen(QPen(QColor(115, 200, 255), 2.2, Qt.PenStyle.SolidLine,
+                              Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                p.drawPolyline(run)
             # The confirmed, not-yet-saved CPR line (orange) — check it on the
             # VR before Save.
             spts = v._cpr_vr_set_line_pts()
@@ -3444,6 +3458,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # VR始点: a click (no drag) picks the start — remember WHICH image
             # (DVR stop-frame / GPU MIP) the user clicked on, before it swaps.
             self._vr_press = (key, x, y, bool(self._vr_dvr_shown.get(key)))
+            if key == "A" and self._cpr_vr_active():
+                self._cpr_vr_follow_begin()      # slab MIP follows on release
             # Dragging resumes the fast GPU MIP; the CPU DVR stop-frame comes back
             # on release (see _on_up → _vr_schedule_dvr).
             if self._vr_dvr_shown.get(key):
@@ -3898,6 +3914,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     and abs(ev["x"] - vp[1]) + abs(ev["y"] - vp[2]) <= 4.0):
                 try:
                     self._cpr_vr_pick_start(k, vp[1], vp[2], dvr=vp[3])
+                except Exception:                        # noqa: BLE001
+                    import traceback
+                    traceback.print_exc()
+            # CPR VR: the right pane's slab MIP follows the VR (centre always,
+            # direction with 回転連動) — once, on release.
+            if k == "A" and self._cpr_vr_active():
+                try:
+                    self._cpr_vr_follow()
                 except Exception:                        # noqa: BLE001
                     import traceback
                     traceback.print_exc()
@@ -4815,12 +4839,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
 
     # ----------------------------------------------------- active pane
     def _set_active(self, which):
+        changed = getattr(self, "_active_pane", None) != which
         self._active_pane = which
         self._sync_slab_spin()
         self._update_active_frames()
         # VR review greys tools per the ACTIVE pane (Rotate off on the left SAX
-        # pane, Paging off on the VR pane), so re-evaluate on any active switch.
-        if hasattr(self, "vr_active") and self.vr_active():
+        # pane, Paging off on the VR pane), so re-evaluate on an active SWITCH
+        # (not on every click in the same pane — that delayed the click's dot).
+        if changed and hasattr(self, "vr_active") and self.vr_active():
             self._refresh_tool_availability()
         # SyncView: keep BOTH viewers' selected sub-pane (A=left / B=right) the
         # same, so a shared Rt90/Flip/… acts on the matching side in both.
@@ -4833,7 +4859,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             colr = "#ff2020" if key == self._active_pane else "transparent"
             if flash and key == self._active_pane:
                 colr = "#ffe000"
-            f.setStyleSheet("QFrame#ctpane { border: 3px solid %s; }" % colr)
+            ss = "QFrame#ctpane { border: 3px solid %s; }" % colr
+            if f.styleSheet() != ss:           # a re-style per click costs a repolish
+                f.setStyleSheet(ss)
 
     def _set_tool_by_key(self, name):
         """Tool hotkey: select the tool and, only if it really became the
@@ -8344,6 +8372,34 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if before is not None:
             self._undo_view(before, self._view_snapshot())
 
+    def _cpr_vr_view_world(self):
+        """CPR VR (pane A) view in world mm: (centre incl. pan, screen-right,
+        screen-up) from the shared VR basis (flips included)."""
+        try:
+            ctr, right, up, _back, *_ = self._vr_basis("A")
+        except Exception:                                # noqa: BLE001
+            return None
+        return ctr, right, up
+
+    def _cpr_vr_follow_apply(self) -> None:
+        """After _cpr_vr_follow set the crossing / frames: centre the map pane on
+        the crossing, re-centre the VR frame there (pan folded in, so the VR
+        image doesn't move) and redraw — same as a map-pane recentre."""
+        c = np.asarray(self._center, float)
+        self._pc = {"A": c.copy(), "B": c.copy()}
+        self._pan["B"] = np.zeros(2)
+        self._view_initial = False
+        self._refresh()
+        if self._vr_on.get("A"):
+            self._cpr_vr_center = c.copy()
+            self._vr_pan["A"] = [0.0, 0.0]
+            try:
+                self._vr_config_cam_gpu("A")
+                self.pane["A"].canvas.request_draw()
+            except Exception:                            # noqa: BLE001
+                pass
+            self._overlay["A"].update()
+
     def _angio_angle(self, key) -> str:
         """C-arm angle (LAO/RAO·CRA/CAU) of this pane's projection direction.
 
@@ -9750,6 +9806,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._commit_draft()
         else:
             self._redraw_geom(which)
+            # Paint the new point NOW (synchronous) — update() waits for the next
+            # paint pass, which a busy event loop (VR / slab refresh) could hold
+            # back, so the start-point dot looked like the click hadn't registered.
+            try:
+                self._overlay[which].repaint()
+            except Exception:                            # noqa: BLE001
+                pass
             self._lv_apex_clear_glow()         # a point was confirmed → normal
         return False
 
@@ -19402,11 +19465,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         control points + RMF seed + display state), or None (with a message) if
         there's nothing to save."""
         from PyQt6.QtWidgets import QMessageBox
-        if self._cpr is None:
+        # VR表示 kept open: the confirmed line is saved WITHOUT building its
+        # short-axis (CPRMixin._cpr_headless holds its state dict).
+        hl = getattr(self, "_cpr_headless", None) if self._cpr is None else None
+        if self._cpr is None and hl is None:
             QMessageBox.information(self.window(), t("Short-axis"),
                                    t("Open a short-axis (CPR) first."))
             return None
-        cpr = self._cpr_state_dict()
+        cpr = hl if hl is not None else self._cpr_state_dict()
         if cpr is None:
             QMessageBox.warning(self.window(), t("Short-axis"),
                                 t("This short-axis has no centreline to save."))
@@ -19420,6 +19486,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "src_dir": (self._lv_series_dir()
                         if hasattr(self, "_lv_series_dir") else ""),
             **cpr,
+            **self._cpr_save_meta(),
         }
 
     def _cpr_write(self, path, data) -> bool:
@@ -19534,6 +19601,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             traceback.print_exc()
             return False
         if ok:
+            self._cpr_adopt_file_meta(data)      # AutoTrace / names kept on re-save
             self._refresh(reset_cam=not keep_view)
             self._view_initial = False           # lock the view (no resize refit)
         return bool(ok)

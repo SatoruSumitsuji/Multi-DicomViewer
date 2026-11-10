@@ -216,6 +216,38 @@ def save_dicomfolder_options(options: dict) -> None:
         pass
 
 
+UI_STATE_PATH = SETTINGS_DIR / "ui_state.json"
+
+
+def load_ui_state(key: str, default=None):
+    """A small remembered UI choice (e.g. Coronary Tree collapsed columns, the
+    CPR VR 回転連動 toggle) from ui_state.json, or *default*."""
+    try:
+        data = json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and key in data:
+            return data[key]
+    except (OSError, ValueError):
+        pass
+    return default
+
+
+def save_ui_state(key: str, value) -> None:
+    """Best-effort persist of one UI choice (JSON-serialisable *value*)."""
+    try:
+        try:
+            data = json.loads(UI_STATE_PATH.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                data = {}
+        except (OSError, ValueError):
+            data = {}
+        data[key] = value
+        UI_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        UI_STATE_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
 def load_language(default: str = "en") -> str:
     """The persisted UI language code (e.g. "en"/"ja"), or *default*."""
     try:
