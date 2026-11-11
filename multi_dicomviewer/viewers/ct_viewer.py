@@ -3859,22 +3859,35 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # needed (the save-only path is still used internally by Save).
         self._cpr_save_btn = None             # (save-only button retired)
         self._cpr_overwrite_btn = None        # (Overwrite button retired)
-        self._cpr_register_btn = FitButton(t("Save"))
+        # Next = save the confirmed line at once under a serial provisional name
+        # (01.cpr.json, 02.cpr.json … — named later in the Coronary Tree) and
+        # arm Draw for the next vessel. No Save As dialog per line.
+        self._cpr_register_btn = FitButton(t("Next"))
         self._cpr_register_btn.setHelpToolTip(
-            t("この短軸CPRを .cpr.json に保存し、続けて Coronary Tree に登録"
-              "（元の3DCTごとに振り分け）。ファイル名が血管名になります。"))
-        self._cpr_register_btn.clicked.connect(self._cpr_register_to_tree)
+            t("確定したCPR線を連番の仮名（01.cpr.json, 02.cpr.json …）で保存して "
+              "Coronary Tree に登録し、続けて次の線を描けるようにします。"
+              "読み込んだ線・編集中の線は元のファイルに上書き。名前は最後に "
+              "Coronary Tree の DetailName / FixName →「ファイル名更新」で付けます。"))
+        self._cpr_register_btn.clicked.connect(
+            lambda _c=False: self._cpr_register_to_tree())
         self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
         row.addWidget(self._cpr_register_btn)
         # Save&Exit = Save (保存登録) followed by an automatic Exit, so the user
         # need not press Exit separately. A cancelled Save does NOT exit.
         self._cpr_save_exit_btn = FitButton(t("Save&Exit"))
         self._cpr_save_exit_btn.setHelpToolTip(
-            t("保存・登録してから冠動脈MPR/短軸モードを自動で終了します"
-              "（Save→Exitを一括）。保存をキャンセルした場合は終了しません。"))
+            t("確定したCPR線を Next と同じく連番の仮名で保存・登録してから、"
+              "冠動脈MPR/短軸モードを終了します（保存先フォルダの選択をキャンセルした場合は終了しません）。"))
         self._cpr_save_exit_btn.clicked.connect(self._cpr_save_and_exit)
         self._cpr_save_exit_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
         row.addWidget(self._cpr_save_exit_btn)
+        # 📁 = the folder Next saves to (asked at the first Next; click = change)
+        self._cpr_next_dir_btn = FitButton("📁 " + t("保存先"))
+        self._cpr_next_dir_btn.clicked.connect(
+            lambda _c=False: self._cpr_next_pick_dir())
+        self._cpr_next_dir_btn.setMaximumWidth(150)
+        row.addWidget(self._cpr_next_dir_btn)
+        self._cpr_next_dir_refresh()
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
@@ -3980,6 +3993,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_register_btn.setEnabled(self._cpr_can_save())
         if getattr(self, "_cpr_save_exit_btn", None) is not None:
             self._cpr_save_exit_btn.setEnabled(self._cpr_can_save())
+        if getattr(self, "_cpr_next_dir_btn", None) is not None:
+            self._cpr_next_dir_refresh()
         if getattr(self, "_cpr_overwrite_btn", None) is not None:
             self._cpr_overwrite_btn.setEnabled(cpr and not pend)
         if getattr(self, "_cpr_fit_btn", None) is not None:
@@ -15764,6 +15779,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._cpr_map_added_point(which, sx, sy)
         elif cpr_act is not None and chosen is cpr_act:
             was_create = not m.get("_cpr_src")   # create vs Resume (edit)
+            # Polyline → CPR joins the CPR-button workflow: coronary mode on,
+            # so Next / Save&Exit / Draw / VR表示 behave the same afterwards.
+            if not getattr(self, "_coronary_mode", False):
+                self._coronary_mode = True
+                self._coronary_mpr_pending = False
+                self._view_initial = False
             self._enter_cpr(which, mi)
             if was_create and self._cpr is not None:
                 self._cpr_fit()                  # auto-Fit on CPR creation
@@ -20250,7 +20271,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             **self._cpr_save_meta(cpr.get("ctrl")),
         }
 
-    def _cpr_write(self, path, data) -> bool:
+    def _cpr_write(self, path, data, quiet: bool = False) -> bool:
         """Write *data* to *path* (.cpr.json), remember it as the last CPR file
         (so Overwrite can reuse it), and confirm. Returns True on success."""
         from PyQt6.QtWidgets import QMessageBox
@@ -20270,8 +20291,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_last_path = path
         if hasattr(self, "_lv_remember_dir"):
             self._lv_remember_dir(path)
-        QMessageBox.information(self.window(), t("Short-axis"),
-                               t("Saved: {p}", p=os.path.basename(path)))
+        if not quiet:                        # Next: status-bar note instead
+            QMessageBox.information(self.window(), t("Short-axis"),
+                                   t("Saved: {p}", p=os.path.basename(path)))
         return True
 
     def _cpr_save(self):
@@ -20419,6 +20441,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     t("This short-axis has no centreline to save."))
             self._refresh(reset_cam=True)
             self._cpr_last_path = path        # Overwrite targets the loaded file
+            _lm = self._cpr_source_measure()
+            if _lm is not None:
+                _lm["_cpr_file"] = path        # Next overwrites the loaded file
             if hasattr(self, "_lv_remember_dir"):
                 self._lv_remember_dir(path)
         except Exception as exc:                        # noqa: BLE001

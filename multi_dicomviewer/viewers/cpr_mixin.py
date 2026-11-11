@@ -100,13 +100,19 @@ class CPRMixin:
         return ([list(map(float, np.asarray(P, float))) for P in ctrl],
                 pts.round(4).tolist())
 
-    def _cpr_register_to_tree(self) -> bool:
-        """Save (+ register) — then Hide All Result automatically, so the saved
-        line's edit points can't block a new CPR start point placed near them.
-        Save&Exit goes through here too."""
+    def _cpr_register_to_tree(self, save_as: bool = False,
+                              rearm: bool = True) -> bool:
+        """Next (+ register) — the confirmed line is saved at once under a serial
+        provisional name (01.cpr.json, 02.cpr.json … in the CT's Next folder; a
+        line loaded / resumed / saved before overwrites its own file), then Hide
+        All Result, and Draw is re-armed for the next vessel (*rearm*). Names are
+        given later in the Coronary Tree (DetailName / FixName → ファイル名更新).
+        *save_as* = the line's right-click 「名前を付けて保存…」 (Save As dialog).
+        Save&Exit goes through here too (rearm=False)."""
         m = None
+        ok = False
         try:
-            ok = self._cpr_register_to_tree_impl()
+            ok = self._cpr_register_to_tree_impl(save_as=save_as)
             if ok:
                 m = self._cpr_source_measure()
                 if m is not None:
@@ -126,11 +132,129 @@ class CPRMixin:
                     self._cpr_parked = None
                 if not getattr(self, "_coronary_mpr_pending", False):
                     self._coronary_draw()
+            elif (rearm and self._cpr is not None
+                    and getattr(self, "_coronary_mode", False)
+                    and not getattr(self, "_coronary_mpr_pending", False)):
+                # Next on a built short-axis: the line is done — leave its
+                # short-axis (view kept) and arm Draw for the next vessel.
+                self._coronary_draw()
+                self._cpr_parked = None          # saved: nothing pending now
+                self._coro_edit_vid = ""
+                self._cpr_suggested_name = ""
             self._cpr_hide_all_results()
             self._coronary_sync_ui()
             if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
                 self._cpr_vr_line_update()
         return ok
+
+    # ---- Next: serial provisional names (01.cpr.json, 02.cpr.json …) ---------
+    def _cpr_series_uid(self) -> str:
+        try:
+            return (self._lv_series_meta().get("series_uid", "") or ""
+                    if hasattr(self, "_lv_series_meta") else "")
+        except Exception:                        # noqa: BLE001
+            return ""
+
+    def _cpr_next_dir(self) -> str:
+        """The folder Next saves this CT's lines to ("" = not chosen yet)."""
+        import os
+        d = (getattr(self, "_cpr_next_dirs", None) or {}).get(
+            self._cpr_series_uid(), "")
+        return d if d and os.path.isdir(d) else ""
+
+    def _cpr_next_pick_dir(self) -> str:
+        """Ask once for the Next folder of this CT (also the folder button)."""
+        from PyQt6.QtWidgets import QFileDialog
+        start = (self._cpr_next_dir()
+                 or (self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""))
+        d = QFileDialog.getExistingDirectory(
+            self.window(), t("CPR線の保存先フォルダ（連番 01.cpr.json, 02.cpr.json …）"),
+            start)
+        if d:
+            if getattr(self, "_cpr_next_dirs", None) is None:
+                self._cpr_next_dirs = {}
+            self._cpr_next_dirs[self._cpr_series_uid()] = d
+            self._cpr_next_dir_refresh()
+        return d or ""
+
+    def _cpr_next_dir_refresh(self) -> None:
+        """The CPR row's 📁 button shows the Next folder (click = change)."""
+        import os
+        b = getattr(self, "_cpr_next_dir_btn", None)
+        if b is None:
+            return
+        d = self._cpr_next_dir()
+        b.setText("📁 " + (os.path.basename(d.rstrip("\\/")) or d
+                          if d else t("保存先")))
+        tip = t("Next の保存先フォルダ（クリックで変更）")
+        b.setToolTip(tip + ("\n" + d if d else ""))
+
+    @staticmethod
+    def _cpr_next_serial(folder: str) -> str:
+        """The next serial name in *folder*: one above the highest NN.cpr.json
+        there (so files from an earlier session are never overwritten)."""
+        import os
+        import re
+        hi = 0
+        try:
+            names = os.listdir(folder)
+        except OSError:
+            names = []
+        for f in names:
+            mm = re.fullmatch(r"(\d+)\.cpr\.json", f, flags=re.IGNORECASE)
+            if mm:
+                hi = max(hi, int(mm.group(1)))
+        n = hi + 1
+        while True:
+            nm = f"{n:02d}"
+            if not os.path.exists(os.path.join(folder, nm + ".cpr.json")):
+                return nm
+            n += 1
+
+    def _cpr_next_target(self):
+        """(path, is_new) Next writes the current line to: the line's own file
+        when it has one (loaded / resumed / saved before), else the next serial
+        name in the Next folder (asked for the first time). None = cancelled."""
+        import os
+        m = self._cpr_source_measure()
+        for key in ("_cpr_file", "_cpr_saved"):
+            p = m.get(key) if m is not None else None
+            if isinstance(p, str) and p and os.path.isdir(os.path.dirname(p)):
+                return p, False
+        last = getattr(self, "_cpr_last_path", "") or ""
+        if (getattr(self, "_coro_edit_vid", "") and last
+                and os.path.isdir(os.path.dirname(last))):
+            return last, False                   # resumed tree vessel → its file
+        d = self._cpr_next_dir() or self._cpr_next_pick_dir()
+        if not d:
+            return None
+        return os.path.join(d, self._cpr_next_serial(d) + ".cpr.json"), True
+
+    def _cpr_next_save(self):
+        """Write the current line without a dialog (see _cpr_next_target).
+        Returns the path, or None (cancelled / failed)."""
+        import os
+        data = self._cpr_build_data()
+        if data is None:
+            return None
+        tgt = self._cpr_next_target()
+        if tgt is None:
+            return None
+        path, _new = tgt
+        if not self._cpr_write(path, data, quiet=True):
+            return None
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        if evid and getattr(self, "_coro_tree_sync_cb", None) is not None:
+            try:
+                self._coro_tree_sync_cb(evid, self._cpr_last_path)
+            except Exception:                    # noqa: BLE001
+                pass
+        try:                                     # no dialog: status-bar note
+            sb = self.window().statusBar()
+            sb.showMessage(t("保存：{p}", p=os.path.basename(path)), 6000)
+        except Exception:                        # noqa: BLE001
+            pass
+        return self._cpr_last_path
 
     def _cpr_hide_all_results(self) -> None:
         """Hide every result shown now (= Hide All Result until nothing shows);
@@ -148,7 +272,7 @@ class CPRMixin:
         if hasattr(self, "_update_hideall_btn"):
             self._update_hideall_btn()
 
-    def _cpr_register_to_tree_impl(self) -> bool:
+    def _cpr_register_to_tree_impl(self, save_as: bool = False) -> bool:
         """「保存登録」button: SAVE the current short-axis to a .cpr.json first
         (the user names the file), THEN register that CPR into the Coronary Tree —
         routed to its source CT by series UID, with the file name as the vessel
@@ -162,9 +286,15 @@ class CPRMixin:
         if self._cpr is None and self._cpr_parked_target() is not None:
             if not self._cpr_ensure_built():
                 return False
-        path = self._cpr_save()                  # Save As prompt → path, or None
+        evid = getattr(self, "_coro_edit_vid", "") or ""
+        # Next: no dialog (serial / own file); 名前を付けて保存…: Save As prompt.
+        path = self._cpr_save() if save_as else self._cpr_next_save()
         if not path:                             # cancelled / nothing to save
             return False
+        if evid:
+            # A resumed Coronary-Tree vessel: the save already pushed the edit
+            # into that vessel (in place) — registering again would duplicate it.
+            return True
         data = self._cpr_build_data()            # includes series / src_dir / ctrl
         if data is None:
             return False
@@ -191,7 +321,7 @@ class CPRMixin:
         save completed (not cancelled) — leave coronary MPR / short-axis mode
         automatically, so Exit need not be pressed separately. Shared by both
         viewers; _coronary_exit is each viewer's own."""
-        if self._cpr_register_to_tree():
+        if self._cpr_register_to_tree(rearm=False):
             self._coronary_exit()
 
     # ---- a set CPR line stays saveable after its short-axis is left ----------
@@ -493,7 +623,7 @@ class CPRMixin:
                     or self._cpr is not None)
         if self._mode == "3D" and coronary and p3 and len(p3) >= 2:
             acts["auto"] = menu.addAction(t("Auto-Trace"))
-            acts["save"] = menu.addAction(t("Save"))
+            acts["save"] = menu.addAction(t("名前を付けて保存…"))
         return acts
 
     def _cpr_line_menu_run(self, chosen, acts, which, mi, sx, sy) -> bool:
@@ -512,7 +642,7 @@ class CPRMixin:
             return True
         if chosen is acts.get("save"):
             if self._cpr_ensure_built((which, mi)):
-                self._cpr_register_to_tree()
+                self._cpr_register_to_tree(save_as=True)
             return True
         return False
 

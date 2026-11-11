@@ -728,6 +728,17 @@ class CoronaryTreeWindow(SnapDock):
         uid = ser.get("series_uid", "") or ""
         src_dir = data.get("src_dir", "") or ""
         self._use_uid(uid, ct_dir=src_dir, series=ser)
+        # Next re-saving a line that is already in the tree (same .cpr.json) →
+        # update that vessel in place instead of adding a duplicate.
+        if path:
+            key = os.path.normcase(os.path.abspath(path))
+            paths = self._bundle()["paths"]
+            same = next((vid for vid, pp in paths.items()
+                         if pp and os.path.normcase(os.path.abspath(pp)) == key
+                         and vid in self._tree.vessels), None)
+            if same is not None:
+                self._apply_cpr_meta(self._tree.vessels[same], data)
+                return self.update_vessel_cpr(same, np.asarray(ctrl, float), path)
         nm = (str(name).strip() if name else "") or "vessel"
         existing = {v.name for v in self._tree.vessels.values()}
         if nm in existing:                       # uniquify: "LAD" → "LAD (2)"
