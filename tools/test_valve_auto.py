@@ -21,7 +21,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import numpy as np
 from scipy import ndimage
 
-from multi_dicomviewer.core.valve_auto import _frame, _unit, detect_aov, detect_mv
+from multi_dicomviewer.core.valve_auto import (_frame, _unit, detect_aov, detect_apex,
+                                               detect_mv, detect_mv_refined)
 
 fails = []
 
@@ -220,6 +221,40 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
         chk(f"{tag}: annulus level ≤ 3 mm", ax_err <= 3.0, f"{ax_err:.1f} mm")
         chk(f"{tag}: radius within 2 mm of {R_ann}", abs(res.radius - R_ann) <= 2.0,
             f"{res.radius:.1f} mm, {dt:.1f}s")
+
+# ---- apex side + MV+Apex (the UI path: detect_mv_refined from two clicks)
+# (The phantom's apex lies beyond the volume, so only the SIDE of the MV plane
+# is judged: the LV side is −n_mv.) In systole the LA reaches as far as the
+# small LV, so the farthest-reach rule used to put the "apex" in the LA.
+for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
+    a = detect_apex(v, dims, C_mv, n_mv)                     # no hint: thick wall
+    chk(f"apex {label}, no hint: on the LV side (thick wall)",
+        a.ok and float(np.dot(a.apex - C_mv, n_mv)) < -20.0,
+        f"{float(np.dot(a.apex - C_mv, n_mv)):+.1f} mm")
+    a = detect_apex(v, dims, C_mv, -n_mv, toward=C_mv - 60.0 * n_mv)
+    chk(f"apex {label}, hint on the LV side (normal flipped): LV side",
+        a.ok and float(np.dot(a.apex - C_mv, n_mv)) < -20.0,
+        f"{float(np.dot(a.apex - C_mv, n_mv)):+.1f} mm")
+    for off_deg, seed_off in ((0, np.array([2.0, -2.0, 1.0])),
+                              (25, np.array([-4.0, 3.0, -3.0]))):
+        apex_rough = (C_mv - 70.0 * np.cos(np.deg2rad(off_deg)) * n_mv
+                      + 70.0 * np.sin(np.deg2rad(off_deg)) * w_mv)
+        res, ap = detect_mv_refined(v, dims, C_mv + seed_off, apex_rough)
+        tag = f"MV+Apex {label}, apex click {off_deg}° off"
+        e_c = float(np.linalg.norm(res.center - C_mv))
+        chk(f"{tag}: MV found, plane ≤ 6°, centre ≤ 3 mm",
+            res.ok and ang(res.normal, n_mv) <= 6.0 and e_c <= 3.0,
+            f"{ang(res.normal, n_mv):.1f}°, {e_c:.1f} mm, r {res.radius:.1f}")
+        chk(f"{tag}: apex on the LV side, not the LA",
+            ap is not None and float(np.dot(ap.apex - C_mv, n_mv)) < -20.0,
+            "-" if ap is None else f"{float(np.dot(ap.apex - C_mv, n_mv)):+.1f} mm")
+    # A click far from the valve (deep in the LA) must not return a wrong ring.
+    far = C_mv + 32.0 * n_mv
+    res, ap = detect_mv_refined(v, dims, far, C_mv - 70.0 * n_mv)
+    chk(f"MV+Apex {label}, MV click 32 mm into the LA: no implausible ring",
+        (not res.ok) or (8.0 <= res.radius <= 28.0
+                         and float(np.linalg.norm(res.center - far)) <= 15.0),
+        f"ok={res.ok} r={res.radius:.1f}")
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)

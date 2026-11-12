@@ -312,7 +312,8 @@ class ValveAutoMixin:
         def work():
             res, apex = va.detect_mv_refined(vol, dims, mv_p, apex_p)
             if res.ok and apex is None:          # refinement stopped early
-                a = va.detect_apex(vol, dims, res.center, res.normal)
+                a = va.detect_apex(vol, dims, res.center, res.normal,
+                                   toward=apex_p)
                 apex = a if a.ok else None
             return res, apex
 
@@ -622,9 +623,12 @@ class ValveAutoMixin:
         from multi_dicomviewer.core import valve_auto as va
         dims = tuple(float(d) for d in self._dims)
         c, n = np.asarray(mv[0], float), np.asarray(mv[1], float)
+        # The current apex (if any) tells the LV side of the MV plane.
+        hint = getattr(self, "_lv_apex", None)
         with self._lv_auto_running(getattr(self, "_lv_ax_auto_btn", None)):
             res = self._run_busy(t("Auto"), t("心尖部を検出中…"),
-                                 lambda: va.detect_apex(vol, dims, c, n))
+                                 lambda: va.detect_apex(vol, dims, c, n,
+                                                        toward=hint))
         if res is None or not res.ok:
             self._lvv_prompt(t(
                 "心尖部を自動で検出できませんでした。センターラインの交点を心尖部に"

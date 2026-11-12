@@ -608,23 +608,34 @@ def _apex_side(vol, dims, c, n, thr, step=0.5, count=360):
     return out
 
 
-def detect_apex(vol, dims, mv_center, mv_normal) -> ApexResult:
+def detect_apex(vol, dims, mv_center, mv_normal, toward=None) -> ApexResult:
     """Epicardial LV apex from the MV plane: the farthest epicardial point from
-    the MV centre within _APEX_CONE_DEG of the MV normal. The normal's sign is
-    not trusted (a manual Set may point either way): both sides are tried and
-    the longer one (the LV, ~80–100 mm vs the LA, ~50 mm) is used."""
+    the MV centre within _APEX_CONE_DEG of the MV normal.
+
+    *toward* (a point on the LV side, e.g. the user's rough apex click) fixes
+    the side: only the half of the normal pointing towards it is searched.
+    Without it the normal's sign is not trusted (a manual Set may point either
+    way): both sides are tried and the one with the THICKER wall (LV myocardium
+    vs the thin LA wall) is used. (The longer reach is not used: it picks the LA
+    in systole, or when LA rays leave through a pulmonary vein into the lung.)"""
     vol = np.asarray(vol)
     c = np.asarray(mv_center, float)
     n = _unit(mv_normal)
     thr = blood_threshold(vol, dims, c)
     c = _snap_into_blood(vol, dims, c, thr)
+    sides = (-1.0, 1.0)
+    if toward is not None:
+        sides = (1.0 if float(np.dot(np.asarray(toward, float) - c, n)) >= 0 else -1.0,)
     best = None
-    for s in (-1.0, 1.0):
+    for s in sides:
         rays = _apex_side(vol, dims, c, s * n, thr)
         if len(rays) < 3:
             continue
         d = np.array([r[0] for r in rays])
-        score = float(np.percentile(d, 90))
+        # The LV side = the THICK wall (myocardium, ~8–12 mm) — not the longer
+        # reach: LA rays can run out through a pulmonary vein into the lung.
+        wall = np.array([r[3] - r[2] for r in rays])
+        score = (float(np.median(wall)), float(np.percentile(d, 90)))
         if best is None or score > best[0]:
             best = (score, rays, d)
     if best is None:
@@ -654,53 +665,103 @@ def detect_apex(vol, dims, mv_center, mv_normal) -> ApexResult:
 #: the click; the result with the most hinge points wins.
 _MV_MIN_PTS = 12
 _MV_RETRY_MM = 6.0
+#: Plausibility against the user's two clicks (MV centre ~ on the annulus, apex
+#: click on the LV side): the plane normal within _MV_MAX_TILT_DEG of the click
+#: axis, the centre within _MV_MAX_SHIFT_MM of the MV click, the annulus radius
+#: in _MV_R_RANGE (an adult annulus is ~20–45 mm across). A fit outside these
+#: locked onto another structure (LA floor, a vein ostium, the LVOT …).
+_MV_MAX_TILT_DEG = 45.0
+_MV_MAX_SHIFT_MM = 15.0
+_MV_R_RANGE = (8.0, 28.0)
+#: The detected apex must lie within this angle of the click axis (MV → apex).
+_APEX_MAX_DEV_DEG = 50.0
 
 
-def _mv_refine_once(vol, dims, mv_mm, apex_mm, rounds):
+def _angle_deg(a, b):
+    return float(np.degrees(np.arccos(np.clip(np.dot(_unit(a), _unit(b)), -1, 1))))
+
+
+def _mv_plausible(res, mv_mm, axis):
+    """res agrees with the clicks (normal sign ignored)."""
+    if res is None or not res.ok:
+        return False
+    tilt = _angle_deg(res.normal, axis)
+    tilt = min(tilt, 180.0 - tilt)
+    return (tilt <= _MV_MAX_TILT_DEG
+            and float(np.linalg.norm(res.center - mv_mm)) <= _MV_MAX_SHIFT_MM
+            and _MV_R_RANGE[0] <= float(res.radius) <= _MV_R_RANGE[1])
+
+
+def _mv_refine_once(vol, dims, mv_mm, apex_mm, rounds, ref_mv=None):
+    """detect_mv, then re-seed it with its own centre and the apex found on
+    its plane (on the side of the user's apex click, near the click axis),
+    while each new fit stays plausible."""
+    ref_mv = np.asarray(mv_mm if ref_mv is None else ref_mv, float)
+    apex_mm = np.asarray(apex_mm, float)
+    axis = _unit(ref_mv - apex_mm)                       # apex → base
     res = detect_mv(vol, dims, mv_mm, apex_mm)
     apex = None
     for _ in range(int(rounds)):
-        if not res.ok:
+        if not _mv_plausible(res, ref_mv, axis):
             break
-        a = detect_apex(vol, dims, res.center, res.normal)
+        a = detect_apex(vol, dims, res.center, res.normal, toward=apex_mm)
         if not a.ok or float(np.linalg.norm(a.apex - res.center)) < 20.0:
             break
+        if _angle_deg(a.apex - res.center, apex_mm - ref_mv) > _APEX_MAX_DEV_DEG:
+            break                                        # not the clicked apex
         apex = a
         nxt = detect_mv(vol, dims, res.center, a.apex)
-        if not nxt.ok:
-            break
+        if not _mv_plausible(nxt, ref_mv, axis):
+            break                                        # keep the last good fit
         moved = float(np.linalg.norm(nxt.center - res.center))
         res = nxt
         if moved < 0.3:
             break
+    if apex is not None and _mv_plausible(res, ref_mv, axis):
+        # The apex on the FINAL plane (the loop may have moved it).
+        a = detect_apex(vol, dims, res.center, res.normal, toward=apex_mm)
+        if (a.ok and float(np.linalg.norm(a.apex - res.center)) >= 20.0
+                and _angle_deg(a.apex - res.center, apex_mm - ref_mv)
+                <= _APEX_MAX_DEV_DEG):
+            apex = a
     return res, apex
 
 
-def _mv_quality(res):
+def _mv_quality(res, mv_mm=None, axis=None):
     if res is None or not res.ok:
+        return (-1, 0.0)
+    if mv_mm is not None and not _mv_plausible(res, mv_mm, axis):
         return (-1, 0.0)
     return (len(res.points), float(np.mean(res.weights)) if len(res.weights) else 0.0)
 
 
 def detect_mv_refined(vol, dims, mv_mm, apex_mm, rounds=3):
     """detect_mv, then re-run it seeded by its own result: the centre from the
-    fitted plane and the rough apex replaced by detect_apex on that plane, until
-    the centre settles (< 0.3 mm). Removes the dependence on where the user put
-    the rough apex (only its side matters). A suspect fit (< _MV_MIN_PTS hinge
-    points) is retried from 6 seeds _MV_RETRY_MM around the click, across the
-    rough axis; the fit with the most hinge points is kept. Returns
-    (ValveResult, ApexResult or None — the apex on the final plane)."""
+    fitted plane and the rough apex replaced by detect_apex on that plane (on
+    the side of the apex click), until the centre settles (< 0.3 mm). A suspect
+    fit (< _MV_MIN_PTS hinge points, or implausible against the clicks — see
+    _mv_plausible) is retried from 6 seeds _MV_RETRY_MM around the click, across
+    the rough axis; the plausible fit with the most hinge points is kept. When
+    none is plausible the result has ok=False (no wrong ring is shown).
+    Returns (ValveResult, ApexResult or None — the apex on the final plane)."""
     vol = np.asarray(vol)
     mv = np.asarray(mv_mm, float)
+    apex_mm = np.asarray(apex_mm, float)
+    axis = _unit(mv - apex_mm)
     best = _mv_refine_once(vol, dims, mv, apex_mm, rounds)
-    if _mv_quality(best[0])[0] >= _MV_MIN_PTS:
+    if _mv_quality(best[0], mv, axis)[0] >= _MV_MIN_PTS:
         return best
-    u, w = _frame(_unit(mv - np.asarray(apex_mm, float)))
+    u, w = _frame(axis)
     for ang in np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False):
         seed = mv + _MV_RETRY_MM * (np.cos(ang) * u + np.sin(ang) * w)
-        cand = _mv_refine_once(vol, dims, seed, apex_mm, rounds)
-        if _mv_quality(cand[0]) > _mv_quality(best[0]):
+        cand = _mv_refine_once(vol, dims, seed, apex_mm, rounds, ref_mv=mv)
+        if _mv_quality(cand[0], mv, axis) > _mv_quality(best[0], mv, axis):
             best = cand
-        if _mv_quality(best[0])[0] >= 16:
+        if _mv_quality(best[0], mv, axis)[0] >= 16:
             break                                  # every hinge found: done
+    res, apex = best
+    if not _mv_plausible(res, mv, axis):
+        res.ok = False
+        res.message = "mitral annulus not found near the clicks"
+        return res, None
     return best
