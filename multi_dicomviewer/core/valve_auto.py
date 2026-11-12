@@ -27,7 +27,9 @@ point. (The pool's narrowest point is NOT used: in systole the LV base is no
 wider than the annulus and papillary muscles / trabeculae narrow the LV pool
 more — that picked the annulus too far apex-ward on real CT.) Thin leaflets
 are filled by a 2-D closing first. A robust weighted plane fit gives the new axis
-(its normal) and centre, and the rotation is repeated, so the rough apex only
+(its normal); the centre is the ring polygon's AREA centroid on that plane (the
+points' mean is pulled towards where they crowd), and the rotation is
+repeated, so the rough apex only
 seeds the first pass. Two phases: run each one (the first result can seed the
 other: pass it as mv_mm / apex_mm = centre ∓ normal).
 
@@ -423,7 +425,9 @@ def _hinges(vol, dims, c, n, thr, H, n_half=16, rmax=40.0, step=0.5,
         # annulus, and papillary muscles / trabeculae narrow the LV pool more.)
         best, k_best = -np.inf, None
         for k in range(win, len(hs) - win):
-            if R[k] < 6.0 or opn[k]:
+            # < _HINGE_MIN_R_MM: a ray cut short (closed leaflets' coaptation
+            # zone), not the annulus (adult radius ≳ 11 mm).
+            if R[k] < _HINGE_MIN_R_MM or opn[k]:
                 continue
             lv_t = float(np.median(Tw[k - win:k]))
             la_t = float(np.median(Tw[k + 1:k + 1 + win]))
@@ -448,6 +452,7 @@ _FAT_HU = -20.0
 _WALL_LV_MM = 5.0        # LV myocardium below the annulus is at least this thick
 _WALL_LA_MM = 4.0        # the LA wall above it is at most this thick
 _WALL_WIN_MM = 5.0       # each side's median window along the axis
+_HINGE_MIN_R_MM = 8.0    # a hinge closer to the axis than this is not used
 
 
 def _wall_thickness(inside, hu, R, step, fat_run_mm=1.5, blood_run_mm=2.0):
@@ -477,6 +482,27 @@ def _wall_thickness(inside, hu, R, step, fat_run_mm=1.5, blood_run_mm=2.0):
                 stop = min(stop, int(np.argmax(cb)))
         out[i] = stop * step
     return out
+
+
+def _ring_centroid(P, c, n):
+    """In-plane AREA centroid of the ring P (sorted by angle around c) on the
+    plane (c, n), at the plane's height. The hinge points are taken at equal
+    angles around the CURRENT centre, so they crowd on the side nearer to it
+    (and on the long sides of an oval annulus): their mean is pulled that way;
+    the polygon's area centroid is not."""
+    u, w = _frame(n)
+    Q = P - c
+    x, y = Q @ u, Q @ w
+    o = np.argsort(np.arctan2(y, x))
+    x, y = x[o], y[o]
+    x1, y1 = np.roll(x, -1), np.roll(y, -1)
+    cr = x * y1 - x1 * y
+    a2 = float(cr.sum())
+    if len(P) < 3 or abs(a2) < 1e-6:
+        return c
+    cx = float(((x + x1) * cr).sum()) / (3.0 * a2)
+    cy = float(((y + y1) * cr).sum()) / (3.0 * a2)
+    return c + cx * u + cy * w
 
 
 def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
@@ -515,6 +541,7 @@ def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
         cc, nn, _res = _plane_fit(P[keep], W[keep])
         if np.dot(nn, n) < 0:
             nn = -nn
+        cc = _ring_centroid(P[keep], cc, nn)
         moved = float(np.linalg.norm(cc - c))
         turned = float(np.degrees(np.arccos(np.clip(np.dot(nn, n), -1, 1))))
         c, n = cc, nn

@@ -172,6 +172,23 @@ def finish(v):
 
 vol_dia = finish(build(24.0, False))
 vol_sys = finish(build(15.5, True))
+
+
+def coapt_curtain(v):
+    """Real systolic MV: the two closed leaflets meet in a COAPTATION zone —
+    apposed leaflets, a dark curtain ~3 mm thick and ~8 mm tall below the
+    annulus — off the orifice centre (the posterior leaflet is the shorter).
+    Seen from a centre click it cuts the pool at ~5 mm on one side."""
+    h, r, phi = mv_coords()
+    a = r * np.cos(phi)                                   # along u_mv
+    hs = 2.0 * np.cos(2.0 * phi)
+    cur = (np.abs(a - 5.0) < 1.5) & (r < Ra) & (h > hs - 9.0) & (h < hs - 0.5)
+    v = v.copy()
+    v[cur & (v > 300)] = 110.0
+    return v
+
+
+vol_coapt = finish(coapt_curtain(build(15.5, True)))
 del X, Y, Z, Pw
 
 
@@ -226,7 +243,8 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
 # (The phantom's apex lies beyond the volume, so only the SIDE of the MV plane
 # is judged: the LV side is −n_mv.) In systole the LA reaches as far as the
 # small LV, so the farthest-reach rule used to put the "apex" in the LA.
-for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
+for label, v in (("diastole", vol_dia), ("systole", vol_sys),
+                 ("systole+coaptation", vol_coapt)):
     a = detect_apex(v, dims, C_mv, n_mv)                     # no hint: thick wall
     chk(f"apex {label}, no hint: on the LV side (thick wall)",
         a.ok and float(np.dot(a.apex - C_mv, n_mv)) < -20.0,
@@ -245,6 +263,8 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
         chk(f"{tag}: MV found, plane ≤ 6°, centre ≤ 3 mm",
             res.ok and ang(res.normal, n_mv) <= 6.0 and e_c <= 3.0,
             f"{ang(res.normal, n_mv):.1f}°, {e_c:.1f} mm, r {res.radius:.1f}")
+        chk(f"{tag}: radius within 2.5 mm of {Ra}", abs(res.radius - Ra) <= 2.5,
+            f"{res.radius:.1f} mm, {len(res.points)} pts")
         chk(f"{tag}: apex on the LV side, not the LA",
             ap is not None and float(np.dot(ap.apex - C_mv, n_mv)) < -20.0,
             "-" if ap is None else f"{float(np.dot(ap.apex - C_mv, n_mv)):+.1f} mm")
