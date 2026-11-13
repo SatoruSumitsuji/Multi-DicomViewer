@@ -7941,6 +7941,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             except Exception:                            # noqa: BLE001
                 pass
         if (which == "mitral" and self._lv is not None
+                and not getattr(self, "_lv_mv_adjusting", False)):
+            self._lv.pop("mv_epi_shift", None)   # MV set anew: no Epi shift yet
+        if (which == "mitral" and self._lv is not None
                 and self._lv.get("phase") == "contour"):
             # The MV plane moved → the base target changed, so re-arm every
             # plane's one-time base→MV extension.
@@ -17085,6 +17088,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 store = (lv["model"].endo_planes if _p == "endo"
                          else lv["model"].epi_planes)
                 if store:
+                    self._lv_epi_mv_adjust(_p, apical=True)
                     self._lv_snap_base_to_mv(_p)
             m = lv["model"]
             endo_ok = m.endo_axis is not None and len(m.endo_contours) >= 3
@@ -17520,6 +17524,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # on, so the base stays on the mitral annulus as you trace plane by plane.
         pas = self._lv.get("pass")
         if pas in ("endo", "epi"):
+            self._lv_epi_mv_adjust(pas)    # Epi past the MV plane → move it
             self._lv_snap_base_to_mv(pas)
         pane = self._lv["pane"]
         # drop any leftover un-captured scratch polyline (plain, untagged)
@@ -17884,6 +17889,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # second pass needed. Skipped in SAX (base snap belongs to the trace).
             pas = lv.get("pass")
             if pas in ("endo", "epi") and lv.get("sax") is None:
+                self._lv_epi_mv_adjust(pas)    # Epi past the MV plane → move it
                 self._lv_snap_base_to_mv(pas)
             self._lv_update_text()
 
@@ -18213,6 +18219,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 if e_s is None:
                     return None
                 s = float(np.sign(float((P_end - apex) @ e_s))) or 1.0
+                # Epi: the myocardium's basal end already ON the MV plane (the
+                # plane was moved to it — see _lv_epi_mv_adjust) → no extension.
+                if (pas == "epi" and abs(float((P_end - c) @ n))
+                        <= self._LV_EXT_TOL_MM):
+                    return None
                 b = (mv_terminal_point(ax, phi, c, n, P_end) if pas == "epi"
                      else c + 5.0 * s * e_s)
                 return None if np.linalg.norm(b - P_end) < eps_mm else b
@@ -18228,6 +18239,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if app is not None:
                 pieces.append(app.reshape(1, 3))
             m.set_long_axis_contour(phi, np.vstack(pieces), which=pas)
+            # remember the automatic ends (not the user's drawing)
+            ext = self._lv.setdefault("base_ext", set())
+            k4 = round(float(phi), 4)
+            if pre is not None:
+                ext.add((pas, k4, "pre"))
+            if app is not None:
+                ext.add((pas, k4, "app"))
             moved = True
         if moved:
             self._lv_rebuild_measures()             # redraw the extended trace
@@ -18366,6 +18384,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # mitral-annulus base) so the border reaches the base EXACTLY even when a
         # point was placed a touch short — no prism gap, base = MV plane.
         self._lv_snap_base_to_mv(pas)
+        # The COMMON MV plane (all analyses) goes to the drawn Epi's most basal
+        # end — both ways now that every plane is traced (angle kept, along the
+        # apex ↔ MV-centre line).
+        self._lv_epi_mv_adjust(pas, apical=True)
         planes = m.endo_planes if pas == "endo" else m.epi_planes
         if len(planes) < 3:
             QMessageBox.information(
@@ -18442,12 +18464,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # result block clean (just Endo-/Epi-LV Volume).
         self._lv_result_lines = [label.format(v=vol_ml)]
         if pas == "epi":
-            # Epi is cut by the MV plane moved atrially past the drawn Epi base
-            # (LVModel.epi_mv_plane) — say by how much.
-            _sh = m.epi_mv_plane(mv)[1]
+            # The common MV plane was moved atrially past the drawn Epi base
+            # (_lv_epi_mv_adjust → LVModel.epi_mv_plane) — say by how much.
+            _sh = float(self._lv.get("mv_epi_shift") or 0.0)
             if _sh > 0.05:
                 self._lv_result_lines.append(
                     t("MV面を心房側へ {d:.1f} mm 移動", d=_sh))
+            elif _sh < -0.05:
+                self._lv_result_lines.append(
+                    t("MV面を心尖側へ {d:.1f} mm 移動", d=-_sh))
         self._lv["vol_done"] = True          # CalcVol button → blue (valid result)
         # Remember the number so Save can persist it and Load can redisplay.
         if pas == "endo":

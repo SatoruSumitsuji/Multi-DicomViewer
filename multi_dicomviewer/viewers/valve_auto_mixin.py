@@ -501,6 +501,165 @@ class ValveAutoMixin:
         self._undo_record(lambda b=before: self._lv_vset_restore(b),
                           lambda a=after: self._lv_vset_restore(a))
 
+    # ------------------------------------- MV level from the Epi basal end
+    # The MV annulus level is set by the LV MYOCARDIUM: the common MV plane
+    # (every analysis — Epi, Endo, Blood, …) sits at the most basal end of the
+    # drawn Epi border. Angle kept, the centre slides on the apex ↔ MV-centre
+    # line (the first MV centre's height is not trusted). Toward the atrium at
+    # every Epi commit / plane step; toward the apex too once all planes are
+    # traced (Calc Vol, short-axis build). The automatic extensions onto the
+    # MV plane are not the user's drawing: left out of the judgement, removed
+    # before the plane moves and re-made on the new plane (none on the plane
+    # whose myocardium end now touches it).
+    _LV_MV_ASK_MM = 8.0          # larger moves ask first (a stray point?)
+    _LV_EXT_TOL_MM = 0.3         # an extension lies ON the MV plane
+
+    def _lv_base_ext_ends(self, pas, mv) -> dict:
+        """{round(phi, 4): (first, last)} — which border ends of *pas* are the
+        automatic MV extensions: recorded by _lv_snap_base_to_mv (and still
+        on the current MV plane), or recognised by shape (on the plane, at the
+        terminal the extension would put there — e.g. after a Load)."""
+        from multi_dicomviewer.core.lv_measure import mv_terminal_point
+        lv = self._lv
+        m = lv["model"]
+        ax = m._axis_for(pas)
+        store = m.endo_planes if pas == "endo" else m.epi_planes
+        if ax is None or not store or mv is None:
+            return {}
+        c = np.asarray(mv[0], float)
+        n = np.asarray(mv[1], float)
+        n = n / (float(np.linalg.norm(n)) or 1.0)
+        flags = lv.get("base_ext") or set()
+        apex = np.asarray(ax.apex, float)
+        out = {}
+        for phi, arr in store.items():
+            P = np.asarray(arr, float).reshape(-1, 3)
+            k = round(float(phi), 4)
+            if len(P) < 3:
+                continue
+            e_s = np.asarray(ax.meridian_dir(phi), float)
+            e_s = e_s / (float(np.linalg.norm(e_s)) or 1.0)
+
+            def _is_ext(i, j, tag):
+                E = P[i]
+                if abs(float((E - c) @ n)) > self._LV_EXT_TOL_MM:
+                    return False
+                if (pas, k, tag) in flags:
+                    return True
+                if pas == "epi":
+                    b = mv_terminal_point(ax, phi, c, n, P[j])
+                else:
+                    sgn = float(np.sign(float((P[j] - apex) @ e_s))) or 1.0
+                    b = c + 5.0 * sgn * e_s
+                return float(np.linalg.norm(b - E)) < 0.5
+
+            f, last = _is_ext(0, 1, "pre"), _is_ext(-1, -2, "app")
+            if f or last:
+                out[k] = (f, last)
+        return out
+
+    def _lv_base_ext_strip(self, mv) -> None:
+        """Remove the automatic MV extensions (both passes) before the MV plane
+        moves; _lv_on_valve_changed re-makes them on the new plane."""
+        lv = self._lv
+        m = lv["model"]
+        for pas in ("endo", "epi"):
+            ends = self._lv_base_ext_ends(pas, mv)
+            store = m.endo_planes if pas == "endo" else m.epi_planes
+            for phi, arr in list(store.items()):
+                f, last = ends.get(round(float(phi), 4), (False, False))
+                if not (f or last):
+                    continue
+                P = np.asarray(arr, float).reshape(-1, 3)
+                m.set_long_axis_contour(
+                    phi, P[(1 if f else 0):(len(P) - 1 if last else len(P))],
+                    which=pas)
+        lv["base_ext"] = set()
+
+    def _lv_undo_muted(self):
+        """Context: _undo_record is a no-op inside (one composite step)."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def _cm():
+            had = "_undo_record" in self.__dict__
+            old = self.__dict__.get("_undo_record")
+            self._undo_record = lambda *a, **k: None
+            try:
+                yield
+            finally:
+                if had:
+                    self._undo_record = old
+                else:
+                    del self._undo_record
+        return _cm()
+
+    def _lv_mvadj_snap(self) -> dict:
+        return {"v": self._lv_vset_snap(), "g": self._lv_geom_snap(),
+                "x": set(self._lv.get("base_ext") or set()),
+                "s": self._lv.get("mv_epi_shift")}
+
+    def _lv_mvadj_restore(self, snap) -> bool:
+        with self._lv_undo_muted():
+            self._lv_vset_restore(snap["v"])   # re-snaps on its plane …
+            self._lv_geom_restore(snap["g"])   # … then the exact borders
+        if self._lv is not None:
+            self._lv["base_ext"] = set(snap["x"])
+            self._lv["mv_epi_shift"] = snap["s"]
+        return True
+
+    def _lv_epi_mv_adjust(self, pas, apical=False) -> float:
+        """Move the COMMON MV plane to the most basal end of the drawn Epi
+        border (see above). *apical*: also toward the apex (all planes
+        traced). Moves over _LV_MV_ASK_MM ask first (a declined target is not
+        asked again). Ctrl+Z restores the plane; the plane is marked unsaved.
+        Returns the centre shift (mm; > 0 atrial, < 0 apical), 0 if none."""
+        if pas != "epi" or getattr(self, "_lv", None) is None:
+            return 0.0
+        mv = self._lv_valves.get("mitral")
+        if mv is None:
+            return 0.0
+        apex = getattr(self, "_lv_apex", None)
+        skip = self._lv_base_ext_ends("epi", mv)
+        mv2, sh = self._lv["model"].epi_mv_plane(mv, toward=apex, skip=skip,
+                                                 apical=apical)
+        if abs(sh) <= 0.05:
+            return 0.0
+        if abs(sh) > self._LV_MV_ASK_MM:
+            sig = tuple(round(float(x), 1) for x in mv2[0])
+            if self._lv.get("mv_adjust_declined") == sig:
+                return 0.0
+            from PyQt6.QtWidgets import QMessageBox
+            msg = (t("Epi の心基部端に合わせて MV 面を心房側へ {d:.1f} mm "
+                     "移動します。よろしいですか？", d=sh) if sh > 0 else
+                   t("Epi の心基部端に合わせて MV 面を心尖側へ {d:.1f} mm "
+                     "移動します。よろしいですか？", d=-sh))
+            if QMessageBox.question(self.window(), t("LV"), msg)                     != QMessageBox.StandardButton.Yes:
+                self._lv["mv_adjust_declined"] = sig
+                return 0.0
+        self._lv.pop("mv_adjust_declined", None)
+        # ONE Ctrl+Z step for the plane + the re-made extensions (the nested
+        # geometry / valve records are muted meanwhile).
+        with self._lv_undo_muted():
+            before = self._lv_mvadj_snap()
+            self._lv_base_ext_strip(mv)    # re-made on the new plane below
+            self._lv_rebuild_measures()
+            self._lv_mv_adjusting = True   # keeps the cumulative shift below
+            try:
+                self._lv_apply_valve_data("mitral", {
+                    "c": [float(x) for x in mv2[0]],
+                    "n": [float(x) for x in mv2[1]],
+                    "r": float(mv2[2]) if len(mv2) > 2 else 20.0})
+            finally:
+                self._lv_mv_adjusting = False
+            self._lv_valve_saved_sig["mitral"] = None    # moved: unsaved
+            after = self._lv_mvadj_snap()
+        self._undo_record(lambda b=before: self._lv_mvadj_restore(b),
+                          lambda a=after: self._lv_mvadj_restore(a))
+        # total moved since the MV was last set (shown after Calc Vol)
+        self._lv["mv_epi_shift"] = float(self._lv.get("mv_epi_shift") or 0.0) + sh
+        return float(sh)
+
     def _lv_set_valve_result(self, which, res) -> None:
         self._lv_apply_valve_data(which, {
             "c": [float(x) for x in res.center],

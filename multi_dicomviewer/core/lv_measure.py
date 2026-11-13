@@ -871,14 +871,23 @@ class LVModel:
             surf.apex_world = apex
         return surf
 
-    def epi_mv_plane(self, mv):
-        """(mv_used, shift_mm) for the EPI volume: the MV plane moved PARALLEL
-        toward the left atrium just far enough that no traced Epi point (any of
-        the long-axis planes) lies on its atrial side — the epicardial base
-        (AV groove) sits atrial of the annulus, so cutting Epi at the annulus
-        plane itself trimmed the drawn border. Endo / Blood keep the plain MV
-        plane. *mv* is (center, normal[, r]) or None; returned unchanged with
-        shift 0 when nothing protrudes."""
+    def epi_mv_plane(self, mv, toward=None, skip=None, apical=False):
+        """(mv_used, shift_mm) for the EPI base: when traced Epi points (any of
+        the long-axis planes) lie on the atrial side of the MV plane — the
+        epicardial base (AV groove) sits atrial of the annulus, and the first
+        MV centre (an Auto / clicked point) is not trusted for its height — the
+        plane is moved toward the left atrium just far enough that none does.
+        The normal (angle) is kept and the centre slides along the line from
+        the apex point *toward* (default: the Epi apex) through the MV centre,
+        so it stays on the MV-centre ↔ apex line. shift_mm = how far the centre
+        moved (> 0 toward the atrium, < 0 toward the apex).
+        *skip*: {phi: (first, last)} — border ends NOT drawn by the user (the
+        automatic extensions onto the MV plane), left out of the judgement.
+        *apical*: also move the plane toward the APEX when the drawn Epi stops
+        short of it (the myocardium's basal end sets the MV level both ways);
+        only once every plane is traced (Calc Vol / short axis).
+        *mv* is (center, normal[, r]) or None; returned unchanged with shift 0
+        when nothing is to move."""
         if mv is None or not self.epi_planes:
             return mv, 0.0
         c = np.asarray(mv[0], float)
@@ -887,22 +896,39 @@ class LVModel:
         if nn < 1e-9:
             return mv, 0.0
         n = n / nn
-        apex = self.epi_apex
+        apex = toward
+        if apex is None:
+            apex = self.epi_apex
         if apex is None and self.epi_axis is not None:
             apex = self.epi_axis.apex
         if apex is None:
             return mv, 0.0
-        sa = float(np.sign(float((np.asarray(apex, float) - c) @ n))) or 1.0
-        pts = [np.asarray(p, float).reshape(-1, 3) for p in self.epi_planes.values()]
-        pts = [p for p in pts if len(p)]
+        apex = np.asarray(apex, float)
+        sa = float(np.sign(float((apex - c) @ n))) or 1.0
+        pts = []
+        for phi, arr in self.epi_planes.items():
+            p = np.asarray(arr, float).reshape(-1, 3)
+            f, l = (skip or {}).get(round(float(phi), 4), (False, False))
+            p = p[(1 if f else 0):(len(p) - 1 if l else len(p))]
+            if len(p):
+                pts.append(p)
         if not pts:
             return mv, 0.0
         P = np.vstack(pts)
-        d = float(np.max(-((P - c) @ n) * sa))       # atrial protrusion (mm)
-        if d <= 0.05:
+        d = float(np.max(-((P - c) @ n) * sa))       # atrial protrusion (mm, ⟂)
+        if not (d > 0.05 or (apical and d < -0.05)):
             return mv, 0.0
-        c2 = c - sa * d * n                          # toward the atrium
-        return (c2, mv[1], *tuple(mv[2:])), d
+        na = -sa * n                                 # toward the atrium
+        a = c - apex                                 # apex → MV centre (atrial)
+        la = float(np.linalg.norm(a))
+        k = float(a @ na) / la if la > 1e-6 else 0.0
+        if k < 0.3:                                  # line ~ in the plane: ⟂ move
+            a, k = na, 1.0
+        else:
+            a = a / la
+        t_mm = d / k                                 # along the line
+        c2 = c + t_mm * a
+        return (c2, mv[1], *tuple(mv[2:])), t_mm
 
     def volume_ml_valves(self, spacing: float, which: str, mv=None, aov=None
                          ) -> float | None:

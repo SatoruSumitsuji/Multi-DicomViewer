@@ -711,6 +711,172 @@ def _inside_outline(P, c, n, q):
     return r <= rad[i]
 
 
+#: In-plane MV REGION (_mv_region_outline): the bright region on the MV plane
+#: that contains the MV-centre click, bounded by ANY dark line — the annulus
+#: rim AND thin ones (the anterior leaflet between the mitral orifice and the
+#: LVOT: real data merged the two when only the wide rim was a boundary).
+#: Thin plane (±_REG_SLAB_MM) so leaflet lines stay dark. Narrow bridges
+#: (partial-volume gaps in a thin line) are cut by an opening of growing
+#: radius until the click's region is closed (does not reach the ROI edge) and
+#: of a plausible size; then grown back inside the blood mask by that radius.
+_REG_STEP = 0.4
+_REG_HALF_MM = 34.0
+_REG_SLAB_MM = 0.6
+_REG_OPEN_MM = (0.0, 0.6, 1.0, 1.4, 1.8, 2.2)
+_REG_SEED_MM = 3.0           # the click may sit on a leaflet: nearest blood
+_REG_R_RANGE = (3.0, 28.0)   # area-equivalent radius (an orifice may be small)
+_REG_CLIP = 1.15        # lobe trim: × the median ray radius
+_REG_CLEAN = 0.9        # a region losing more to the trim = leaked: cut harder
+_REG_CORE = 0.8         # centre = centroid of the pixels ≥ this × max depth
+
+
+def _mv_region_outline(vol, dims, clk, n, thr):
+    """(points (N,3) in angle order around the centroid, centroid) of the
+    click's closed bright region on the plane (clk, n), or (None, None)."""
+    u, w = _frame(n)
+    g = np.arange(-_REG_HALF_MM, _REG_HALF_MM + 1e-6, _REG_STEP)
+    GX, GY = np.meshgrid(g, g, indexing="xy")
+    acc = np.zeros(GX.shape)
+    hs = (-_REG_SLAB_MM, 0.0, _REG_SLAB_MM)
+    for h in hs:
+        P = (clk + h * n + GX[..., None] * u + GY[..., None] * w)
+        acc += _sample(vol, dims, P)
+    img = acc / len(hs)
+    blood = img >= thr
+    c0 = len(g) // 2
+    rr = np.hypot(GX, GY)
+    border = np.zeros_like(blood)
+    border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+    leaked = []                            # (kept fraction, trimmed region)
+    for r_open in _REG_OPEN_MM:
+        if r_open > 0:
+            st = _disk(r_open / _REG_STEP)
+            core = ndimage.binary_opening(blood, structure=st)
+        else:
+            st = None
+            core = blood
+        lab, nl = ndimage.label(core)
+        if nl == 0:
+            continue
+        # the click's component (or the nearest one within _REG_SEED_MM)
+        lid = int(lab[c0, c0])
+        if lid == 0:
+            cand = (lab > 0) & (rr <= _REG_SEED_MM)
+            if not cand.any():
+                continue
+            ii = np.argmin(np.where(cand, rr, np.inf))
+            lid = int(lab.flat[ii])
+        reg = lab == lid
+        if st is not None:                 # grow back inside the blood mask
+            reg = ndimage.binary_dilation(reg, structure=st) & blood
+            lab2, _ = ndimage.label(reg)
+            keep = lab2[np.unravel_index(
+                np.argmin(np.where(reg, rr, np.inf)), reg.shape)]
+            reg = lab2 == keep
+        reg = ndimage.binary_fill_holes(
+            ndimage.binary_closing(reg, structure=_disk(1.0 / _REG_STEP)))
+        # A lobe hanging on the region (LA appendage, LVOT through a gap in a
+        # thin leaflet line) is trimmed off by its radius. A region that loses
+        # much to the trim leaked: cut harder at the next opening, keeping the
+        # trimmed one as a fallback; one still leaking out of the ROI too.
+        n0 = float(reg.sum())
+        reg = _clip_lobes(reg, GX, GY)
+        if reg is None or (reg & border).any() or not _reg_size_ok(reg):
+            continue
+        kept = float(reg.sum()) / n0
+        if kept < _REG_CLEAN:
+            leaked.append((kept, reg))
+            continue
+        return _reg_outline(reg, GX, GY, clk, u, w, g)
+    if leaked:                             # the least leaky of them
+        return _reg_outline(max(leaked, key=lambda t: t[0])[1],
+                            GX, GY, clk, u, w, g)
+    return None, None
+
+
+def _ray_radii(reg, GX, GY, ox, oy):
+    """first-exit radius of *reg* along _RING_NTH rays from (ox, oy)."""
+    th = np.linspace(0.0, 2.0 * np.pi, _RING_NTH, endpoint=False)
+    rs = np.arange(0.0, 2 * _REG_HALF_MM, _REG_STEP * 0.5)
+    X = ox + np.cos(th)[:, None] * rs[None, :]
+    Y = oy + np.sin(th)[:, None] * rs[None, :]
+    n = reg.shape[0]
+    ix = np.round((X + _REG_HALF_MM) / _REG_STEP).astype(int)
+    iy = np.round((Y + _REG_HALF_MM) / _REG_STEP).astype(int)
+    inb = (ix >= 0) & (ix < n) & (iy >= 0) & (iy < n)
+    hit = np.zeros(ix.shape, bool)
+    hit[inb] = reg[iy[inb], ix[inb]]
+    out = np.full(len(th), rs[-1])
+    for k in range(len(th)):
+        stop = np.flatnonzero(~hit[k])
+        if len(stop):
+            out[k] = rs[stop[0]]
+    return out
+
+
+def _clip_lobes(reg, GX, GY):
+    """Trim the region to a disk of _REG_CLIP × its median ray radius around
+    its centre (rays from the click first, then from the centroid). A lobe
+    (LA appendage, LVOT) has a few very long rays and is cut off; a compact
+    (even oval) orifice is trimmed symmetrically, keeping its centre."""
+    ox = oy = 0.0                                  # the click
+    # loose from the click (it may be off-centre), tight around the core
+    for f in (1.5, _REG_CLIP, _REG_CLIP, _REG_CLIP):
+        if not reg[int(round((oy + _REG_HALF_MM) / _REG_STEP)),
+                   int(round((ox + _REG_HALF_MM) / _REG_STEP))]:
+            break
+        m = float(np.median(_ray_radii(reg, GX, GY, ox, oy)))
+        reg = reg & (np.hypot(GX - ox, GY - oy) <= f * m)
+        if not reg.any():
+            return None
+        ox, oy = _core_centre(reg, GX, GY)
+    return reg
+
+
+def _core_centre(reg, GX, GY):
+    """centroid of the region's core (pixels at least _REG_CORE × the largest
+    inscribed radius deep): a lobe left on the region barely moves it, an oval
+    orifice keeps its middle."""
+    edt = ndimage.distance_transform_edt(reg)
+    core = edt >= _REG_CORE * float(edt.max())
+    return float(GX[core].mean()), float(GY[core].mean())
+
+
+def _reg_size_ok(reg):
+    rad = float(np.sqrt(float(reg.sum()) * _REG_STEP ** 2 / np.pi))
+    return _REG_R_RANGE[0] <= rad <= _REG_R_RANGE[1]
+
+
+def _reg_outline(reg, GX, GY, clk, u, w, g):
+    """(points in angle order around the centre, centre) of a region; the
+    centre = _core_centre."""
+    cx, cy = _core_centre(reg, GX, GY)
+    cen = clk + cx * u + cy * w
+    # outline: farthest region pixel along each ray from the centroid
+    th = np.linspace(0.0, 2.0 * np.pi, _RING_NTH, endpoint=False)
+    rs = np.arange(0.0, 2 * _REG_HALF_MM, _REG_STEP * 0.5)
+    X = cx + np.cos(th)[:, None] * rs[None, :]
+    Y = cy + np.sin(th)[:, None] * rs[None, :]
+    ix = np.round((X + _REG_HALF_MM) / _REG_STEP).astype(int)
+    iy = np.round((Y + _REG_HALF_MM) / _REG_STEP).astype(int)
+    inb = (ix >= 0) & (ix < len(g)) & (iy >= 0) & (iy < len(g))
+    hit = np.zeros(ix.shape, bool)
+    hit[inb] = reg[iy[inb], ix[inb]]
+    # first exit along the ray (star-shaped outline from the centroid)
+    out_r = np.zeros(len(th))
+    for k in range(len(th)):
+        row = hit[k]
+        if not row[0]:
+            j = int(np.argmax(row)) if row.any() else 0
+        else:
+            j = 0
+        stop = np.flatnonzero(~row[j:])
+        out_r[k] = rs[j + int(stop[0]) - 1] if len(stop) else rs[-1]
+    pts = cen + out_r[:, None] * (np.cos(th)[:, None] * u
+                                  + np.sin(th)[:, None] * w)
+    return pts, cen
+
+
 def mv_refine_outline(vol, dims, res, click_mm, thr=None):
     """Replace a found MV plane's ring by the dark-rim outline on that plane
     (see _mv_inplane_ring): the click must lie inside it. Two passes, the
@@ -725,6 +891,18 @@ def mv_refine_outline(vol, dims, res, click_mm, thr=None):
     clk = click - float(np.dot(click - c0, n)) * n               # on the plane
     if thr is None:
         thr = blood_threshold(vol, dims, c0)
+    # 1) the click's closed bright region (any dark line is a boundary)
+    # (at the CLICK's own height: the MV centre point is set where the user
+    # clicked — the opened leaflets' orifice in diastole, the leaflet bellies'
+    # ellipse just LA-side of the leaflets in systole; the size is secondary,
+    # the Epi step moves the plane to the most basal myocardium later)
+    pts, cen = _mv_region_outline(vol, dims, click, n, thr)
+    if pts is not None:
+        area, _c = _polygon_area_centroid(pts, cen, n)
+        rad = float(np.sqrt(max(area, 1.0) / np.pi))
+        return ValveResult(cen, n, rad, points=pts,
+                           weights=np.ones(len(pts)), ok=True, message="region")
+    # 2) else the wide dark rim (thin lines bridged)
     best = None
     # Around the user's MV-centre click only (not the hinge fit's centre, which
     # may have drifted): the outline must contain the click and its centroid

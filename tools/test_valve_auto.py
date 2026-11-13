@@ -227,6 +227,25 @@ vol_root_sys = finish(build(15.5, True, LVOT_TILT=20.0, CROWN=8.0))
 _ao_truth = (C_ao, n_ao, u_ao, w_ao, R_ann)
 vol_laa0 = finish(build(24.0, False, AO_DIST=26.0, LAA=0.0001))
 C_ao, n_ao, u_ao, w_ao, R_ann = _ao_truth
+
+
+def lvot_pocket(v):
+    """Real MV face-on view: the LVOT blood lies right next to the mitral
+    orifice on the annulus plane, separated only by the THIN anterior leaflet
+    (1.2 mm) — no wide dark rim there. Treating only wide dark bands as the
+    boundary merged the two (the magenta ring ran around both)."""
+    h, r, phi = mv_coords()
+    hs = 2.0 * np.cos(2.0 * phi)
+    sec = np.abs(np.angle(np.exp(1j * phi))) < np.deg2rad(55)      # +u side
+    band = sec & (np.abs(h - hs) < 4.0)
+    v = v.copy()
+    v[band & (r >= Ra + 1.2) & (r < 27.0)] = 420.0
+    v[band & (r >= Ra) & (r < Ra + 1.2)] = 110.0
+    return v
+
+
+vol_lvot = finish(lvot_pocket(build(24.0, False, AO_DIST=40.0)))
+C_ao, n_ao, u_ao, w_ao, R_ann = _ao_truth
 del X, Y, Z, Pw
 
 
@@ -298,20 +317,32 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
     chk(f"apex {label}, hint on the LV side (normal flipped): LV side",
         a.ok and float(np.dot(a.apex - C_mv, n_mv)) < -20.0,
         f"{float(np.dot(a.apex - C_mv, n_mv)):+.1f} mm")
+    # 2nd click: 5 mm off-centre IN the valve plane (the user clicks the
+    # orifice / the leaflet-belly ellipse, slightly LA-side in systole).
     for off_deg, seed_off in ((0, np.array([2.0, -2.0, 1.0])),
-                              (25, np.array([-4.0, 3.0, -3.0]))):
+                              (25, -4.0 * u_mv + 3.0 * w_mv + 0.8 * n_mv)):
         apex_rough = (C_mv - 70.0 * np.cos(np.deg2rad(off_deg)) * n_mv
                       + 70.0 * np.sin(np.deg2rad(off_deg)) * w_mv)
         res, ap = detect_mv_refined(v, dims, C_mv + seed_off, apex_rough)
         tag = f"MV+Apex {label}, apex click {off_deg}° off"
-        e_c = float(np.linalg.norm(res.center - C_mv))
-        chk(f"{tag}: MV found, plane ≤ 6°, centre ≤ 3 mm",
+        # The MV centre point = the centre of the click's orifice region, at
+        # the CLICK's height (size secondary: the Epi step moves the plane to
+        # the most basal myocardium) — judged in-plane + height.
+        click = C_mv + seed_off
+        dv = res.center - C_mv
+        e_c = float(np.linalg.norm(dv - np.dot(dv, n_mv) * n_mv))
+        e_h = abs(float(np.dot(res.center - click, n_mv)))
+        # (≤ 3 mm: the click 5 mm off-centre on a plane up to 6° tilted, the
+        # LA appendage hanging on the region)
+        chk(f"{tag}: MV found, plane ≤ 6°, centre in-plane ≤ 3 mm",
             res.ok and ang(res.normal, n_mv) <= 6.0 and e_c <= 3.0,
             f"{ang(res.normal, n_mv):.1f}°, {e_c:.1f} mm, r {res.radius:.1f}")
-        chk(f"{tag}: radius within 2.5 mm of {Ra}", abs(res.radius - Ra) <= 2.5,
-            f"{res.radius:.1f} mm, {len(res.points)} pts")
-        chk(f"{tag}: ring = the dark-rim outline on the plane",
-            res.message == "outline", res.message)
+        chk(f"{tag}: centre at the click's height (± 0.5 mm)", e_h <= 0.5,
+            f"{e_h:.1f} mm")
+        chk(f"{tag}: region radius plausible (3–{Ra + 2.5:g} mm)",
+            3.0 <= res.radius <= Ra + 2.5, f"{res.radius:.1f} mm, {len(res.points)} pts")
+        chk(f"{tag}: ring = the click's region", res.message == "region",
+            res.message)
         # The phantom's apex lies beyond the volume: the click-guided search
         # may then report "outside the image" (None) — never an LA point.
         chk(f"{tag}: apex never in the LA (LV side, or none: beyond the image)",
@@ -346,25 +377,45 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
         e_c = float(np.linalg.norm((out.center - C_mv)
                                    - np.dot(out.center - C_mv, n_mv) * n_mv))
         tag = f"outline {label}, bad ring #{k}"
-        chk(f"{tag}: outline found", out.message == "outline", out.message)
+        chk(f"{tag}: outline found", out.message in ("region", "outline"), out.message)
         chk(f"{tag}: centre in-plane ≤ 2 mm", e_c <= 2.0, f"{e_c:.1f} mm")
-        chk(f"{tag}: radius within 2 mm of {Ra}", abs(out.radius - Ra) <= 2.0,
-            f"{out.radius:.1f} mm")
-        chk(f"{tag}: every point within 3 mm of the rim",
-            float(np.max(np.abs(rr - Ra))) <= 3.0,
+        # region semantics: may be smaller than the annulus (leaflet orifice),
+        # never beyond the rim (no leak into the LA appendage / aortic root)
+        chk(f"{tag}: radius plausible (3–{Ra + 1.5:g} mm)",
+            3.0 <= out.radius <= Ra + 1.5, f"{out.radius:.1f} mm")
+        chk(f"{tag}: no point far beyond the rim (+4 mm: a trimmed lobe stub)",
+            float(np.max(rr)) <= Ra + 4.0,
             f"{float(np.min(rr)):.1f}–{float(np.max(rr)):.1f} mm")
+# The LVOT next to the orifice behind only the thin anterior leaflet: the ring
+# = the mitral orifice (the click's region), not orifice + LVOT.
+for k, coff in enumerate((np.array([2.0, -1.5, 1.0]), -5.0 * u_mv, 4.0 * w_mv)):
+    bad = ValveResult(C_mv + 5.0 * u_mv, n_mv, 20.0,
+                      points=np.zeros((6, 3)), weights=np.ones(6))
+    out = mv_refine_outline(vol_lvot, dims, bad, C_mv + coff)
+    q = out.points - C_mv
+    rr = np.linalg.norm(q - np.outer(q @ n_mv, n_mv), axis=1)
+    e_c = float(np.linalg.norm((out.center - C_mv)
+                               - np.dot(out.center - C_mv, n_mv) * n_mv))
+    chk(f"outline LVOT behind the thin leaflet, click #{k}: the orifice only "
+        f"(centre ≤ 2 mm, r within 2 mm, no point beyond the leaflet)",
+        out.message == "region" and e_c <= 2.0 and abs(out.radius - Ra) <= 2.0
+        and float(np.max(rr)) <= Ra + 4.0,
+        f"{out.message} c {e_c:.1f} r {out.radius:.1f} max {float(np.max(rr)):.1f}")
 # The centre follows the CLICK, not a drifted fit: from a fit whose centre is
 # 9 mm off (a sliver at one side) and a click 4 mm off the true centre, the
 # outline centre lands on the orifice (≤ 2 mm) — within 6 mm of the click.
 for label, v in (("diastole", vol_dia), ("systole+LAA", vol_laa_sys)):
     for off in (4.0 * u_mv, -4.0 * w_mv):
+        # systole: the click slightly LA-side of the closed leaflets (the
+        # user's protocol), not through them
+        off = off + (1.5 * n_mv if "systole" in label else 0.0)
         bad = ValveResult(C_mv + 9.0 * w_mv, n_mv, 8.0,
                           points=np.zeros((6, 3)), weights=np.ones(6))
         out = mv_refine_outline(v, dims, bad, C_mv + off)
         e_c = float(np.linalg.norm(out.center - C_mv))
         chk(f"outline {label}, click {np.round(off, 1)} off, fit 9 mm off: "
             f"centre ≤ 2 mm, ≤ 6 mm from the click",
-            out.message == "outline" and e_c <= 2.0
+            out.message in ("region", "outline") and e_c <= 2.0
             and float(np.linalg.norm(out.center - (C_mv + off))) <= 6.0,
             f"{e_c:.1f} mm, r {out.radius:.1f}")
 # A click outside any orifice (in the fat beyond the rim) → no outline: the
