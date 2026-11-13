@@ -1619,6 +1619,7 @@
   "心尖部がMV中心に近すぎます。心尖近傍をクリックしてください。": "El ápex está demasiado cerca del centro de la VM. Haga clic cerca del ápex.",
   "心尖部が未設定のため、MV だけ保存しました。": "El ápex no está definido, así que solo se guardó la VM.",
   "心尖部が未設定のため、MV面（.MVLv.json）だけを保存します。": "El ápex no está definido, así que solo se guarda el plano de la VM (.MVLv.json).",
+  "心尖部の外側に脂肪が見えないため（横隔膜・肝臓に接しているなど）、心外膜側の心尖点は心内膜側の心尖点＋推定壁厚で設定しました。": "No se ve grasa por fuera del ápex (p. ej., apoyado en el diafragma o el hígado), por lo que el ápex epicárdico se fijó como el ápex endocárdico + un grosor de pared estimado.",
   "心尖部の自動設定には MV 面が必要です。先に MV を設定してください。": "El ápex automático necesita el plano de la VM. Defina primero la VM.",
   "心尖部を検出中…": "Detectando el ápex…",
   "心尖部を自動で検出できませんでした。センターラインの交点を心尖部に合わせて Set で設定してください。": "No se pudo detectar el ápex automáticamente. Coloque el cruce de las líneas centrales en el ápex y pulse Set.",

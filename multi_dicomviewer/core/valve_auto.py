@@ -499,6 +499,7 @@ def _hinges(vol, dims, c, n, thr, H, n_half=16, rmax=40.0, step=0.5,
         halves.append((e, m[:, i0:], hu[:, i0:]))
         halves.append((-e, m[:, i0::-1], hu[:, i0::-1]))
     win = max(4, int(round(_WALL_WIN_MM / step)))
+    cands = []                       # per half-plane: [(score, k, rk), …]
     for e, inside, hu in halves:
         R, opn = _ray_extent(inside, step, gap_mm, lead_mm=4.0)
         R = ndimage.median_filter(R, 5, mode="nearest")
@@ -508,7 +509,7 @@ def _hinges(vol, dims, c, n, thr, H, n_half=16, rmax=40.0, step=0.5,
         # to the THIN LA wall (above): the AV junction. (The blood pool's waist
         # is not reliable there — in systole the LV base is no wider than the
         # annulus, and papillary muscles / trabeculae narrow the LV pool more.)
-        best, k_best = -np.inf, None
+        cl = []
         for k in range(win, len(hs) - win):
             # < _HINGE_MIN_R_MM: a ray cut short (closed leaflets' coaptation
             # zone), not the annulus (adult radius ≳ 11 mm).
@@ -519,12 +520,22 @@ def _hinges(vol, dims, c, n, thr, H, n_half=16, rmax=40.0, step=0.5,
             if lv_t < _WALL_LV_MM or la_t > _WALL_LA_MM:
                 continue
             sc = (lv_t - la_t) - 0.1 * abs(float(hs[k]))
-            if sc > best:
-                best, k_best = sc, k
-        if k_best is None:
+            cl.append((sc, k, float(np.median(R[max(0, k - 2):k + 3]))))
+        cands.append((e, cl))
+    # Ring consistency: each half-plane's best hinge row is chosen among those
+    # whose radius fits the ring (≤ _HINGE_RING_TOL × the median of the
+    # half-planes' best radii). Just above the lateral annulus the pool may open
+    # into the LA appendage (and anteriorly toward the aortic root): such a row
+    # also has thick wall below / thin wall above, but reaches far out — it
+    # would throw the ring point, and the fit's centre that seeds every later
+    # pass, outward (the trace bulged toward the appendage).
+    tops = [max(cl)[2] for _e, cl in cands if cl]
+    r_lim = _HINGE_RING_TOL * float(np.median(tops)) if tops else np.inf
+    for e, cl in cands:
+        ok = [t for t in cl if t[2] <= r_lim]
+        if not ok:
             continue
-        k = k_best
-        rk = float(np.median(R[max(0, k - 2):k + 3]))
+        best, k, rk = max(ok)
         pts.append(c + hs[k] * n + rk * e)
         wts.append(float(np.clip((best + 0.1 * abs(float(hs[k]))) / 6.0,
                                  0.15, 1.0)))
@@ -538,6 +549,7 @@ _WALL_LV_MM = 5.0        # LV myocardium below the annulus is at least this thic
 _WALL_LA_MM = 4.0        # the LA wall above it is at most this thick
 _WALL_WIN_MM = 5.0       # each side's median window along the axis
 _HINGE_MIN_R_MM = 8.0    # a hinge closer to the axis than this is not used
+_HINGE_RING_TOL = 1.35   # hinge radius ≤ this × the ring's median (see _hinges)
 
 
 def _wall_thickness(inside, hu, R, step, fat_run_mm=1.5, blood_run_mm=2.0):
@@ -610,6 +622,17 @@ def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
             return ValveResult(c, n, 15.0, points=P, weights=W, ok=False,
                                message="mitral annulus not found")
         keep = np.ones(len(P), bool)
+        if it == 0:
+            # First pass: only gross RADIAL outliers (a point thrown far out —
+            # appendage / aortic root — would drag the centre that seeds every
+            # later pass). The height spread of the still-oblique half-planes
+            # is expected, so no plane-residual test yet.
+            q = P - c
+            rr0 = np.linalg.norm(q - np.outer(q @ n, n), axis=1)
+            m0 = float(np.median(rr0))
+            k0 = rr0 <= 1.5 * m0
+            if k0.sum() >= 6:
+                keep = k0
         # Robust: drop outliers — not on the first pass, whose half-planes are
         # still oblique to the annulus (its spread is expected, not outliers).
         for _ in range(3 if it > 0 else 0):
@@ -668,16 +691,16 @@ class ApexResult:
     message: str = ""
 
 
-def _apex_ray(hu_row, blood_row, step):
-    """(endo_idx, epi_idx) along one ray, or None."""
+def _cavity_end(hu_row, blood_row, step):
+    """Index of the LV cavity's end along one ray from inside the cavity: the
+    last blood sample before a dark run > _APEX_GAP_MM (trabeculae / papillary
+    tips are bridged when blood follows) or any fat. None if the ray does not
+    start in blood."""
     K = len(hu_row)
     if not blood_row[0]:
         return None
     gap = int(round(_APEX_GAP_MM / step))
     fat = hu_row < _FAT_HU
-    fr = max(1, int(round(1.5 / step)))
-    br = max(1, int(round(2.0 / step)))
-    # cavity end: last blood sample before a dark run > gap (or any fat)
     e, i = 0, 0
     while i < K:
         if blood_row[i]:
@@ -688,6 +711,17 @@ def _apex_ray(hu_row, blood_row, step):
         if len(nxt) == 0 or fat[i:i + int(nxt[0])].any():
             break
         i += int(nxt[0])
+    return e
+
+
+def _apex_ray(hu_row, blood_row, step):
+    """(endo_idx, epi_idx) along one ray, or None."""
+    e = _cavity_end(hu_row, blood_row, step)
+    if e is None:
+        return None
+    fat = hu_row < _FAT_HU
+    fr = max(1, int(round(1.5 / step)))
+    br = max(1, int(round(2.0 / step)))
     j0 = e + 1
     wmax = int(round(_APEX_WALL_MAX_MM / step))
     seg_f = fat[j0:j0 + wmax + fr]
@@ -720,12 +754,125 @@ def _apex_side(vol, dims, c, n, thr, step=0.5, count=360):
     return out
 
 
-def detect_apex(vol, dims, mv_center, mv_normal, toward=None) -> ApexResult:
+#: Click-guided apex (detect_apex(click=...)): the user's rough apex click
+#: steers the search instead of the MV normal (which may be tilted from the LV
+#: long axis — the MV normal's cone then reached the LATERAL wall and the
+#: farthest epicardial point there was taken as the apex). Candidates are the
+#: rays within _APEX_CLICK_CONE_DEG of the current search direction, which
+#: starts at MV centre → click and follows the apex found (up to 3 rounds).
+#: The result must lie within _APEX_CLICK_MAX_DEG of the click direction and
+#: _APEX_CLICK_MAX_MM of the click — otherwise it is rejected (no wrong apex).
+#: The direction is that of the farthest CAVITY end (the endocardial apex is
+#: visible all round); where that ray shows no epicardium (apex against the
+#: diaphragm / liver: no fat outside the wall), the epicardial apex is
+#: ESTIMATED as the cavity end + the median wall of the surrounding rays.
+_APEX_CLICK_CONE_DEG = 20.0
+_APEX_CLICK_MAX_DEG = 30.0
+_APEX_CLICK_MAX_MM = 35.0
+#: Estimated apical wall: rays reaching the wall obliquely measure it too
+#: thick (≈13–14 mm for a 5 mm apex), so the estimate is clamped to the
+#: usual compact apical wall (5–8 mm); expect ±2–3 mm on an estimated apex.
+_APEX_WALL_EST = (5.0, 8.0)
+_APEX_WALL_DEFAULT = 6.5
+
+
+def _in_volume(vol, dims, P):
+    """True where world-mm points P (..., 3) lie inside the volume (_sample
+    clamps outside points to the edge value, which would read as tissue / blood
+    continuing beyond the field of view)."""
+    P = np.asarray(P, float)
+    nz, ny, nx = np.asarray(vol).shape
+    sx, sy, sz = (float(d) for d in dims)
+    return ((P[..., 0] >= 0) & (P[..., 0] <= (nx - 1) * sx)
+            & (P[..., 1] >= 0) & (P[..., 1] <= (ny - 1) * sy)
+            & (P[..., 2] >= 0) & (P[..., 2] <= (nz - 1) * sz))
+
+
+def _apex_avg_dir(dists, dirs):
+    """Weighted mean direction of the rays within 2 mm of the farthest."""
+    d = np.asarray(dists, float)
+    top = d >= float(d.max()) - 2.0
+    w = d[top] - (float(d.max()) - 2.0) + 0.5
+    return _unit((np.asarray(dirs)[top] * w[:, None]).sum(axis=0))
+
+
+def _apex_from_click(vol, dims, c, click, thr, step=0.5):
+    """ApexResult near the user's rough apex click (see _APEX_CLICK_*).
+
+    The apex DIRECTION comes from the farthest CAVITY end (endocardial apex):
+    blood → myocardium is visible all round, whereas the epicardium is not
+    where the apex rests on the diaphragm / liver — there the farthest
+    *epicardial* ray sits at the edge of the contact, well off the apex. The
+    epicardial apex is then read on that ray, or (no fat there) estimated
+    with the median wall of the surrounding rays."""
+    click = np.asarray(click, float)
+    d0 = _unit(click - c)
+    rs = np.arange(0.0, _APEX_RMAX_MM + 1e-6, step)
+    dc, best, walls, fov_cut = d0, None, None, False
+    for _round in range(3):
+        D = _dirs_cone(dc, _APEX_CLICK_CONE_DEG, 240)
+        P = c + D[:, None, :] * rs[None, :, None]
+        hu = _sample(vol, dims, P)
+        inv = _in_volume(vol, dims, P)
+        endo = []
+        for k in range(len(D)):
+            e = _cavity_end(hu[k], hu[k] >= thr, step)
+            if e is None or e <= 0:
+                continue
+            out = np.flatnonzero(~inv[k])
+            if len(out) and e + 2 >= int(out[0]):
+                fov_cut = True                    # cavity runs out of the image
+                continue
+            endo.append((rs[e], D[k]))
+        if not endo:
+            break
+        dv = _apex_avg_dir([x[0] for x in endo], [x[1] for x in endo])
+        row = _sample(vol, dims, c + dv[None, :] * rs[:, None])
+        b = row >= thr
+        r = _apex_ray(row, b, step)
+        if r is not None:
+            e_d, p_d, msg = rs[r[0]], rs[r[1]], ""
+        else:
+            e = _cavity_end(row, b, step)
+            e_d = rs[e] if e else max(x[0] for x in endo)
+            if walls is None:          # the wall around the apex (wide cone)
+                side = _apex_side(vol, dims, c, dv, thr)
+                walls = [r_[3] - r_[2] for r_ in side]
+            # Lowest decile (the apex is the LV's thinnest wall; rays at the
+            # edge of the diaphragm contact count the diaphragm as wall).
+            wall = (float(np.clip(np.percentile(walls, 10), *_APEX_WALL_EST))
+                    if walls else _APEX_WALL_DEFAULT)
+            p_d, msg = e_d + wall, "estimated (no epicardial fat at the apex)"
+        cand = (c + p_d * dv, c + e_d * dv, float(p_d - e_d), dv, msg)
+        if _angle_deg(dv, d0) > _APEX_CLICK_MAX_DEG:
+            break                                 # drifted away from the click
+        best = cand
+        if _angle_deg(dv, dc) < 2.0:
+            break
+        dc = dv
+    if best is None:
+        return ApexResult(c, c, 0.0, ok=False,
+                          message=("LV apex outside the image" if fov_cut
+                                   else "LV apex not found near the click"))
+    apex, endo_p, wall, _dv, msg = best
+    if not bool(_in_volume(vol, dims, apex)):
+        return ApexResult(apex, endo_p, wall, ok=False,
+                          message="LV apex outside the image")
+    if float(np.linalg.norm(apex - click)) > _APEX_CLICK_MAX_MM:
+        return ApexResult(apex, endo_p, wall, ok=False,
+                          message="LV apex found too far from the click")
+    return ApexResult(apex, endo_p, wall, message=msg)
+
+
+def detect_apex(vol, dims, mv_center, mv_normal, toward=None,
+                click=None) -> ApexResult:
     """Epicardial LV apex from the MV plane: the farthest epicardial point from
     the MV centre within _APEX_CONE_DEG of the MV normal.
 
-    *toward* (a point on the LV side, e.g. the user's rough apex click) fixes
-    the side: only the half of the normal pointing towards it is searched.
+    *click* (the user's rough apex click): search around the MV centre →
+    click direction instead, and reject a result far from it — see
+    _apex_from_click. *toward* (a point on the LV side) only fixes the side:
+    only the half of the normal pointing towards it is searched.
     Without it the normal's sign is not trusted (a manual Set may point either
     way): both sides are tried and the one with the THICKER wall (LV myocardium
     vs the thin LA wall) is used. (The longer reach is not used: it picks the LA
@@ -735,6 +882,9 @@ def detect_apex(vol, dims, mv_center, mv_normal, toward=None) -> ApexResult:
     n = _unit(mv_normal)
     thr = blood_threshold(vol, dims, c)
     c = _snap_into_blood(vol, dims, c, thr)
+    if click is not None:
+        # The user's rough apex click steers the search (not the MV normal).
+        return _apex_from_click(vol, dims, c, click, thr)
     sides = (-1.0, 1.0)
     if toward is not None:
         sides = (1.0 if float(np.dot(np.asarray(toward, float) - c, n)) >= 0 else -1.0,)
@@ -785,8 +935,8 @@ _MV_RETRY_MM = 6.0
 _MV_MAX_TILT_DEG = 45.0
 _MV_MAX_SHIFT_MM = 15.0
 _MV_R_RANGE = (8.0, 28.0)
-#: The detected apex must lie within this angle of the click axis (MV → apex).
-_APEX_MAX_DEV_DEG = 50.0
+#: (The detected apex is checked against the apex click in _apex_from_click:
+#: _APEX_CLICK_MAX_DEG / _APEX_CLICK_MAX_MM.)
 
 
 def _angle_deg(a, b):
@@ -816,11 +966,9 @@ def _mv_refine_once(vol, dims, mv_mm, apex_mm, rounds, ref_mv=None):
     for _ in range(int(rounds)):
         if not _mv_plausible(res, ref_mv, axis):
             break
-        a = detect_apex(vol, dims, res.center, res.normal, toward=apex_mm)
+        a = detect_apex(vol, dims, res.center, res.normal, click=apex_mm)
         if not a.ok or float(np.linalg.norm(a.apex - res.center)) < 20.0:
             break
-        if _angle_deg(a.apex - res.center, apex_mm - ref_mv) > _APEX_MAX_DEV_DEG:
-            break                                        # not the clicked apex
         apex = a
         nxt = detect_mv(vol, dims, res.center, a.apex)
         if not _mv_plausible(nxt, ref_mv, axis):
@@ -831,10 +979,8 @@ def _mv_refine_once(vol, dims, mv_mm, apex_mm, rounds, ref_mv=None):
             break
     if apex is not None and _mv_plausible(res, ref_mv, axis):
         # The apex on the FINAL plane (the loop may have moved it).
-        a = detect_apex(vol, dims, res.center, res.normal, toward=apex_mm)
-        if (a.ok and float(np.linalg.norm(a.apex - res.center)) >= 20.0
-                and _angle_deg(a.apex - res.center, apex_mm - ref_mv)
-                <= _APEX_MAX_DEV_DEG):
+        a = detect_apex(vol, dims, res.center, res.normal, click=apex_mm)
+        if a.ok and float(np.linalg.norm(a.apex - res.center)) >= 20.0:
             apex = a
     return res, apex
 

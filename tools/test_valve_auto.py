@@ -55,7 +55,7 @@ def mv_coords():
     return h, np.sqrt(a * a + b * b), np.arctan2(b, a)
 
 
-def build(LV_PEAK, LEAFLETS, LVOT_TILT=0.0, CROWN=0.0):
+def build(LV_PEAK, LEAFLETS, LVOT_TILT=0.0, CROWN=0.0, AO_DIST=34.0, LAA=0.0):
     global n_ao, u_ao, w_ao, C_ao, R_ann
     h, r, phi = mv_coords()
     hs = 2.0 * np.cos(2.0 * phi)                                # saddle height
@@ -68,6 +68,13 @@ def build(LV_PEAK, LEAFLETS, LVOT_TILT=0.0, CROWN=0.0):
     rho = np.where(h >= hs, np.minimum(rho, Ra + 0.6 * (h - hs)), rho)   # LA side
     lv_blood = (r < rho) & (h < hs)
     la_blood = (r < rho) & (h >= hs)
+    if LAA:
+        # Left atrial appendage: a blood pouch off the LA just above the
+        # LATERAL annulus (+w), its ostium starting LAA mm above the hinge,
+        # reaching out to r ≈ 34 mm (real LAA ostium sits over the annulus).
+        dphi = np.abs(np.angle(np.exp(1j * (phi - np.pi / 2))))
+        la_blood |= ((dphi < np.deg2rad(28)) & (h > hs + LAA) & (h < hs + LAA + 12.0)
+                     & (r < 34.0))
 
 
     def sector(phi0, half):
@@ -77,7 +84,7 @@ def build(LV_PEAK, LEAFLETS, LVOT_TILT=0.0, CROWN=0.0):
     # Aortic root: anterior (+u), axis tilted towards +u.
     n_ao = _unit(n_mv + 0.8 * u_mv)
     u_ao, w_ao = _frame(n_ao)
-    C_ao = C_mv + 34.0 * u_mv - 4.0 * n_mv
+    C_ao = C_mv + AO_DIST * u_mv - 4.0 * n_mv
     # The annulus plane (the virtual basal ring through the three cusp nadirs)
     # is ⊥ the sinus axis n_ao: there the three cusps look alike. The LVOT
     # below runs LVOT_TILT° off it (real hearts: the LVOT / LV axis and the
@@ -202,6 +209,14 @@ def coapt_curtain(v):
 
 
 vol_coapt = finish(coapt_curtain(build(15.5, True)))
+# Real MV surroundings: the LA appendage ostium 1 mm above the LATERAL annulus
+# and the aortic root against the anterior annulus (aorto-mitral continuity).
+# The appendage used to throw the lateral ring points ~33 mm out and drag the
+# centre 7–16 mm toward it (the bulged magenta trace seen on real data).
+# Built BEFORE the root volumes: build() leaves the aortic-root truth
+# (C_ao, n_ao …) of its LAST call in the globals the AoV checks use.
+vol_laa_dia = finish(build(24.0, False, AO_DIST=26.0, LAA=1.0))
+vol_laa_sys = finish(build(15.5, True, AO_DIST=26.0, LAA=1.0))
 # Realistic aortic root: the LVOT 20° off the sinus axis, crown-shaped hinge
 # line (commissures 8 mm above the nadirs).
 vol_root_dia = finish(build(24.0, False, LVOT_TILT=20.0, CROWN=8.0))
@@ -267,7 +282,8 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
 # is judged: the LV side is −n_mv.) In systole the LA reaches as far as the
 # small LV, so the farthest-reach rule used to put the "apex" in the LA.
 for label, v in (("diastole", vol_dia), ("systole", vol_sys),
-                 ("systole+coaptation", vol_coapt)):
+                 ("systole+coaptation", vol_coapt),
+                 ("diastole+LAA", vol_laa_dia), ("systole+LAA", vol_laa_sys)):
     a = detect_apex(v, dims, C_mv, n_mv)                     # no hint: thick wall
     chk(f"apex {label}, no hint: on the LV side (thick wall)",
         a.ok and float(np.dot(a.apex - C_mv, n_mv)) < -20.0,
@@ -288,9 +304,11 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
             f"{ang(res.normal, n_mv):.1f}°, {e_c:.1f} mm, r {res.radius:.1f}")
         chk(f"{tag}: radius within 2.5 mm of {Ra}", abs(res.radius - Ra) <= 2.5,
             f"{res.radius:.1f} mm, {len(res.points)} pts")
-        chk(f"{tag}: apex on the LV side, not the LA",
-            ap is not None and float(np.dot(ap.apex - C_mv, n_mv)) < -20.0,
-            "-" if ap is None else f"{float(np.dot(ap.apex - C_mv, n_mv)):+.1f} mm")
+        # The phantom's apex lies beyond the volume: the click-guided search
+        # may then report "outside the image" (None) — never an LA point.
+        chk(f"{tag}: apex never in the LA (LV side, or none: beyond the image)",
+            ap is None or float(np.dot(ap.apex - C_mv, n_mv)) < -20.0,
+            "none" if ap is None else f"{float(np.dot(ap.apex - C_mv, n_mv)):+.1f} mm")
     # A click far from the valve (deep in the LA) must not return a wrong ring.
     far = C_mv + 32.0 * n_mv
     res, ap = detect_mv_refined(v, dims, far, C_mv - 70.0 * n_mv)

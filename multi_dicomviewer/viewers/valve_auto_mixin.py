@@ -312,9 +312,12 @@ class ValveAutoMixin:
         def work():
             res, apex = va.detect_mv_refined(vol, dims, mv_p, apex_p)
             if res.ok and apex is None:          # refinement stopped early
+                # Same click-guided search as the refinement: a result far
+                # from the apex click is rejected (no wrong apex shown).
                 a = va.detect_apex(vol, dims, res.center, res.normal,
-                                   toward=apex_p)
-                apex = a if a.ok else None
+                                   click=apex_p)
+                apex = (a if a.ok and float(np.linalg.norm(
+                    a.apex - res.center)) >= 20.0 else None)
             return res, apex
 
         with self._lv_auto_running(self._lv_ve_auto_btn):
@@ -344,12 +347,17 @@ class ValveAutoMixin:
                 "でした。交点を心尖部に合わせて Apex Set で設定してください。").format(
                     r=float(res.radius)))
             return
-        self._lvv_prompt(t(
+        msg = t(
             "MV面（半径 {r:.1f} mm）と心尖部（MV 中心から {d:.0f} mm、壁厚 "
             "{w:.1f} mm）を自動設定しました。確認して、ずれていれば MV は MV Draw → "
             "MV Set、心尖部は交点を合わせて Apex Set で修正してください。").format(
                 r=float(res.radius), d=float(np.linalg.norm(apex.apex - res.center)),
-                w=float(apex.wall_mm)))
+                w=float(apex.wall_mm))
+        if str(getattr(apex, "message", "")).startswith("estimated"):
+            msg += "\n" + t(
+                "心尖部の外側に脂肪が見えないため（横隔膜・肝臓に接しているなど）、"
+                "心外膜側の心尖点は心内膜側の心尖点＋推定壁厚で設定しました。")
+        self._lvv_prompt(msg)
 
     def _lv_set_valve_result(self, which, res) -> None:
         self._lv_apply_valve_data(which, {

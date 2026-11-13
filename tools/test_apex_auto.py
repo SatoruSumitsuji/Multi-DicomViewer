@@ -82,10 +82,22 @@ vol[myo | la_wall | rv_wall] = 110.0
 vol[cav | la] = 420.0
 vol[rv] = 380.0
 vol[trab & cav] = 110.0
-vol = ndimage.gaussian_filter(vol, 0.7)
-vol += rng.normal(0, 20, vol.shape).astype(np.float32)
-vol = vol.astype(np.int16)
-del X, Y, Z, Pw, Q, h, qa, qb, rr, hn
+# Variant: the apex rests on the diaphragm / liver — soft tissue (no fat)
+# caps the apical epicardium, so no ray near the apex shows an epicardium.
+cap = (h > L_EPI - 14.0) & (h < L_EPI + 25.0) & (rr < 30.0) & ~myo & ~cav
+vol_cap = vol.copy()
+vol_cap[cap] = 70.0
+
+
+def _noisy(v):
+    v = ndimage.gaussian_filter(v, 0.7)
+    v += rng.normal(0, 20, v.shape).astype(np.float32)
+    return v.astype(np.int16)
+
+
+vol = _noisy(vol)
+vol_cap = _noisy(vol_cap)
+del X, Y, Z, Pw, Q, h, qa, qb, rr, hn, cap
 
 apex_true = C + L_EPI * a
 endo_true = C + L_ENDO * a
@@ -102,6 +114,49 @@ for label, c, n in (("exact", C, n_mv),
     chk(f"Apex {label}: epicardial apex ≤ 4 mm", d <= 4.0,
         f"{d:.1f} mm (wall {res.wall_mm:.1f} mm, {dt:.1f}s)")
     chk(f"Apex {label}: endocardial apex ≤ 6 mm", de <= 6.0, f"{de:.1f} mm")
+
+# ---- click-guided apex (MV+Apex Auto passes the user's rough apex click) ----
+# The MV normal may be far from the LV long axis; the click steers the search.
+# A result must stay near the click (≤ 30° / ≤ 35 mm) or it is rejected.
+n_lat = _unit(np.cos(np.deg2rad(40.0)) * n_mv - np.sin(np.deg2rad(40.0)) * ua)
+click_near = apex_true - 8.0 * a + 6.0 * ua + 4.0 * wa      # rough, ~10 mm off
+for label, v, n, tol in (("exact normal", vol, n_mv, 4.0),
+                         ("MV normal 40° off the long axis", vol, n_lat, 4.0),
+                         ("apex on the diaphragm (no apical fat)", vol_cap,
+                          n_mv, 6.0),
+                         ("diaphragm + MV normal 40° off", vol_cap, n_lat, 6.0)):
+    old = detect_apex(v, dims, C, n, toward=click_near)
+    res = detect_apex(v, dims, C, n, click=click_near)
+    d_old = float(np.linalg.norm(old.apex - apex_true)) if old.ok else float("nan")
+    d = float(np.linalg.norm(res.apex - apex_true))
+    chk(f"Apex click, {label}: found ≤ {tol:g} mm of the true apex",
+        res.ok and d <= tol,
+        f"{d:.1f} mm (old normal-cone search: {d_old:.1f} mm) {res.message}")
+# A click pointing away from any apex (into the RV side, 70° off the long
+# axis) must not return an apex far from the click.
+click_bad = C + 60.0 * _unit(np.cos(np.deg2rad(70.0)) * a - np.sin(np.deg2rad(70.0)) * wa)
+res = detect_apex(vol, dims, C, n_mv, click=click_bad)
+chk("Apex click far from any apex: rejected or near the click",
+    (not res.ok) or float(np.linalg.norm(res.apex - click_bad)) <= 35.0,
+    f"ok={res.ok} {res.message}")
+
+# The apex cut off by the field of view (volume cropped 20 mm short of it, on
+# the axis the LV long axis runs along most): the cavity runs out of the
+# image — no apex beyond the edge is invented.
+ax_i = int(np.argmax(np.abs(a)))                     # world axis (x, y, z)
+k3 = 2 - ax_i                                        # vol is [z, y, x]
+edge = int((apex_true[ax_i] - 20.0 * np.sign(a[ax_i])) / dims[ax_i])
+sl = [slice(None)] * 3
+off = np.zeros(3)
+if a[ax_i] > 0:
+    sl[k3] = slice(0, edge)
+else:
+    sl[k3] = slice(edge, None)
+    off[ax_i] = edge * dims[ax_i]
+vol_crop = np.ascontiguousarray(vol[tuple(sl)])
+res = detect_apex(vol_crop, dims, C - off, n_mv, click=click_near - off)
+chk("Apex click, apex outside the image: not invented beyond the edge",
+    not res.ok, f"ok={res.ok} {res.message}")
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)
