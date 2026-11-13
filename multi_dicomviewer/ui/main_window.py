@@ -2471,6 +2471,14 @@ class MainWindow(QMainWindow):
             return False
         if ok:
             self.coronary_overlay_refresh()
+            # ツリー登録 → CoronaryTreeモード on the CT that registered it.
+            v = (self._active.current_viewer()
+                 if getattr(self, "_active", None) is not None else None)
+            if v is not None and hasattr(v, "_ct_mode_auto"):
+                try:
+                    v._ct_mode_auto("coronary")
+                except Exception:                        # noqa: BLE001
+                    pass
         return ok
 
     def coronary_show_ct(self, series_uid: str, src_dir: str = "",
@@ -3404,12 +3412,54 @@ class MainWindow(QMainWindow):
                 name = os.path.basename(w.full_lv_path_for_series(uid) or "")
                 out["full"] = name or t("(ファイル名なし)")
             path = w.corotree_path_for_series(uid) or ""
-            if (path.lower().endswith(".corotree.json")
-                    and w.tree_vessels_for_series(uid)):
+            has_tree = bool(w.tree_vessels_for_series(uid))
+            if path.lower().endswith(".corotree.json") and has_tree:
                 out["tree"] = os.path.basename(path)
+            elif has_tree:
+                out["tree_mem"] = True       # registered, not yet saved
         except Exception:                                # noqa: BLE001
             pass
         return out
+
+    # ---- in-place CT modes (see CTModeBarMixin._ct_switch_inplace) ---------
+    def _ct_tree_dock_for(self, viewer):
+        """(dock, uid) when the Coronary Tree dock holds a tree with vessels
+        for the CT *viewer* shows, else (None, "")."""
+        w = getattr(self, "_corotree_win", None)
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        if w is None or not uid:
+            return None, ""
+        try:
+            if not w.tree_vessels_for_series(uid):
+                return None, ""
+        except Exception:                                # noqa: BLE001
+            return None, ""
+        return w, uid
+
+    def ct_tree_overlay_on(self, viewer):
+        """ツリー表示 state of the dock for *viewer*'s CT (None: no tree)."""
+        w, _uid = self._ct_tree_dock_for(viewer)
+        return None if w is None else bool(getattr(w, "_overlay_on", False))
+
+    def ct_tree_show(self, viewer, on: bool, raise_tab: bool = False) -> None:
+        """LVモード / CoronaryTreeモード: bring the CoronaryTree tab to the front
+        and set ツリー表示 for *viewer*'s CT (no-op without a tree)."""
+        w, uid = self._ct_tree_dock_for(viewer)
+        if w is None:
+            return
+        try:
+            u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+            if u and hasattr(w, "_use_uid"):
+                w._use_uid(u)
+            if raise_tab:
+                w.show()
+                w.raise_()
+            if bool(getattr(w, "_overlay_on", False)) != bool(on):
+                w._set_overlay(bool(on))
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
 
     def refresh_ct_mode_bars(self) -> None:
         """Re-sync every CT pane's mode buttons + file readout (after a FullLv /

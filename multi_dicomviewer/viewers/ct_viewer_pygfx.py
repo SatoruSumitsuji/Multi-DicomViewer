@@ -2310,7 +2310,7 @@ class _Overlay(QWidget):
         # word-wrapped so growing the font can't make them overlap the tags.
         # In LV mode, prepend the LV status / volume result lines.
         lines = list(v._metrics.get(key, []))
-        if v._lv is not None:
+        if v._lv is not None and not getattr(v, "_ct_lv_hidden", False):
             lines = v._lv_status_lines() + lines
         if lines:                            # _metrics is already per-item filtered
             p.setPen(QColor(255, 217, 0))   # yellow — match the other modalities
@@ -2449,6 +2449,8 @@ class _Overlay(QWidget):
         # LV volume breakdown readout (top-right, nested Epi ⊇ Endo ⊇ Blood):
         # Epi / Endo / Blood + LV Compact (Epi−Endo) + LV PapTned (Endo−Blood).
         lvv = getattr(v, "_lvv", None)
+        if getattr(v, "_ct_lv_hidden", False):     # Standard / CoronaryTree
+            lvv = None
         if lvv is not None:
             vlines = []
             epi_ml = (v._lvv_epi_volume_ml()
@@ -2986,6 +2988,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Coronary:CPR + filename); "lv" = a .FullLv drop (show the LV selector row +
         # filename). Reset to "both" on a fresh series. Parity with the VTK viewer.
         self._bottom_ctx = "both"
+        self._ct_mode_reset()            # in-place mode state (ct_mode_bar)
         self._coro_file_name = ""
         self._lv_file_name = ""
         # CT Territory targets (see the VTK viewer): markers + pick mode.
@@ -5667,6 +5670,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_target_mode = False
         # Fresh series → the full Coronary:CPR + LV: row again, no linked filenames.
         self._bottom_ctx = "both"
+        self._ct_mode_reset()            # in-place mode state (ct_mode_bar)
         self._coro_file_name = self._lv_file_name = ""
         if hasattr(self, "_coro_names"):
             try:
@@ -9157,7 +9161,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Public (shell): set / clear the Coronary Tree overlay and repaint. A
         *spec* is a list of {vid,name,points(world-mm),color,selected} or None
         to clear. Painting happens only in 3-D MPR (see _paint_coronary)."""
-        self._coro_overlay = spec or None
+        # Kept as requested; hidden (not dropped) in 標準モード — see
+        # CTModeBarMixin._ct_tree_apply.
+        self._coro_overlay_req = spec or None
+        self._coro_overlay = (None if getattr(self, "_ct_tree_suppressed", False)
+                              else (spec or None))
         try:
             for k in ("A", "B"):
                 if self._overlay.get(k) is not None:
@@ -12535,6 +12543,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _lv_update_submode_ui(self) -> None:
         if not hasattr(self, "_lv_grp_trace"):
             return
+        # An LV edit step (MV / AoV / Apex / Epi / Blood-Endo) → LVモード.
+        try:
+            if self._lv_mode_active():
+                self._ct_mode_auto("lv")
+        except Exception:                                # noqa: BLE001
+            pass
         sm = self._lv_current_submode()
         endoepi = sm in ("endo", "epi")
         blood = sm == "blood"
@@ -15407,6 +15421,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _full_lv_refresh_btn(self) -> None:
         """Enable/disable the FullLV button AND set a tooltip that NAMES what is
         still missing when it's greyed — so the reason is visible on hover."""
+        try:
+            self.refresh_ct_mode_bar()   # readout: 計測済み（保存済 / 未保存）
+        except Exception:                                # noqa: BLE001
+            pass
         b = getattr(self, "_full_lv_btn", None)
         if b is None:
             return
@@ -19372,6 +19390,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         self._coronary_mode = True
         self._coronary_mpr_pending = False
+        self._ct_mode_auto("coronary")      # CPR setting → CoronaryTreeモード
         # Freeze the view so showing the coronary/measure rows (which shrink the
         # image area) doesn't re-fit and shift the image on entry.
         self._view_initial = False

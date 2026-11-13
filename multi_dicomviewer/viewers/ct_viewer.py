@@ -3161,6 +3161,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # "lv" = a .FullLv drop → hide Coronary:CPR, show the LV selector row with
         # FullLV coloured + its filename. Reset to "both" on a fresh series.
         self._bottom_ctx = "both"
+        self._ct_mode_reset()            # in-place mode state (ct_mode_bar)
         self._coro_file_name = ""        # <name>.corotree.json shown next to CPR
         self._lv_file_name = ""          # <name>.FullLv.json shown next to FullLV
         # CT Territory targets: markers {n, point(world-mm), ml, pct, selected}
@@ -5533,6 +5534,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         comes from _lv_sync_buttons / _lvv_sync."""
         if not hasattr(self, "_lv_grp_trace"):
             return
+        # An LV edit step (MV / AoV / Apex / Epi / Blood-Endo) → LVモード.
+        try:
+            if self._lv_mode_active():
+                self._ct_mode_auto("lv")
+        except Exception:                                # noqa: BLE001
+            pass
         sm = self._lv_current_submode()               # 'endo'/'epi'/'blood'/None
         endoepi = sm in ("endo", "epi")
         blood = sm == "blood"
@@ -9737,6 +9744,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _full_lv_refresh_btn(self) -> None:
         """Enable/disable the FullLV button AND set a tooltip that NAMES what is
         still missing when it's greyed — so the reason is visible on hover."""
+        try:
+            self.refresh_ct_mode_bar()   # readout: 計測済み（保存済 / 未保存）
+        except Exception:                                # noqa: BLE001
+            pass
         b = getattr(self, "_full_lv_btn", None)
         if b is None:
             return
@@ -11931,7 +11942,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Public (shell): set / clear the Coronary Tree overlay and redraw. A
         *spec* is a list of {vid,name,points(world-mm),color,selected} or None
         to clear. No-op storage is cheap; drawing happens only in 3-D MPR."""
-        self._coro_overlay = spec or None
+        # Kept as requested; hidden (not dropped) in 標準モード — see
+        # CTModeBarMixin._ct_tree_apply.
+        self._coro_overlay_req = spec or None
+        self._coro_overlay = (None if getattr(self, "_ct_tree_suppressed", False)
+                              else (spec or None))
         try:
             for k in ("A", "B"):
                 if self._vr_on.get(k):           # VR pane draws 3-D tubes
@@ -13447,6 +13462,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # A fresh series → the bottom bar is the full Coronary:CPR + LV: row again,
         # with no linked-file names (a drop re-sets the context afterward).
         self._bottom_ctx = "both"
+        self._ct_mode_reset()            # in-place mode state (ct_mode_bar)
         self._coro_file_name = self._lv_file_name = ""
         if hasattr(self, "_coro_names"):
             try:
@@ -19250,6 +19266,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _lv_status_lines(self) -> list:
         """Result-block lines for LV mode: the computed volume result (if any),
         then the current tracing guidance. Empty when not in LV mode."""
+        # Standard / CoronaryTree mode: the LV results are kept but not shown.
+        if getattr(self, "_ct_lv_hidden", False):
+            return []
         # Blood sub-mode: show the measured volume in the SAME pane result block
         # as Endo/Epi (consistent overlay), labelled "Blood-Volume:".
         lvv = self._lvv
@@ -20133,6 +20152,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         self._coronary_mode = True
         self._coronary_mpr_pending = False
+        self._ct_mode_auto("coronary")      # CPR setting → CoronaryTreeモード
         # Freeze the view so showing the coronary/measure rows (which shrink the
         # image area) doesn't re-fit and shift the image on entry.
         self._view_initial = False

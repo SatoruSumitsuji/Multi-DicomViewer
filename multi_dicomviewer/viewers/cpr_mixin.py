@@ -705,6 +705,9 @@ class CPRMixin:
     def _cpr_tree_edit(self, which, sx, sy, mi, vid, gpos) -> None:
         """編集: the full edit menu on the line. A Coronary Tree vessel is
         resumed first (short-axis rebuilt, the vessel remembered for Save)."""
+        # The tree is view-only in LVモード: editing a line → CoronaryTreeモード.
+        if hasattr(self, "_ct_mode_auto"):
+            self._ct_mode_auto("coronary")
         if vid is not None and getattr(self, "_coro_resume_cb", None) is not None:
             try:
                 self._coro_resume_cb(vid)
