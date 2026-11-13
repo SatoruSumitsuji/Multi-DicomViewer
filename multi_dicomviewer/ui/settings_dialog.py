@@ -287,6 +287,30 @@ class SettingsDialog(QDialog):
             lvform.addRow(label, sb)
         root.addWidget(gb_lv)
 
+        # ---- LV Epi HU補正範囲 ---------------------------------------------
+        # ± band (mm) around the traced Epi spline within which Epi HU補正 may
+        # move the border; the same band is drawn on the long-axis pane while
+        # tracing, so the user can see how far the snap reaches.
+        gb_epi = QGroupBox(t("LV Epi HU補正範囲"))
+        epiform = QFormLayout(gb_epi)
+        epinote = QLabel(t(
+            "Epi HU補正で境界を動かせる範囲（スプライン線から短軸の半径方向に±）。"
+            "Epi トレース中、右ペインの長軸画像にこの幅の帯を表示します。"
+            "広げると心膜・肺静脈・肺の境界に引き寄せられやすくなります。既定 ±4.0 mm。"))
+        epinote.setWordWrap(True)
+        epiform.addRow(epinote)
+        self._epi_hu_range_combo = QComboBox()
+        for i in range(19):                       # 1.0 … 10.0 mm, 0.5 mm steps
+            mm = 1.0 + 0.5 * i
+            self._epi_hu_range_combo.addItem(f"± {mm:.1f} mm", mm)
+        cur = float(lv.get("epi_hu_range_mm", 4.0))
+        ci = int(round((min(10.0, max(1.0, cur)) - 1.0) / 0.5))
+        self._epi_hu_range_combo.setCurrentIndex(ci)
+        self._epi_hu_range_combo.setToolTip(t(
+            "Epi HU補正範囲（±mm）。この範囲の外にある HU の境界は使いません。"))
+        epiform.addRow(t("LV Epi HU補正範囲"), self._epi_hu_range_combo)
+        root.addWidget(gb_epi)
+
         # ---- LV wall-thickness colour bands (壁厚) -------------------------
         gb_wall = QGroupBox(t("LV wall thickness colour (壁厚)"))
         wform = QFormLayout(gb_wall)
@@ -545,11 +569,13 @@ class SettingsDialog(QDialog):
 
     def lv_endo(self) -> dict:
         """Chosen Auto-Endo params (method / min_chord_mm / n_meridians /
-        grid_mm / step_mm)."""
+        grid_mm / step_mm) + the LV Epi HU補正範囲 (epi_hu_range_mm)."""
         out = {"method": self._lv_method_combo.currentData() or "hull_smooth"}
         for k, sb in self._lv_spins.items():
             v = sb.value()
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
+        out["epi_hu_range_mm"] = float(
+            self._epi_hu_range_combo.currentData() or 4.0)
         return out
 
     def mouse_grid_layout(self) -> list:

@@ -586,8 +586,13 @@ _LV_ENDO_DEFAULTS = {
     "n_meridians": 240,    # 放射: number of radial directions
     "grid_mm": 0.7,        # mask sampling pitch (smaller = finer/slower)
     "step_mm": 0.45,       # display outline sampling pitch
+    # LV Epi HU補正範囲: ± band (mm) around the Epi spline where the HU snap may
+    # move the border (1.0–10.0, 0.5 steps; snapped on load/save). Also drawn as
+    # the band on the long-axis pane while tracing.
+    "epi_hu_range_mm": 4.0,
 }
 _LV_ENDO_RANGES = {       # (min, max) sanity clamps — numeric keys only
+    "epi_hu_range_mm": (1.0, 10.0),
     "close_mm": (1, 20),
     "min_chord_mm": (1.0, 30.0),
     "n_meridians": (60, 720),
@@ -612,10 +617,31 @@ def load_lv_endo_params() -> dict:
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     lo, hi = _LV_ENDO_RANGES[k]
                     vv = max(lo, min(hi, v))
+                    if k == "epi_hu_range_mm":
+                        vv = round(vv * 2.0) / 2.0      # 0.5 mm steps
                     out[k] = int(vv) if isinstance(dv, int) else float(vv)
     except (OSError, ValueError):
         pass
     return out
+
+
+_EPI_HU_RANGE_CACHE: list = [None, None]   # [mtime_ns, value]
+
+
+def lv_epi_hu_range_mm() -> float:
+    """Settings → 「LV Epi HU補正範囲」 (± mm). Cached on the settings file's
+    mtime — the long-axis band is redrawn on every mouse move, so this must not
+    re-parse the JSON each time; a Settings OK (file rewrite) is picked up."""
+    try:
+        mt = LV_ENDO_PATH.stat().st_mtime_ns
+    except OSError:
+        mt = -1
+    if _EPI_HU_RANGE_CACHE[0] != mt or _EPI_HU_RANGE_CACHE[1] is None:
+        _EPI_HU_RANGE_CACHE[0] = mt
+        _EPI_HU_RANGE_CACHE[1] = float(
+            load_lv_endo_params().get("epi_hu_range_mm",
+                                      _LV_ENDO_DEFAULTS["epi_hu_range_mm"]))
+    return _EPI_HU_RANGE_CACHE[1]
 
 
 def save_lv_endo_params(params: dict) -> None:
@@ -634,6 +660,8 @@ def save_lv_endo_params(params: dict) -> None:
                 vv = max(lo, min(hi, float(v)))
             except (TypeError, ValueError):
                 vv = dv
+            if k == "epi_hu_range_mm":
+                vv = round(vv * 2.0) / 2.0              # 0.5 mm steps
             out[k] = int(vv) if isinstance(dv, int) else float(vv)
         out["version"] = 1
         LV_ENDO_PATH.parent.mkdir(parents=True, exist_ok=True)

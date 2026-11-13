@@ -13,6 +13,12 @@ area profile is read from the LVOT to the ascending aorta. The annulus (the
 BASE of the sinus-of-Valsalva bulge: just below where the area starts to rise
 into the sinus. (After Elattar et al., Int J Cardiovasc Imaging 2016, who split
 LVOT / sinus / STJ on the root's cross-sectional shape along its centreline.)
+The plane's TILT is then set on the sinus alone: the axis about which the root
+sections above the annulus are symmetric (centroids on one line along it) —
+the plane ⊥ it is where the three cusps (LCC / RCC / NCC) look alike, i.e. the
+plane through the three cusp nadirs. The first-guess axis (sections ±12 mm
+around the click) includes the LVOT, which runs at an angle to the root with
+the LV, and tilted the plane towards it.
 
 MV (detect_mv): the annulus is the hinge line of the leaflets, where the LA and
 LV walls meet at the AV junction; the annular plane is the least-squares plane
@@ -232,6 +238,79 @@ def _closed_blood_roi(vol, dims, c, thr):
     return roi, o
 
 
+#: Sinus axis (AoV): sections ⊥ a candidate axis every 1 mm from
+#: _AOV_SINUS_H[0] to [1] mm above the annulus; candidates within
+#: _AOV_AXIS_MAX_DEG of the first-guess axis.
+_AOV_SINUS_H = (1.0, 20.0)
+_AOV_AXIS_MAX_DEG = 30.0
+
+
+def _aov_axis_cost(vol, dims, p, a, thr, cs):
+    """How far the sinus sections ⊥ *a* are from being centred on one line
+    parallel to *a* (mm², trimmed mean); inf when too few sections close."""
+    a = _unit(a)
+    D = []
+    for h in np.arange(_AOV_SINUS_H[0], _AOV_SINUS_H[1] + 1e-6, 1.0):
+        q = p + h * a
+        _ar, cen, opn, _r = cs(vol, dims, q, a, thr, nray=36, step=0.6)
+        if opn > _TUBE_OPEN:
+            continue
+        d = cen - q
+        D.append(d - np.dot(d, a) * a)
+    if len(D) < 8:
+        return np.inf, np.zeros(3)
+    D = np.asarray(D)
+    off = np.median(D, axis=0)
+    e = np.sum((D - off) ** 2, axis=1)
+    e = np.sort(e)[: max(6, int(round(0.8 * len(e))))]   # leaflet glitches out
+    return float(e.mean()), off
+
+
+def _aov_sinus_axis(vol, dims, p, a, thr, cs):
+    """(point, axis): the axis about which the root's sections are symmetric —
+    their centroids on one line along it — i.e. the plane ⊥ it shows the three
+    cusps alike. Searched directly (coarse grid in a cone, then finer), not by
+    re-slicing along the centroid line: around the sinus bulge a tilted
+    section's centroid shifts towards the wider side, so that iteration runs
+    away. *p* is moved onto the axis at its own level."""
+    p = np.asarray(p, float)
+    a0 = _unit(a)
+    u, w = _frame(a0)
+    lim = np.tan(np.deg2rad(_AOV_AXIS_MAX_DEG))
+
+    def cand(tx, ty):
+        return _unit(a0 + tx * u + ty * w)
+    best = (np.inf, 0.0, 0.0, np.zeros(3))
+    g = np.tan(np.deg2rad(np.arange(-_AOV_AXIS_MAX_DEG, _AOV_AXIS_MAX_DEG + 0.01, 6.0)))
+    for tx in g:
+        for ty in g:
+            if tx * tx + ty * ty > lim * lim + 1e-9:
+                continue
+            c, off = _aov_axis_cost(vol, dims, p, cand(tx, ty), thr, cs)
+            if c < best[0]:
+                best = (c, tx, ty, off)
+    if not np.isfinite(best[0]):
+        return p, a0
+    for stp in (3.0, 1.5, 0.75):
+        d = np.tan(np.deg2rad(stp))
+        c0, tx0, ty0 = best[0], best[1], best[2]
+        for dx in (-d, 0.0, d):
+            for dy in (-d, 0.0, d):
+                if dx == 0.0 and dy == 0.0:
+                    continue
+                tx, ty = tx0 + dx, ty0 + dy
+                if tx * tx + ty * ty > lim * lim + 1e-9:
+                    continue
+                c, off = _aov_axis_cost(vol, dims, p, cand(tx, ty), thr, cs)
+                if c < best[0]:
+                    best = (c, tx, ty, off)
+    a_best = cand(best[1], best[2])
+    if _DEBUG:
+        print("sinus axis: cost", round(best[0], 3), "tilt from first guess",
+              round(float(np.degrees(np.arccos(np.clip(np.dot(a_best, a0), -1, 1)))), 1))
+    return p + best[3], a_best
+
+
 def detect_aov(vol, dims, click_mm, lv_hint_mm=None) -> ValveResult:
     """Aortic annulus plane from a rough click in / near the aortic root.
     *lv_hint_mm* (optional, e.g. the MV centre or apex) tells which way along
@@ -360,6 +439,12 @@ def _detect_aov_core(vol, dims, c, thr, lv_hint_mm) -> ValveResult:
     cand = mid[As[mid] <= lim]
     i_ann = int(cand.max()) if len(cand) else i_min
     _s, _a, p, d, _o = prof[i_ann]
+    # The axis so far came from sections ±12 mm around the click, LVOT
+    # included — but the LVOT (with the LV) runs at an angle to the root, which
+    # tilted the plane towards it. The annulus plane is ⊥ the SINUS axis (the
+    # plane where the three cusps look alike): re-fit the axis on the sinus
+    # sections only, above the annulus level found.
+    p, d = _aov_sinus_axis(vol, dims, p, _unit(n * (-lv_sign)), thr, _cs)
     a, cen, _o, rad = _cs(vol, dims, p, d, thr)
     u, w = _frame(d)
     th = np.linspace(0.0, 2 * np.pi, len(rad), endpoint=False)

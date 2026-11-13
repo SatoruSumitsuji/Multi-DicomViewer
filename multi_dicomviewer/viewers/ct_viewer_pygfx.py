@@ -2233,6 +2233,17 @@ class _Overlay(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawPolyline(poly(_band))
 
+        # LV Epi trace: the HU補正 band (± Settings → LV Epi HU補正範囲) around
+        # the Epi spline, faint green dotted — how far Epi HU補正 can move it.
+        _ebands = v._lv_epi_band_2d(key)
+        if _ebands:
+            _pen = QPen(QColor(46, 139, 87, 150), 1.2)
+            _pen.setStyle(Qt.PenStyle.DotLine)
+            p.setPen(_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for _bc in _ebands:
+                p.drawPolyline(poly(_bc))
+
         d = v._draft
         if d and d["pane"] == key and d["pts"]:
             hover = v._meas_hover
@@ -17062,6 +17073,44 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         lv["target"] = lv.get("pass")           # resume tracing this pass
         self._lv_sax_btn.setChecked(False)
 
+    def _lv_epi_band_2d(self, key) -> list:
+        """HU補正 band of the Epi line(s) on the LV long-axis pane *key*, as 2-D
+        polylines in that pane's output frame: the draft being traced + the
+        committed Epi border of the CURRENT plane, offset ± Settings → LV Epi
+        HU補正範囲 along the short-axis radial direction (core.epi_band_curves).
+        Shown only while tracing Epi and until Epi HU補正 has run."""
+        lv = self._lv
+        if (lv is None or lv.get("phase") != "contour"
+                or lv.get("target") != "epi" or key != lv.get("pane")):
+            return []
+        model = lv.get("model")
+        axis = getattr(model, "epi_axis", None)
+        if axis is None or getattr(model, "epi_hu_done", False):
+            return []
+        srcs = []
+        d = self._draft
+        if (d and d.get("pane") == key and d.get("type") == "polyline"
+                and len(d.get("pts", [])) >= 2):
+            srcs.append([self._out_to_world3d(key, *q) for q in d["pts"]])
+        for m in self._measures.get(key, []):
+            tag = m.get("_lv")
+            if (tag and tag[1] == "epi" and tag[0] == lv.get("plane_idx")
+                    and len(m.get("pts3d", [])) >= 2):
+                srcs.append(m["pts3d"])
+        if not srcs:
+            return []
+        try:
+            from multi_dicomviewer.core import lv_epi_autocontour as ea
+            from multi_dicomviewer.core import settings as _st
+            rng = _st.lv_epi_hu_range_mm()
+            out = []
+            for P in srcs:
+                for c in ea.epi_band_curves(axis, P, rng):
+                    out.append([self._world3d_to_out(key, q) for q in c])
+            return out
+        except Exception:                                # noqa: BLE001
+            return []
+
     def _lv_capture_current(self) -> None:
         lv = self._lv
         if lv is None or lv.get("phase") != "contour":
@@ -18692,7 +18741,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         QApplication.setOverrideCursor(_Qt.CursorShape.WaitCursor)
         try:
             from multi_dicomviewer.core import lv_epi_autocontour as ea
-            stats = ea.refine_epi_model(self._vol, self._dims, model)
+            from multi_dicomviewer.core import settings as _st
+            # Settings → LV Epi HU補正範囲 (± mm around the Epi spline).
+            prm = ea.epi_snap_params(_st.lv_epi_hu_range_mm())
+            stats = ea.refine_epi_model(self._vol, self._dims, model, prm)
             # …then straight into the short-axis spline on the DEFAULT rings
             # (apex excluded, 8 levels) → sparse edit points, not a dense line.
             sp = ea.refine_epi_short_axis(self._vol, self._dims, model,

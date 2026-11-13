@@ -50,6 +50,75 @@ class EpiSnapParams:
     outside_hu: float = -1000.0    # HU returned for samples outside the volume
 
 
+#: Settings → 「LV Epi HU補正範囲」: ± half-width (mm) of the HU snap band around
+#: the traced Epi spline, 1.0–10.0 mm in 0.5 mm steps. Default = the original
+#: max_move_mm (4.0).
+EPI_HU_RANGE_DEFAULT_MM = 4.0
+EPI_HU_RANGE_MIN_MM = 1.0
+EPI_HU_RANGE_MAX_MM = 10.0
+EPI_HU_RANGE_STEP_MM = 0.5
+
+
+def clamp_epi_hu_range(v) -> float:
+    """Clamp + snap a ± range value to [1, 10] mm on the 0.5 mm grid."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return EPI_HU_RANGE_DEFAULT_MM
+    if not np.isfinite(x):
+        return EPI_HU_RANGE_DEFAULT_MM
+    x = max(EPI_HU_RANGE_MIN_MM, min(EPI_HU_RANGE_MAX_MM, x))
+    return round(x / EPI_HU_RANGE_STEP_MM) * EPI_HU_RANGE_STEP_MM
+
+
+def epi_snap_params(range_mm=EPI_HU_RANGE_DEFAULT_MM) -> EpiSnapParams:
+    """EpiSnapParams for a ± HU補正範囲 of *range_mm*: an edge is accepted only
+    within ±range of the trace (max_move_mm), and the HU profile is read 2 mm
+    beyond that (≥ the original 6 mm) so the edge test's median window still
+    sees the far side. range 4.0 → exactly the original defaults."""
+    w = clamp_epi_hu_range(range_mm)
+    reach = max(6.0, w + 2.0)
+    return EpiSnapParams(search_in_mm=reach, search_out_mm=reach,
+                         max_move_mm=w)
+
+
+def epi_band_curves(axis, pts3d, range_mm, prm=None, per_seg=8):
+    """The HU補正 band of a traced Epi line, for display: the curves the snap can
+    reach at most, i.e. the trace offset by ±range along the SHORT-AXIS RADIAL
+    direction (the direction detect_epi_radius searches — not the curve normal),
+    inner side clamped at the search floor (r_min/2). Points nearer the axis than
+    r_min (apex region, never corrected) break the band.
+
+    *pts3d*: the trace's control points (N,3) world mm; densified with the same
+    centripetal Catmull-Rom the border uses. Returns a list of (M,3) arrays (inner
+    and outer runs; each run ≥ 2 points)."""
+    prm = prm or epi_snap_params(range_mm)
+    w = clamp_epi_hu_range(range_mm)
+    P = np.asarray(pts3d, float).reshape(-1, 3)
+    if axis is None or len(P) < 2:
+        return []
+    dense = _cr_densify_3d(P, per_seg=per_seg) if len(P) >= 3 else P
+    floor = prm.r_min_mm * 0.5
+    runs, cur_in, cur_out = [], [], []
+
+    def _flush():
+        for c in (cur_in, cur_out):
+            if len(c) >= 2:
+                runs.append(np.asarray(c, float))
+        cur_in.clear()
+        cur_out.clear()
+
+    for q in dense:
+        along, radius, theta = axis.project(q)
+        if radius < prm.r_min_mm:
+            _flush()
+            continue
+        cur_in.append(axis.to_world(theta, max(floor, radius - w), along))
+        cur_out.append(axis.to_world(theta, radius + w, along))
+    _flush()
+    return runs
+
+
 def sample_hu(vol, dims, pts, outside=-1000.0):
     """Trilinear HU at world-mm *pts* ((N,3)); world = voxel·spacing, origin 0,
     array indexed ``vol[z, y, x]``. Points outside the volume → *outside*."""

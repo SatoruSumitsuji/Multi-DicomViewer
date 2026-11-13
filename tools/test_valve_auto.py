@@ -55,7 +55,7 @@ def mv_coords():
     return h, np.sqrt(a * a + b * b), np.arctan2(b, a)
 
 
-def build(LV_PEAK, LEAFLETS):
+def build(LV_PEAK, LEAFLETS, LVOT_TILT=0.0, CROWN=0.0):
     global n_ao, u_ao, w_ao, C_ao, R_ann
     h, r, phi = mv_coords()
     hs = 2.0 * np.cos(2.0 * phi)                                # saddle height
@@ -78,24 +78,37 @@ def build(LV_PEAK, LEAFLETS):
     n_ao = _unit(n_mv + 0.8 * u_mv)
     u_ao, w_ao = _frame(n_ao)
     C_ao = C_mv + 34.0 * u_mv - 4.0 * n_mv
+    # The annulus plane (the virtual basal ring through the three cusp nadirs)
+    # is ⊥ the sinus axis n_ao: there the three cusps look alike. The LVOT
+    # below runs LVOT_TILT° off it (real hearts: the LVOT / LV axis and the
+    # root differ). The sinus bulge starts at the leaflet hinge line: ON the
+    # annulus plane at each cusp's nadir (psi = 0, ±120°, the sinus centres)
+    # and CROWN mm higher at the commissures.
+    tr = np.deg2rad(LVOT_TILT)
+    n_lvot = _unit(np.cos(tr) * n_ao + np.sin(tr) * w_ao)
     Qa = Pw - C_ao.astype(np.float32)
     ta = Qa @ n_ao.astype(np.float32)
     aa = Qa @ u_ao.astype(np.float32)
     ba = Qa @ w_ao.astype(np.float32)
     ra = np.sqrt(aa * aa + ba * ba)
     psi = np.arctan2(ba, aa)
+    tl = Qa @ n_lvot.astype(np.float32)
     R_ann = 12.0
-    r_lvot = np.where(ta < 0, 11.0 + 1.0 * np.clip(1 + ta / 10.0, 0, 1), R_ann)
-    bul = np.where((ta >= 0) & (ta <= 20),
-                   4.5 * np.sin(np.pi * np.clip(ta, 0, 20) / 20.0)
-                   * (1.0 + 0.35 * np.cos(3 * psi)), 0.0)
-    r_root = np.where(ta < 0, r_lvot, np.where(ta <= 20, R_ann + bul, 13.0))
-    aorta = (ra < r_root) & (ta > -26.0) & (ta < 60.0)
-    del Qa, aa, ba, psi
+    s_b = CROWN * (1.0 - np.cos(3 * psi)) / 2.0
+    top = 20.0
+    f = np.clip((ta - s_b) / np.maximum(top - s_b, 1.0), 0, 1)
+    bul = np.where((ta >= s_b) & (ta <= top),
+                   4.5 * np.sin(np.pi * f) * (1.0 + 0.35 * np.cos(3 * psi)), 0.0)
+    below = ta < 0                                          # LVOT
+    rl = np.sqrt(np.maximum(np.sum(Qa * Qa, axis=-1) - tl * tl, 0.0))
+    r_lvot = 11.0 + 1.0 * np.clip(1 + tl / 10.0, 0, 1)
+    r_root = np.where(below, r_lvot, np.where(ta <= top, R_ann + bul, 13.0))
+    aorta = (np.where(below, rl, ra) < r_root) & (tl > -26.0) & (ta < 60.0)
+    del Qa, aa, ba, psi, rl, f, bul, s_b, tl
 
     # Walls: THICK LV myocardium (10 mm) that ends at the annulus, THIN LA wall
     # (2 mm), thin aortic wall; epicardial fat everywhere else.
-    lv_cav = lv_blood | (aorta & (ta < 0))
+    lv_cav = lv_blood | (aorta & below)
     myo_lv = ((ndimage.distance_transform_edt(~lv_cav, sampling=S) <= 10.0)
               & (h < hs + 1.5))
     la_wall = ndimage.distance_transform_edt(~la_blood, sampling=S) <= 2.0
@@ -189,6 +202,10 @@ def coapt_curtain(v):
 
 
 vol_coapt = finish(coapt_curtain(build(15.5, True)))
+# Realistic aortic root: the LVOT 20° off the sinus axis, crown-shaped hinge
+# line (commissures 8 mm above the nadirs).
+vol_root_dia = finish(build(24.0, False, LVOT_TILT=20.0, CROWN=8.0))
+vol_root_sys = finish(build(15.5, True, LVOT_TILT=20.0, CROWN=8.0))
 del X, Y, Z, Pw
 
 
@@ -219,21 +236,27 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
         chk(f"{tag}: radius within 2.5 mm of {Ra}", abs(res.radius - Ra) <= 2.5,
             f"{res.radius:.1f} mm, {len(res.points)} pts, {dt:.1f}s")
 
-for label, v in (("diastole", vol_dia), ("systole", vol_sys)):
+# AoV truth = the annulus plane (through the three nadirs, ⊥ the sinus axis:
+# the three cusps look alike) — n_ao. With the LVOT 20° off, the old axis
+# (centroids of sections ±12 mm, LVOT included) leaned towards the LVOT.
+nt = n_ao
+for label, v in (("diastole", vol_dia), ("systole", vol_sys),
+                 ("diastole, LVOT 20° off + crown", vol_root_dia),
+                 ("systole, LVOT 20° off + crown", vol_root_sys)):
     for click in (C_ao + 7.0 * n_ao + 3.0 * u_ao, C_ao + 2.0 * n_ao - 3.0 * w_ao,
                   C_ao + 8.0 * n_ao,                 # ON the coaptation centre
                   C_ao + 5.0 * n_ao + 6.0 * u_ao):   # inside one cusp's sinus
         t0 = time.time()
         res = detect_aov(v, dims, click)
         dt = time.time() - t0
-        a = ang(res.normal, n_ao)
+        a = ang(res.normal, nt)
         # the centre may slide a little along the axis; judge in-plane and axial
         dv = res.center - C_ao
-        ax_err = abs(float(np.dot(dv, n_ao)))
-        rad_err = float(np.linalg.norm(dv - np.dot(dv, n_ao) * n_ao))
+        ax_err = abs(float(np.dot(dv, nt)))
+        rad_err = float(np.linalg.norm(dv - np.dot(dv, nt) * nt))
         tag = f"AoV {label}, click {np.round(click - C_ao, 1)}"
         chk(f"{tag}: found", res.ok, res.message)
-        chk(f"{tag}: axis angle ≤ 6°", a <= 6.0, f"{a:.1f}°")
+        chk(f"{tag}: annulus plane angle ≤ 6°", a <= 6.0, f"{a:.1f}°")
         chk(f"{tag}: centre in-plane ≤ 2 mm", rad_err <= 2.0, f"{rad_err:.1f} mm")
         chk(f"{tag}: annulus level ≤ 3 mm", ax_err <= 3.0, f"{ax_err:.1f} mm")
         chk(f"{tag}: radius within 2 mm of {R_ann}", abs(res.radius - R_ann) <= 2.0,
