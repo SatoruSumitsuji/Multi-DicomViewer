@@ -1218,6 +1218,12 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
                     and self._owner._cpr_context_menu(
                         e.position().x(), e.position().y())):
                 return
+            # The MV / AoV line (detected outline or ring) → 描き直す menu.
+            _vh = self._owner._lv_valve_hit(
+                self._which, e.position().x(), e.position().y())
+            if _vh is not None:
+                self._owner._lv_valve_menu(self._which, _vh)
+                return
             # A CPR line of the tree (overlay line, or a CPR line of this
             # session other than the one being edited) → the short 編集 / 名前
             # menu, the same with Measure on or off.
@@ -1330,7 +1336,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # MV/AoV valve-edit draws a TRUE CIRCLE (正円) by default — the annulus
             # is modelled as a circle, so force the constraint on while editing a
             # valve without needing Shift (Shift still forces it elsewhere).
-            _valve = getattr(self._owner, "_lv_valve_edit", None) is not None
+            _valve = (getattr(self._owner, "_lv_valve_edit", None) is not None
+                      and self._owner._lv_valve_redraw is None)
             self._owner._meas_circle = _sh or _valve
             self._owner._meas_ortho = _sh
             started = self._owner._measure_left(
@@ -1431,7 +1438,8 @@ class _PaneCanvas(QVTKRenderWindowInteractor):
             # Keep the draw-constraint live so the Shift 縦横/正円 preview tracks
             # the modifier during the drag, not only at press.
             _sh = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
-            _valve = getattr(self._owner, "_lv_valve_edit", None) is not None
+            _valve = (getattr(self._owner, "_lv_valve_edit", None) is not None
+                      and self._owner._lv_valve_redraw is None)
             self._owner._meas_ortho = _sh
             self._owner._meas_circle = _sh or _valve   # valve annulus = 正円
             self._owner._measure_drag(
@@ -3043,6 +3051,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Common valve planes (MV / AoV) shared by Endo/Epi/Blood as the LV base.
         # Each is (centre_xyz, normal_xyz, radius) in volume mm, or None.
         self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_redraw = None   # MV/AoV redraw disarmed
         #: Valve-edit sub-mode ("mitral"/"aortic"/None). When set, the LV bar
         #: shows that valve's Draw/Confirm/Save/Load/Clear/Exit row and greys the
         #: other sub-modes (guided MV/AoV setup — see _lv_enter_valve).
@@ -5358,6 +5367,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Drop the common MV/AoV planes (+ their rings) and every Blood/Epi/Endo
         stash so the LV setup is blank after Exit."""
         self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_redraw = None   # MV/AoV redraw disarmed
         self._lv_valve_shown = {"mitral": True, "aortic": True}
         self._lv_valve_saved_sig = {}
         self._lv_saved_sig = {}
@@ -8055,7 +8065,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._redraw_meas(k)
         self._lv_update_valve_buttons()
 
-    def _lv_view_mv_perpendicular(self, reset_cam=True) -> None:
+    def _lv_view_mv_perpendicular(self, reset_cam=True,
+                                  which="mitral") -> None:
         """Reorient both panes to view the MV plane perpendicular: the LEFT pane
         (A) looks straight down the MV normal → the MV ring is a true CIRCLE
         face-on; the RIGHT pane (B) contains the MV normal → the MV ring is a
@@ -8063,7 +8074,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for setting the Epi/Endo base against the mitral annulus.
         reset_cam=False keeps the CURRENT zoom (no auto fit) — used by the
         automatic re-orient on entering an Endo/Epi align."""
-        mv = self._lv_valves.get("mitral")
+        mv = self._lv_valves.get(which)       # MV (or AoV: redraw)
         if mv is None or self._image is None:
             return
         c = np.asarray(mv[0], float)
@@ -15408,6 +15419,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if d["type"] == "polyline" and d.get("pts3d") \
                 and len(d["pts3d"]) == len(pts):
             rec["pts3d"] = list(d["pts3d"])
+        if self._lv_valve_redraw_commit(d["pane"], rec):
+            return                       # MV / AoV redraw (no measure)
         self._measures[d["pane"]].append(rec)
         self._redraw_meas(d["pane"])
         if meas_before is not None:                  # general-Measure create undo
@@ -15440,7 +15453,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         d = self._draft
         if d and d["type"] in ("polyline", "polygon") \
                 and len(d["pts"]) >= 2:
+            redraw = self._lv_valve_redraw_wants(d["type"])
             self._commit_draft()
+            if redraw:
+                return                           # MV / AoV redraw, not a border
             # LV EF: a finished border is captured to the current target and the
             # per-plane sequence advances endo → epi (both on THIS plane before
             # the user steps to the next long-axis plane).
@@ -16106,6 +16122,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # annotations are all in the OLD series' coordinates). Was the reported
         # "contours/regions show on a fresh CT with nothing loaded" bug.
         self._lv_valves = {"mitral": None, "aortic": None}
+        self._lv_valve_redraw = None   # MV/AoV redraw disarmed
         self._lv_valve_shown = {"mitral": True, "aortic": True}
         # The COMMON apex is in the OLD series' coordinates too — clear it, or a
         # freshly loaded series shows an apex the user never set/loaded (its
@@ -16277,6 +16294,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr = None                         # drop any short-axis session
         self._lv = None                          # drop any LV EF session
         self._lv_valves = {"mitral": None, "aortic": None}   # new series → clear
+        self._lv_valve_redraw = None   # MV/AoV redraw disarmed
         self._lv_valve_shown = {"mitral": True, "aortic": True}
         self._lvv = None                         # drop LV blood-pool session
         self._lvv_epi_surf = None                # a new series invalidates the Epi

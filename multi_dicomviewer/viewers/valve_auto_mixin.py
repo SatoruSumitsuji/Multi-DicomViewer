@@ -18,7 +18,12 @@ result):
 While a procedure runs (waiting for a click, or detecting) the Auto button has
 an orange frame; Esc or Auto again cancels. Results go through
 _lv_apply_valve_data (same ring / caches as Load) and are marked unsaved.
-Manual correction = MV / AoV Draw → Set and Apex Set (crossing).
+Manual correction = MV / AoV Draw → Set and Apex Set (crossing), or a
+right-click on the MV / AoV line (the detected outline or the ring) →
+「Ellipseで描き直す」/「Polygonで描き直す」: pane A turns face-on to that valve,
+the drawn shape sets the plane like Auto does (centre = area centroid, normal =
+the pane it was drawn on, radius = the equal-area circle) and replaces the
+outline. One Ctrl+Z step; Esc cancels.
 
 MV+Apex Save / Load / Clear / Hide act on both: an .MVLv.json and an
 .ApxLv.json of the same name in one folder.
@@ -53,6 +58,8 @@ class _AutoRunning:
 
 class ValveAutoMixin:
     _lv_valve_auto_seed_v = None             # (which, "mv"|"apex"|"aov", MV mm)
+    #: Right-click redraw armed: {"which", "kind", "meas_on", "type"} or None.
+    _lv_valve_redraw = None
 
     @property
     def _lv_valve_auto_seed(self):
@@ -184,6 +191,9 @@ class ValveAutoMixin:
 
     def _lv_pick_escape(self) -> bool:
         """Esc while an Auto procedure runs → cancel. True when consumed."""
+        if self._lv_valve_redraw is not None:
+            self._lv_valve_redraw_cancel()
+            return True
         if self._lv_auto_pending():
             self._lv_pick_cancel()
             return True
@@ -1011,3 +1021,243 @@ class ValveAutoMixin:
                 "_lv_valve": which, "_lv_valve_auto": True,
                 "transp": 30, "hidden": hidden})
             self._redraw_meas(k)
+
+    # ------------------------------------ right-click redraw of the MV / AoV
+    # Right-click on the MV / AoV line → 「Ellipseで描き直す」/「Polygonで描き直す」.
+    # A finished Polygon sets the plane at once. An Ellipse (2 clicks = the
+    # major axis, minor axis by its handles) stays as a magenta shape to adjust,
+    # then its right-click 「このEllipseで…面を設定」 sets the plane; a new
+    # Ellipse replaces it. The plane comes out like Auto's: centre = the area
+    # centroid, normal = the pane it was drawn on, radius = the equal-area
+    # circle; the drawn outline replaces the detected one. Esc cancels.
+    _LV_VALVE_HIT_PX = 6.0
+
+    def _lv_screen_dist(self, pane, m, sx, sy, closed=True) -> float:
+        """On-screen distance (px) from (sx, sy) to measure m's outline."""
+        proj = getattr(self, "_world_to_qt", None) or getattr(
+            self, "_world_to_screen", None)
+        try:
+            q = [proj(pane, p[0], p[1]) for p in self._outline(m)]
+        except Exception:                                # noqa: BLE001
+            return float("inf")
+        if len(q) < 2:
+            return float("inf")
+        q = np.asarray(q + ([q[0]] if closed else []), float)
+        a, d = q[:-1], q[1:] - q[:-1]
+        L2 = np.maximum((d * d).sum(1), 1e-12)
+        p = np.array([float(sx), float(sy)])
+        tt = np.clip(((p - a) * d).sum(1) / L2, 0.0, 1.0)
+        return float(np.min(np.linalg.norm(a + d * tt[:, None] - p, axis=1)))
+
+    def _lv_valve_shape(self):
+        """(pane, index) of the redraw Ellipse waiting to be set, else None."""
+        rd = self._lv_valve_redraw
+        if rd is None or rd.get("shape_id") is None:
+            return None
+        pane = rd["pane"]
+        for mi, m in enumerate(self._measures.get(pane, [])):
+            if m.get("id") == rd["shape_id"]:
+                return pane, mi
+        return None
+
+    def _lv_valve_hit(self, pane, sx, sy):
+        """Right-click target: ("shape", None) on the redraw Ellipse waiting to
+        be set (outline or a handle), ("line", 'mitral' / 'aortic') on a shown
+        MV / AoV line (the detected outline or the ring), else None. Not while a
+        shape is being drawn (the right-click then finishes the draft)."""
+        if getattr(self, "_draft", None) is not None:
+            return None
+        tol = self._LV_VALVE_HIT_PX
+        sh = self._lv_valve_shape()
+        if sh is not None and sh[0] == pane:
+            m = self._measures[pane][sh[1]]
+            if self._lv_screen_dist(pane, m, sx, sy) < tol:
+                return ("shape", None)
+            try:
+                h = self._pick_handle(pane, sx, sy)
+            except Exception:                            # noqa: BLE001
+                h = None
+            if h is not None and h[0] == sh[1]:
+                return ("shape", None)
+        vs = getattr(self, "_lv_valves", None) or {}
+        best, hit = tol, None
+        for m in reversed(self._measures.get(pane, [])):
+            w = m.get("_lv_valve")
+            if (w not in ("mitral", "aortic") or vs.get(w) is None
+                    or m.get("hidden") or m.get("_bulk_hidden")):
+                continue
+            dist = self._lv_screen_dist(pane, m, sx, sy)
+            if dist < best:
+                best, hit = dist, w
+        return None if hit is None else ("line", hit)
+
+    def _lv_valve_menu(self, pane, hit) -> None:
+        """Right-click menu of _lv_valve_hit's target."""
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        if hit[0] == "shape":
+            rd = self._lv_valve_redraw
+            v = "MV" if rd["which"] == "mitral" else "AoV"
+            a_set = menu.addAction(t("このEllipseで{v}面を設定").format(v=v))
+            a_cancel = menu.addAction(t("描き直しを中止"))
+            ch = menu.exec(QCursor.pos())
+            if ch is a_set:
+                sh = self._lv_valve_shape()
+                if sh is not None:
+                    self._lv_valve_redraw_apply(
+                        sh[0], self._measures[sh[0]][sh[1]])
+            elif ch is a_cancel:
+                self._lv_valve_redraw_cancel()
+            return
+        which = hit[1]
+        v = "MV" if which == "mitral" else "AoV"
+        a_el = menu.addAction(t("{v}をEllipseで描き直す").format(v=v))
+        a_pg = menu.addAction(t("{v}をPolygonで描き直す").format(v=v))
+        ch = menu.exec(QCursor.pos())
+        if ch is a_el:
+            self._lv_valve_redraw_start(which, "ellipse")
+        elif ch is a_pg:
+            self._lv_valve_redraw_start(which, "polygon")
+
+    def _lv_valve_redraw_start(self, which, kind) -> None:
+        """Arm the redraw: pane A face-on to the valve (pane B edge-on), the
+        Ellipse (free, not forced round) or Polygon type armed, Measure on."""
+        if self._lv_valves.get(which) is None:
+            return
+        if self._lv_valve_redraw is not None:
+            self._lv_valve_shape_drop()
+        elif self._lv_auto_pending():
+            self._lv_pick_cancel(prompt=False)
+        prev = self._lv_valve_redraw
+        self._lv_valve_redraw = {
+            "which": which, "kind": kind,
+            "meas_on": (prev["meas_on"] if prev else bool(self._meas_on)),
+            "type": (prev["type"] if prev
+                     else getattr(self, "_meas_type", None)),
+            "shape_id": None, "pane": None}
+        try:
+            self._lv_view_mv_perpendicular(which=which)
+        except Exception:                                # noqa: BLE001
+            pass
+        self._set_measure_type(kind)
+        if not self._meas_on:
+            self._meas_btn.setChecked(True)
+            self._toggle_measure()
+        v = "MV" if which == "mitral" else "AoV"
+        if kind == "ellipse":
+            msg = t("{v}の弁輪を Ellipse で描き、ハンドルで形を合わせてから、"
+                    "Ellipse を右クリック →「このEllipseで{v}面を設定」。"
+                    "描いた画面の向きが{v}面になります。Esc で中止。")
+        else:
+            msg = t("{v}の弁輪を Polygon で描いてください（ダブルクリックか右クリックで"
+                    "完了）。描いた画面の向きが{v}面になります。Esc で中止。")
+        self._lvv_prompt(msg.format(v=v))
+
+    def _lv_valve_shape_drop(self) -> None:
+        """Remove the redraw Ellipse waiting to be set (if any)."""
+        sh = self._lv_valve_shape()
+        if sh is not None:
+            del self._measures[sh[0]][sh[1]]
+            self._redraw_meas(sh[0])
+        if self._lv_valve_redraw is not None:
+            self._lv_valve_redraw["shape_id"] = None
+
+    def _lv_valve_redraw_end(self, rd) -> None:
+        """Back to the Measure state from before the redraw."""
+        if rd["meas_on"]:
+            self._set_measure_type(rd["type"])
+        elif self._meas_on:
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+
+    def _lv_valve_redraw_cancel(self) -> None:
+        if self._lv_valve_redraw is None:
+            return
+        self._lv_valve_shape_drop()
+        rd, self._lv_valve_redraw = self._lv_valve_redraw, None
+        self._lv_valve_redraw_end(rd)
+        self._lvv_prompt(t("描き直しを中止しました。"))
+
+    def _lv_valve_redraw_wants(self, dtype) -> bool:
+        rd = self._lv_valve_redraw
+        return rd is not None and rd["kind"] == dtype
+
+    @staticmethod
+    def _lv_valve_plane_2d(P):
+        """(centroid (2,), area mm²) of the closed 2-D outline P (N, 2)."""
+        P = np.asarray(P, float).reshape(-1, 2)
+        x, y = P[:, 0], P[:, 1]
+        x1, y1 = np.roll(x, -1), np.roll(y, -1)
+        cr = x * y1 - x1 * y
+        a = 0.5 * float(cr.sum())
+        if abs(a) < 1e-9:
+            return P.mean(0), 0.0
+        cx = float(((x + x1) * cr).sum()) / (6.0 * a)
+        cy = float(((y + y1) * cr).sum()) / (6.0 * a)
+        return np.array([cx, cy]), abs(a)
+
+    def _lv_valve_redraw_commit(self, pane, rec) -> bool:
+        """A finished draft while the redraw is armed (called by _commit_draft
+        before the shape becomes a measure). Polygon → the plane at once.
+        Ellipse → kept as the magenta shape to adjust (not a Measure-History
+        figure), replacing an earlier one. True = consumed."""
+        if not self._lv_valve_redraw_wants(rec.get("type")):
+            return False
+        rd = self._lv_valve_redraw
+        if rec["type"] == "ellipse":
+            self._lv_valve_shape_drop()
+            rec["color"] = self._LV_VALVE_AUTO_COLOR
+            rec["_lv_vredraw"] = rd["which"]
+            self._measures[pane].append(rec)
+            rd["shape_id"], rd["pane"] = rec["id"], pane
+            self._redraw_meas(pane)
+            v = "MV" if rd["which"] == "mitral" else "AoV"
+            self._lvv_prompt(t(
+                "ハンドルで形を合わせ、Ellipse を右クリック →"
+                "「このEllipseで{v}面を設定」。Esc で中止。").format(v=v))
+            return True
+        self._lv_valve_redraw_apply(pane, rec)
+        return True
+
+    def _lv_valve_redraw_apply(self, pane, rec) -> None:
+        """Set the valve plane from the drawn shape rec on pane (see above)."""
+        rd = self._lv_valve_redraw
+        if rd is None:
+            return
+        which = rd["which"]
+        Q = [tuple(map(float, q)) for q in self._outline(rec)]
+        if len(Q) >= 2 and np.allclose(Q[0], Q[-1]):
+            Q = Q[:-1]
+        cen2, area = self._lv_valve_plane_2d(Q)
+        self._lv_valve_shape_drop()
+        self._lv_valve_redraw = None
+        if len(Q) < 3 or area < 1.0:
+            self._redraw_meas(pane)
+            self._lv_valve_redraw_end(rd)
+            self._lvv_prompt(t("図形が小さすぎます。描き直しを中止しました。"))
+            return
+        before = self._lv_vset_snap()
+        c = np.asarray(self._out_to_world3d(pane, cen2[0], cen2[1]), float)
+        n = np.asarray(self._axes_for(pane)[2], float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        r = float(np.sqrt(area / np.pi))
+        self._lv_valves[which] = (c, n, r)
+        self._lv_valve_shown[which] = True
+        self._lv_valve_show_from_geom(which)      # the ring; old outline removed
+        self._lv_valve_saved_sig[which] = None    # redrawn: unsaved
+        step = max(1, len(Q) // 64)
+        P3 = np.array([self._out_to_world3d(pane, q[0], q[1])
+                       for q in Q[::step]], float)
+        from types import SimpleNamespace
+        self._lv_valve_auto_contour(
+            which, SimpleNamespace(points=P3, center=c, normal=n))
+        self._lv_valve_redraw_end(rd)
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+        self._lv_on_valve_changed(which)
+        self._lv_vset_record(before)              # Ctrl+Z / Ctrl+Y
+        v = "MV" if which == "mitral" else "AoV"
+        self._lvv_prompt(t(
+            "{v}面を描き直した図形から設定しました（半径 {r:.1f} mm）。"
+            "Ctrl+Z で戻せます。").format(v=v, r=r))
