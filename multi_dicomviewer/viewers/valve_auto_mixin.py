@@ -1024,7 +1024,9 @@ class ValveAutoMixin:
 
     # ------------------------------------ right-click redraw of the MV / AoV
     # Right-click on the MV / AoV line → 「Ellipseで描き直す」/「Polygonで描き直す」.
-    # A finished Polygon sets the plane at once. An Ellipse (2 clicks = the
+    # That valve's outline and ring are taken off the image while the new
+    # outline is drawn (in magenta); the ring comes back once the plane is set
+    # (on cancel, the old ones come back). A finished Polygon sets the plane at once. An Ellipse (2 clicks = the
     # major axis, minor axis by its handles) stays as a magenta shape to adjust,
     # then its right-click 「このEllipseで…面を設定」 sets the plane; a new
     # Ellipse replaces it. The plane comes out like Auto's: centre = the area
@@ -1127,6 +1129,7 @@ class ValveAutoMixin:
             return
         if self._lv_valve_redraw is not None:
             self._lv_valve_shape_drop()
+            self._lv_valve_lines_hide(self._lv_valve_redraw["which"], False)
         elif self._lv_auto_pending():
             self._lv_pick_cancel(prompt=False)
         prev = self._lv_valve_redraw
@@ -1136,6 +1139,7 @@ class ValveAutoMixin:
             "type": (prev["type"] if prev
                      else getattr(self, "_meas_type", None)),
             "shape_id": None, "pane": None}
+        self._lv_valve_lines_hide(which, True)
         try:
             self._lv_view_mv_perpendicular(which=which)
         except Exception:                                # noqa: BLE001
@@ -1153,6 +1157,20 @@ class ValveAutoMixin:
             msg = t("{v}の弁輪を Polygon で描いてください（ダブルクリックか右クリックで"
                     "完了）。描いた画面の向きが{v}面になります。Esc で中止。")
         self._lvv_prompt(msg.format(v=v))
+
+    def _lv_valve_lines_hide(self, which, on) -> None:
+        """Take this valve's outline + ring off the image for the redraw (on)
+        or bring back only what the redraw hid (off)."""
+        for k in ("A", "B"):
+            for m in self._measures.get(k, []):
+                if m.get("_lv_valve") != which:
+                    continue
+                if on and not m.get("hidden"):
+                    m["hidden"] = True
+                    m["_lv_redraw_hid"] = True
+                elif not on and m.pop("_lv_redraw_hid", False):
+                    m["hidden"] = False
+            self._redraw_meas(k)
 
     def _lv_valve_shape_drop(self) -> None:
         """Remove the redraw Ellipse waiting to be set (if any)."""
@@ -1176,6 +1194,7 @@ class ValveAutoMixin:
             return
         self._lv_valve_shape_drop()
         rd, self._lv_valve_redraw = self._lv_valve_redraw, None
+        self._lv_valve_lines_hide(rd["which"], False)
         self._lv_valve_redraw_end(rd)
         self._lvv_prompt(t("描き直しを中止しました。"))
 
@@ -1232,6 +1251,7 @@ class ValveAutoMixin:
         cen2, area = self._lv_valve_plane_2d(Q)
         self._lv_valve_shape_drop()
         self._lv_valve_redraw = None
+        self._lv_valve_lines_hide(which, False)   # (undo keeps the old look)
         if len(Q) < 3 or area < 1.0:
             self._redraw_meas(pane)
             self._lv_valve_redraw_end(rd)

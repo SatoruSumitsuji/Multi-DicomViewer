@@ -2277,8 +2277,12 @@ class _Overlay(QWidget):
                     p.drawLine(S(pts[-1]), S(hover))
                 dots(pts, QColor(255, 217, 0), 4.0)
             else:
-                # Yellow DASHED preview of the draft-in-progress.
-                pen = QPen(QColor(244, 208, 63), 1.2)
+                # Yellow DASHED preview of the draft-in-progress (magenta,
+                # thicker, while the MV / AoV outline is redrawn).
+                if getattr(v, "_lv_valve_redraw", None) is not None:
+                    pen = QPen(QColor(v._LV_VALVE_AUTO_COLOR), 2.0)
+                else:
+                    pen = QPen(QColor(244, 208, 63), 1.2)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 p.setPen(pen)
                 p.setBrush(Qt.BrushStyle.NoBrush)

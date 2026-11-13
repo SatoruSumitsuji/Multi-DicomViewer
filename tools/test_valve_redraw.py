@@ -193,6 +193,10 @@ picks[:] = ["MVをPolygonで描き直す"]
 v._lv_valve_menu("A", ("line", "mitral"))
 check("Polygon redraw armed: Measure on, Polygon type, pane A face-on",
       v._meas_on and v._meas_type == "polygon" and v.views == ["mitral"])
+mv_lines = lambda: [m for k in ("A", "B") for m in v._measures[k]  # noqa: E731
+                    if m.get("_lv_valve") == "mitral"]
+check("redraw armed: the MV outline + ring taken off the image",
+      mv_lines() and all(m.get("hidden") for m in mv_lines()))
 sq = [(5.0, 5.0), (25.0, 5.0), (25.0, 25.0), (5.0, 25.0)]   # centred (15, 15)
 check("an Ellipse while Polygon is armed is a plain measure",
       v.commit("A", "ellipse", ellipse_from_major((0, 0), (4, 0))) == "measure")
@@ -217,6 +221,8 @@ outl = [m for m in v._measures["A"] if m.get("_lv_valve_auto")]
 check("the drawn outline replaced the detected one (same magenta tag)",
       len(outl) == 1 and np.allclose(np.mean(outl[0]["pts3d"], 0)[:2], [15, 15],
                                      atol=1.5))
+check("plane set: the new ring + outline shown",
+      mv_lines() and not any(m.get("hidden") for m in mv_lines()))
 check("Measure back off (as before the redraw), redraw disarmed",
       not v._meas_on and v._lv_valve_redraw is None)
 v.undo[0][0]()
@@ -262,10 +268,18 @@ check("the waiting Ellipse is gone; Measure back to Line",
 # ---- Esc cancels (and drops a waiting Ellipse); AoV the same
 before = v._lv_valves["mitral"]
 v._lv_valves["aortic"] = (np.array([30, 0, 10.0]), np.array([0, 0, 1.0]), 10.0)
+v._lv_valve_show_from_geom("aortic")
 picks[:] = ["AoVをEllipseで描き直す"]
 v._lv_valve_menu("A", ("line", "aortic"))
 v.commit("A", "ellipse", ellipse_from_major((20.0, 0.0), (40.0, 0.0)))
+ao_lines = lambda: [m for k in ("A", "B") for m in v._measures[k]  # noqa: E731
+                    if m.get("_lv_valve") == "aortic"]
+check("AoV redraw: only the AoV lines hidden",
+      all(m.get("hidden") for m in ao_lines())
+      and not any(m.get("hidden") for m in mv_lines()))
 check("Esc consumed", v._lv_pick_escape())
+check("Esc: the old AoV lines come back",
+      ao_lines() and not any(m.get("hidden") for m in ao_lines()))
 check("Esc: nothing set, the waiting Ellipse removed",
       v._lv_valves["mitral"] is before and np.allclose(v._lv_valves["aortic"][0],
                                                        [30, 0, 10])
@@ -294,6 +308,9 @@ for fn, n_circle in (("ct_viewer.py", 2), ("ct_viewer_pygfx.py", 3)):
           "redraw = self._lv_valve_redraw_wants(d[\"type\"])" in s)
     check(f"{fn}: no forced 正円 during a redraw",
           len(re.findall(r"_lv_valve_redraw is None\)", s)) == n_circle)
+    check(f"{fn}: the redraw draft is drawn in magenta",
+          "_lv_valve_redraw\", None) is not None:" in s
+          and "_LV_VALVE_AUTO_COLOR" in s)
     check(f"{fn}: face-on view for either valve",
           'mv = self._lv_valves.get(which)' in s)
 

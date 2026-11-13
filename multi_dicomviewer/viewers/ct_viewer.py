@@ -11847,6 +11847,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 if lv_trace:
                     draft_col = ((211, 47, 47) if self._lv["target"] == "endo"
                                  else (46, 139, 87))
+            if getattr(self, "_lv_valve_redraw", None) is not None:
+                draft_col = _hex_to_rgb(self._LV_VALVE_AUTO_COLOR)  # MV/AoV redraw
             handles += list(d["pts"])
         # LV Epi trace: the HU補正 band (± Settings → LV Epi HU補正範囲) around
         # the Epi spline, faint green 点線 — how far Epi HU補正 can move it.
