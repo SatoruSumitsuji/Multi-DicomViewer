@@ -602,6 +602,157 @@ def _ring_centroid(P, c, n):
     return c + cx * u + cy * w
 
 
+#: In-plane annulus outline (_mv_inplane_ring): on the fitted MV plane the
+#: orifice is the blood region around the MV-centre click, bounded by a DARK
+#: rim (annulus myocardium / AV-groove fat). Polar image around an origin
+#: (slab-averaged ±_RING_SLAB_MM), cost low where bright blood inside meets a
+#: WIDE dark band outside; one closed, continuous path (dynamic programming,
+#: ≤ _RING_MAX_STEP_MM radius change per angle step) follows the rim — thin
+#: leaflet lines inside (dark but narrow) cost more than the rim, and a gap in
+#: the rim (aorto-mitral continuity) is bridged by the continuity.
+_RING_NTH = 96
+_RING_STEP = 0.5
+_RING_R = (6.0, 32.0)
+_RING_SLAB_MM = 1.5
+_RING_IN_MM = 2.0
+_RING_OUT_MM = 3.0
+_RING_MAX_STEP_MM = 1.5
+_RING_MIN_EDGE = 0.30        # mean rim contrast (0–1) for a usable outline
+_RING_MAX_SHIFT_MM = 6.0     # outline centroid ≤ this from the MV-centre click
+
+
+def _mv_inplane_ring(vol, dims, origin, n, thr):
+    """(points (N,3), mean edge 0–1) of the dark-rim outline on the plane
+    (origin, n) around *origin*, or (None, 0)."""
+    u, w = _frame(n)
+    th = np.linspace(0.0, 2.0 * np.pi, _RING_NTH, endpoint=False)
+    rs = np.arange(0.0, _RING_R[1] + _RING_OUT_MM + 1e-6, _RING_STEP)
+    dirs = np.cos(th)[:, None] * u + np.sin(th)[:, None] * w      # (T, 3)
+    acc = np.zeros((len(th), len(rs)))
+    hs = np.linspace(-_RING_SLAB_MM, _RING_SLAB_MM, 5)
+    for h in hs:
+        P = origin + h * n + rs[None, :, None] * dirs[:, None, :]
+        acc += _sample(vol, dims, P)
+    img = ndimage.gaussian_filter(acc / len(hs), (0.8, 1.0), mode=("wrap", "nearest"))
+    s = np.clip((img - thr) / 160.0 + 0.5, 0.0, 1.0)              # 1 blood, 0 wall
+    ni = max(1, int(round(_RING_IN_MM / _RING_STEP)))
+    no = max(1, int(round(_RING_OUT_MM / _RING_STEP)))
+    cs = np.concatenate([np.zeros((len(th), 1)), np.cumsum(s, axis=1)], axis=1)
+    j0 = int(round(_RING_R[0] / _RING_STEP))
+    j1 = int(round(_RING_R[1] / _RING_STEP))
+    J = np.arange(j0, j1 + 1)
+    s_in = (cs[:, J] - cs[:, J - ni]) / ni
+    s_out = (cs[:, J + 1 + no] - cs[:, J + 1]) / no
+    j2 = int(round(2.0 / _RING_STEP))
+    fill = (cs[:, J] - cs[:, j2:j2 + 1]) / np.maximum(J - j2, 1)  # blood 2 mm → r
+    edge = s_in - s_out
+    cost = (1.0 - edge) + 0.7 * (1.0 - fill)
+    # closed path: DP over two laps, the second lap's path is used
+    T, R = cost.shape
+    k = max(1, int(round(_RING_MAX_STEP_MM / _RING_STEP)))
+    shifts = range(-k, k + 1)
+    D = cost[0].copy()
+    back = np.zeros((2 * T, R), int)
+    for t in range(1, 2 * T):
+        best = np.full(R, np.inf)
+        arg = np.zeros(R, int)
+        for d in shifts:
+            prev = np.full(R, np.inf)
+            if d >= 0:
+                prev[d:] = D[:R - d] if d else D
+            else:
+                prev[:d] = D[-d:]
+            val = prev + 0.05 * abs(d)
+            better = val < best
+            best[better] = val[better]
+            arg[better] = (np.arange(R) - d)[better]
+        D = best + cost[t % T]
+        back[t] = arg
+    path = np.zeros(2 * T, int)
+    path[-1] = int(np.argmin(D))
+    for t in range(2 * T - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+    lap = path[T:]
+    order = np.arange(T, 2 * T) % T
+    r_of = np.zeros(T)
+    r_of[order] = (J[lap]) * _RING_STEP
+    e_mean = float(np.mean(edge[order, lap]))
+    if not np.all(np.isfinite(r_of)):
+        return None, 0.0
+    pts = origin + r_of[:, None] * dirs
+    return pts, e_mean
+
+
+def _polygon_area_centroid(P, c, n):
+    """(area mm², centroid) of the closed outline P (in order) on the plane."""
+    u, w = _frame(n)
+    Q = P - c
+    x, y = Q @ u, Q @ w
+    x1, y1 = np.roll(x, -1), np.roll(y, -1)
+    cr = x * y1 - x1 * y
+    a2 = float(cr.sum())
+    if abs(a2) < 1e-6:
+        return 0.0, c
+    cx = float(((x + x1) * cr).sum()) / (3.0 * a2)
+    cy = float(((y + y1) * cr).sum()) / (3.0 * a2)
+    return 0.5 * abs(a2), c + cx * u + cy * w
+
+
+def _inside_outline(P, c, n, q):
+    """Is point q (projected on the plane) inside the outline P (star-shaped
+    around c, in angle order)?"""
+    u, w = _frame(n)
+    Q = P - c
+    ang = np.arctan2(Q @ w, Q @ u)
+    rad = np.hypot(Q @ u, Q @ w)
+    d = np.asarray(q, float) - c
+    a, r = float(np.arctan2(d @ w, d @ u)), float(np.hypot(d @ u, d @ w))
+    i = int(np.argmin(np.abs(np.angle(np.exp(1j * (ang - a))))))
+    return r <= rad[i]
+
+
+def mv_refine_outline(vol, dims, res, click_mm, thr=None):
+    """Replace a found MV plane's ring by the dark-rim outline on that plane
+    (see _mv_inplane_ring): the click must lie inside it. Two passes, the
+    second around the first outline's centroid. Returns a new ValveResult
+    (normal kept), or *res* unchanged when no usable outline is found."""
+    if res is None or not res.ok:
+        return res
+    vol = np.asarray(vol)
+    n = _unit(res.normal)
+    c0 = np.asarray(res.center, float)
+    click = np.asarray(click_mm, float)
+    clk = click - float(np.dot(click - c0, n)) * n               # on the plane
+    if thr is None:
+        thr = blood_threshold(vol, dims, c0)
+    best = None
+    # Around the user's MV-centre click only (not the hinge fit's centre, which
+    # may have drifted): the outline must contain the click and its centroid
+    # stay within _RING_MAX_SHIFT_MM of it — the centre never wanders off.
+    for origin in (clk,):
+        o = origin
+        for _pass in range(2):
+            pts, e = _mv_inplane_ring(vol, dims, o, n, thr)
+            if pts is None:
+                break
+            area, cen = _polygon_area_centroid(pts, o, n)
+            rad = float(np.sqrt(max(area, 1.0) / np.pi))
+            ok = (e >= _RING_MIN_EDGE and _MV_R_RANGE[0] <= rad <= _MV_R_RANGE[1]
+                  and _inside_outline(pts, o, n, clk)
+                  and float(np.linalg.norm(cen - clk)) <= _RING_MAX_SHIFT_MM)
+            if ok and (best is None or e > best[1]):
+                best = (pts, e, cen, rad)
+            if not ok:
+                break
+            o = cen
+    if best is None:
+        return res
+    pts, e, cen, rad = best
+    return ValveResult(cen, n, rad, points=pts,
+                       weights=np.full(len(pts), float(e)), ok=True,
+                       message="outline")
+
+
 def detect_mv(vol, dims, mv_mm, apex_mm, iters=4) -> ValveResult:
     """Mitral annulus plane from a rough MV-centre click and a rough apex (it
     only seeds the first rotation axis; later passes rotate around the fitted
@@ -993,7 +1144,27 @@ def _mv_quality(res, mv_mm=None, axis=None):
     return (len(res.points), float(np.mean(res.weights)) if len(res.weights) else 0.0)
 
 
-def detect_mv_refined(vol, dims, mv_mm, apex_mm, rounds=3):
+def detect_mv_refined(vol, dims, mv_mm, apex_mm, rounds=3, outline=True):
+    """detect_mv_refined_hinges (the annulus PLANE from the hinge points),
+    then — *outline* — the ring on that plane redrawn along the dark rim
+    around the MV-centre click (mv_refine_outline: centre / radius / traced
+    points from the outline; the plane normal kept). When the outline moves
+    the centre, the apex is searched again from the new centre.
+    Returns (ValveResult, ApexResult or None)."""
+    res, apex = detect_mv_refined_hinges(vol, dims, mv_mm, apex_mm, rounds)
+    if not outline or res is None or not res.ok:
+        return res, apex
+    out = mv_refine_outline(vol, dims, res, mv_mm)
+    if out is res:
+        return res, apex
+    if apex is not None and float(np.linalg.norm(out.center - res.center)) > 1.0:
+        a = detect_apex(vol, dims, out.center, out.normal, click=apex_mm)
+        if a.ok and float(np.linalg.norm(a.apex - out.center)) >= 20.0:
+            apex = a
+    return out, apex
+
+
+def detect_mv_refined_hinges(vol, dims, mv_mm, apex_mm, rounds=3):
     """detect_mv, then re-run it seeded by its own result: the centre from the
     fitted plane and the rough apex replaced by detect_apex on that plane (on
     the side of the apex click), until the centre settles (< 0.3 mm). A suspect

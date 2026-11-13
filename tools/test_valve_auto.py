@@ -221,6 +221,12 @@ vol_laa_sys = finish(build(15.5, True, AO_DIST=26.0, LAA=1.0))
 # line (commissures 8 mm above the nadirs).
 vol_root_dia = finish(build(24.0, False, LVOT_TILT=20.0, CROWN=8.0))
 vol_root_sys = finish(build(15.5, True, LVOT_TILT=20.0, CROWN=8.0))
+# LAA ostium right AT the annulus height (for the dark-rim outline checks).
+# Built LAST (the random noise of the volumes above stays as it was) and the
+# aortic-root truth of the root volumes is kept for the AoV checks.
+_ao_truth = (C_ao, n_ao, u_ao, w_ao, R_ann)
+vol_laa0 = finish(build(24.0, False, AO_DIST=26.0, LAA=0.0001))
+C_ao, n_ao, u_ao, w_ao, R_ann = _ao_truth
 del X, Y, Z, Pw
 
 
@@ -304,6 +310,8 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
             f"{ang(res.normal, n_mv):.1f}°, {e_c:.1f} mm, r {res.radius:.1f}")
         chk(f"{tag}: radius within 2.5 mm of {Ra}", abs(res.radius - Ra) <= 2.5,
             f"{res.radius:.1f} mm, {len(res.points)} pts")
+        chk(f"{tag}: ring = the dark-rim outline on the plane",
+            res.message == "outline", res.message)
         # The phantom's apex lies beyond the volume: the click-guided search
         # may then report "outside the image" (None) — never an LA point.
         chk(f"{tag}: apex never in the LA (LV side, or none: beyond the image)",
@@ -316,6 +324,55 @@ for label, v in (("diastole", vol_dia), ("systole", vol_sys),
         (not res.ok) or (8.0 <= res.radius <= 28.0
                          and float(np.linalg.norm(res.center - far)) <= 15.0),
         f"ok={res.ok} r={res.radius:.1f}")
+
+# ---- dark-rim outline (real data: the hinge ring came out far too SMALL — a
+# sliver at one side of the orifice). From a bad ring on the right plane (centre
+# 7 mm off toward the rim, radius 8) the outline around the MV-centre click
+# recovers the orifice: centre ≤ 2 mm, radius within 2 mm, every outline point
+# within 3 mm of the true rim (no leak into the LA appendage / aortic root).
+from multi_dicomviewer.core.valve_auto import ValveResult, mv_refine_outline  # noqa: E402
+
+for label, v in (("diastole", vol_dia), ("systole", vol_sys),
+                 ("systole+coaptation", vol_coapt),
+                 ("diastole+LAA", vol_laa_dia), ("systole+LAA", vol_laa_sys),
+                 ("diastole, LAA ostium at the annulus", vol_laa0)):
+    for k, bad_off in enumerate((7.0 * u_mv, -7.0 * w_mv, 6.0 * w_mv)):
+        bad = ValveResult(C_mv + bad_off, n_mv, 8.0,
+                          points=np.zeros((6, 3)), weights=np.ones(6))
+        click = C_mv + np.array([2.0, -1.5, 1.0])
+        out = mv_refine_outline(v, dims, bad, click)
+        q = out.points - C_mv
+        rr = np.linalg.norm(q - np.outer(q @ n_mv, n_mv), axis=1)
+        e_c = float(np.linalg.norm((out.center - C_mv)
+                                   - np.dot(out.center - C_mv, n_mv) * n_mv))
+        tag = f"outline {label}, bad ring #{k}"
+        chk(f"{tag}: outline found", out.message == "outline", out.message)
+        chk(f"{tag}: centre in-plane ≤ 2 mm", e_c <= 2.0, f"{e_c:.1f} mm")
+        chk(f"{tag}: radius within 2 mm of {Ra}", abs(out.radius - Ra) <= 2.0,
+            f"{out.radius:.1f} mm")
+        chk(f"{tag}: every point within 3 mm of the rim",
+            float(np.max(np.abs(rr - Ra))) <= 3.0,
+            f"{float(np.min(rr)):.1f}–{float(np.max(rr)):.1f} mm")
+# The centre follows the CLICK, not a drifted fit: from a fit whose centre is
+# 9 mm off (a sliver at one side) and a click 4 mm off the true centre, the
+# outline centre lands on the orifice (≤ 2 mm) — within 6 mm of the click.
+for label, v in (("diastole", vol_dia), ("systole+LAA", vol_laa_sys)):
+    for off in (4.0 * u_mv, -4.0 * w_mv):
+        bad = ValveResult(C_mv + 9.0 * w_mv, n_mv, 8.0,
+                          points=np.zeros((6, 3)), weights=np.ones(6))
+        out = mv_refine_outline(v, dims, bad, C_mv + off)
+        e_c = float(np.linalg.norm(out.center - C_mv))
+        chk(f"outline {label}, click {np.round(off, 1)} off, fit 9 mm off: "
+            f"centre ≤ 2 mm, ≤ 6 mm from the click",
+            out.message == "outline" and e_c <= 2.0
+            and float(np.linalg.norm(out.center - (C_mv + off))) <= 6.0,
+            f"{e_c:.1f} mm, r {out.radius:.1f}")
+# A click outside any orifice (in the fat beyond the rim) → no outline: the
+# ring is left as it was.
+bad = ValveResult(C_mv, n_mv, 15.0, points=np.zeros((6, 3)), weights=np.ones(6))
+out = mv_refine_outline(vol_dia, dims, bad, C_mv + 40.0 * w_mv)
+chk("outline: click outside the orifice → ring unchanged", out is bad,
+    out.message)
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)
