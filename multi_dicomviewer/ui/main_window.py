@@ -2853,43 +2853,6 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
 
-    def on_full_lv_created(self, full) -> bool:
-        """A CT viewer just saved a FullLv bundle. If a Coronary Tree with vessels
-        is already loaded, feed it in and start the territory review on the CURRENT
-        CT (no re-drop). Returns True if the review was started."""
-        w = getattr(self, "_corotree_win", None)
-        if w is None or not hasattr(w, "load_full_lv"):
-            return False
-        # 案A: make the panel's active CT follow the pane that created this FullLv
-        # so the territory attaches to THAT CT's vessel tree, not whichever was
-        # last active in the panel.
-        pane = self._active
-        su = pane.shown_series_uid() if pane is not None else ""
-        if su and hasattr(w, "uid_for_series") and hasattr(w, "_use_uid"):
-            u = w.uid_for_series(su)
-            if u:
-                w._use_uid(u)
-        if getattr(w, "_tree", None) is None or not w._tree.vessels:
-            return False                                 # no tree → just save
-        try:
-            if not w.load_full_lv(full):
-                return False
-        except Exception:                                # noqa: BLE001
-            return False
-        if hasattr(w, "_set_overlay"):
-            try:
-                w._set_overlay(True)                     # overlay ON (+ show CT)
-            except Exception:                            # noqa: BLE001
-                pass
-        v = self._active.current_viewer() if self._active is not None else None
-        if v is not None and hasattr(v, "apply_full_lv"):
-            try:
-                v.apply_full_lv(full)
-            except Exception:                            # noqa: BLE001
-                import traceback
-                traceback.print_exc()
-        return True
-
     # ===================== LV editable open / save (reused by Territory) =====
     @staticmethod
     def _full_lv_to_files(full_data) -> dict:
@@ -3410,7 +3373,13 @@ class MainWindow(QMainWindow):
         try:
             if w.full_lv_for_series(uid):
                 name = os.path.basename(w.full_lv_path_for_series(uid) or "")
-                out["full"] = name or t("(ファイル名なし)")
+                if name:
+                    out["full"] = name
+                else:
+                    out["full_mem"] = True   # from the in-session LV (no file)
+            if hasattr(w, "territory_for_series") and \
+                    w.territory_for_series(uid):
+                out["terr"] = True
             path = w.corotree_path_for_series(uid) or ""
             has_tree = bool(w.tree_vessels_for_series(uid))
             if path.lower().endswith(".corotree.json") and has_tree:
@@ -3436,6 +3405,120 @@ class MainWindow(QMainWindow):
         except Exception:                                # noqa: BLE001
             return None, ""
         return w, uid
+
+    # ---- Territory (in place; see CTModeBarMixin._ct_territory_enter) ------
+    def ct_territory_compute(self, viewer) -> bool:
+        """「Territory計算」 (CoronaryTreeモード): compute the perfusion territory
+        for *viewer*'s CT from its in-session LV (a FullLv built in memory — no
+        save needed), else the docked .FullLv.json, plus the coronary tree, then
+        enter the Territory review IN PLACE (no CT re-open)."""
+        from PyQt6.QtWidgets import QMessageBox
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        w = getattr(self, "_corotree_win", None)
+        if (pane is None or not uid or w is None
+                or not w.tree_vessels_for_series(uid)):
+            QMessageBox.information(
+                self, t("Territory"),
+                t("冠動脈ツリーがありません。先にツリーを登録してください。"))
+            return False
+        self._set_active_pane(pane)
+        full, src = None, ""
+        if hasattr(viewer, "_ct_full_lv_build"):
+            full = viewer._ct_full_lv_build()
+        if full is not None:
+            if getattr(viewer, "_full_lv_saved", False):
+                src = getattr(viewer, "_full_lv_saved_path", "") or ""
+        else:
+            full = w.full_lv_for_series(uid)
+            src = w.full_lv_path_for_series(uid) or ""
+        if not full:
+            QMessageBox.information(
+                self, t("Territory"),
+                t("LV の計測データがありません。LV を計測（MV・AoV・Apex・Epi・"
+                  "Blood/Endo）するか .FullLv.json を読み込んでください。"))
+            return False
+        u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+        if u and hasattr(w, "_use_uid"):
+            w._use_uid(u)
+        try:
+            if not w.load_full_lv(full, src_path=src):
+                return False
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        w._full_lv_path = src                # "" = in-session (no file)
+        if getattr(w, "_territory", None) is None:
+            return False                     # the dock shows why (Territory: …)
+        return self._ct_territory_open(viewer, full)
+
+    def ct_territory_show(self, viewer) -> bool:
+        """Territoryモード button: re-show the ALREADY computed Territory for
+        *viewer*'s CT in place (no recompute)."""
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        w = getattr(self, "_corotree_win", None)
+        if (w is None or not uid or not hasattr(w, "territory_for_series")
+                or not w.territory_for_series(uid)):
+            return False
+        full = w.full_lv_for_series(uid)
+        if not full:
+            return False
+        self._set_active_pane(pane)
+        u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+        if u and hasattr(w, "_use_uid"):
+            w._use_uid(u)
+        return self._ct_territory_open(viewer, full)
+
+    def _ct_territory_open(self, viewer, full) -> bool:
+        """Tree ON, enter the review on *viewer*, 領域色 ON (it implies the VR)."""
+        import os
+        w = getattr(self, "_corotree_win", None)
+        self.ct_tree_show(viewer, True)
+        try:
+            ok = bool(viewer._ct_territory_enter(full))
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            ok = False
+        if not ok:
+            return False
+        if w is not None and hasattr(w, "set_territory_color"):
+            try:
+                w.set_territory_color(True)
+            except Exception:                            # noqa: BLE001
+                pass
+        if hasattr(viewer, "set_territory_source_names"):
+            try:
+                viewer.set_territory_source_names(
+                    os.path.basename(getattr(w, "_full_lv_path", "") or ""),
+                    os.path.basename(getattr(w, "_last_path", "") or ""))
+            except Exception:                            # noqa: BLE001
+                pass
+        return True
+
+    def ct_territory_left(self, viewer) -> None:
+        """*viewer* left the Territory review in place: the 領域色 tint off (the
+        LV / CoronaryTree screens start without it) and, when the LV came from a
+        FullLv only (apply_full_lv carries no apex), put the apex back so the LV
+        stays editable."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "set_territory_color"):
+            try:
+                w.set_territory_color(False)
+            except Exception:                            # noqa: BLE001
+                pass
+        if getattr(viewer, "_lv_apex", 1) is None and w is not None:
+            pane = self._pane_of_viewer(viewer)
+            uid = (pane.shown_series_uid() or "") if pane is not None else ""
+            full = w.full_lv_for_series(uid) if uid else None
+            apex = self._full_lv_to_files(full).get("apex") if full else None
+            if apex is not None and hasattr(viewer, "_lv_apply_apex_data"):
+                try:
+                    viewer._lv_apply_apex_data(apex)
+                except Exception:                        # noqa: BLE001
+                    pass
 
     def ct_tree_overlay_on(self, viewer):
         """ツリー表示 state of the dock for *viewer*'s CT (None: no tree)."""

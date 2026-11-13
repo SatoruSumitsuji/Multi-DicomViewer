@@ -939,7 +939,6 @@
   "Saved {n} CoSync point(s).": "{n}個のCoSync点を保存しました。",
   "Saved {n} MultiReg point(s).": "{n}個のMultiReg点を保存しました。",
   "Saved: {p}": "保存しました: {p}",
-  "Saved: {p} — load it with a corotree.json in Tools ▸ Territory.": "保存しました: {p}（Tools ▸ Territory で corotree.json と一緒に読み込んでください）",
   "Scan a folder and delete non-DICOM files (and empty folders)": "フォルダを走査し、非DICOMファイル（と空フォルダ）を削除",
   "Scan failed": "スキャン失敗",
   "Scanning": "スキャン中",

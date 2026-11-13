@@ -1,6 +1,7 @@
 """CT mode buttons, in-place (CTModeBarMixin): 標準 / LV / CoronaryTree switch by
 hiding / restoring overlays (data kept), availability from in-session data,
-auto modes, the tree view in LVモード, Territory via the shell.
+auto modes, the tree view in LVモード; 「Territory計算」 (CoronaryTreeモード only)
+and the Territory review entered / left in place (no CT re-open).
 
 Fake viewer + fake shell; no real dialogs (QMessageBox patched).
 """
@@ -39,6 +40,7 @@ class Shell:
         self.state = {"full": "", "tree": ""}
         self.overlay_on = True
         self.shows, self.set_modes = [], []
+        self.computed, self.left = [], []
 
     def ct_mode_state(self, v):
         return dict(self.state)
@@ -55,6 +57,18 @@ class Shell:
 
     def ct_set_mode(self, mode, v):
         self.set_modes.append(mode)
+
+    def ct_territory_compute(self, v):
+        full = v._ct_full_lv_build() or {"file": 1}
+        self.computed.append(full)
+        self.state["terr"] = True
+        return v._ct_territory_enter(full)
+
+    def ct_territory_show(self, v):
+        return v._ct_territory_enter({"file": 1})
+
+    def ct_territory_left(self, v):
+        self.left.append(True)
 
 
 class V(QWidget, CTModeBarMixin):
@@ -86,6 +100,18 @@ class V(QWidget, CTModeBarMixin):
         self.calls = []
         self._coro_overlay_req = None
         self._coro_overlay = None
+        # view state + the Territory review plumbing (the viewers' real names)
+        self._mode = "3D"
+        self._frame = {"A": (np.eye(3)[0], np.eye(3)[1], np.eye(3)[2]),
+                       "B": (np.eye(3)[1], np.eye(3)[2], np.eye(3)[0])}
+        self._pc = {"A": np.array([1.0, 2.0, 3.0]),
+                    "B": np.array([4.0, 5.0, 6.0])}
+        self._cross_ang = {"A": 0.3, "B": 0.0}
+        self._thick = {"A": 0.0, "B": 5.0}
+        self._center = np.array([7.0, 8.0, 9.0])
+        self._vr_on = {"A": False, "B": False}
+        self._lv_missing = []
+        self._applied = []
         row = QHBoxLayout(self)
         self._build_ct_mode_buttons(row)
         row.addWidget(self._build_ct_files_line())
@@ -119,6 +145,47 @@ class V(QWidget, CTModeBarMixin):
     def set_coronary_overlay(self, spec):
         self._coro_overlay_req = spec or None
         self._coro_overlay = None if self._ct_tree_suppressed else (spec or None)
+
+    def _full_lv_missing(self):
+        return list(self._lv_missing)
+
+    def _full_lv_bld_for_save(self):
+        return {"endo": {}}
+
+    def _full_lv_epi_dict(self):
+        return {"region": {}}
+
+    def _lvv_setup_axis_views(self):
+        self.calls.append(("axis",))
+        self._frame = {"A": ("lvA",), "B": ("lvB",)}
+        self._pc = {"A": np.zeros(3), "B": np.zeros(3)}
+        self._center = np.zeros(3)
+
+    def _lvv_observe_exit(self):
+        self._lvv["observe"] = True
+
+    def _refresh(self, reset_cam=False):
+        self.calls.append(("refresh", reset_cam))
+
+    def _set_mode(self, m):
+        self._mode = m
+
+    def _init_frames(self):
+        self.calls.append(("init_frames",))
+
+    def _vr_set(self, k, on):
+        self._vr_on[k] = bool(on)
+        if not on and not any(self._vr_on.values()):
+            self._territory_display = False
+
+    def _terr_bar_sync(self):
+        self.calls.append(("terr_bar", self._territory_display))
+
+    def apply_full_lv(self, full):
+        self._applied.append(full)
+        self._lvv_setup_axis_views()
+        self._territory_display = True
+        return True
 
 
 sh = Shell()
@@ -210,14 +277,90 @@ v._ct_mode_clicked("lv")
 check("leaving CoronaryTree ends the CPR session",
       ("cpr_exit",) in v.calls and not v._coronary_mode)
 
-# Territory still goes through the shell (re-open)
-sh.state.update(full="a.FullLv.json", tree="a.corotree.json")
+# 「Territory計算」: shown only in CoronaryTreeモード; enabled with a tree + a
+# complete LV (in-session) or a FullLv.
+import multi_dicomviewer.core.full_lv as _flm  # noqa: E402
+_flm.build = lambda epi, bld: ({"epi": epi, "bld": bld, "mem": True}, "")
+from PyQt6.QtCore import QTimer  # noqa: E402
+_ss = QTimer.singleShot
+single = []
+
+
+def run_deferred(fn, *a):
+    single.clear()
+    QTimer.singleShot = staticmethod(lambda ms, f: single.append(f))
+    try:
+        fn(*a)
+    finally:
+        QTimer.singleShot = _ss
+    for f in single:
+        f()
+
+
+tb = v._ct_terr_btn
+v._ct_mode_clicked("coronary")
 v.refresh_ct_mode_bar()
-v._ct_mode_clicked("territory")
-check("Territory → shell.ct_set_mode (re-open)", sh.set_modes == ["territory"])
-v._territory_display = True
+check("Territory計算 visible in CoronaryTreeモード, enabled (tree + LV ready)",
+      not tb.isHidden() and tb.isEnabled())
+check("Territoryモード not selectable before a result",
+      not b["territory"].isEnabled())
 v._ct_mode_clicked("lv")
-check("from Territory → shell too", sh.set_modes == ["territory", "lv"])
+check("Territory計算 hidden in LVモード", tb.isHidden())
+v._ct_mode_clicked("standard")
+check("Territory計算 hidden in 標準モード", tb.isHidden())
+v._ct_mode_clicked("coronary")
+v._lv_missing = ["Epi(region)"]
+v.refresh_ct_mode_bar()
+check("Territory計算 disabled while the LV is incomplete and no FullLv",
+      not tb.isEnabled())
+v._lv_missing = []
+v.refresh_ct_mode_bar()
+
+pre_center = v._center.copy()
+pre_a = v._frame["A"]
+v._lvv_epi_surf = object()                 # a complete in-session LV
+v.calls.clear()
+sh.set_modes.clear()
+run_deferred(tb.click)
+check("Territory計算 → FullLv built in memory from the in-session LV",
+      len(sh.computed) == 1 and sh.computed[0].get("mem") is True,
+      str(sh.computed)[:120])
+check("in place: Territory review on (light path: LV kept, no apply_full_lv)",
+      v._ct_current_mode() == "territory" and not v._applied
+      and ("axis",) in v.calls and v._vr_on["B"] and not sh.set_modes)
+check("review shows the LV (+ tree) again", not v._ct_lv_hidden
+      and v._coro_overlay is not None)
+check("Territoryモード checked + Territory計算 hidden in the review",
+      b["territory"].isChecked() and tb.isHidden())
+v.calls.clear()
+v._ct_mode_clicked("coronary")
+check("leave → VR off, previous view restored (frames / centre), refit",
+      not v._vr_on["B"]
+      and all(np.allclose(x, y) for x, y in zip(v._frame["A"], pre_a))
+      and np.allclose(v._center, pre_center) and ("refresh", True) in v.calls
+      and sh.left == [True] and not sh.set_modes, str(v.calls))
+check("back in CoronaryTreeモード (LV hidden, tree on)",
+      v._ct_current_mode() == "coronary" and v._ct_lv_hidden
+      and v._coro_overlay is not None)
+v.refresh_ct_mode_bar()
+check("result kept → Territoryモード selectable", b["territory"].isEnabled())
+v._ct_mode_clicked("lv")
+run_deferred(v._ct_mode_clicked, "territory")
+check("Territoryモード from LV: shown in place, not recomputed",
+      v._ct_current_mode() == "territory" and len(sh.computed) == 1)
+v._ct_mode_clicked("lv")
+check("Territory → LV: LV shown, view back",
+      v._ct_current_mode() == "lv" and not v._ct_lv_hidden
+      and np.allclose(v._center, pre_center))
+v._lv_missing = ["Blood/Endo"]
+run_deferred(v._ct_mode_clicked, "territory")
+check("no complete in-session LV → apply_full_lv(FullLv) path",
+      v._applied == [{"file": 1}] and v._ct_current_mode() == "territory")
+v._ct_mode_clicked("standard")
+check("Territory → 標準: plain, view restored",
+      v._ct_current_mode() == "standard" and v._ct_lv_hidden
+      and np.allclose(v._center, pre_center))
+v._lv_missing = []
 
 # a fresh series resets
 v._ct_mode_reset()
@@ -254,6 +397,13 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           ok1 and o._coro_overlay == [{"vid": 1}])
     check(f"{fn}: LV readouts gated by _ct_lv_hidden",
           src.count("_ct_lv_hidden") >= 1 and "_ct_mode_reset()" in src)
+
+# FullLv save: no automatic Territory any more (both viewers).
+for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
+    src = (root / fn).read_text(encoding="utf-8")
+    check(f"{fn}: FullLv save no longer enters Territory",
+          "on_full_lv_created" not in src
+          and "_full_lv_saved_path = path" in src)
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

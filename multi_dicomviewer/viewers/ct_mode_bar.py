@@ -9,18 +9,23 @@ Four mode buttons sit right of 3D/2D on the Plane bar (row 1):
                                                                or FullLv loaded
     CoronaryTreeモード  the coronary tree only (LV hidden), CoronaryTree tab in
                         front, ツリー表示 ON                    — a tree exists
-    Territoryモード     perfusion territory + VR review          — BOTH loaded
+    Territoryモード     perfusion territory + VR review          — a Territory
+                                                               result exists
 
-標準 / LV / CoronaryTree switch IN PLACE (overlays hidden / restored, data
-kept); entering or leaving the Territory review still re-opens the CT through
-the shell (``shell.ct_set_mode``). Availability comes from the viewer's own
-in-session LV data plus what the Coronary Tree dock holds (``shell.ct_mode_state``).
-Auto: an LV edit step → LVモード; the CPR button / ツリー登録 /
-editing a tree line → CoronaryTreeモード. A row-3 readout names the FullLv /
-corotree (or 計測済み / 未保存).
+Every switch is IN PLACE (the CT is never re-opened): 標準 / LV / CoronaryTree
+hide / restore overlays (data kept); the Territory review lays the panes on the
+LV axis + VR and leaving it restores the previous view. 「Territory計算」 (shown
+in CoronaryTreeモード only) computes the territory from the in-session LV (else
+the docked FullLv) + the tree via the shell (``shell.ct_territory_compute``) and
+enters the review. Availability comes from the viewer's own in-session LV data
+plus what the Coronary Tree dock holds (``shell.ct_mode_state``). Auto: an LV
+edit step → LVモード; the CPR button / ツリー登録 / editing a tree line →
+CoronaryTreeモード. A row-3 readout names the FullLv / corotree (or 計測済み /
+未保存).
 """
 from __future__ import annotations
 
+import numpy as np
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
 
 from multi_dicomviewer.i18n import t
@@ -40,8 +45,17 @@ _CT_MODES = (
      "編集。左のタブを CoronaryTree に切り替えます。CPR ボタンかツリー登録で"
      "自動的に入ります"),
     ("territory", "Territoryモード",
-     "Territory（灌流領域 + VR）表示へ移動（.FullLv.json と .corotree.json の"
-     "両方を読み込んだときのみ有効）"),
+     "Territoryモード：灌流領域 + VR の表示。Territory を計算済みのとき有効"
+     "（計算は CoronaryTreeモードの「Territory計算」）"),
+)
+
+_TERR_BTN_TIP = (
+    "Territory計算：LV の計測結果（保存していなくても可。無ければ読み込んだ "
+    ".FullLv.json）と冠動脈ツリーから灌流領域を計算し、Territoryモードに入ります")
+_TERR_BTN_CSS = (
+    "QPushButton { background:#fff4d6; color:black; border:1px solid #c89b2c; }"
+    "QPushButton:disabled { background:#f0f0f0; color:#aaa;"
+    " border:1px solid #ddd; }"
 )
 
 # Checked = the current mode (teal, so it reads apart from the yellow 3D/2D).
@@ -71,6 +85,16 @@ class CTModeBarMixin:
             b.clicked.connect(lambda _c, k=key: self._ct_mode_clicked(k))
             self._ct_mode_btns[key] = b
             row.addWidget(b)
+        # 「Territory計算」: CoronaryTreeモード only (the tree is the prerequisite;
+        # an LVモード button would invite mistakes).
+        row.addSpacing(8)
+        tb = FitButton(t("Territory計算"))
+        tb.setHelpToolTip(t(_TERR_BTN_TIP))
+        tb.setStyleSheet(_TERR_BTN_CSS)
+        tb.clicked.connect(lambda _c=False: self._ct_territory_compute_clicked())
+        tb.setVisible(False)
+        self._ct_terr_btn = tb
+        row.addWidget(tb)
 
     def _build_ct_files_line(self) -> QWidget:
         """The row-3 readout of the loaded .FullLv.json / .corotree.json."""
@@ -96,6 +120,9 @@ class CTModeBarMixin:
         self._ct_lv_snap = None           # what to restore on LVモード
         self._ct_tree_suppressed = False  # tree lines hidden here (標準モード)
         self._ct_tree_on_lv = True        # ツリー表示 remembered for LVモード
+        self._ct_terr_snap = None         # the view before the Territory review
+        self._ct_terr_lvd = None          # LVD shown before the review
+        self._full_lv_saved_path = ""     # this CT's last saved .FullLv.json
 
     def _ct_lv_data(self) -> bool:
         """Any LV analysis on this CT — measured in this session or loaded."""
@@ -106,6 +133,17 @@ class CTModeBarMixin:
             return True
         vs = getattr(self, "_lv_valves", None) or {}
         return any(v is not None for v in vs.values())
+
+    def _ct_lv_ready(self) -> bool:
+        """The in-session LV is complete enough to build a FullLv (the FullLV
+        button's own readiness rule)."""
+        f = getattr(self, "_full_lv_missing", None)
+        if f is None:
+            return False
+        try:
+            return not f()
+        except Exception:                                # noqa: BLE001
+            return False
 
     def _ct_current_mode(self) -> str:
         if getattr(self, "_territory_display", False):
@@ -151,12 +189,12 @@ class CTModeBarMixin:
                 state = {}
         full = state.get("full", "") or ""
         tree = state.get("tree", "") or ""
-        lv_mem = self._ct_lv_data()
+        lv_mem = self._ct_lv_data() or bool(state.get("full_mem"))
         avail = {"standard": True,
                  "lv": bool(full) or lv_mem,
                  "coronary": (bool(tree) or bool(state.get("tree_mem"))
                               or getattr(self, "_coronary_mode", False)),
-                 "territory": bool(full and tree)}
+                 "territory": bool(state.get("terr"))}
         cur = self._ct_current_mode()
         for key, b in btns.items():
             # The CURRENT mode stays enabled even if its file just went away, so
@@ -164,13 +202,25 @@ class CTModeBarMixin:
             b.setEnabled(avail[key] or key == cur)
             if b.isChecked() != (key == cur):
                 b.setChecked(key == cur)
+        tb = getattr(self, "_ct_terr_btn", None)
+        if tb is not None:
+            tb.setVisible(cur == "coronary")
+            tb.setEnabled(avail["coronary"] and bool(
+                state.get("tree") or state.get("tree_mem"))
+                and (self._ct_lv_ready() or bool(full)
+                     or bool(state.get("full_mem"))))
         lbl = getattr(self, "_ct_files_lbl", None)
         if lbl is not None:
             none = t("なし")
             if not full and lv_mem:
-                full = (t("計測済み（保存済）")
-                        if getattr(self, "_full_lv_saved", False)
-                        else t("計測済み（未保存）"))
+                import os
+                sp = getattr(self, "_full_lv_saved_path", "") or ""
+                if getattr(self, "_full_lv_saved", False) and sp:
+                    full = os.path.basename(sp)
+                else:
+                    full = (t("計測済み（保存済）")
+                            if getattr(self, "_full_lv_saved", False)
+                            else t("計測済み（未保存）"))
             if not tree and state.get("tree_mem"):
                 tree = t("ツリーあり（未保存）")
             lbl.setText(t("読込ファイル") + ":  FullLv: " + (full or none)
@@ -181,21 +231,26 @@ class CTModeBarMixin:
         if key == cur:                         # already there — keep it checked
             self.refresh_ct_mode_bar()
             return
-        # 標準 / LV / CoronaryTree switch IN PLACE (show / hide, data kept);
-        # entering or leaving the Territory review re-opens the CT (below).
-        if key != "territory" and cur != "territory":
-            self._ct_switch_inplace(key)
-            return
+        # Every switch is IN PLACE (the CT is never re-opened).
         shell = self._ct_mode_shell()
-        if shell is not None and hasattr(shell, "ct_set_mode"):
-            try:
-                shell.ct_set_mode(key, self)
-            except Exception:                            # noqa: BLE001
-                import traceback
-                traceback.print_exc()
-        # The switch re-opens the CT asynchronously (a NEW viewer); until then
-        # this one keeps showing the mode it is actually in.
-        self.refresh_ct_mode_bar()
+        if cur == "territory":
+            self._ct_territory_leave()
+            self._ct_switch_inplace(key, auto=True)
+            return
+        if key == "territory":
+            if (hasattr(self, "_lv_mode_active") and self._lv_mode_active()):
+                self._ct_lv_editing_msg()
+                self.refresh_ct_mode_bar()
+                return
+            if shell is not None and hasattr(shell, "ct_territory_show"):
+                try:
+                    shell.ct_territory_show(self)
+                except Exception:                        # noqa: BLE001
+                    import traceback
+                    traceback.print_exc()
+            self.refresh_ct_mode_bar()
+            return
+        self._ct_switch_inplace(key)
 
     # ------------------------------------------------- in-place switching
     # 標準モード: plain CT (LV + tree kept, hidden). LVモード: the LV overlays and
@@ -218,13 +273,7 @@ class CTModeBarMixin:
         cur = self._ct_current_mode()
         if (not auto and key != "lv" and hasattr(self, "_lv_mode_active")
                 and self._lv_mode_active()):
-            try:
-                from PyQt6.QtWidgets import QMessageBox
-                QMessageBox.information(
-                    self.window(), t("モード"),
-                    t("LV の編集中です。編集を終了してから切り替えてください。"))
-            except Exception:                            # noqa: BLE001
-                pass
+            self._ct_lv_editing_msg()
             self.refresh_ct_mode_bar()
             return
         shell = self._ct_mode_shell()
@@ -359,3 +408,163 @@ class CTModeBarMixin:
                     if mm.get("_lvv") == "apex":
                         mm["hidden"] = not on
         _do("_lv_style_selectors")
+
+    def _ct_lv_editing_msg(self) -> None:
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(
+                self.window(), t("モード"),
+                t("LV の編集中です。編集を終了してから切り替えてください。"))
+        except Exception:                                # noqa: BLE001
+            pass
+
+    # ------------------------------------------------- Territory (in place)
+    def _ct_territory_compute_clicked(self) -> None:
+        """「Territory計算」 (CoronaryTreeモード): the shell computes the territory
+        from this CT's LV + tree and calls back _ct_territory_enter."""
+        shell = self._ct_mode_shell()
+        if shell is None or not hasattr(shell, "ct_territory_compute"):
+            return
+        try:
+            shell.ct_territory_compute(self)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        self.refresh_ct_mode_bar()
+
+    def _ct_full_lv_build(self):
+        """A FullLv dict built IN MEMORY from the in-session LV (no file), or
+        None when the LV isn't complete / the build fails."""
+        if not self._ct_lv_ready():
+            return None
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QApplication
+        from multi_dicomviewer.core import full_lv
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            bld = self._full_lv_bld_for_save()
+            epi = self._full_lv_epi_dict()
+            if bld is None or epi is None:
+                return None
+            full, _err = full_lv.build(epi, bld)
+            return full
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return None
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    _CT_VIEW_KEYS = ("_frame", "_pc", "_cross_ang", "_roll", "_thick")
+
+    def _ct_view_snap(self) -> dict:
+        """The MPR view (frames / centres / slab / mode) to restore after the
+        Territory review re-laid the panes on the LV axis."""
+        import copy
+        snap = {"mode": getattr(self, "_mode", "3D")}
+        for a in self._CT_VIEW_KEYS:
+            if hasattr(self, a):
+                snap[a] = copy.deepcopy(getattr(self, a))
+        c = getattr(self, "_center", None)
+        snap["_center"] = None if c is None else np.asarray(c, float).copy()
+        return snap
+
+    def _ct_view_restore(self, snap) -> None:
+        if snap:
+            for a in self._CT_VIEW_KEYS:
+                if a in snap:
+                    setattr(self, a, snap[a])
+            if snap.get("_center") is not None:
+                self._center = snap["_center"]
+        elif hasattr(self, "_init_frames"):
+            self._init_frames()                  # no snapshot → default MPR
+        self._view_initial = True
+        if hasattr(self, "_refresh"):
+            self._refresh(reset_cam=True)        # fit both panes on the restored view
+
+    def _ct_territory_enter(self, full) -> bool:
+        """Enter the Territory review IN PLACE. With a complete in-session LV the
+        LV state is kept as is (only the layout changes: LV-axis panes + VR);
+        otherwise the FullLv is applied first (apply_full_lv, display-only)."""
+        if getattr(self, "_territory_display", False):
+            return True
+        if (getattr(self, "_coronary_mode", False)
+                and hasattr(self, "_coronary_exit")):
+            try:
+                self._coronary_exit()            # end an open CPR session first
+            except Exception:                    # noqa: BLE001
+                pass
+        # The review shows the LV (+ tree): undo the in-place hiding first.
+        self._ct_show_lv(True)
+        self._ct_tree_suppressed = False
+        self._ct_tree_apply()
+        self._ct_terr_snap = self._ct_view_snap()
+        self._ct_terr_lvd = bool(getattr(self, "_lvv_lvd_shown", False))
+        light = (self._ct_lv_ready()
+                 and getattr(self, "_lvv", None) is not None
+                 and getattr(self, "_lvv_epi_surf", None) is not None)
+        if not light:
+            ok = bool(hasattr(self, "apply_full_lv") and self.apply_full_lv(full))
+            if not ok:
+                self._ct_terr_snap = None
+            self.refresh_ct_mode_bar()
+            return ok
+        from PyQt6.QtCore import QTimer
+        if getattr(self, "_mode", "3D") != "3D" and hasattr(self, "_set_mode"):
+            self._set_mode("3D")
+        self._lvv_lvd_shown = False              # LVD is clutter in the review
+        try:
+            self._lvv_setup_axis_views()         # A = LV short axis, B = long axis
+        except Exception:                        # noqa: BLE001
+            pass
+        lvv = getattr(self, "_lvv", None)
+        if lvv is not None and not lvv.get("observe"):
+            try:
+                self._lvv_observe_exit()
+            except Exception:                    # noqa: BLE001
+                pass
+        self._refresh(reset_cam=False)
+        self._territory_display = True
+        for fn in ("_cpr_mark_full_lv", "_refresh_tool_availability",
+                   "_terr_bar_sync"):
+            try:
+                getattr(self, fn)()
+            except Exception:                    # noqa: BLE001
+                pass
+        self._ct_render()
+        QTimer.singleShot(0, lambda: self._vr_set("B", True))
+        return True
+
+    def _ct_territory_leave(self) -> None:
+        """Leave the Territory review IN PLACE: VR off on every pane, the view
+        from before the review back, the LV / Coronary bars back."""
+        vr_on = getattr(self, "_vr_on", {}) or {}
+        for k in ("A", "B"):
+            try:
+                if vr_on.get(k):
+                    self._vr_set(k, False)
+            except Exception:                    # noqa: BLE001
+                pass
+        self._territory_display = False
+        snap = getattr(self, "_ct_terr_snap", None)
+        self._ct_terr_snap = None
+        try:
+            self._ct_view_restore(snap)
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        lvd = getattr(self, "_ct_terr_lvd", None)
+        if lvd is not None:
+            self._lvv_lvd_shown = bool(lvd)
+            self._ct_terr_lvd = None
+        for fn in ("_refresh_tool_availability", "_terr_bar_sync"):
+            try:
+                getattr(self, fn)()
+            except Exception:                    # noqa: BLE001
+                pass
+        shell = self._ct_mode_shell()
+        if shell is not None and hasattr(shell, "ct_territory_left"):
+            try:
+                shell.ct_territory_left(self)
+            except Exception:                    # noqa: BLE001
+                pass

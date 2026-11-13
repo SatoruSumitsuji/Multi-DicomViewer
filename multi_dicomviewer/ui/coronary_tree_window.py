@@ -1829,6 +1829,14 @@ class CoronaryTreeWindow(SnapDock):
         b = self._by_uid.get(u) if u else None
         return (b.get("last_path") or "") if b else ""
 
+    def territory_for_series(self, series_uid: str) -> bool:
+        """True when a Territory result (TerritoryEngine) is computed for the CT
+        showing *series_uid* (→ Territoryモード available)."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        return bool(b and b.get("territory") is not None)
+
     def full_lv_path_for_series(self, series_uid: str) -> str:
         """The .FullLv.json path the dock loaded for *series_uid*'s CT (for the
         bottom-bar filename readout), or ""."""
