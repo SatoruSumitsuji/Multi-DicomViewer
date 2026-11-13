@@ -608,10 +608,125 @@ class CPRMixin:
                 out.append(pts)
         return out
 
-    # ---- CPR line right-click: Resume trace / Auto-Trace / Save --------------
+    # ---- CPR line right-click: 編集 / 名前を表示 first, then the edit menu -------
+    # Every CPR line of the tree (the Coronary Tree overlay line, or a CPR line
+    # of this session that is not the one being edited) gets the SAME short
+    # menu — 編集 (Edit) / 名前を表示・非表示 — whether Measure is on or off.
+    # 編集 opens the full edit menu (_outline_right) on that line; a tree vessel
+    # is resumed first (its short-axis rebuilt) so the menu acts on the live line.
+    def _cpr_is_cpr_line(self, m) -> bool:
+        return (m.get("type") == "polyline" and m.get("_lv") is None
+                and bool(m.get("_cpr_src") or m.get("_cpr_saved")))
+
+    def _cpr_tree_hit(self, which, sx, sy):
+        """(mi or None, vid or None) of a tree CPR line under the cursor that
+        should get the short 編集 menu, or None (normal right-click flow: no
+        such line, a trace being drawn, or the line being edited now)."""
+        if getattr(self, "_mode", "") != "3D":
+            return None
+        d = getattr(self, "_draft", None)
+        if d is not None and d.get("pane") == which:
+            return None
+        if (getattr(self, "_vr_on", {}) or {}).get(which):
+            return None                          # VR pane: its own routing
+        live = self._cpr_source_measure()
+        mi = None
+        hit = self._pick_handle(which, sx, sy)
+        cand = hit[0] if hit is not None else self._pick_measure(which, sx, sy)
+        if cand is not None:
+            m = self._measures[which][cand]
+            if m is live:
+                return None                      # being edited → its menus
+            if self._cpr_is_cpr_line(m):
+                mi = cand
+            else:
+                return None                      # another measure → its menu
+        vid = (self._coronary_pick(which, sx, sy)
+               if hasattr(self, "_coronary_pick") else None)
+        if mi is None and vid is None:
+            return None
+        return mi, vid
+
+    def _cpr_tree_menu(self, which, sx, sy, mi, vid,
+                       with_target: bool = False) -> None:
+        """The short CPR-line menu: 編集 (Edit) / 名前を表示・非表示 (and the
+        Territory 「ここにターゲット設定」 where the viewer offers it)."""
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        tgt_act = None
+        if with_target and vid is not None \
+                and getattr(self, "_coro_target_cb", None) is not None:
+            tgt_act = menu.addAction(t("ここにターゲット設定"))
+            menu.addSeparator()
+        can_edit = mi is not None or (
+            vid is not None and getattr(self, "_coro_resume_cb", None) is not None)
+        edit_act = menu.addAction(t("編集 (Edit)"))
+        edit_act.setEnabled(can_edit)
+        names = getattr(self, "_coro_names", set())
+        show_act = hide_all = None
+        if vid is not None:
+            menu.addSeparator()
+            show_act = menu.addAction(
+                t("名前を非表示") if vid in names else t("名前を表示"))
+        if names:
+            hide_all = menu.addAction(t("すべての名前を非表示"))
+        gpos = self.pane[which].canvas.mapToGlobal(QPoint(int(sx), int(sy)))
+        try:
+            chosen = menu.exec(gpos)
+        finally:
+            if hasattr(self, "_reset_pointer_state"):
+                self._reset_pointer_state()
+        if chosen is None:
+            return
+        if tgt_act is not None and chosen is tgt_act:
+            if (getattr(self, "_vr_on", {}) or {}).get(which) \
+                    and hasattr(self, "_coronary_pick_sample_vr"):
+                tvid, tidx = self._coronary_pick_sample_vr(which, sx, sy)
+            else:
+                tvid, tidx = self._coronary_pick_sample(which, sx, sy)
+            if tvid is None:
+                tvid, tidx = vid, 0
+            try:
+                self._coro_target_cb(tvid, int(tidx))
+            except Exception:                    # noqa: BLE001
+                pass
+            return
+        if chosen is edit_act:
+            self._cpr_tree_edit(which, sx, sy, mi, vid, gpos)
+            return
+        if show_act is not None and chosen is show_act:
+            names.discard(vid) if vid in names else names.add(vid)
+        elif hide_all is not None and chosen is hide_all:
+            names.clear()
+        for k in ("A", "B"):
+            self._redraw_geom(k)
+
+    def _cpr_tree_edit(self, which, sx, sy, mi, vid, gpos) -> None:
+        """編集: the full edit menu on the line. A Coronary Tree vessel is
+        resumed first (short-axis rebuilt, the vessel remembered for Save)."""
+        if vid is not None and getattr(self, "_coro_resume_cb", None) is not None:
+            try:
+                self._coro_resume_cb(vid)
+            except Exception:                    # noqa: BLE001
+                return
+            m = self._cpr_source_measure()
+            hit = self._cpr_find_measure(m) if m is not None else None
+            if hit is None:
+                return
+            pane, mi = hit
+            lp = self.pane[pane].canvas.mapFromGlobal(gpos)
+            self._outline_right(pane, mi, float(lp.x()), float(lp.y()))
+            return
+        if mi is not None and 0 <= mi < len(self._measures.get(which, [])):
+            self._outline_right(which, mi, sx, sy)
+
+    # ---- CPR line edit menu: Resume trace / Save (overwrite) / Save as… ------
     def _cpr_line_menu_add(self, menu, which, mi) -> dict:
-        """Add 「Resume trace」「Auto-Trace」「Save」 to a polyline's outline
-        right-click menu (after the CPR item). Returns {name: QAction}."""
+        """Add 「Resume trace」「上書き保存」「名前を付けて保存…」 to a polyline's
+        outline right-click menu (after the CPR item). Auto-Trace / lumen snap
+        are not offered here: with Auto on, every trace is auto-traced and
+        snapped already. Returns {name: QAction}."""
         m = self._measures[which][mi]
         acts = {}
         if m.get("type") != "polyline" or m.get("_lv") is not None:
@@ -620,11 +735,17 @@ class CPRMixin:
             acts["resume"] = menu.addAction(t("Resume trace"))
         p3 = m.get("pts3d")
         coronary = (getattr(self, "_coronary_mode", False)
-                    or self._cpr is not None)
+                    or self._cpr is not None or self._cpr_is_cpr_line(m))
         if self._mode == "3D" and coronary and p3 and len(p3) >= 2:
-            acts["auto"] = menu.addAction(t("Auto-Trace"))
-            acts["save"] = menu.addAction(t("名前を付けて保存…"))
+            acts["save"] = menu.addAction(t("上書き保存 (Save)"))
+            acts["save_as"] = menu.addAction(t("名前を付けて保存…"))
         return acts
+
+    def _cpr_line_menu_hide_ok(self, which, mi) -> bool:
+        """Hide / Show is offered on the edit menu except for CPR lines (their
+        visibility is the Coronary Tree tab's check box)."""
+        m = self._measures[which][mi]
+        return not (self._cpr_is_cpr_line(m) or self._cpr_is_src(which, mi))
 
     def _cpr_line_menu_run(self, chosen, acts, which, mi, sx, sy) -> bool:
         """Run a 「Resume trace / Auto-Trace / Save」 pick. True = handled."""
@@ -637,10 +758,13 @@ class CPRMixin:
                 self._exit_cpr(keep_view=True)
             self._resume_trace(which, mi, vi)
             return True
-        if chosen is acts.get("auto"):
-            self._cpr_line_auto(which, mi)
-            return True
         if chosen is acts.get("save"):
+            # Overwrite: the line's own file (a loaded / resumed / saved line),
+            # a new serial name the first time — no dialog, like Next.
+            if self._cpr_ensure_built((which, mi)):
+                self._cpr_register_to_tree(save_as=False, rearm=False)
+            return True
+        if chosen is acts.get("save_as"):
             if self._cpr_ensure_built((which, mi)):
                 self._cpr_register_to_tree(save_as=True)
             return True

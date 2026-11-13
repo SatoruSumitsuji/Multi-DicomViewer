@@ -113,6 +113,9 @@ from multi_dicomviewer.ui.measure_style_menu import (
 )
 
 #: SPIN sign. +1.0 matches the rotation direction expected on the Mac build.
+#: Coronary Tree list selection on the image: orange, 1.5x the line width
+_CORO_SEL_RGB = (255, 140, 0)
+
 _SPIN_SIGN = 1.0
 
 #: CrossLine CENTRE grab radius, in normalised pane space (1 = centre→edge). A
@@ -1291,7 +1294,8 @@ class _Overlay(QWidget):
             sx, sy = v._world_to_screen(key, out[0], out[1])
             return QPointF(sx, sy)
 
-        for ves in spec:
+        # The list-selected vessel is painted LAST (on top of the others).
+        for ves in sorted(spec, key=lambda s: bool(s.get("selected"))):
             pts3d = ves.get("points")
             if pts3d is None or len(pts3d) < 2:
                 continue
@@ -1308,7 +1312,10 @@ class _Overlay(QWidget):
             sel = bool(ves.get("selected"))
             a_full = 255 if sel else 210
             a_half = 150 if sel else 90
-            width = 3.0 if sel else 2.2
+            # Selected in the Coronary Tree list → orange, 1.5× wide.
+            width = 2.2 * 1.5 if sel else 2.2
+            if sel:
+                rgb = _CORO_SEL_RGB
             out = [v._world3d_to_out(key, np.asarray(P, float)) for P in pts3d]
             off = [abs(float(np.dot(np.asarray(P, float) - _po, _pn))) > 1.0
                    for P in pts3d]
@@ -2992,6 +2999,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_select_cb = None          # (vid) a click on a CPR line selects it
         self._coro_resume_cb = None          # (vid) CPR-line right-click ▸ 編集
         self._coro_overwrite_cb = None       # (vid) CPR-line right-click ▸ 上書き保存
+        self._coro_vessel_hide_cb = None     # (vid) VR right-click ▸ この血管を非表示
         self._coro_tree_sync_cb = None       # (vid, path) Save → push edit into tree
         # VR-pane territory readout text (pushed by the panel): per-system
         # myocardium summary (top-right) + per-target list (bottom-right).
@@ -3535,6 +3543,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._drag_btn == 2:
             self._cross_grab = False
             self._meas_drag = False
+            # A CPR line of the tree (overlay line, or a CPR line of this
+            # session other than the one being edited) → the short 編集 / 名前
+            # menu, the same with Measure on or off. Deferred out of the
+            # pointer handler (modal-in-pointer-handler safety).
+            _th = self._cpr_tree_hit(key, x, y)
+            if _th is not None:
+                self._reset_pointer_state()
+                QTimer.singleShot(
+                    0, lambda k=key, sx=x, sy=y, h=_th:
+                    self._cpr_tree_menu(k, sx, sy, h[0], h[1]))
+                return
             # A CONFIRMED CPR centreline (_cpr_src) stays right-click-editable even
             # when Measure is OFF (and even before it's saved as a tree vessel), so
             # its 「このCPR線を短軸で再計算 (ReCalc)」menu is always reachable — otherwise an
@@ -9472,56 +9491,46 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         return True
 
     def _coronary_menu(self, which, vid, sx, sy):
-        """Deferred menu (out of the pointer handler) to show / hide a coronary
-        vessel's NAME on the image. Names are off by default."""
-        names = self._coro_names
+        """Deferred menu (out of the pointer handler) on a coronary line —
+        Windows parity: on the VR pane 「ここにターゲット設定」/「この血管を非表示」;
+        on an MPR pane the short CPR-line menu (編集 (Edit) / 名前を表示)."""
+        if self._vr_on.get(which):
+            self._vr_vessel_menu(which, vid, sx, sy)
+            return
+        self._cpr_tree_menu(which, sx, sy, None, vid)
+
+    def set_coronary_vessel_hide_cb(self, cb) -> None:
+        """Register cb(vid) for a VR right-click ▸ この血管を非表示."""
+        self._coro_vessel_hide_cb = cb
+
+    def _vr_vessel_menu(self, which, vid, sx, sy) -> None:
+        """VR pane, right-click on a vessel (not on a Target marker): set a
+        Target at the clicked sample, or hide this vessel (as on Windows)."""
+        tgt_cb = getattr(self, "_coro_target_cb", None)
+        hide_cb = getattr(self, "_coro_vessel_hide_cb", None)
+        if tgt_cb is None and hide_cb is None:
+            return
         menu = QMenu(self)
-        # Territory target: right-click a coronary line ▸ set a Target here (same
-        # as the ターゲット設定 button, but one-shot without toggling the mode).
-        tgt_act = menu.addAction(t("ここにターゲット設定")) \
-            if getattr(self, "_coro_target_cb", None) is not None else None
-        if tgt_act is not None:
-            menu.addSeparator()
-        edit_act = menu.addAction(t("この血管を編集 (Resume)")) \
-            if self._coro_resume_cb is not None else None
-        over_act = menu.addAction(t("この血管に上書き保存")) \
-            if self._coro_overwrite_cb is not None else None
-        if edit_act is not None or over_act is not None:
-            menu.addSeparator()
-        show_act = menu.addAction(
-            t("名前を非表示") if vid in names else t("名前を表示"))
-        hide_all = menu.addAction(t("すべての名前を非表示")) if names else None
+        a_set = menu.addAction(t("ここにターゲット設定")) if tgt_cb else None
+        a_hide = menu.addAction(t("この血管を非表示")) if hide_cb else None
         try:
-            chosen = menu.exec(self.pane[which].canvas.mapToGlobal(
+            ch = menu.exec(self.pane[which].canvas.mapToGlobal(
                 QPoint(int(sx), int(sy))))
         finally:
             self._reset_pointer_state()
-        if tgt_act is not None and chosen is tgt_act:
-            # Pick the exact sample under the click (VR or MPR projection).
-            if self._vr_on.get(which):
-                tvid, tidx = self._coronary_pick_sample_vr(which, sx, sy)
-            else:
-                tvid, tidx = self._coronary_pick_sample(which, sx, sy)
-            if tvid is None:                      # fall back to the menu's vessel
+        if a_set is not None and ch is a_set:
+            tvid, tidx = self._coronary_pick_sample_vr(which, sx, sy)
+            if tvid is None:
                 tvid, tidx = vid, 0
             try:
-                self._coro_target_cb(tvid, int(tidx))
-            except Exception:                        # noqa: BLE001
+                tgt_cb(tvid, int(tidx))
+            except Exception:                            # noqa: BLE001
                 pass
-            return
-        if edit_act is not None and chosen is edit_act:
-            self._coro_resume_cb(vid)
-            return
-        if over_act is not None and chosen is over_act:
-            self._coro_overwrite_cb(vid)
-            return
-        if chosen is show_act:
-            names.discard(vid) if vid in names else names.add(vid)
-        elif hide_all is not None and chosen is hide_all:
-            names.clear()
-        for k in ("A", "B"):
-            if self._overlay.get(k) is not None:
-                self._overlay[k].update()
+        elif a_hide is not None and ch is a_hide:
+            try:
+                hide_cb(vid)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def _redraw_geom(self, key):
         self._reproject_traces(key)
@@ -9552,7 +9561,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         fallback = None
         for mi in range(len(self._measures[which]) - 1, -1, -1):
             m = self._measures[which][mi]
-            if m.get("hidden") or m.get("_lv_valve"):
+            if (m.get("hidden") or m.get("_bulk_hidden")
+                    or m.get("_lv_valve")):
                 continue          # invisible / LOCKED valve ring → not grabbable
             for vi, q in enumerate(m["pts"]):
                 qx, qy = self._world_to_screen(which, q[0], q[1])
@@ -9644,7 +9654,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         lv_t = self._lv.get("target") if self._lv is not None else None
         best, bi = tol, None
         for mi, m in enumerate(self._measures[which]):
-            if m.get("hidden") or m.get("_lv_valve"):   # locked valve ring
+            # Hidden (incl. Hide All Result — e.g. the lines Next has
+            # saved) → not selectable; locked valve ring → never.
+            if (m.get("hidden") or m.get("_bulk_hidden")
+                    or m.get("_lv_valve")):
                 continue
             if lv_t in ("endo", "epi"):
                 tag = m.get("_lv")
@@ -10428,7 +10441,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
         circle_act = (menu.addAction(t("Make Circle"))
                       if m["type"] == "ellipse" else None)
-        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        hide_act = (menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+                    if self._cpr_line_menu_hide_ok(which, mi) else None)
         copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
@@ -10463,7 +10477,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._exit_cpr(keep_view=True)
             self._resume_trace(which, mi, vi)
             return                               # _resume_trace redraws itself
-        elif chosen is hide_act:
+        elif hide_act is not None and chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
             _mr_changed = True
         elif chosen is del_res:
@@ -10514,14 +10528,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     else t("この線で短軸CPRを作成 (Coronary)"))
         # Resume trace / Auto-Trace / Save on the CPR line (shared, CPRMixin).
         line_acts = self._cpr_line_menu_add(menu, which, mi)
-        # Lumen-snap controls (3-D traces only): re-snap this trace now, and a
-        # checkable auto-snap toggle for future clicks.
-        snap_now_act = snap_auto_act = None
-        if m["type"] == "polyline" and self._mode == "3D" and m.get("pts3d"):
-            snap_now_act = menu.addAction(t("Snap trace to lumen"))
-            snap_auto_act = menu.addAction(t("Auto-snap to lumen"))
-            snap_auto_act.setCheckable(True)
-            snap_auto_act.setChecked(self._snap_lumen)
         center_angle_act = None
         if m["type"] in ("ellipse", "polygon"):
             center_angle_act = menu.addAction(t("Center Angle"))
@@ -10536,7 +10542,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             a.setIcon(QIcon(pix))
             color_actions.append((a, hexcol))
         transp_actions = add_transparency_submenu(menu, m.get("transp", 0))
-        hide_act = menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+        # CPR lines: visibility is the Coronary Tree tab's check box.
+        hide_act = (menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
+                    if self._cpr_line_menu_hide_ok(which, mi) else None)
         copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         del_act = menu.addAction(t("Delete"))
         try:
@@ -10572,18 +10580,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._cpr_fit()                  # auto-Fit on CPR creation
                 self._cpr_jump_ctrl_end(False)   # start at the most proximal edit point (|◀)
             return                               # _enter_cpr redraws itself
-        elif snap_now_act is not None and chosen is snap_now_act:
-            self._snap_trace(which, mi)
-            _mr_changed = True
-        elif snap_auto_act is not None and chosen is snap_auto_act:
-            self._snap_lumen = snap_auto_act.isChecked()
         elif spline_act is not None and chosen is spline_act:
             m["smooth"] = not m.get("smooth", False)
             _mr_changed = True
         elif center_angle_act is not None and chosen is center_angle_act:
             self._center_angle_target = {"key": which, "mi": mi}
             m.pop("center_angle", None)
-        elif chosen is hide_act:
+        elif hide_act is not None and chosen is hide_act:
             m["hidden"] = not m.get("hidden", False)   # hide THIS line only
             _mr_changed = True
         elif chosen is del_act:
@@ -11133,8 +11136,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Confirm step: set/UPDATE the valve plane from the drawn Ellipse.
         Re-pressing Confirm updates it; it never toggles the ring's visibility
         (that is Hide/Show or the button's right-click)."""
+        before = self._lv_vset_snap()
         self._lv_capture_valve_common(self._lv_valve_edit or "mitral",
                                       from_confirm=True)
+        self._lv_vset_record(before)                 # Ctrl+Z / Ctrl+Y
         QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
         self._lv_update_submode_ui()
 
@@ -11576,9 +11581,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._center is None:
             return
         apex = np.asarray(self._center, float).copy()
+        before = self._lv_vset_snap()
         self._lv_apex = apex
         self._lv_apex_shown = True
         self._lv_apex_marker_draw()
+        self._lv_vset_record(before)                 # Ctrl+Z / Ctrl+Y
         if self._lv_long_axis_from_apex(apex) is None:
             self._lvv_prompt(t(
                 "Apex set. Set the MV plane so the LV long axis (apex → MV "
@@ -17765,6 +17772,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._draft is not None and self._draft.get("pts"):
             self._draft_pop_point()
             return
+        if self._lv_pick_undo():          # MV+Apex Auto: drop the MV click
+            return
         if not getattr(self, "_undo_cmds", None) or self._undo_idx <= 0:
             return
         self._undo_idx -= 1
@@ -17779,6 +17788,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Ctrl+Y: while tracing re-place a dropped point; else step forward."""
         if self._draft is not None and getattr(self, "_draft_redo", None):
             self._draft_push_point()
+            return
+        if self._lv_pick_redo():          # MV+Apex Auto: re-place the MV click
             return
         if not getattr(self, "_undo_cmds", None) \
                 or self._undo_idx >= len(self._undo_cmds):

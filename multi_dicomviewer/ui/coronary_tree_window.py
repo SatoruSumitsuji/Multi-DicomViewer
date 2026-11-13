@@ -119,6 +119,10 @@ class _XHeader(QHeaderView):
     columns needed now in the narrow panel); clicking that "×" unfolds it."""
 
     toggled = pyqtSignal(int)
+    #: the "+" left of FixName's "×" → copy the selected FixName to every row
+    plusClicked = pyqtSignal(int)
+    #: columns that carry the "+" (only while unfolded)
+    PLUS_COLS = (_C_FIX,)
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -134,6 +138,14 @@ class _XHeader(QHeaderView):
             return QRect(x, 0, w, self.height())
         return QRect(x + w - _X_W - 2, 0, _X_W, self.height())
 
+    def _plus_rect(self, idx):
+        """The "+" hit area just left of the "×" (None when not offered)."""
+        if idx not in self.PLUS_COLS or idx in self.folded:
+            return None
+        from PyQt6.QtCore import QRect
+        xr = self._x_rect(idx)
+        return QRect(xr.left() - _X_W - 1, 0, _X_W, self.height())
+
     def paintSection(self, painter, rect, idx):
         painter.save()
         super().paintSection(painter, rect, idx)
@@ -141,6 +153,16 @@ class _XHeader(QHeaderView):
         if idx == _C_NAME:
             return
         from PyQt6.QtCore import QRect
+        if idx in self.PLUS_COLS and idx not in self.folded:
+            pr = QRect(rect.right() - 2 * _X_W - 2, rect.top(), _X_W,
+                       rect.height())
+            painter.save()
+            painter.setPen(QColor("#1a5fb4"))
+            f = painter.font()
+            f.setBold(True)
+            painter.setFont(f)
+            painter.drawText(pr, int(Qt.AlignmentFlag.AlignCenter), "+")
+            painter.restore()
         if idx in self.folded:
             r = rect
         else:
@@ -158,6 +180,11 @@ class _XHeader(QHeaderView):
         if (idx > _C_NAME and e.button() == Qt.MouseButton.LeftButton
                 and self._x_rect(idx).contains(e.position().toPoint())):
             self.toggled.emit(idx)
+            return
+        pr = self._plus_rect(idx) if idx > _C_NAME else None
+        if (pr is not None and e.button() == Qt.MouseButton.LeftButton
+                and pr.contains(e.position().toPoint())):
+            self.plusClicked.emit(idx)
             return
         super().mousePressEvent(e)
 
@@ -545,6 +572,7 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.setHeaderLabels(self._col_labels)
         hdr.setStretchLastSection(False)
         hdr.toggled.connect(self._toggle_col_fold)
+        hdr.plusClicked.connect(lambda _c: self._fix_name_copy_all())
         self._tree_w.headerItem().setToolTip(
             _C_ROLE, t("列名右の × で列を折りたたみ（× をもう一度押すと戻ります）"))
         # 血管 column auto-fits its contents so the full vessel name (now with the
@@ -1426,6 +1454,39 @@ class CoronaryTreeWindow(SnapDock):
             return False
         return a.shape == b.shape and bool(np.all(np.abs(a - b) <= tol_mm))
 
+    @staticmethod
+    def _display_name(v) -> str:
+        """Vessel-column text: the DetailName only (the file / vessel name is
+        DetailName+FixName after ファイル名更新); the vessel name until a
+        DetailName is given."""
+        det = (getattr(v, "detail_name", "") or "").strip()
+        return det or (v.name or "")
+
+    def _fix_name_copy_all(self) -> None:
+        """FixName header "+": the selected row's FixName → every vessel of this
+        CT (after a confirm)."""
+        from PyQt6.QtWidgets import QMessageBox
+        vid = self.selected_vid()
+        v = self._tree.vessels.get(vid) if vid else None
+        if v is None:
+            QMessageBox.information(self, t("FixName"), t(
+                "コピー元の行（FixName を入力済みの行）を選択してから ＋ を押して"
+                "ください。"))
+            return
+        val = (v.fix_name or "").strip()
+        n = len(self._tree.vessels)
+        msg = (t("全 {n} 本の FixName を「{f}」にします。よろしいですか？",
+                 n=n, f=val) if val else
+               t("選択中の行の FixName は空です。全 {n} 本の FixName を空にします。"
+                 "よろしいですか？", n=n))
+        if QMessageBox.question(self, t("FixName"), msg) \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for vv in self._tree.vessels.values():
+            vv.fix_name = val
+        self._populate()
+        self._refresh_rename_btn()
+
     def _auto_text(self, v) -> str:
         return _MARK_YES if getattr(v, "auto_traced", False) else _MARK_NO
 
@@ -1436,7 +1497,7 @@ class CoronaryTreeWindow(SnapDock):
         v = self._tree.vessels[vid]
         role_txt = v.role if v.role in ROOT_ROLES else t("枝")
         cols = [""] * _N_COLS
-        cols[_C_NAME] = v.name
+        cols[_C_NAME] = self._display_name(v)
         cols[_C_ROLE] = role_txt
         cols[_C_BR] = self._junction_text(vid)
         cols[_C_AUTO] = self._auto_text(v)
@@ -1638,10 +1699,12 @@ class CoronaryTreeWindow(SnapDock):
                 val = (item.text(_col) or "").strip()
                 setattr(v, "detail_name" if _col == _C_DETAIL else "fix_name",
                         val)
+                self._tree_w.blockSignals(True)
                 if val != item.text(_col):
-                    self._tree_w.blockSignals(True)
                     item.setText(_col, val)
-                    self._tree_w.blockSignals(False)
+                if _col == _C_DETAIL:            # the Vessel column follows
+                    item.setText(_C_NAME, self._display_name(v))
+                self._tree_w.blockSignals(False)
                 self._refresh_rename_btn()
             return
         if _col not in (0, -1):

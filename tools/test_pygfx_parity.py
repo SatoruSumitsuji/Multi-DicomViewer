@@ -175,7 +175,7 @@ def main() -> int:
     try:
         v._handle_right(key, (0, 2), 10, 10)          # last vertex → end
         v._handle_right(key, (0, 1), 10, 10)          # middle vertex
-        v._outline_right(key, 0, 10, 10)              # outline → lumen snap
+        v._outline_right(key, 0, 10, 10)              # outline menu
     finally:
         mod.QMenu = real_menu
     from multi_dicomviewer.i18n import t
@@ -183,10 +183,12 @@ def main() -> int:
           str(seen[0]))
     check("middle-vertex menu has no Resume trace",
           t("Resume trace") not in seen[1], str(seen[1]))
-    check("outline menu offers Snap trace to lumen",
-          t("Snap trace to lumen") in seen[2], str(seen[2]))
-    check("outline menu offers Auto-snap to lumen",
-          t("Auto-snap to lumen") in seen[2])
+    # Lumen snap / Auto-Trace are no longer on the outline menu (Auto on =
+    # auto-traced and snapped already; the Snap toggle stays on the CPR row).
+    check("outline menu has no Snap trace to lumen",
+          t("Snap trace to lumen") not in seen[2], str(seen[2]))
+    check("outline menu has no Auto-snap to lumen",
+          t("Auto-snap to lumen") not in seen[2])
 
     # the real thing: resume from the END vertex
     v._resume_trace(key, 0, 2)

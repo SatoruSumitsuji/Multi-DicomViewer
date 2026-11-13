@@ -145,6 +145,7 @@ class ValveAutoMixin:
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lv_pick_xy = None
+        self._lv_pick_redo_pt = None
         self._lv_pick_marker_clear()
         if which == "aortic":
             self._lv_valve_auto_seed = (which, "aov", None)
@@ -211,8 +212,21 @@ class ValveAutoMixin:
         which, stage = seed[0], seed[1]
         P = np.asarray(P, float)
         if stage == "aov":
-            self._lv_run_aov_auto(P)
+            # Show the AoV-centre click, then ask before the AutoTrace runs.
+            self._lv_pick_marker(P)
+            self._lv_pick_repaint()
+            ans = self._lv_auto_confirm(which)
+            if ans == "yes":
+                self._lv_run_aov_auto(P)
+                self._lv_pick_marker_clear_later()
+            elif ans == "no":
+                self._lv_pick_cancel()
+            else:                                # 戻る → click the centre again
+                self._lv_pick_marker_clear()
+                self._lvv_prompt(t(
+                    "AoVの短軸を表示し、その中心近傍をクリックしてください。"))
         elif stage == "mv":
+            self._lv_pick_redo_pt = None         # a new MV click ends the redo
             self._lv_valve_auto_seed = (which, "apex", P.copy())
             self._lv_pick_marker(P)
             self._lvv_prompt(t("心尖近傍をクリックしてください。"))
@@ -226,7 +240,69 @@ class ValveAutoMixin:
             # so it is clear the click was taken.
             self._lv_pick_marker(P, self._LV_PICK_APEX_COLOR, keep=True)
             self._lv_pick_repaint()
-            self._lv_run_mv_apex_auto(mv_p, P)
+            ans = self._lv_auto_confirm(which)
+            if ans == "yes":
+                self._lv_run_mv_apex_auto(mv_p, P)
+            elif ans == "no":
+                self._lv_pick_cancel()
+            else:                     # 戻る → keep the MV click, redo the apex
+                self._lv_pick_marker(mv_p)
+                self._lvv_prompt(t("心尖近傍をクリックしてください。"))
+
+    def _lv_pick_undo(self) -> bool:
+        """Ctrl+Z after the MV click (waiting for the apex click): drop the MV
+        click and ask for it again — instead of undoing a view change, which
+        would move the image under the MV click. True when consumed."""
+        if not self._lv_pick_active():
+            return False
+        seed = self._lv_valve_auto_seed
+        if seed[1] != "apex" or seed[2] is None:
+            return False
+        self._lv_pick_redo_pt = np.asarray(seed[2], float).copy()
+        self._lv_valve_auto_seed = (seed[0], "mv", None)
+        self._lv_pick_xy = None
+        self._lv_pick_marker_clear()
+        self._lvv_prompt(t(
+            "MV点を取り消しました。MV中心近傍をクリックし直してください"
+            "（Ctrl+Y で元に戻します）。"))
+        return True
+
+    def _lv_pick_redo(self) -> bool:
+        """Ctrl+Y right after that: put the MV click back. True when consumed."""
+        P = getattr(self, "_lv_pick_redo_pt", None)
+        if P is None or not self._lv_pick_active():
+            return False
+        seed = self._lv_valve_auto_seed
+        self._lv_pick_redo_pt = None
+        if seed[1] != "mv":
+            return False
+        self._lv_valve_auto_seed = (seed[0], "apex", P.copy())
+        self._lv_pick_marker(P)
+        self._lvv_prompt(t("心尖近傍をクリックしてください。"))
+        return True
+
+    def _lv_auto_confirm(self, which):
+        """After the last click: 'yes' (run the AutoTrace), 'no' (stop the
+        Auto) or 'back' (Cancel / Esc: click the last point again)."""
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Auto"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("AutoTraceを開始しますか？"))
+        box.setInformativeText(t(
+            "Yes：開始します。\nNo：Auto を中止します。\nCancel：戻って心尖近傍を"
+            "クリックし直します。") if which == "mitral" else t(
+            "Yes：開始します。\nNo：Auto を中止します。\nCancel：戻ってAoV中心近傍"
+            "をクリックし直します。"))
+        b_yes = box.addButton("Yes", QMessageBox.ButtonRole.YesRole)
+        b_no = box.addButton("No", QMessageBox.ButtonRole.NoRole)
+        b_back = box.addButton(t("Cancel（戻る）"),
+                               QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_yes)
+        box.setEscapeButton(b_back)
+        box.exec()
+        c = box.clickedButton()
+        return "yes" if c is b_yes else "no" if c is b_no else "back"
 
     def _lv_pick_marker(self, P, color=None, keep=False) -> None:
         """'+' marker at a picked point on both panes (keep=True adds it next
@@ -299,7 +375,9 @@ class ValveAutoMixin:
                 "AoV面を自動で検出できませんでした。Auto をもう一度押してAoV中心を"
                 "クリックし直すか、AoV Draw → AoV Set で手動設定してください。"))
             return
+        before = self._lv_vset_snap()
         self._lv_set_valve_result("aortic", res)
+        self._lv_vset_record(before)                 # one Ctrl+Z step
         self._lvv_prompt(t(
             "AoV面を自動設定しました（半径 {r:.1f} mm）。確認して、ずれていれば "
             "AoV Draw → AoV Set で修正してください。").format(r=float(res.radius)))
@@ -330,10 +408,13 @@ class ValveAutoMixin:
                 "MV面を自動で検出できませんでした。Auto をもう一度押してクリックし"
                 "直すか、MV Draw → MV Set で手動設定してください。"))
             return
+        before = self._lv_vset_snap()
         self._lv_set_valve_result("mitral", res)
         if apex is not None:
             self._lv_apex = np.asarray(apex.apex, float).copy()
             self._lv_apex_shown = True
+            self._lv_apex_marker_draw()
+        self._lv_vset_record(before)       # MV + apex = one Ctrl+Z step
         # Check view: MV face-on (left) and edge-on along the long axis (right).
         if hasattr(self, "_lv_view_mv_perpendicular"):
             self._lv_view_mv_perpendicular(reset_cam=False)
@@ -358,6 +439,67 @@ class ValveAutoMixin:
                 "心尖部の外側に脂肪が見えないため（横隔膜・肝臓に接しているなど）、"
                 "心外膜側の心尖点は心内膜側の心尖点＋推定壁厚で設定しました。")
         self._lvv_prompt(msg)
+
+    # ------------------------------------------- Ctrl+Z / Ctrl+Y of the Sets
+    # MV+Apex Auto, AoV Auto, MV Set, AoV Set and Apex Set each record ONE undo
+    # step: the MV / AoV planes (+ their rings and Auto traces on both panes)
+    # and the common apex before → after. The view is not part of it.
+    def _lv_vset_snap(self) -> dict:
+        import copy
+        vs = getattr(self, "_lv_valves", {}) or {}
+        ap = getattr(self, "_lv_apex", None)
+        return {
+            "valves": {w: (None if vs.get(w) is None else
+                           ([float(x) for x in vs[w][0]],
+                            [float(x) for x in vs[w][1]], float(vs[w][2])))
+                       for w in ("mitral", "aortic")},
+            "shown": dict(getattr(self, "_lv_valve_shown", {}) or {}),
+            "sig": dict(getattr(self, "_lv_valve_saved_sig", {}) or {}),
+            "apex": None if ap is None else [float(x) for x in ap],
+            "apex_shown": bool(getattr(self, "_lv_apex_shown", True)),
+            "rings": {k: copy.deepcopy([m for m in self._measures.get(k, [])
+                                        if m.get("_lv_valve")])
+                      for k in ("A", "B")},
+        }
+
+    def _lv_vset_restore(self, snap) -> bool:
+        import copy
+        cur = self._lv_vset_snap()
+        for w in ("mitral", "aortic"):
+            v = snap["valves"][w]
+            self._lv_valves[w] = (None if v is None else
+                                  (np.asarray(v[0], float),
+                                   np.asarray(v[1], float), float(v[2])))
+        self._lv_valve_shown.clear()
+        self._lv_valve_shown.update(snap["shown"])
+        self._lv_valve_saved_sig.clear()
+        self._lv_valve_saved_sig.update(snap["sig"])
+        self._lv_apex = (None if snap["apex"] is None
+                         else np.asarray(snap["apex"], float))
+        self._lv_apex_shown = snap["apex_shown"]
+        for k in ("A", "B"):
+            self._measures[k] = ([m for m in self._measures.get(k, [])
+                                  if not m.get("_lv_valve")]
+                                 + copy.deepcopy(snap["rings"][k]))
+            self._redraw_meas(k)
+        self._lv_apex_marker_draw()
+        for w in ("mitral", "aortic"):
+            if cur["valves"][w] != snap["valves"][w]:
+                self._lv_on_valve_changed(w)     # dependent caches follow
+        self._lv_update_valve_buttons()
+        self._lv_update_submode_ui()
+        return True
+
+    def _lv_vset_record(self, before) -> None:
+        """One Ctrl+Z step from *before* to now (nothing if nothing changed)."""
+        if before is None or not hasattr(self, "_undo_record"):
+            return
+        after = self._lv_vset_snap()
+        if (after["valves"] == before["valves"]
+                and after["apex"] == before["apex"]):
+            return
+        self._undo_record(lambda b=before: self._lv_vset_restore(b),
+                          lambda a=after: self._lv_vset_restore(a))
 
     def _lv_set_valve_result(self, which, res) -> None:
         self._lv_apply_valve_data(which, {
@@ -642,6 +784,7 @@ class ValveAutoMixin:
                 "心尖部を自動で検出できませんでした。センターラインの交点を心尖部に"
                 "合わせて Set で設定してください。"))
             return
+        before = self._lv_vset_snap()
         self._lv_apex = np.asarray(res.apex, float).copy()
         self._lv_apex_shown = True
         # Move the crossing onto the apex so both panes pass through it and the
@@ -649,6 +792,7 @@ class ValveAutoMixin:
         self._lv_goto_point(self._lv_apex)
         self._lv_apex_marker_draw()
         self._lv_update_submode_ui()
+        self._lv_vset_record(before)                 # one Ctrl+Z step
         self._lvv_prompt(t(
             "心尖部（心外膜側）を自動設定しました（MV 中心から {d:.0f} mm、心尖部の"
             "壁厚 {w:.1f} mm）。確認して、ずれていれば交点を合わせて Set で修正して"
