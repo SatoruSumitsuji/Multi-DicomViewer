@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QStyle,
+    QStyleOptionHeader,
     QMessageBox,
     QFrame,
     QPushButton,
@@ -269,7 +270,30 @@ class _CloseHeader(QHeaderView):
             return False
 
     def paintSection(self, painter, rect, logicalIndex):   # noqa: N802
-        super().paintSection(painter, rect, logicalIndex)
+        # Titles LEFT-aligned and elided at the right, kept clear of the ✕, so a
+        # narrow column still shows its first letters.
+        try:
+            opt = QStyleOptionHeader()
+            self.initStyleOptionForIndex(opt, logicalIndex)
+            opt.rect = rect
+            text = opt.text
+            opt.text = ""
+            st = self.style()
+            painter.save()
+            st.drawControl(QStyle.ControlElement.CE_Header, opt, painter, self)
+            painter.restore()
+            tr = QRect(rect.left() + 4, rect.top(),
+                       max(0, self._x_rect(rect).left() - rect.left() - 5),
+                       rect.height())
+            painter.save()
+            painter.setPen(self.palette().color(self.foregroundRole()))
+            painter.drawText(tr, int(Qt.AlignmentFlag.AlignLeft
+                                     | Qt.AlignmentFlag.AlignVCenter),
+                             self.fontMetrics().elidedText(
+                                 text, Qt.TextElideMode.ElideRight, tr.width()))
+            painter.restore()
+        except Exception:                                  # noqa: BLE001
+            super().paintSection(painter, rect, logicalIndex)
         painter.save()
         painter.setPen(QColor("#c0392b"))
         painter.drawText(self._x_rect(rect), Qt.AlignmentFlag.AlignCenter, "✕")
@@ -461,28 +485,10 @@ class CasePresentationWindow(SnapDock):
         bar1.addWidget(b_max)
         outer.addWidget(self._wrap_bar(bar1))
 
-        # -- toolbar row 2: reorder / update-delete / file (left-packed) ---
+        # -- toolbar row 2: batch remove / file (left-packed, tight) --------
+        # Row order: drag & drop or the row right-click menu (最初へ / 10上 / …).
         bar2 = QHBoxLayout()
-        # "リスト変更": reorder the SELECTED row within the list (最初 / 10上 /
-        # 一つ上 / 一つ下 / 10下 / 最後; drag & drop also works). Vertical symbols
-        # (bar+triangle = edge, double = 10, single = 1) are deliberately kept
-        # DIFFERENT from row 3's horizontal arrows, which move which series is
-        # DISPLAYED. 状態更新・除外・削除 were removed here — each row now has its
-        # own buttons (and the right-click menu), so they were redundant.
-        bar2.addWidget(QLabel(t("リスト変更:")))
-        for sym, tip, fn in (
-                ("⤒", t("選択行を最初へ"), lambda: self._move_edge(True)),
-                ("⏫", t("選択行を10上へ"), lambda: self._move(-10)),
-                ("▲", t("選択行を一つ上へ"), lambda: self._move(-1)),
-                ("▼", t("選択行を一つ下へ"), lambda: self._move(+1)),
-                ("⏬", t("選択行を10下へ"), lambda: self._move(+10)),
-                ("⤓", t("選択行を最後へ"), lambda: self._move_edge(False))):
-            b = QPushButton(sym)
-            b.setToolTip(tip)
-            b.setFixedWidth(34)
-            b.clicked.connect(fn)
-            bar2.addWidget(b)
-        bar2.addSpacing(12)
+        bar2.setSpacing(3)
         # Batch remove of the CURRENT multi-selection (Shift/Ctrl-select rows,
         # or right-click them). The per-row 除外/削除 buttons act on one row;
         # these act on every selected row at once. Same handlers as the
@@ -498,7 +504,7 @@ class CasePresentationWindow(SnapDock):
             "フォルダへ移動（元に戻せます）"))
         b_berase.clicked.connect(self._erase_selected)
         bar2.addWidget(b_berase)
-        bar2.addSpacing(12)
+        bar2.addSpacing(10)
         b_overwrite = QPushButton(t("上書き保存"))
         b_overwrite.setToolTip(t("直前に保存/読込したファイルへ上書き保存"))
         b_overwrite.clicked.connect(self._save_overwrite)
@@ -508,6 +514,11 @@ class CasePresentationWindow(SnapDock):
         b_save = QPushButton(t("名前を付けて保存…"))
         b_save.clicked.connect(self._save)
         bar2.addWidget(b_save)
+        b_export = QPushButton(t("書き出し…"))
+        b_export.setToolTip(t("表を Excel (.xlsx) または PDF に書き出し"
+                              "（表示中の列のみ・画像なし）"))
+        b_export.clicked.connect(self._export)
+        bar2.addWidget(b_export)
         b_load = QPushButton(t("読込…"))
         b_load.clicked.connect(self._load)
         bar2.addWidget(b_load)
@@ -1402,6 +1413,63 @@ class CasePresentationWindow(SnapDock):
         if not path:
             return
         self._write_to(path)
+
+    #: Per-row button columns — nothing to export there.
+    _EXPORT_SKIP = ("表示", "更新", "除外", "削除")
+
+    def _export_table(self):
+        """(headers, rows) of the table as shown: visible columns in header
+        order, without the per-row button columns."""
+        tb = self._table
+        hdr = tb.horizontalHeader()
+        cols = [c for c in sorted(range(len(_HEADERS)), key=hdr.visualIndex)
+                if not tb.isColumnHidden(c) and _HEADERS[c] not in self._EXPORT_SKIP]
+        headers = [t(_HEADERS[c]) for c in cols]
+        rows = []
+        for i in range(tb.rowCount()):
+            row = []
+            for c in cols:
+                it = tb.item(i, c)
+                row.append(it.text() if it is not None else "")
+            rows.append(row)
+        return headers, rows
+
+    def _export(self) -> None:
+        """書き出し… — the table to Excel (.xlsx) or PDF, no JSON needed."""
+        if not self._rows:
+            self._warn(t("書き出す行がありません。"))
+            return
+        base = os.path.splitext(os.path.basename(self._last_path))[0] \
+            if self._last_path else "CasePresentation"
+        d = self._default_dir()
+        default = os.path.join(d, base + ".xlsx") if d else base + ".xlsx"
+        f_xlsx, f_pdf = t("Excel (*.xlsx)"), t("PDF (*.pdf)")
+        path, flt = QFileDialog.getSaveFileName(
+            self, t("Case Presentation を書き出し"), default,
+            f_xlsx + ";;" + f_pdf)
+        if not path:
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".xlsx", ".pdf"):
+            ext = ".pdf" if flt == f_pdf else ".xlsx"
+            path += ext
+        headers, rows = self._export_table()
+        from multi_dicomviewer.core import table_export
+        try:
+            if ext == ".pdf":
+                table_export.write_pdf(path, headers, rows,
+                                       title=t("Case Presentation"))
+            else:
+                table_export.write_xlsx(path, headers, rows,
+                                        sheet="Case Presentation")
+        except Exception as e:                       # noqa: BLE001
+            self._warn(t("書き出しに失敗しました：{e}", e=str(e)))
+            return
+        self._last_dir = os.path.dirname(path)
+        try:
+            self._hint.setText(t("書き出しました：{p}", p=os.path.basename(path)))
+        except Exception:                            # noqa: BLE001
+            pass
 
     def _save_overwrite(self) -> None:
         """上書き保存 — write straight to the last saved/loaded file (no dialog);

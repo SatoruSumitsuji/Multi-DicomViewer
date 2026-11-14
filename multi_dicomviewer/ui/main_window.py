@@ -5215,13 +5215,15 @@ class MainWindow(QMainWindow):
                     except Exception:                    # noqa: BLE001
                         pass
             return False
+        # Shown in the SELECTED (active) pane; the pane the row was captured
+        # from only when no shown pane is selected.
         shown = self._shown_panes()
         idx = row.get("pane_index", 0)
-        if isinstance(idx, int) and 0 <= idx < len(self._panes) \
+        if self._active in shown:
+            pane = self._active
+        elif isinstance(idx, int) and 0 <= idx < len(self._panes) \
                 and self._panes[idx] in shown:
             pane = self._panes[idx]
-        elif self._active in shown:
-            pane = self._active
         else:
             pane = shown[0] if shown else self._active
         self._set_active_pane(pane)
