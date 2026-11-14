@@ -100,7 +100,7 @@ class _CoregPane:
         col.setSpacing(2)
 
         self.title = QLabel("—")
-        self.title.setStyleSheet("QLabel { color:#cfcfcf; }")
+        self.title.setStyleSheet("QLabel { color:black; }")
         col.addWidget(self.title)
 
         self.canvas = ImageCanvas()
@@ -513,7 +513,7 @@ class CoregWindow(QMainWindow):
         cv.addWidget(self._exclude_xa_cb)
         self._status = QLabel("")
         self._status.setWordWrap(True)
-        self._status.setStyleSheet("QLabel { color:#88ccff; }")
+        self._status.setStyleSheet("QLabel { color:#0b4f9c; }")
         cv.addWidget(self._status)
         # One row per MultiReg point: [MultiReg-N (jump)] [✕ (delete)].
         self._lm_host = QWidget()
