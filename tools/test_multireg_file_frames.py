@@ -1,6 +1,6 @@
 """MultiReg save / load: new files are named *.multireg.json and store every
 pane's frame; loading puts each ANGIO pane back on its frame (the guide's
-frame first, else the stored pane frame); older .cosync.json files still load.
+frame first, else the stored pane frame) and shows the top MultiReg point; older .cosync.json files still load.
 Synthetic data only; the file dialog is mocked.
 """
 import json
@@ -62,16 +62,18 @@ def make():
                      "name": "A"}],
         _guides={1: {"vertices": [(1.0, 2.0), (5.0, 6.0)], "curve": [],
                      "frame": 23}},
-        _active_ivus=0, _status=Status(), _selected_lm=-1, _renaming=-1)
+        _active_ivus=0, _status=Status(), _selected_lm=-1, _renaming=-1,
+        _placing=False, _syncing=False)
     for name in ("_default_dir", "_remember_dir", "_save_coreg", "_load_coreg",
                  "_parse_coreg_json", "_parse_pane_frames", "_apply_loaded",
-                 "_parse_multisync_txt"):
+                 "_parse_multisync_txt", "_goto_landmark"):
         fn = W.__dict__[name]
         setattr(o, name, fn.__func__ if isinstance(fn, staticmethod)
                 else fn.__get__(o))
     o._clear_guide = lambda i: o._guides.__setitem__(
         i, {"vertices": [], "curve": [], "frame": None})
     o._refresh_list = o._drive_markers = lambda: None
+    o._apply_rotation = lambda pane: None
     return o
 
 
@@ -96,7 +98,10 @@ try:
     o2._load_coreg()
     check("load: angio with a guide → the guide's frame", o2.panes[1].cur == 23)
     check("load: angio without a guide → its stored frame", o2.panes[2].cur == 7)
-    check("load: the IVUS is not moved by the pane frame", o2.panes[0].cur == 0)
+    check("load: the IVUS shows the TOP MultiReg point (not its pane frame)",
+          o2.panes[0].cur == 100)
+    check("load: that point is shown but not left selected",
+          o2._selected_lm == -1)
 
     # An older .cosync.json: no pane frames, a guide frame only.
     old = os.path.join(tmp, "old.cosync.json")

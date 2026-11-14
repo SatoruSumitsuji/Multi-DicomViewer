@@ -1333,6 +1333,14 @@ class CoregWindow(QMainWindow):
                     pass
         self._refresh_list()
         self._drive_markers()
+        # Show the TOP MultiReg point at once, so it is obvious the
+        # registration came back (not the panes' arbitrary frames).
+        # Only the view jumps — the point is NOT left selected (blue), so the
+        # next "Add" still makes a new point instead of editing this one.
+        if self._landmarks:
+            self._goto_landmark(0)
+            self._selected_lm = -1
+            self._refresh_list()
         self._status.setText(
             t("Loaded {n} MultiReg point(s).", n=len(self._landmarks)))
 
@@ -1351,6 +1359,8 @@ class CoregWindow(QMainWindow):
 
     #: ui_state key — the last MP4 text-overlay choice (title / frame).
     _MP4_TEXT_KEY = "multireg_mp4_text"
+    #: x264 speed preset for the MultiReg MP4 (CRF mode).
+    _MP4_PRESET = "veryfast"
 
     def _compose_coreg_frame(self, cell: int, cols: int, title: bool = False,
                              frame_info: bool = False) -> np.ndarray:
@@ -1502,8 +1512,11 @@ class CoregWindow(QMainWindow):
 
         from multi_dicomviewer.core import export as exporter
         try:
+            # Speed: x264 "veryfast" — about 2× faster than "medium" at the
+            # same CRF, with about the same file size on these composites.
             stream = exporter.open_mp4_stream(
-                path, fps=cfg.fps, bitrate_mbps=cfg.bitrate_mbps, crf=cfg.crf)
+                path, fps=cfg.fps, bitrate_mbps=cfg.bitrate_mbps, crf=cfg.crf,
+                preset=self._MP4_PRESET)
         except Exception as e:      # noqa: BLE001
             prog.close()
             QMessageBox.critical(

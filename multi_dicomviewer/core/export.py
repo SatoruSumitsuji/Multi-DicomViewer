@@ -549,7 +549,7 @@ def _pad_to_even(rgb: np.ndarray) -> np.ndarray:
 
 
 def _make_writer(path: str, fps: float, bitrate_mbps: int,
-                 crf: Optional[int]):
+                 crf: Optional[int], preset: str = "medium"):
     """imageio-ffmpeg writer; libx264 + yuv420p so QuickTime / Windows
     Media Player / browsers all play it.
 
@@ -571,7 +571,7 @@ def _make_writer(path: str, fps: float, bitrate_mbps: int,
     )
     if crf is not None:
         kwargs["output_params"] = [
-            "-crf", str(int(crf)), "-preset", "medium"
+            "-crf", str(int(crf)), "-preset", str(preset or "medium")
         ]
     else:
         kwargs["bitrate"] = f"{int(bitrate_mbps)}M"
@@ -599,7 +599,7 @@ class _Mp4Stream:
     on close()."""
 
     def __init__(self, path: str, fps: float, bitrate_mbps: int,
-                 crf: Optional[int]):
+                 crf: Optional[int], preset: str = "medium"):
         self._final = path
         self._tmp: Optional[str] = None
         out = path
@@ -607,7 +607,7 @@ class _Mp4Stream:
             fd, self._tmp = tempfile.mkstemp(suffix=".mp4")
             os.close(fd)
             out = self._tmp
-        self._writer = _make_writer(out, fps, bitrate_mbps, crf)
+        self._writer = _make_writer(out, fps, bitrate_mbps, crf, preset)
 
     def add(self, frame: np.ndarray) -> None:
         self._writer.append_data(_pad_to_even(frame))
@@ -630,11 +630,13 @@ class _Mp4Stream:
 
 
 def open_mp4_stream(path: str, fps: float, bitrate_mbps: int,
-                    crf: Optional[int] = None) -> _Mp4Stream:
+                    crf: Optional[int] = None,
+                    preset: str = "medium") -> _Mp4Stream:
     """Open a streaming MP4 encoder. Call ``.add(frame_rgb)`` per frame,
     then ``.close()`` (or ``.abort()`` on cancel). Bounds memory and works
-    with non-ASCII output paths — used by the MultiSync composite export."""
-    return _Mp4Stream(path, fps, bitrate_mbps, crf)
+    with non-ASCII output paths — used by the MultiSync composite export.
+    *preset* is the x264 speed preset used in CRF mode."""
+    return _Mp4Stream(path, fps, bitrate_mbps, crf, preset)
 
 
 def write_mp4(path: str, frames: list[np.ndarray],
