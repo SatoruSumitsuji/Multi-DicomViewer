@@ -715,7 +715,7 @@
   "Multi-registration of IVUS / coronary-CT short-axis / XA angio: trace a guide, pin MultiReg landmarks, then scrubbing a driver moves a marker along the angio (needs at least one pull-back / short-axis or XA series shown)": "IVUS／冠動脈CT短軸／XAアンギオのマルチレジストレーション：ガイドをトレースしMultiReg点を設定、ドライバーをスクラブすると造影上のマーカーが移動（プルバック／短軸またはXA系列の表示が1つ以上必要）",
   "MultiReg": "MultiReg",
   "MultiReg / MultiSync (*.json *.txt);;All files (*)": "MultiReg / MultiSync (*.json *.txt);;すべてのファイル (*)",
-  "MultiReg file (*.cosync.json)": "MultiRegファイル (*.cosync.json)",
+  "MultiReg file (*.multireg.json)": "MultiRegファイル (*.multireg.json)",
   "MultiReg points": "MultiReg点",
   "MultiReg…": "MultiReg…",
   "MultiSync": "MultiSync",

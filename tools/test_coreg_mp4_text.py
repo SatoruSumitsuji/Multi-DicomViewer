@@ -58,7 +58,7 @@ check("no master → first pane with files", os.path.normcase(
     W._default_dir(fake)) == study)
 empty = SimpleNamespace(panes=[SimpleNamespace(series=None)], _active_ivus=-1)
 check("no files anywhere → '' (or the last folder)", W._default_dir(empty) == "")
-W._remember_dir(empty, os.path.join(s1, "x.cosync.json"))
+W._remember_dir(empty, os.path.join(s1, "x.multireg.json"))
 check("…then the last folder a dialog used", W._default_dir(empty) == s1)
 src = (ROOT / "multi_dicomviewer/ui/coreg_window.py").read_text(encoding="utf-8")
 check("save / load / MP4 dialogs all start at _default_dir()",

@@ -1151,24 +1151,27 @@ class CoregWindow(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(
             self, t("Save MultiReg"), self._default_dir(),
-            t("MultiReg file (*.cosync.json)"))
+            t("MultiReg file (*.multireg.json)"))
         if not path:
             return
         if not path.lower().endswith(".json"):
-            path += ".cosync.json"
+            path += ".multireg.json"
         self._remember_dir(path)
         data = {
             "format": "MDV-MultiReg",
             "version": 1,
             "panes": [
                 {"index": p.index, "ivus": bool(p.is_ivus),
-                 "label": (p.series.label if p.series is not None else "")}
+                 "label": (p.series.label if p.series is not None else ""),
+                 # The frame each pane shows — an angio comes back on it.
+                 "frame": int(p.cur)}
                 for p in self.panes
             ],
             "guides": {
                 str(i): {"vertices": [[float(x), float(y)] for (x, y) in
                                       g.get("vertices", [])],
-                         "frame": g.get("frame")}
+                         "frame": (g.get("frame") if g.get("frame") is not None
+                                   else int(self.panes[i].cur))}
                 for i, g in self._guides.items() if g.get("vertices")
             },
             "landmarks": [
@@ -1189,8 +1192,9 @@ class CoregWindow(QMainWindow):
             t("Saved {n} MultiReg point(s).", n=len(self._landmarks)))
 
     def _load_coreg(self) -> None:
-        """Load MultiReg points + guide traces from a native .cosync.json, or
-        import a legacy MultiSync .txt as IVUS-only sync points."""
+        """Load MultiReg points + guide traces from a native .multireg.json
+        (or an older .cosync.json), or import a legacy MultiSync .txt as
+        IVUS-only sync points. Each angio pane goes to its saved frame."""
         path, _ = QFileDialog.getOpenFileName(
             self, t("Load MultiReg"), self._default_dir(),
             t("MultiReg / MultiSync (*.json *.txt);;All files (*)"))
@@ -1203,6 +1207,7 @@ class CoregWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, t("Load MultiReg"), str(exc))
             return
+        frames = {}
         if path.lower().endswith(".txt") or text.lstrip().startswith("#"):
             landmarks, guides = self._parse_multisync_txt(text), {}
         else:
@@ -1212,11 +1217,25 @@ class CoregWindow(QMainWindow):
                 QMessageBox.warning(self, t("Load MultiReg"), str(exc))
                 return
             landmarks, guides = self._parse_coreg_json(data)
+            frames = self._parse_pane_frames(data)
         if landmarks is None:
             QMessageBox.warning(
                 self, t("Load MultiReg"), t("Unrecognised MultiReg file."))
             return
-        self._apply_loaded(landmarks, guides)
+        self._apply_loaded(landmarks, guides, frames)
+
+    @staticmethod
+    def _parse_pane_frames(data) -> dict:
+        """{pane index: frame} saved per pane (files from now on); {} for
+        older files, which only carry the frame a guide was drawn on."""
+        out = {}
+        for pd in (data.get("panes") or []) if isinstance(data, dict) else []:
+            try:
+                if pd.get("frame") is not None:
+                    out[int(pd["index"])] = int(pd["frame"])
+            except (TypeError, ValueError, KeyError, AttributeError):
+                continue
+        return out
 
     def _parse_coreg_json(self, data):
         """(landmarks, guides) from a native file, with int-keyed maps —
@@ -1280,9 +1299,11 @@ class CoregWindow(QMainWindow):
                             "fracs": {}, "name": name[:8]})
         return lms
 
-    def _apply_loaded(self, landmarks, guides) -> None:
+    def _apply_loaded(self, landmarks, guides, frames=None) -> None:
         """Replace the current MultiReg points + guides with loaded ones and
-        redraw. Guide curves are re-derived from vertices here."""
+        redraw. Guide curves are re-derived from vertices here. Each ANGIO
+        pane goes to its saved frame: the frame its guide was drawn on, else
+        the pane frame stored in the file (*frames*)."""
         self._landmarks = landmarks
         self._selected_lm = -1
         self._renaming = -1
@@ -1298,6 +1319,18 @@ class CoregWindow(QMainWindow):
             self._guides[i] = {"vertices": verts, "curve": curve,
                                "frame": g.get("frame")}
             self.panes[i].canvas.set_coreg_guide(verts, curve)
+        for pane in self.panes:
+            if pane.is_ivus or pane.index not in valid:
+                continue
+            g = (guides or {}).get(pane.index) or {}
+            f = g.get("frame")
+            if f is None:
+                f = (frames or {}).get(pane.index)
+            if f is not None and pane.total > 0:
+                try:
+                    pane.show_frame(int(f))
+                except (TypeError, ValueError):
+                    pass
         self._refresh_list()
         self._drive_markers()
         self._status.setText(

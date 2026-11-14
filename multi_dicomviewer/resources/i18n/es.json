@@ -801,7 +801,7 @@
   "Multi-registration of IVUS / coronary-CT short-axis / XA angio: trace a guide, pin MultiReg landmarks, then scrubbing a driver moves a marker along the angio (needs at least one pull-back / short-axis or XA series shown)": "Multirregistro de IVUS / eje corto de TC coronaria / angio XA: trace una guía, fije marcas MultiReg y, al recorrer un conductor, un marcador se desplaza por el angio (requiere al menos una retirada / eje corto o serie XA visible)",
   "MultiReg": "MultiReg",
   "MultiReg / MultiSync (*.json *.txt);;All files (*)": "MultiReg / MultiSync (*.json *.txt);;Todos los archivos (*)",
-  "MultiReg file (*.cosync.json)": "Archivo MultiReg (*.cosync.json)",
+  "MultiReg file (*.multireg.json)": "Archivo MultiReg (*.multireg.json)",
   "MultiReg points": "Puntos MultiReg",
   "MultiReg…": "MultiReg…",
   "MultiSync": "MultiSync",
