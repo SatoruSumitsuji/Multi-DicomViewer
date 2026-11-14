@@ -405,6 +405,14 @@ class TW:
     _rename_base = W._rename_base
     _rename_plan_raw = W._rename_plan_raw
     _batch_rename = W._batch_rename
+    _rename = W._rename
+    _retarget_viewer_path = W._retarget_viewer_path
+
+    def _source_viewer(self):
+        return None
+
+    def _refresh_rename_btn(self):
+        pass
 
     def __init__(self, folder, fix=""):
         self._tree = FakeTree(fix)
@@ -484,6 +492,62 @@ old = {"vessels": [{"vid": "x", "name": "a", "points": [[0, 0, 0], [1, 0, 0]],
                     "fix_name": "@9"}]}
 check("an older .corotree.json: the FixName from its lines",
       CoronaryTree.from_json(old).fix_name == "@9")
+
+# 名前を変更 renames that one line's file at once (B案), no preview / Folder sync.
+
+
+class FakeViewer:
+    def __init__(self):
+        self._cpr_last_path = None
+        self._measures = {"A": [], "B": []}
+
+
+real_in = ctw.QInputDialog.getText
+real_q = QMessageBox.question
+asked = []
+QMessageBox.question = staticmethod(
+    lambda *a, **k: asked.append(1) or QMessageBox.StandardButton.Yes)
+try:
+    tmp = tempfile.mkdtemp(prefix="mdv_cpr1_")
+    w = TW(tmp, fix="@030")
+    for vid in ("a", "b"):                     # names already <name>+FixName
+        v = w._tree.vessels[vid]
+        nm = W._display_name(v) + "@030"
+        np_ = os.path.join(tmp, nm + ".cpr.json")
+        os.replace(w.b["paths"][vid], np_)
+        w.b["paths"][vid] = np_
+        v.name, v.detail_name = nm, W._display_name(v)
+    fv = FakeViewer()
+    old = w.b["paths"]["a"]
+    fv._cpr_last_path = old
+    fv._measures["B"].append({"_cpr_file": old})
+    w._source_viewer = lambda: fv
+    w._refresh_rename_btn = lambda: None
+    w._write_to = lambda *_a: None
+    w.selected_vid = lambda: "a"
+    ctw.QInputDialog.getText = staticmethod(lambda *a, **k: ("LAD6", True))
+    w._rename()
+    files = sorted(os.listdir(tmp))
+    check("rename → that line's file renamed at once (<name> + FixName)",
+          "LAD6@030.cpr.json" in files and "01@030.cpr.json" not in files
+          and "LAD7@030.cpr.json" in files, str(files))
+    check("… without a preview and without Folder sync",
+          not asked and w.synced == [])
+    va = w._tree.vessels["a"]
+    newp = os.path.join(tmp, "LAD6@030.cpr.json")
+    check("… vessel / path updated, name written into the file",
+          va.name == "LAD6@030" and W._display_name(va) == "LAD6"
+          and w.b["paths"]["a"] == newp
+          and _json.load(open(newp, encoding="utf-8")).get("detail_name") == "LAD6")
+    check("… the viewer's Overwrite / Next target follows the new file",
+          fv._cpr_last_path == newp and fv._measures["B"][0]["_cpr_file"] == newp)
+    ctw.QInputDialog.getText = staticmethod(lambda *a, **k: ("LAD7", True))
+    w._rename()
+    check("a clash with another line's name: file kept, user told",
+          os.path.exists(newp) and w.warned, str(w.warned))
+finally:
+    ctw.QInputDialog.getText = real_in
+    QMessageBox.question = real_q
 _ = QPoint
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")

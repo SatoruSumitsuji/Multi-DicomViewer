@@ -1485,6 +1485,7 @@
   "ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動": "Arrastrar = rotar · Rueda = zoom · Arrastrar con botón derecho = desplazar",
   "ハンドルで形を合わせ、Ellipse を右クリック →「このEllipseで{v}面を設定」。Esc で中止。": "Ajuste la forma con los tiradores y haga clic derecho en la elipse → «Fijar el plano {v} con esta elipse». Esc cancela.",
   "ファイルの記録と選んだCTが一致しません（{d}）。別のCTに適用すると位置が合いません。適用しますか？": "El registro del archivo y el CT elegido no coinciden ({d}). Si se aplica a otro CT, las posiciones no coincidirán. ¿Aplicar?",
+  "ファイル名は変更していません：": "No se ha cambiado el nombre del archivo:",
   "ファイル名更新": "Renombrar archivos",
   "ファイル名（拡張子なし）": "Nombre de archivo (sin extensión)",
   "フォルダと一致しています（更新はありません）。": "Coincide con la carpeta (sin actualizaciones).",

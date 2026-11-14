@@ -2633,6 +2633,8 @@ class CoronaryTreeWindow(SnapDock):
             v.name = v.detail_name = name.strip()
             self._populate()
             self.treeChanged.emit()
+            # The file follows at once (<name> + FixName), no extra step.
+            self._batch_rename(only={vid}, ask=False)
 
     def _reparent(self):
         vid = self.selected_vid()
@@ -2809,6 +2811,28 @@ class CoronaryTreeWindow(SnapDock):
         return [vid for vid, v in self._tree.vessels.items()
                 if not v.auto_traced and not v.fin_traced]
 
+    def _retarget_viewer_path(self, old, new) -> None:
+        """A renamed .cpr.json: the viewer's Overwrite / Next target for that
+        line (its last path, the line's _cpr_file / _cpr_saved) follows to the
+        new file, so a later Save does not bring the old name back."""
+        v = self._source_viewer()
+        if v is None or not old or not new:
+            return
+        nc = os.path.normcase(os.path.abspath(old))
+
+        def same(p):
+            return isinstance(p, str) and p and \
+                os.path.normcase(os.path.abspath(p)) == nc
+        if same(getattr(v, "_cpr_last_path", None)):
+            v._cpr_last_path = new
+        for lst in (getattr(v, "_measures", None) or {}).values():
+            for m in lst or []:
+                if not isinstance(m, dict):
+                    continue
+                for key in ("_cpr_file", "_cpr_saved"):
+                    if same(m.get(key)):
+                        m[key] = new
+
     def _source_viewer(self):
         """The CT viewer showing this tree's source 3-D CT (for its volume)."""
         sh = self._shell
@@ -2876,7 +2900,8 @@ class CoronaryTreeWindow(SnapDock):
         import threading
         from PyQt6.QtCore import QEventLoop, QTimer
         from PyQt6.QtWidgets import QProgressDialog
-        from multi_dicomviewer.core.cpr_autotrack import thin_ctrl, trace_vessel
+        from multi_dicomviewer.core.cpr_autotrack import (gap_ctrl_pts, thin_ctrl,
+                                                          trace_vessel)
         dims = tuple(float(d) for d in v._dims)
         try:
             sp = float(settings_mod.load_coronary_params().get("cpr_ctrl_mm", 3))
@@ -2963,6 +2988,14 @@ class CoronaryTreeWindow(SnapDock):
                 nd.pop("fin_traced", None)
                 nd["ctrl_manual"] = np.asarray(ves.ctrl_manual,
                                                float).round(4).tolist()
+                try:
+                    gp = gap_ctrl_pts(res.path_mm, ctrl, res.gaps)
+                except Exception:                    # noqa: BLE001
+                    gp = []
+                if gp:
+                    nd["gap_pts"] = np.asarray(gp, float).round(4).tolist()
+                else:
+                    nd.pop("gap_pts", None)
                 st0 = dict(nd.get("state") or {})
                 st0["idx"] = 0                   # old index may not fit the new line
                 nd["state"] = st0
@@ -3104,12 +3137,16 @@ class CoronaryTreeWindow(SnapDock):
                 out.append((vid, base, new, path))
         return out
 
-    def _batch_rename(self) -> None:
+    def _batch_rename(self, only=None, ask: bool = True) -> None:
         """ファイル名更新: rename each line's .cpr.json (and its vessel) to
         <vessel name> + the tree's FixName, write the names into the file (the
         name without FixName as detail_name), then run フォルダ更新
         on that folder. A preview lists 旧名 → 新名; duplicates / existing files /
-        unusable characters / unknown files are reported and skipped."""
+        unusable characters / unknown files are reported and skipped.
+
+        *only* (a set of vids) limits it to those lines and *ask* False skips the
+        preview — 名前を変更 renames that one line's file at once (a line not yet
+        saved to a .cpr.json is left alone; no Folder sync needed)."""
         import re
         tree = self._tree
         b = self._bundle()
@@ -3118,6 +3155,8 @@ class CoronaryTreeWindow(SnapDock):
         plan, problems = [], []
         new_names = {}
         for vid, v in tree.vessels.items():
+            if only is not None and vid not in only:
+                continue
             base = self._rename_base(v, fix)
             if not base:
                 continue
@@ -3127,10 +3166,16 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             path = b["paths"].get(vid, "") or ""
             if not path or not os.path.isfile(path):
-                problems.append(t("{a}: 元の .cpr.json が不明", a=v.name))
+                if only is None:                 # a not-yet-saved line: nothing
+                    problems.append(t("{a}: 元の .cpr.json が不明", a=v.name))
                 continue
             new_names.setdefault(new.lower(), []).append(vid)
             plan.append((vid, v.name, new, path))
+        if only is not None:                     # a clash with any other line
+            for ovid, ov in tree.vessels.items():
+                if ovid not in only:
+                    nm = self._rename_base(ov, fix) + fix
+                    new_names.setdefault(nm.lower(), []).append(ovid)
         dups = {k for k, vs in new_names.items() if len(vs) > 1}
         final = []
         for vid, old, new, path in plan:
@@ -3147,6 +3192,12 @@ class CoronaryTreeWindow(SnapDock):
                 continue
             final.append((vid, old, new, path, dst))
         if not final:
+            if not ask:
+                if problems:
+                    self._warn(t("ファイル名は変更していません：") + "\n"
+                               + "\n".join(problems[:15]))
+                self._refresh_rename_btn()
+                return
             msg = t("更新するファイル名はありません。")
             if problems:
                 msg += "\n" + "\n".join(problems[:15])
@@ -3162,7 +3213,7 @@ class CoronaryTreeWindow(SnapDock):
                            and os.path.isfile(lp)) else ""
         if tree_file:
             msg += "\n\n" + t("（.corotree.json も上書き保存します）")
-        if QMessageBox.question(self, t("ファイル名更新"), msg) \
+        if ask and QMessageBox.question(self, t("ファイル名更新"), msg) \
                 != QMessageBox.StandardButton.Yes:
             return
         done, folders = 0, []
@@ -3189,6 +3240,7 @@ class CoronaryTreeWindow(SnapDock):
                     pass
             v.name, v.detail_name, v.fix_name = new, base, fix
             b["paths"][vid] = dst
+            self._retarget_viewer_path(path, dst)
             done += 1
             fd = os.path.dirname(dst)
             if fd not in folders:
@@ -3202,6 +3254,9 @@ class CoronaryTreeWindow(SnapDock):
         if problems and done:
             self._warn(t("{n} 本のファイル名を更新しました。", n=done) + "\n"
                        + t("スキップ：") + "\n" + "\n".join(problems[:15]))
+        if only is not None:                     # paths + names already updated
+            self._refresh_rename_btn()
+            return
         for fd in folders:                       # Folder Sync on the new names
             self._resync_from_folder(folder=fd)
 

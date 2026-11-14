@@ -1270,6 +1270,10 @@ class _Overlay(QWidget):
                 p.setPen(QPen(QColor(0, 0, 0, 200), 1.4))
                 p.setBrush(QColor(255, 235, 0))
                 p.drawEllipse(QPointF(mx, my), 5.0, 5.0)
+                if v._cpr_at_gap():              # a gap edit point: ring round it
+                    p.setPen(QPen(QColor(*v._CPR_GAP_RGB), 2.2))
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawEllipse(QPointF(mx, my), 9.0, 9.0)
         else:
             p.setPen(QPen(QColor(255, 217, 0, 220), 1.6))
             p.setBrush(Qt.BrushStyle.NoBrush)
@@ -2232,6 +2236,9 @@ class _Overlay(QWidget):
         _sel = v._cpr_sel_world_pts(key)
         if _sel:
             dots_hollow(_sel, QColor(255, 60, 255), 8.0, 2.0)
+        _gap = v._cpr_gap_world_pts(key)         # AutoTrace gap edit points
+        if _gap:
+            dots_hollow(_gap, QColor(*v._CPR_GAP_RGB), 7.0, 2.2)
         _band = v._cpr_band_world_rect(key)
         if _band is not None:
             _pen = QPen(QColor(0, 220, 255), 1.5)

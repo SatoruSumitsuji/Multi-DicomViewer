@@ -11902,7 +11902,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # radius tracks the pane's parallel scale so the on-screen size stays
         # constant across zoom (same trick the ▲ markers use).
         sel_pts = self._cpr_sel_world_pts(key)   # CPR map: selected edit points
-        if off_pts or sel_pts:
+        gap_pts = self._cpr_gap_world_pts(key)   # … and AutoTrace gap points
+        if off_pts or sel_pts or gap_pts:
             ps_off = p.ren.GetActiveCamera().GetParallelScale()
             # Size the hollow ring's OUTER edge to _CPR_RING_OUTER_PX — kept a
             # little smaller than the in-plane dot's radius (_MEAS_PT_PX/2) so
@@ -11921,6 +11922,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 srings = _ring_polylines(sel_pts, ring_r_world * 2.0)
                 rings = list(rings) + list(srings)
                 cols += [(255, 60, 255, 255)] * len(srings)
+            if gap_pts:
+                # AutoTrace low-contrast (gap) edit points: orange-red ring.
+                grings = _ring_polylines(gap_pts, ring_r_world * 1.6)
+                rings = list(rings) + list(grings)
+                cols += [self._CPR_GAP_RGB + (255,)] * len(grings)
             p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())
@@ -20995,15 +21001,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             else:
                 hollow.append((0.0, 0.0))       # spline centre (interpolated)
         p.meas_pts_mapper.SetInputData(_points_pd(filled))
-        if hollow:
+        gap = filled if (filled and self._cpr_at_gap()) else []
+        if hollow or gap:
             dpr = max(1.0, p.canvas.devicePixelRatioF())
             ps = p.ren.GetActiveCamera().GetParallelScale()
             h_phys = max(1.0, p.canvas.height() * dpr)
             ring_r_px = max(1.0, _MEAS_PT_PX / 2.0 - 1.2 * dpr)
             ring_r_world = ring_r_px * (2.0 * ps) / h_phys
-            rings = _ring_polylines(hollow, ring_r_world)
-            p.meas_pts_off_mapper.SetInputData(
-                _colored_multi_pd(rings, [(255, 217, 0, 220)] * len(rings)))
+            rings = _ring_polylines(hollow, ring_r_world) if hollow else []
+            cols = [(255, 217, 0, 220)] * len(rings)
+            if gap:                              # a gap edit point: ring round it
+                grings = _ring_polylines(gap, ring_r_world * 1.8)
+                rings = list(rings) + list(grings)
+                cols += [self._CPR_GAP_RGB + (255,)] * len(grings)
+            p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())
         p.meas_off_dash_mapper.SetInputData(vtkPolyData())

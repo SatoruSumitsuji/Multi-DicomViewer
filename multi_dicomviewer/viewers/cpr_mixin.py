@@ -492,6 +492,10 @@ class CPRMixin:
         out = {"auto_traced": bool(m is not None and m.get("_cpr_auto"))}
         if m is not None and m.get("_cpr_manual"):
             out["ctrl_manual"] = [list(map(float, q)) for q in m["_cpr_manual"]]
+        if m is not None:
+            gp = self._cpr_gap_pts_left(m, ctrl)
+            if gp:
+                out["gap_pts"] = gp
         for key in ("detail_name", "fix_name"):
             val = ((m.get("_cpr_names") or {}) if m is not None else {}).get(key)
             if val:
@@ -528,6 +532,8 @@ class CPRMixin:
             m["_cpr_auto"] = True
         if data.get("ctrl_manual"):
             m["_cpr_manual"] = [list(map(float, q)) for q in data["ctrl_manual"]]
+        if data.get("gap_pts"):
+            m["_cpr_gap_pts"] = [list(map(float, q)) for q in data["gap_pts"]]
         names = {k: data[k] for k in ("detail_name", "fix_name")
                  if isinstance(data.get(k), str) and data[k].strip()}
         if names:
@@ -1022,6 +1028,13 @@ class CPRMixin:
             m["pts"] = [self._world3d_to_out(src, q) for q in ctrl]
         m["_cpr_auto"] = True
         self._cpr_auto_gaps = list(res.gaps)
+        # The edit points in a low-contrast stretch are drawn as gap points
+        # (orange-red ring) until they are moved.
+        try:
+            from multi_dicomviewer.core.cpr_autotrack import gap_ctrl_pts
+            m["_cpr_gap_pts"] = gap_ctrl_pts(res.path_mm, ctrl, res.gaps)
+        except Exception:                        # noqa: BLE001
+            m["_cpr_gap_pts"] = []
 
     def _cpr_auto_report(self) -> None:
         """After an auto-tracked CPR is built: tell the user about stretches
@@ -1525,6 +1538,51 @@ class CPRMixin:
         _, x0, y0, x1, y1 = b
         cs = [(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
         return [tuple(self._disp_to_world(key, x, y)) for x, y in cs]
+
+    #: Edit points in a low-contrast stretch of an AutoTrace (stenosis /
+    #: occlusion / calcium?): an orange-red ring until the point is moved.
+    _CPR_GAP_RGB = (255, 90, 40)
+
+    @staticmethod
+    def _cpr_gap_idx(m, p3=None, tol_mm: float = 0.05) -> list:
+        """Indices of *m*'s edit points (or of *p3*) that are still gap points
+        (at a stored gap position — a moved point is no longer one)."""
+        gp = (m or {}).get("_cpr_gap_pts") or []
+        p3 = (m or {}).get("pts3d") if p3 is None else p3
+        if not gp or not p3:
+            return []
+        try:
+            G = np.asarray(gp, float).reshape(-1, 3)
+            P = np.asarray(p3, float).reshape(-1, 3)
+        except (TypeError, ValueError):
+            return []
+        d = np.abs(P[:, None, :] - G[None, :, :]).max(axis=2)
+        return [int(k) for k in np.nonzero((d <= tol_mm).any(axis=1))[0]]
+
+    def _cpr_gap_pts_left(self, m, ctrl=None) -> list:
+        """The gap points still unmoved on the saved line (for .cpr.json)."""
+        p3 = ctrl if ctrl is not None else m.get("pts3d")
+        idx = self._cpr_gap_idx(m, p3)
+        return [list(map(float, np.asarray(p3[k], float))) for k in idx]
+
+    def _cpr_gap_world_pts(self, key):
+        """Output-plane positions of the gap edit points on the CPR map pane."""
+        c = self._cpr
+        if c is None or key != c.get("src"):
+            return []
+        m = self._cpr_src_measure()
+        if m is None:
+            return []
+        pts = m.get("pts") or []
+        return [pts[k] for k in self._cpr_gap_idx(m) if k < len(pts)]
+
+    def _cpr_at_gap(self) -> bool:
+        """The short-axis sits on an edit point that is a gap point."""
+        if self._cpr is None:
+            return False
+        k = self._cpr_at_ctrl()
+        m = self._cpr_src_measure()
+        return k is not None and m is not None and k in self._cpr_gap_idx(m)
 
     def _cpr_sel_world_pts(self, key):
         """Output-plane positions of the selected edit points on pane *key*."""

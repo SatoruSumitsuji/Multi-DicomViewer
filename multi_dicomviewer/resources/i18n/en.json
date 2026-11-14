@@ -291,6 +291,7 @@
   "ドラッグ=回転 ・ ホイール=拡大縮小 ・ 右ドラッグ=平行移動": "Drag = rotate · Wheel = zoom · Right-drag = pan",
   "ハンドルで形を合わせ、Ellipse を右クリック →「このEllipseで{v}面を設定」。Esc で中止。": "Fit the shape with the handles, then right-click the Ellipse → “Set the {v} plane from this Ellipse”. Esc cancels.",
   "ファイルの記録と選んだCTが一致しません（{d}）。別のCTに適用すると位置が合いません。適用しますか？": "The file's record does not match the chosen CT ({d}). Applying it to a different CT will misalign it. Apply anyway?",
+  "ファイル名は変更していません：": "The file name was not changed:",
   "ファイル名更新": "Rename files",
   "ファイル名（拡張子なし）": "File name (no extension)",
   "フォルダと一致しています（更新はありません）。": "Matches the folder (nothing to update).",

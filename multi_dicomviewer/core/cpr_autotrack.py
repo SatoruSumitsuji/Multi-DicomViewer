@@ -497,6 +497,30 @@ def thin_ctrl(path_mm, ctrl_mm, keep_mm, spacing_mm):
     return np.asarray(res, float)
 
 
+def gap_ctrl_pts(path_mm, ctrl_mm, gaps, pad_mm: float = 1.0) -> list:
+    """The edit points *ctrl_mm* that lie in (or within *pad_mm* of) a
+    low-contrast gap of the trace (``TraceResult.gaps``, arc lengths along
+    *path_mm*). A gap with no edit point inside flags the nearest one, so every
+    gap is marked. Returns their positions ([x, y, z] lists, world mm)."""
+    P = np.asarray(path_mm, float).reshape(-1, 3)
+    C = np.asarray(ctrl_mm, float).reshape(-1, 3)
+    if len(P) < 2 or len(C) == 0 or not gaps:
+        return []
+    s = np.concatenate([[0.0], np.cumsum(np.linalg.norm(np.diff(P, axis=0),
+                                                        axis=1))])
+    from scipy.spatial import cKDTree
+    sc = s[cKDTree(P).query(C)[1]]
+    flag = np.zeros(len(C), bool)
+    for a, b in gaps:
+        a, b = float(a), float(b)
+        inside = (sc >= a - pad_mm) & (sc <= b + pad_mm)
+        if inside.any():
+            flag |= inside
+        else:
+            flag[int(np.argmin(np.abs(sc - 0.5 * (a + b))))] = True
+    return [list(map(float, q)) for q in C[flag]]
+
+
 class TraceCancelled(Exception):
     """Raised inside trace_vessel when the progress callback asks to stop."""
 
