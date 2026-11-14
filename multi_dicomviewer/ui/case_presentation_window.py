@@ -599,7 +599,7 @@ class CasePresentationWindow(SnapDock):
         # controllable. DATA columns get a light bar via a delegate (never
         # bleeding onto the button columns); the padding keeps text off that bar.
         # The four action buttons paint their OWN conditional bar (see
-        # _cell_btn_css / _rebuild) — 除外・削除 none, 表示/更新 state-dependent.
+        # _cell_btn_css / _rebuild) — 除外・削除 plain, 表示/更新 state-dependent.
         # Only padding + an explicit selection colour go through QSS: a QSS
         # *border* here silently broke the selected-row highlight (cells went
         # blank), so borders are the delegate's job, not the stylesheet's.
@@ -1703,16 +1703,17 @@ class CasePresentationWindow(SnapDock):
                       bg: bool = False) -> str:
         """Stylesheet for a per-row action button. *bar* draws the left 縦棒
         status indicator; *bg* fills a green "done" background (used on 更新 once
-        the row has been updated); *grey* dims the label. No flags → empty string
-        = native button (no bar/background), used for 除外・削除 always."""
-        rules = ""
+        the row has been updated); *grey* dims the label. No flags → a plain
+        button (no bar/background), used for 除外・削除 always. The label is
+        always LEFT-aligned so a narrow column still shows its first letters."""
+        rules = "text-align:left;padding-left:3px;"
         if grey:
             rules += "color:#999;"
         if bg:
             rules += "background-color:#d7f0d7;"
         if bar:
             rules += "border-left:4px solid #1e6fd0;"
-        return ("QPushButton{" + rules + "}") if rules else ""
+        return "QPushButton{" + rules + "}"
 
     # ------------------------------------------------------------ render
     def _rebuild(self, select: int | None = None) -> None:
@@ -1772,9 +1773,11 @@ class CasePresentationWindow(SnapDock):
             tb.setCellWidget(i, C_UPD, b_upd)
             b_del = QPushButton(t("除外"))
             b_del.setToolTip(t("この行をプレゼンから除外（元ファイルは残す）"))
+            b_del.setStyleSheet(self._cell_btn_css())
             b_del.clicked.connect(lambda _c, row=r: self._delete_row(row))
             tb.setCellWidget(i, C_DEL, b_del)
             b_erase = QPushButton(t("削除"))
+            b_erase.setStyleSheet(self._cell_btn_css())
             b_erase.setToolTip(t(
                 "このシリーズの元ファイルを、画像フォルダの親にある "
                 "CasePresentation-Erase フォルダへ移動（元に戻せます）"))

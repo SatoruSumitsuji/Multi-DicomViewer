@@ -126,6 +126,15 @@ finally:
 check("header titles painted left-aligned (no fallback)", not fallback)
 w.close()
 
+# Row buttons (表示 / 更新 / 除外 / 削除): labels left-aligned too.
+w._rows and w._rebuild()
+btn_cols = [cpw._HEADERS.index(h) for h in ("表示", "更新", "除外", "削除")]
+sty = [w._table.cellWidget(0, c).styleSheet() for c in btn_cols]
+check("row buttons: label text left-aligned in every button column",
+      all("text-align:left" in x for x in sty), str(sty))
+check("row buttons: 表示 keeps its status bar",
+      "border-left:4px" in sty[0])
+
 # Show → the selected pane first (the captured pane only as a fallback).
 src = (ROOT / "multi_dicomviewer/ui/main_window.py").read_text(encoding="utf-8")
 fn = next(n for n in ast.walk(ast.parse(src))
