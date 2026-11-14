@@ -85,16 +85,24 @@ class CTModeBarMixin:
             b.clicked.connect(lambda _c, k=key: self._ct_mode_clicked(k))
             self._ct_mode_btns[key] = b
             row.addWidget(b)
-        # 「Territory計算」: CoronaryTreeモード only (the tree is the prerequisite;
-        # an LVモード button would invite mistakes).
-        row.addSpacing(8)
-        tb = FitButton(t("Territory計算"))
-        tb.setHelpToolTip(t(_TERR_BTN_TIP))
-        tb.setStyleSheet(_TERR_BTN_CSS)
-        tb.clicked.connect(lambda _c=False: self._ct_territory_compute_clicked())
-        tb.setVisible(False)
-        self._ct_terr_btn = tb
-        row.addWidget(tb)
+        # 「Territory計算」 is not a mode: it sits at the right end of the
+        # Coronary / VR / LV row (the viewers place it there).
+        self._ct_terr_button()
+
+    def _ct_terr_button(self):
+        """The 「Territory計算」 (Calc Territory) button, made once: CoronaryTree
+        モード only (the tree is the prerequisite; an LVモード button would invite
+        mistakes). Placed by the viewer at the right end of its Coronary row."""
+        tb = getattr(self, "_ct_terr_btn", None)
+        if tb is None:
+            tb = FitButton(t("Territory計算"))
+            tb.setHelpToolTip(t(_TERR_BTN_TIP))
+            tb.setStyleSheet(_TERR_BTN_CSS)
+            tb.clicked.connect(
+                lambda _c=False: self._ct_territory_compute_clicked())
+            tb.setVisible(False)
+            self._ct_terr_btn = tb
+        return tb
 
     def _build_ct_files_line(self) -> QWidget:
         """The row-3 readout of the loaded .FullLv.json / .corotree.json."""

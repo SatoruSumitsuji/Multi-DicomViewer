@@ -70,6 +70,12 @@ def _outline_sty(col):
 
 
 class ValveAutoMixin:
+    def _save_exit_sty(self, kind) -> str:
+        """The Save ("save") / Exit ("exit") outline style + the disabled grey
+        (LV steps, and CPR Save&Exit / Exit)."""
+        col = _SAVE_OUTLINE if kind == "save" else _EXIT_OUTLINE
+        return _outline_sty(col) + getattr(self, "_BTN_DIS", "")
+
     def _lv_style_save_exit(self) -> None:
         """Outline the Save / Exit buttons of every LV step (see above)."""
         dis = getattr(self, "_BTN_DIS", "")

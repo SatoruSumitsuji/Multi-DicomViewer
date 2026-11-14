@@ -378,82 +378,112 @@ class V:
 
 
 W = ctw.CoronaryTreeWindow
-check("Vessel column = DetailName", W._display_name(V("LAD7@030", "LAD7")) == "LAD7")
-check("Vessel column = name until a DetailName is given",
+check("Vessel column = the name without FixName",
+      W._display_name(V("LAD7@030", "LAD7")) == "LAD7")
+check("Vessel column = name until renamed",
       W._display_name(V("14")) == "14")
 
 
+import json as _json  # noqa: E402
+
+from multi_dicomviewer.core.coronary_territory import CoronaryTree  # noqa: E402
+
+
 class FakeTree:
-    def __init__(self):
-        self.vessels = {"a": V("1", fix="@030"), "b": V("2", fix=""),
-                        "c": V("3", fix="@x")}
+    def __init__(self, fix=""):
+        self.vessels = {"a": V("01"), "b": V("02", "LAD7"),
+                        "c": V("RCA@030", "RCA", "@030")}
+        self.fix_name = fix
 
 
 class TW:
-    def __init__(self, sel):
-        self._tree = FakeTree()
-        self.sel = sel
-        self.populated = 0
+    """The dock's naming methods on a fake (no SnapDock)."""
+    _display_name = staticmethod(W._display_name)
+    _read_cpr = staticmethod(W._read_cpr)
+    _write_cpr = staticmethod(W._write_cpr)
+    _tree_fix = W._tree_fix
+    _rename_base = W._rename_base
+    _rename_plan_raw = W._rename_plan_raw
+    _batch_rename = W._batch_rename
 
-    def selected_vid(self):
-        return self.sel
+    def __init__(self, folder, fix=""):
+        self._tree = FakeTree(fix)
+        self._last_path = None
+        self.b = {"paths": {}}
+        for vid, v in self._tree.vessels.items():
+            path = os.path.join(folder, v.name + ".cpr.json")
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump({"ctrl": [[0, 0, 0], [1, 1, 1]]}, f)
+            self.b["paths"][vid] = path
+        self.synced, self.warned = [], []
+        self.treeChanged = type("S", (), {"emit": lambda *_a: None})()
+        self._hint = type("H", (), {"setText": lambda *_a: None})()
+
+    def _bundle(self):
+        return self.b
 
     def _populate(self):
-        self.populated += 1
-
-    def _refresh_rename_btn(self):
         pass
 
+    def _push_overlay(self):
+        pass
 
-real_q, real_i = QMessageBox.question, QMessageBox.information
-asked = []
-QMessageBox.information = staticmethod(lambda *a, **k: asked.append("info"))
+    def _warn(self, m):
+        self.warned.append(m)
+
+    def _resync_from_folder(self, folder=None):
+        self.synced.append(folder)
+
+
+check("no DetailName / FixName columns any more",
+      ctw._N_COLS == 6 and not hasattr(ctw, "_C_DETAIL")
+      and not hasattr(ctw, "_C_FIX") and ctw._XHeader.PLUS_COLS == ())
+check("no per-line FixName actions left",
+      not hasattr(W, "_fix_name_copy_all") and not hasattr(W, "_set_fix_name_bulk"))
+
+real_q = QMessageBox.question
 QMessageBox.question = staticmethod(
     lambda *a, **k: QMessageBox.StandardButton.Yes)
-w = TW("a")
-W._fix_name_copy_all(w)
-check("+ → every FixName = the selected row's",
-      [v.fix_name for v in w._tree.vessels.values()] == ["@030"] * 3
-      and w.populated == 1)
-QMessageBox.question = staticmethod(
-    lambda *a, **k: QMessageBox.StandardButton.No)
-w = TW("a")
-W._fix_name_copy_all(w)
-check("+ → No keeps every FixName",
-      [v.fix_name for v in w._tree.vessels.values()] == ["@030", "", "@x"])
-w = TW(None)
-W._fix_name_copy_all(w)
-check("+ with no row selected → a note, nothing changed",
-      asked == ["info"] and w.populated == 0)
-QMessageBox.question, QMessageBox.information = real_q, real_i
+try:
+    tmp = tempfile.mkdtemp(prefix="mdv_cpr_")
+    w = TW(tmp)
+    check("an older tree's per-line FixName is adopted as the tree's",
+          w._tree_fix() == "@030" and w._tree.fix_name == "@030")
+    check("a name already ending with the FixName is not doubled",
+          w._rename_base(w._tree.vessels["c"], "@030") == "RCA")
+    plan = {vid: new for vid, _b, new, _p in w._rename_plan_raw()}
+    check("plan: <vessel name> + FixName (the renamed 02 = LAD7)",
+          plan == {"a": "01@030", "b": "LAD7@030"}, str(plan))
+    w._batch_rename()
+    files = sorted(os.listdir(tmp))
+    check("files renamed to <name> + FixName",
+          files == ["01@030.cpr.json", "LAD7@030.cpr.json",
+                    "RCA@030.cpr.json"], str(files))
+    v = w._tree.vessels["b"]
+    d = _json.load(open(os.path.join(tmp, "LAD7@030.cpr.json"), encoding="utf-8"))
+    check("vessel: name = file name, list text = the name without FixName",
+          v.name == "LAD7@030" and W._display_name(v) == "LAD7"
+          and d.get("detail_name") == "LAD7" and d.get("fix_name") == "@030")
+    check("Folder sync run on the folder", w.synced == [tmp])
+    check("nothing left to rename", w._rename_plan_raw() == [])
+    w._tree.fix_name = "@031"
+    w._batch_rename()
+    check("a new tree FixName renames every file again (not doubled)",
+          sorted(os.listdir(tmp)) == ["01@031.cpr.json", "LAD7@031.cpr.json",
+                                      "RCA@031.cpr.json"],
+          str(sorted(os.listdir(tmp))))
+finally:
+    QMessageBox.question = real_q
 
-tw = QTreeWidget()
-tw.setColumnCount(ctw._N_COLS)
-hdr = ctw._XHeader(tw)
-tw.setHeader(hdr)
-tw.setHeaderLabels([str(i) for i in range(ctw._N_COLS)])
-for c in range(ctw._N_COLS):
-    tw.setColumnWidth(c, 90)
-tw.resize(900, 200)
-tw.show()
-app.processEvents()
-got = []
-hdr.plusClicked.connect(got.append)
-hdr.toggled.connect(lambda c: got.append(("x", c)))
-pr = hdr._plus_rect(ctw._C_FIX)
-QTest.mouseClick(hdr.viewport(), QtW.QApplication.instance() and
-                 __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
-                 pos=pr.center())
-check("FixName header + → plusClicked", got == [ctw._C_FIX], f"{got}")
-got.clear()
-xr = hdr._x_rect(ctw._C_FIX)
-QTest.mouseClick(hdr.viewport(),
-                 __import__("PyQt6.QtCore", fromlist=["Qt"]).Qt.MouseButton.LeftButton,
-                 pos=xr.center())
-check("FixName header × still folds", got == [("x", ctw._C_FIX)], f"{got}")
-check("+ only on FixName", hdr._plus_rect(ctw._C_DETAIL) is None)
-hdr.folded.add(ctw._C_FIX)
-check("no + while FixName is folded", hdr._plus_rect(ctw._C_FIX) is None)
+tr = CoronaryTree()
+tr.fix_name = "@030"
+check("the tree FixName is saved in the .corotree.json",
+      tr.to_json().get("fix_name") == "@030"
+      and CoronaryTree.from_json(tr.to_json()).fix_name == "@030")
+old = {"vessels": [{"vid": "x", "name": "a", "points": [[0, 0, 0], [1, 0, 0]],
+                    "fix_name": "@9"}]}
+check("an older .corotree.json: the FixName from its lines",
+      CoronaryTree.from_json(old).fix_name == "@9")
 _ = QPoint
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")

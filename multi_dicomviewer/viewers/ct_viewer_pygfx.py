@@ -12970,6 +12970,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row1.addWidget(self._lv_grp_trace)
         # ---- Blood GROUP (row 1) — built above ----
         row1.addWidget(_blood_grp)
+        # 「Territory計算」 (Calc Territory, CoronaryTreeモード only) at the row end.
+        row1.addSpacing(12)
+        row1.addWidget(self._ct_terr_button())
         row1.addStretch(1)
 
         # ================= Row 2 (Epi row 3): guided order =================
@@ -19235,7 +19238,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "Coronary Tree の DetailName / FixName →「ファイル名更新」で付けます。"))
         self._cpr_register_btn.clicked.connect(
             lambda _c=False: self._cpr_register_to_tree())
-        self._cpr_register_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
+        # Next = save + next line: the Save outline (grey when disabled)
+        self._cpr_register_btn.setStyleSheet(self._save_exit_sty("save"))
         row.addWidget(self._cpr_register_btn)
         # Save&Exit = Save (保存登録) followed by an automatic Exit, so the user
         # need not press Exit separately. A cancelled Save does NOT exit.
@@ -19244,7 +19248,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             t("確定したCPR線を Next と同じく連番の仮名で保存・登録してから、"
               "冠動脈MPR/短軸モードを終了します（保存先フォルダの選択をキャンセルした場合は終了しません）。"))
         self._cpr_save_exit_btn.clicked.connect(self._cpr_save_and_exit)
-        self._cpr_save_exit_btn.setStyleSheet(self._BTN_DIS)  # grey out during Draw
+        # Save&Exit: the Save outline (grey when disabled, e.g. during Draw)
+        self._cpr_save_exit_btn.setStyleSheet(self._save_exit_sty("save"))
         row.addWidget(self._cpr_save_exit_btn)
         # 📁 = the folder Next saves to (asked at the first Next; click = change)
         self._cpr_next_dir_btn = FitButton("📁 " + t("保存先"))
@@ -19257,7 +19262,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))
         self._cpr_exit_btn.clicked.connect(self._coronary_exit)
-        self._cpr_exit_btn.setStyleSheet(self._BTN_DIS)   # grey out during Draw
+        # Exit: the Exit outline (grey when disabled)
+        self._cpr_exit_btn.setStyleSheet(self._save_exit_sty("exit"))
         row.addWidget(self._cpr_exit_btn)
         # Short-axis scrubber, RIGHT of Exit — a stretchy container that stays in
         # the layout (so the buttons keep their natural width); its CHILDREN are

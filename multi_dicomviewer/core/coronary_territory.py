@@ -94,6 +94,9 @@ class CoronaryTree:
         # Insertion order == draw order; a branch may only attach to a vessel
         # already in the dict (parents are always drawn before their children).
         self.vessels: dict[str, Vessel] = {}
+        #: ONE FixName for the whole tree (e.g. "@030"): ファイル名更新 names each
+        #: line's .cpr.json <vessel name> + FixName.
+        self.fix_name: str = ""
 
     # ------------------------------------------------------------ build
     def add_root(self, vid: str, name: str, role: str, points) -> Vessel:
@@ -389,6 +392,8 @@ class CoronaryTree:
         out = {"format": "MDV-CoroTree", "version": 1,
                "type": "coronary-tree", "snap_tol_mm": float(snap_tol_mm),
                "vessels": vessels}
+        if self.fix_name:
+            out["fix_name"] = self.fix_name
         if series is not None:
             out["series"] = series
         return out
@@ -416,6 +421,12 @@ class CoronaryTree:
                 fix_name=str(d.get("fix_name", "") or ""),
                 ctrl_manual=(np.asarray(d["ctrl_manual"], float)
                              if d.get("ctrl_manual") else None))
+        # The tree's FixName; an older file kept it per vessel → the first one.
+        fx = (data or {}).get("fix_name")
+        if not (isinstance(fx, str) and fx.strip()):
+            fx = next((v.fix_name for v in tree.vessels.values()
+                       if v.fix_name), "")
+        tree.fix_name = (fx or "").strip()
         return tree
 
 

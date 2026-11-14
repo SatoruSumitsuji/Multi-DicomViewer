@@ -405,5 +405,15 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
           "on_full_lv_created" not in src
           and "_full_lv_saved_path = path" in src)
 
+# 「Territory計算」 (Calc Territory) is not in the mode row: the viewers put it
+# at the right end of the Coronary / VR / LV row.
+check("Territory計算 not added to the mode row",
+      "row.addWidget(tb)" not in (root / "ct_mode_bar.py").read_text(encoding="utf-8"))
+for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
+    src = (root / fn).read_text(encoding="utf-8")
+    check(f"{fn}: Territory計算 at the end of the Coronary row",
+          "row1.addWidget(self._ct_terr_button())\n"
+          "        row1.addStretch(1)" in src)
+
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

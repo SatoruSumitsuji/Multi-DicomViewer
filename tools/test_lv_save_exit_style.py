@@ -65,5 +65,18 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     check(f"{fn}: outline applied once, after the construction re-styles",
           len(call) == 1 and not later, f"{call} {later}")
 
+# CPR (CoronaryTree): Next / Save&Exit = the Save outline, Exit = the Exit one.
+check("_save_exit_sty: save / exit colours + disabled grey",
+      vam._SAVE_OUTLINE in v._save_exit_sty("save")
+      and vam._EXIT_OUTLINE in v._save_exit_sty("exit")
+      and v._save_exit_sty("exit").endswith(V._BTN_DIS))
+for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
+    src = (ROOT / "multi_dicomviewer" / "viewers" / fn).read_text(encoding="utf-8")
+    for nm, kind in (("_cpr_register_btn", "save"), ("_cpr_save_exit_btn", "save"),
+                     ("_cpr_exit_btn", "exit")):
+        check(f"{fn}: CPR {nm} → {kind} outline",
+              f'self.{nm}.setStyleSheet(self._save_exit_sty("{kind}"))' in src
+              and f"self.{nm}.setStyleSheet(self._BTN_DIS)" not in src)
+
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

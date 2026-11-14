@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
@@ -98,17 +99,18 @@ _CPR_STEP_MM = 0.5
 #: an existing vessel attaches to it. Was 3 mm; widened to 5 mm per user request.
 _CONNECT_TOL_MM = 5.0
 
-#: Vessel list columns: Vessel, Role, Branches, AutoTrace, FinTrace, DetailName,
-#: FixName, Myocardium. Every column but Vessel can be folded to a narrow "×"
-#: (header ×).
-_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_FIN, _C_DETAIL, _C_FIX, _C_MYO = range(8)
-_N_COLS = 8
+#: Vessel list columns: Vessel, Role, Branches, AutoTrace, FinTrace, Myocardium.
+#: Every column but Vessel can be folded to a narrow "×" (header ×). The
+#: Vessel column is the line's name (名前を変更 renames the serial 01, 02 …);
+#: ファイル名更新 names the files <name> + the tree's ONE FixName (row 2).
+_C_NAME, _C_ROLE, _C_BR, _C_AUTO, _C_FIN, _C_MYO = range(6)
+_N_COLS = 6
 _COL_DEFAULT_W = {_C_ROLE: 76, _C_BR: 76, _C_AUTO: 90, _C_FIN: 84,
-                  _C_DETAIL: 102, _C_FIX: 82, _C_MYO: 120}
+                  _C_MYO: 120}
 #: AutoTrace / FinTrace cell marks
 _MARK_YES, _MARK_NO = "◯", "×"
 #: ui_state key of the folded columns (v2: FinTrace inserted → indices moved)
-_FOLD_KEY = "corotree_folded_cols2"
+_FOLD_KEY = "corotree_folded_cols3"   # v3: DetailName / FixName removed
 _COL_FOLDED_W = 20
 _X_W = 14                                     # the "×" hit area at a header's right
 
@@ -119,10 +121,10 @@ class _XHeader(QHeaderView):
     columns needed now in the narrow panel); clicking that "×" unfolds it."""
 
     toggled = pyqtSignal(int)
-    #: the "+" left of FixName's "×" → copy the selected FixName to every row
+    #: a "+" left of a column's "×" (none at present)
     plusClicked = pyqtSignal(int)
     #: columns that carry the "+" (only while unfolded)
-    PLUS_COLS = (_C_FIX,)
+    PLUS_COLS = ()
 
     def __init__(self, parent=None):
         super().__init__(Qt.Orientation.Horizontal, parent)
@@ -193,12 +195,10 @@ def _col_delegate_cls():
     from PyQt6.QtWidgets import QStyledItemDelegate
 
     class _ColDelegate(QStyledItemDelegate):
-        """Only DetailName / FixName are typed into (the item is editable so
-        those two can be; every other column refuses an editor)."""
+        """No cell is typed into (the Vessel name is changed with 名前を変更;
+        the FixName is the row-2 field)."""
 
         def createEditor(self, parent, option, index):
-            if index.column() in (_C_DETAIL, _C_FIX):
-                return super().createEditor(parent, option, index)
             return None
     return _ColDelegate
 
@@ -414,8 +414,9 @@ class CoronaryTreeWindow(SnapDock):
             outer.addLayout(row)
             return made
 
-        # CPR row: build the tree from per-vessel .cpr.json files.
-        _row(t("CPR："), [
+        # CPR row: build the tree from per-vessel .cpr.json files, then
+        # ファイル名更新 / 一括AutoTrace / 取消 at its right.
+        cpr_btns = _row(t("CPR："), [
             (t("読込"), t("枝ごとの .cpr.json を複数選択で読込（未接続で追加）"),
              self._load_cpr, False),
             (t("フォルダ更新"),
@@ -429,23 +430,36 @@ class CoronaryTreeWindow(SnapDock):
              t("下の血管リストで選択した血管（下流の枝を含む）を一覧から消去。"
                "Ctrlで複数選択・Shiftで範囲選択（元のCPRファイルは残る）"),
              self._delete_selected, False),
-        ])
-        # 一括 row: auto-trace every not-yet-auto-traced line (foreground, with
-        # a progress window) / undo the last batch / rename the files to
-        # DetailName+FixName and re-sync the folder.
-        bulk_btns = _row(t("一括："), [
+            (t("ファイル名更新"),
+             t("各線の .cpr.json を「血管名 + FixName」に一括で名前変更し、"
+               "フォルダ更新を実行（血管名は右クリック →「名前を変更」）"),
+             self._batch_rename, False),
             (t("一括AutoTrace"),
              t("AutoTrace が × の線をまとめて自動トレース（FinTrace が ◯ の線は"
                "除く。Vessel を選択中は選択した行だけ）。結果は同じ .cpr.json に上書き"),
              self._batch_auto_trace, False),
             (t("取消"), t("直前の一括AutoTraceを取り消し、手動の点に戻す"),
              self._batch_auto_undo, False),
-            (t("ファイル名更新"),
-             t("DetailName+FixName でファイル名（.cpr.json）と血管名を一括更新し、"
-               "フォルダ更新を実行"),
-             self._batch_rename, False),
         ])
-        self._bulk_auto_btn, self._bulk_undo_btn, self._rename_btn = bulk_btns
+        self._rename_btn, self._bulk_auto_btn, self._bulk_undo_btn = \
+            cpr_btns[4:7]
+        # FixName row: ONE FixName for the whole tree (e.g. @030) — the files
+        # become <vessel name> + FixName on ファイル名更新.
+        fix_row = QHBoxLayout()
+        fix_row.setSpacing(3)
+        fix_lbl = QLabel(t("FixName："))
+        fix_lbl.setStyleSheet("font-weight:bold;")
+        fix_row.addWidget(fix_lbl)
+        self._fix_edit = QLineEdit()
+        self._fix_edit.setPlaceholderText(t("例：@030"))
+        self._fix_edit.setToolTip(t(
+            "ツリー全体で1つの FixName。ファイル名更新でファイル名を"
+            "「血管名 + FixName」にします"))
+        self._fix_edit.setMaximumWidth(160)
+        self._fix_edit.textEdited.connect(self._on_fix_edited)
+        fix_row.addWidget(self._fix_edit)
+        fix_row.addStretch(1)
+        outer.addLayout(fix_row)
         self._last_batch = None              # undo record of the last 一括AutoTrace
         # Tree row: overlay toggle / save / load / clear.
         tree_btns = _row(t("ツリー："), [
@@ -563,16 +577,14 @@ class CoronaryTreeWindow(SnapDock):
 
         self._tree_w = QTreeWidget()
         self._tree_w.setColumnCount(_N_COLS)
-        # Vessel, Role, Branches, AutoTrace, DetailName, FixName, Myocardium.
+        # Vessel, Role, Branches, AutoTrace, FinTrace, Myocardium.
         self._col_labels = [t("血管"), t("役割"), t("分岐"), t("AutoTrace"),
-                            t("FinTrace"), t("DetailName"), t("FixName"),
-                            t("心筋量")]
+                            t("FinTrace"), t("心筋量")]
         hdr = _XHeader(self._tree_w)
         self._tree_w.setHeader(hdr)
         self._tree_w.setHeaderLabels(self._col_labels)
         hdr.setStretchLastSection(False)
         hdr.toggled.connect(self._toggle_col_fold)
-        hdr.plusClicked.connect(lambda _c: self._fix_name_copy_all())
         self._tree_w.headerItem().setToolTip(
             _C_ROLE, t("列名右の × で列を折りたたみ（× をもう一度押すと戻ります）"))
         # 血管 column auto-fits its contents so the full vessel name (now with the
@@ -1456,35 +1468,37 @@ class CoronaryTreeWindow(SnapDock):
 
     @staticmethod
     def _display_name(v) -> str:
-        """Vessel-column text: the DetailName only (the file / vessel name is
-        DetailName+FixName after ファイル名更新); the vessel name until a
-        DetailName is given."""
+        """Vessel-column text: the line's name WITHOUT the FixName (kept as
+        detail_name once renamed / after ファイル名更新, whose file + vessel name
+        is <name> + FixName); the vessel name until then."""
         det = (getattr(v, "detail_name", "") or "").strip()
         return det or (v.name or "")
 
-    def _fix_name_copy_all(self) -> None:
-        """FixName header "+": the selected row's FixName → every vessel of this
-        CT (after a confirm)."""
-        from PyQt6.QtWidgets import QMessageBox
-        vid = self.selected_vid()
-        v = self._tree.vessels.get(vid) if vid else None
-        if v is None:
-            QMessageBox.information(self, t("FixName"), t(
-                "コピー元の行（FixName を入力済みの行）を選択してから ＋ を押して"
-                "ください。"))
+    # ---- the tree's ONE FixName (row 2) -------------------------------------
+    def _tree_fix(self) -> str:
+        """The active tree's FixName; an older tree carried it per vessel → the
+        first one is adopted."""
+        tr = self._tree
+        fx = (getattr(tr, "fix_name", "") or "").strip()
+        if not fx:
+            fx = next(((v.fix_name or "").strip() for v in tr.vessels.values()
+                       if (v.fix_name or "").strip()), "")
+            if fx:
+                tr.fix_name = fx
+        return fx
+
+    def _sync_fix_edit(self) -> None:
+        ed = getattr(self, "_fix_edit", None)
+        if ed is None:
             return
-        val = (v.fix_name or "").strip()
-        n = len(self._tree.vessels)
-        msg = (t("全 {n} 本の FixName を「{f}」にします。よろしいですか？",
-                 n=n, f=val) if val else
-               t("選択中の行の FixName は空です。全 {n} 本の FixName を空にします。"
-                 "よろしいですか？", n=n))
-        if QMessageBox.question(self, t("FixName"), msg) \
-                != QMessageBox.StandardButton.Yes:
-            return
-        for vv in self._tree.vessels.values():
-            vv.fix_name = val
-        self._populate()
+        fx = self._tree_fix()
+        if ed.text() != fx:
+            ed.blockSignals(True)
+            ed.setText(fx)
+            ed.blockSignals(False)
+
+    def _on_fix_edited(self, text) -> None:
+        self._tree.fix_name = (text or "").strip()
         self._refresh_rename_btn()
 
     def _auto_text(self, v) -> str:
@@ -1502,15 +1516,11 @@ class CoronaryTreeWindow(SnapDock):
         cols[_C_BR] = self._junction_text(vid)
         cols[_C_AUTO] = self._auto_text(v)
         cols[_C_FIN] = self._fin_text(v)
-        cols[_C_DETAIL] = v.detail_name or ""
-        cols[_C_FIX] = v.fix_name or ""
         cols[_C_MYO] = self._myo_text(vid)
         it = QTreeWidgetItem(cols)
         it.setData(0, _UID_ROLE, vid)
         it.setData(0, _CTUID_ROLE, self._active_uid)   # which CT this vessel is in
-        # Editable = DetailName / FixName only (the delegate refuses the rest).
-        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable
-                    | Qt.ItemFlag.ItemIsEditable)
+        it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
         it.setCheckState(0, Qt.CheckState.Unchecked
                          if vid in self._hidden else Qt.CheckState.Checked)
         it.setForeground(0, QColor(self._root_color(self._root_role(vid))))
@@ -1587,6 +1597,7 @@ class CoronaryTreeWindow(SnapDock):
         self._tree_w.blockSignals(False)
         self._building = False
         self._refresh_hint()
+        self._sync_fix_edit()
         self._refresh_bulk_btns()
 
     def _refresh_hint(self):
@@ -1610,6 +1621,7 @@ class CoronaryTreeWindow(SnapDock):
     def _on_selection(self):
         self._activate_item_ct(self._tree_w.currentItem())
         self.vesselSelected.emit(self.selected_vid() or "")
+        self._sync_fix_edit()                    # the selected row's CT
         self._refresh_bulk_btns()                # 一括AutoTrace counts the selection
 
     def _on_item_double_clicked(self, item, _col=0):
@@ -1687,25 +1699,6 @@ class CoronaryTreeWindow(SnapDock):
 
     def _on_item_changed(self, item, _col):
         if self._building:
-            return
-        if _col in (_C_DETAIL, _C_FIX):
-            # DetailName / FixName typed in → kept on the vessel (saved in the
-            # .corotree.json; written to the .cpr.json by 一括ファイル名更新).
-            vid = item.data(0, _UID_ROLE)
-            uid = item.data(0, _CTUID_ROLE) or self._active_uid
-            b = self._by_uid.get(uid)
-            v = b["tree"].vessels.get(vid) if (b and vid) else None
-            if v is not None:
-                val = (item.text(_col) or "").strip()
-                setattr(v, "detail_name" if _col == _C_DETAIL else "fix_name",
-                        val)
-                self._tree_w.blockSignals(True)
-                if val != item.text(_col):
-                    item.setText(_col, val)
-                if _col == _C_DETAIL:            # the Vessel column follows
-                    item.setText(_C_NAME, self._display_name(v))
-                self._tree_w.blockSignals(False)
-                self._refresh_rename_btn()
             return
         if _col not in (0, -1):
             return
@@ -2591,17 +2584,12 @@ class CoronaryTreeWindow(SnapDock):
         a_fin_off = menu.addAction(t("FinTrace を × にする ({n}本)", n=len(sel)))
         a_fin_on.setEnabled(bool(sel))
         a_fin_off.setEnabled(bool(sel))
-        a_fix = menu.addAction(t("FixName を一括入力…"))
-        a_fix.setEnabled(bool(sel))
         a_man = menu.addAction(t("手動の点に戻す"))
         a_man.setEnabled(any(self._tree.vessels[x].ctrl_manual is not None
                              for x in sel))
         chosen = menu.exec(self._tree_w.viewport().mapToGlobal(pos))
         if chosen in (a_fin_on, a_fin_off):
             self._set_fin_traced(sel, chosen is a_fin_on)
-            return
-        if chosen is a_fix:
-            self._set_fix_name_bulk(sel)
             return
         if chosen is a_man:
             self._revert_manual(sel)
@@ -2635,11 +2623,14 @@ class CoronaryTreeWindow(SnapDock):
         vid = self.selected_vid()
         if not vid:
             return
-        cur = self._tree.vessels[vid].name
+        v = self._tree.vessels[vid]
+        cur = self._display_name(v)              # the name without the FixName
         name, ok = QInputDialog.getText(self, t("名前を変更"), t("血管名:"),
                                         text=cur)
         if ok and name.strip():
-            self._tree.vessels[vid].name = name.strip()
+            # The Vessel-column name (the DetailName of old): the file becomes
+            # <name> + FixName on ファイル名更新.
+            v.name = v.detail_name = name.strip()
             self._populate()
             self.treeChanged.emit()
 
@@ -2783,7 +2774,8 @@ class CoronaryTreeWindow(SnapDock):
     # ---- 一括 row: AutoTrace / undo / rename ----------------------------------
     def _refresh_bulk_btns(self) -> None:
         """一括AutoTrace (n本) — the not-yet-auto-traced count (selection-aware);
-        取消 only after a batch; ファイル名更新 when a DetailName is filled."""
+        取消 only after a batch; ファイル名更新 when a file is not yet named
+        <vessel name> + FixName."""
         b = getattr(self, "_bulk_auto_btn", None)
         if b is None:
             return
@@ -2791,9 +2783,7 @@ class CoronaryTreeWindow(SnapDock):
         b.setText(t("一括AutoTrace ({n}本)", n=n))
         b.setEnabled(n > 0)
         self._bulk_undo_btn.setEnabled(bool(self._last_batch))
-        self._rename_btn.setEnabled(any(
-            (v.detail_name or "").strip()
-            for v in self._tree.vessels.values()))
+        self._rename_btn.setEnabled(bool(self._rename_plan_raw()))
 
     _refresh_rename_btn = _refresh_bulk_btns
 
@@ -3087,37 +3077,51 @@ class CoronaryTreeWindow(SnapDock):
             self._populate()
             self.treeChanged.emit()
 
-    def _set_fix_name_bulk(self, vids) -> None:
-        """Right-click FixName を一括入力: the same FixName on the chosen rows."""
-        if not vids:
-            return
-        cur = next((self._tree.vessels[v].fix_name for v in vids
-                    if self._tree.vessels[v].fix_name), "")
-        txt, ok = QInputDialog.getText(
-            self, t("FixName"), t("{n} 本の FixName（例：@030）:", n=len(vids)),
-            text=cur)
-        if not ok:
-            return
-        for vid in vids:
-            self._tree.vessels[vid].fix_name = (txt or "").strip()
-        self._populate()
+    def _rename_base(self, v, fix) -> str:
+        """The line's name without the FixName (a name already ending with it,
+        e.g. an older file, is not doubled)."""
+        base = self._display_name(v).strip()
+        if fix and base.endswith(fix) and len(base) > len(fix):
+            base = base[:-len(fix)]
+        return base
+
+    def _rename_plan_raw(self) -> list:
+        """(vid, base, new name, file) of every line whose .cpr.json is not yet
+        <name> + FixName."""
+        b = self._bundle()
+        fix = self._tree_fix()
+        out = []
+        for vid, v in self._tree.vessels.items():
+            path = b["paths"].get(vid, "") or ""
+            base = self._rename_base(v, fix)
+            if not path or not base:
+                continue
+            new = base + fix
+            stem = os.path.basename(path)
+            if stem.lower().endswith(".cpr.json"):
+                stem = stem[:-len(".cpr.json")]
+            if new != stem or v.name != new:
+                out.append((vid, base, new, path))
+        return out
 
     def _batch_rename(self) -> None:
         """ファイル名更新: rename each line's .cpr.json (and its vessel) to
-        DetailName+FixName, write the names into the file, then run フォルダ更新
+        <vessel name> + the tree's FixName, write the names into the file (the
+        name without FixName as detail_name), then run フォルダ更新
         on that folder. A preview lists 旧名 → 新名; duplicates / existing files /
         unusable characters / unknown files are reported and skipped."""
         import re
         tree = self._tree
         b = self._bundle()
         bad_chars = re.compile(r'[\\/:*?"<>|]')
+        fix = self._tree_fix()
         plan, problems = [], []
         new_names = {}
         for vid, v in tree.vessels.items():
-            det = (v.detail_name or "").strip()
-            if not det:
+            base = self._rename_base(v, fix)
+            if not base:
                 continue
-            new = det + (v.fix_name or "").strip()
+            new = base + fix
             if bad_chars.search(new):
                 problems.append(t("{a}: 使えない文字", a=new))
                 continue
@@ -3168,10 +3172,12 @@ class CoronaryTreeWindow(SnapDock):
                 problems.append(t("{a}: 読めません", a=os.path.basename(path)))
                 continue
             v = tree.vessels[vid]
-            if v.detail_name:
-                d["detail_name"] = v.detail_name
-            if v.fix_name:
-                d["fix_name"] = v.fix_name
+            base = self._rename_base(v, fix)
+            d["detail_name"] = base
+            if fix:
+                d["fix_name"] = fix
+            else:
+                d.pop("fix_name", None)
             if not self._write_cpr(dst, d):
                 problems.append(t("{a}: 保存失敗", a=os.path.basename(dst)))
                 continue
@@ -3181,7 +3187,7 @@ class CoronaryTreeWindow(SnapDock):
                     os.remove(path)
                 except OSError:
                     pass
-            v.name = new
+            v.name, v.detail_name, v.fix_name = new, base, fix
             b["paths"][vid] = dst
             done += 1
             fd = os.path.dirname(dst)

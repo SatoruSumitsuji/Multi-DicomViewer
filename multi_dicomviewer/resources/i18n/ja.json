@@ -468,6 +468,7 @@
   "Fit": "Fit",
   "Fit MV": "Fit MV",
   "FixName": "FixName",
+  "FixName：": "FixName：",
   "Flip horizontally (left-right mirror)": "左右反転（水平ミラー）",
   "Flip the distal/proximal direction": "遠位/近位の向きを反転",
   "Flip the fullscreen (1×1) view to the next loaded pane; wraps around from the last back to the first. Available only in the 1×1 layout.": "全画面（1×1）表示を次の読み込み済みペインへ切り替えます（最後まで来たら最初に戻ってループ）。1×1レイアウトのときのみ使用できます。",
