@@ -56,7 +56,33 @@ class _AutoRunning:
         return False
 
 
+#: Save / Exit of every LV step: a coloured OUTLINE only (no fill) — they act
+#: at once (no "running" state), so they must not look like the filled
+#: state colours (Endo red, Epi green, CalcVol blue, MV / AoV, the Auto orange
+#: frame). Save = deep purple, Exit = blue-grey; disabled → the plain grey.
+_SAVE_OUTLINE = "#7b3fa0"
+_EXIT_OUTLINE = "#5f7d8c"
+
+
+def _outline_sty(col):
+    return ("QPushButton{background:palette(button);color:black;"
+            "border:2px solid %s;border-radius:3px;padding:1px 6px;}" % col)
+
+
 class ValveAutoMixin:
+    def _lv_style_save_exit(self) -> None:
+        """Outline the Save / Exit buttons of every LV step (see above)."""
+        dis = getattr(self, "_BTN_DIS", "")
+        for names, col in (
+                (("_lv_save_btn", "_lvv_save_btn", "_lv_ve_save_btn",
+                  "_lv_ax_save_btn"), _SAVE_OUTLINE),
+                (("_lv_exit_btn", "_lvv_exit_btn", "_lv_ve_exit_btn",
+                  "_lv_ax_exit_btn"), _EXIT_OUTLINE)):
+            for nm in names:
+                b = getattr(self, nm, None)
+                if b is not None:
+                    b.setStyleSheet(_outline_sty(col) + dis)
+
     _lv_valve_auto_seed_v = None             # (which, "mv"|"apex"|"aov", MV mm)
     #: Right-click redraw armed: {"which", "kind", "meas_on", "type"} or None.
     _lv_valve_redraw = None

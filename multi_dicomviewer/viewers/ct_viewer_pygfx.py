@@ -13461,6 +13461,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._lvv_exit_btn, self._lvv_manual_endo_btn]
         for b in self._lvv_ctrl_btns:
             b.setStyleSheet(self._BTN_DIS)
+        self._lv_style_save_exit()          # Save / Exit: coloured outline
         self._lvv_load_btn.setStyleSheet(self._BTN_DIS)
         self._lvv_start_btn.setStyleSheet(
             "QPushButton:checked{background:#2e8b57;color:white;}" + self._BTN_DIS)
@@ -16980,9 +16981,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if sa is None:
             return
         length = float(getattr(ax, "length_mm", 0.0))
+        # The long-axis slice is centred on the LEVEL point (_pc = the level on
+        # the axis), but the pan was kept — so the yellow level line landed
+        # somewhere else every time. No pan → the level line at the pane centre.
+        self._pan[la] = np.zeros(2)
         if length > 1e-3:
             self._ps[la] = 0.75 * length
-            self._config_cam(la)
+        self._config_cam(la)
         ps_sa = self._lv_sax_short_scale(ax, float(lv["sax"]))
         if ps_sa is not None:
             self._ps[sa] = ps_sa
