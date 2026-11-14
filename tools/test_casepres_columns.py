@@ -53,5 +53,41 @@ check("すべて表示 → every column back, button plain again",
 check("header tooltip tells where to show a column again",
       "列表示" in w._table.horizontalHeader().toolTip())
 
+
+# A press on a column edge (the ↔ resize zone) resizes, never hides.
+from PyQt6.QtCore import QPoint, Qt  # noqa: E402
+from PyQt6.QtGui import QCursor  # noqa: E402
+from PyQt6.QtTest import QTest  # noqa: E402
+
+w.setFloating(True)
+w.resize(1400, 500)
+w.show()
+app.processEvents()
+hdr = w._table.horizontalHeader()
+hits = []
+hdr.closeClicked.connect(hits.append)
+col = 1
+right = hdr.sectionViewportPosition(col) + hdr.sectionSize(col)
+y = hdr.height() // 2
+for dx in (0, 1, 2, 3, 4):                    # on / just left of the edge
+    QTest.mousePress(hdr.viewport(), Qt.MouseButton.LeftButton,
+                     Qt.KeyboardModifier.NoModifier, QPoint(right - dx, y))
+    QTest.mouseRelease(hdr.viewport(), Qt.MouseButton.LeftButton,
+                       Qt.KeyboardModifier.NoModifier, QPoint(right - dx, y))
+check("press on the column edge (resize zone) does not hide",
+      hits == [] and not w._hidden_cols(), str(hits))
+cx = right - hdr._grip() - hdr._X_W // 2
+QTest.mousePress(hdr.viewport(), Qt.MouseButton.LeftButton,
+                 Qt.KeyboardModifier.NoModifier, QPoint(cx, y))
+check("press on the ✕ itself still hides", hits == [col], str(hits))
+w._show_all_cols()
+hits.clear()
+hdr.viewport().setCursor(QCursor(Qt.CursorShape.SplitHCursor))
+QTest.mousePress(hdr.viewport(), Qt.MouseButton.LeftButton,
+                 Qt.KeyboardModifier.NoModifier, QPoint(cx, y))
+check("while the cursor is ↔ the ✕ does nothing", hits == [], str(hits))
+hdr.viewport().unsetCursor()
+w.close()
+
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

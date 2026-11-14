@@ -38,6 +38,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QStyle,
     QMessageBox,
     QFrame,
     QPushButton,
@@ -245,9 +246,27 @@ class _CloseHeader(QHeaderView):
         super().__init__(Qt.Orientation.Horizontal, parent)
         self.setSectionsClickable(True)
 
+    def _grip(self) -> int:
+        """Half-width (px) of the column-resize zone at a section edge (where
+        the cursor turns into ↔); the ✕ sits just inside it."""
+        try:
+            g = int(self.style().pixelMetric(
+                QStyle.PixelMetric.PM_HeaderGripMargin, None, self))
+        except Exception:                                  # noqa: BLE001
+            g = 4
+        return max(4, g) + 1
+
     def _x_rect(self, rect) -> QRect:
-        return QRect(rect.right() - self._X_W, rect.top(),
+        return QRect(rect.right() - self._grip() - self._X_W, rect.top(),
                      self._X_W, rect.height())
+
+    def _on_resize_handle(self) -> bool:
+        """The cursor is the ↔ resize cursor (a column edge is under it)."""
+        try:
+            return (self.viewport().cursor().shape()
+                    == Qt.CursorShape.SplitHCursor)
+        except Exception:                                  # noqa: BLE001
+            return False
 
     def paintSection(self, painter, rect, logicalIndex):   # noqa: N802
         super().paintSection(painter, rect, logicalIndex)
@@ -259,10 +278,12 @@ class _CloseHeader(QHeaderView):
     def mousePressEvent(self, e):                          # noqa: N802
         x = int(e.position().x())
         log = self.logicalIndexAt(x)
-        if log >= 0:
+        # A press on a column edge (↔ cursor) resizes — never hides.
+        if log >= 0 and not self._on_resize_handle():
             left = self.sectionViewportPosition(log)
             right = left + self.sectionSize(log)
-            if right - self._X_W <= x <= right - 1:
+            x1 = right - self._grip()
+            if x1 - self._X_W <= x < x1:
                 self.closeClicked.emit(log)
                 return                        # consume — don't sort/select
         super().mousePressEvent(e)
