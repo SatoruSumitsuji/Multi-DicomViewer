@@ -401,7 +401,12 @@ class CasePresentationWindow(SnapDock):
         b_cols = QPushButton(t("列表示"))
         b_cols.setToolTip(t("列の表示/非表示を切り替え（ヘッダの ✕ でも非表示）"))
         col_menu = QMenu(b_cols)
+        self._cols_btn = b_cols
         self._col_actions = {}
+        # One click brings back everything hidden with the header ✕.
+        self._col_show_all = col_menu.addAction(t("すべて表示"))
+        self._col_show_all.triggered.connect(self._show_all_cols)
+        col_menu.addSeparator()
         # Every column is toggleable here so anything hidden with the header ✕ can
         # be brought back. Listed in table (title-row) order.
         for col in range(len(_HEADERS)):
@@ -412,6 +417,7 @@ class CasePresentationWindow(SnapDock):
             self._col_actions[col] = a
         b_cols.setMenu(col_menu)
         bar1.addWidget(b_cols)
+        self._refresh_cols_btn()
         # Time-offset tools sit just right of 列表示 (left-packed, not floated
         # to the far right where they were hard to find).
         b_anchor = QPushButton(t("アンカーで揃える"))
@@ -537,6 +543,7 @@ class CasePresentationWindow(SnapDock):
         # Header with a per-column ✕ → click to hide that column (restore via 列表示).
         _hdr = _CloseHeader(self._table)
         _hdr.closeClicked.connect(self._hide_col)
+        _hdr.setToolTip(t("✕ で列を非表示（再表示は「列表示」から）"))
         self._table.setHorizontalHeader(_hdr)
         self._table.setHorizontalHeaderLabels([t(h) for h in _HEADERS])
         self._table.verticalHeader().setVisible(False)
@@ -668,6 +675,36 @@ class CasePresentationWindow(SnapDock):
             a.blockSignals(True)
             a.setChecked(on)
             a.blockSignals(False)
+        self._refresh_cols_btn()
+
+    #: 列表示 outline while some column is hidden (amber, stands out without
+    #: looking like a running state).
+    _COLS_HIDDEN_CSS = ("QPushButton{border:2px solid #e0a000;border-radius:3px;"
+                        "padding:1px 6px;}")
+
+    def _hidden_cols(self) -> list:
+        tbl = getattr(self, "_table", None)
+        if tbl is None:
+            return []
+        return [c for c in range(len(_HEADERS)) if tbl.isColumnHidden(c)]
+
+    def _refresh_cols_btn(self) -> None:
+        """列表示 says how many columns are hidden (and is outlined), so a
+        column hidden with the header ✕ is never lost."""
+        b = getattr(self, "_cols_btn", None)
+        if b is None:
+            return
+        n = len(self._hidden_cols())
+        b.setText(t("列表示 ({n}列非表示)", n=n) if n else t("列表示"))
+        b.setStyleSheet(self._COLS_HIDDEN_CSS if n else "")
+        a = getattr(self, "_col_show_all", None)
+        if a is not None:
+            a.setEnabled(n > 0)
+
+    def _show_all_cols(self) -> None:
+        """列表示 ▸ すべて表示: show every hidden column again."""
+        for c in self._hidden_cols():
+            self._set_col_visible(c, True)
 
     def _hide_col(self, col: int) -> None:
         """Header ✕ clicked → hide that column (restore via the 列表示 menu)."""
