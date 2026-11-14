@@ -1119,6 +1119,28 @@ class CoregWindow(QMainWindow):
             self._drive_markers()
 
     # ------------------------------------------------- save / load
+    def _default_dir(self) -> str:
+        """File-dialog start folder: the PARENT of the source DICOM series
+        folder (master IVUS first, then the other panes in order); the last
+        folder a MultiReg dialog used when no pane has files on disk."""
+        order = list(self.panes)
+        if 0 <= self._active_ivus < len(order):
+            order.insert(0, order[self._active_ivus])
+        for pane in order:
+            files = getattr(getattr(pane, "series", None), "files", None) or []
+            for f in files[:1]:
+                folder = os.path.dirname(os.path.abspath(f))
+                parent = os.path.dirname(folder)
+                if parent and os.path.isdir(parent):
+                    return parent
+                if folder and os.path.isdir(folder):
+                    return folder
+        return getattr(self, "_last_dir", "") or ""
+
+    def _remember_dir(self, path: str) -> None:
+        if path:
+            self._last_dir = os.path.dirname(os.path.abspath(path))
+
     def _save_coreg(self) -> None:
         """Write the MultiReg points + guide traces to a JSON file. The guide
         curves are NOT stored (re-derived from the vertices on load)."""
@@ -1128,11 +1150,13 @@ class CoregWindow(QMainWindow):
                 self, "MultiReg", t("Nothing to save yet."))
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, t("Save MultiReg"), "", t("MultiReg file (*.cosync.json)"))
+            self, t("Save MultiReg"), self._default_dir(),
+            t("MultiReg file (*.cosync.json)"))
         if not path:
             return
         if not path.lower().endswith(".json"):
             path += ".cosync.json"
+        self._remember_dir(path)
         data = {
             "format": "MDV-MultiReg",
             "version": 1,
@@ -1168,10 +1192,11 @@ class CoregWindow(QMainWindow):
         """Load MultiReg points + guide traces from a native .cosync.json, or
         import a legacy MultiSync .txt as IVUS-only sync points."""
         path, _ = QFileDialog.getOpenFileName(
-            self, t("Load MultiReg"), "",
+            self, t("Load MultiReg"), self._default_dir(),
             t("MultiReg / MultiSync (*.json *.txt);;All files (*)"))
         if not path:
             return
+        self._remember_dir(path)
         try:
             with open(path, encoding="utf-8") as fh:
                 text = fh.read()
@@ -1291,19 +1316,29 @@ class CoregWindow(QMainWindow):
         arr = np.frombuffer(ptr, np.uint8).reshape(h, bpl)
         return np.array(arr[:, :w * 3].reshape(h, w, 3))
 
-    def _compose_coreg_frame(self, cell: int, cols: int) -> np.ndarray:
+    #: ui_state key — the last MP4 text-overlay choice (title / frame).
+    _MP4_TEXT_KEY = "multireg_mp4_text"
+
+    def _compose_coreg_frame(self, cell: int, cols: int, title: bool = False,
+                             frame_info: bool = False) -> np.ndarray:
         """Grab every pane's canvas (image + guide + moving marker, exactly as
         shown), CROP off the canvas letterbox so only the image region remains,
         and tile them into a cols-wide grid of square *cell* cells — so the
-        image fills its cell instead of sitting small inside a double margin."""
+        image fills its cell instead of sitting small inside a double margin.
+        *title* adds a text band ABOVE each image (the pane title: modality /
+        side / series name); *frame_info* one BELOW it (the "F n / N" label)."""
         rows = (len(self.panes) + cols - 1) // cols
         # Black gutters between cells so the tiles don't run together. The
         # horizontal (column) gutter is 3× the vertical one — the left/right
         # halves read as clearly separated. Kept even for yuv420p.
         gap_y = (cell // 12) & ~1
         gap_x = (gap_y * 3) & ~1
+        band = max(18, cell // 22) & ~1          # text band height (even)
+        top = band if title else 0
+        bot = band if frame_info else 0
+        cell_h = top + cell + bot
         W = cols * cell + (cols - 1) * gap_x
-        H = rows * cell + (rows - 1) * gap_y
+        H = rows * cell_h + (rows - 1) * gap_y
         img = QImage(W, H, QImage.Format.Format_RGB888)
         img.fill(QColor("#000000"))
         p = QPainter(img)
@@ -1331,7 +1366,13 @@ class CoregWindow(QMainWindow):
                 if w <= 0 or h <= 0:
                     continue
                 r, c = divmod(k, cols)
-                tx, ty = c * (cell + gap_x), r * (cell + gap_y)
+                tx, ty0 = c * (cell + gap_x), r * (cell_h + gap_y)
+                ty = ty0 + top
+                if top or bot:
+                    self._draw_band_text(p, tx, ty0, cell, top,
+                                         pane.title.text() if top else "")
+                    self._draw_band_text(p, tx, ty + cell, cell, bot,
+                                         pane.lbl.text() if bot else "")
                 scale = min(cell / w, cell / h)
                 dw, dh = w * scale, h * scale
                 p.save()
@@ -1343,6 +1384,25 @@ class CoregWindow(QMainWindow):
         finally:
             p.end()
         return self._qimage_to_rgb(img)
+
+    @staticmethod
+    def _draw_band_text(p: QPainter, x: int, y: int, w: int, h: int,
+                        text: str) -> None:
+        """White text, left-aligned and elided, in an (x, y, w, h) band."""
+        if h <= 0 or not text or text == "—":
+            return
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QFont, QFontMetrics
+        p.save()
+        f = QFont(p.font())
+        f.setPixelSize(max(10, int(h * 0.72)))
+        p.setFont(f)
+        p.setPen(QColor("#ffffff"))
+        r = QRect(int(x) + 4, int(y), max(0, int(w) - 8), int(h))
+        p.drawText(r, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                   QFontMetrics(f).elidedText(text, Qt.TextElideMode.ElideRight,
+                                              r.width()))
+        p.restore()
 
     def _export_mp4(self) -> None:
         """Scrub the master IVUS from its first to last frame; each frame drives
@@ -1360,21 +1420,39 @@ class CoregWindow(QMainWindow):
                 self, "MultiReg", t("The master IVUS has no frames."))
             return
 
+        from multi_dicomviewer.core import settings as _settings
         from multi_dicomviewer.ui.export_dialog import ExportDialog
+        last = _settings.load_ui_state(self._MP4_TEXT_KEY, {}) or {}
+        if not isinstance(last, dict):
+            last = {}
         dlg_cfg = ExportDialog(
             "mp4", 1, default_fps=15.0, default_bitrate=40, default_crf=10,
             show_filename_fields=False,
-            title_override=t("Export MultiReg MP4"), parent=self)
+            title_override=t("Export MultiReg MP4"),
+            extra_checks=[
+                ("title", t("Source info above each image (series name)"),
+                 bool(last.get("title", False))),
+                ("frame", t("Frame info below each image"),
+                 bool(last.get("frame", False))),
+            ],
+            extra_title=t("Text in the video (none = images only)"),
+            parent=self)
         if dlg_cfg.exec() != dlg_cfg.DialogCode.Accepted:
             return
         cfg = dlg_cfg.result_settings()
+        text_opts = dlg_cfg.extra_checked()
+        _settings.save_ui_state(self._MP4_TEXT_KEY, {
+            "title": bool(text_opts.get("title")),
+            "frame": bool(text_opts.get("frame"))})
 
         path, _ = QFileDialog.getSaveFileName(
-            self, t("Export MultiReg MP4"), "", t("MP4 video (*.mp4)"))
+            self, t("Export MultiReg MP4"), self._default_dir(),
+            t("MP4 video (*.mp4)"))
         if not path:
             return
         if not path.lower().endswith(".mp4"):
             path += ".mp4"
+        self._remember_dir(path)
 
         cols = _grid_dims(len(self.panes))
         # Square cell ≈ the largest pane canvas, clamped and made even.
@@ -1409,7 +1487,9 @@ class CoregWindow(QMainWindow):
                     break
                 master.show_frame(f)
                 self._on_ivus_scrub(master.index)   # sync followers + markers
-                frame = self._compose_coreg_frame(cell, cols)
+                frame = self._compose_coreg_frame(
+                    cell, cols, title=bool(text_opts.get("title")),
+                    frame_info=bool(text_opts.get("frame")))
                 stream.add(frame)
                 written += 1
                 if f % 8 == 0:

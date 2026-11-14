@@ -107,6 +107,8 @@ class ExportDialog(QDialog):
                  initial_fields: Optional[list] = None,
                  default_bitrate: Optional[int] = None,
                  default_crf: int = 20,
+                 extra_checks: Optional[list] = None,
+                 extra_title: Optional[str] = None,
                  parent=None):
         """``dicom_tags`` is an optional list of ``(identifier, label)``
         tuples — typically the modality's tag-overlay selection — that
@@ -276,6 +278,20 @@ class ExportDialog(QDialog):
             self._bitrate = None
             self._fps = None
 
+        # --- caller-defined extra options (e.g. MultiReg MP4 text overlays) -
+        #: ``extra_checks`` = [(key, label, checked), …] → one checkbox each;
+        #: read back with extra_checked().
+        self._extra: dict[str, QCheckBox] = {}
+        if extra_checks:
+            xbox = QGroupBox(extra_title or t("Options"))
+            xcol = QVBoxLayout(xbox)
+            for key, label, checked in extra_checks:
+                cb = QCheckBox(label)
+                cb.setChecked(bool(checked))
+                self._extra[key] = cb
+                xcol.addWidget(cb)
+            root.addWidget(xbox)
+
         # --- OK / Cancel ---------------------------------------------------
         btns = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -284,6 +300,10 @@ class ExportDialog(QDialog):
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
+
+    def extra_checked(self) -> dict:
+        """{key: ticked} for the ``extra_checks`` boxes."""
+        return {k: cb.isChecked() for k, cb in self._extra.items()}
 
     def result_settings(self) -> ExportSettings:
         """Returns the user's choices. Call only after exec() == Accepted.
