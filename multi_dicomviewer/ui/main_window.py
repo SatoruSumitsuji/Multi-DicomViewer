@@ -1856,8 +1856,26 @@ class MainWindow(QMainWindow):
         # is (series, plane_index): for a biplane pane we send exactly the
         # projection(s) actually displayed — Lt→plane 0, Rt→plane 1, and Bi
         # (both shown) → both planes as two CoSync views.
+        # ONE pass in on-screen order (a CT short-axis included IN PLACE, not
+        # appended), and each spec's grid cell in the current layout, so the
+        # MultiReg grid matches the screen (2×2 XA | IVUS / CT | IVUS stays so).
         specs: list = []
+        cells: list = []
+        r0, c0 = self._current_layout_rect()[:2]
         for pane in self._shown_panes():
+            if self._layout_key == "1x1" or pane not in self._order:
+                cell = (0, 0)
+            else:
+                r, c = divmod(self._order.index(pane), _MAX_GRID_COLS)
+                cell = (r - r0, c - c0)
+            v = pane.current_viewer()
+            if getattr(v, "handles_modality", "") == "CT" \
+                    and hasattr(v, "cpr_active") and v.cpr_active():
+                spec = v.cpr_cosync_spec()
+                if spec is not None:
+                    specs.append(spec)
+                    cells.append(cell)
+                continue
             se = self._series_by_uid.get(pane.shown_series_uid())
             if se is None or se.modality not in (Modality.IVUS, Modality.XA):
                 continue
@@ -1875,26 +1893,19 @@ class MainWindow(QMainWindow):
             if side == "Bi":
                 specs.append((se, 0, fr, rot, rev))
                 specs.append((se, 1, fr, rot, rev))
+                cells += [cell, cell]            # two views, one cell → no grid
             elif side == "Rt":
                 specs.append((se, 1, fr, rot, rev))
+                cells.append(cell)
             else:                                # "Lt", single-plane, or none
                 specs.append((se, 0, fr, rot, rev))
-        # Include any CT pane currently in short-axis (Stretch MPR) mode as a
-        # synthetic pull-back — it joins the CoSync grid like an IVUS and can
-        # be landmark-synced against the real IVUS / other short-axes.
-        cpr_specs = []
-        for pane in self._shown_panes():
-            v = pane.current_viewer()
-            if getattr(v, "handles_modality", "") == "CT" \
-                    and hasattr(v, "cpr_active") and v.cpr_active():
-                spec = v.cpr_cosync_spec()
-                if spec is not None:
-                    cpr_specs.append(spec)
-        specs = specs[:6]
+                cells.append(cell)
+        # (A CT pane in short-axis (Stretch MPR) mode joined above, in place, as
+        # a synthetic pull-back — landmark-synced like an IVUS.)
         # No IVUS-required gate any more: MultiReg co-registers ANY mix of an
         # IVUS pull-back, a coronary-CT short-axis (a driver too), and XA angio —
         # e.g. CT-MPR + XA with no IVUS. Only require SOMETHING to show.
-        specs = (specs + cpr_specs)[:6]
+        specs, cells = specs[:6], cells[:6]
         if not specs:
             QMessageBox.information(
                 self, t("MultiReg"),
@@ -1902,7 +1913,7 @@ class MainWindow(QMainWindow):
                   "or an XA angio in the panes first, then press MultiReg."),
             )
             return
-        self._coreg_win = CoregWindow(specs)
+        self._coreg_win = CoregWindow(specs, grid_cells=cells)
         self._as_taskbar_window(self._coreg_win)
         self._coreg_win.showMaximized()
         self._coreg_win.raise_()

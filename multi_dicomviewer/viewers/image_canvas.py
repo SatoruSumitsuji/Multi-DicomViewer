@@ -1697,8 +1697,9 @@ class ImageCanvas(QWidget):
             dy = sy - self._manual_last[1]
             self._manual_last = (sx, sy)
             if self._drag_mode == "zoom":
-                # drag up = zoom in (like the CT viewer): dy<0 → factor>1.
-                self._apply_zoom(1.0 - dy * 0.005,
+                # drag DOWN = zoom IN (enlarge), UP = zoom OUT (shrink) — the
+                # same direction as the CT viewer's Zoom: dy>0 → factor>1.
+                self._apply_zoom(1.0 + dy * 0.005,
                                  self.width() / 2.0, self.height() / 2.0)
             elif self._drag_mode == "wl":
                 self.wl_dragged.emit(float(dx), float(dy))

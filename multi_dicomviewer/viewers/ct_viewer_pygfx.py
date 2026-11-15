@@ -7610,7 +7610,23 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             both = (shift and ctrl) if indiv else shift
             only_pane = None if both else which      # single-pane zoom skips other
             for k in (("A", "B") if both else (which,)):
+                if k == "A" and self._cpr is not None:
+                    # Short-axis (CPR) pane: its camera is framed from the
+                    # section half-width, not _ps — zoom a CPR view scale
+                    # instead (as the VTK camera ParallelScale zoom does).
+                    c = self._cpr
+                    c["view_scale"] = float(min(20.0, max(0.05,
+                        float(c.get("view_scale", 1.0)) * factor)))
+                    continue
                 self._ps[k] = max(1e-3, self._ps[k] * factor)
+        elif t == "MOVE" and which == "A" and self._cpr is not None:
+            # Short-axis (CPR) pane: pan the section camera in mm along the
+            # section's u / v so the image follows the cursor (the VTK path
+            # pans its camera the same way).
+            only_pane = which
+            s_px = max(1e-6, self._cpr_section_scale())
+            pu, pv = self._cpr_view_pan()
+            self._cpr["view_pan"] = (pu - dx / s_px, pv + dy / s_px)
         elif t == "MOVE":
             only_pane = which
             sc = self._ps[which] * 0.003
@@ -19916,13 +19932,33 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         w = _norm(np.cross(ur, vr))
         R = np.column_stack([ur, vr, w]).astype(np.float64)
         p.cam.local.rotation = la.quat_from_mat(R)
-        p.cam.local.position = np.asarray(o, float) + w * self._cam_off
-        ps = max(1e-3, float(self._cpr["half"]))
+        pu, pv = self._cpr_view_pan()
+        p.cam.local.position = (np.asarray(o, float) + ur * pu + vr * pv
+                                + w * self._cam_off)
+        ps = max(1e-3, float(self._cpr["half"]) * self._cpr_view_scale())
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
         p.cam.height = 2.0 * ps
         p.cam.width = 2.0 * ps * (pw / ph)
         p.cam.depth_range = (0.1, 4.0 * self._cam_off + self._diag)
+
+    def _cpr_view_scale(self) -> float:
+        """Zoom of the short-axis pane (1 = the ±half mm section fills it;
+        <1 = zoomed in). Set by the Zoom tool; view-only, not saved."""
+        try:
+            return float(min(20.0, max(0.05,
+                float((self._cpr or {}).get("view_scale", 1.0)))))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _cpr_view_pan(self):
+        """(du, dv) mm the short-axis view centre is panned along u / v by the
+        Move tool; (0, 0) = the section centre. View-only, not saved."""
+        try:
+            pu, pv = (self._cpr or {}).get("view_pan", (0.0, 0.0))
+            return float(pu), float(pv)
+        except (TypeError, ValueError):
+            return 0.0, 0.0
 
     def _cpr_section_scale(self) -> float:
         """Pixels-per-mm of pane A's short-axis cross-section — matches the camera
@@ -19932,7 +19968,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p = self.pane["A"]
         ph = max(1, p.canvas.height())
         half = max(1e-3, float((self._cpr or {}).get("half", 25.0)))
-        return ph / (2.0 * half)
+        return ph / (2.0 * half * self._cpr_view_scale())
 
     def _cpr_offset_to_screen(self, du, dv):
         """Cross-section in-plane offset (du,dv mm along u,v) → pane-A widget px
@@ -19941,7 +19977,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
         s = self._cpr_section_scale()
-        return pw / 2.0 + du * s, ph / 2.0 - dv * s
+        pu, pv = self._cpr_view_pan()
+        return pw / 2.0 + (du - pu) * s, ph / 2.0 - (dv - pv) * s
 
     def _cpr_screen_to_offset(self, sx, sy):
         """Pane-A widget px → cross-section in-plane offset (du,dv mm along u,v)."""
@@ -19949,7 +19986,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         pw = max(1, p.canvas.width())
         ph = max(1, p.canvas.height())
         s = self._cpr_section_scale()
-        return (sx - pw / 2.0) / s, (ph / 2.0 - sy) / s
+        pu, pv = self._cpr_view_pan()
+        return (sx - pw / 2.0) / s + pu, (ph / 2.0 - sy) / s + pv
 
     # ---- control-point markers (edit the pseudo-centres in the section) ----
     def _cpr_marker_geom(self):

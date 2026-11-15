@@ -376,7 +376,7 @@ class CoregWindow(QMainWindow):
         ("arrow", "Direction arrow", False),
     )
 
-    def __init__(self, pane_specs, parent=None):
+    def __init__(self, pane_specs, parent=None, grid_cells=None):
         """*pane_specs*: list of ``(Series, plane_index)`` — one per pane to
         create, mirroring the source panes on screen. plane_index picks the
         biplane projection (0=Lt, 1=Rt); a biplane pane shown as "Bi"
@@ -422,7 +422,7 @@ class CoregWindow(QMainWindow):
         root.addWidget(left, 1)
         root.addWidget(self._build_panel())
 
-        self._load_series(pane_specs)
+        self._load_series(pane_specs, grid_cells)
         self._refresh_global_seek()
 
         # Z / W toggle the drag mode (Zoom / WL) on the IVUS-like panes, so a
@@ -706,17 +706,22 @@ class CoregWindow(QMainWindow):
         # clamped frame) so the green point sweeps the WHOLE bar range.
         self._drive_markers(g)
 
-    def _load_series(self, pane_specs) -> None:
+    def _load_series(self, pane_specs, grid_cells=None) -> None:
         # A spec is either a (Series, plane, start) tuple or a CT short-axis
         # dict {"kind": "ct_cpr", ...} from CTViewer.cpr_cosync_spec.
-        specs = [s for s in (pane_specs or [])
-                 if s is not None
-                 and (isinstance(s, dict) or s[0] is not None)][:6]
-        cols = _grid_dims(len(specs))
+        raw = list(pane_specs or [])
+        cells_in = list(grid_cells or [])
+        keep = [i for i, s in enumerate(raw)
+                if s is not None and (isinstance(s, dict) or s[0] is not None)][:6]
+        specs = [raw[i] for i in keep]
+        cells = ([cells_in[i] for i in keep]
+                 if len(cells_in) == len(raw) else None)
+        self._grid_pos = self._layout_cells(cells, len(specs))
         for i, spec in enumerate(specs):
             pane = _CoregPane(i, self)
             self.panes.append(pane)
-            self._grid.addWidget(pane.frame, i // cols, i % cols)
+            r, c = self._grid_pos[i]
+            self._grid.addWidget(pane.frame, r, c)
             if isinstance(spec, dict):            # CT short-axis stack pane
                 pane.load_stack(spec)
                 continue
@@ -1357,6 +1362,21 @@ class CoregWindow(QMainWindow):
         arr = np.frombuffer(ptr, np.uint8).reshape(h, bpl)
         return np.array(arr[:, :w * 3].reshape(h, w, 3))
 
+    @staticmethod
+    def _layout_cells(cells, n: int) -> list:
+        """Grid (row, col) per pane: the cells the panes had on the main screen
+        (empty rows / columns squeezed out), so MultiReg keeps that layout; the
+        plain reading-order grid when there are none or two share a cell (a
+        biplane shown as Bi)."""
+        ok = (cells is not None and len(cells) == n and n > 0
+              and len(set(map(tuple, cells))) == n)
+        if ok:
+            rows = sorted({int(r) for r, _c in cells})
+            cols = sorted({int(c) for _r, c in cells})
+            return [(rows.index(int(r)), cols.index(int(c))) for r, c in cells]
+        nc = _grid_dims(n)
+        return [divmod(i, nc) for i in range(n)]
+
     #: ui_state key — the last MP4 text-overlay choice (title / frame).
     _MP4_TEXT_KEY = "multireg_mp4_text"
     #: x264 speed preset for the MultiReg MP4 (CRF mode).
@@ -1370,7 +1390,11 @@ class CoregWindow(QMainWindow):
         image fills its cell instead of sitting small inside a double margin.
         *title* adds a text band ABOVE each image (the pane title: modality /
         side / series name); *frame_info* one BELOW it (the "F n / N" label)."""
-        rows = (len(self.panes) + cols - 1) // cols
+        pos = getattr(self, "_grid_pos", None)
+        if not pos or len(pos) != len(self.panes):
+            pos = [divmod(k, cols) for k in range(len(self.panes))]
+        cols = max(c for _r, c in pos) + 1 if pos else cols
+        rows = max(r for r, _c in pos) + 1 if pos else 1
         # Black gutters between cells so the tiles don't run together. The
         # horizontal (column) gutter is 3× the vertical one — the left/right
         # halves read as clearly separated. Kept even for yuv420p.
@@ -1408,7 +1432,7 @@ class CoregWindow(QMainWindow):
                 w, h = qimg.width(), qimg.height()
                 if w <= 0 or h <= 0:
                     continue
-                r, c = divmod(k, cols)
+                r, c = pos[k]
                 tx, ty0 = c * (cell + gap_x), r * (cell_h + gap_y)
                 ty = ty0 + top
                 if top or bot:
