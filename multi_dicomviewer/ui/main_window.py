@@ -4461,6 +4461,19 @@ class MainWindow(QMainWindow):
             pass
         return sorted(out)
 
+    @staticmethod
+    def _folder_holds_dicom(folder: str) -> bool:
+        """True if *folder* or any folder below it directly holds a DICOM file
+        (stops at the first hit; a few files are probed per folder)."""
+        import os
+        try:
+            for root, _dirs, _names in os.walk(folder):
+                if dicom_io.folder_has_dicom(root, limit=20):
+                    return True
+        except OSError:
+            pass
+        return False
+
     def _folder_lv_analysis_files(self, folder: str) -> list:
         """Every LV-analysis JSON (MV / AoV / Apex / Epi / Bld) found under
         *folder* (recursively), sorted — so dropping the FOLDER that holds the
@@ -7098,6 +7111,15 @@ class MainWindow(QMainWindow):
         paths = [p for p in paths if p not in cpr_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
+        # A DICOM folder dropped on the Studies tree / window (open_in_pane is
+        # None) is IMPORTED ONLY — never opened in a pane — even when analysis
+        # JSONs (.cpr.json / MV・AoV・Apex・Epi・Blood) were saved inside it.
+        # The folder sweeps below are for JSON-only analysis folders; sweeping a
+        # CT folder used to open its CT in a pane and try to apply a partial LV
+        # (→ the "MV・AoV・Apex …" warning). Dropped analysis FILES still open.
+        plain_dicom = set()
+        if open_in_pane is None and not dicom_only:
+            plain_dicom = {d for d in dirs if self._folder_holds_dicom(d)}
         # A dropped FOLDER that holds .cpr.json files (a vessel collection) →
         # load them into the Coronary Tree, and DON'T DICOM-scan that folder
         # (a cpr-only folder has no DICOM, which otherwise dead-ends in the
@@ -7107,6 +7129,8 @@ class MainWindow(QMainWindow):
         w = None
         if not dicom_only:
             for d in list(dirs):
+                if d in plain_dicom:
+                    continue
                 cprs = self._folder_cpr_files(d)
                 if cprs:
                     cpr_dirs.append(d)
@@ -7128,6 +7152,8 @@ class MainWindow(QMainWindow):
         if not dicom_only and dirs:
             lv_dirs, lv_folder_files = [], []
             for d in list(dirs):
+                if d in plain_dicom:
+                    continue
                 lvs = self._folder_lv_analysis_files(d)
                 if lvs:
                     lv_dirs.append(d)
