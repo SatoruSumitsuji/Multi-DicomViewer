@@ -61,6 +61,9 @@ from multi_dicomviewer.viewers.image_canvas import ImageCanvas
 from multi_dicomviewer.viewers.xa_viewer import apply_window
 
 
+_EXCL_TIP = ("Leave this image out of the MultiReg point being added / edited (e.g. the section can't be identified here, or it isn't recorded). It keeps following the other MultiReg points.")
+
+
 def _grid_dims(n: int) -> int:
     """Number of columns for *n* panes: 1 for a single pane, 2 up to four,
     3 for five or six."""
@@ -150,17 +153,21 @@ class _CoregPane:
         self.wl_btn.clicked.connect(
             lambda: self.owner._set_drag_mode(
                 "wl" if self.wl_btn.isChecked() else "rotate"))
-        self.include_cb = QCheckBox(t("Include in this point"))
-        self.include_cb.setChecked(True)
-        self.include_cb.setToolTip(
-            t("While adding a MultiReg point, include this IVUS's current frame"))
-        self.include_cb.setVisible(False)
+        # 除外 (Exclude): while adding / editing a MultiReg point, leave THIS
+        # image out of it (section not identifiable here, or not recorded). Any
+        # pane — IVUS, CT short-axis or angio. Shown only while placing; the
+        # image keeps following the MultiReg points it IS part of.
+        self.excl_btn = QPushButton(t("Exclude"))
+        self.excl_btn.setCheckable(True)
+        self.excl_btn.setToolTip(t(_EXCL_TIP))
+        self.excl_btn.setVisible(False)
+        self.excl_btn.toggled.connect(self._on_excl_toggled)
         self.nav.addWidget(self.master_radio)
         self.nav.addWidget(self.reverse_btn)
         self.nav.addWidget(self.zoom_btn)
         self.nav.addWidget(self.wl_btn)
+        self.nav.addWidget(self.excl_btn)
         self.nav.addStretch(1)
-        self.nav.addWidget(self.include_cb)
         col.addLayout(self.nav)
         self.canvas.wl_dragged.connect(self._on_wl_drag)
 
@@ -172,9 +179,28 @@ class _CoregPane:
         self.reverse_btn.setText(t("Reverse"))
         self.reverse_btn.setToolTip(
             t("Reverse the play/scroll order (distal↔proximal)"))
-        self.include_cb.setText(t("Include in this point"))
-        self.include_cb.setToolTip(
-            t("While adding a MultiReg point, include this IVUS's current frame"))
+        self.excl_btn.setText(t("Exclude"))
+        self.excl_btn.setToolTip(t(_EXCL_TIP))
+
+    #: Red outline while 除外 is on (outline, not a filled face — readable).
+    _EXCL_ON_CSS = ("QPushButton { border:2px solid #d03030; border-radius:4px;"
+                    " background:#fff4f4; color:#a01010; font-weight:bold;"
+                    " padding:2px 8px; }")
+
+    def excluded(self) -> bool:
+        # isHidden = explicitly hidden (not 'window not on screen').
+        return (not self.excl_btn.isHidden()) and self.excl_btn.isChecked()
+
+    def set_excluded(self, on: bool) -> None:
+        """Set 除外 without telling the window (used when placing starts)."""
+        self.excl_btn.blockSignals(True)
+        self.excl_btn.setChecked(bool(on))
+        self.excl_btn.blockSignals(False)
+        self.excl_btn.setStyleSheet(self._EXCL_ON_CSS if on else "")
+
+    def _on_excl_toggled(self, on: bool) -> None:
+        self.excl_btn.setStyleSheet(self._EXCL_ON_CSS if on else "")
+        self.owner._on_pane_excluded(self.index, bool(on))
 
     # ---- loading ----
     def load(self, series: Series | None, plane_index: int = 0,
@@ -835,10 +861,17 @@ class CoregWindow(QMainWindow):
         self.panes[pane_idx].canvas.set_coreg_anchors([])
 
     # ------------------------------------------------- MultiReg placement
+    #: "On" look for the Add/edit/commit button while placing and for the
+    #: selected MultiReg-N button: a blue OUTLINE on a light face with dark
+    #: text. (A filled blue face with white text read as an inverted, hard to
+    #: read button — especially in the macOS style.)
+    _BLUE_ON_CSS = ("QPushButton { border:2px solid #2d7ff0; border-radius:4px;"
+                    " background:#f4f8ff; color:#0b3f80; font-weight:bold;"
+                    " padding:2px 8px; }"
+                    "QPushButton:pressed { background:#dce9ff; }")
+
     def _style_blue(self, btn, on: bool) -> None:
-        btn.setStyleSheet(
-            "QPushButton { background:#2d7ff0; color:white; font-weight:bold; }"
-            if on else "")
+        btn.setStyleSheet(self._BLUE_ON_CSS if on else "")
 
     def _on_mode_button(self) -> None:
         """Top toggle: white → enter create/modify (blue); blue → commit."""
@@ -866,11 +899,24 @@ class CoregWindow(QMainWindow):
         self._exclude_xa_cb.setChecked(
             modifying and not self._landmarks[self._selected_lm]["fracs"])
         self._exclude_xa_cb.setVisible(has_angio)
+        lm_sel = self._landmarks[self._selected_lm] if modifying else None
         for p in self.panes:
+            # 除外: a new point starts with every image in; an edited point
+            # starts with the images it already uses (the others excluded).
+            if lm_sel is None:
+                excl = False
+            elif p.is_ivus:
+                excl = p.index not in lm_sel["frames"]
+            else:
+                excl = p.index not in lm_sel["fracs"]
+            p.set_excluded(excl)
+            p.excl_btn.setVisible(p.total > 0)
             if p.is_ivus:
                 # Frame(s) were chosen before entering — lock the seekbars.
                 p.slider.setEnabled(False)
-                p.include_cb.setVisible(not modifying)
+            elif excl:
+                p.canvas.set_coreg_marker(None)       # not part of this point
+                p.canvas.set_coreg_edit(False)
             else:
                 p.canvas.set_coreg_edit(True)
                 p.canvas.set_coreg_mode("anchor")
@@ -908,29 +954,74 @@ class CoregWindow(QMainWindow):
 
     def _on_slider_moved(self, pane_idx: int, s: float) -> None:
         # Provisional anchor for this angio while placing a MultiReg point.
-        if self._placing:
+        if self._placing and not self.panes[pane_idx].excluded():
             self._pending_fracs[pane_idx] = float(s)
+
+    def _on_pane_excluded(self, pane_idx: int, on: bool) -> None:
+        """除外 toggled on a pane while placing. An angio drops / regains its
+        circle (back at the point's own position, else the 按分 spot); an
+        IVUS / CT short-axis is simply left out of (or put back into) the
+        point at commit."""
+        if not self._placing or not (0 <= pane_idx < len(self.panes)):
+            return
+        p = self.panes[pane_idx]
+        if p.is_ivus:
+            return
+        if on:
+            self._pending_fracs.pop(pane_idx, None)
+            p.canvas.set_coreg_marker(None)
+            p.canvas.set_coreg_mode("")
+            p.canvas.set_coreg_edit(False)
+            return
+        p.canvas.set_coreg_edit(True)
+        p.canvas.set_coreg_mode("anchor")
+        sfr = None
+        if 0 <= self._selected_lm < len(self._landmarks):
+            sfr = self._landmarks[self._selected_lm]["fracs"].get(pane_idx)
+        if sfr is None:
+            sfr = self._interp_frac(pane_idx)
+        curve = self._guides.get(pane_idx, {}).get("curve", [])
+        if sfr is not None:
+            self._pending_fracs[pane_idx] = float(sfr)
+        p.canvas.set_coreg_marker(
+            coreg.point_at_fraction(curve, sfr)
+            if (sfr is not None and curve) else None)
 
     def _commit_placing(self) -> None:
         if not self._placing:
             return
         has_angio = any(not p.is_ivus for p in self.panes)
-        exclude_xa = self._exclude_xa_cb.isChecked() or not has_angio
-        if not exclude_xa and not self._pending_fracs:
+        # Every angio 除外'd = the same as Exclude XA (an IVUS-only point).
+        all_xa_out = has_angio and all(p.excluded() for p in self.panes
+                                       if not p.is_ivus)
+        exclude_xa = (self._exclude_xa_cb.isChecked() or not has_angio
+                      or all_xa_out)
+        pending = {i: v for i, v in self._pending_fracs.items()
+                   if not self.panes[i].excluded()}
+        if not exclude_xa and not pending:
             QMessageBox.information(
                 self, "MultiReg",
                 t("Place the circle on at least one angio (if you cannot "
                   "decide on XA, turn on 'Exclude XA')."))
             return
-        fracs = {} if exclude_xa else dict(self._pending_fracs)
+        fracs = {} if exclude_xa else pending
         if 0 <= self._selected_lm < len(self._landmarks):
             lm = self._landmarks[self._selected_lm]
+            # Keep each still-included IVUS's stored frame; one put back in
+            # (除外 off) joins at the frame it shows now.
+            frames = {p.index: lm["frames"].get(p.index, p.cur)
+                      for p in self.panes if p.is_ivus and not p.excluded()}
+            if not frames:
+                QMessageBox.information(
+                    self, "MultiReg", t("Select at least one IVUS to include."))
+                return
+            lm["frames"] = frames
             lm["fracs"] = fracs
             lm["rots"] = {i: self.panes[i].canvas.free_rotation()
-                          for i in lm["frames"]}
+                          for i in frames}
         else:
             frames = {p.index: p.cur for p in self.panes
-                      if p.is_ivus and p.include_cb.isChecked()}
+                      if p.is_ivus and not p.excluded()}
             if not frames:
                 QMessageBox.information(
                     self, "MultiReg", t("Select at least one IVUS to include."))
@@ -957,9 +1048,10 @@ class CoregWindow(QMainWindow):
         self._clear_all_btn.setVisible(True)
         self._status.setText("")
         for p in self.panes:
+            p.excl_btn.setVisible(False)
+            p.set_excluded(False)
             if p.is_ivus:
                 p.slider.setEnabled(p.total > 1)
-                p.include_cb.setVisible(False)
             else:
                 p.canvas.set_coreg_mode("")
                 p.canvas.set_coreg_edit(False)
