@@ -1761,8 +1761,16 @@ class _Overlay(QWidget):
             return
         rng = (lv["model"].along_range("endo")
                or lv["model"].along_range("epi"))
-        if rng is not None:
-            base = rng[1]
+        if rng is not None and lv["model"].axis is not None:
+            # The base level as a WORLD point → output y. (Output y equals the
+            # along value only when the pane is centred on the apex; with the
+            # kept view (Draw keeps the user's zoom / pan) it is not, and the
+            # line floated above the LA.)
+            _ax = lv["model"].axis
+            _, base = v._world3d_to_out(
+                key, np.asarray(_ax.apex, float)
+                + float(rng[1]) * np.asarray(_ax.axis, float))
+            base = float(base)
             X = float(v._half)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.setPen(QPen(yellow, 2.4))
@@ -11804,24 +11812,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return len(m.endo_contours) >= 3 or bool(m.endo_planes)
         return len(m.epi_contours) >= 3 or bool(m.epi_planes)
 
-    def _lv_refresh_pass_axis(self, pas) -> None:
-        """Re-seed *pas*'s long axis (apex → MV centre) from the common apex and
-        the CURRENT MV, quietly (no redraw). No-op if either is missing."""
+    def _lv_drop_pass_axis(self, pas) -> None:
+        """Forget *pas*'s long axis + apex point (no border on it yet)."""
         lv = self._lv
-        if lv is None or self._lv_apex is None:
+        if lv is None:
             return
-        apex = np.asarray(self._lv_apex, float).copy()
-        axinfo = self._lv_long_axis_from_apex(apex)
-        if axinfo is None:
-            return
-        from multi_dicomviewer.core.lv_axis import LVAxis
-        ax = LVAxis.from_frame(apex, axinfo[0], axinfo[1])
         m = lv["model"]
+        old = m.endo_axis if pas == "endo" else m.epi_axis
         if pas == "endo":
-            m.endo_axis = ax
+            m.endo_axis = None
         else:
-            m.epi_axis = ax
-        m.set_apex_point(pas, apex)
+            m.epi_axis = None
+        if old is not None and m.axis is old:
+            m.axis = None
+        m.set_apex_point(pas, None)
 
     def _lv_apply_common_apex_to_pass(self, pas) -> None:
         """Seed *pas*'s long axis + apex from the COMMON apex (apex → MV centre).
@@ -11989,11 +11993,44 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     self._lv_sax_btn.setChecked(False)
                 self._lv_leave_sax()
             m = self._lv["model"]
-            # Traced or not, leave the contour → selector (keeps MV/AoV + the
-            # common apex). Only clearing the pass left phase 'contour' →
-            # Rotate/Paging stayed locked and the ⟂-axis guides stayed drawn.
-            self._lv_exit()
+            if bool(m.endo_planes or m.epi_planes):
+                self._lv_exit()          # drop contour → selector (keeps MV/AoV)
+            else:
+                # Nothing traced: leave the trace IN PLACE (image unchanged).
+                # Only clearing the pass left phase 'contour' → Rotate/Paging
+                # stayed locked and the ⟂-axis guides stayed drawn.
+                self._lv_reset_untraced()
         self._lv_update_submode_ui()
+
+    def _lv_reset_untraced(self) -> None:
+        """Leave an Endo/Epi pass that has NO border yet: back to the no-pass
+        'align' state (axis / apex dropped; Draw re-seeds them), Measure off,
+        tool locks lifted — WITHOUT touching the view (no frame / camera
+        reset, unlike _lv_exit)."""
+        from multi_dicomviewer.core.lv_measure import LVModel
+        lv = self._lv
+        if lv is None:
+            return
+        self._lv_region_reset()
+        lv["model"] = LVModel(n_planes=lv["model"].n_planes)
+        for k in ("A", "B"):
+            self._measures[k] = [mm for mm in self._measures[k]
+                                 if mm.get("_lv") is None]
+        lv.update({"pass": None, "sax": None, "sax_edit": None,
+                   "plane_idx": 0, "phase": "align", "target": None,
+                   "fitted": False})
+        lv.pop("base_snapped", None)
+        self._draft = None
+        self._lv_result_lines = []
+        self._lv_apply_target(None)
+        self._lv_reset_undo()
+        if self._meas_on:                # a drag drives the view again
+            self._meas_btn.setChecked(False)
+            self._toggle_measure()
+        self._lv_apply_view_free()       # lift the LV tool locks
+        self._lv_sync_buttons()
+        self._lv_update_text()
+        self._lv_redraw_all()
 
     def _lv_save_valve(self, which) -> None:
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
@@ -12174,9 +12211,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for k in ("A", "B"):
             self._fit_pane(k)
         self._lvv_enlarge_default_zoom()
-        for k in ("A", "B"):
-            self.pane[k].render()
-            self._overlay[k].update()
+        # Full refresh (not just render): the plane tints / overlays are rebuilt
+        # for the new zoom, so no centreline nudge is needed to correct them.
+        self._refresh()
 
     def _lvv_endo_mask_cached(self):
         """The auto Endo VOXEL MASK (comp, bbox) — the shared-with-Windows
@@ -13687,8 +13724,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 if hasattr(self, "_update_hideall_btn"):
                     self._update_hideall_btn()
                 self._lvv_sync()
-                for k in ("A", "B"):
-                    self._overlay[k].update()
+                # Re-render NOW: the panes were laid out (_lvv_setup_axis_views
+                # → _refresh) BEFORE the Epi mask / 全域HU tint were set, so the
+                # first image showed stale tints until the centreline was moved.
+                self._refresh()
                 self._lvv_prompt(
                     t("Epi border loaded. Move the crosshair onto the LV apex "
                       "(left double-click recentres), then press Apex. (This "
@@ -16518,11 +16557,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         lv["pass"] = which
         self._lv_thick_trace_both()
-        # No border traced on this pass yet → re-seed its long axis from the
-        # CURRENT common apex + MV centre. An axis seeded earlier (e.g. Draw,
-        # then MV re-done) would otherwise stay on the OLD MV centre.
+        # No border traced on this pass yet → DROP any axis / apex left from an
+        # earlier Draw, so the entry goes to 'align' exactly like a fresh one:
+        # the image is NOT changed and the trace starts only with Draw, which
+        # seeds the axis from the CURRENT common apex + MV centre. (A leftover
+        # axis stayed on the OLD MV centre after the MV was re-done; re-seeding
+        # it here instead jumped straight into the trace and re-fitted the view.)
         if not self._lv_pass_has_border(which):
-            self._lv_refresh_pass_axis(which)
+            self._lv_drop_pass_axis(which)
         ax = m._axis_for(which)
         if ax is None:
             self._lv_enter_align()
@@ -18469,6 +18511,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (_lvv_mask_vol via _lvv_plane_rgba 'red'). Show it now if the button is
         # already toggled on.
         self._lv_show_measured_mask(result.get("mask"))
+        # Show the measured region at once and turn Epi-Area ON (Windows
+        # parity): the red region appearing is how the user sees that Calc Vol
+        # has finished.
+        if (self._lvv_mask_vol is not None
+                and getattr(self, "_lv_region_btn", None) is not None):
+            self._lv_region_btn.setChecked(True)
+            self._lv_region_btn.setStyleSheet(
+                "QPushButton{background:#ff5a5a;color:black;}")
+            self._lvv_mask_on = True
+            self._lvv_redraw()
+            self._lv_apply_view_free()
         self._lv_sync_buttons()
         self._lv_update_text()
 

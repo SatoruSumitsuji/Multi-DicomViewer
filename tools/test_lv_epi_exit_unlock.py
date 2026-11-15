@@ -4,7 +4,7 @@
   belong to an ACTIVE Endo/Epi pass only;
 * the trace is left completely, so the Rotate / Paging lock (phase 'contour')
   is lifted: Windows → _lv_reset_contour_empty ('align') + Measure off + the
-  tool locks recomputed; Mac → _lv_exit (as with a traced border).
+  tool locks recomputed; Mac → _lv_reset_untraced (view kept).
 
 VTK / pygfx can't run in the sandbox: the guide painters are run on a stand-in
 object, the Exit branches are checked in the source.
@@ -98,8 +98,8 @@ check("Windows Exit → Measure off + tool locks recomputed",
 
 pg = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text(encoding="utf-8")
 body = ast.get_source_segment(pg, func(pg, "_lv_submode_exit"))
-check("Mac Exit → _lv_exit whether traced or not",
-      "self._lv_exit()" in body and 'self._lv["pass"] = None' not in body)
+check("Mac Exit, nothing traced → in-place reset (no lingering 'contour')",
+      "self._lv_reset_untraced()" in body and 'self._lv["pass"] = None' not in body)
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

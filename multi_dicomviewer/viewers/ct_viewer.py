@@ -5283,24 +5283,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return len(m.endo_contours) >= 3 or bool(m.endo_planes)
         return len(m.epi_contours) >= 3 or bool(m.epi_planes)
 
-    def _lv_refresh_pass_axis(self, pas) -> None:
-        """Re-seed *pas*'s long axis (apex → MV centre) from the common apex and
-        the CURRENT MV, quietly (no redraw). No-op if either is missing."""
+    def _lv_drop_pass_axis(self, pas) -> None:
+        """Forget *pas*'s long axis + apex point (no border on it yet)."""
         lv = self._lv
-        if lv is None or self._lv_apex is None:
+        if lv is None:
             return
-        apex = np.asarray(self._lv_apex, float).copy()
-        axinfo = self._lv_long_axis_from_apex(apex)
-        if axinfo is None:
-            return
-        from multi_dicomviewer.core.lv_axis import LVAxis
-        ax = LVAxis.from_frame(apex, axinfo[0], axinfo[1])
         m = lv["model"]
+        old = m.endo_axis if pas == "endo" else m.epi_axis
         if pas == "endo":
-            m.endo_axis = ax
+            m.endo_axis = None
         else:
-            m.epi_axis = ax
-        m.set_apex_point(pas, apex)
+            m.epi_axis = None
+        if old is not None and m.axis is old:
+            m.axis = None
+        m.set_apex_point(pas, None)
 
     def _lv_apply_common_apex_to_pass(self, pas) -> None:
         """Seed *pas*'s long axis + apex from the COMMON apex (self._lv_apex): the
@@ -16887,11 +16883,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         lv["pass"] = which
         self._lv_thick_trace_both()
-        # No border traced on this pass yet → re-seed its long axis from the
-        # CURRENT common apex + MV centre. An axis seeded earlier (e.g. Draw,
-        # then MV re-done) would otherwise stay on the OLD MV centre.
+        # No border traced on this pass yet → DROP any axis / apex left from an
+        # earlier Draw, so the entry goes to 'align' exactly like a fresh one:
+        # the image is NOT changed and the trace starts only with Draw, which
+        # seeds the axis from the CURRENT common apex + MV centre. (A leftover
+        # axis stayed on the OLD MV centre after the MV was re-done; re-seeding
+        # it here instead jumped straight into the trace and re-fitted the view.)
         if not self._lv_pass_has_border(which):
-            self._lv_refresh_pass_axis(which)
+            self._lv_drop_pass_axis(which)
         ax = m._axis_for(which)
         if ax is None:
             self._lv_enter_align()
@@ -19852,11 +19851,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # horizontal line at y = base_along across the FOV).
         rng = (lv["model"].along_range("endo")
                or lv["model"].along_range("epi"))
-        if rng is not None:
-            base = rng[1]
+        if rng is not None and lv["model"].axis is not None:
+            # The base level as a WORLD point → output y. (Output y equals the
+            # along value only when the pane is centred on the apex; with the
+            # kept view it is not, and the line floated above the LA.)
+            _ax = lv["model"].axis
+            _, base = self._world3d_to_out(
+                key, np.asarray(_ax.apex, float)
+                + float(rng[1]) * np.asarray(_ax.axis, float))
             X = float(getattr(self, "_half", 100.0))
             p.lv_line_mapper.SetInputData(
-                _polylines_pd([[(-X, base), (X, base)]]))
+                _polylines_pd([[(-X, float(base)), (X, float(base))]]))
         self._lv_draw_axis_guides(key, p)
 
     def _lv_draw_axis_guides(self, key, p) -> None:
