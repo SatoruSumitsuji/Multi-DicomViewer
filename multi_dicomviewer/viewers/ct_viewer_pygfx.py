@@ -3472,8 +3472,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # line selects that vessel's row in the panel (highlights the branch / CPR
         # line). Non-consuming side-effect — the normal gesture (orbit / tool /
         # target) still proceeds; works on either pane (_coronary_pick handles VR).
+        # Not while setting CPR lines (_coronary_mode): there a line is picked
+        # only by its right-click ▸ 編集 — a click to start a branch on its parent
+        # must not select the parent.
         if (self._drag_btn == 1 and self._coro_select_cb is not None
-                and self._coro_overlay):
+                and self._coro_overlay
+                and not getattr(self, "_coronary_mode", False)):
             _svid = self._coronary_pick(key, x, y)
             if _svid is not None:
                 try:
@@ -9774,7 +9778,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # With the Polyline tool active, IGNORE a _cpr_src handle so the click adds
         # a point there; other measures' handles stay grabbable as before.
         if (hit is not None and self._meas_type == "polyline"
-                and self._measures[which][hit[0]].get("_cpr_src")):
+                and (self._measures[which][hit[0]].get("_cpr_src")
+                     or self._cpr_is_cpr_line(self._measures[which][hit[0]]))):
             hit = None
         # Starting a NEW LV border must not grab a DIFFERENT border's point.
         if (hit is not None and lv_target in ("endo", "epi")
@@ -10529,6 +10534,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                       if m["type"] == "ellipse" else None)
         hide_act = (menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
                     if self._cpr_line_menu_hide_ok(which, mi) else None)
+        desel_act = self._cpr_edit_deselect_add(menu, which, mi)
         copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         if m["type"] in ("polyline", "polygon"):
             del_res = menu.addAction(t("Delete result"))
@@ -10541,6 +10547,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if circle_act is not None and chosen is circle_act:
             self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        if desel_act is not None and chosen is desel_act:
+            self._cpr_edit_deselect()            # leave the edit (line stays)
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
@@ -10631,6 +10640,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # CPR lines: visibility is the Coronary Tree tab's check box.
         hide_act = (menu.addAction(t("Show") if m.get("hidden") else t("Hide"))
                     if self._cpr_line_menu_hide_ok(which, mi) else None)
+        desel_act = self._cpr_edit_deselect_add(menu, which, mi)
         copy_act = menu.addAction(t("Copy (Ctrl+V to paste)"))
         del_act = menu.addAction(t("Delete"))
         try:
@@ -10640,6 +10650,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._reset_pointer_state()   # never leave a stuck grab (Mac dead-buttons)
         if circle_act is not None and chosen is circle_act:
             self._make_circle(which, mi)         # records its own undo + redraw
+            return
+        if desel_act is not None and chosen is desel_act:
+            self._cpr_edit_deselect()            # leave the edit (line stays)
             return
         if chosen is copy_act:
             self._copy_measure(which, mi)        # stash for Ctrl+V paste
@@ -19417,13 +19430,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Save&Exit: the Save outline (grey when disabled, e.g. during Draw)
         self._cpr_save_exit_btn.setStyleSheet(self._save_exit_sty("save"))
         row.addWidget(self._cpr_save_exit_btn)
-        # 📁 = the folder Next saves to (asked at the first Next; click = change)
-        self._cpr_next_dir_btn = FitButton("📁 " + t("保存先"))
-        self._cpr_next_dir_btn.clicked.connect(
-            lambda _c=False: self._cpr_next_pick_dir())
-        self._cpr_next_dir_btn.setMaximumWidth(150)
-        row.addWidget(self._cpr_next_dir_btn)
-        self._cpr_next_dir_refresh()
+        # (The 📁 Next-folder button was removed: the folder is asked at the
+        # first Next of each CT; 名前を付けて保存… saves anywhere else.)
+        self._cpr_next_dir_btn = None
         self._cpr_exit_btn = FitButton(t("Exit"))
         self._cpr_exit_btn.setHelpToolTip(
             t("Leave coronary MPR / short-axis mode and restore the normal MPR"))

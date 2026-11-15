@@ -585,6 +585,7 @@
   "継続": "Keep",
   "編集 (Edit)": "Edit",
   "編集したCPR中心点に短軸断面を再フィット（Save→Exit→Load と同等の 再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す": "Re-fit the short-axis sections to the edited CPR centre points (same rebuild as Save→Exit→Load; rotation/flip/FOV/position are kept). Press after correcting points with Measure",
+  "編集中の変更は保存されていません。変更を破棄して編集を終了しますか？": "The changes being edited are not saved. Discard them and leave the edit?",
   "編集中の短軸がありません（先に『編集』してください）。": "No short axis is being edited ('Edit' one first).",
   "編集点を配置中": "Placing edit points",
   "縮尺を合わせる": "Match scale",

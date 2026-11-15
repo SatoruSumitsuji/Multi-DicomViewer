@@ -1789,6 +1789,7 @@
   "継続": "Continuo",
   "編集 (Edit)": "Editar",
   "編集したCPR中心点に短軸断面を再フィット（Save→Exit→Load と同等の 再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す": "Reajusta los cortes de eje corto a los puntos centrales CPR editados (reconstrucción equivalente a Save→Exit→Load; se conservan rotación/inversión/FOV/posición). Púlselo tras corregir puntos con Measure.",
+  "編集中の変更は保存されていません。変更を破棄して編集を終了しますか？": "Los cambios en edición no se han guardado. ¿Descartarlos y salir de la edición?",
   "編集中の短軸がありません（先に『編集』してください）。": "No hay eje corto en edición (primero pulse 'Editar').",
   "編集点を配置中": "Colocando puntos de edición",
   "縮尺を合わせる": "Igualar escala",

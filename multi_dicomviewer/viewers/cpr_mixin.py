@@ -1466,6 +1466,80 @@ class CPRMixin:
             self._cpr_sync_bar()
             self._refresh()
 
+    # ---- 選択を解除 (Deselect): leave the edit of a CPR line ------------------
+    def _cpr_edit_deselect_add(self, menu, which, mi):
+        """Put 「選択を解除 (Deselect)」 at the TOP of the right-click menu of the
+        CPR line being edited (its short-axis is open). Returns the action or
+        None."""
+        if self._cpr is None or not self._cpr_is_src(which, mi):
+            return None
+        from PyQt6.QtGui import QAction
+        a = QAction(t("選択を解除 (Deselect)"), menu)
+        acts = menu.actions()
+        if acts:
+            menu.insertAction(acts[0], a)
+            menu.insertSeparator(acts[0])
+        else:
+            menu.addAction(a)
+        return a
+
+    def _cpr_edit_deselect(self) -> bool:
+        """Leave the edit of the CPR line now open in the short-axis. A Coronary
+        Tree vessel goes straight back to its tree line (white before connect,
+        its territory's branch colour after) — the editing copy is dropped and
+        the tree overlay is pushed AT ONCE, so the line never vanishes. Unsaved
+        changes are confirmed first. A line not in the tree yet stays as it is
+        (kept for Save). Draw is armed again for the next line. False =
+        cancelled / nothing to leave."""
+        c = self._cpr
+        m = self._cpr_src_measure()
+        if c is None or m is None:
+            return False
+        vid = getattr(self, "_coro_edit_vid", "") or ""
+        if vid:
+            orig = m.get("_cpr_orig_ctrl")
+            if orig is not None and not self._cpr_same_ctrl(m.get("pts3d"), orig):
+                from PyQt6.QtWidgets import QMessageBox
+                r = QMessageBox.question(
+                    self.window(), t("Coronary Tree"),
+                    t("編集中の変更は保存されていません。変更を破棄して編集を終了しますか？"))
+                if r != QMessageBox.StandardButton.Yes:
+                    return False
+            if hasattr(self, "_view_snapshot"):
+                self._cpr_prev_view = self._view_snapshot()
+            self._exit_cpr(keep_view=True)
+            for k in ("A", "B"):
+                lst = self._measures.get(k, [])
+                for i in range(len(lst) - 1, -1, -1):
+                    if lst[i] is m:
+                        del lst[i]
+            pk = getattr(self, "_cpr_parked", None)
+            if pk and pk.get("m") is m:
+                self._cpr_parked = None
+        self._coronary_mpr_pending = False
+        self._coronary_draw()          # leaves a non-tree line's short-axis (parked)
+        sel_cb = getattr(self, "_coro_select_cb", None)
+        if sel_cb is not None:
+            try:
+                sel_cb("")             # nothing stays highlighted
+            except Exception:                    # noqa: BLE001
+                pass
+        shell = self.window() if hasattr(self, "window") else None
+        if shell is not None and hasattr(shell, "coronary_overlay_refresh"):
+            try:
+                shell.coronary_overlay_refresh()   # the tree line is back now
+            except Exception:                    # noqa: BLE001
+                pass
+        self._cpr_vr_saved_cache = None
+        for k in ("A", "B"):
+            self._redraw_meas(k)
+        if hasattr(self, "_cpr_vr_line_update") and self._cpr_vr_active():
+            try:
+                self._cpr_vr_line_update()
+            except Exception:                    # noqa: BLE001
+                pass
+        return True
+
     def _cpr_delete_ctrl_near(self) -> None:
         """Delete the control (edit) point the current cross-section sits ON,
         keeping AT LEAST TWO (a centreline needs two), then rebuild. Between
@@ -1492,9 +1566,32 @@ class CPRMixin:
         k = int(k_on)
         if not (0 <= k < len(p3)):
             return
+        gone = np.asarray(p3[k], float)
         del p3[k]
         self._cpr_set_ctrl(m, src, p3)
         self._cpr_edit_rebuild()
+        self._cpr_goto_nearest_ctrl(gone)
+
+    def _cpr_goto_nearest_ctrl(self, P) -> None:
+        """Move the short-axis section (and the map pane's point) to the edit
+        point nearest — along the vessel — to 3-D point *P* (e.g. the point just
+        deleted)."""
+        c = self._cpr
+        if c is None:
+            return
+        idxs = self._cpr_ctrl_indices()
+        if not idxs:
+            return
+        pts = np.asarray(c["cl"].points, float)
+        at = int(np.argmin(np.linalg.norm(pts - np.asarray(P, float), axis=1)))
+        c["idx"] = int(min(idxs, key=lambda i: abs(int(i) - at)))
+        self._cpr_sync_bar()
+        self._cpr_center_map_on_current()        # long-axis point follows
+        self._refresh()
+        try:
+            self.cpr_index_changed.emit(self._cpr_disp(c["idx"]))
+        except Exception:                        # noqa: BLE001
+            pass
 
     # ---- MAP-pane edit points: click → show its section, Shift+drag select,
     #      bulk Delete / Fit / Smooth (shared by both viewers) ----------------

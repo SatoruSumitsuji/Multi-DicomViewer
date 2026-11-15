@@ -49,6 +49,15 @@ class V(CPRMixin):
     def _cpr_edit_rebuild(self):
         self.rebuilt += 1
 
+    def _cpr_sync_bar(self):
+        pass
+
+    def _cpr_center_map_on_current(self):
+        self.centred = True
+
+    def _refresh(self):
+        pass
+
 
 v = V()
 check("on an edit point → _cpr_at_ctrl gives it", v._cpr_at_ctrl() == 1)
@@ -56,6 +65,8 @@ v._cpr_delete_ctrl_near()
 zs = [q[2] for q in v._measures["B"][0]["pts3d"]]
 check("Delete removes THAT edit point", zs == [0.0, 20.0, 30.0] and v.rebuilt == 1,
       str(zs))
+check("Delete → the nearest remaining edit point's section (map follows)",
+      v._cpr["idx"] in (0, 20) and getattr(v, "centred", False), str(v._cpr["idx"]))
 v._cpr["idx"] = 14                      # between 0 and 20 → not on a point
 check("between edit points → not on a point", v._cpr_at_ctrl() is None)
 v._cpr_delete_ctrl_near()

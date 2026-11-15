@@ -3116,6 +3116,13 @@ class MainWindow(QMainWindow):
                                 keep_view=True):
                 self._coro_editing_vid = vid
                 try:
+                    _sm = v._cpr_source_measure()
+                    if _sm is not None and _sm.get("pts3d"):
+                        _sm["_cpr_orig_ctrl"] = [list(map(float, q))
+                                                 for q in _sm["pts3d"]]
+                except Exception:                        # noqa: BLE001
+                    pass
+                try:
                     # Tell the viewer which tree vessel it is editing so (a) its
                     # reference overlay line is suppressed while the live editable
                     # trace is shown (no duplicate grey line) and (b) Save defaults

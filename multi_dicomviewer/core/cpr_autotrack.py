@@ -480,11 +480,14 @@ def thin_ctrl(path_mm, ctrl_mm, keep_mm, spacing_mm):
     out.sort(key=lambda e: (e[0], not e[2]))
     res, last = [], None
     kept_arcs = np.array(keep)
+
+    def at(a):
+        return np.array([np.interp(a, s, P[:, i]) for i in range(3)])
     for a, q, is_click in out:
         if is_click:
             if last is not None and abs(a - last) < 1e-6:
                 continue
-            res.append(np.array([np.interp(a, s, P[:, i]) for i in range(3)]))
+            res.append(at(a))
             last = a
             continue
         if last is not None and a - last < sp:
@@ -492,7 +495,14 @@ def thin_ctrl(path_mm, ctrl_mm, keep_mm, spacing_mm):
         nxt = kept_arcs[kept_arcs > a + 1e-6]
         if len(nxt) and float(nxt[0]) - a < sp:
             continue
-        res.append(np.asarray(q, float))
+        q = np.asarray(q, float)
+        # ...and not nearer than the spacing in SPACE either (a meandering
+        # trace through a hard stretch): no point is forced in there.
+        if res and float(np.linalg.norm(q - res[-1])) < sp:
+            continue
+        if len(nxt) and float(np.linalg.norm(at(float(nxt[0])) - q)) < sp:
+            continue
+        res.append(q)
         last = a
     return np.asarray(res, float)
 
