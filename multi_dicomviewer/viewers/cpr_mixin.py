@@ -635,6 +635,8 @@ class CPRMixin:
             return None
         if (getattr(self, "_vr_on", {}) or {}).get(which):
             return None                          # VR pane: its own routing
+        if which == "A" and getattr(self, "_cpr", None) is not None:
+            return None                          # CPR short axis: Add/Delete Point
         live = self._cpr_source_measure()
         mi = None
         hit = self._pick_handle(which, sx, sy)

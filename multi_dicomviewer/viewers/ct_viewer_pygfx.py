@@ -3572,6 +3572,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._drag_btn == 2:
             self._cross_grab = False
             self._meas_drag = False
+            # CPR short-axis (pane A): Add Point / Delete Point on the edit
+            # points takes priority (Windows parity) — the tree-line menu
+            # (編集 / 名前 / 選択を解除) must not answer here. Deferred out of the
+            # pointer handler (modal-in-pointer-handler safety).
+            if self._cpr is not None and key == "A":
+                self._reset_pointer_state()
+                QTimer.singleShot(
+                    0, lambda sx=x, sy=y: self._cpr_context_menu(sx, sy))
+                return
             # The MV / AoV line (detected outline or ring) → 描き直す menu
             # (deferred out of the pointer handler, like the menus below).
             _vh = self._lv_valve_hit(key, x, y)
@@ -11858,6 +11867,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             m.epi_axis = ax
         m.axis = ax
         m.set_apex_point(pas, apex)
+        # The crosshair centre goes ONTO the apex → MV-centre axis (same level
+        # along it), so the centreline + the left section follow that axis and
+        # not a centre left over from the previous step (e.g. the AoV centre).
+        if getattr(self, "_center", None) is not None:
+            c0 = np.asarray(self._center, float)
+            self._center = apex + float(np.dot(c0 - apex, axis_dir)) * axis_dir
         # Keep the user's EXACT view on Draw — do NOT recentre on the apex (that
         # jumped the image). keep_view preserves zoom + pan through tracing; only
         # the trace plane's orientation follows the meridian.
@@ -16946,6 +16961,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         keep = lv.get("keep_view", False)
         if not keep:
             self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        else:
+            # keep_view keeps the zoom + the level ALONG the axis, but the plane
+            # centre must lie ON the long axis (apex → MV centre): a centre left
+            # over from the previous view (e.g. the AoV step's AoV centre) slid
+            # the 8 planes sideways, so the centreline ran apex → AoV instead.
+            try:
+                pc0 = np.asarray(self._pc[pane], float)
+                along = float(np.dot(pc0 - ax.apex, ax.axis))
+                self._pc[pane] = ax.apex + along * ax.axis
+            except Exception:                            # noqa: BLE001
+                self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
         self._roll[pane] = 0.0          # long axis EXACTLY vertical: clear any
         #                                SPIN roll done before Set axis

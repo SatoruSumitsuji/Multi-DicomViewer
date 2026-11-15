@@ -122,7 +122,7 @@ CORONARY_PARAMS_DEFAULT = {
     #: Coronary Tree panel; drives the MPR tint + the Mac/Windows VR territory.
     "territory_opacity": 0.45,
     "line_colors": {
-        "LM": "#b4a7d6", "LAD": "#6fa8dc", "LCX": "#bf9000", "RCA": "#93c47d",
+        "LM": "#e53935", "LAD": "#6fa8dc", "LCX": "#bf9000", "RCA": "#93c47d",
     },
     "target_colors": ["#e06666", "#f6b26b", "#e78ac3",
                       "#9b59b6", "#3d85c6", "#6aa84f"],
@@ -130,6 +130,9 @@ CORONARY_PARAMS_DEFAULT = {
     #: spacing (mm) along the vessel; the hand-clicked points always stay.
     "cpr_ctrl_mm": 3,
 }
+#: The pre-6.0 LM line default (pale purple); saved settings holding it are
+#: read as the new red default.
+_OLD_LM_DEFAULT = "#b4a7d6"
 CORONARY_TUBE_MIN, CORONARY_TUBE_MAX, CORONARY_TUBE_STEP = 0.5, 4.0, 0.5
 CORONARY_LM_MIN, CORONARY_LM_MAX, CORONARY_LM_STEP = 1.0, 2.0, 0.1
 CPR_CTRL_MM_CHOICES = (1, 2, 3, 4, 5)
@@ -972,8 +975,13 @@ def load_coronary_params() -> dict:
         lc = data.get("line_colors")
         if isinstance(lc, dict):
             for k in out["line_colors"]:
-                out["line_colors"][k] = _clean_hex(
-                    lc.get(k), out["line_colors"][k])
+                v = lc.get(k)
+                # The OLD shipped LM default (pale purple, read as grey) is
+                # migrated to the new red default; a user-chosen colour stays.
+                if k == "LM" and isinstance(v, str) \
+                        and v.strip().lower() == _OLD_LM_DEFAULT:
+                    v = None
+                out["line_colors"][k] = _clean_hex(v, out["line_colors"][k])
         tc = data.get("target_colors")
         if isinstance(tc, list):
             for i in range(6):

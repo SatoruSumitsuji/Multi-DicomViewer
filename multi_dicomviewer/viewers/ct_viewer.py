@@ -5323,6 +5323,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             m.epi_axis = ax
         m.axis = ax
         m.set_apex_point(pas, apex)
+        # The crosshair centre goes ONTO the apex → MV-centre axis (same level
+        # along it), so the centreline + the left section follow that axis and
+        # not a centre left over from the previous step (e.g. the AoV centre).
+        if getattr(self, "_center", None) is not None:
+            c0 = np.asarray(self._center, float)
+            self._center = apex + float(np.dot(c0 - apex, axis_dir)) * axis_dir
         # Keep the user's EXACT view on Draw — do NOT recentre on the apex (that
         # jumped the image). keep_view preserves zoom + pan through tracing; only
         # the trace plane's orientation follows the meridian (needed to draw on
@@ -17105,6 +17111,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         keep = lv.get("keep_view", False)
         if not keep:
             self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
+        else:
+            # keep_view keeps the zoom + the level ALONG the axis, but the plane
+            # centre must lie ON the long axis (apex → MV centre): a centre left
+            # over from the previous view (e.g. the AoV step's AoV centre) slid
+            # the 8 planes sideways, so the centreline ran apex → AoV instead.
+            try:
+                pc0 = np.asarray(self._pc[pane], float)
+                along = float(np.dot(pc0 - ax.apex, ax.axis))
+                self._pc[pane] = ax.apex + along * ax.axis
+            except Exception:                            # noqa: BLE001
+                self._pc[pane] = ax.apex + 0.5 * ax.length_mm * ax.axis
         self._cross_ang[pane] = 0.0
         # Just after Set axis (ready): sync the cross-section pane's reslice
         # centre to the crosshair (_center), like a recenter does

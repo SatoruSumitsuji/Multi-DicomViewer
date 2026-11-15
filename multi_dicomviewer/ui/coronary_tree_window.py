@@ -52,10 +52,11 @@ from multi_dicomviewer.ui.snap_dock import SnapDock
 
 #: One colour per root trunk; branches inherit their root's colour. Soft/pale
 #: tones so the lines read on a grey CT: LAD pale blue, LCX pale yellow, RCA pale
-#: green, LM pale purple (the left-main stub). Legacy LM-LAD/LM-LCX keys alias to
+#: green, LM red (the left main — the most important trunk, so it stands out;
+#: the old pale purple read as grey). Legacy LM-LAD/LM-LCX keys alias to
 #: LAD/LCX so an old tree still colours before it is normalised.
 ROOT_COLORS = {
-    "LM":  "#b4a7d6",       # pale purple
+    "LM":  "#e53935",       # red (was pale purple #b4a7d6)
     "LAD": "#6fa8dc",       # pale blue
     "LCX": "#bf9000",       # dark(er) yellow — readable on a light panel
     "RCA": "#93c47d",       # pale green

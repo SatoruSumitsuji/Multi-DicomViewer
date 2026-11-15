@@ -128,6 +128,21 @@ n0 = len(v._measures["B"][0]["pts3d"])
 v._cpr_add_ctrl_at(np.array([1.0, 0.0, 20.0]))
 check("Add on an edit point → nothing added",
       len(v._measures["B"][0]["pts3d"]) == n0)
+# The short-axis pane never offers the tree-line menu (編集 / 名前 / 選択を解除)
+# while a CPR is open — Add / Delete Point answers there (Mac showed the tree
+# menu because its tree-hit check ran first).
+v._mode = "3D"
+v._draft = None
+v._vr_on = {}
+check("CPR open: no tree-line menu on the short-axis pane A",
+      CPRMixin._cpr_tree_hit(v, "A", 10, 10) is None)
+src = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text(
+    encoding="utf-8")
+i_cpr = src.index("if self._cpr is not None and key == \"A\":")
+i_tree = src.index("_th = self._cpr_tree_hit(key, x, y)")
+i_valve = src.index("_vh = self._lv_valve_hit(key, x, y)")
+check("pygfx: short-axis Add/Delete menu checked before the valve / tree menus",
+      i_cpr < i_valve and i_cpr < i_tree)
 check("i18n ja add hint", t("Add Point (only between edit points)")
       == "点を追加（編集点の間でのみ）")
 check("i18n ja hint", t("Delete Point (only on an edit point)")
