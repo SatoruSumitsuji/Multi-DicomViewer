@@ -3299,7 +3299,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for seq, direction in (("Alt+F", +1), ("Alt+A", -1)):
             sc = QShortcut(QKeySequence(seq), self)
             sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            sc.activated.connect(lambda d=direction: self._cpr_jump_ctrl(d))
+            sc.activated.connect(lambda d=direction: self._cpr_bar_step_ctrl(d))
             sc.setEnabled(False)
             self._cpr_jump_sc.append(sc)
         # Ctrl+Z = unified undo, Ctrl+Y = redo. macOS note: Qt's portable "Ctrl"
@@ -19293,25 +19293,25 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # first (一番手前) / last (一番奥) point; ◀ / ▶ step one (= Alt+A / Alt+F).
         self._cpr_first_ctrl_btn = FitButton("|◀")
         self._cpr_first_ctrl_btn.setHelpToolTip(
-            t("一番手前のCPR編集点へジャンプ（Shift+A）"))
+            t("シークバーの一番左のCPR編集点へジャンプ（Shift+A）"))
         self._cpr_first_ctrl_btn.clicked.connect(
-            lambda: self._cpr_jump_ctrl_end(False))
+            lambda: self._cpr_bar_ctrl_end(False))
         srow.addWidget(self._cpr_first_ctrl_btn)
         self._cpr_prev_ctrl_btn = FitButton("◀")
         self._cpr_prev_ctrl_btn.setHelpToolTip(
-            t("前のCPR編集点へ移動（調整用、A）"))
-        self._cpr_prev_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(-1))
+            t("シークバー上で左隣のCPR編集点へ移動（調整用、A）"))
+        self._cpr_prev_ctrl_btn.clicked.connect(lambda: self._cpr_bar_step_ctrl(-1))
         srow.addWidget(self._cpr_prev_ctrl_btn)
         self._cpr_next_ctrl_btn = FitButton("▶")
         self._cpr_next_ctrl_btn.setHelpToolTip(
-            t("次のCPR編集点へ移動（調整用、F）"))
-        self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_jump_ctrl(+1))
+            t("シークバー上で右隣のCPR編集点へ移動（調整用、F）"))
+        self._cpr_next_ctrl_btn.clicked.connect(lambda: self._cpr_bar_step_ctrl(+1))
         srow.addWidget(self._cpr_next_ctrl_btn)
         self._cpr_last_ctrl_btn = FitButton("▶|")
         self._cpr_last_ctrl_btn.setHelpToolTip(
-            t("一番奥のCPR編集点へジャンプ（Shift+F）"))
+            t("シークバーの一番右のCPR編集点へジャンプ（Shift+F）"))
         self._cpr_last_ctrl_btn.clicked.connect(
-            lambda: self._cpr_jump_ctrl_end(True))
+            lambda: self._cpr_bar_ctrl_end(True))
         srow.addWidget(self._cpr_last_ctrl_btn)
         self._cpr_slider = QSlider(Qt.Orientation.Horizontal)
         self._cpr_slider.setMinimum(0)

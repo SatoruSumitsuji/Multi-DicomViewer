@@ -1256,6 +1256,22 @@ class CPRMixin:
         self._cpr_center_map_on_current()        # map pane follows the edit point
         self._refresh()
 
+    # The ◀ ▶ / |◀ ▶| buttons (and A / F / Shift+A / Shift+F) move along the
+    # SEEK BAR as drawn: ◀ = leftwards. After Reverse (distal→proximal, IVUS
+    # pull-back) the bar runs backwards along the vessel, so the anatomical
+    # direction is flipped for them.
+    def _cpr_bar_flipped(self) -> bool:
+        c = self._cpr
+        return bool(c is not None and c.get("reversed"))
+
+    def _cpr_bar_step_ctrl(self, direction: int) -> None:
+        """Step to the edit point to the LEFT (-1) / RIGHT (+1) on the seek bar."""
+        self._cpr_jump_ctrl(-direction if self._cpr_bar_flipped() else direction)
+
+    def _cpr_bar_ctrl_end(self, right: bool) -> None:
+        """Jump to the LEFTMOST (False) / RIGHTMOST (True) edit point on the bar."""
+        self._cpr_jump_ctrl_end((not right) if self._cpr_bar_flipped() else right)
+
     def cpr_key_nav(self, where: str) -> bool:
         """Shell nav keys while a CPR short-axis is open: A / F step the PREVIOUS /
         NEXT edit point, Shift+A / Shift+F jump to the FIRST / LAST — instead of
@@ -1264,13 +1280,13 @@ class CPRMixin:
         if self._cpr is None:
             return False
         if where == "prev":
-            self._cpr_jump_ctrl(-1)
+            self._cpr_bar_step_ctrl(-1)
         elif where == "next":
-            self._cpr_jump_ctrl(+1)
+            self._cpr_bar_step_ctrl(+1)
         elif where == "first":
-            self._cpr_jump_ctrl_end(False)
+            self._cpr_bar_ctrl_end(False)
         elif where == "last":
-            self._cpr_jump_ctrl_end(True)
+            self._cpr_bar_ctrl_end(True)
         else:
             return False
         return True
