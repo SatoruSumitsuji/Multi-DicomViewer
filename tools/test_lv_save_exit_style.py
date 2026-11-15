@@ -47,23 +47,37 @@ for nm in EXIT:
     check(f"{nm}: Exit outline", vam._EXIT_OUTLINE in s and s.endswith(V._BTN_DIS))
 check("Save and Exit colours differ", vam._SAVE_OUTLINE != vam._EXIT_OUTLINE)
 
+# Call ORDER (not file line order): _build_lv_bar builds every LV row and calls
+# _build_lvv_bar part-way through, so the outline must be applied by the LAST
+# _lv_style_save_exit() in _build_lv_bar — after _build_lvv_bar() and after
+# every re-style loop over those buttons. (On the Mac it used to run only
+# inside _build_lvv_bar, before the MV+Apex / AoV buttons existed.)
+names = set(SAVE + EXIT) | {"_lvv_ctrl_btns"}
 for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (ROOT / "multi_dicomviewer" / "viewers" / fn).read_text(encoding="utf-8")
     tree = ast.parse(src)
-    call = [n.lineno for n in ast.walk(tree) if isinstance(n, ast.Call)
+    fn_node = next(n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == "_build_lv_bar")
+    call = [n.lineno for n in ast.walk(fn_node) if isinstance(n, ast.Call)
             and isinstance(n.func, ast.Attribute)
             and n.func.attr == "_lv_style_save_exit"]
+    sub = [n.lineno for n in ast.walk(fn_node) if isinstance(n, ast.Call)
+           and isinstance(n.func, ast.Attribute)
+           and n.func.attr == "_build_lvv_bar"]
     later = []
-    names = set(SAVE + EXIT) | {"_lvv_ctrl_btns"}
-    for n in ast.walk(tree):
+    for n in ast.walk(fn_node):
         if isinstance(n, ast.For):
             it = {a.attr for a in ast.walk(n.iter) if isinstance(a, ast.Attribute)}
+            it |= {a.id for a in ast.walk(n.iter) if isinstance(a, ast.Name)}
             sty = any(isinstance(c, ast.Attribute) and c.attr == "setStyleSheet"
                       for c in ast.walk(ast.Module(n.body, [])))
-            if it & names and sty and call and n.lineno > call[0]:
+            if (it & names or any(x.endswith(("_save_btn", "_exit_btn"))
+                                  for x in it)) and sty                     and call and n.lineno > max(call):
                 later.append(n.lineno)
-    check(f"{fn}: outline applied once, after the construction re-styles",
-          len(call) == 1 and not later, f"{call} {later}")
+    check(f"{fn}: outline applied last in _build_lv_bar (after _build_lvv_bar "
+          "and the construction re-styles)",
+          bool(call) and not later and all(s_ < max(call) for s_ in sub),
+          f"{call} {sub} {later}")
 
 # CPR (CoronaryTree): Next / Save&Exit = the Save outline, Exit = the Exit one.
 check("_save_exit_sty: save / exit colours + disabled grey",

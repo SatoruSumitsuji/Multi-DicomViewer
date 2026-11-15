@@ -1775,7 +1775,10 @@ class _Overlay(QWidget):
     def _paint_lv_axis_guides(self, p, key, S) -> None:
         v = self._v
         lv = v._lv
-        if lv is None or lv["model"].axis is None:
+        # Only while an Endo/Epi pass is ACTIVE: after Exit (pass None) the
+        # long axis may linger in the model, but its guides must not.
+        if (lv is None or lv["model"].axis is None
+                or lv.get("pass") not in ("endo", "epi")):
             return
         mv = v._lv_valves.get("mitral")
         if mv is None:
@@ -2251,8 +2254,11 @@ class _Overlay(QWidget):
         # the Epi spline, faint green dotted — how far Epi HU補正 can move it.
         _ebands = v._lv_epi_band_2d(key)
         if _ebands:
-            _pen = QPen(QColor(46, 139, 87, 150), 1.2)
-            _pen.setStyle(Qt.PenStyle.DotLine)
+            # Thicker, more opaque dashes (the thin 1.2 px DotLine was hard to
+            # see on the Mac) — on par with the Windows dashed band.
+            _pen = QPen(QColor(46, 139, 87, 230), 2.2)
+            _pen.setDashPattern([3.0, 2.5])
+            _pen.setCapStyle(Qt.PenCapStyle.FlatCap)
             p.setPen(_pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             for _bc in _ebands:
@@ -11788,6 +11794,35 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex_marker_draw()
         self._lv_update_submode_ui()
 
+    def _lv_pass_has_border(self, pas) -> bool:
+        """True when *pas* ("endo" / "epi") has a traced / loaded border."""
+        lv = self._lv
+        if lv is None:
+            return False
+        m = lv["model"]
+        if pas == "endo":
+            return len(m.endo_contours) >= 3 or bool(m.endo_planes)
+        return len(m.epi_contours) >= 3 or bool(m.epi_planes)
+
+    def _lv_refresh_pass_axis(self, pas) -> None:
+        """Re-seed *pas*'s long axis (apex → MV centre) from the common apex and
+        the CURRENT MV, quietly (no redraw). No-op if either is missing."""
+        lv = self._lv
+        if lv is None or self._lv_apex is None:
+            return
+        apex = np.asarray(self._lv_apex, float).copy()
+        axinfo = self._lv_long_axis_from_apex(apex)
+        if axinfo is None:
+            return
+        from multi_dicomviewer.core.lv_axis import LVAxis
+        ax = LVAxis.from_frame(apex, axinfo[0], axinfo[1])
+        m = lv["model"]
+        if pas == "endo":
+            m.endo_axis = ax
+        else:
+            m.epi_axis = ax
+        m.set_apex_point(pas, apex)
+
     def _lv_apply_common_apex_to_pass(self, pas) -> None:
         """Seed *pas*'s long axis + apex from the COMMON apex (apex → MV centre).
         Non-clearing so any captured meridians survive. No-op if unavailable."""
@@ -11886,7 +11921,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_epi_armed = True
         # BEGIN tracing right away so the border points can be placed on the
         # right pane — Draw is the "start drawing" action, not just an unlock.
-        self._lv_start_trace()                # ready + apex → enter contour (armed)
+        # Already in the trace (re-entered Epi with an axis) → just (re)enter
+        # the contour on the refreshed axis. _lv_start_trace would read a press
+        # in 'contour' as UNDO → ready (apex cleared), so Draw had to be pressed
+        # twice and the dialog came back.
+        if (self._lv.get("phase") in ("apex", "contour")
+                and self._lv.get("sax") is None):
+            self._lv["apex_target"] = None
+            self._lv_enter_contour()
+        else:
+            self._lv_start_trace()            # ready + apex → enter contour (armed)
         self._lv_update_submode_ui()
         # macOS: release any implicit canvas mouse-grab the modal left behind so
         # the FIRST Epi trace click lands on the image (parity with _lvv_prompt).
@@ -11945,12 +11989,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     self._lv_sax_btn.setChecked(False)
                 self._lv_leave_sax()
             m = self._lv["model"]
-            if bool(m.endo_planes or m.epi_planes):
-                self._lv_exit()          # drop contour → selector (keeps MV/AoV)
-            else:
-                self._lv["pass"] = None
-                self._lv_apply_target(None)
-                self._lv_sync_buttons()
+            # Traced or not, leave the contour → selector (keeps MV/AoV + the
+            # common apex). Only clearing the pass left phase 'contour' →
+            # Rotate/Paging stayed locked and the ⟂-axis guides stayed drawn.
+            self._lv_exit()
         self._lv_update_submode_ui()
 
     def _lv_save_valve(self, which) -> None:
@@ -13245,6 +13287,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_coro_style = (
             "QPushButton{background:#b8860b;color:white;}"
             "QPushButton:checked{background:#b8860b;color:white;}" + self._BTN_DIS)
+        # Save / Exit outline AGAIN here: _build_lvv_bar (which also applies
+        # it) runs BEFORE the MV+Apex / AoV, Apex and Endo/Epi buttons exist,
+        # and their plain _BTN_DIS styling above would otherwise win.
+        self._lv_style_save_exit()
         self._lv_sync_buttons()
         self._lv_update_submode_ui()
         return self._lv_wrap
@@ -16472,6 +16518,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         lv["pass"] = which
         self._lv_thick_trace_both()
+        # No border traced on this pass yet → re-seed its long axis from the
+        # CURRENT common apex + MV centre. An axis seeded earlier (e.g. Draw,
+        # then MV re-done) would otherwise stay on the OLD MV centre.
+        if not self._lv_pass_has_border(which):
+            self._lv_refresh_pass_axis(which)
         ax = m._axis_for(which)
         if ax is None:
             self._lv_enter_align()
