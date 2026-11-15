@@ -309,6 +309,17 @@ class SettingsDialog(QDialog):
         self._epi_hu_range_combo.setToolTip(t(
             "Epi HU補正範囲（±mm）。この範囲の外にある HU の境界は使いません。"))
         epiform.addRow(t("LV Epi HU補正範囲"), self._epi_hu_range_combo)
+        # Epi境界設定断面数: long-axis planes traced for the Epi border.
+        self._epi_planes_combo = QComboBox()
+        for nn in (4, 6, 8, 10, 12, 16):
+            self._epi_planes_combo.addItem(str(nn), nn)
+        cur_n = int(lv.get("epi_n_planes", 8))
+        ix = self._epi_planes_combo.findData(cur_n)
+        self._epi_planes_combo.setCurrentIndex(ix if ix >= 0 else 2)
+        self._epi_planes_combo.setToolTip(t(
+            "LV モードで Epi 境界を設定する長軸断面の数（1 断面で境界線 2 本）。"
+            "次に LV モードを開始したときから有効です。"))
+        epiform.addRow(t("Epi境界設定断面数"), self._epi_planes_combo)
         root.addWidget(gb_epi)
 
         # ---- LV wall-thickness colour bands (壁厚) -------------------------
@@ -576,6 +587,7 @@ class SettingsDialog(QDialog):
             out[k] = int(v) if isinstance(sb, QSpinBox) else float(v)
         out["epi_hu_range_mm"] = float(
             self._epi_hu_range_combo.currentData() or 4.0)
+        out["epi_n_planes"] = int(self._epi_planes_combo.currentData() or 8)
         return out
 
     def mouse_grid_layout(self) -> list:

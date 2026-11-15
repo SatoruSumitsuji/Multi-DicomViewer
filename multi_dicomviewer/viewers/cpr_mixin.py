@@ -1143,6 +1143,135 @@ class CPRMixin:
             m["_cpr_gap_pts"] = gap_ctrl_pts(res.path_mm, ctrl, res.gaps)
         except Exception:                        # noqa: BLE001
             m["_cpr_gap_pts"] = []
+        # With an Epi border of this CT, those gap points (where the lumen
+        # trace could not follow) go onto the Epi surface.
+        try:
+            self._cpr_epi_snap_gaps(m, m.get("_cpr_manual"))
+        except Exception:                        # noqa: BLE001
+            pass
+
+    # ---- Epi surface for CPR (gap points, short-axis Epi line) ---------------
+    #: The Epi border drawn on the short axis (CPR row → Epi).
+    _CPR_EPI_RGB = (0, 220, 120)
+
+    def _cpr_epi_surface(self):
+        """The Epi surface (LVSurface) of this CT if one is in memory — a
+        traced Epi, or a loaded EpiLv / FullLv (built once) — else None."""
+        surf = getattr(self, "_lvv_epi_surf", None)
+        if surf is None:
+            lv = getattr(self, "_lv", None)
+            m = lv.get("model") if isinstance(lv, dict) else None
+            surf = getattr(m, "epi", None) if m is not None else None
+        if surf is not None:
+            return surf
+        md = getattr(self, "_lvv_epi_model_dict", None)
+        if not isinstance(md, dict):
+            return None
+        cache = getattr(self, "_cpr_epi_surf_cache", None)
+        if cache is not None and cache[0] is md:
+            return cache[1]
+        surf = None
+        try:
+            from multi_dicomviewer.core.lv_measure import LVModel
+            mm = LVModel.from_dict(md.get("model") if isinstance(
+                md.get("model"), dict) else md)
+            mm.build()
+            surf = mm.epi
+        except Exception:                        # noqa: BLE001
+            surf = None
+        self._cpr_epi_surf_cache = (md, surf)
+        return surf
+
+    def _cpr_epi_snap_gaps(self, m, clicks=None) -> int:
+        """Gap edit points of an auto trace (the hollow-ring points: the lumen
+        trace could not follow the contrast there — e.g. the most distal
+        vessel added from the angiogram) → onto the NEAREST point of the Epi
+        surface (a distal coronary lies on the myocardium). Only those points:
+        wherever the lumen trace works it always wins; the user's own clicks
+        are never moved. Returns how many moved (0 without an Epi)."""
+        gidx = self._cpr_gap_idx(m)
+        if not gidx:
+            return 0
+        surf = self._cpr_epi_surface()
+        if surf is None:
+            return 0
+        p3 = [np.asarray(q, float) for q in (m.get("pts3d") or [])]
+        C = [np.asarray(q, float) for q in (clicks or [])]
+        moved, new_gap = 0, []
+        for k in gidx:
+            P = p3[k]
+            if any(float(np.linalg.norm(P - q)) < 0.5 for q in C):
+                new_gap.append(P)                # a hand click: kept
+                continue
+            try:
+                Q = np.asarray(surf.nearest_point(P), float)
+            except Exception:                    # noqa: BLE001
+                new_gap.append(P)
+                continue
+            p3[k] = Q
+            new_gap.append(Q)
+            moved += 1
+        if not moved:
+            return 0
+        m["pts3d"] = [list(map(float, q)) for q in p3]
+        src = None
+        for kk in ("A", "B"):
+            if any(mm is m for mm in self._measures.get(kk, [])):
+                src = kk
+        if src is not None and hasattr(self, "_world3d_to_out"):
+            m["pts"] = [self._world3d_to_out(src, q) for q in p3]
+        # Still marked (hollow ring) — they were placed, not traced: check them.
+        m["_cpr_gap_pts"] = [list(map(float, q)) for q in new_gap]
+        m["_cpr_epi_snapped"] = int(moved)
+        return moved
+
+    def _cpr_epi_show_toggle(self, on) -> None:
+        """CPR row → Epi: show / hide the Epi border on the short axis."""
+        on = bool(on)
+        if on and self._cpr_epi_surface() is None:
+            on = False
+            self._cpr_epi_show_sync(False)
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self.window(), t("Epi"),
+                    t("このCTには Epi 境界がありません（LV モードで Epi を設定するか、"
+                      "EpiLv / FullLv を読み込んでください）。"))
+            except Exception:                    # noqa: BLE001
+                pass
+        self._cpr_epi_show = on
+        if self._cpr is not None:
+            try:
+                self._refresh()
+            except Exception:                    # noqa: BLE001
+                pass
+
+    def _cpr_epi_show_sync(self, on) -> None:
+        b = getattr(self, "_cpr_epi_show_btn", None)
+        if b is not None:
+            b.blockSignals(True)
+            b.setChecked(bool(on))
+            b.blockSignals(False)
+
+    def _cpr_epi_section_2d(self) -> list:
+        """The Epi border on the current short-axis section as 2-point
+        segments [(du, dv), (du, dv)] (pane A in-plane mm) — [] when off."""
+        if not getattr(self, "_cpr_epi_show", False) or self._cpr is None:
+            return []
+        surf = self._cpr_epi_surface()
+        if surf is None:
+            return []
+        try:
+            o, u, vv, n = self._cpr_frame()
+            segs = surf.plane_section(o, n)
+        except Exception:                        # noqa: BLE001
+            return []
+        o, u, vv = (np.asarray(x, float) for x in (o, u, vv))
+        out = []
+        for a, b in segs:
+            out.append([(float((a - o) @ u), float((a - o) @ vv)),
+                        (float((b - o) @ u), float((b - o) @ vv))])
+        return out
 
     # (No low-contrast popup after an auto trace: the edit points in those
     # stretches are already marked on the short axis — the orange-red gap

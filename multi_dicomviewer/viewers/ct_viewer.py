@@ -3881,6 +3881,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_auto_btn.toggled.connect(
             lambda on: setattr(self, "_cpr_auto", bool(on)))
         row.addWidget(self._cpr_auto_btn)
+        # Epi: the Epi border (LV mode / EpiLv / FullLv) on the short axis only.
+        self._cpr_epi_show_btn = FitButton(t("Epi"))
+        self._cpr_epi_show_btn.setCheckable(True)
+        self._cpr_epi_show_btn.setStyleSheet(
+            "QPushButton:checked{background:#2e8b57;color:white;}")
+        self._cpr_epi_show_btn.setHelpToolTip(t(
+            "Epi 境界の表示・非表示（左ペインの短軸像のみ）。このCTに Epi 境界が"
+            "ある場合、自動トレースで中抜き丸になる編集点は Epi 面上に置かれます。"))
+        self._cpr_epi_show_btn.toggled.connect(self._cpr_epi_show_toggle)
+        row.addWidget(self._cpr_epi_show_btn)
         # 腔除外 / 除外クリア buttons REMOVED (user 2026-10-22): a coronary lumen is
         # itself contrast-bright (HU 200–1000), so a chamber flood by HU threshold
         # risks grabbing the proximal coronary too, and the Snap already auto-rejects
@@ -4134,7 +4144,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
         # and the Blood region's basal bound. Saved to their own MVLv.json /
         # AoVLv.json (single source, one per 3DCT phase). ----
-        self._lv_mv_btn = FitButton(t("MV+Apex"))
+        self._lv_mv_btn = FitButton(t("MV-AoV+Apex"))
         self._lv_mv_btn.setHelpToolTip(t(
             "MV 面と心尖部（Epi / Blood-Endo 共通）を設定します。Auto で MV 中心と"
             "心尖を順にクリックすると両方を自動設定します。右クリックで表示 ⇔ "
@@ -4157,6 +4167,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_aov_btn.customContextMenuRequested.connect(
             lambda _p: self._lv_rclick_valve("aortic"))
         row1.addWidget(self._lv_aov_btn)
+        # The AoV plane is no longer set by hand: the LV base is the MV-AoV
+        # point (MV-AoV+Apex → Auto also finds the AoV plane it lies on).
+        self._lv_aov_btn.setVisible(False)
         # ---- Common APEX: the third shared prerequisite, set ONCE before tracing
         # (the LV long axis = apex → MV centre). Opens the Apex step
         # (Set / RePosition / Hide / Exit). Right-click hides / shows the marker. ----
@@ -4819,7 +4832,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Both common valve planes (MV + AoV) are set — the prerequisite for
         setting the common apex (the axis is apex → MV centre)."""
         return (self._lv_valves.get("mitral") is not None
-                and self._lv_valves.get("aortic") is not None)
+                and (self._lv_valves.get("aortic") is not None
+                     or self._lv_mvaov_on()))
 
     def _lv_setup_ready(self) -> bool:
         """The three common prerequisites (MV + AoV + apex) are all set — the
@@ -5243,7 +5257,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         box = QMessageBox(self.window())
         box.setWindowTitle(t("Epi"))
         box.setIcon(QMessageBox.Icon.Information)
+        _npl = (self._lv["model"].n_planes if self._lv is not None else 8)
         box.setText(t(
+            "Trace the Epi border on the {n} planes (both basal ends run into "
+            "the MV-AoV point), then refine it on the short axis (SAX). The apex "
+            "+ long axis are already set.").format(n=_npl)
+            if self._lv_mvaov_on() else t(
             "Trace the Epi border on the 8 planes, then refine it on the short "
             "axis (SAX). The apex + long axis are already set."))
         b_draw = box.addButton(t("Draw"), QMessageBox.ButtonRole.AcceptRole)
@@ -5672,9 +5691,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     b.setEnabled(True)
                 mvx = ve == "mitral"                 # MV+Apex step
                 has_ax = mvx and self._lv_apex is not None
-                vname = "MV" if mvx else "AoV"
+                vname = "MV-AoV" if mvx else "AoV"
                 self._lv_ve_draw_btn.setText(f"{vname} {t('Draw')}")
                 self._lv_ve_confirm_btn.setText(f"{vname} {t('Set')}")
+                # MV-AoV point: Auto or the crossing → Set (no ellipse Draw)
+                self._lv_ve_draw_btn.setVisible(not mvx)
                 self._lv_ve_apex_set_btn.setVisible(mvx)
                 self._lv_ve_apex_set_btn.setEnabled(mvx)
                 self._lv_ve_save_btn.setEnabled(has)
@@ -7665,6 +7686,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex = apex
         self._lv_apex_shown = True
         self._lv_apex_marker_draw()
+        self._lv_mvaov_sync()                        # normal = apex → point
         self._lv_vset_record(before)                 # Ctrl+Z / Ctrl+Y
         if self._lv_long_axis_from_apex(apex) is None:
             self._lvv_prompt(t(
@@ -7797,6 +7819,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apex = np.asarray(data["apex"], float)
         self._lv_apex_shown = True
         self._lv_apex_marker_draw()
+        self._lv_mvaov_sync()
         self._lv_update_submode_ui()
 
     def _lv_clear_apex(self) -> None:
@@ -7867,6 +7890,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         the press/drag handlers), so a plain drag draws the annulus circle; press
         Confirm to set the plane from it."""
         which = self._lv_valve_edit or "mitral"
+        if which == "mitral":                  # MV-AoV point: no ellipse
+            self._lvv_prompt(t(
+                "MV-AoV点は Auto（大動脈基部の中を 1 回クリック）で設定するか、"
+                "センターラインの交点を MV-AoV 移行点に合わせて Set を押します。"))
+            return
         self._set_measure_type("ellipse")      # arm Ellipse
         if not self._meas_on:                  # auto-enable Measure
             self._meas_btn.setChecked(True)
@@ -7881,6 +7909,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         Confirm UPDATES the plane from a newer ellipse; it never toggles the
         ring's visibility (that is Hide/Show or the button's right-click)."""
         which = self._lv_valve_edit or "mitral"
+        if which == "mitral":                    # MV-AoV point at the crossing
+            self._lv_mvaov_set_at_cross()
+            self._lv_update_submode_ui()
+            return
         before = self._lv_vset_snap()
         self._lv_capture_valve_common(which, from_confirm=True)
         self._lv_vset_record(before)                 # Ctrl+Z / Ctrl+Y
@@ -8300,6 +8332,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Apply a parsed MVLv/AoVLv dict to the common valve planes and draw the
         ring (headless — no dialog / message box). Shared by the file-dialog load
         and the LV-analysis batch drop."""
+        if which == "mitral":
+            self._lv_mvaov = (dict(data["mvaov"]) if isinstance(
+                data.get("mvaov"), dict) else None)
         self._lv_valves[which] = (np.asarray(data["c"], float),
                                   np.asarray(data["n"], float),
                                   float(data.get("r", 20.0)))
@@ -16535,7 +16570,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._meas_btn.setChecked(False)
             self._toggle_measure()
         self._lvv_deactivate()            # contour LV and LV Vol are exclusive
-        self._lv = {"model": LVModel(n_planes=8), "phase": "align",
+        from multi_dicomviewer.core.settings import lv_epi_n_planes
+        self._lv = {"model": LVModel(n_planes=lv_epi_n_planes()),
+                    "phase": "align",
                     "plane_idx": 0, "target": None, "pane": "B",
                     "sax": None, "pass": None,
                     "prev_side": self.current_side()}
@@ -18317,7 +18354,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # user-adjusted end (now off-plane) from an un-extended one, so it kept
         # "repeating the last new-endpoint step". A freshly (re)traced plane is
         # re-armed in _lv_capture_current (its key is discarded there).
-        from multi_dicomviewer.core.lv_measure import mv_terminal_point
+        from multi_dicomviewer.core.lv_measure import (mv_terminal_point,
+                                                       tent_terminal_ok)
+        # MV-AoV tent: both basal ends of every Epi border run INTO the MV-AoV
+        # point (drawn points at / past its level are dropped), so the 2 × N
+        # lines close the Epi base like a tent (no MV-plane cut).
+        tent = pas == "epi" and self._lv_mvaov_on()
+        if pas == "epi":
+            m.epi_tent = bool(tent)
         snapped = self._lv.setdefault("base_snapped", set())
         before = self._lv_geom_snap()
         moved = False
@@ -18329,6 +18373,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if len(P) < 2:
                 continue
             snapped.add(key)                         # processed (lock it either way)
+            trunc = False
+            if tent:
+                ok = tent_terminal_ok(ax, P, c)
+                if not ok.all() and ok.sum() >= 2:
+                    P, trunc = P[ok], True
             a0 = float((P[0] - apex) @ axis)         # first end along-axis pos
             aL = float((P[-1] - apex) @ axis)        # last end along-axis pos
             # New basal terminal = a point 5 mm RADIAL from the LV long axis at
@@ -18341,6 +18390,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             e_s = e_s / ne if ne > 1e-6 else None
 
             def _base5(P_end):
+                if tent:                             # → the MV-AoV point itself
+                    return (None if np.linalg.norm(c - P_end) < eps_mm
+                            else c.copy())
                 if e_s is None:
                     return None
                 s = float(np.sign(float((P_end - apex) @ e_s))) or 1.0
@@ -18353,9 +18405,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                      else c + 5.0 * s * e_s)
                 return None if np.linalg.norm(b - P_end) < eps_mm else b
 
+            if trunc:
+                a0 = float((P[0] - apex) @ axis)
+                aL = float((P[-1] - apex) @ axis)
             pre = _base5(P[0]) if a0 > thr else None
             app = _base5(P[-1]) if aL > thr else None
-            if pre is None and app is None:
+            if pre is None and app is None and not trunc:
                 continue
             pieces = []
             if pre is not None:
@@ -18387,6 +18442,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         re-draws + invalidates the volume."""
         from PyQt6.QtWidgets import QMessageBox
         if self._lv is None or self._lv.get("phase") != "contour":
+            return
+        if self._lv_mvaov_on():
+            self._lv_tent_refit()
             return
         mv = self._lv_valves.get("mitral")
         if mv is None:
@@ -21092,7 +21150,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 hollow.append((0.0, 0.0))       # spline centre (interpolated)
         p.meas_pts_mapper.SetInputData(_points_pd(filled))
         gap = filled if (filled and self._cpr_at_gap()) else []
-        if hollow or gap:
+        epi = self._cpr_epi_section_2d()          # CPR row → Epi (short axis)
+        if hollow or gap or epi:
             dpr = max(1.0, p.canvas.devicePixelRatioF())
             ps = p.ren.GetActiveCamera().GetParallelScale()
             h_phys = max(1.0, p.canvas.height() * dpr)
@@ -21104,6 +21163,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 grings = _ring_polylines(gap, ring_r_world * 1.8)
                 rings = list(rings) + list(grings)
                 cols += [self._CPR_GAP_RGB + (255,)] * len(grings)
+            if epi:                              # the Epi border on this section
+                rings = list(rings) + list(epi)
+                cols += [self._CPR_EPI_RGB + (255,)] * len(epi)
             p.meas_pts_off_mapper.SetInputData(_colored_multi_pd(rings, cols))
         else:
             p.meas_pts_off_mapper.SetInputData(vtkPolyData())

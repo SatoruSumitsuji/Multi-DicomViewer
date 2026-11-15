@@ -229,7 +229,8 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
         vv = SimpleNamespace(_LV_EXT_TOL_MM=0.3, _lv_geom_snap=lambda: None,
                              _lv_rebuild_measures=lambda: None,
                              _lv_show_plane=lambda: None,
-                             _lv_record_geom=lambda b: None)
+                             _lv_record_geom=lambda b: None,
+                             _lv_mvaov_on=lambda: False)
         vv._lv = {"model": copy.deepcopy(m)}
         vv._lv_valves = {"mitral": (C0 + [0, 0, z], np.array([0, 0, 1.0]), 15.0)}
         moved = snap(vv, "epi")

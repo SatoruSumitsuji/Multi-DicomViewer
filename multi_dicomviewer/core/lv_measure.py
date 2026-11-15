@@ -23,6 +23,19 @@ import numpy as np
 from .lv_axis import LVAxis
 from .lv_surface import LV_LEVEL_STEP_MM, LV_RING_POINTS, LVSurface
 
+#: Long-axis plane counts the LV mode offers (Settings → Epi境界設定断面数).
+LV_PLANE_COUNTS = (4, 6, 8, 10, 12, 16)
+
+
+def tent_terminal_ok(ax, pts, point, tol_mm: float = 0.5):
+    """MV-AoV tent: the drawn border points of one long-axis plane that stay
+    APICAL of the MV-AoV *point* (along the axis), so both basal ends can run
+    straight into it. A drawn point at / past the point's level is dropped
+    (the border must end at the point). Returns a bool mask."""
+    P = np.asarray(pts, float).reshape(-1, 3)
+    L = float((np.asarray(point, float) - ax.apex) @ ax.axis)
+    return ((P - ax.apex) @ ax.axis) < L - float(tol_mm)
+
 
 def mv_terminal_point(ax, theta, c, n, p_ref, min_r: float = 1.0) -> np.ndarray:
     """Basal terminal of a long-axis border wall: ON the MV plane (point *c*,
@@ -163,9 +176,14 @@ class LVModel:
     """Holds the LV measurement state for one cardiac phase (ED or ES)."""
 
     def __init__(self, n_planes: int = 6):
-        if n_planes not in (4, 6, 8):
-            raise ValueError("n_planes must be 4, 6 or 8")
+        if int(n_planes) not in LV_PLANE_COUNTS:
+            raise ValueError("n_planes must be one of %s" % (LV_PLANE_COUNTS,))
         self.n_planes = int(n_planes)
+        # MV-AoV tent (the Epi base): every Epi long-axis border runs into the
+        # MV-AoV transition point at both basal ends, so the Epi surface is
+        # CLOSED at its base by the "tent" of those 2×n_planes lines — no MV /
+        # AoV plane cut (see tent_terminal_ok and build / epi_mv_plane).
+        self.epi_tent = False
         # Endo (lumen) and Epi (myocardium) are INDEPENDENT analyses, each traced
         # on its OWN long axis (their apexes are offset, so a single shared axis
         # can't put both apexes at the bottom of their trace planes — see
@@ -496,6 +514,8 @@ class LVModel:
             d["epi_sax_extra"] = [float(x) for x in self.epi_sax_extra]
         if self.epi_hu_done:
             d["epi_hu_done"] = True
+        if self.epi_tent:
+            d["epi_tent"] = True
         if self.endo_orig is not None:
             o = self.endo_orig
             d["endo_orig"] = {
@@ -511,7 +531,9 @@ class LVModel:
     def from_dict(cls, d: dict) -> "LVModel":
         """Rebuild a model from to_dict() output. v3 has independent endo/epi
         axes; v1/v2 have a single 'axis' → use it for BOTH (fallback)."""
-        m = cls(n_planes=int(d.get("n_planes", 6)))
+        npl = int(d.get("n_planes", 6))
+        m = cls(n_planes=npl if npl in LV_PLANE_COUNTS else 8)
+        m.epi_tent = bool(d.get("epi_tent", False))
         ea, pa = d.get("endo_axis"), d.get("epi_axis")
         if ea or pa:                                   # v3: independent axes
             if ea:
@@ -582,7 +604,7 @@ class LVModel:
         endo_ok = self.endo_axis is not None and len(self.endo_contours) >= 3
         epi_ok = self.epi_axis is not None and len(self.epi_contours) >= 3
         endo_base = epi_base = None
-        if endo_ok and epi_ok:
+        if endo_ok and epi_ok and not self.epi_tent:
             endo_base, epi_base = self._common_base()
         self.endo = (LVSurface.from_meridian_contours(
             self.endo_axis, self.endo_contours, level_step, n_theta,
@@ -595,6 +617,7 @@ class LVModel:
             self.endo.apex_world = self.endo_apex
         if self.epi is not None:
             self.epi.apex_world = self.epi_apex
+            self.epi.tent = bool(self.epi_tent)
 
     # -------------------------------------------------- promote endo → epi axis
     def promote_endo_to_epi_axis(self, level_step: float = LV_LEVEL_STEP_MM,
@@ -804,6 +827,7 @@ class LVModel:
         if surf is not None:
             surf.apex_world = (self.endo_apex if which == "endo"
                                else self.epi_apex)
+            surf.tent = bool(which == "epi" and self.epi_tent)
         return surf
 
     def _mv_parallel_surface(self, which: str, mv_center, mv_normal,
@@ -888,8 +912,8 @@ class LVModel:
         only once every plane is traced (Calc Vol / short axis).
         *mv* is (center, normal[, r]) or None; returned unchanged with shift 0
         when nothing is to move."""
-        if mv is None or not self.epi_planes:
-            return mv, 0.0
+        if mv is None or not self.epi_planes or self.epi_tent:
+            return mv, 0.0                       # (the tent has no MV plane)
         c = np.asarray(mv[0], float)
         n = np.asarray(mv[1], float)
         nn = float(np.linalg.norm(n))
@@ -939,6 +963,8 @@ class LVModel:
         follows the mitral annulus and the region never exceeds the drawn border.
         *mv*/*aov* are (center, normal[, r]) tuples or None. None if not built.
         Epi uses epi_mv_plane (MV moved atrially past the drawn Epi base)."""
+        if which == "epi" and self.epi_tent:
+            mv = aov = None                      # closed by the MV-AoV tent
         if which == "epi":
             mv = self.epi_mv_plane(mv)[0]
         planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
@@ -957,6 +983,8 @@ class LVModel:
         """Boolean voxel mask (comp, bbox) of the region volume_ml_valves counts —
         the faithful surface clipped by the MV (+AoV) plane — on the native DICOM
         grid, for the red overlay. (None, None) if not built/empty."""
+        if which == "epi" and self.epi_tent:
+            mv = aov = None                      # closed by the MV-AoV tent
         if which == "epi":
             mv = self.epi_mv_plane(mv)[0]
         planes = [(v[0], v[1]) for v in (mv, aov) if v is not None]
@@ -974,6 +1002,8 @@ class LVModel:
         """ONE rasterization → (comp, bbox, vol_ml, vol_mv_only_ml) for Calc Vol
         (mask + both volumes in a single `contains` pass). See
         LVSurface.inside_mask_volumes."""
+        if which == "epi" and self.epi_tent:
+            mv = aov = None                      # closed by the MV-AoV tent
         if which == "epi":
             mv = self.epi_mv_plane(mv)[0]
         surf =self._full_surface(which) if (mv is not None or aov is not None) \

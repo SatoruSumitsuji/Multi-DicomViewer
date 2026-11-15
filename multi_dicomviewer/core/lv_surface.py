@@ -452,7 +452,7 @@ class LVSurface:
         is snapped onto the MV plane while tracing). With no planes this is the
         plain voxel volume (flat basal cut)."""
         planes = [(np.asarray(c, float), np.asarray(n, float))
-                  for (c, n) in (planes or [])]
+                  for (c, n) in (planes or [])] if not self.tent else []
         if not planes:
             return self.voxel_volume_ml(spacing)
         apex = np.asarray(apex_xyz, float)
@@ -488,7 +488,7 @@ class LVSurface:
         sx, sy, sz = spacing_xyz
         nz, ny, nx = shape
         planes = [(np.asarray(c, float), np.asarray(n, float))
-                  for (c, n) in (planes or [])]
+                  for (c, n) in (planes or [])] if not self.tent else []
         apex = np.asarray(apex_xyz, float)
         allp = self._all_ring_points()          # tight to the traced surface only
         lo = allp.min(axis=0) - pad_mm
@@ -531,6 +531,8 @@ class LVSurface:
         """
         sx, sy, sz = spacing_xyz
         nz, ny, nx = shape
+        if self.tent:                           # closed by the MV-AoV tent
+            mv = aov = None
         apex = np.asarray(apex_xyz, float)
         allp = self._all_ring_points()
         lo = allp.min(axis=0) - pad_mm
@@ -584,6 +586,11 @@ class LVSurface:
         if not comp.any():
             return None, (z0, z1, y0, y1, x0, x1), vol, vol_mv
         return comp, (z0, z1, y0, y1, x0, x1), vol, vol_mv
+
+    #: MV-AoV tent Epi: the surface is CLOSED at its base by the tent of the
+    #: border lines meeting at the MV-AoV point, so a valve-plane clip passed
+    #: to the volume / mask methods is ignored (LVModel sets it on build).
+    tent = False
 
     def contains(self, pts, extend_base: bool = False) -> np.ndarray:
         """Boolean mask (N,) — which world points (N,3) fall inside the closed
@@ -718,10 +725,89 @@ class LVSurface:
         verts = np.concatenate(verts_list, 0)
         return verts, np.asarray(faces, dtype=np.int64)
 
+    # ------------------------------------------- nearest point / plane section
+    def _mesh_cache(self):
+        """(verts, faces) of the closed display mesh, cached on the ring data."""
+        key = (id(self.rings), self.rings.shape, float(self.rings.sum()))
+        c = getattr(self, "_mesh_c", None)
+        if c is None or c[0] != key:
+            v, f = self.to_mesh(close_base=True, smooth=False)
+            c = self._mesh_c = (key, np.asarray(v, float), np.asarray(f))
+        return c[1], c[2]
+
+    def nearest_point(self, P) -> np.ndarray:
+        """The point ON the surface nearest to world point *P* (mm): the
+        closest point over the mesh triangles near the nearest vertices."""
+        P = np.asarray(P, float).reshape(3)
+        V, F = self._mesh_cache()
+        from scipy.spatial import cKDTree
+        tree = getattr(self, "_mesh_tree", None)
+        if tree is None or tree[0] is not V:
+            tree = self._mesh_tree = (V, cKDTree(V))
+        _d, idx = tree[1].query(P, k=min(12, len(V)))
+        cand = np.flatnonzero(np.isin(F, np.atleast_1d(idx)).any(axis=1))
+        best, bq = np.inf, V[int(np.atleast_1d(idx)[0])]
+        for fi in cand:
+            q = _closest_on_triangle(P, V[F[fi, 0]], V[F[fi, 1]], V[F[fi, 2]])
+            d = float(np.linalg.norm(q - P))
+            if d < best:
+                best, bq = d, q
+        return np.asarray(bq, float)
+
+    def plane_section(self, origin, normal):
+        """Segments ((K, 2, 3) world mm) where the surface crosses the plane
+        (origin, normal) — the outline of the surface on that section."""
+        V, F = self._mesh_cache()
+        n = np.asarray(normal, float)
+        n = n / (np.linalg.norm(n) or 1.0)
+        d = (V - np.asarray(origin, float)) @ n
+        d = np.where(d == 0.0, 1e-9, d)             # a vertex ON the plane: nudge
+        T = d[F]                                    # (F, 3) signed distances
+        s = np.sign(T)
+        cross = ~((s >= 0).all(axis=1) | (s <= 0).all(axis=1))
+        out = []
+        for fi in np.flatnonzero(cross):
+            pts = []
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                da, db = T[fi, a], T[fi, b]
+                if (da < 0) != (db < 0) and da != db:
+                    t = da / (da - db)
+                    pts.append(V[F[fi, a]] + t * (V[F[fi, b]] - V[F[fi, a]]))
+            if len(pts) == 2:
+                out.append(pts)
+        return np.asarray(out, float).reshape(-1, 2, 3)
+
     # ------------------------------------------------------------------ private
     def _all_ring_points(self) -> np.ndarray:
         return np.concatenate([self.ring_world(i)
                                for i in range(self.n_levels)], 0)
+
+
+def _closest_on_triangle(p, a, b, c):
+    """Closest point to *p* on triangle (a, b, c) (Ericson, RTCD 5.1.5)."""
+    ab, ac, ap = b - a, c - a, p - a
+    d1, d2 = ab @ ap, ac @ ap
+    if d1 <= 0 and d2 <= 0:
+        return a
+    bp = p - b
+    d3, d4 = ab @ bp, ac @ bp
+    if d3 >= 0 and d4 <= d3:
+        return b
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0 and d1 >= 0 and d3 <= 0:
+        return a + (d1 / (d1 - d3)) * ab
+    cp = p - c
+    d5, d6 = ab @ cp, ac @ cp
+    if d6 >= 0 and d5 <= d6:
+        return c
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0 and d2 >= 0 and d6 <= 0:
+        return a + (d2 / (d2 - d6)) * ac
+    va_ = d3 * d6 - d5 * d4
+    if va_ <= 0 and (d4 - d3) >= 0 and (d5 - d6) >= 0:
+        return b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b)
+    den = 1.0 / (va_ + vb + vc)
+    return a + ab * (vb * den) + ac * (vc * den)
 
 
 def _cup_block(surf, base_off, outward):

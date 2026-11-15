@@ -96,6 +96,7 @@ class _Model:
         self.endo_contours, self.endo_planes = [], {}
         self.epi_axis = self.endo_axis = self.axis = None
         self.epi_apex = self.endo_apex = None
+        self.n_planes = 8
 
     def set_apex_point(self, which, p):
         setattr(self, which + "_apex", None if p is None else np.asarray(p, float))
@@ -179,6 +180,7 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     v._lv_enter_contour = lambda: calls.append("enter")
     v._lv_start_trace = lambda: calls.append("start")
     v._lv_update_submode_ui = lambda: None
+    v._lv_mvaov_on = lambda: False
     v._lv_sync_buttons = v._lv_update_text = v._lv_show_plane = \
         v._lv_redraw_all = v._reset_pointer_state = lambda *a: None
     v._ps = {}

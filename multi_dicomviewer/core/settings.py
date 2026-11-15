@@ -593,8 +593,13 @@ _LV_ENDO_DEFAULTS = {
     # move the border (1.0–10.0, 0.5 steps; snapped on load/save). Also drawn as
     # the band on the long-axis pane while tracing.
     "epi_hu_range_mm": 4.0,
+    # Epi境界設定断面数: long-axis planes traced for the Epi (one of
+    # LV_EPI_PLANE_COUNTS; each plane gives 2 border lines).
+    "epi_n_planes": 8,
 }
+LV_EPI_PLANE_COUNTS = (4, 6, 8, 10, 12, 16)
 _LV_ENDO_RANGES = {       # (min, max) sanity clamps — numeric keys only
+    "epi_n_planes": (4, 16),
     "epi_hu_range_mm": (1.0, 10.0),
     "close_mm": (1, 20),
     "min_chord_mm": (1.0, 30.0),
@@ -622,10 +627,18 @@ def load_lv_endo_params() -> dict:
                     vv = max(lo, min(hi, v))
                     if k == "epi_hu_range_mm":
                         vv = round(vv * 2.0) / 2.0      # 0.5 mm steps
+                    if k == "epi_n_planes" and int(vv) not in LV_EPI_PLANE_COUNTS:
+                        vv = dv
                     out[k] = int(vv) if isinstance(dv, int) else float(vv)
     except (OSError, ValueError):
         pass
     return out
+
+
+def lv_epi_n_planes() -> int:
+    """Settings → 「Epi境界設定断面数」 (4/6/8/10/12/16, default 8)."""
+    v = int(load_lv_endo_params().get("epi_n_planes", 8))
+    return v if v in LV_EPI_PLANE_COUNTS else 8
 
 
 _EPI_HU_RANGE_CACHE: list = [None, None]   # [mtime_ns, value]
@@ -665,6 +678,8 @@ def save_lv_endo_params(params: dict) -> None:
                 vv = dv
             if k == "epi_hu_range_mm":
                 vv = round(vv * 2.0) / 2.0              # 0.5 mm steps
+            if k == "epi_n_planes" and int(vv) not in LV_EPI_PLANE_COUNTS:
+                vv = dv
             out[k] = int(vv) if isinstance(dv, int) else float(vv)
         out["version"] = 1
         LV_ENDO_PATH.parent.mkdir(parents=True, exist_ok=True)
