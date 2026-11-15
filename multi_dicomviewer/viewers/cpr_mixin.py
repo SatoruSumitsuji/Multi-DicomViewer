@@ -1368,6 +1368,8 @@ class CPRMixin:
         c = self._cpr
         if c is None:
             return
+        if self._cpr_at_ctrl() is not None:     # on an edit point: nothing to add
+            return
         src, mi = c.get("src"), c.get("src_mi")
         if src not in ("A", "B") or mi is None \
                 or not (0 <= mi < len(self._measures.get(src, []))):

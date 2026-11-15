@@ -1,6 +1,8 @@
 """CT mode buttons, in-place (CTModeBarMixin): 標準 / LV / CoronaryTree switch by
 hiding / restoring overlays (data kept), availability from in-session data,
-auto modes, the tree view in LVモード; 「Territory計算」 (CoronaryTreeモード only)
+auto modes, the per-mode visibility matrix (標準 = CT only, LV = LV only,
+CoronaryTree = tree only, Territory = all); 「Territory: Calc / Load / Save」
+(Calc in CoronaryTreeモード only)
 and the Territory review entered / left in place (no CT re-open).
 
 Fake viewer + fake shell; no real dialogs (QMessageBox patched).
@@ -69,6 +71,15 @@ class Shell:
 
     def ct_territory_left(self, v):
         self.left.append(True)
+
+    def ct_territory_tint_off(self, v):
+        self.tint_off = getattr(self, "tint_off", 0) + 1
+
+    def ct_territory_load(self, v):
+        self.loads = getattr(self, "loads", 0) + 1
+
+    def ct_territory_save(self, v):
+        self.saves = getattr(self, "saves", 0) + 1
 
 
 class V(QWidget, CTModeBarMixin):
@@ -240,16 +251,21 @@ check("CoronaryTree: LV hidden, tab raised + ツリー表示 ON",
 v._ct_mode_clicked("standard")
 check("標準: tree lines hidden here (kept)", v._coro_overlay is None
       and v._coro_overlay_req is not None)
+n_shows = len(sh.shows)
 v._ct_mode_clicked("lv")
-check("LV with a tree: tree drawn over the LV, tab raised",
-      v._coro_overlay is not None and sh.shows[-1] == (True, True)
-      and not v._ct_lv_hidden)
-sh.overlay_on = False                      # the user turns ツリー表示 off in LV
+check("LV with a tree: tree hidden (LV only), tree view not touched",
+      v._coro_overlay is None and v._coro_overlay_req is not None
+      and len(sh.shows) == n_shows and not v._ct_lv_hidden)
+sh.overlay_on = False                      # the user turns ツリー表示 off
 v._ct_mode_clicked("coronary")
-check("CoronaryTree forces ツリー表示 ON", sh.shows[-1] == (True, True))
+check("CoronaryTree forces ツリー表示 ON", sh.shows[-1] == (True, True)
+      and v._coro_overlay is not None)
+sh.tint_off = 0
+for m in ("standard", "lv", "coronary"):
+    v._ct_mode_clicked(m)
+check("標準 / LV / CoronaryTree each turn the territory colour off (data kept)",
+      sh.tint_off == 3)
 v._ct_mode_clicked("lv")
-check("back in LV: ツリー表示 OFF remembered for LVモード",
-      sh.shows[-1] == (False, True))
 
 # an LV edit step blocks a manual switch away from LV (dialog patched)
 asked = []
@@ -305,9 +321,18 @@ check("Territory計算 visible in CoronaryTreeモード, enabled (tree + LV read
 check("Territoryモード not selectable before a result",
       not b["territory"].isEnabled())
 v._ct_mode_clicked("lv")
-check("Territory計算 hidden in LVモード", tb.isHidden())
+check("Territory: Calc disabled in LVモード (group still shown)",
+      not tb.isEnabled() and tb.isVisibleTo(v._ct_terr_wrap))
 v._ct_mode_clicked("standard")
-check("Territory計算 hidden in 標準モード", tb.isHidden())
+check("Territory: Calc disabled in 標準モード", not tb.isEnabled())
+check("Territory Load always enabled; Save disabled without a result",
+      v._ct_terr_load_btn.isEnabled() and not v._ct_terr_save_btn.isEnabled())
+v._ct_terr_load_btn.click()
+v._ct_terr_save_btn.setEnabled(True)
+v._ct_terr_save_btn.click()
+check("Load / Save buttons call the shell",
+      getattr(sh, "loads", 0) == 1 and getattr(sh, "saves", 0) == 1)
+v.refresh_ct_mode_bar()
 v._ct_mode_clicked("coronary")
 v._lv_missing = ["Epi(region)"]
 v.refresh_ct_mode_bar()
@@ -330,8 +355,9 @@ check("in place: Territory review on (light path: LV kept, no apply_full_lv)",
       and ("axis",) in v.calls and v._vr_on["B"] and not sh.set_modes)
 check("review shows the LV (+ tree) again", not v._ct_lv_hidden
       and v._coro_overlay is not None)
-check("Territoryモード checked + Territory計算 hidden in the review",
-      b["territory"].isChecked() and tb.isHidden())
+check("Territoryモード checked + Calc disabled in the review, Save enabled",
+      b["territory"].isChecked() and not tb.isEnabled()
+      and v._ct_terr_save_btn.isEnabled())
 v.calls.clear()
 v._ct_mode_clicked("coronary")
 check("leave → VR off, previous view restored (frames / centre), refit",
@@ -407,13 +433,24 @@ for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
 
 # 「Territory計算」 (Calc Territory) is not in the mode row: the viewers put it
 # at the right end of the Coronary / VR / LV row.
-check("Territory計算 not added to the mode row",
-      "row.addWidget(tb)" not in (root / "ct_mode_bar.py").read_text(encoding="utf-8"))
+check("Territory group not added to the mode row",
+      "addWidget(self._ct_terr_button())"
+      not in (root / "ct_mode_bar.py").read_text(encoding="utf-8"))
 for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     src = (root / fn).read_text(encoding="utf-8")
     check(f"{fn}: Territory計算 at the end of the Coronary row",
           "row1.addWidget(self._ct_terr_button())\n"
           "        row1.addStretch(1)" in src)
+
+for fn in ("ct_viewer.py", "ct_viewer_pygfx.py"):
+    src = (root / fn).read_text(encoding="utf-8")
+    i = src.index("def _build_terr_bar(")
+    check(f"{fn}: Territory bar has Load / Save",
+          "self._ct_terr_bar_file_buttons(row)" in src[i:i + 6000])
+src = (root / "ct_viewer_pygfx.py").read_text(encoding="utf-8")
+check("pygfx: VR re-toggle keeps Territoryモード (_vr_retoggle guard)",
+      "self._vr_retoggle = True" in src
+      and 'not getattr(self, "_vr_retoggle", False)' in src)
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)

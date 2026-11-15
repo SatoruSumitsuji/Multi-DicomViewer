@@ -3517,6 +3517,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "3D メッシュを生成します（scikit-image が必要）。"))
         self._terr_export_btn.clicked.connect(self._terr_export_html)
         row.addWidget(self._terr_export_btn)
+        # Territory file: Load / Save (.territory.json).
+        row.addSpacing(12)
+        self._ct_terr_bar_file_buttons(row)
         row.addStretch(1)
         outer.addWidget(row_host)
         self._terr_bar.setVisible(False)
@@ -21117,11 +21120,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
-        a_add = menu.addAction(t("Add Point"))
-        # Delete only while the section sits EXACTLY on an edit point (jump
-        # there with the edit-point buttons) — between points it would delete
-        # the nearest one, which may not be the one the user means.
+        # Add only BETWEEN edit points (on an edit point it would stack a
+        # duplicate there); Delete only while the section sits EXACTLY on an
+        # edit point (jump there with the edit-point buttons) — between points
+        # it would delete the nearest one, which may not be the one meant.
         on_pt = self._cpr_at_ctrl() is not None
+        a_add = menu.addAction(t("Add Point (only between edit points)")
+                               if on_pt else t("Add Point"))
+        a_add.setEnabled(not on_pt)
         a_del = menu.addAction(t("Delete Point") if on_pt
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)

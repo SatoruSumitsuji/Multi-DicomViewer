@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
 
 from multi_dicomviewer.core import full_lv as full_lv_mod
 from multi_dicomviewer.core import settings as settings_mod
+from multi_dicomviewer.core import territory_file as territory_file_mod
 from multi_dicomviewer.core.centerline import CenterLine
 from multi_dicomviewer.core.coronary_territory import (
     ROOT_ROLES, CoronaryTree, format_territory_report, short_vessel_name)
@@ -1974,11 +1975,129 @@ class CoronaryTreeWindow(SnapDock):
         self._compute_territory()
         return True
 
-    # ---- .territory.json: save / load the whole Territory session -------
-    # NOTE: save_territory / load_territory (the .territory.json session file) were
-    # REMOVED by design — Territory is always re-derived by dropping the
-    # corotree.json + FullLv.json pair, and the VR result is shared via a one-way
-    # glTF/GLB export instead (the Territory bar's 書き出し button).
+    # ---- .territory.json: save / load a Territory result -----------------
+    # (Territory: Calc / Load / Save on the CT viewer.) The file LINKS to the
+    # corotree.json + FullLv.json (+ their SHA-1, the Targets, the params and the
+    # result as computed) — see core/territory_file.py.
+    def territory_default_path(self) -> str:
+        """Suggested XXXX.territory.json: next to the FullLv (else the corotree),
+        named after it."""
+        src = self._full_lv_path or self._last_path or ""
+        d = os.path.dirname(src) if src else (self._ct_dir or "")
+        base = os.path.basename(src)
+        for suf in (".FullLv.json", ".corotree.json", ".json"):
+            if base.lower().endswith(suf.lower()):
+                base = base[:-len(suf)]
+                break
+        stem = base or "territory"
+        name = stem + ".territory.json"
+        return os.path.join(d, name) if d else name
+
+    def save_territory(self, path: str | None = None) -> bool:
+        """Save the current Territory to a ``.territory.json``. Needs a computed
+        Territory and SAVED corotree.json + FullLv.json (the file links to them).
+        *path* None → a Save dialog (default XXXX.territory.json)."""
+        if (self._territory is None or not self._tree.vessels
+                or self._full_lv_data is None):
+            self._warn(t("Territory が計算されていません。先に Calc を押してください。"))
+            return False
+        if not self._last_path:
+            self._warn(t("先に冠動脈ツリーを .corotree.json に保存してください"
+                         "（territory は corotree.json へのリンクを持ちます）。"))
+            return False
+        if not self._full_lv_path:
+            self._warn(t("先に LV を .FullLv.json に保存してください"
+                         "（territory は FullLv.json へのリンクを持ちます）。"))
+            return False
+        series = self._corotree_series_block()
+        src_meta = {
+            "series_uid": self._ct_uid, "src_dir": self._ct_dir,
+            "patient": series.get("patient", ""),
+            "date": series.get("date", ""),
+            "series_number": series.get("series_number", ""),
+        }
+        from datetime import datetime
+        res = {"myocardium_ml": (None if self._myo_ml is None
+                                 else float(self._myo_ml)),
+               "systems": [ln for ln in self._territory_summary_text().split(chr(10))
+                           if ln],
+               "targets": [f"Target-{i} {tg.get('pct', 0.0):.1f}% / "
+                           f"{tg.get('ml', 0.0):.1f}mL"
+                           for i, tg in enumerate(self._targets, 1)]}
+        data, err = territory_file_mod.build(
+            src_meta=src_meta,
+            corotree_path=self._last_path, full_lv_path=self._full_lv_path,
+            targets=[dict(tg) for tg in self._targets],
+            params={"territory_opacity": float(getattr(self, "_terr_alpha", 0.45)),
+                    "targets_shown": bool(getattr(self, "_targets_shown", True))},
+            result=res, saved_at=datetime.now().strftime("%Y%m%d;%H%M"))
+        if data is None:
+            self._warn(t("territory を保存できません: {e}", e=t(err)))
+            return False
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self, t("Territory を保存"), self.territory_default_path(),
+                t("Territory (*.territory.json)"))
+            if not path:
+                return False
+        if not path.lower().endswith(".territory.json"):
+            stem = path[:-5] if path.lower().endswith(".json") else path
+            path = stem + ".territory.json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            self._warn(t("保存に失敗しました: {e}", e=str(exc)))
+            return False
+        self._bundle()["terr_path"] = path
+        self._hint.setText(t("Territory を保存しました: {p}",
+                             p=os.path.basename(path)))
+        return True
+
+    def load_territory(self, data, coro, full, path: str = "",
+                       coro_path: str = "", lv_path: str = "") -> bool:
+        """Install a Territory from its .territory.json + the two linked files
+        already parsed (the shell resolves the links): restores the tree, the
+        FullLv, the Targets and the params, then recomputes the Territory."""
+        if not territory_file_mod.is_territory(data):
+            self._warn(t("Territory (.territory.json) 形式ではありません。"))
+            return False
+        if not isinstance(coro, dict) or not full_lv_mod.is_full_lv(full):
+            self._warn(t("リンク先 (corotree.json / FullLv.json) の中身が不正です。"))
+            return False
+        uid = (territory_file_mod.series_uid(data)
+               or full_lv_mod.series_uid(full)
+               or (coro.get("series") or {}).get("series_uid", "") or "")
+        ser = coro.get("series") or {}
+        match = self.uid_for_series(uid) if uid else ""
+        self._use_uid(match or uid, ct_dir=(territory_file_mod.src_dir(data)
+                                            or full_lv_mod.src_dir(full)),
+                      series=ser)
+        self._tree = CoronaryTree.from_json(coro)
+        self._dedupe_tree()
+        self._hidden.clear()
+        self._last_path = coro_path or territory_file_mod.corotree_path(data)
+        self._full_lv_path = lv_path or territory_file_mod.full_lv_path(data)
+        self._bundle()["terr_path"] = path or ""
+        p = territory_file_mod.params(data)
+        if "territory_opacity" in p:
+            try:
+                self._terr_alpha = max(0.0, min(1.0, float(p["territory_opacity"])))
+                self._sync_terr_alpha_combo()
+            except Exception:                            # noqa: BLE001
+                pass
+        if "targets_shown" in p:
+            self._targets_shown = bool(p["targets_shown"])
+        self._full_lv_data = full
+        self._targets = [{"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
+                          "hidden": bool(tg.get("hidden", False))}
+                         for tg in territory_file_mod.targets(data)
+                         if tg.get("vid")]
+        self._populate()
+        self._compute_territory()            # engine + targets + overlay
+        self._hint.setText(t("Territory を読込みました: {p}",
+                             p=os.path.basename(path) if path else "territory"))
+        return self._territory is not None
 
     def _sync_terr_alpha_combo(self) -> None:
         """Reflect self._terr_alpha on the 透過度 combo without re-triggering it."""
@@ -2313,7 +2432,7 @@ class CoronaryTreeWindow(SnapDock):
             if role in by_role:
                 ml = by_role[role]
                 pct = (100.0 * ml / total) if total > 0 else 0.0
-                lines.append(f"{role} {pct:.1f}%/{ml:.1f}mL")
+                lines.append(f"{role} {pct:.1f}% / {ml:.1f}mL")
         return "\n".join(lines)
 
     def _target_summary_text(self) -> str:
@@ -2326,7 +2445,7 @@ class CoronaryTreeWindow(SnapDock):
         for i, tg in enumerate(self._targets, 1):
             if tg.get("hidden"):
                 continue
-            lines.append(f"Target-{i} {tg.get('pct', 0.0):.1f}%/"
+            lines.append(f"Target-{i} {tg.get('pct', 0.0):.1f}% / "
                          f"{tg.get('ml', 0.0):.1f}mL")
         return "\n".join(lines)
 

@@ -3482,6 +3482,165 @@ class MainWindow(QMainWindow):
             w._use_uid(u)
         return self._ct_territory_open(viewer, full)
 
+    # ---- Territory: Save / Load (.territory.json) --------------------------
+    def ct_territory_save(self, viewer) -> bool:
+        """Territory ▸ Save: write the CT's computed Territory to a
+        XXXX.territory.json (links to its corotree.json + FullLv.json)."""
+        from PyQt6.QtWidgets import QMessageBox
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        w = getattr(self, "_corotree_win", None)
+        if (w is None or not uid or not hasattr(w, "territory_for_series")
+                or not w.territory_for_series(uid)):
+            QMessageBox.information(
+                self, t("Territory"),
+                t("Territory が計算されていません。先に Calc を押してください。"))
+            return False
+        u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+        if u and hasattr(w, "_use_uid"):
+            w._use_uid(u)
+        return bool(w.save_territory())
+
+    def _territory_resolve_link(self, data, link: str, base: str, which: str):
+        """Resolve a .territory.json LINK to an existing file: the stored path,
+        else relative to the territory.json's folder, else by name beside it. On
+        a miss, alert and let the user locate it (the new path is written back
+        into *data*). Returns the path, or None when cancelled."""
+        import os
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core import territory_file
+        for c in (link,
+                  (os.path.join(base, link) if link and not os.path.isabs(link)
+                   else ""),
+                  (os.path.join(base, os.path.basename(link)) if link else "")):
+            if c and os.path.isfile(c):
+                return c
+        name = "corotree.json" if which == "corotree" else "FullLv.json"
+        filt = (t("CoroTree (*.corotree.json)") if which == "corotree"
+                else t("Full LV (*.FullLv.json)"))
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle(t("Territory"))
+        box.setText(t("{n} が見当たりません。「ファイルを探す」で関連付けてください。",
+                      n=name))
+        locate = box.addButton(t("ファイルを探す"),
+                               QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(t("閉じる"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not locate:
+            return None
+        p, _ = QFileDialog.getOpenFileName(
+            self, t("{n} を選択", n=name), base, filt)
+        if not p:
+            return None
+        if which == "corotree":
+            territory_file.set_corotree_path(data, p)
+        else:
+            territory_file.set_full_lv_path(data, p)
+        return p
+
+    def ct_territory_load(self, viewer, path: str | None = None) -> bool:
+        """Territory ▸ Load: open a .territory.json for the CT *viewer* shows —
+        resolve + load its corotree.json and FullLv.json, restore the Targets,
+        recompute, and show the result at once (Territoryモード). Warns when the
+        file is for another CT or a linked file changed since it was saved."""
+        import json
+        import os
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        from multi_dicomviewer.core import territory_file
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        if pane is None or not uid:
+            return False
+        if hasattr(viewer, "_lv_mode_active") and viewer._lv_mode_active():
+            if hasattr(viewer, "_ct_lv_editing_msg"):
+                viewer._ct_lv_editing_msg()
+            return False
+        w = self._open_coronary_tree()
+        if w is None or not hasattr(w, "load_territory"):
+            return False
+        if path is None:
+            start = ""
+            for f in (getattr(w, "full_lv_path_for_series", None),
+                      getattr(w, "corotree_path_for_series", None)):
+                try:
+                    q = f(uid) if f is not None else ""
+                except Exception:                        # noqa: BLE001
+                    q = ""
+                if q:
+                    start = os.path.dirname(q)
+                    break
+            path, _ = QFileDialog.getOpenFileName(
+                self, t("Territory を読込"), start,
+                t("Territory (*.territory.json)"))
+            if not path:
+                return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Territory"),
+                                t("読込に失敗しました: {e}", e=str(exc)))
+            return False
+        if not territory_file.is_territory(data):
+            QMessageBox.information(
+                self, t("Territory"),
+                t("Territory (.territory.json) 形式ではありません。"))
+            return False
+        tu = territory_file.series_uid(data)
+        if tu and tu.split("#", 1)[0] != uid.split("#", 1)[0]:
+            if QMessageBox.question(
+                    self, t("Territory"),
+                    t("この Territory は別の CT（SeriesUID が違う）で保存されています。"
+                      "読み込みますか？")) != QMessageBox.StandardButton.Yes:
+                return False
+        base = os.path.dirname(path)
+        coro_path = self._territory_resolve_link(
+            data, territory_file.corotree_path(data), base, "corotree")
+        if coro_path is None:
+            return False
+        lv_path = self._territory_resolve_link(
+            data, territory_file.full_lv_path(data), base, "full_lv")
+        if lv_path is None:
+            return False
+        try:
+            with open(coro_path, encoding="utf-8") as f:
+                coro = json.load(f)
+            with open(lv_path, encoding="utf-8") as f:
+                full = json.load(f)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Territory"),
+                                t("リンク先の読込に失敗しました: {e}", e=str(exc)))
+            return False
+        changed = territory_file.changed_sources(data, coro_path, lv_path)
+        if changed:
+            QMessageBox.information(
+                self, t("Territory"),
+                t("保存後に {f} が変更されています。結果が保存時と異なる"
+                  "可能性があります。", f=" / ".join(changed)))
+        u = w.uid_for_series(uid) if hasattr(w, "uid_for_series") else ""
+        if u and hasattr(w, "_use_uid"):
+            w._use_uid(u)
+        # Loading replaces this CT's tree + FullLv in the panel with the linked
+        # files — confirm when a tree is already there.
+        if getattr(w, "_tree", None) is not None and w._tree.vessels:
+            if QMessageBox.question(
+                    self, t("Territory"),
+                    t("現在の冠動脈ツリーと FullLv を、この Territory の"
+                      "リンク先ファイルで置き換えます。続行しますか？")) \
+                    != QMessageBox.StandardButton.Yes:
+                return False
+        if not w.load_territory(data, coro, full, path=path,
+                                coro_path=coro_path, lv_path=lv_path):
+            return False
+        if hasattr(w, "_set_overlay") and w._tree.vessels:
+            w._set_overlay(True)
+        if getattr(viewer, "_territory_display", False):
+            self.ct_territory_tint_off(viewer)       # re-push the new result
+        ok = self._ct_territory_open(viewer, full)
+        self.refresh_ct_mode_bars()
+        return ok
+
     def _ct_territory_open(self, viewer, full) -> bool:
         """Tree ON, enter the review on *viewer*, 領域色 ON (it implies the VR)."""
         import os
@@ -3508,6 +3667,16 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
         return True
+
+    def ct_territory_tint_off(self, viewer) -> None:
+        """標準 / LV / CoronaryTreeモード: the 領域色 (territory tint) is hidden —
+        the computed Territory itself is kept (Territoryモード shows it again)."""
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and getattr(w, "_territory_on", False)                 and hasattr(w, "set_territory_color"):
+            try:
+                w.set_territory_color(False)
+            except Exception:                            # noqa: BLE001
+                pass
 
     def ct_territory_left(self, viewer) -> None:
         """*viewer* left the Territory review in place: the 領域色 tint off (the

@@ -6898,7 +6898,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if on and self._vr_on.get(key):
             # Already in VR (e.g. the VR button, then VR表示): end it cleanly
             # first so the MPR slice + camera are restored from the right state.
-            self._vr_set(key, False)
+            # A RE-toggle, not a real exit: the "last VR off → leave Territory"
+            # rule must not fire, or Calc Territory with a VR already open lost
+            # the Territory state (mode stuck on CoronaryTree, its button dead).
+            self._vr_retoggle = True
+            try:
+                self._vr_set(key, False)
+            finally:
+                self._vr_retoggle = False
         self._vr_on[key] = on
         if on:
             # The heart crop (scipy EDT shell) is the slow part of turning VR on —
@@ -6950,7 +6957,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._vr_img.pop(key, None)
             self._vr_mask = None
             self._vr_gpu_disable(key)             # restore the MPR slice + camera
-            if not any(self._vr_on.values()):     # last VR off → leave Territory
+            if (not any(self._vr_on.values())     # last VR off → leave Territory
+                    and not getattr(self, "_vr_retoggle", False)):
                 self._territory_display = False
                 self._terr_bar_sync()
         self._overlay[key].update()
@@ -11395,6 +11403,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "3D メッシュを生成します（scikit-image が必要）。"))
         self._terr_export_btn.clicked.connect(self._terr_export_html)
         row.addWidget(self._terr_export_btn)
+        # Territory file: Load / Save (.territory.json).
+        row.addSpacing(12)
+        self._ct_terr_bar_file_buttons(row)
         row.addStretch(1)
         outer.addWidget(row_host)
         self._terr_bar.setVisible(False)
@@ -20151,11 +20162,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtWidgets import QMenu
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
-        a_add = menu.addAction(t("Add Point"))
-        # Delete only while the section sits EXACTLY on an edit point (jump
-        # there with the edit-point buttons) — between points it would delete
-        # the nearest one, which may not be the one the user means.
+        # Add only BETWEEN edit points (on an edit point it would stack a
+        # duplicate there); Delete only while the section sits EXACTLY on an
+        # edit point (jump there with the edit-point buttons) — between points
+        # it would delete the nearest one, which may not be the one meant.
         on_pt = self._cpr_at_ctrl() is not None
+        a_add = menu.addAction(t("Add Point (only between edit points)")
+                               if on_pt else t("Add Point"))
+        a_add.setEnabled(not on_pt)
         a_del = menu.addAction(t("Delete Point") if on_pt
                                else t("Delete Point (only on an edit point)"))
         a_del.setEnabled(on_pt)

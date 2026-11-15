@@ -52,6 +52,13 @@ _CT_MODES = (
 _TERR_BTN_TIP = (
     "Territory計算：LV の計測結果（保存していなくても可。無ければ読み込んだ "
     ".FullLv.json）と冠動脈ツリーから灌流領域を計算し、Territoryモードに入ります")
+_TERR_LOAD_TIP = (
+    "Territory を読込：.territory.json を開き、リンク先の corotree.json と "
+    "FullLv.json を読み込んで Territory を再計算し、すぐ Territoryモードで表示します")
+_TERR_SAVE_TIP = (
+    "Territory を保存：計算した Territory を XXXX.territory.json に保存します"
+    "（corotree.json と FullLv.json へのリンク、ターゲット、結果を記録。"
+    "先に両方を保存しておく必要があります）")
 _TERR_BTN_CSS = (
     "QPushButton { background:#fff4d6; color:black; border:1px solid #c89b2c; }"
     "QPushButton:disabled { background:#f0f0f0; color:#aaa;"
@@ -90,19 +97,42 @@ class CTModeBarMixin:
         self._ct_terr_button()
 
     def _ct_terr_button(self):
-        """The 「Territory計算」 (Calc Territory) button, made once: CoronaryTree
-        モード only (the tree is the prerequisite; an LVモード button would invite
-        mistakes). Placed by the viewer at the right end of its Coronary row."""
-        tb = getattr(self, "_ct_terr_btn", None)
-        if tb is None:
-            tb = FitButton(t("Territory計算"))
+        """The 「Territory: Calc / Load / Save」 group, made once and placed by the
+        viewer at the right end of its Coronary / VR / LV row. Calc (=
+        Territory計算) works in CoronaryTreeモード only (the tree is the
+        prerequisite); Load opens a .territory.json; Save writes one (needs a
+        computed Territory). Returns the group widget; the Calc button is
+        ``_ct_terr_btn``."""
+        wrap = getattr(self, "_ct_terr_wrap", None)
+        if wrap is None:
+            wrap = QWidget()
+            row = QHBoxLayout(wrap)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(4)
+            cap = QLabel(t("Territory:"))
+            f = cap.font()
+            f.setBold(True)
+            cap.setFont(f)
+            row.addWidget(cap)
+            tb = FitButton(t("Calc"))
             tb.setHelpToolTip(t(_TERR_BTN_TIP))
             tb.setStyleSheet(_TERR_BTN_CSS)
             tb.clicked.connect(
                 lambda _c=False: self._ct_territory_compute_clicked())
-            tb.setVisible(False)
+            row.addWidget(tb)
+            lb = FitButton(t("Load"))
+            lb.setHelpToolTip(t(_TERR_LOAD_TIP))
+            lb.clicked.connect(lambda _c=False: self._ct_territory_load_clicked())
+            row.addWidget(lb)
+            sb = FitButton(t("Save"))
+            sb.setHelpToolTip(t(_TERR_SAVE_TIP))
+            sb.clicked.connect(lambda _c=False: self._ct_territory_save_clicked())
+            row.addWidget(sb)
             self._ct_terr_btn = tb
-        return tb
+            self._ct_terr_load_btn = lb
+            self._ct_terr_save_btn = sb
+            self._ct_terr_wrap = wrap
+        return wrap
 
     def _build_ct_files_line(self) -> QWidget:
         """The row-3 readout of the loaded .FullLv.json / .corotree.json."""
@@ -212,11 +242,15 @@ class CTModeBarMixin:
                 b.setChecked(key == cur)
         tb = getattr(self, "_ct_terr_btn", None)
         if tb is not None:
-            tb.setVisible(cur == "coronary")
-            tb.setEnabled(avail["coronary"] and bool(
+            # Calc: CoronaryTreeモード only (+ a tree and an LV / FullLv).
+            tb.setEnabled(cur == "coronary" and avail["coronary"] and bool(
                 state.get("tree") or state.get("tree_mem"))
                 and (self._ct_lv_ready() or bool(full)
                      or bool(state.get("full_mem"))))
+        for nm in ("_ct_terr_save_btn", "_terr_save_btn2"):
+            b = getattr(self, nm, None)
+            if b is not None:
+                b.setEnabled(bool(state.get("terr")))     # a computed Territory
         lbl = getattr(self, "_ct_files_lbl", None)
         if lbl is not None:
             none = t("なし")
@@ -300,15 +334,22 @@ class CTModeBarMixin:
                 except Exception:                        # noqa: BLE001
                     pass
             self._ct_mode_sel = key
+            # What each mode shows (data is always kept, only hidden):
+            #   標準         the 3DCT only
+            #   LV           Epi / Blood / Endo only (no tree, no 領域色)
+            #   CoronaryTree the tree only (no LV, no 領域色)
+            #   Territory    everything (_ct_territory_enter)
             self._ct_show_lv(key == "lv")
-            self._ct_tree_suppressed = (key == "standard")
+            self._ct_tree_suppressed = (key != "coronary")
             self._ct_tree_apply()
+            if shell is not None and hasattr(shell, "ct_territory_tint_off"):
+                try:
+                    shell.ct_territory_tint_off(self)     # 領域色 off (kept)
+                except Exception:                        # noqa: BLE001
+                    pass
             if shell is not None and hasattr(shell, "ct_tree_show"):
                 if key == "coronary":
                     shell.ct_tree_show(self, True, raise_tab=True)
-                elif key == "lv":
-                    shell.ct_tree_show(self, self._ct_tree_on_lv,
-                                       raise_tab=True)
         finally:
             self._ct_switching = False
         for fn in ("_apply_file_context", "_lv_update_submode_ui"):
@@ -439,6 +480,43 @@ class CTModeBarMixin:
             import traceback
             traceback.print_exc()
         self.refresh_ct_mode_bar()
+
+    def _ct_territory_load_clicked(self) -> None:
+        """Territory ▸ Load (.territory.json) via the shell."""
+        shell = self._ct_mode_shell()
+        if shell is None or not hasattr(shell, "ct_territory_load"):
+            return
+        try:
+            shell.ct_territory_load(self)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        self.refresh_ct_mode_bar()
+
+    def _ct_territory_save_clicked(self) -> None:
+        """Territory ▸ Save (XXXX.territory.json) via the shell."""
+        shell = self._ct_mode_shell()
+        if shell is None or not hasattr(shell, "ct_territory_save"):
+            return
+        try:
+            shell.ct_territory_save(self)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
+    def _ct_terr_bar_file_buttons(self, row) -> None:
+        """Load / Save on the Territory bar too (Territoryモード hides the row
+        that holds the Calc / Load / Save group)."""
+        lb = FitButton(t("Load"))
+        lb.setHelpToolTip(t(_TERR_LOAD_TIP))
+        lb.clicked.connect(lambda _c=False: self._ct_territory_load_clicked())
+        sb = FitButton(t("Save"))
+        sb.setHelpToolTip(t(_TERR_SAVE_TIP))
+        sb.clicked.connect(lambda _c=False: self._ct_territory_save_clicked())
+        row.addWidget(lb)
+        row.addWidget(sb)
+        self._terr_load_btn2 = lb
+        self._terr_save_btn2 = sb
 
     def _ct_full_lv_build(self):
         """A FullLv dict built IN MEMORY from the in-session LV (no file), or

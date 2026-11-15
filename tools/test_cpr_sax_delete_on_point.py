@@ -1,4 +1,5 @@
-"""CPR short-axis (left pane) right-click ▸ Delete Point works ONLY while the
+"""CPR short-axis (left pane) right-click ▸ Add Point works only BETWEEN edit
+points; Delete Point works ONLY while the
 section sits exactly on an edit point (both viewers). Between edit points the
 item is disabled ("only on an edit point") and nothing is deleted — before, it
 deleted the NEAREST edit point, which could be the wrong one.
@@ -111,11 +112,24 @@ try:
                   and d.text == (t("Delete Point") if want else
                                  t("Delete Point (only on an edit point)")),
                   d.text)
+            a = _Menu.last.acts[0]
+            check(f"{fn}: idx {idx} → Add enabled={not want}",
+                  a.enabled == (not want)
+                  and a.text == (t("Add Point (only between edit points)")
+                                 if want else t("Add Point")), a.text)
 finally:
     for k, m in real.items():
         if m is not None:
             sys.modules[k] = m
 
+# Add on an edit point is a no-op (would stack a duplicate there).
+v._cpr["idx"] = 20
+n0 = len(v._measures["B"][0]["pts3d"])
+v._cpr_add_ctrl_at(np.array([1.0, 0.0, 20.0]))
+check("Add on an edit point → nothing added",
+      len(v._measures["B"][0]["pts3d"]) == n0)
+check("i18n ja add hint", t("Add Point (only between edit points)")
+      == "点を追加（編集点の間でのみ）")
 check("i18n ja hint", t("Delete Point (only on an edit point)")
       == "点を削除（編集点にいる時のみ）")
 print("ALL PASS" if not fails else f"FAILED: {fails}")
