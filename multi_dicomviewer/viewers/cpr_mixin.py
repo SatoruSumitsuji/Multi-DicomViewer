@@ -117,6 +117,8 @@ class CPRMixin:
                 m = self._cpr_source_measure()
                 if m is not None:
                     m["_cpr_saved"] = getattr(self, "_cpr_last_path", "") or True
+                    # Older session copies of the SAME file are now outdated.
+                    self._cpr_retire_stale_copies(m.get("_cpr_saved"), keep=m)
         finally:
             headless = getattr(self, "_cpr_headless", None) is not None
             self._cpr_headless = None
@@ -146,6 +148,99 @@ class CPRMixin:
             if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
                 self._cpr_vr_line_update()
         return ok
+
+    def _cpr_retire_stale_copies(self, path, keep=None) -> int:
+        """Hide every OTHER line of this session that is a copy of the CPR file
+        *path* (saved as / loaded from it) — once that file is re-edited or
+        overwritten, those copies show the shape from BEFORE the edit (the
+        "修正前の線が残る" report: a Save&Exit line kept on screen / on the VR
+        next to the re-edited one). They are hidden for good (also from Show
+        All and the VR's saved lines) and stop counting as CPR lines; the file
+        and the Coronary Tree hold the current shape. Returns how many."""
+        import os
+        if not isinstance(path, str) or not path:
+            return 0
+        try:
+            nc = os.path.normcase(os.path.abspath(path))
+        except (TypeError, ValueError):
+            return 0
+
+        def same(p):
+            try:
+                return (isinstance(p, str) and bool(p)
+                        and os.path.normcase(os.path.abspath(p)) == nc)
+            except (TypeError, ValueError):
+                return False
+        n = 0
+        for k in ("A", "B"):
+            for m in (self._measures.get(k, []) if isinstance(
+                    getattr(self, "_measures", None), dict) else []):
+                if m is keep or not isinstance(m, dict):
+                    continue
+                if same(m.get("_cpr_saved")) or same(m.get("_cpr_file")):
+                    m["hidden"] = True
+                    m["_cpr_stale"] = True
+                    for key in ("_cpr_saved", "_cpr_file", "_cpr_src"):
+                        m.pop(key, None)
+                    n += 1
+        if n:
+            self._cpr_vr_saved_cache = None
+            for k in ("A", "B"):
+                try:
+                    self._redraw_meas(k)
+                except Exception:                    # noqa: BLE001
+                    pass
+            if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
+                try:
+                    self._cpr_vr_line_update()
+                except Exception:                    # noqa: BLE001
+                    pass
+        return n
+
+    def _cpr_retire_outdated(self) -> int:
+        """Hide every session CPR line whose shape no longer matches its
+        .cpr.json (the file was re-edited / overwritten since) — run on フォルダ
+        更新. The line being edited now is kept. Returns how many."""
+        import json
+        import os
+        cur = self._cpr_source_measure()
+        n = 0
+        for k in ("A", "B"):
+            for m in list(self._measures.get(k, []) if isinstance(
+                    getattr(self, "_measures", None), dict) else []):
+                if m is cur or not isinstance(m, dict):
+                    continue
+                p = m.get("_cpr_saved") or m.get("_cpr_file")
+                if not isinstance(p, str) or not os.path.isfile(p):
+                    continue
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        ctrl = np.asarray((json.load(f) or {}).get("ctrl") or [],
+                                          float)
+                    mine = np.asarray(m.get("pts3d") or [], float)
+                    same = (ctrl.shape == mine.shape
+                            and np.allclose(ctrl, mine, atol=1e-3))
+                except Exception:                    # noqa: BLE001
+                    continue
+                if not same:
+                    m["hidden"] = True
+                    m["_cpr_stale"] = True
+                    for key in ("_cpr_saved", "_cpr_file", "_cpr_src"):
+                        m.pop(key, None)
+                    n += 1
+        if n:
+            self._cpr_vr_saved_cache = None
+            for k in ("A", "B"):
+                try:
+                    self._redraw_meas(k)
+                except Exception:                    # noqa: BLE001
+                    pass
+            if self._cpr_vr_active() and hasattr(self, "_cpr_vr_line_update"):
+                try:
+                    self._cpr_vr_line_update()
+                except Exception:                    # noqa: BLE001
+                    pass
+        return n
 
     # ---- Next: serial provisional names (01.cpr.json, 02.cpr.json …) ---------
     def _cpr_series_uid(self) -> str:
@@ -831,7 +926,6 @@ class CPRMixin:
                 return
             if self._cpr is None and self._cpr_vr_active():
                 self._cpr_vr_confirm(hit[0], m)  # VR表示 kept: re-confirm only
-                self._cpr_auto_report()
                 return
             if self._cpr is not None:
                 self._exit_cpr(keep_view=True)
@@ -841,7 +935,6 @@ class CPRMixin:
                     self._coro_edit_vid = vid
                     self._cpr_suggested_name = sug
                 self._cpr_jump_ctrl_end(False)
-                self._cpr_auto_report()
         self._cpr_auto_run(m, build, force=True)
 
     def _coronary_trace_ctrl(self):
@@ -884,7 +977,6 @@ class CPRMixin:
                 return
             if self._cpr_vr_active():          # VR表示: keep it, confirm only
                 self._cpr_vr_confirm(pane, m)
-                self._cpr_auto_report()
                 return
             self._enter_cpr(pane, mi)
             if self._cpr is not None:
@@ -894,7 +986,6 @@ class CPRMixin:
                 if not m.get("_cpr_auto"):
                     self._cpr_fit()
                 self._cpr_jump_ctrl_end(False)   # most proximal edit point (|◀)
-                self._cpr_auto_report()          # flag low-contrast stretches
         self._cpr_auto_run(m, build)
 
     def _cpr_auto_run(self, m, on_done, force: bool = False) -> None:
@@ -1053,26 +1144,9 @@ class CPRMixin:
         except Exception:                        # noqa: BLE001
             m["_cpr_gap_pts"] = []
 
-    def _cpr_auto_report(self) -> None:
-        """After an auto-tracked CPR is built: tell the user about stretches
-        where the trace crossed low contrast (stenosis / occlusion / calcium) so
-        they check them. Deferred — a modal shown inside the finishing click
-        swallows its release on macOS."""
-        gaps = list(getattr(self, "_cpr_auto_gaps", []) or [])
-        if not gaps:
-            return
-        txt = ", ".join(f"{a:.0f}–{b:.0f} mm" for a, b in gaps)
-
-        def show():
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(
-                self, t("Short-axis"),
-                t("自動トレースが造影の弱い区間を通過しました（始点からの距離）: "
-                  "{gaps}\n狭窄・閉塞・石灰化の可能性があります。短軸で確認し、"
-                  "必要なら編集点を修正してください。").format(gaps=txt))
-        defer = getattr(self, "_after_mouse_release", None)
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(0, (lambda: defer(show)) if defer else show)
+    # (No low-contrast popup after an auto trace: the edit points in those
+    # stretches are already marked on the short axis — the orange-red gap
+    # ring — so the shape of the edit points tells the user where to check.)
 
     #: Fit lumen-snap parameters (contrast CTA): a control point is moved to the
     #: HU-weighted centroid of voxels in [LO, HI] HU within a RADIUS-mm disc of the

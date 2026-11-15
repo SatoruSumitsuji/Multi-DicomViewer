@@ -3132,6 +3132,15 @@ class MainWindow(QMainWindow):
                         v._cpr_last_path = data["path"]
                     except Exception:                    # noqa: BLE001
                         pass
+                    # An earlier session copy of this file (e.g. the line kept
+                    # after Save&Exit) would stay on screen with the PRE-edit
+                    # shape next to the line being edited — hide it.
+                    if hasattr(v, "_cpr_retire_stale_copies"):
+                        try:
+                            v._cpr_retire_stale_copies(
+                                data["path"], keep=v._cpr_source_measure())
+                        except Exception:                # noqa: BLE001
+                            pass
                 self.coronary_overlay_refresh()
         except Exception:                                # noqa: BLE001
             import traceback

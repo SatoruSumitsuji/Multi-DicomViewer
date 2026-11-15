@@ -8768,9 +8768,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         return bar
 
     def _hideall_items(self):
-        """Every bulk-hideable result (measures on both panes + compares)."""
-        return [m for k in ("A", "B") for m in self._measures[k]] \
-            + list(self._compares)
+        """Every bulk-hideable result (measures on both panes + compares).
+        An outdated CPR copy (_cpr_stale) is left out, so Show All never brings
+        the pre-edit line back."""
+        return [m for k in ("A", "B") for m in self._measures[k]
+                if not m.get("_cpr_stale")] + list(self._compares)
 
     def _enter_hidden_mode(self):
         """Hide everything that exists NOW (per-item _bulk_hidden); later-added

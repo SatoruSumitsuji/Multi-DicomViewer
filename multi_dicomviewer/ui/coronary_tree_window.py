@@ -71,6 +71,9 @@ TERRITORY_FILLS = [
     (0.58, 0.77, 0.49, 0.28),    # 3 RCA  — green
     (0.918, 0.50, 0.50, 0.42),   # 4 Target territory — red
 ]
+#: Coronary Tree tab buttons: LEFT-aligned text (Mac centred some of them, so a
+#: button squeezed in a narrow dock showed only the middle of its label).
+_BTN_CSS = "padding: 2px 6px; text-align: left;"
 #: Clinical display order for root trunks — LM first (not alphabetical).
 _ROOT_ORDER = {"LM": 0, "LAD": 1, "LCX": 2, "RCA": 3}
 #: Root role → territory label. LM now has its OWN label/colour (was 0 = the
@@ -409,7 +412,7 @@ class CoronaryTreeWindow(SnapDock):
                     b.clicked.connect(fn)
                 else:
                     b.clicked.connect(fn)
-                b.setStyleSheet("padding: 2px 6px;")
+                b.setStyleSheet(_BTN_CSS)
                 row.addWidget(b)
                 made.append(b)
             row.addStretch(1)
@@ -492,7 +495,7 @@ class CoronaryTreeWindow(SnapDock):
         self._vr_show_btn = QPushButton(t("表示/非表示"))
         self._vr_show_btn.setToolTip(t(
             "Territory の右画面VR (立体表示) を表示/非表示。CPR の Open VR とは別です"))
-        self._vr_show_btn.setStyleSheet("padding: 2px 6px;")
+        self._vr_show_btn.setStyleSheet(_BTN_CSS)
         self._vr_show_btn.clicked.connect(self._toggle_vr)
         vr_row.addWidget(self._vr_show_btn)
         # シェルVR removed: the VR now always crops to the solid LV (Epi region),
@@ -543,7 +546,7 @@ class CoronaryTreeWindow(SnapDock):
             t("非表示") if self._territory_on else t("表示"))
         self._terr_vis_btn.setToolTip(
             t("心筋の灌流領域色 (LM/LAD/LCX/RCA) を表示/非表示"))
-        self._terr_vis_btn.setStyleSheet("padding: 2px 6px;")
+        self._terr_vis_btn.setStyleSheet(_BTN_CSS)
         self._terr_vis_btn.clicked.connect(self._toggle_territory_color)
         lv_row.addWidget(self._terr_vis_btn)
         lv_row.addWidget(QLabel(t("透過度")))
@@ -1038,6 +1041,14 @@ class CoronaryTreeWindow(SnapDock):
         self.treeChanged.emit()
         if self._overlay_on:
             self._push_overlay()
+        # Session lines on the CT whose file was re-edited since (the pre-edit
+        # shape) are hidden — the tree now shows the current one.
+        _sv = self._source_viewer()
+        if _sv is not None and hasattr(_sv, "_cpr_retire_outdated"):
+            try:
+                _sv._cpr_retire_outdated()
+            except Exception:                            # noqa: BLE001
+                pass
         parts = []
         if to_add:
             parts.append(t("追加 {n}", n=len(to_add)))
