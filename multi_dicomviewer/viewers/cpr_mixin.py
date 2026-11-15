@@ -1374,11 +1374,15 @@ class CPRMixin:
             self._refresh()
 
     def _cpr_delete_ctrl_near(self) -> None:
-        """Delete the control (edit) point nearest the current cross-section,
-        keeping AT LEAST TWO (a centreline needs two), then rebuild."""
+        """Delete the control (edit) point the current cross-section sits ON,
+        keeping AT LEAST TWO (a centreline needs two), then rebuild. Between
+        edit points (an interpolated section) nothing is deleted."""
         from PyQt6.QtWidgets import QMessageBox
         c = self._cpr
         if c is None:
+            return
+        k_on = self._cpr_at_ctrl()
+        if k_on is None:                  # not on an edit point → no delete
             return
         src, mi = c.get("src"), c.get("src_mi")
         if src not in ("A", "B") or mi is None \
@@ -1392,8 +1396,9 @@ class CPRMixin:
                 t("At least 2 edit points are required "
                   "(cannot delete any more)."))
             return
-        ci = self._cpr_ctrl_indices()
-        k = int(np.argmin([abs(di - c["idx"]) for di in ci])) if ci else 0
+        k = int(k_on)
+        if not (0 <= k < len(p3)):
+            return
         del p3[k]
         self._cpr_set_ctrl(m, src, p3)
         self._cpr_edit_rebuild()

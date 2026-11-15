@@ -336,6 +336,7 @@
   "Delete All": "Eliminar todo",
   "Delete Center Angle": "Eliminar ángulo central",
   "Delete Point": "Eliminar punto",
+  "Delete Point (only on an edit point)": "Eliminar punto (solo sobre un punto de edición)",
   "Delete all CoReg points": "Eliminar todos los puntos de CoReg",
   "Delete all CoReg points?": "¿Eliminar todos los puntos de CoReg?",
   "Delete all CoSync points": "Eliminar todos los puntos de CoSync",

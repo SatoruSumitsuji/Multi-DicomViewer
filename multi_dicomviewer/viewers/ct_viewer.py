@@ -21118,7 +21118,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtGui import QCursor
         menu = QMenu(self)
         a_add = menu.addAction(t("Add Point"))
-        a_del = menu.addAction(t("Delete Point"))
+        # Delete only while the section sits EXACTLY on an edit point (jump
+        # there with the edit-point buttons) — between points it would delete
+        # the nearest one, which may not be the one the user means.
+        on_pt = self._cpr_at_ctrl() is not None
+        a_del = menu.addAction(t("Delete Point") if on_pt
+                               else t("Delete Point (only on an edit point)"))
+        a_del.setEnabled(on_pt)
         act = menu.exec(QCursor.pos())
         if act is a_add:
             o, u, vv, _n = self._cpr_frame()

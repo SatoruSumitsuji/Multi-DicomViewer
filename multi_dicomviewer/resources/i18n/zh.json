@@ -336,6 +336,7 @@
   "Delete All": "全部删除",
   "Delete Center Angle": "删除中心角度",
   "Delete Point": "删除点",
+  "Delete Point (only on an edit point)": "删除点（仅在编辑点上）",
   "Delete all CoReg points": "删除所有 CoReg 点",
   "Delete all CoReg points?": "删除所有 CoReg 点？",
   "Delete all CoSync points": "删除所有 CoSync 点",

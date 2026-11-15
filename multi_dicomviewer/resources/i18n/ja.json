@@ -294,6 +294,7 @@
   "Delete All": "すべて削除",
   "Delete Center Angle": "中心角度を削除",
   "Delete Point": "点を削除",
+  "Delete Point (only on an edit point)": "点を削除（編集点にいる時のみ）",
   "Delete all CoReg points": "CoReg点の一括削除",
   "Delete all CoReg points?": "すべてのCoReg点を削除しますか？",
   "Delete all CoSync points": "CoSync点の一括削除",
