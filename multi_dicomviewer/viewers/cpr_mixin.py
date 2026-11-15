@@ -677,6 +677,15 @@ class CPRMixin:
                 t("名前を非表示") if vid in names else t("名前を表示"))
         if names:
             hide_all = menu.addAction(t("すべての名前を非表示"))
+        # 選択を解除: drop the Coronary Tree selection so the orange highlight
+        # goes away (a click on a line selects it; nothing un-selected it).
+        desel_act = None
+        sel_cb = getattr(self, "_coro_select_cb", None)
+        if vid is not None and sel_cb is not None:
+            desel_act = menu.addAction(t("選択を解除 (Deselect)"))
+            desel_act.setEnabled(any(
+                e.get("selected") for e in (getattr(self, "_coro_overlay", None)
+                                            or [])))
         gpos = self.pane[which].canvas.mapToGlobal(QPoint(int(sx), int(sy)))
         try:
             chosen = menu.exec(gpos)
@@ -700,6 +709,12 @@ class CPRMixin:
             return
         if chosen is edit_act:
             self._cpr_tree_edit(which, sx, sy, mi, vid, gpos)
+            return
+        if desel_act is not None and chosen is desel_act:
+            try:
+                sel_cb("")                       # "" = clear the selection
+            except Exception:                    # noqa: BLE001
+                pass
             return
         if show_act is not None and chosen is show_act:
             names.discard(vid) if vid in names else names.add(vid)

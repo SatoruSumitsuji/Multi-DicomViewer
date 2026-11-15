@@ -1836,6 +1836,7 @@
   "選択した編集点を内腔中心へ補正 (Fit)": "Corregir los puntos de edición seleccionados hacia el centro de la luz (Fit)",
   "選択した編集点を削除 ({n}点)": "Eliminar los puntos de edición seleccionados ({n} puntos)",
   "選択した行に有効な時刻がありません。": "Las filas seleccionadas no tienen una hora válida.",
+  "選択を解除 (Deselect)": "Deseleccionar",
   "選択不可です。選んだ親まで {d} mm 離れています（接続可能距離は {tol:.0f} mm 以内）。\n近い枝を選ぶか、先に接続し直してください。": "No seleccionable. El padre elegido está a {d} mm (la distancia de conexión admitida es de {tol:.0f} mm o menos).\nElija una rama más cercana o vuelva a conectar antes.",
   "選択中の検査の全シリーズを種別/Ser/時間つきで取り込む (表示は各シリーズの自動フレーム)": "Añade todas las series del estudio seleccionado con tipo/Ser/hora (la vista es el fotograma automático de cada serie)",
   "選択中の行の FixName は空です。全 {n} 本の FixName を空にします。よろしいですか？": "El FixName de la fila seleccionada está vacío. ¿Vaciar el FixName de los {n} vasos?",

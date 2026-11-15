@@ -635,6 +635,7 @@
   "選択した編集点を内腔中心へ補正 (Fit)": "Snap selected edit points to the lumen centre (Fit)",
   "選択した編集点を削除 ({n}点)": "Delete selected edit points ({n})",
   "選択した行に有効な時刻がありません。": "The selected rows have no valid time.",
+  "選択を解除 (Deselect)": "Deselect",
   "選択不可です。選んだ親まで {d} mm 離れています（接続可能距離は {tol:.0f} mm 以内）。\n近い枝を選ぶか、先に接続し直してください。": "Not selectable: the chosen parent is {d} mm away (connectable within {tol:.0f} mm).\nChoose a nearer branch, or reconnect first.",
   "選択中の検査の全シリーズを種別/Ser/時間つきで取り込む (表示は各シリーズの自動フレーム)": "Capture all series of the selected study with type/Ser/time (view = each series' auto frame)",
   "選択中の行の FixName は空です。全 {n} 本の FixName を空にします。よろしいですか？": "The selected row's FixName is empty. Clear the FixName of all {n} vessels?",

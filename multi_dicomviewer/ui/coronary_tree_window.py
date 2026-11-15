@@ -1666,8 +1666,14 @@ class CoronaryTreeWindow(SnapDock):
         CLICK on that vessel's CPR line in the viewer (Coronary Tree / Territory
         mode). Activates the owning CT, selects the row (scrolls it into view) and
         pushes the overlay so the image highlight matches. No-op if the vid isn't
-        shown or is already current."""
+        shown or is already current. An EMPTY *vid* clears the selection (the
+        image line's 選択を解除 / Deselect) so the orange highlight goes."""
         if not vid:
+            if self._tree_w.currentItem() is not None                     or self._tree_w.selectedItems():
+                self._tree_w.clearSelection()
+                self._tree_w.setCurrentItem(None)
+                self._on_selection()
+                self._push_overlay()
             return
         it = self._item_for_vid(vid)
         if it is None or it is self._tree_w.currentItem():
