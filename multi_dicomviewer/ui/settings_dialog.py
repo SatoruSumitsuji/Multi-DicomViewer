@@ -384,25 +384,38 @@ class SettingsDialog(QDialog):
         # 領域色: LM / LAD / LCX / RCA + Target1..6
         lc = cp.get("line_colors") or {}
         grid = QGridLayout()
+        grid.setHorizontalSpacing(18)            # gap BETWEEN name+swatch pairs
+
+        def _pair(name, btn):
+            """Name + its swatch as ONE cell, so widening the dialog never
+            pulls a swatch away from its name (toward the next name)."""
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(4)
+            h.addWidget(QLabel(name))
+            h.addWidget(btn)
+            h.addStretch(1)
+            return w
+
         self._coro_line_btns: dict[str, _ColorButton] = {}
         sys_defaults = settings.CORONARY_PARAMS_DEFAULT["line_colors"]
         for i, role in enumerate(("LM", "LAD", "LCX", "RCA")):
-            grid.addWidget(QLabel(role), 0, i * 2)
             b = _ColorButton(lc.get(role) or sys_defaults[role],
                              t("{r} の色", r=role))
             self._coro_line_btns[role] = b
-            grid.addWidget(b, 0, i * 2 + 1)
+            grid.addWidget(_pair(role, b), 0, i)
         tcs = cp.get("target_colors") \
             or settings.CORONARY_PARAMS_DEFAULT["target_colors"]
         self._coro_target_btns: list[_ColorButton] = []
         for i in range(6):
-            r, cstart = divmod(i, 3)
-            grid.addWidget(QLabel(f"Target{i + 1}"), 1 + r, cstart * 2)
+            r, c = divmod(i, 3)
             hexv = tcs[i] if i < len(tcs) \
                 else settings.CORONARY_PARAMS_DEFAULT["target_colors"][i]
             b = _ColorButton(hexv, t("Target{n} の色", n=i + 1))
             self._coro_target_btns.append(b)
-            grid.addWidget(b, 1 + r, cstart * 2 + 1)
+            grid.addWidget(_pair(f"Target{i + 1}", b), 1 + r, c)
+        grid.setColumnStretch(4, 1)              # extra width goes to the right
         _grid_w = QWidget()
         _grid_w.setLayout(grid)
         coform.addRow(t("領域色（系統 / ターゲット）"), _grid_w)
