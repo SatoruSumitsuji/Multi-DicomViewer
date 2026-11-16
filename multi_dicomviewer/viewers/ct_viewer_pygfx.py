@@ -12123,12 +12123,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 "src_dir": (self._lv_series_dir()     # drop re-opens just this CT
                             if hasattr(self, "_lv_series_dir") else ""),
                 "c": list(map(float, c)), "n": list(map(float, n)), "r": float(r)}
-        suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
+        if which == "mitral" and hasattr(self, "_lv_mv_payload"):
+            data = self._lv_mv_payload()          # + the MV-AoV point
+        suffix = ".MVAoVLv.json" if which == "mitral" else ".AoVLv.json"
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "valve")
         default = os.path.join(d, stem + suffix) if d else stem + suffix
-        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+        flt = (("MV-AoV (*.MVAoVLv.json *.MVLv.json)" if which == "mitral"
                 else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save valve plane"), default, flt)
@@ -12149,7 +12151,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         QTimer.singleShot(0, self._reset_pointer_state)   # macOS post-modal grab
 
     def _lv_apply_valve_data(self, which, data) -> None:
-        """Apply a parsed MVLv/AoVLv dict to the common valve planes + draw the
+        """Apply a parsed MVAoVLv(MVLv)/AoVLv dict to the common valve planes + draw the
         ring (headless — no dialog). Shared by the file-dialog load and the
         LV-analysis batch drop."""
         if which == "mitral":
@@ -12170,7 +12172,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         import json
         if self._vol is None:
             return
-        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+        flt = (("MV-AoV (*.MVAoVLv.json *.MVLv.json)" if which == "mitral"
                 else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
@@ -15426,8 +15428,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "apex": list(map(float, lvv["apex"])),
             "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
                        "r": float(r_a)},
+            # The MV-AoV point rides with the MV (as in .MVAoVLv.json), so a
+            # FullLv re-opened for editing is the MV-AoV (tent) method again.
             "mitral": {"c": list(map(float, c_m)), "n": list(map(float, n_m)),
-                       "r": float(r_m)},
+                       "r": float(r_m),
+                       **({"mvaov": dict(self._lv_mvaov)}
+                          if self._lv_mvaov_on() else {})},
             "hu_lo": float(self._lvv_lo_spin.value()),
             "hu_hi": float(self._lvv_hi_spin.value()),
             "volume_ml": (None if lvv.get("last_ml") is None
@@ -16132,16 +16138,32 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                        or self._lv_valves.get("aortic") is not None)
             have_apex = (files.get("apex") is not None
                          or getattr(self, "_lv_apex", None) is not None)
+            # MV-AoV point method (the MV file carries "mvaov", or the one already
+            # set does): there is NO AoV plane — MV-AoV + Apex are enough. Only an
+            # old MV-plane analysis still needs the AoV plane.
+            mvf = files.get("valve_mitral")
+            if isinstance(mvf, dict):
+                mvaov = isinstance(mvf.get("mvaov"), dict)
+            elif self._lv_valves.get("mitral") is not None:
+                mvaov = bool(getattr(self, "_lv_mvaov_on", lambda: False)())
+            else:
+                mvaov = True                 # nothing set yet → the current method
+            if mvaov:
+                have_av = True
             if not (have_mv and have_av and have_apex):
                 missing = []
                 if not have_mv:
-                    missing.append("MV")
+                    missing.append("MV-AoV" if mvaov else "MV")
                 if not have_av:
                     missing.append("AoV")
                 if not have_apex:
                     missing.append("Apex")
                 QMessageBox.warning(
                     self.window(), t("LV"),
+                    t("MV-AoV・Apex の両方が開いていないと Epi / Blood は"
+                      "開けません（不足: {m}）。先にMV-AoV・Apexを一緒に"
+                      "ドロップしてください。", m=t("・").join(missing))
+                    if mvaov else
                     t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
                       "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
                       "ドロップしてください。", m=t("・").join(missing)))
@@ -16149,6 +16171,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")
         applied = False
+        epi_conv = False
         try:
             if files.get("valve_mitral") is not None:
                 self._lv_apply_valve_data("mitral", files["valve_mitral"])
@@ -16159,6 +16182,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if files.get("apex") is not None:
                 self._lv_apply_apex_data(files["apex"])
                 applied = True
+            if files.get("epi") is not None:
+                # An OLD EpiLv (no MV-AoV tent) → convert / as is /
+                # cancel. Runs after the MV-AoV + Apex of this drop.
+                res = self._lv_epi_maybe_convert(files["epi"])
+                if res is None:              # cancelled → no Epi / Blood
+                    files = {k: v for k, v in files.items()
+                             if k not in ("epi", "blood")}
+                else:
+                    files = dict(files, epi=res[0])
+                    epi_conv = res[1]
             if files.get("epi") is not None:
                 self._lvv_apply_epi_data(files["epi"])
                 applied = True
@@ -16177,6 +16210,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         except Exception:                            # noqa: BLE001
             import traceback
             traceback.print_exc()
+        if epi_conv:
+            self._lv_epi_converted_notice(
+                blood=files.get("blood") is not None)
         if applied:
             self._refresh(reset_cam=False)
             for k in ("A", "B"):
@@ -18968,7 +19004,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self._lv_warn_if_axis_stale(data)
+            res = self._lv_epi_maybe_convert(data)   # old EpiLv?
+            if res is None:
+                return
+            data, epi_conv = res
+            if not epi_conv:
+                self._lv_warn_if_axis_stale(data)
             model = LVModel.from_dict(data)
         except Exception as exc:                          # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV EF"),
@@ -18990,10 +19031,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_apply_model(model, volume=data.get("volume"))
         # Loaded borders match their file → record the signature so Exit won't
         # alert until they are edited.
+        # (A converted old Epi is NOT the file — left unsaved, so Exit
+        # warns until it is saved.)
         for pas in ("endo", "epi"):
             s = self._lv_pass_sig(pas)
-            if s is not None:
+            if s is not None and not (epi_conv and pas == "epi"):
                 self._lv_saved_sig[pas] = s
+        if epi_conv:
+            self._lv_dirty = True
+            self._lv_epi_converted_notice()
 
     def _lv_apply_model(self, model, volume=None) -> None:
         if self._meas_on:

@@ -4142,7 +4142,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
 
         # ---- Common valve planes (MV / AoV): set ONCE at the start, shared by
         # every sub-mode as the LV base — Endo/Epi base cut + wall normalisation,
-        # and the Blood region's basal bound. Saved to their own MVLv.json /
+        # and the Blood region's basal bound. Saved to their own MVAoVLv.json /
         # AoVLv.json (single source, one per 3DCT phase). ----
         self._lv_mv_btn = FitButton(t("MV-AoV+Apex"))
         self._lv_mv_btn.setHelpToolTip(t(
@@ -4600,11 +4600,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         r2v = QHBoxLayout(self._lv_grp_r2_valves)
         r2v.setContentsMargins(0, 0, 0, 0); r2v.setSpacing(4)
         self._lv_mv_save_btn = FitButton(t("Save MV"))
-        self._lv_mv_save_btn.setHelpToolTip(t("Save the MV plane to MVLv.json"))
+        self._lv_mv_save_btn.setHelpToolTip(t("Save the MV-AoV point to MVAoVLv.json"))
         self._lv_mv_save_btn.clicked.connect(lambda: self._lv_save_valve("mitral"))
         r2v.addWidget(self._lv_mv_save_btn)
         self._lv_mv_load_btn = FitButton(t("Load MV"))
-        self._lv_mv_load_btn.setHelpToolTip(t("Load an MVLv.json"))
+        self._lv_mv_load_btn.setHelpToolTip(t("Load an MVAoVLv.json (or an older MVLv.json)"))
         self._lv_mv_load_btn.clicked.connect(lambda: self._lv_load_valve("mitral"))
         r2v.addWidget(self._lv_mv_load_btn)
         self._lv_aov_save_btn = FitButton(t("Save AoV"))
@@ -4653,7 +4653,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (No RePosition here: Apex Set at the moved crossing overwrites.)
         self._lv_ve_save_btn = FitButton(t("Save"))
         self._lv_ve_save_btn.setHelpToolTip(t(
-            "Save this valve plane to a file. (MV+Apex: .MVLv.json and "
+            "Save to a file. (MV-AoV+Apex: .MVAoVLv.json and "
             ".ApxLv.json of the same name.)"))
         self._lv_ve_save_btn.clicked.connect(
             lambda: self._lv_mvapex_save()
@@ -4662,8 +4662,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         r2ve.addWidget(self._lv_ve_save_btn)
         self._lv_ve_load_btn = FitButton(t("Load"))
         self._lv_ve_load_btn.setHelpToolTip(t(
-            "Load a saved valve plane. (MV+Apex: the .MVLv.json and the "
-            ".ApxLv.json of the same name.)"))
+            "Load a saved file. (MV-AoV+Apex: the .MVAoVLv.json (or an older "
+            ".MVLv.json) and the .ApxLv.json of the same name.)"))
         self._lv_ve_load_btn.clicked.connect(
             lambda: self._lv_mvapex_load()
             if (self._lv_valve_edit or "mitral") == "mitral"
@@ -6170,8 +6170,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                           "may not line up. Load anyway?")) \
                         != QMessageBox.StandardButton.Yes:
                     return False
-            self._lv_warn_if_axis_stale(data)
+            res = self._lv_epi_maybe_convert(data)   # old EpiLv?
+            if res is None:
+                return False
+            data, epi_conv = res
+            if not epi_conv:
+                self._lv_warn_if_axis_stale(data)
             self._lvv_apply_epi_data(data)
+            if epi_conv:
+                self._lv_epi_converted_notice()
             return True
         except Exception as exc:                        # noqa: BLE001
             import traceback
@@ -8291,7 +8298,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Epi/Blood); a SET selector always shows its data colour above.
 
     def _lv_save_valve(self, which) -> None:
-        """Save the common MV or AoV plane to its own MVLv.json / AoVLv.json."""
+        """Save the common MV (+ MV-AoV point) or AoV plane to its own
+        MVAoVLv.json / AoVLv.json."""
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
         import os
@@ -8310,12 +8318,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                             if hasattr(self, "_lv_series_dir") else ""),
                 "c": list(map(float, c)), "n": list(map(float, n)),
                 "r": float(r)}
-        suffix = ".MVLv.json" if which == "mitral" else ".AoVLv.json"
+        if which == "mitral" and hasattr(self, "_lv_mv_payload"):
+            data = self._lv_mv_payload()          # + the MV-AoV point
+        suffix = ".MVAoVLv.json" if which == "mitral" else ".AoVLv.json"
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         stem = (self._lv_default_stem() if hasattr(self, "_lv_default_stem")
                 else "valve")
         default = os.path.join(d, stem + suffix) if d else stem + suffix
-        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+        flt = (("MV-AoV (*.MVAoVLv.json *.MVLv.json)" if which == "mitral"
                 else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
         path, _ = QFileDialog.getSaveFileName(
             self.window(), t("Save valve plane"), default, flt)
@@ -8337,7 +8347,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                t("Saved: {p}", p=os.path.basename(path)))
 
     def _lv_apply_valve_data(self, which, data) -> None:
-        """Apply a parsed MVLv/AoVLv dict to the common valve planes and draw the
+        """Apply a parsed MVAoVLv(MVLv)/AoVLv dict to the common valve planes and draw the
         ring (headless — no dialog / message box). Shared by the file-dialog load
         and the LV-analysis batch drop."""
         if which == "mitral":
@@ -8354,12 +8364,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_on_valve_changed(which)
 
     def _lv_load_valve(self, which) -> None:
-        """Load an MVLv.json / AoVLv.json into the common valve planes."""
+        """Load an MVAoVLv.json (or old MVLv.json) / AoVLv.json into the common
+        valve planes."""
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
         if self._image is None:
             return
-        flt = (("MV plane (*.MVLv.json)" if which == "mitral"
+        flt = (("MV-AoV (*.MVAoVLv.json *.MVLv.json)" if which == "mitral"
                 else "AoV plane (*.AoVLv.json)") + ";;JSON (*.json)")
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
@@ -9637,8 +9648,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "apex": list(map(float, lvv["apex"])),
             "aortic": {"c": list(map(float, c_a)), "n": list(map(float, n_a)),
                        "r": float(r_a)},
+            # The MV-AoV point rides with the MV (as in .MVAoVLv.json), so a
+            # FullLv re-opened for editing is the MV-AoV (tent) method again.
             "mitral": {"c": list(map(float, c_m)), "n": list(map(float, n_m)),
-                       "r": float(r_m)},
+                       "r": float(r_m),
+                       **({"mvaov": dict(self._lv_mvaov)}
+                          if self._lv_mvaov_on() else {})},
             "hu_lo": float(self._lvv_lo_spin.value()),
             "hu_hi": float(self._lvv_hi_spin.value()),
             "volume_ml": (None if lvv.get("last_ml") is None
@@ -10173,16 +10188,32 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                        or self._lv_valves.get("aortic") is not None)
             have_apex = (files.get("apex") is not None
                          or getattr(self, "_lv_apex", None) is not None)
+            # MV-AoV point method (the MV file carries "mvaov", or the one already
+            # set does): there is NO AoV plane — MV-AoV + Apex are enough. Only an
+            # old MV-plane analysis still needs the AoV plane.
+            mvf = files.get("valve_mitral")
+            if isinstance(mvf, dict):
+                mvaov = isinstance(mvf.get("mvaov"), dict)
+            elif self._lv_valves.get("mitral") is not None:
+                mvaov = bool(getattr(self, "_lv_mvaov_on", lambda: False)())
+            else:
+                mvaov = True                 # nothing set yet → the current method
+            if mvaov:
+                have_av = True
             if not (have_mv and have_av and have_apex):
                 missing = []
                 if not have_mv:
-                    missing.append("MV")
+                    missing.append("MV-AoV" if mvaov else "MV")
                 if not have_av:
                     missing.append("AoV")
                 if not have_apex:
                     missing.append("Apex")
                 QMessageBox.warning(
                     self.window(), t("LV"),
+                    t("MV-AoV・Apex の両方が開いていないと Epi / Blood は"
+                      "開けません（不足: {m}）。先にMV-AoV・Apexを一緒に"
+                      "ドロップしてください。", m=t("・").join(missing))
+                    if mvaov else
                     t("MV・AoV・Apex の全てが開いていないと Epi / Blood は"
                       "開けません（不足: {m}）。先にMV・AoV・Apexを一緒に"
                       "ドロップしてください。", m=t("・").join(missing)))
@@ -10190,6 +10221,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._mode != "3D" and hasattr(self, "_set_mode"):
             self._set_mode("3D")             # overlays only draw in 3-D MPR
         applied = False
+        epi_conv = False
         try:
             if files.get("valve_mitral") is not None:
                 self._lv_apply_valve_data("mitral", files["valve_mitral"])
@@ -10200,6 +10232,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if files.get("apex") is not None:
                 self._lv_apply_apex_data(files["apex"])
                 applied = True
+            if files.get("epi") is not None:
+                # An OLD EpiLv (no MV-AoV tent) → convert / as is /
+                # cancel. Runs after the MV-AoV + Apex of this drop.
+                res = self._lv_epi_maybe_convert(files["epi"])
+                if res is None:              # cancelled → no Epi / Blood
+                    files = {k: v for k, v in files.items()
+                             if k not in ("epi", "blood")}
+                else:
+                    files = dict(files, epi=res[0])
+                    epi_conv = res[1]
             if files.get("epi") is not None:
                 self._lvv_apply_epi_data(files["epi"])
                 applied = True
@@ -10220,6 +10262,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
+        if epi_conv:
+            self._lv_epi_converted_notice(
+                blood=files.get("blood") is not None)
         if applied:
             self._refresh(reset_cam=False)
         # Reflect the just-loaded LV analysis in the FullLV button (territory
@@ -10260,7 +10305,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Record the COMMON MV/AoV planes from the bundle, so _lv_valves_ready() is
         # true and _lvv_sync keeps the (retired, parent-less) MV/AoV buttons hidden
         # instead of promoting them to stray floating windows.
+        # MV-AoV method: the bundle's "aortic" is only the MV stand-in (kept for
+        # older readers) — record the MV-AoV point instead of a fake AoV plane.
+        _mv = bld.get("mitral")
+        _mvaov = _mv.get("mvaov") if isinstance(_mv, dict) else None
+        if isinstance(_mvaov, dict):
+            self._lv_mvaov = dict(_mvaov)
         for vk in ("mitral", "aortic"):
+            if vk == "aortic" and isinstance(_mvaov, dict):
+                continue
             d = bld.get(vk)
             if isinstance(d, dict) and d.get("c") is not None:
                 self._lv_valves[vk] = (np.asarray(d["c"], float),
@@ -19152,7 +19205,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-            self._lv_warn_if_axis_stale(data)
+            res = self._lv_epi_maybe_convert(data)   # old EpiLv?
+            if res is None:
+                return
+            data, epi_conv = res
+            if not epi_conv:
+                self._lv_warn_if_axis_stale(data)
             model = LVModel.from_dict(data)
         except Exception as exc:                          # noqa: BLE001
             QMessageBox.warning(self.window(), t("LV EF"),
@@ -19178,10 +19236,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_restore_region(data.get("region"))
         # Loaded borders match their file → record the signature so Exit won't
         # alert until they are edited.
+        # (A converted old Epi is NOT the file — left unsaved, so Exit
+        # warns until it is saved.)
         for pas in ("endo", "epi"):
             s = self._lv_pass_sig(pas)
-            if s is not None:
+            if s is not None and not (epi_conv and pas == "epi"):
                 self._lv_saved_sig[pas] = s
+        if epi_conv:
+            self._lv_dirty = True
+            self._lv_epi_converted_notice()
 
     def _lv_restore_region(self, reg) -> None:
         """Make the RED region available right after a Load so BOTH toggles work

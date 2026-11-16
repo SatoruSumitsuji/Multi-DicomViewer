@@ -25,8 +25,9 @@ the drawn shape sets the plane like Auto does (centre = area centroid, normal =
 the pane it was drawn on, radius = the equal-area circle) and replaces the
 outline. One Ctrl+Z step; Esc cancels.
 
-MV+Apex Save / Load / Clear / Hide act on both: an .MVLv.json and an
-.ApxLv.json of the same name in one folder.
+MV+Apex Save / Load / Clear / Hide act on both: an .MVAoVLv.json (the MV +
+MV-AoV point; older files: .MVLv.json, still loaded) and an .ApxLv.json of
+the same name in one folder.
 """
 from __future__ import annotations
 
@@ -431,6 +432,69 @@ class ValveAutoMixin:
     def _lv_mvaov_point(self):
         mv = (getattr(self, "_lv_valves", {}) or {}).get("mitral")
         return None if mv is None else np.asarray(mv[0], float)
+
+    # ------------------------------------------ old EpiLv → MV-AoV tent
+    def _lv_epi_maybe_convert(self, data):
+        """An EpiLv dict about to be applied: an OLD one (made before the MV-AoV
+        tent method — no "epi_tent" marker) asks 変換 / そのまま読み込む /
+        キャンセル. 変換 re-cuts the old Epi on the current long axis (Apex →
+        MV-AoV point) and closes both basal ends at the MV-AoV point
+        (core.lv_epi_convert) — in memory only, the file is not touched.
+        Returns (data, converted) or None (cancelled / not possible)."""
+        from multi_dicomviewer.core import lv_epi_convert as cv
+        if not cv.is_old_epi(data):
+            return data, False
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Epi"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t("このEpiLv.jsonファイルは古いアルゴリズムで作られたEpiLv.json"
+                      "ファイルです。今のバージョンのEpiLv.jsonファイルに変換しますか？"))
+        box.setInformativeText(t(
+            "変換：新しい長軸（Apex点 → MV-AoV点）の断面で Epi の線を作り直し、"
+            "両端を MV-AoV点に集めます。ファイルはまだ保存されません。"))
+        b_conv = box.addButton(t("変換"), QMessageBox.ButtonRole.AcceptRole)
+        b_keep = box.addButton(t("そのまま読み込む"),
+                               QMessageBox.ButtonRole.ActionRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        # Latch the press from each button's own clicked signal (macOS: the
+        # clickedButton() identity is unreliable in the native alert).
+        hit = {"v": None}
+        b_conv.clicked.connect(lambda *_: hit.__setitem__("v", "conv"))
+        b_keep.clicked.connect(lambda *_: hit.__setitem__("v", "keep"))
+        box.exec()
+        if hit["v"] == "keep":
+            return data, False
+        if hit["v"] != "conv":
+            return None
+        apex = getattr(self, "_lv_apex", None)
+        axinfo = (self._lv_long_axis_from_apex(np.asarray(apex, float))
+                  if (apex is not None and self._lv_mvaov_on()) else None)
+        if axinfo is None:
+            QMessageBox.information(
+                self.window(), t("Epi"),
+                t("変換には MV-AoV点と Apex点が必要です。先に MV-AoV Set と "
+                  "Apex Set をしてから、もう一度読み込んでください。"))
+            return None
+        from multi_dicomviewer.core.settings import lv_epi_n_planes
+        out, err = cv.convert(data, np.asarray(apex, float), axinfo[0],
+                              axinfo[1], self._lv_mvaov_point(),
+                              lv_epi_n_planes())
+        if out is None:
+            QMessageBox.warning(self.window(), t("Epi"),
+                                t("変換できませんでした: {e}", e=err))
+            return None
+        return out, True
+
+    def _lv_epi_converted_notice(self, blood: bool = False) -> None:
+        """Tell the user a converted old Epi is on screen, NOT saved yet."""
+        from PyQt6.QtWidgets import QMessageBox
+        msg = t("古い EpiLv.json を変換しました（まだ保存していません）。Epi モードで"
+                "各断面の線を確認・修正し、Calc Vol のあと保存してください。")
+        if blood:
+            msg += "\n\n" + t("一緒に読み込んだ BldLv.json は変換前の Epi で作られて"
+                              "います。Blood/Endo は変換後の Epi で作り直してください。")
+        QMessageBox.information(self.window(), t("Epi"), msg)
 
     def _lv_mvaov_normal(self, point, apex=None):
         """apex → point (the long-axis direction) as the degenerate plane's
@@ -1000,9 +1064,9 @@ class ValveAutoMixin:
 
     @staticmethod
     def _lv_mvapex_stem(path) -> str:
-        """'…/case.MVLv.json' → '…/case' (any case of the suffix)."""
+        """'…/case.MVAoVLv.json' (or old '.MVLv.json') → '…/case' (any case)."""
         low = path.lower()
-        for suf in (".mvlv.json", ".apxlv.json", ".json"):
+        for suf in (".mvaovlv.json", ".mvlv.json", ".apxlv.json", ".json"):
             if low.endswith(suf):
                 return path[: len(path) - len(suf)]
         return path
@@ -1020,9 +1084,9 @@ class ValveAutoMixin:
         dlg.setWindowTitle(t("Save MV + Apex"))
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel(
-            t("MV面（.MVLv.json）と心尖部（.ApxLv.json）の 2 つのファイルを、"
+            t("MV-AoV点（.MVAoVLv.json）と心尖部（.ApxLv.json）の 2 つのファイルを、"
               "同じ名前で同じフォルダに保存します。") if has_apex else
-            t("心尖部が未設定のため、MV面（.MVLv.json）だけを保存します。")))
+            t("心尖部が未設定のため、MV-AoV点（.MVAoVLv.json）だけを保存します。")))
         g = QGridLayout()
         g.addWidget(QLabel(t("ファイル名（拡張子なし）")), 0, 0)
         name = QLineEdit(str(stem))
@@ -1050,7 +1114,7 @@ class ValveAutoMixin:
 
         def upd(*_a):
             n = clean()
-            sufs = [".MVLv.json"] + ([".ApxLv.json"] if has_apex else [])
+            sufs = [".MVAoVLv.json"] + ([".ApxLv.json"] if has_apex else [])
             preview.setText(t("保存されるファイル：") + "\n" + "\n".join(
                 "  " + n + s for s in sufs))
             ok.setEnabled(bool(n) and not bad.search(n)
@@ -1073,7 +1137,7 @@ class ValveAutoMixin:
 
     def _lv_mvapex_save(self) -> None:
         """Save MV + apex: one dialog, two files of the same name side by side
-        (.MVLv.json and .ApxLv.json). Only the MV is written when no apex."""
+        (.MVAoVLv.json and .ApxLv.json). Only the MV is written when no apex."""
         from PyQt6.QtWidgets import QMessageBox
         import json
         import os
@@ -1089,7 +1153,7 @@ class ValveAutoMixin:
         if not target:
             return
         base = os.path.join(target[0], target[1])
-        files = [(base + ".MVLv.json", self._lv_mv_payload())]
+        files = [(base + ".MVAoVLv.json", self._lv_mv_payload())]
         if has_apex:
             files.append((base + ".ApxLv.json", self._lv_apex_payload()))
         exist = [os.path.basename(fp) for fp, _d in files if os.path.exists(fp)]
@@ -1117,7 +1181,8 @@ class ValveAutoMixin:
         QMessageBox.information(self.window(), t("LV"), msg)
 
     def _lv_mvapex_load(self) -> None:
-        """Load an .MVLv.json (or .ApxLv.json) and its same-name partner."""
+        """Load an .MVAoVLv.json / old .MVLv.json (or .ApxLv.json) and its
+        same-name partner."""
         from PyQt6.QtWidgets import QFileDialog, QMessageBox
         import json
         import os
@@ -1126,7 +1191,7 @@ class ValveAutoMixin:
         d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
         path, _ = QFileDialog.getOpenFileName(
             self.window(), t("Load MV + Apex"), d,
-            "MV / Apex (*.MVLv.json *.ApxLv.json);;JSON (*.json)")
+            "MV-AoV / Apex (*.MVAoVLv.json *.MVLv.json *.ApxLv.json);;JSON (*.json)")
         if not path:
             return
         base = self._lv_mvapex_stem(path)
@@ -1142,7 +1207,8 @@ class ValveAutoMixin:
                 pass
             return None
 
-        mv_fp, ax_fp = find(".mvlv.json"), find(".apxlv.json")
+        mv_fp = find(".mvaovlv.json") or find(".mvlv.json")   # new name, else old
+        ax_fp = find(".apxlv.json")
         if path.lower().endswith(".json") and not (mv_fp or ax_fp):
             mv_fp = path                                 # a plain .json: as MV
         try:
@@ -1175,7 +1241,7 @@ class ValveAutoMixin:
         if "apex" not in loaded:
             msg += "\n\n" + t("同じ名前の .ApxLv.json がないため、心尖部は読み込んでいません。")
         if "mv" not in loaded:
-            msg += "\n\n" + t("同じ名前の .MVLv.json がないため、MV は読み込んでいません。")
+            msg += "\n\n" + t("同じ名前の .MVAoVLv.json がないため、MV-AoV点は読み込んでいません。")
         QMessageBox.information(self.window(), t("LV"), msg)
 
     def _lv_mvapex_clear(self) -> None:

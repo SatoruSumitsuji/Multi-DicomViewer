@@ -2877,7 +2877,11 @@ class MainWindow(QMainWindow):
         files: dict = {}
         if isinstance(bld.get("mitral"), dict):
             files["valve_mitral"] = bld["mitral"]
-        if isinstance(bld.get("aortic"), dict):
+        # MV-AoV method (the MV carries "mvaov"): the bundle's "aortic" is only
+        # the MV stand-in kept for older readers — don't load it as an AoV plane.
+        mv = bld.get("mitral")
+        if isinstance(bld.get("aortic"), dict) and not (
+                isinstance(mv, dict) and isinstance(mv.get("mvaov"), dict)):
             files["valve_aortic"] = bld["aortic"]
         if bld.get("apex") is not None:
             files["apex"] = {"apex": bld["apex"]}
@@ -2922,7 +2926,8 @@ class MainWindow(QMainWindow):
 
     def lv_save_active_full(self):
         """Save the ACTIVE CT viewer's current editable LV state to a FullLv.json
-        AND the 5 component files (MV / AoV / Apex / Epi / Blood-Endo). Returns the
+        AND the component files (MVAoV / Apex / Epi / Blood-Endo; + AoV for an
+        old MV-plane analysis). Returns the
         saved FullLv dict on success, False if there's nothing to save. Called by
         the LV Analysis tab's 「保存」."""
         import json
@@ -2934,10 +2939,16 @@ class MainWindow(QMainWindow):
             return False
         valves = getattr(v, "_lv_valves", {}) or {}
         apex = getattr(v, "_lv_apex", None)
-        if valves.get("mitral") is None or valves.get("aortic") is None \
-                or apex is None:
+        # MV-AoV point method: no AoV plane — MV-AoV + Apex are the set. Only an
+        # old MV-plane analysis also needs the AoV plane.
+        mvaov = bool(getattr(v, "_lv_mvaov_on", lambda: False)()) \
+            or valves.get("mitral") is None
+        if valves.get("mitral") is None or apex is None \
+                or (not mvaov and valves.get("aortic") is None):
             QMessageBox.information(
                 self, t("LV Analysis"),
+                t("MV-AoV・Apex が揃っていません。先に「元CTで編集」で LV データを "
+                  "読み込んでから保存してください。") if mvaov else
                 t("MV・AoV・Apex が揃っていません。先に「元CTで編集」で LV データを "
                   "読み込んでから保存してください。"))
             return False
@@ -2991,8 +3002,15 @@ class MainWindow(QMainWindow):
                 json.dump(obj, f, ensure_ascii=False)
 
         try:
-            for which, suf in (("mitral", ".MVLv.json"),
+            # MV (+ the MV-AoV point) → .MVAoVLv.json; an .AoVLv.json only when
+            # a real AoV plane is set (old MV-plane analyses).
+            for which, suf in (("mitral", ".MVAoVLv.json"),
                                ("aortic", ".AoVLv.json")):
+                if valves.get(which) is None:
+                    continue
+                if which == "mitral" and hasattr(v, "_lv_mv_payload"):
+                    _dump(v._lv_mv_payload(), stem + suf)
+                    continue
                 c, n, r = valves[which]
                 _dump({"type": "valve", "valve": which, "series": sm,
                        "src_dir": sd,
