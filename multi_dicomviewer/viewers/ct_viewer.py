@@ -5271,15 +5271,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if box.clickedButton() is not b_draw:
             return
         self._lv_apply_common_apex_to_pass("epi")   # set axis from the common apex
-        # Default Epi zoom for the RIGHT (long-axis) pane: show the apex→MV-centre
-        # length at 2/3 of the pane HEIGHT. ParallelScale = half the pane height in
-        # mm, so ps = (3/4)·length gives length = (2/3)·(2·ps) = (2/3)·height. Set
-        # once on Draw as the sensible default; the user's later manual zoom is
-        # kept (keep_view → no auto-refit rescales it afterwards).
-        ax = self._lv["model"].epi_axis
-        length = float(getattr(ax, "length_mm", 0.0)) if ax is not None else 0.0
-        if length > 1e-3:
-            self.pane["B"].ren.GetActiveCamera().SetParallelScale(0.75 * length)
+        # Zoom is SAVED across Draw (2026-11-16): the right pane keeps the zoom
+        # the user had before pressing Draw, so the look doesn't jump. (Draw used
+        # to set a default 0.75·length scale here; _lv_show_plane keeps the
+        # current ParallelScale through its first fit.)
         self._lv_epi_armed = True
         # BEGIN tracing right away so the border points can be placed on the
         # right pane — Draw is the "start drawing" action, not just an unlock.

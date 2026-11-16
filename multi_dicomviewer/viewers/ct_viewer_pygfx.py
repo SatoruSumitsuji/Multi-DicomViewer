@@ -11994,15 +11994,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if not proceed["v"]:
             return
         self._lv_apply_common_apex_to_pass("epi")
-        # Default Epi zoom for the RIGHT (long-axis) pane: show the apex→MV-centre
-        # length at 2/3 of the pane HEIGHT. _ps = half the pane height in mm, so
-        # ps = (3/4)·length gives length = (2/3)·(2·ps) = (2/3)·height. Set once
-        # on Draw as the sensible default; the user's later manual zoom is kept
-        # (no other view op auto-rescales).
-        ax = self._lv["model"].epi_axis
-        length = float(getattr(ax, "length_mm", 0.0)) if ax is not None else 0.0
-        if length > 1e-3:
-            self._ps["B"] = 0.75 * length
+        # Zoom is SAVED across Draw (2026-11-16): the right pane keeps the zoom
+        # the user had before pressing Draw, so the look doesn't jump. (Draw used
+        # to set a default 0.75·length _ps here.)
         self._lv_epi_armed = True
         # BEGIN tracing right away so the border points can be placed on the
         # right pane — Draw is the "start drawing" action, not just an unlock.
@@ -17054,7 +17048,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if tag is not None:
                 mm["hidden"] = (tag[0] != idx) or (tag[1] != lv.get("pass"))
         self._lv_plane_lbl.setText(f"{idx + 1}/{len(angs)}")
+        # Keep the ZOOM across the first fit (parity with the VTK viewer): the
+        # fit only recentres the plane, the scale the user had stays.
+        ps0 = self._ps.get(pane) if first else None
         self._refresh(reset_cam=first)
+        if ps0:
+            self._ps[pane] = ps0
+            self._config_cam(pane)
+            self._refresh(only=pane)
         self._overlay[pane].update()
         self._lv_update_text()
 
