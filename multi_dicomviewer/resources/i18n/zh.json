@@ -1011,6 +1011,7 @@
   "S-Zoom": "S-Zoom",
   "SAX": "SAX",
   "SAX {mm:.0f}mm": "SAX {mm:.0f}mm",
+  "SAX に入ったので Epi に HU＋スプライン補正を自動で適用しました（{p} 面、短軸 {L} 断面）。短軸・長軸で点を修正できます。": "进入 SAX 时已自动对 Epi 应用 HU＋样条校正（{p} 个断面，短轴 {L} 个层面）。可在短轴和长轴上修正各点。",
   "STL": "STL",
   "STL export failed: {err}": "STL 导出失败：{err}",
   "Same as source": "与源相同",

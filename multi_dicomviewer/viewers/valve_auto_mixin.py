@@ -471,6 +471,12 @@ class ValveAutoMixin:
             self._lv_apex_marker_draw()
         self._lv_update_submode_ui()
 
+    def _lv_tent_point(self):
+        """The MV-AoV point when the Epi is a tent (spline terminals), else None."""
+        if not self._lv_mvaov_on():
+            return None
+        return self._lv_mvaov_point()
+
     def _lv_mvaov_sync(self) -> None:
         """The apex moved: re-aim the degenerate plane (normal = apex → point)."""
         if not self._lv_mvaov_on():

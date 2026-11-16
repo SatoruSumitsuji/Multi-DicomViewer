@@ -170,6 +170,7 @@
   "PDF (*.pdf)": "PDF (*.pdf)",
   "Press LV-Blood表示 (or Auto-Endo表示) first to compute the blood pool, then 壁厚.": "Press LV-Blood (or Endo-Border(Auto)) first to compute the blood pool, then Wall thickness.",
   "ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from the ROI (min {mn:.0f} / max {mx:.0f}). Adjust 下限/上限 if needed, then press CalcVol.": "ROI captured. Blood HU range set to {lo:.0f}–{hi:.0f} from the ROI (min {mn:.0f} / max {mx:.0f}). Adjust Lower/Upper if needed, then press CalcVol.",
+  "SAX に入ったので Epi に HU＋スプライン補正を自動で適用しました（{p} 面、短軸 {L} 断面）。短軸・長軸で点を修正できます。": "Entering SAX applied the Epi HU + spline correction automatically ({p} planes, {L} short-axis levels). You can correct the points on the short and long axes.",
   "SciPy is not installed, so Auto-Endo / 壁厚 cannot run. In the app's environment run:\n\n    pip3 install scipy\n\nthen reopen and retry.": "SciPy is not installed, so Auto-Endo / Wall thickness cannot run. In the app's environment run:\n\n    pip3 install scipy\n\nthen reopen and retry.",
   "Selected: {n}": "Selected: {n}",
   "Set Auto": "Set Auto",

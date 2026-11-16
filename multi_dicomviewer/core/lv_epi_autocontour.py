@@ -379,7 +379,7 @@ def _edited_levels(model, amax, prev_levels):
 
 def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
                           level_fracs=_SAX_LEVEL_FRACS, keep_edits=False,
-                          mv_plane=None):
+                          mv_plane=None, tent_point=None):
     """Short-axis SPLINE correction of the Epi surface — PURELY GEOMETRIC (no HU).
 
     The user traces/edits the Epi on the long axis (incl. the long-axis range
@@ -405,7 +405,11 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
     rings.
 
     *mv_plane* ((c, n) of the MV plane): each wall's basal terminal is placed by
-    mv_terminal_point instead of on the base ring."""
+    mv_terminal_point instead of on the base ring.
+
+    *tent_point* (the MV-AoV point of the tent): each wall runs INTO it — ring
+    points at / past its level are dropped and the point is the terminal (it
+    wins over *mv_plane*)."""
     stats = {"mode": "spline-geom", "levels": 0, "planes": 0, "extra_levels": 0}
     axis = getattr(model, "epi_axis", None)
     if axis is None or len(getattr(model, "epi_contours", {})) < 3:
@@ -459,6 +463,11 @@ def refine_epi_short_axis(vol, dims, model, prm=None, harmonics=4,
         def _wall(th, ci):
             w = [axis.to_world(th, max(0.0, float(ring[li, ci])), levels[li])
                  for li in range(len(levels)) if np.isfinite(ring[li, ci])]
+            if tent_point is not None and len(w) >= 1:
+                TP = np.asarray(tent_point, float)
+                a_end = float((TP - axis.apex) @ axis.axis)
+                return [P for P in w
+                        if float((P - axis.apex) @ axis.axis) < a_end - 0.5] + [TP]
             if mv_plane is not None and len(w) >= 2:
                 end = mv_terminal_point(axis, th, mv_plane[0], mv_plane[1], w[-2])
                 a_end = float((end - axis.apex) @ axis.axis)

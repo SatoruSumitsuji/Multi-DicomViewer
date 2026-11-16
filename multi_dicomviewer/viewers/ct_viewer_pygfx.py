@@ -1762,6 +1762,9 @@ class _Overlay(QWidget):
                 p.drawPolyline(QPolygonF([
                     S((-ahs, y - ah + ahs)), S((0.0, y - ah)),
                     S((ahs, y - ah + ahs))]))
+                # The trace guides (⟂ axis at 1/16 … 15/16) stay on the
+                # long-axis pane while correcting in SAX, as while tracing.
+                self._paint_lv_axis_guides(p, key, S)
             return
         # LONG-AXIS view: base-cut line ⟂ the axis at the common basal level.
         if key != lv.get("pane"):
@@ -17064,6 +17067,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return
         if self._lv_sax_btn.isChecked():
             self._lv_capture_current()
+            # Epi not yet HU-corrected → HU＋スプライン補正 automatically.
+            self._lv_hu_snap_epi(auto=True)
             m = lv["model"]
             endo_ok = m.endo_axis is not None and len(m.endo_contours) >= 3
             epi_ok = m.epi_axis is not None and len(m.epi_contours) >= 3
@@ -19032,7 +19037,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._lv_sync_buttons()
         self._lv_update_text()
 
-    def _lv_hu_snap_epi(self) -> None:
+    def _lv_hu_snap_epi(self, auto: bool = False) -> None:
         """HU補正: snap the traced Epi border to the epicardial edge in the CT
         where the HU gradient is clear (前壁/側壁/下壁), leaving it on the manual
         spline where the HU difference is small (inferior wall). Then the user
@@ -19044,6 +19049,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if lv is not None and lv.get("phase") == "contour":
             self._lv_capture_current()
         model = lv.get("model") if lv else None
+        if auto and (model is None or model.epi_hu_done
+                     or getattr(model, "epi_axis", None) is None
+                     or len(getattr(model, "epi_contours", {})) < 3):
+            return               # SAX entry: only a not-yet-corrected Epi
         if (self._vol is None or model is None
                 or getattr(model, "epi_axis", None) is None
                 or not getattr(model, "epi_planes", None)):
@@ -19076,7 +19085,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # …then straight into the short-axis spline on the DEFAULT rings
             # (apex excluded, 8 levels) → sparse edit points, not a dense line.
             sp = ea.refine_epi_short_axis(self._vol, self._dims, model,
-                                          mv_plane=self._lv_mv_plane())
+                                          mv_plane=self._lv_mv_plane(),
+                                          tent_point=self._lv_tent_point())
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -19086,6 +19096,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_invalidate_volume()
         model.epi_hu_done = True                 # button colour + re-run warning
         self._lv_after_spline(model)
+        if auto:                                 # SAX entry: no dialog
+            self._lvv_prompt(t(
+                "SAX に入ったので Epi に HU＋スプライン補正を自動で適用しました"
+                "（{p} 面、短軸 {L} 断面）。短軸・長軸で点を修正できます。",
+                p=stats.get("planes", 0), L=sp.get("levels", 0)))
+            return
         QMessageBox.information(
             self.window(), t("Epi HU＋スプライン補正"),
             t("HU補正：{p} 面 / {n} 点を心外膜エッジに適合（平均適合度 {w:.2f}）。\n"
@@ -19117,7 +19133,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             from multi_dicomviewer.core import lv_epi_autocontour as ea
             stats = ea.refine_epi_short_axis(self._vol, self._dims, model,
                                              keep_edits=True,
-                                             mv_plane=self._lv_mv_plane())
+                                             mv_plane=self._lv_mv_plane(),
+                                             tent_point=self._lv_tent_point())
             try:
                 model.build()
             except Exception:                            # noqa: BLE001
@@ -19139,9 +19156,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               p=stats.get("planes", 0)))
 
     def _lv_mv_plane(self):
-        """(c, n) of the MV plane for the spline's terminals, or None."""
+        """(c, n) of the MV plane for the spline's terminals, or None (also in
+        the MV-AoV mode: the walls end at the point — _lv_tent_point)."""
         mv = self._lv_valves.get("mitral")
-        if mv is None:
+        if mv is None or self._lv_mvaov_on():
             return None
         n = np.asarray(mv[1], float)
         return (np.asarray(mv[0], float), n / (float(np.linalg.norm(n)) or 1.0))

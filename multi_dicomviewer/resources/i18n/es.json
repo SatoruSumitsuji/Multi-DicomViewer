@@ -1011,6 +1011,7 @@
   "S-Zoom": "S-Zoom",
   "SAX": "SAX",
   "SAX {mm:.0f}mm": "SAX {mm:.0f}mm",
+  "SAX に入ったので Epi に HU＋スプライン補正を自動で適用しました（{p} 面、短軸 {L} 断面）。短軸・長軸で点を修正できます。": "Al entrar en SAX se aplicó automáticamente la corrección HU + spline del Epi ({p} planos, {L} niveles de eje corto). Puede corregir los puntos en los ejes corto y largo.",
   "STL": "STL",
   "STL export failed: {err}": "Error al exportar STL: {err}",
   "Same as source": "Igual que el origen",
