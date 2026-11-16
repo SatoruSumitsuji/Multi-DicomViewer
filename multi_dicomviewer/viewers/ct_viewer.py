@@ -4101,10 +4101,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # ---- Coronary short-axis (CPR) entry, LEFT of the LV group: an explicit
         # one-click start for "trace the vessel centreline → build the short-axis
         # MPR", so the user need not discover the trace's right-click menu. ----
-        cor_cap = QLabel(t("Coronary:"))
+        cor_cap = QLabel(t("CoronaryTree:"))
         cf = cor_cap.font(); cf.setBold(True); cor_cap.setFont(cf)
         self._coro_cap = cor_cap
         row1.addWidget(cor_cap)
+        # CoronaryTree: Load — open a saved .corotree.json (the whole tree at once).
+        self._coro_load_btn = FitButton(t("Load"))
+        self._coro_load_btn.setHelpToolTip(t(
+            "保存した .corotree.json を読み込み、CoronaryTree を一括で表示します。"))
+        self._coro_load_btn.clicked.connect(lambda _=False: self._coro_load_tree())
+        row1.addWidget(self._coro_load_btn)
         self._coronary_mpr_btn = FitButton(t("CPR"))
         self._coronary_mpr_btn.setCheckable(True)
         self._coronary_mpr_btn.setHelpToolTip(
@@ -4124,7 +4130,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_file_label.setStyleSheet("color:#b8860b;")
         self._coro_file_label.setVisible(False)
         row1.addWidget(self._coro_file_label)
-        # 「VR: [Open VR] [Set Epi-Data] <Epi file>」 (shared, CPRMixin).
+        # [Open VR] [回転連動] — CoronaryTree support
+        # tools in the same row (shared, CPRMixin; no 「VR:」 caption).
         self._cpr_vr_build_group(row1)
         self._coro_spacer_w = QWidget()      # the 12-px gap between the two groups
         self._coro_spacer_w.setFixedWidth(12)
@@ -4775,7 +4782,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # selectors + FullLV + filename) are toggled as units by _apply_file_context
         # so a .corotree drop shows only the Coronary half and a .FullLv drop only
         # the LV half (see _bottom_ctx). The 12-px spacer shows only when BOTH do.
-        self._coro_group_widgets = [self._coro_cap, self._coronary_mpr_btn,
+        self._coro_group_widgets = [self._coro_cap, self._coro_load_btn,
+                                    self._coronary_mpr_btn,
                                     self._coro_file_label]
         # NOTE: _lv_endo_btn is a hidden internal flag (merged into Blood/Endo) —
         # excluded so it is never force-shown.
@@ -5499,6 +5507,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                         d.setdefault("volume", {})["epi_ml"] = \
                             float(self._lv["vol_epi_ml"])
                     self._lvv_epi_model_dict = d
+                    # Unchanged since its load / save → an EpiLv.json Epi (the
+                    # CoronaryTree priority); unsaved edits → the LV-mode Epi.
+                    if not getattr(self, "_lv_dirty", True):
+                        self._lvv_epi_file_dict = d
                     self._lvv_epi_ml = None      # re-read from the new dict
                     # Reuse the Epi TRACE mode's valve-clipped region (which
                     # reaches the MV plane) as the Blood/Endo Epi-border source,
@@ -6200,6 +6212,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lvv_epi_surf = model.epi
         self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
         self._lvv_epi_model_dict = data
+        self._lvv_epi_file_dict = data       # a loaded EpiLv / FullLv Epi
         self._lvv_epi_ml = None                  # new Epi → its own volume
         self._lvv_invalidate_epi_disp()          # new Epi → rebuild the line mask
         if getattr(self, "_lvv_epi_show", False):

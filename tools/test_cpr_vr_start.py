@@ -226,16 +226,12 @@ h._center = np.asarray(h._pc["B"], float) + np.array([3.0, -2.0, 1.5])
 h._vr_view_saved = {"A": {"cam": "old"}}
 h._vr_pan = {"A": [5.0, -4.0], "B": [0.0, 0.0]}
 h._cpr_vr_sync_btn = lambda: None
-h._cpr_vr_epi_choice = lambda: None              # キャンセル
-h._cpr_vr_toggle()
-chk("toggle: Epi choice キャンセル → VR stays off",
-    not h._cpr_vr_active() and ("vr", "A", True) not in calls)
-calls.clear()
-h._coronary_mpr_pending = False
-h._cpr_vr_epi_choice = lambda: True              # Epi を使う
+h._cpr_vr_group_sync = lambda: None
+# No Epi for this 3DCT → Open VR goes straight to the 70 mm sphere (no question).
 h._cpr_vr_toggle()
 chk("toggle on: arms Draw, VR on pane A", calls[:2] == ["draw", ("vr", "A", True)]
-    and h._cpr_vr_active() and not h._cpr_vr_no_epi)
+    and h._cpr_vr_active())
+chk("toggle on, no Epi: the 70 mm sphere, no question", h._cpr_vr_no_epi)
 chk("toggle on: VR centred on the centreline crossing",
     np.allclose(h._cpr_vr_center, h._center))
 chk("toggle on: last VR camera / pan dropped (fresh, centred view)",
@@ -246,14 +242,14 @@ chk("toggle off: VR off, state cleared", calls[-1] == ("vr", "A", False)
 h._cpr_vr_stop()
 chk("stop when off is a no-op", calls[-1] == ("vr", "A", False)
     and len(calls) == 3)
-
-# ---- 「なし」: the Epi is ignored → heart sphere only
-h._vr_epi_full_mask = lambda: epi_
-h._cpr_vr_epi_choice = lambda: False
+# An Epi in memory → the band around it, automatically.
+h._lvv_epi_model_dict = {"region": {}}
+h._coronary_mpr_pending = False
 h._cpr_vr_toggle()
-chk("なし: VR on, no-Epi flag set", h._cpr_vr_active() and h._cpr_vr_no_epi)
-chk("なし: crop is the heart sphere even with an Epi",
-    np.array_equal(h._cpr_vr_crop_mask(), h._cpr_vr_sphere_mask()))
+chk("toggle on with an Epi: the Epi band (no question)",
+    h._cpr_vr_active() and not h._cpr_vr_no_epi)
+h._lvv_epi_model_dict = None
+h._vr_epi_full_mask = lambda: epi_           # (VR stays on for the cross checks)
 
 # ---- the map pane B's centreline crossing "+" for the VR
 h._frame = {"B": (np.array([1.0, 0, 0]), np.array([0, 1.0, 0]),
@@ -289,28 +285,6 @@ chk("band cache: a new Epi rebuilds", len(built) == 2 and b3 is not b1)
 h._cpr_vr_no_epi = True
 chk("band cache: なし still gives the sphere", not np.array_equal(h._cpr_vr_crop_mask(), b3))
 h._cpr_vr_no_epi = False
-# The same EpiLv file chosen again → its band is kept (no rebuild).
-import json as _json, tempfile as _tf
-_fp = os.path.join(_tf.mkdtemp(), "c.EpiLv.json")
-with open(_fp, "w", encoding="utf-8") as _f:
-    _json.dump({"region": {}}, _f)
-from PyQt6.QtWidgets import QFileDialog as _QFD
-_QFD.getOpenFileName = staticmethod(lambda *a, **k: (_fp, ""))
-h.window = lambda: None
-h._lvv_apply_epi_data = lambda data: setattr(h, "_lvv_epi_model_dict", data)
-h._cpr_vr_load_epi_file()
-h._cpr_vr_crop_mask()
-n0 = len(built)
-h._lvv_epi_model_dict = None                     # e.g. LV Exit dropped the Epi
-h._cpr_vr_load_epi_file()                        # the same file again
-h._cpr_vr_crop_mask()
-chk("band cache: the same EpiLv file again → no rebuild", len(built) == n0)
-h._lvv_epi_model_dict = {"region": {}}           # another Epi in between
-h._cpr_vr_crop_mask()
-h._cpr_vr_load_epi_file()
-h._cpr_vr_crop_mask()
-chk("band cache: not mixed up with another Epi's band (rebuilt for the file)",
-    len(built) == n0 + 2)
 del h._vr_epi_full_mask
 
 print("\nALL PASS" if not fails else f"\n{len(fails)} FAIL: {fails}")

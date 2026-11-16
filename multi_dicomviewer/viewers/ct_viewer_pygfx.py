@@ -12213,6 +12213,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     except Exception:                   # noqa: BLE001
                         pass
                     self._lvv_epi_model_dict = d
+                    # Unchanged since its load / save → an EpiLv.json Epi (the
+                    # CoronaryTree priority); unsaved edits → the LV-mode Epi.
+                    if not getattr(self, "_lv_dirty", True):
+                        self._lvv_epi_file_dict = d
         except Exception:                               # noqa: BLE001
             pass
 
@@ -13003,10 +13007,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # ---- Coronary short-axis (CPR) entry, LEFT of the LV group: an explicit
         # one-click start for "trace the vessel centreline → build the short-axis
         # MPR", so the user need not discover the trace's right-click menu. ----
-        cor_cap = QLabel(t("Coronary:"))
+        cor_cap = QLabel(t("CoronaryTree:"))
         cf = cor_cap.font(); cf.setBold(True); cor_cap.setFont(cf)
         self._coro_cap = cor_cap
         row1.addWidget(cor_cap)
+        # CoronaryTree: Load — open a saved .corotree.json (the whole tree at once).
+        self._coro_load_btn = FitButton(t("Load"))
+        self._coro_load_btn.setHelpToolTip(t(
+            "保存した .corotree.json を読み込み、CoronaryTree を一括で表示します。"))
+        self._coro_load_btn.clicked.connect(lambda _=False: self._coro_load_tree())
+        row1.addWidget(self._coro_load_btn)
         self._coronary_mpr_btn = FitButton(t("CPR"))
         self._coronary_mpr_btn.setCheckable(True)
         self._coronary_mpr_btn.setHelpToolTip(
@@ -13025,7 +13035,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coro_file_label.setStyleSheet("color:#b8860b;")
         self._coro_file_label.setVisible(False)
         row1.addWidget(self._coro_file_label)
-        # 「VR: [Open VR] [Set Epi-Data] <Epi file>」 (shared, CPRMixin).
+        # [Open VR] [回転連動] — CoronaryTree support
+        # tools in the same row (shared, CPRMixin; no 「VR:」 caption).
         self._cpr_vr_build_group(row1)
         self._coro_spacer_w = QWidget()          # the 12-px gap between the halves
         self._coro_spacer_w.setFixedWidth(12)
@@ -13394,7 +13405,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # half, a .FullLv drop only the LV half (see _apply_file_context). The 12-px
         # spacer shows only when BOTH do. _lv_endo_btn is a hidden internal flag,
         # excluded so it is never force-shown.
-        self._coro_group_widgets = [self._coro_cap, self._coronary_mpr_btn,
+        self._coro_group_widgets = [self._coro_cap, self._coro_load_btn,
+                                    self._coronary_mpr_btn,
                                     self._coro_file_label]
         self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
                               self._lv_epi_btn,
@@ -16097,6 +16109,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lvv_epi_surf = model.epi
         self._lvv_epi_apex = np.asarray(model.epi_axis.apex, float)
         self._lvv_epi_model_dict = data
+        self._lvv_epi_file_dict = data       # a loaded EpiLv / FullLv Epi
         self._lvv_epi_ml = None
         # New Epi → drop the cached border mask so it rebuilds for THIS Epi
         # (_lvv_ensure_epi_mask returns the cache without checking identity).
@@ -19303,6 +19316,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                         except Exception:               # noqa: BLE001
                             pass
                         self._lvv_epi_model_dict = d
+                        # Unchanged since its load / save → an EpiLv.json Epi (the
+                        # CoronaryTree priority); unsaved edits → the LV-mode Epi.
+                        if not getattr(self, "_lv_dirty", True):
+                            self._lvv_epi_file_dict = d
         except Exception:                               # noqa: BLE001
             pass
         # Keep a hand-edited Endo (Manual-Endo) so it is retained across HU

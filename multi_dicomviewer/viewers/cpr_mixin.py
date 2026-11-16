@@ -1155,16 +1155,12 @@ class CPRMixin:
     _CPR_EPI_RGB = (0, 220, 120)
 
     def _cpr_epi_surface(self):
-        """The Epi surface (LVSurface) of this CT if one is in memory — a
-        traced Epi, or a loaded EpiLv / FullLv (built once) — else None."""
-        surf = getattr(self, "_lvv_epi_surf", None)
-        if surf is None:
-            lv = getattr(self, "_lv", None)
-            m = lv.get("model") if isinstance(lv, dict) else None
-            surf = getattr(m, "epi", None) if m is not None else None
+        """The Epi surface (LVSurface) the CoronaryTree tools use — the
+        _coro_epi pick (FullLv.json > EpiLv.json > LV-mode Epi), built once from
+        its dict when needed — else None."""
+        _k, md, surf = self._coro_epi()
         if surf is not None:
             return surf
-        md = getattr(self, "_lvv_epi_model_dict", None)
         if not isinstance(md, dict):
             return None
         cache = getattr(self, "_cpr_epi_surf_cache", None)
@@ -2085,19 +2081,44 @@ class CPRMixin:
             return band
         return self._cpr_vr_sphere_mask()
 
-    def _cpr_vr_epi_source(self):
-        """The object the VR Epi crop is derived from (same priority as
-        _cpr_vr_epi_region): the loaded EpiLv / FullLv dict when it has a
-        packed region, else the Epi surface. A new load / trace gives a new
-        object, so the band cache keyed on it is rebuilt. None = no Epi."""
+    def _coro_epi(self):
+        """The ONE Epi the CoronaryTree tools use — the VR crop, the short-axis
+        Epi line (CPR → Epi) and the gap-point snap — by fixed priority:
+
+        1. "fulllv": the FullLv.json loaded for this 3DCT (its Epi is kept
+           aside when it is applied, so a later EpiLv load can't replace it);
+        2. "epilv":  an EpiLv.json Epi — loaded (drop / LV Load / Blood Load
+           Epi) or saved and unchanged since;
+        3. "lv":     an Epi made in LV mode and not saved (unsaved edits).
+
+        Returns (kind, dict_or_None, surf_or_None); (None, None, None) when this
+        3DCT has no Epi (→ the VR uses the 70 mm sphere)."""
+        vol = getattr(self, "_vol", None)
+        snap = getattr(self, "_full_lv_epi_snap", None)
+        if (snap is not None and vol is not None and snap[0]() is vol
+                and (snap[1] is not None or snap[2] is not None)):
+            return "fulllv", snap[1], snap[2]
         d = getattr(self, "_lvv_epi_model_dict", None)
+        d = d if isinstance(d, dict) else None
+        surf = getattr(self, "_lvv_epi_surf", None)
+        if d is not None or surf is not None:
+            loaded = d is not None and d is getattr(self, "_lvv_epi_file_dict", None)
+            return ("epilv" if loaded else "lv"), d, surf
+        lv = getattr(self, "_lv", None)
+        m = lv.get("model") if isinstance(lv, dict) else None
+        s2 = getattr(m, "epi", None) if m is not None else None
+        if s2 is not None:
+            return "lv", None, s2
+        return None, None, None
+
+    def _cpr_vr_epi_source(self):
+        """The object the VR Epi crop is derived from (the _coro_epi pick): its
+        dict when it has a packed region, else its surface. A new load / trace
+        gives a new object, so the band cache keyed on it is rebuilt. None = no
+        Epi."""
+        _k, d, surf = self._coro_epi()
         if isinstance(d, dict) and isinstance(d.get("region"), dict):
             return d
-        surf = getattr(self, "_lvv_epi_surf", None)
-        if surf is None:
-            lv = getattr(self, "_lv", None)
-            m = lv.get("model") if isinstance(lv, dict) else None
-            surf = getattr(m, "epi", None) if m is not None else None
         return surf
 
     #: Epi band for the start VR: from _CPR_VR_EPI_IN_MM inside the Epi
@@ -2148,15 +2169,15 @@ class CPRMixin:
         vol = getattr(self, "_vol", None)
         if vol is None:
             return None
-        f = getattr(self, "_vr_epi_full_mask", None)
-        epi = f() if callable(f) else None
+        kind, d, surf = self._coro_epi()
+        epi = None
+        if kind == "fulllv" and d is not getattr(self, "_lvv_epi_model_dict", None):
+            epi = self._cpr_unpack_region(d)     # the kept FullLv Epi
+        else:
+            f = getattr(self, "_vr_epi_full_mask", None)
+            epi = f() if callable(f) else None   # the live Epi slot's region
         if epi is not None and np.asarray(epi).any():
             return epi
-        surf = getattr(self, "_lvv_epi_surf", None)
-        if surf is None:
-            lv = getattr(self, "_lv", None)
-            m = lv.get("model") if isinstance(lv, dict) else None
-            surf = getattr(m, "epi", None) if m is not None else None
         if surf is None:
             return None
         cache = getattr(self, "_cpr_vr_epi_cache", None)
@@ -2192,6 +2213,29 @@ class CPRMixin:
         full[z0:z1, y0:y1, x0:x1] = comp
         self._cpr_vr_epi_cache = (surf, vol.shape, full)
         return full
+
+    def _cpr_unpack_region(self, d):
+        """Full-volume bool [z,y,x] mask from an Epi dict's packed "region"
+        (None when it has none / another volume shape)."""
+        reg = d.get("region") if isinstance(d, dict) else None
+        vol = getattr(self, "_vol", None)
+        if not isinstance(reg, dict) or vol is None:
+            return None
+        try:
+            import base64
+            import zlib
+            if [int(x) for x in reg.get("vol_shape", [])] != [int(x) for x in vol.shape]:
+                return None
+            shape = tuple(int(x) for x in reg["shape"])
+            z0, z1, y0, y1, x0, x1 = (int(x) for x in reg["bbox"])
+            raw = zlib.decompress(base64.b64decode(reg["packed"]))
+            comp = np.unpackbits(np.frombuffer(raw, np.uint8))[
+                :int(np.prod(shape))].reshape(shape).astype(bool)
+            full = np.zeros(vol.shape, bool)
+            full[z0:z1, y0:y1, x0:x1] = comp
+            return full
+        except Exception:                        # noqa: BLE001
+            return None
 
     def _cpr_vr_sphere_mask(self):
         """Bool [z,y,x] sphere of _CPR_VR_CROP_MM around the start-VR centre."""
@@ -2483,14 +2527,11 @@ class CPRMixin:
         if not getattr(self, "_coronary_mpr_pending", False):
             self._cpr_vr_sync_btn()
             return
-        # Which Epi bounds the VR crop: asked only on the FIRST Open VR after a
-        # 3DCT load (EpiLv.json / なし / キャンセル); later ones reuse it. Change
-        # it any time with 「Set Epi-Data」. A loaded FullLv's Epi is always used.
-        use = self._cpr_vr_epi_for_open()
-        if use is None:
-            self._cpr_vr_sync_btn()
-            return
-        self._cpr_vr_no_epi = not use
+        # The VR crop: the band around the Epi when this 3DCT has one (the
+        # _coro_epi pick: FullLv.json > EpiLv.json > LV-mode Epi), else the 70 mm
+        # sphere around the crossing. No question.
+        self._cpr_vr_no_epi = self._coro_epi()[0] is None
+        self._cpr_vr_group_sync()
         self._cpr_vr_on = True
         self._cpr_vr_start = None
         # Centre the VR on the centreline crossing (as seen on the map pane B),
@@ -2554,81 +2595,21 @@ class CPRMixin:
             return lambda: obj
 
     def _cpr_mark_full_lv(self) -> None:
-        """apply_full_lv: a FullLv.json (the upper-level data) is loaded for
-        this 3DCT — its Epi is used for the VR and EpiLv.json can't be chosen."""
+        """apply_full_lv / Territory entry: a FullLv.json (the upper-level data)
+        is loaded for this 3DCT — keep ITS Epi aside, so it stays the first
+        choice of the CoronaryTree tools even if an EpiLv is loaded later."""
         self._full_lv_vol_ref = self._cpr_ref(getattr(self, "_vol", None))
         self._full_lv_name = getattr(self, "_lv_file_name", "") or ""
+        d = getattr(self, "_lvv_epi_model_dict", None)
+        surf = getattr(self, "_lvv_epi_surf", None)
+        # Only an Epi that came from the file (apply_full_lv); the Territory
+        # light entry with an in-session LV keeps its LV-mode Epi as "lv".
+        if isinstance(d, dict) and d is getattr(self, "_lvv_epi_file_dict", None):
+            self._full_lv_epi_snap = (self._full_lv_vol_ref, d, surf)
         self._cpr_vr_group_sync()
 
     def _cpr_full_lv_on(self) -> bool:
-        r = getattr(self, "_full_lv_vol_ref", None)
-        vol = getattr(self, "_vol", None)
-        return (r is not None and vol is not None and r() is vol
-                and self._cpr_vr_epi_source() is not None)
-
-    def _cpr_vr_epi_record(self, use: bool) -> None:
-        """Remember the Epi choice for this 3DCT (until the next load)."""
-        src = self._cpr_vr_epi_source() if use else None
-        fn = getattr(self, "_cpr_vr_epi_file", None)
-        name = fn[0] if (use and fn is not None and fn[1] is src) else ""
-        self._cpr_vr_epi_dec = {
-            "vol": self._cpr_ref(getattr(self, "_vol", None)),
-            "mode": ("file" if name else "mem") if use else "none",
-            "name": name, "src": src}
-
-    def _cpr_vr_epi_status(self):
-        """(kind, file name) of the VR Epi for this 3DCT: kind "fulllv" (a
-        loaded FullLv.json), "file" (an EpiLv.json), "mem" (an Epi already in
-        memory), "none" (なし) or None (not decided yet → asked at Open VR)."""
-        if self._cpr_full_lv_on():
-            nm = getattr(self, "_lv_file_name", "") or ""
-            if nm:
-                self._full_lv_name = nm
-            return "fulllv", getattr(self, "_full_lv_name", "") or ""
-        dec = getattr(self, "_cpr_vr_epi_dec", None)
-        vol = getattr(self, "_vol", None)
-        if dec is None or vol is None or dec["vol"]() is not vol:
-            return None, ""
-        if dec["mode"] == "none":
-            return "none", ""
-        src = self._cpr_vr_epi_source()
-        if src is None:
-            return None, ""                      # the Epi was dropped → ask again
-        if src is dec["src"]:
-            return dec["mode"], dec["name"]
-        return "mem", ""                         # another Epi loaded / traced since
-
-    def _cpr_vr_epi_for_open(self):
-        """Open VR: True = crop with the Epi, False = なし, None = cancelled.
-        Asks only when nothing is decided for this 3DCT yet."""
-        kind, _n = self._cpr_vr_epi_status()
-        if kind in ("fulllv", "file", "mem"):
-            return True
-        if kind == "none":
-            return False
-        use = self._cpr_vr_epi_choice()
-        if use is not None:
-            self._cpr_vr_epi_record(use)
-        self._cpr_vr_group_sync()
-        return use
-
-    def _cpr_epi_set_clicked(self) -> None:
-        """「Set Epi-Data」: register / change the VR Epi (EpiLv.json or なし)
-        at any time; an open VR is re-cropped at once."""
-        from PyQt6.QtWidgets import QMessageBox
-        if self._cpr_full_lv_on():
-            QMessageBox.information(
-                self.window(), t("Set Epi-Data"),
-                t("FullLv.json が読み込み済みです。FullLv.json（上位データ）の Epi を"
-                  "使うため、EpiLv.json は選択できません。"))
-            return
-        use = self._cpr_vr_epi_choice(title=t("Set Epi-Data"))
-        if use is None:
-            return
-        self._cpr_vr_epi_record(use)
-        self._cpr_vr_no_epi = not use
-        self._cpr_vr_group_sync()
-        self._cpr_vr_refresh_crop()
+        return self._coro_epi()[0] == "fulllv"
 
     def _cpr_vr_refresh_crop(self) -> None:
         """Re-crop an open CPR VR after the Epi changed (keeps its view)."""
@@ -2641,13 +2622,11 @@ class CPRMixin:
         self._cpr_vr_sync_btn()
 
     def _cpr_vr_build_group(self, row) -> None:
-        """「VR: [Open VR] [Set Epi-Data] <Epi file>」, right of Coronary: CPR
-        (row 2). Shown while the CPR mode is on."""
+        """[Open VR] <Epi in use> [回転連動] — CoronaryTree support
+        tools placed in the CoronaryTree: row right of CPR (no caption of their
+        own). Shown while the CPR mode is on."""
         from PyQt6.QtWidgets import QLabel
         from multi_dicomviewer.ui.study_browser import FitButton
-        cap = QLabel(t("VR:"))
-        f = cap.font(); f.setBold(True); cap.setFont(f)
-        row.addWidget(cap)
         self._cpr_vr_btn = FitButton(t("Open VR"))
         self._cpr_vr_btn.setCheckable(True)
         self._cpr_vr_btn.setStyleSheet(
@@ -2658,18 +2637,9 @@ class CPRMixin:
             "位置の確認に使います。CPR線は右ペインで設定します。"))
         self._cpr_vr_btn.clicked.connect(lambda _=False: self._cpr_vr_toggle())
         row.addWidget(self._cpr_vr_btn)
-        self._cpr_epi_btn = FitButton(t("Set Epi-Data"))
-        self._cpr_epi_btn.setHelpToolTip(t(
-            "VRの切り抜きに使う Epi データ（EpiLv.json）を登録・変更します。"
-            "「なし」で未使用にできます。3DCTを読み込み直すまで保持されます。"))
-        self._cpr_epi_btn.clicked.connect(
-            lambda _=False: self._cpr_epi_set_clicked())
-        row.addWidget(self._cpr_epi_btn)
-        self._cpr_epi_lbl = QLabel("")
-        self._cpr_epi_lbl.setStyleSheet("color:#2e8b57;")
-        row.addWidget(self._cpr_epi_lbl)
         # 回転連動: when ON, a VR rotation turns the right pane's slab MIP to the
         # VR's viewing direction (on release). The centre always follows.
+        # Default ON (2026-11-16); the user's own choice is remembered.
         self._cpr_vr_rot_btn = FitButton(t("回転連動"))
         self._cpr_vr_rot_btn.setCheckable(True)
         self._cpr_vr_rot_btn.setStyleSheet(
@@ -2680,14 +2650,13 @@ class CPRMixin:
             "されます。"))
         try:
             from multi_dicomviewer.core import settings as _st
-            on = bool(_st.load_ui_state("cpr_vr_rot_follow", False))
+            on = bool(_st.load_ui_state("cpr_vr_rot_follow", True))
         except Exception:                        # noqa: BLE001
-            on = False
+            on = True
         self._cpr_vr_rot_btn.setChecked(on)
         self._cpr_vr_rot_btn.toggled.connect(self._cpr_vr_rot_toggled)
         row.addWidget(self._cpr_vr_rot_btn)
-        self._cpr_vr_group = [cap, self._cpr_vr_btn, self._cpr_epi_btn,
-                              self._cpr_epi_lbl, self._cpr_vr_rot_btn]
+        self._cpr_vr_group = [self._cpr_vr_btn, self._cpr_vr_rot_btn]
         for w in self._cpr_vr_group:
             w.setVisible(False)
 
@@ -2772,8 +2741,22 @@ class CPRMixin:
             except Exception:                    # noqa: BLE001
                 pass
 
+    def _coro_load_tree(self) -> None:
+        """CoronaryTree: Load — pick a saved .corotree.json and open it like a
+        drop (the source CT + the whole tree, CoronaryTreeモード)."""
+        from PyQt6.QtWidgets import QFileDialog
+        shell = self.window()
+        if shell is None or not hasattr(shell, "_open_coronary_tree_file"):
+            return
+        d = self._lv_series_dir() if hasattr(self, "_lv_series_dir") else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self.window(), t("冠動脈ツリーを読込"), d,
+            t("CoroTree (*.corotree.json)"))
+        if path:
+            shell._open_coronary_tree_file(path, to_territory=False)
+
     def _cpr_vr_group_sync(self) -> None:
-        """Visibility / texts of the 「VR:」 group."""
+        """Visibility / texts of the VR support tools (Open VR / 回転連動)."""
         ws = getattr(self, "_cpr_vr_group", None)
         if not ws:
             return
@@ -2783,107 +2766,7 @@ class CPRMixin:
                      or getattr(self, "_cpr", None) is not None))
         for w in ws:
             w.setVisible(show)
-        kind, name = self._cpr_vr_epi_status()
-        if kind == "fulllv":
-            txt = t("FullLv.json読み込み済み") + (f"（{name}）" if name else "")
-        elif kind == "file":
-            txt = name
-        elif kind == "mem":
-            txt = t("読込済みEpi")
-        elif kind == "none":
-            txt = t("なし")
-        else:
-            txt = t("未登録")
-        self._cpr_epi_lbl.setText(txt)
-        self._cpr_epi_lbl.setStyleSheet(
-            "color:#2e8b57;" if kind in ("fulllv", "file", "mem")
-            else "color:#888888;")
-        self._cpr_epi_btn.setEnabled(kind != "fulllv")
         self._cpr_vr_sync_btn()
-
-    def _cpr_vr_epi_choice(self, title=None):
-        """VR表示: ask which Epi bounds the VR crop. True = use an Epi (the one
-        in memory, or an EpiLv.json chosen now), False = なし (heart sphere
-        only), None = キャンセル. A cancelled / failed file pick asks again."""
-        from PyQt6.QtWidgets import QMessageBox
-        while True:
-            have = self._cpr_vr_has_epi()
-            box = QMessageBox(self.window())
-            box.setWindowTitle(title or t("VR表示"))
-            box.setIcon(QMessageBox.Icon.Question)
-            msg = t("関連づいた EpiLv.json ファイルがある場合には選択してください。"
-                    "ない場合は「なし」を選択してください。")
-            if have:
-                msg += "\n\n" + t("読み込み済みの Epi があります。そのまま使う場合は"
-                                  "「読込済みEpiを使用」を選んでください。")
-            box.setText(msg)
-            b_cur = (box.addButton(t("読込済みEpiを使用"),
-                                   QMessageBox.ButtonRole.AcceptRole)
-                     if have else None)
-            b_file = box.addButton(t("EpiLv.jsonを選択"),
-                                   QMessageBox.ButtonRole.ActionRole)
-            b_none = box.addButton(t("なし"), QMessageBox.ButtonRole.ActionRole)
-            b_can = box.addButton(t("キャンセル"),
-                                  QMessageBox.ButtonRole.RejectRole)
-            box.setDefaultButton(b_cur if b_cur is not None else b_file)
-            box.setEscapeButton(b_can)
-            box.exec()
-            c = box.clickedButton()
-            if b_cur is not None and c is b_cur:
-                return True
-            if c is b_none:
-                return False
-            if c is b_file:
-                if self._cpr_vr_load_epi_file():
-                    return True
-                continue                             # file dialog cancelled
-            return None
-
-    def _cpr_vr_load_epi_file(self) -> bool:
-        """Pick an EpiLv.json (series folder first) and make it the Epi in
-        memory (the same Epi LV Vol uses). Warns on a different series."""
-        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-        import json
-        d = self._lv_save_dir() if hasattr(self, "_lv_save_dir") else ""
-        path, _ = QFileDialog.getOpenFileName(
-            self.window(), t("Load Epi data"), d,
-            "Epi LV (*.EpiLv.json);;JSON (*.json)")
-        if not path:
-            return False
-        try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            saved = (data.get("series") or {}).get("series_uid", "")
-            cur = (self._lv_series_meta().get("series_uid", "")
-                   if hasattr(self, "_lv_series_meta") else "")
-            if saved and cur and saved != cur:
-                if QMessageBox.question(
-                        self.window(), t("VR表示"),
-                        t("This Epi file was saved for a DIFFERENT series — it "
-                          "may not line up. Load anyway?")) \
-                        != QMessageBox.StandardButton.Yes:
-                    return False
-            import os
-            try:
-                tag = (os.path.normcase(os.path.abspath(path)),
-                       os.path.getmtime(path))
-            except OSError:
-                tag = None
-            self._lvv_apply_epi_data(data)
-            # The SAME file chosen again (e.g. after an LV Exit dropped the Epi)
-            # → keep its already-built VR band instead of rebuilding it.
-            src = self._cpr_vr_epi_source()
-            cache = getattr(self, "_cpr_vr_band_cache", None)
-            if (tag is not None and src is not None and cache is not None
-                    and len(cache) > 4 and cache[4] == tag):
-                self._cpr_vr_band_cache = (src,) + tuple(cache[1:])
-            self._cpr_vr_band_file = (tag, src)
-            self._cpr_vr_epi_file = (os.path.basename(path), src)
-            return True
-        except Exception as exc:                     # noqa: BLE001
-            QMessageBox.warning(self.window(), t("VR表示"),
-                                t("Epi を読み込めませんでした：{e}").format(e=exc))
-            return False
 
     def _cpr_vr_stop(self) -> None:
         """Leave the start VR (CPR built / Draw disarmed / Exit / button)."""
