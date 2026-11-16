@@ -13507,7 +13507,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p.render()
         if not on:
             self._refresh(reset_cam=False)          # rebuild the MPR overlays
-            if not any(self._vr_on.values()):       # left the territory VR layout
+            if (not any(self._vr_on.values())       # left the territory VR layout
+                    and not getattr(self, "_vr_retoggle", False)):
                 self._territory_display = False
                 self._refresh_tool_availability()
                 self._terr_bar_sync()               # restore the LV / Coronary bars
@@ -13519,7 +13520,16 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         the already-hidden MPR props as 'nothing hidden' and the VR camera as the
         'MPR camera', so VR off could never bring the image back (black pane)."""
         if on and self._vr_on.get(key):
-            self._vr_set(key, False)
+            # A RE-toggle, not a real exit: the "last VR off → leave Territory"
+            # rule must not fire (Mac parity). A FullLv re-applied while its VR
+            # was open (FullLv + corotree drops) otherwise dropped the Territory
+            # state with VR still on — the mode bar then showed LV and no mode
+            # switch ever turned that VR off.
+            self._vr_retoggle = True
+            try:
+                self._vr_set(key, False)
+            finally:
+                self._vr_retoggle = False
         return self.pane[key]
 
     def _vr_toggle(self, key) -> None:
@@ -21114,6 +21124,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         into the viewport, not the oversized diagonal-sized FOV square.
         Without this the visible image only fills ~max(W,H)/diag of the
         pane in the initial axial view."""
+        if (getattr(self, "_vr_on", None) or {}).get(key):
+            # A VR pane's camera is the 3-D perspective one, not the MPR camera:
+            # this 2-D fit would put it at the origin looking along +z (readout
+            # "LAO0 CRA90") with the heart out of view — a BLACK VR. Reached by
+            # the canvas resize refit (the Territory bar swap / dock relayout
+            # resizes pane B while _view_initial is set) and the deferred
+            # Blood/Endo default-zoom re-fit.
+            return
         p = self.pane[key]
         p.reslice.Update()
         cam = p.ren.GetActiveCamera()
