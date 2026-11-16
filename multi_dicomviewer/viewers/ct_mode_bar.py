@@ -96,6 +96,137 @@ class CTModeBarMixin:
         # Coronary / VR / LV row (the viewers place it there).
         self._ct_terr_button()
 
+    # ---- Territory: Blood / 壁厚3D / 壁厚短軸 (the review bar) ---------------
+    def _terr_toggle_blood(self) -> None:
+        """Territory: Blood — its OWN on/off toggle: ON = LV-Blood (水色, the
+        FullLv's blood, instant), OFF = no blood. Independent of 壁厚 (a 壁厚
+        on/off never changes it); never switches to the All-Blood tint."""
+        btn = getattr(self, "_terr_blood_btn", None)
+        want = bool(btn.isChecked()) if btn is not None else True
+        self._lv_set_blood("lv" if want else None)
+        self._terr_btn_states()
+
+    def _terr_toggle_thick(self, mode) -> None:
+        """Territory: 壁厚3D / 壁厚短軸 on/off. The LV handler hides the blood fill
+        when a heat map comes on (LV mode); here the Blood state is kept."""
+        blood = bool(getattr(self, "_lvv_mask_on", False))
+        tint = bool(getattr(self, "_lvv_hl_on", False))
+        self._lvv_set_thick_mode(mode)
+        if blood and not getattr(self, "_lvv_mask_on", False):
+            self._lv_set_blood("lv")
+        elif tint and not getattr(self, "_lvv_hl_on", False):
+            self._lv_set_blood("all")
+        self._terr_btn_states()
+
+    def _terr_btn_states(self) -> None:
+        """Territory bar buttons: checked + coloured background while ON (Blood
+        水色, 壁厚3D yellow, 壁厚短軸 magenta — the LV bar's colours); 壁厚3D ⇔
+        壁厚短軸 are exclusive — while one is on the other is greyed out."""
+        self._ctlv_sync()
+        if not getattr(self, "_territory_display", False):
+            return
+        style = getattr(self, "_lvv_style_toggle", None)
+        b = getattr(self, "_terr_blood_btn", None)
+        if b is not None:
+            on = (bool(getattr(self, "_lvv_mask_on", False))
+                  or bool(getattr(self, "_lvv_hl_on", False)))
+            b.blockSignals(True)
+            b.setChecked(on)
+            b.blockSignals(False)
+            if style is not None:
+                style(b, "#40e0ff", "black")
+        tm = getattr(self, "_lvv_thick_mode", None)
+        modes = getattr(self, "_THICK_MODES", {}) or {}
+        for m, attr in (("3d", "_terr_thick3d_btn"), ("sax", "_terr_thicksax_btn")):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            btn.blockSignals(True)
+            btn.setChecked(tm == m)
+            btn.blockSignals(False)
+            btn.setEnabled(tm is None or tm == m)
+            if style is not None and m in modes:
+                style(btn, modes[m][1], "black")
+
+    # ---- LV: 壁厚3D / 壁厚短軸 / CoronaryTree (LVモード, row 2) --------------
+    def _ct_targets_visible(self) -> bool:
+        """Territory Target points (dots + numbers, MPR and VR) belong to the
+        Territory review only — hidden in 標準 / LV / CoronaryTree (kept)."""
+        return bool(getattr(self, "_territory_display", False))
+
+    def _ctlv_tree_available(self) -> bool:
+        shell = self._ct_mode_shell()
+        if shell is None or not hasattr(shell, "ct_tree_overlay_on"):
+            return False
+        try:
+            return shell.ct_tree_overlay_on(self) is not None
+        except Exception:                        # noqa: BLE001
+            return False
+
+    def _ctlv_tree_toggle(self) -> None:
+        """LV: CoronaryTree — draw the coronary tree over the LV (view only) or
+        hide it again. Remembered while the CT stays open (LVモード re-entry)."""
+        btn = getattr(self, "_ctlv_tree_btn", None)
+        on = bool(btn.isChecked()) if btn is not None else False
+        if on and not self._ctlv_tree_available():
+            on = False
+        self._ct_lv_tree_on = on
+        if self._ct_current_mode() == "lv":
+            shell = self._ct_mode_shell()
+            if on and shell is not None and hasattr(shell, "ct_tree_show"):
+                try:
+                    shell.ct_tree_show(self, True)   # ツリー表示 ON in the dock
+                except Exception:                    # noqa: BLE001
+                    pass
+            self._ct_tree_suppressed = not on
+            self._ct_tree_apply()
+            self._ct_render()
+        self._ctlv_sync()
+
+    def _ctlv_sync(self) -> None:
+        """Show the LV group in LVモード only (3-D, no LV edit step open), with
+        coloured backgrounds while ON and 壁厚3D ⇔ 壁厚短軸 exclusive."""
+        grp = getattr(self, "_ctlv_group", None)
+        if not grp:
+            return
+        editing = False
+        f = getattr(self, "_lv_mode_active", None)
+        if callable(f):
+            try:
+                editing = bool(f())
+            except Exception:                    # noqa: BLE001
+                editing = False
+        show = (self._ct_current_mode() == "lv"
+                and getattr(self, "_mode", "3D") == "3D" and not editing)
+        for w in grp:
+            if w.isHidden() == show:
+                w.setVisible(show)
+        if not show:
+            return
+        style = getattr(self, "_lvv_style_toggle", None)
+        tm = getattr(self, "_lvv_thick_mode", None)
+        modes = getattr(self, "_THICK_MODES", {}) or {}
+        for m, attr in (("3d", "_ctlv_thick3d_btn"), ("sax", "_ctlv_thicksax_btn")):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            btn.blockSignals(True)
+            btn.setChecked(tm == m)
+            btn.blockSignals(False)
+            btn.setEnabled(tm is None or tm == m)
+            if style is not None and m in modes:
+                style(btn, modes[m][1], "black")
+        tb = getattr(self, "_ctlv_tree_btn", None)
+        if tb is not None:
+            avail = self._ctlv_tree_available()
+            on = bool(getattr(self, "_ct_lv_tree_on", False)) and avail
+            tb.blockSignals(True)
+            tb.setChecked(on)
+            tb.blockSignals(False)
+            tb.setEnabled(avail)
+            if style is not None:
+                style(tb, "#b8860b", "white")
+
     def _ct_terr_button(self):
         """The 「Territory: Calc / Load / Save」 group, made once and placed by the
         viewer at the right end of its Coronary / VR / LV row. Calc (=
@@ -267,6 +398,7 @@ class CTModeBarMixin:
                 tree = t("ツリーあり（未保存）")
             lbl.setText(t("読込ファイル") + ":  FullLv: " + (full or none)
                         + "  ／  corotree: " + (tree or none))
+        self._ctlv_sync()
 
     def _ct_mode_clicked(self, key: str) -> None:
         cur = self._ct_current_mode()
@@ -340,7 +472,9 @@ class CTModeBarMixin:
             #   CoronaryTree the tree only (no LV, no 領域色)
             #   Territory    everything (_ct_territory_enter)
             self._ct_show_lv(key == "lv")
-            self._ct_tree_suppressed = (key != "coronary")
+            self._ct_tree_suppressed = not (
+                key == "coronary"
+                or (key == "lv" and getattr(self, "_ct_lv_tree_on", False)))
             self._ct_tree_apply()
             if shell is not None and hasattr(shell, "ct_territory_tint_off"):
                 try:

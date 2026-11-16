@@ -190,6 +190,12 @@ _TOOL_KEYS = {
 }  # C = ColorMap toggle (handled separately)
 
 
+def _internal_marker(m) -> bool:
+    """A point the app places itself (LV apex, MV-AoV point, auto-valve pick)
+    — drawn as a "+" but its "#id" means nothing to the user, so no label."""
+    return bool(m.get("_lvv") or m.get("_lv_valve") or m.get("_lv_pick"))
+
+
 # --------------------------------------------------------------------- math
 # (copied verbatim from ct_viewer.py — pure numpy, no vtk dependency)
 def _norm(v):
@@ -842,7 +848,8 @@ class _Overlay(QWidget):
             thick = v._lvv_thick_img.get(key)
             if thick is not None:
                 p.drawImage(self.rect(), thick)
-                self._paint_wall_legend(p, v, w, h)
+                if not getattr(v, "_vr_on", {}).get(key):   # no legend on VR
+                    self._paint_wall_legend(p, v, w, h)
         # CT Territory tint (independent of LV mode — a coronary Target's distal
         # perfusion territory), drawn under the crosshair / overlay.
         terr = v._terr_img.get(key)
@@ -1083,7 +1090,8 @@ class _Overlay(QWidget):
                             int(Qt.AlignmentFlag.AlignLeft
                                 | Qt.AlignmentFlag.AlignVCenter),
                             name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
-        for tg in getattr(v, "_coro_targets", ()):
+        for tg in (getattr(v, "_coro_targets", ())
+                   if v._ct_targets_visible() else ()):
             P = tg.get("point")
             if P is None:
                 continue
@@ -1351,7 +1359,7 @@ class _Overlay(QWidget):
                     name, QColor(rgb[0], rgb[1], rgb[2]), width=1.2)
         # Territory Target markers: a dot + the target NUMBER, in that target's
         # own colour (Target1..6; the mL/% is shown in the panel table).
-        for tg in v._coro_targets:
+        for tg in (v._coro_targets if v._ct_targets_visible() else ()):
             P = tg.get("point")
             if P is None:
                 continue
@@ -2140,8 +2148,9 @@ class _Overlay(QWidget):
                            QPointF(sp.x() + 6, sp.y()))
                 p.drawLine(QPointF(sp.x(), sp.y() - 6),
                            QPointF(sp.x(), sp.y() + 6))
-                p.setPen(QPen(QColor(255, 217, 0)))
-                p.drawText(QPointF(sp.x() + 8, sp.y() - 6), f"#{m['id']}")
+                if not _internal_marker(m):      # a user's HU probe only
+                    p.setPen(QPen(QColor(255, 217, 0)))
+                    p.drawText(QPointF(sp.x() + 8, sp.y() - 6), f"#{m['id']}")
                 continue
             of = off_flags(m)
             if of is not None and not m.get("smooth"):
@@ -9346,7 +9355,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         through the SAME camera the markers are drawn with; on overlap the dot
         NEAREST the camera wins (the visible one). Lets a press GRAB an existing
         Target to drag it, instead of dropping a brand-new one."""
-        if not self._vr_on.get(which) or not self._coro_targets:
+        if (not self._vr_on.get(which) or not self._coro_targets
+                or not self._ct_targets_visible()):
             return None
         gpu = (self.pane[which].vr_volume is not None
                and not self._vr_dvr_shown.get(which))
@@ -11432,18 +11442,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row.addWidget(cap)
         self._terr_blood_btn = FitButton(t("LV-Blood"))
         self._terr_blood_btn.setCheckable(True)
-        self._terr_blood_btn.setHelpToolTip(t("LV血流(水色)の表示 / 非表示"))
+        self._terr_blood_btn.setHelpToolTip(t(
+            "LV血流(水色)の表示 / 非表示（クリックでオン・オフ。壁厚とは独立）"))
         self._terr_blood_btn.clicked.connect(self._terr_toggle_blood)
         row.addWidget(self._terr_blood_btn)
         self._terr_thick3d_btn = FitButton(t("壁厚3D"))
         self._terr_thick3d_btn.setCheckable(True)
-        self._terr_thick3d_btn.setHelpToolTip(t("壁厚ヒートマップ(3D)の表示 / 非表示"))
+        self._terr_thick3d_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(3D)の表示 / 非表示（オンの間は壁厚短軸を選べません）"))
         self._terr_thick3d_btn.clicked.connect(lambda: self._terr_toggle_thick("3d"))
         row.addWidget(self._terr_thick3d_btn)
         self._terr_thicksax_btn = FitButton(t("壁厚短軸"))
         self._terr_thicksax_btn.setCheckable(True)
-        self._terr_thicksax_btn.setHelpToolTip(
-            t("壁厚ヒートマップ(短軸)の表示 / 非表示"))
+        self._terr_thicksax_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(短軸)の表示 / 非表示（オンの間は壁厚3Dを選べません）"))
         self._terr_thicksax_btn.clicked.connect(
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
@@ -11473,14 +11485,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         """Shell hook (a Territory review just opened): the source file names
         now show on the row-3 readout, so just refresh it."""
         self.refresh_ct_mode_bar()
-
-    def _terr_toggle_blood(self) -> None:
-        self._lvv_toggle_blood()
-        self._terr_bar_sync()
-
-    def _terr_toggle_thick(self, mode) -> None:
-        self._lvv_set_thick_mode(mode)
-        self._terr_bar_sync()
 
     def _terr_export_html(self) -> None:
         """Export the VR model (perfusion-territory coloured surfaces + coronary
@@ -11635,14 +11639,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if b2d is not None:                          # must stay 3-D in territory
             b2d.setEnabled(not terr)
         if terr:
-            if getattr(self, "_terr_blood_btn", None) is not None:
-                self._terr_blood_btn.setChecked(
-                    bool(getattr(self, "_lvv_mask_on", False)))
-            tm = getattr(self, "_lvv_thick_mode", None)
-            if getattr(self, "_terr_thick3d_btn", None) is not None:
-                self._terr_thick3d_btn.setChecked(tm == "3d")
-            if getattr(self, "_terr_thicksax_btn", None) is not None:
-                self._terr_thicksax_btn.setChecked(tm == "sax")
+            self._terr_btn_states()
         else:
             # Leaving the review → the LV bar is back; re-apply the Coronary/LV
             # file-context show-hide (hidden halves, filenames, CPR/FullLV colour).
@@ -12689,6 +12686,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if b.isChecked() != none:
             b.setChecked(none)
         self._lvv_style_toggle(b, "#9aa0a6", "white")
+        self._terr_btn_states()
 
     def _lv_rclick_epi(self) -> None:
         """Right-click Epi: toggle the Epi overlays. Hiding stores what was shown;
@@ -13004,6 +13002,39 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row1 = QHBoxLayout(); row1.setSpacing(4)
         row2 = QHBoxLayout(); row2.setSpacing(4)
         outer.addLayout(row1); outer.addLayout(row2)
+        # ---- LV: 壁厚3D / 壁厚短軸 / CoronaryTree — LVモード view tools, LEFT of
+        # CoronaryTree: (the row-1 mode order). Shown in LVモード only (not while
+        # an LV edit step is open); the logic is CTModeBarMixin._ctlv_*.
+        self._ctlv_cap = QLabel(t("LV:"))
+        _lf = self._ctlv_cap.font(); _lf.setBold(True); self._ctlv_cap.setFont(_lf)
+        row1.addWidget(self._ctlv_cap)
+        self._ctlv_thick3d_btn = FitButton(t("壁厚3D"))
+        self._ctlv_thick3d_btn.setCheckable(True)
+        self._ctlv_thick3d_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(3D)の表示 / 非表示（オンの間は壁厚短軸を選べません）"))
+        self._ctlv_thick3d_btn.clicked.connect(
+            lambda _=False: self._terr_toggle_thick("3d"))
+        row1.addWidget(self._ctlv_thick3d_btn)
+        self._ctlv_thicksax_btn = FitButton(t("壁厚短軸"))
+        self._ctlv_thicksax_btn.setCheckable(True)
+        self._ctlv_thicksax_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(短軸)の表示 / 非表示（オンの間は壁厚3Dを選べません）"))
+        self._ctlv_thicksax_btn.clicked.connect(
+            lambda _=False: self._terr_toggle_thick("sax"))
+        row1.addWidget(self._ctlv_thicksax_btn)
+        self._ctlv_tree_btn = FitButton(t("CoronaryTree"))
+        self._ctlv_tree_btn.setCheckable(True)
+        self._ctlv_tree_btn.setHelpToolTip(t(
+            "CoronaryTree を LV に重ねて表示 / 非表示（ツリーがあるときのみ）"))
+        self._ctlv_tree_btn.clicked.connect(
+            lambda _=False: self._ctlv_tree_toggle())
+        row1.addWidget(self._ctlv_tree_btn)
+        self._ctlv_group = [self._ctlv_cap, self._ctlv_thick3d_btn,
+                            self._ctlv_thicksax_btn, self._ctlv_tree_btn]
+        for _w in self._ctlv_group:
+            _w.setVisible(False)
+        row1.addSpacing(12)
+
         # ---- Coronary short-axis (CPR) entry, LEFT of the LV group: an explicit
         # one-click start for "trace the vessel centreline → build the short-axis
         # MPR", so the user need not discover the trace's right-click menu. ----
@@ -14887,6 +14918,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             btn.setChecked(mode == m)
             btn.setEnabled(can)
             self._lvv_style_toggle(btn, col, "black")
+        self._terr_btn_states()
 
     def _lvv_thick_clear(self) -> None:
         """Drop the 壁厚 heat map + cache (used when the Endo becomes stale)."""

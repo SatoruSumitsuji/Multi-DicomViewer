@@ -124,6 +124,12 @@ _VTK_TAG_LINE_SPACING = 1.5525
 _VTK_MIN_FONT = 4
 
 
+
+def _internal_marker(m) -> bool:
+    """A point the app places itself (LV apex, MV-AoV point, auto-valve pick)
+    — drawn as a "+" but its "#id" means nothing to the user, so no label."""
+    return bool(m.get("_lvv") or m.get("_lv_valve") or m.get("_lv_pick"))
+
 def _vtk_font_px(pt) -> int:
     return max(1, round(int(pt) * _VTK_TAG_FONT_SCALE))
 
@@ -3494,18 +3500,20 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row.addWidget(cap)
         self._terr_blood_btn = FitButton(t("LV-Blood"))
         self._terr_blood_btn.setCheckable(True)
-        self._terr_blood_btn.setHelpToolTip(t("LV血流(水色)の表示 / 非表示"))
+        self._terr_blood_btn.setHelpToolTip(t(
+            "LV血流(水色)の表示 / 非表示（クリックでオン・オフ。壁厚とは独立）"))
         self._terr_blood_btn.clicked.connect(self._terr_toggle_blood)
         row.addWidget(self._terr_blood_btn)
         self._terr_thick3d_btn = FitButton(t("壁厚3D"))
         self._terr_thick3d_btn.setCheckable(True)
-        self._terr_thick3d_btn.setHelpToolTip(t("壁厚ヒートマップ(3D)の表示 / 非表示"))
+        self._terr_thick3d_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(3D)の表示 / 非表示（オンの間は壁厚短軸を選べません）"))
         self._terr_thick3d_btn.clicked.connect(lambda: self._terr_toggle_thick("3d"))
         row.addWidget(self._terr_thick3d_btn)
         self._terr_thicksax_btn = FitButton(t("壁厚短軸"))
         self._terr_thicksax_btn.setCheckable(True)
-        self._terr_thicksax_btn.setHelpToolTip(
-            t("壁厚ヒートマップ(短軸)の表示 / 非表示"))
+        self._terr_thicksax_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(短軸)の表示 / 非表示（オンの間は壁厚3Dを選べません）"))
         self._terr_thicksax_btn.clicked.connect(
             lambda: self._terr_toggle_thick("sax"))
         row.addWidget(self._terr_thicksax_btn)
@@ -3774,14 +3782,6 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         except Exception:                                # noqa: BLE001
             pass
 
-    def _terr_toggle_blood(self) -> None:
-        self._lvv_toggle_blood()
-        self._terr_bar_sync()
-
-    def _terr_toggle_thick(self, mode) -> None:
-        self._lvv_set_thick_mode(mode)
-        self._terr_bar_sync()
-
     def _terr_bar_sync(self) -> None:
         """Show the Territory bar (and hide the LV + Coronary bars, grey the 2D
         button) during a FullLv review; restore otherwise. Reflects the current
@@ -3803,14 +3803,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if b2d is not None:                          # must stay 3-D in territory
             b2d.setEnabled(not terr)
         if terr:
-            if getattr(self, "_terr_blood_btn", None) is not None:
-                self._terr_blood_btn.setChecked(
-                    bool(getattr(self, "_lvv_mask_on", False)))
-            tm = getattr(self, "_lvv_thick_mode", None)
-            if getattr(self, "_terr_thick3d_btn", None) is not None:
-                self._terr_thick3d_btn.setChecked(tm == "3d")
-            if getattr(self, "_terr_thicksax_btn", None) is not None:
-                self._terr_thicksax_btn.setChecked(tm == "sax")
+            self._terr_btn_states()
         else:
             # Leaving the review → the LV bar is back; re-apply the Coronary/LV
             # file-context show-hide (hidden halves, filenames, CPR/FullLV colour).
@@ -4097,6 +4090,39 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row2 = QHBoxLayout(); row2.setSpacing(4)
         outer.addLayout(row1)
         outer.addLayout(row2)
+
+        # ---- LV: 壁厚3D / 壁厚短軸 / CoronaryTree — LVモード view tools, LEFT of
+        # CoronaryTree: (the row-1 mode order). Shown in LVモード only (not while
+        # an LV edit step is open); the logic is CTModeBarMixin._ctlv_*.
+        self._ctlv_cap = QLabel(t("LV:"))
+        _lf = self._ctlv_cap.font(); _lf.setBold(True); self._ctlv_cap.setFont(_lf)
+        row1.addWidget(self._ctlv_cap)
+        self._ctlv_thick3d_btn = FitButton(t("壁厚3D"))
+        self._ctlv_thick3d_btn.setCheckable(True)
+        self._ctlv_thick3d_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(3D)の表示 / 非表示（オンの間は壁厚短軸を選べません）"))
+        self._ctlv_thick3d_btn.clicked.connect(
+            lambda _=False: self._terr_toggle_thick("3d"))
+        row1.addWidget(self._ctlv_thick3d_btn)
+        self._ctlv_thicksax_btn = FitButton(t("壁厚短軸"))
+        self._ctlv_thicksax_btn.setCheckable(True)
+        self._ctlv_thicksax_btn.setHelpToolTip(t(
+            "壁厚ヒートマップ(短軸)の表示 / 非表示（オンの間は壁厚3Dを選べません）"))
+        self._ctlv_thicksax_btn.clicked.connect(
+            lambda _=False: self._terr_toggle_thick("sax"))
+        row1.addWidget(self._ctlv_thicksax_btn)
+        self._ctlv_tree_btn = FitButton(t("CoronaryTree"))
+        self._ctlv_tree_btn.setCheckable(True)
+        self._ctlv_tree_btn.setHelpToolTip(t(
+            "CoronaryTree を LV に重ねて表示 / 非表示（ツリーがあるときのみ）"))
+        self._ctlv_tree_btn.clicked.connect(
+            lambda _=False: self._ctlv_tree_toggle())
+        row1.addWidget(self._ctlv_tree_btn)
+        self._ctlv_group = [self._ctlv_cap, self._ctlv_thick3d_btn,
+                            self._ctlv_thicksax_btn, self._ctlv_tree_btn]
+        for _w in self._ctlv_group:
+            _w.setVisible(False)
+        row1.addSpacing(12)
 
         # ---- Coronary short-axis (CPR) entry, LEFT of the LV group: an explicit
         # one-click start for "trace the vessel centreline → build the short-axis
@@ -5996,6 +6022,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if b.isChecked() != none:
             b.setChecked(none)
         self._lvv_style_toggle(b, "#9aa0a6", "white")
+        self._terr_btn_states()
 
     def _lv_rclick_epi(self) -> None:
         """Right-click Epi: toggle the Epi overlays. Hiding stores what was shown;
@@ -9052,7 +9079,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     p.thick_bar.SetCustomLabels(arr)
                 except Exception:                        # noqa: BLE001
                     p.thick_bar.SetNumberOfLabels(min(12, len(thr) + 2))
-                p.thick_bar.SetVisibility(True)
+                p.thick_bar.SetVisibility(not self._vr_on.get(k, False))
             else:
                 p.reslice_thick.SetInputData(_placeholder_image())
                 p.colors_thick.SetLookupTable(
@@ -9123,6 +9150,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             btn.setChecked(mode == m)
             btn.setEnabled(can)
             self._lvv_style_toggle(btn, col, "black")
+        self._terr_btn_states()
 
     def _lv_auto_endo_from_blood(self) -> bool:
         """Build the auto Endo from the blood pool and OPEN it for editing (the
@@ -11780,6 +11808,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 f"Dmax:{dmax:.1f}  Dmin:{dmin:.1f}mm{ca_str}")
 
     # ---- drawing ----
+    def _pane_is_vr(self, p) -> bool:
+        """True when pane object *p* is showing the VR (its 2-D labels hide)."""
+        for k in ("A", "B"):
+            if self.pane.get(k) is p and self._vr_on.get(k):
+                return True
+        return False
+
     def _rebuild_labels(self, p, labels):
         for a in getattr(p, "meas_labels", []):
             p.ren.RemoveActor(a)
@@ -11791,6 +11826,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             ta.GetTextProperty().SetColor(1.0, 0.85, 0.0)
             ta.GetTextProperty().SetFontSize(16)
             ta.GetTextProperty().SetBold(True)
+            ta.SetVisibility(not self._pane_is_vr(p))   # 2-D labels: not on VR
             p.ren.AddActor(ta)
             p.meas_labels.append(ta)
 
@@ -11891,7 +11927,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
                 polylines.append([up, dp])
                 outline_colors.append((rgb[0], rgb[1], rgb[2], a4))
-                labels.append((f"#{m['id']}", (wx, wy)))
+                if not _internal_marker(m):      # a user's HU probe only
+                    labels.append((f"#{m['id']}", (wx, wy)))
                 continue
             rgb = _hex_to_rgb(m.get("color"))
             # A deselected CPR source line (Measure OFF) reads as a plain
@@ -12251,7 +12288,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (the mL/% is shown on the VR summary / the panel table, not here). The
         # number is drawn in that target's own colour (Target1..6).
         t_pts = []
-        for tg in self._coro_targets:
+        for tg in (self._coro_targets if self._ct_targets_visible() else []):
             P = tg.get("point")
             if P is None:
                 continue
@@ -12284,6 +12321,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
             ta.GetTextProperty().SetFontSize(18 if sel else 14)
             ta.GetTextProperty().SetBold(True)
+            ta.SetVisibility(not self._pane_is_vr(p))   # 2-D labels: not on VR
             p.ren.AddActor(ta)
             p.coro_labels.append(ta)
 
@@ -12681,7 +12719,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         for lb in getattr(p, "vr_tgt_labels", []):
             p.ren.RemoveViewProp(lb)
         p.vr_tgt_labels = []
-        specs = self._coro_targets if self._vr_on.get(key) else []
+        specs = (self._coro_targets if self._vr_on.get(key)
+                 and self._ct_targets_visible() else [])
         if not specs:
             p.vr_tgt_mapper.SetInputData(vtkPolyData())
             p.vr_tgt_actor.SetVisibility(False)
@@ -12919,7 +12958,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         the visible dot itself, so a NEW target can be placed right next to an existing
         one (zoom in for a pinpoint hit). On overlap the NEAREST-camera dot wins (the
         visible one; a far-side marker sits behind the heart)."""
-        if not self._vr_on.get(key) or not self._coro_targets:
+        if (not self._vr_on.get(key) or not self._coro_targets
+                or not self._ct_targets_visible()):
             return None
         p = self.pane[key]
         ren = p.ren
@@ -13421,12 +13461,27 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         p = self._vr_pane_reset_if_on(key, on)   # (re-toggle before the build)
         if not on:
             self._vr_set_impl(key, False)
+            getattr(self, "_lvv_thick_bar_vis", lambda: None)()
             return
         building.add(key)
         try:
             self._vr_set_impl(key, True)
         finally:
             building.discard(key)
+        # 壁厚 legend: never over a VR pane.
+        getattr(self, "_lvv_thick_bar_vis", lambda: None)()
+
+    def _lvv_thick_bar_vis(self) -> None:
+        """The 壁厚 colour legend only on a pane that shows the heat map — never
+        on a VR pane (Territory's right pane), where no 壁厚 image is drawn."""
+        on = (getattr(self, "_lvv_thick_mode", None) is not None
+              and getattr(self, "_lvv_thick_vol", None) is not None)
+        for k in ("A", "B"):
+            try:
+                self.pane[k].thick_bar.SetVisibility(
+                    on and not self._vr_on.get(k, False))
+            except Exception:                    # noqa: BLE001
+                pass
 
     def _vr_set_impl(self, key, on) -> None:
         p = self._vr_pane_reset_if_on(key, on)

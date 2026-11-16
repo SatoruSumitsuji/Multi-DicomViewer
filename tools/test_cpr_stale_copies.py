@@ -77,7 +77,7 @@ cw = (ROOT / "multi_dicomviewer/ui/coronary_tree_window.py").read_text(
 check("フォルダ更新 calls _cpr_retire_outdated", "_sv._cpr_retire_outdated()" in cw)
 check("Coronary Tree tab buttons left-aligned",
       '_BTN_CSS = "padding: 2px 6px; text-align: left;"' in cw
-      and cw.count("setStyleSheet(_BTN_CSS)") == 3
+      and cw.count("setStyleSheet(_BTN_CSS)") == 2   # (Territory VR row removed)
       and 'setStyleSheet("padding: 2px 6px;")' not in cw)
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")

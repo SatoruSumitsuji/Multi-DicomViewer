@@ -480,41 +480,11 @@ class CoronaryTreeWindow(SnapDock):
              self._clear_all, False),
         ])
         self._overlay_btn = tree_btns[0]     # relabelled 表示/非表示
-        # VR row (built by hand — it carries a spin box, not just buttons): show /
-        # hide the right-pane VR, switch 内腔 (lumen) ⇔ シェル (Epi surface + shell),
-        # and set the outward shell thickness (0–20 mm) when シェル is selected.
+        # 「Territory VR」 row REMOVED (2026-11-16): the Territory review's right
+        # pane is a VR by itself (Territoryモード), and the VR aid while building a
+        # tree is the CPR 「Open VR」 — one VR button, no mix-up. _vr_shown stays
+        # as the tab's record of the Territory VR (領域色 ON → VR ON).
         self._vr_shown = True                # matches apply_full_lv's auto-on VR
-        self._vr_shell_mode = False          # default 内腔VR (True = シェルVR)
-        vr_row = QHBoxLayout()
-        vr_row.setSpacing(3)
-        # "Territory VR" — the right-pane VR of the Territory review, NOT the CPR
-        # VR (Open VR, left pane), so the two are not confused.
-        vr_lbl = QLabel(t("Territory VR："))
-        vr_lbl.setStyleSheet("font-weight:bold;")
-        vr_row.addWidget(vr_lbl)
-        self._vr_show_btn = QPushButton(t("表示/非表示"))
-        self._vr_show_btn.setToolTip(t(
-            "Territory の右画面VR (立体表示) を表示/非表示。CPR の Open VR とは別です"))
-        self._vr_show_btn.setStyleSheet(_BTN_CSS)
-        self._vr_show_btn.clicked.connect(self._toggle_vr)
-        vr_row.addWidget(self._vr_show_btn)
-        # シェルVR removed: the VR now always crops to the solid LV (Epi region),
-        # so the 内腔/シェル toggle + range had no effect. Attributes kept as None
-        # so the sync / toggle helpers stay safe no-ops.
-        self._vr_shell_btn = None
-        self._vr_shell_lbl = None
-        self._vr_shell_spin = None
-        vr_row.addStretch(1)
-        outer.addLayout(vr_row)
-        self._sync_vr_row()
-        # Keep the 表示/非表示 label in step with the viewer's ACTUAL Territory VR
-        # (it can change outside this window: FullLv auto-on, a new CT, Exit …).
-        from PyQt6.QtCore import QTimer
-        self._vr_state_timer = QTimer(self)
-        self._vr_state_timer.setInterval(700)
-        self._vr_state_timer.timeout.connect(
-            lambda: self.isVisible() and self._refresh_vr_state())
-        self._vr_state_timer.start()
         # Target row: set / show-hide / delete-last / delete-all.
         tgt_btns = _row(t("ターゲット："), [
             (t("設定"),
@@ -1125,10 +1095,10 @@ class CoronaryTreeWindow(SnapDock):
         colour) renders ONLY on the VR heart, so 領域色オン must imply VRオン —
         otherwise the colour has nothing to render on and the pane stays a bare
         coronary-line view. Never turns the VR OFF; no-op when already shown."""
+        self._refresh_vr_state()                     # the viewer's REAL state
         if bool(getattr(self, "_vr_shown", True)):
             return
         self._vr_shown = True
-        self._sync_vr_row()                          # relabel 表示 → 非表示
         if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):
             try:
                 self._shell.coronary_vr_visible(True)
@@ -1201,21 +1171,9 @@ class CoronaryTreeWindow(SnapDock):
         except Exception:                                # noqa: BLE001
             pass
 
-    # ------------------------------------------------------------- VR row
-    def _sync_vr_row(self) -> None:
-        """Update the VR show/hide button's label to the current state. (シェルVR
-        removed — the VR always crops to the solid LV; legacy widgets guarded.)"""
-        if getattr(self, "_vr_show_btn", None) is not None:
-            self._vr_show_btn.setText(
-                t("非表示") if getattr(self, "_vr_shown", True) else t("表示"))
-        if getattr(self, "_vr_shell_btn", None) is not None:
-            shell = bool(getattr(self, "_vr_shell_mode", True))
-            self._vr_shell_btn.setText(t("シェルVR") if shell else t("内腔VR"))
-            self._vr_shell_lbl.setEnabled(shell)
-            self._vr_shell_spin.setEnabled(shell)
-
+    # ------------------------------------------------- Territory VR state
     def _refresh_vr_state(self) -> None:
-        """Read the viewer's actual Territory VR state into the button label."""
+        """Read the viewer's actual Territory VR state."""
         sh = self._shell
         if sh is None or not hasattr(sh, "coronary_vr_shown"):
             return
@@ -1225,28 +1183,6 @@ class CoronaryTreeWindow(SnapDock):
             st = None
         if st is not None and bool(st) != bool(getattr(self, "_vr_shown", True)):
             self._vr_shown = bool(st)
-            self._sync_vr_row()
-
-    def _toggle_vr(self) -> None:
-        """VR ▸ 表示/非表示 — show or hide the right-pane Volume Rendering."""
-        self._refresh_vr_state()             # act on the REAL state, not a guess
-        self._vr_shown = not bool(getattr(self, "_vr_shown", True))
-        self._sync_vr_row()                  # relabel 表示 ⇄ 非表示
-        if self._shell is not None and hasattr(self._shell, "coronary_vr_visible"):
-            self._shell.coronary_vr_visible(self._vr_shown)
-
-    def _toggle_vr_shell(self) -> None:
-        """VR ▸ 内腔VR/シェルVR — switch the VR crop between the LV lumen and the
-        Epi surface + outward shell."""
-        self._vr_shell_mode = not bool(getattr(self, "_vr_shell_mode", True))
-        self._sync_vr_row()
-        if self._shell is not None and hasattr(self._shell, "coronary_vr_shell"):
-            self._shell.coronary_vr_shell(self._vr_shell_mode)
-
-    def _on_vr_shell_mm(self, mm: int) -> None:
-        """VR ▸ シェルVR範囲 — outward shell thickness (mm) changed."""
-        if self._shell is not None and hasattr(self._shell, "coronary_vr_shell_mm"):
-            self._shell.coronary_vr_shell_mm(float(mm))
 
     def _show_source_ct(self, prompt: bool = True) -> str:
         """Ask the shell to show the tree's source CT (by UID / saved folder / the

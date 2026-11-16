@@ -2760,10 +2760,13 @@ class CPRMixin:
         ws = getattr(self, "_cpr_vr_group", None)
         if not ws:
             return
+        # Shown wherever the CoronaryTree: group (CPR button) is — before the
+        # CPR detail mode too (2026-11-16): Open VR arms the CPR itself.
         ctx = getattr(self, "_bottom_ctx", "both")
+        cpr_btn = getattr(self, "_coronary_mpr_btn", None)
         show = (ctx in ("both", "coronary")
-                and (getattr(self, "_coronary_mode", False)
-                     or getattr(self, "_cpr", None) is not None))
+                and not getattr(self, "_territory_display", False)
+                and (cpr_btn is None or not cpr_btn.isHidden()))
         for w in ws:
             w.setVisible(show)
         self._cpr_vr_sync_btn()
