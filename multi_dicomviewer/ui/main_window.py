@@ -3573,7 +3573,113 @@ class MainWindow(QMainWindow):
             territory_file.set_full_lv_path(data, p)
         return p
 
-    def ct_territory_load(self, viewer, path: str | None = None) -> bool:
+    @staticmethod
+    def _territory_links_match(w, viewer, uid, coro_path, lv_path) -> bool:
+        """True when Territory ▸ Load would replace the open tree / FullLv with
+        THE SAME files and nothing is unsaved: the dock's corotree is
+        *coro_path* and its vessels equal that file's, the dock's FullLv (if
+        any) is *lv_path*, and the viewer has no unsaved LV edit. Anything
+        uncertain → False (the question is asked)."""
+        import json
+        import os
+
+        def same(a, b):
+            try:
+                return bool(a) and bool(b) and (
+                    os.path.normcase(os.path.abspath(a))
+                    == os.path.normcase(os.path.abspath(b)))
+            except (TypeError, ValueError):
+                return False
+        try:
+            if getattr(viewer, "_lv_dirty", False):
+                return False
+            cur_coro = (w.corotree_path_for_series(uid)
+                        if hasattr(w, "corotree_path_for_series") else "")
+            if not same(cur_coro, coro_path):
+                return False
+            cur_lv = (w.full_lv_path_for_series(uid)
+                      if hasattr(w, "full_lv_path_for_series") else "")
+            if cur_lv and not same(cur_lv, lv_path):
+                return False
+            if not cur_lv and (w.full_lv_for_series(uid)
+                               if hasattr(w, "full_lv_for_series") else None):
+                return False                     # an unsaved in-memory FullLv
+            tree = getattr(w, "_tree", None)
+            if tree is None:
+                return False
+            with open(coro_path, encoding="utf-8") as f:
+                saved = (json.load(f) or {}).get("vessels") or []
+            mine = json.loads(json.dumps(tree.to_json().get("vessels") or []))
+            return mine == saved                 # no unsaved tree edit
+        except Exception:                        # noqa: BLE001
+            return False
+
+    @staticmethod
+    def _is_territory_json(path: str) -> bool:
+        """True if *path* is a .territory.json (a saved Territory result)."""
+        if not path.lower().endswith(".json"):
+            return False
+        import json
+        from multi_dicomviewer.core import territory_file
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        return territory_file.is_territory(data)
+
+    def _open_territory_file(self, path: str) -> None:
+        """Drop a .territory.json → find its source 3-D CT (through the linked
+        corotree.json: by UID / saved folder / prompt, as a corotree drop),
+        load it, then load the Territory (tree + FullLv + Targets, recompute)
+        and show it in the Territory review."""
+        import json
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+        from multi_dicomviewer.core import territory_file
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, t("Territory"),
+                                t("読込に失敗しました: {e}", e=str(exc)))
+            return
+        if not territory_file.is_territory(data):
+            return
+        coro_path = self._territory_resolve_link(
+            data, territory_file.corotree_path(data), os.path.dirname(path),
+            "corotree")
+        if coro_path is None:
+            return
+        # The corotree knows its source CT: open it like a corotree drop (plain
+        # coronary display — the Territory load below enters the review).
+        self._open_coronary_tree_file(coro_path, to_territory=False)
+        uid = territory_file.series_uid(data) or ""
+        w = getattr(self, "_corotree_win", None)
+        if not uid and w is not None and hasattr(w, "active_uid"):
+            uid = w.active_uid() or ""
+        self._poll_territory_load(uid, path, 0)
+
+    def _poll_territory_load(self, uid: str, path: str, attempt: int) -> None:
+        """Wait for the dropped Territory's CT to be shown + decoded (a slow
+        folder scan included), then run Territory ▸ Load on it."""
+        from PyQt6.QtCore import QTimer
+        shown = self._coronary_display_uid(uid) if uid else True
+        v = self._active.current_viewer() if self._active is not None else None
+        ready = (v is not None and hasattr(v, "_ct_territory_enter")
+                 and (getattr(v, "_image", None) is not None
+                      or getattr(v, "_vol", None) is not None))
+        if shown and ready:
+            # After the corotree's own bottom-bar poll (300 ms steps) settles.
+            QTimer.singleShot(
+                700, lambda: self.ct_territory_load(v, path, confirm=False))
+            return
+        if attempt < 200:                                # ~60 s (folder scan)
+            QTimer.singleShot(
+                300, lambda: self._poll_territory_load(uid, path, attempt + 1))
+
+    def ct_territory_load(self, viewer, path: str | None = None,
+                          confirm: bool = True) -> bool:
         """Territory ▸ Load: open a .territory.json for the CT *viewer* shows —
         resolve + load its corotree.json and FullLv.json, restore the Targets,
         recompute, and show the result at once (Territoryモード). Warns when the
@@ -3657,7 +3763,13 @@ class MainWindow(QMainWindow):
             w._use_uid(u)
         # Loading replaces this CT's tree + FullLv in the panel with the linked
         # files — confirm when a tree is already there.
-        if getattr(w, "_tree", None) is not None and w._tree.vessels:
+        # (*confirm* False: a .territory.json DROP just loaded that same tree.)
+        # No question either when the open tree / FullLv ARE the linked files
+        # and nothing is unsaved — replacing them changes nothing.
+        if confirm and self._territory_links_match(
+                w, viewer, uid, coro_path, lv_path):
+            confirm = False
+        if confirm and getattr(w, "_tree", None) is not None and w._tree.vessels:
             if QMessageBox.question(
                     self, t("Territory"),
                     t("現在の冠動脈ツリーと FullLv を、この Territory の"
@@ -7290,8 +7402,13 @@ class MainWindow(QMainWindow):
         for p in cp_files:
             self._open_case_presentation_file(p)
         paths = [p for p in paths if p not in cp_files]
-        # (.territory.json dropping was removed — Territory is re-derived from the
-        # corotree.json + FullLv.json pair.)
+        # Peel off .territory.json drops → find + load the source 3-D CT (via the
+        # linked corotree), then load the Territory and show the review.
+        terr_files = [p for p in paths
+                      if os.path.isfile(p) and self._is_territory_json(p)]
+        for p in terr_files[:1]:                 # one review at a time
+            self._open_territory_file(p)
+        paths = [p for p in paths if p not in terr_files]
         # Peel off Coronary Tree .corotree.json drops → open the panel, load the
         # tree and re-open its source 3-D CT with the overlay.
         ct_files = [p for p in paths
