@@ -10598,6 +10598,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         elif resume_act is not None and chosen is resume_act:
             # If this line IS the active CPR short-axis, leave it first so self._cpr
             # doesn't dangle on the measure _resume_trace is about to un-commit.
+            # Remember the line's own .cpr.json / tree vessel BEFORE leaving the
+            # short-axis (that forgets the vessel): its save then asks whether
+            # to replace the original (no silent second copy).
+            self._cpr_resume_capture(which, mi)
             c = self._cpr
             if c is not None and c.get("src") == which and c.get("src_mi") == mi:
                 self._exit_cpr(keep_view=True)
@@ -11395,6 +11399,13 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 or not hasattr(self, "_coro_group_widgets"):
             return
         ctx = getattr(self, "_bottom_ctx", "both")
+        # A loaded corotree / FullLv narrows the bar to its half — but once the
+        # user PICKS 標準 / LVモード the LV steps (MV-AoV+Apex, Epi, Blood/Endo)
+        # must be reachable again (a corotree Load used to leave them hidden
+        # in every mode). 標準 shows the full bar.
+        sel = getattr(self, "_ct_mode_sel", None)
+        if sel == "standard" or (sel == "lv" and ctx == "coronary"):
+            ctx = "both"
         self.refresh_ct_mode_bar()
         sig = (ctx, getattr(self, "_coro_file_name", ""),
                getattr(self, "_lv_file_name", ""))
@@ -19830,6 +19841,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._coronary_mode = False
         self._coronary_mpr_pending = False
         self._cpr_tool_hold = False                   # no Draw hold left
+        self._cpr_resume_origin = None                # Resume ended unsaved
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
         self._cpr_exclude_seeding = False

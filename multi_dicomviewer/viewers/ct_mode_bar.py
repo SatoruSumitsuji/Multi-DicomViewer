@@ -33,8 +33,8 @@ from multi_dicomviewer.ui.study_browser import FitButton
 
 #: (key, label, tooltip) in button order.
 _CT_MODES = (
-    ("standard", "標準モード",
-     "標準モード：LV・冠動脈ツリーの表示を消した通常の 3DCT 表示（計測結果は"
+    ("standard", "Simple View",
+     "Simple View：LV・冠動脈ツリーの表示を消した通常の 3DCT 表示（計測結果は"
      "すべて保持され、モードを切り替えるとすぐ表示されます）"),
     ("lv", "LVモード",
      "LVモード：Epi / Endo / Blood と LV 計測値を表示（冠動脈ツリーがあれば"

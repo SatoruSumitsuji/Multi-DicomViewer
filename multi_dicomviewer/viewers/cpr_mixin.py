@@ -308,12 +308,76 @@ class CPRMixin:
                 return nm
             n += 1
 
+    # ---- Resume trace of a saved line: replace the original, or keep both ----
+    def _cpr_resume_capture(self, which, mi) -> None:
+        """Resume trace: remember the line's own .cpr.json (loaded / saved, or
+        the tree vessel being edited) so its next save can replace it. The
+        re-committed line is a new record (keeps only the id), which used to
+        lose the file → a 2nd serial file + a 2nd tree vessel ("二重保存")."""
+        import os
+        self._cpr_resume_origin = None
+        lst = self._measures.get(which, []) if isinstance(
+            getattr(self, "_measures", None), dict) else []
+        if not (0 <= mi < len(lst)):
+            return
+        m = lst[mi]
+        path = ""
+        for key in ("_cpr_file", "_cpr_saved"):
+            p = m.get(key)
+            if isinstance(p, str) and p:
+                path = p
+                break
+        c = getattr(self, "_cpr", None)
+        is_src = (c is not None and c.get("src") == which
+                  and c.get("src_mi") == mi)
+        vid = (getattr(self, "_coro_edit_vid", "") or "") if is_src else ""
+        if not path and vid:
+            path = getattr(self, "_cpr_last_path", "") or ""
+        if path and os.path.isfile(path) and m.get("id") is not None:
+            self._cpr_resume_origin = {"path": path, "vid": vid,
+                                       "id": int(m["id"])}
+
+    def _cpr_resume_origin_ask(self, m):
+        """Saving a resumed line whose original file exists → ask. Returns the
+        original path (Yes: replace it — same file name / tree vessel, the old
+        shape is gone), "" (No: keep the original, save the new line as a new
+        file) or None (not a resumed line)."""
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+        org = getattr(self, "_cpr_resume_origin", None)
+        if (not org or m is None or m.get("id") is None
+                or int(m["id"]) != org.get("id")):
+            return None
+        self._cpr_resume_origin = None           # asked once per Resume
+        path = org.get("path") or ""
+        if not os.path.isfile(path):
+            return None
+        ans = QMessageBox.question(
+            self.window(), t("Resume trace"),
+            t("元のCPR線とそのファイル {name} を削除していいですか？\n\n"
+              "Yes：新しい線だけを残します（ファイル名とツリーの血管名は"
+              "そのまま、中身を新しい線に置き換え）。\n"
+              "No：元の線とファイルも残し、新しい線は別のファイルに保存します。",
+              name=os.path.basename(path)),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes)
+        return path if ans == QMessageBox.StandardButton.Yes else ""
+
     def _cpr_next_target(self):
         """(path, is_new) Next writes the current line to: the line's own file
         when it has one (loaded / resumed / saved before), else the next serial
-        name in the Next folder (asked for the first time). None = cancelled."""
+        name in the Next folder (asked for the first time). None = cancelled.
+        A resumed line asks first (_cpr_resume_origin_ask)."""
         import os
         m = self._cpr_source_measure()
+        org = self._cpr_resume_origin_ask(m)
+        if org:
+            return org, False                    # Yes: replace the original
+        if org == "":                            # No: keep it, new serial file
+            d = self._cpr_next_dir() or self._cpr_next_pick_dir()
+            if not d:
+                return None
+            return os.path.join(d, self._cpr_next_serial(d) + ".cpr.json"), True
         for key in ("_cpr_file", "_cpr_saved"):
             p = m.get(key) if m is not None else None
             if isinstance(p, str) and p and os.path.isdir(os.path.dirname(p)):
@@ -877,6 +941,7 @@ class CPRMixin:
             return False
         if chosen is acts.get("resume"):
             vi = self._cpr_line_near_end(which, mi, sx, sy)
+            self._cpr_resume_capture(which, mi)  # before _exit_cpr forgets it
             c = self._cpr
             if c is not None and c.get("src") == which and c.get("src_mi") == mi:
                 self._exit_cpr(keep_view=True)
