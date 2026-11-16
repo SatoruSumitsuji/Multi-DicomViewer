@@ -13339,9 +13339,35 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         return self._wl_of(key)[1] - 300.0
 
     def _vr_set(self, key, on) -> None:
-        """Turn Volume Rendering on/off for pane *key* (contrast-CTA preset)."""
+        """Turn Volume Rendering on/off for pane *key* (contrast-CTA preset).
+
+        Re-entrancy guard: turning VR on runs the crop build behind a busy
+        dialog (an event loop), and a SECOND request queued meanwhile (the
+        Territory entry turns VR on both from apply_full_lv's deferred call and
+        from the 領域色 ON of the corotree drop) used to run INSIDE the first —
+        its re-toggle saved the still-MPR camera as the "VR view" and restored
+        it (black pane, "LAO0 CRA90"), and the outer build then recorded the MPR
+        image as already hidden, so VR off never brought it back (black pane in
+        every mode). A nested ON for a pane being built is dropped (that build
+        finishes it); a nested OFF runs right after the build."""
         if self._image is None:
             return
+        building = self.__dict__.setdefault("_vr_building", set())
+        if key in building:
+            if not on:
+                QTimer.singleShot(0, lambda: self._vr_set(key, False))
+            return
+        p = self._vr_pane_reset_if_on(key, on)   # (re-toggle before the build)
+        if not on:
+            self._vr_set_impl(key, False)
+            return
+        building.add(key)
+        try:
+            self._vr_set_impl(key, True)
+        finally:
+            building.discard(key)
+
+    def _vr_set_impl(self, key, on) -> None:
         p = self._vr_pane_reset_if_on(key, on)
         on = bool(on)
         self._vr_on[key] = on
@@ -13405,6 +13431,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             # 完全復元: if a prior VR session was switched off, restore its exact
             # orientation (Rt90/Flip xform) + camera pose; else start fresh.
             snap_view = getattr(self, "_vr_view_saved", {}).get(key)
+            if snap_view is not None and snap_view["cam"][0]:
+                snap_view = None        # a parallel (MPR) pose is never a VR view
             self._vr_xform[key] = (
                 np.asarray(snap_view["xform"], float).copy()
                 if snap_view is not None else np.eye(4))
@@ -13463,13 +13491,18 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             saved = getattr(self, "_vr_view_saved", None)
             if saved is None:
                 saved = self._vr_view_saved = {}
-            saved[key] = {
-                "xform": np.asarray(
-                    self._vr_xform.get(key, np.eye(4)), float).copy(),
-                "cam": (cam.GetParallelProjection(), tuple(cam.GetPosition()),
-                        tuple(cam.GetFocalPoint()), tuple(cam.GetViewUp()),
-                        cam.GetParallelScale()),
-            }
+            if cam.GetParallelProjection():
+                # Still the MPR camera (VR never got its perspective view):
+                # nothing to restore later — keep no "VR view" for it.
+                saved.pop(key, None)
+            else:
+                saved[key] = {
+                    "xform": np.asarray(
+                        self._vr_xform.get(key, np.eye(4)), float).copy(),
+                    "cam": (cam.GetParallelProjection(), tuple(cam.GetPosition()),
+                            tuple(cam.GetFocalPoint()), tuple(cam.GetViewUp()),
+                            cam.GetParallelScale()),
+                }
             if getattr(p, "vr_volume", None) is not None:
                 p.vr_volume.SetVisibility(False)
             for _a in (getattr(p, "vr_coro_actor", None),

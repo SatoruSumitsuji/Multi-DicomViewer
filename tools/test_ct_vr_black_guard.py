@@ -67,13 +67,50 @@ def seg(name):
 
 
 reset = seg("_vr_pane_reset_if_on")
-vrset = seg("_vr_set")
+vrset = seg("_vr_set_impl")
 check("re-toggle flagged around the internal VR off",
       "self._vr_retoggle = True" in reset and "self._vr_retoggle = False" in reset)
 check("last-VR-off leaves Territory only on a real exit",
       'not getattr(self, "_vr_retoggle", False)' in vrset
       and vrset.index('not getattr(self, "_vr_retoggle", False)')
       < vrset.index("self._territory_display = False"))
+
+# (3) re-entrancy: a VR ON queued while another ON's busy dialog runs (the
+# corotree drop's 領域色 ON + apply_full_lv's deferred ON) must not run nested.
+from unittest import mock  # noqa: E402
+
+
+class Host:
+    def __init__(self):
+        self._image = object()
+        self._vr_on = {"A": False, "B": False}
+        self.calls = []
+
+    def _vr_pane_reset_if_on(self, key, on):
+        return None
+
+    def _vr_set_impl(self, key, on):
+        self.calls.append((key, on))
+        self._vr_on[key] = on
+        if on and len(self.calls) == 1:
+            CTViewer._vr_set(self, key, True)    # nested ON (from the busy loop)
+            CTViewer._vr_set(self, key, False)   # nested OFF
+
+
+h = Host()
+with mock.patch("multi_dicomviewer.viewers.ct_viewer.QTimer.singleShot") as ss:
+    CTViewer._vr_set(h, "B", True)
+check("nested VR ON during a build is dropped", h.calls == [("B", True)], str(h.calls))
+check("nested VR OFF during a build is deferred", ss.call_count == 1)
+check("build flag cleared afterwards", not h._vr_building)
+CTViewer._vr_set(h, "B", True)
+check("a later ON runs normally", h.calls[-1] == ("B", True) and len(h.calls) == 2)
+
+check("a parallel (MPR) camera is never saved / restored as the VR view",
+      'snap_view["cam"][0]' in vrset or 'snap_view["cam"][0]' in seg("_vr_set_impl"))
+impl = seg("_vr_set_impl")
+check("VR off skips saving an MPR pose", "if cam.GetParallelProjection():" in impl
+      and "saved.pop(key, None)" in impl)
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
 sys.exit(1 if fails else 0)
