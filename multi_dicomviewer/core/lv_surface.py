@@ -602,6 +602,8 @@ class LVSurface:
         cross-section). Used when an external plane (the valve plane) provides
         the real basal cut, so a short Epi trace doesn't clip the base."""
         pts = np.asarray(pts, float).reshape(-1, 3)
+        if self.tent:                       # closed by the MV-AoV tent
+            extend_base = False
         along, px, py = self.axis.project_array(pts)
         lo_a = float(self.along[0])
         hi_a = float(self.along[-1])

@@ -4648,7 +4648,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_apex_set_btn = FitButton(t("Apex Set"))
         self._lv_ve_apex_set_btn.setHelpToolTip(
             t("Set the LV apex at the current centreline crossing."))
-        self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set)
+        self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set_ask)
         r2ve.addWidget(self._lv_ve_apex_set_btn)
         # (No RePosition here: Apex Set at the moved crossing overwrites.)
         self._lv_ve_save_btn = FitButton(t("Save"))
@@ -4779,7 +4779,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                                     self._coro_file_label]
         # NOTE: _lv_endo_btn is a hidden internal flag (merged into Blood/Endo) —
         # excluded so it is never force-shown.
-        self._lv_selectors = [self._lv_cap, self._lv_mv_btn, self._lv_aov_btn,
+        self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
                               self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]
@@ -5696,6 +5696,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._lv_ve_confirm_btn.setText(f"{vname} {t('Set')}")
                 # MV-AoV point: Auto or the crossing → Set (no ellipse Draw)
                 self._lv_ve_draw_btn.setVisible(not mvx)
+                self._lv_ve_auto_btn.setVisible(not mvx)
                 self._lv_ve_apex_set_btn.setVisible(mvx)
                 self._lv_ve_apex_set_btn.setEnabled(mvx)
                 self._lv_ve_save_btn.setEnabled(has)
@@ -6250,8 +6251,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                     self._lvv_add_marker("apex", self._lvv["apex"], "#ff4040")
                 if self._lv_valves.get("mitral") is not None:
                     self._lvv["mitral"] = self._lv_valves["mitral"]
-                if self._lv_valves.get("aortic") is not None:
-                    self._lvv["aortic"] = self._lv_valves["aortic"]
+                if self._lv_aov_eff({}) is not None:
+                    self._lvv["aortic"] = self._lv_aov_eff({})
                 self._lvv_dirty = False              # fresh Blood session
                 # Blood/Endo evaluates HU on THIN slices — force BOTH panes' slab
                 # to 0 (the right pane often carried a 5mm MPR slab).
@@ -6754,7 +6755,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         try:
             apex = lvv["apex"]
             # Effective valves: common MV/AoV if set, else the Blood-wizard ones.
-            aortic = self._lv_valves.get("aortic") or lvv.get("aortic")
+            aortic = self._lv_aov_eff(lvv)
             mitral = self._lv_valves.get("mitral") or lvv.get("mitral")
             if apex is None or aortic is None or mitral is None:
                 return None
@@ -6785,7 +6786,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         apex = (self._lvv or {}).get("apex")
         apex = np.asarray(apex, float) if apex is not None else np.zeros(3)
         dims, shape = self._dims, self._vol.shape
-        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        av = self._lv_aov_eff()
         mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
         planes = []
         if av is not None:
@@ -7910,8 +7911,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         ring's visibility (that is Hide/Show or the button's right-click)."""
         which = self._lv_valve_edit or "mitral"
         if which == "mitral":                    # MV-AoV point at the crossing
-            self._lv_mvaov_set_at_cross()
-            self._lv_update_submode_ui()
+            self._lv_mvaov_set_ask()
             return
         before = self._lv_vset_snap()
         self._lv_capture_valve_common(which, from_confirm=True)
@@ -8092,6 +8092,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                  for t in ths]
         color = "#ffd24d" if which == "aortic" else "#4dd0ff"
         hidden = not self._lv_valve_shown.get(which, True)
+        if which == "mitral" and self._lv_mvaov_on():
+            P = tuple(map(float, c))                 # MV-AoV point: a point
+            for k in ("A", "B"):
+                self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                     if mm.get("_lv_valve") != which]
+                self._meas_seq += 1
+                self._measures[k].append({
+                    "id": self._meas_seq, "type": "point",
+                    "pts": [self._world3d_to_out(k, np.asarray(P))],
+                    "pts3d": [P], "color": color, "_lv_valve": which,
+                    "hidden": hidden})
+                self._redraw_meas(k)
+            return
         for k in ("A", "B"):
             self._measures[k] = [mm for mm in self._measures.get(k, [])
                                  if mm.get("_lv_valve") != which]
@@ -8452,7 +8465,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         missing = []
         if self._lv_valves.get("mitral") is None:
             missing.append(t("MV plane"))
-        if self._lv_valves.get("aortic") is None:
+        if self._lv_aov_eff() is None:
             missing.append(t("AoV plane"))
         if not epi_ok:
             missing.append(t("Epi data"))
@@ -8771,7 +8784,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if av is not None:
                 planes.append((np.asarray(av[0], float),
                                np.asarray(av[1], float)))
-            if planes:
+            if planes and not self._lv_mvaov_on():
                 comp = clip_mask_by_planes(comp, mbbox, dims, apex, planes)
         except Exception:                                # noqa: BLE001
             pass
@@ -8784,6 +8797,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             eb = getattr(self, "_lvv_epi_disp_bbox", None)
             if ec is not None and eb is not None:
                 comp = _mask_intersect_bbox(comp, mbbox, ec, eb)
+            elif epi_full is not None:               # (the MV-AoV tent base)
+                mz0, mz1, my0, my1, mx0, mx1 = mbbox
+                comp = np.asarray(comp, bool) & epi_full[mz0:mz1, my0:my1,
+                                                         mx0:mx1]
         except Exception:                                # noqa: BLE001
             pass
         return comp, mbbox
@@ -8799,7 +8816,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         from PyQt6.QtCore import Qt, QThread
         from PyQt6.QtWidgets import QProgressDialog
         epi = getattr(self, "_lvv_epi_surf", None)
-        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        av = self._lv_aov_eff()
         mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
         apex = (self._lvv or {}).get("apex")
         if (self._vol is None or epi is None or av is None or mv is None
@@ -9135,7 +9152,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._lv_endo_ghost = False
             self._lv_endo_mask_sig = None
         # Ready to compute? (apex + valves + Epi). If not, tell the user.
-        av = self._lv_valves.get("aortic") or (self._lvv or {}).get("aortic")
+        av = self._lv_aov_eff()
         mv = self._lv_valves.get("mitral") or (self._lvv or {}).get("mitral")
         ready = (self._lvv is not None and self._lvv.get("apex") is not None
                  and av is not None and mv is not None
@@ -9311,7 +9328,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 return
             # Valve planes: prefer the COMMON MV/AoV (shared step); fall back to
             # any captured in the Blood wizard itself.
-            av = self._lv_valves.get("aortic") or lvv.get("aortic")
+            av = self._lv_aov_eff(lvv)
             mv = self._lv_valves.get("mitral") or lvv.get("mitral")
             miss = [n for n, val in ((t("apex"), lvv.get("apex")),
                     (t("aortic plane"), av), (t("mitral plane"), mv))
@@ -9337,12 +9354,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             epi = self._lvv_epi_surf
             apex = tuple(lvv["apex"])
             vol, dims = self._vol, self._dims
+            # MV-AoV tent: the Epi tent is the LV base (no valve-plane clip).
+            planes = self._lv_blood_planes(av, mv, epi)
 
             def _job():
                 return bloodpool_volume_epi(
                     vol, dims, epi._all_ring_points(),
                     lambda p: epi.contains(p, extend_base=True),
-                    [(c_a, n_a), (c_m, n_m)], apex, hu_lo, hu_hi, seed)
+                    planes, apex, hu_lo, hu_hi, seed)
 
             # Busy progress bar while the (few-second) volume runs off-thread.
             dlg = QProgressDialog(t("Measuring LV volume…"), None, 0, 0,
@@ -9604,7 +9623,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             return None
         # Prefer the COMMON MV/AoV planes (Blood now measures against them and no
         # longer captures its own), falling back to any captured in the wizard.
-        av = self._lv_valves.get("aortic") or lvv.get("aortic")
+        av = self._lv_aov_eff(lvv)
         mv = self._lv_valves.get("mitral") or lvv.get("mitral")
         if av is None or mv is None:
             if warn:
@@ -9796,7 +9815,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if surf is None or self._vol is None:
             return None
         lvv = self._lvv or {}
-        av = self._lv_valves.get("aortic") or lvv.get("aortic")
+        av = self._lv_aov_eff(lvv)
         mv = self._lv_valves.get("mitral") or lvv.get("mitral")
         apex = lvv.get("apex")
         if apex is None:

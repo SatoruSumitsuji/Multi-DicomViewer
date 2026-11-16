@@ -129,8 +129,8 @@ class ValveAutoMixin:
         pick; キャンセル during 画像設定 ends the procedure. Auto while the pick
         is armed cancels."""
         which = getattr(self, "_lv_valve_edit", None) or "mitral"
-        if getattr(self, "_vol", None) is None:
-            return
+        if getattr(self, "_vol", None) is None or which == "mitral":
+            return                               # MV-AoV+Apex: no Auto (Set)
         seed = self._lv_valve_auto_seed if self._lv_auto_pending() else None
         if seed is not None and seed[1] != "prep":
             self._lv_pick_cancel()
@@ -157,18 +157,11 @@ class ValveAutoMixin:
         box = QMessageBox(self.window())
         box.setWindowTitle(t("Auto"))
         box.setIcon(QMessageBox.Icon.Question)
-        if which == "mitral":
-            box.setText(t(
-                "MV-AoV+Apex の Auto を始めます。\n\n画像設定：先に大動脈基部が見える"
-                "画像を調整します（Rotate / Paging などが普段どおり使えます）。調整後に"
-                "もう一度 Auto を押すと、この選択画面に戻ります。\n\nMV-AoV点設定："
-                "すぐに大動脈弁のすぐ上、大動脈基部の中を 1 回クリックします。"))
-        else:
-            box.setText(t(
-                "AoV の Auto を始めます。\n\n画像設定：先に AoV の短軸像を調整します"
-                "（Rotate / Paging などが普段どおり使えます）。調整後にもう一度 Auto "
-                "を押すと、この選択画面に戻ります。\n\nAoV点設定：すぐに AoV 中心近傍を"
-                "クリックします。"))
+        box.setText(t(
+            "AoV の Auto を始めます。\n\n画像設定：先に AoV の短軸像を調整します"
+            "（Rotate / Paging などが普段どおり使えます）。調整後にもう一度 Auto "
+            "を押すと、この選択画面に戻ります。\n\nAoV点設定：すぐに AoV 中心近傍を"
+            "クリックします。"))
         b_prep = box.addButton(t("画像設定"), QMessageBox.ButtonRole.ActionRole)
         b_pick = box.addButton(pick_lbl, QMessageBox.ButtonRole.AcceptRole)
         b_cancel = box.addButton(t("キャンセル"), QMessageBox.ButtonRole.RejectRole)
@@ -189,11 +182,6 @@ class ValveAutoMixin:
         if which == "aortic":
             self._lv_valve_auto_seed = (which, "aov", None)
             self._lvv_prompt(t("AoVの短軸を表示し、その中心近傍をクリックしてください。"))
-        else:
-            # MV-AoV+Apex: ONE click inside the aortic root, just above the
-            # valve → the MV-AoV point + the apex are detected (detect_mv_aov_point).
-            self._lv_valve_auto_seed = (which, "mvaov", None)
-            self._lvv_prompt(t(self._LV_MVAOV_PROMPT))
 
     def _lv_auto_pending(self) -> bool:
         """An Auto procedure runs for the valve being edited (画像設定 or pick)."""
@@ -253,19 +241,6 @@ class ValveAutoMixin:
             return
         which, stage = seed[0], seed[1]
         P = np.asarray(P, float)
-        if stage == "mvaov":
-            self._lv_pick_marker(P)
-            self._lv_pick_repaint()
-            ans = self._lv_auto_confirm(which)
-            if ans == "yes":
-                self._lv_run_mvaov_auto(P)
-                self._lv_pick_marker_clear_later()
-            elif ans == "no":
-                self._lv_pick_cancel()
-            else:                                # 戻る → click again
-                self._lv_pick_marker_clear()
-                self._lvv_prompt(t(self._LV_MVAOV_PROMPT))
-            return
         if stage == "aov":
             # Show the AoV-centre click, then ask before the AutoTrace runs.
             self._lv_pick_marker(P)
@@ -439,16 +414,14 @@ class ValveAutoMixin:
 
     # ------------------------------------------------- MV-AoV point (Epi base)
     # The LV mode's base is ONE point: the MV-AoV transition point (aortic end
-    # of the aorto-mitral curtain, on the aortic annulus toward the mitral
-    # inflow — core.mv_aov_point). The Epi long axis = apex → that point, and
-    # every Epi border runs into it at both basal ends (the "tent", the Epi
-    # base). Internally the point is the "mitral" valve slot as a DEGENERATE
-    # plane (centre = the point, normal = apex → point, small ring), so the
-    # long axis / views / Blood-Endo keep working; the detected AoV plane fills
-    # the "aortic" slot (Blood-Endo uses it). self._lv_mvaov marks the mode.
-    _LV_MVAOV_PROMPT = ("大動脈弁のすぐ上、大動脈基部の中を 1 回クリックしてください"
-                        "（MV-AoV移行点と心尖部を自動で求めます）。")
-    _LV_MVAOV_RING_MM = 4.0                  # marker ring radius of the point
+    # of the aorto-mitral curtain), set at the centreline crossing (MV-AoV
+    # Set). The Epi long axis = apex → that point, and every Epi border runs
+    # into it at both basal ends (the "tent", the Epi base; Blood/Endo use the
+    # tent as the LV base too — no AoV plane). Internally the point is the
+    # "mitral" valve slot as a DEGENERATE plane (centre = the point, normal =
+    # apex → point; drawn as a point), so the long axis / views keep working.
+    # self._lv_mvaov marks the mode.
+    _LV_MVAOV_RING_MM = 4.0                  # nominal radius of the slot
 
     def _lv_mvaov_on(self) -> bool:
         """The LV base is the MV-AoV point (not an MV plane)."""
@@ -547,46 +520,164 @@ class ValveAutoMixin:
         self._lv_record_geom(before)
         self._lvv_prompt(t("Epi の両端を MV-AoV点に合わせ直しました。"))
 
-    def _lv_run_mvaov_auto(self, P) -> None:
-        from multi_dicomviewer.core.mv_aov_point import detect_mv_aov_point
+    # ----------------------- MV-AoV Set / Apex Set (the centreline crossing)
+    # Both take the CURRENT centreline crossing (no click on the image):
+    # Set / Adjust / Cancel. Apex Set then offers the true-apex search from that
+    # provisional apex (the MV+Apex apex algorithm, valve_auto.apex_from_point).
+    _LV_APEX_MAX_SHIFT_MM = 20.0             # true apex this far off → provisional
+
+    def _lv_ask_set_adjust(self, title, text):
+        """'set' / 'adjust' / None (Cancel) — Set, Adjust, Cancel buttons."""
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setWindowTitle(title)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(text)
+        b_set = box.addButton(t("Set"), QMessageBox.ButtonRole.AcceptRole)
+        b_adj = box.addButton(t("Adjust"), QMessageBox.ButtonRole.ActionRole)
+        b_can = box.addButton(t("Cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_set)
+        box.setEscapeButton(b_can)
+        box.exec()
+        c = box.clickedButton()
+        return "set" if c is b_set else "adjust" if c is b_adj else None
+
+    def _lv_info(self, title, text) -> None:
+        from PyQt6.QtWidgets import QMessageBox
+        QMessageBox.information(self.window(), title, text)
+
+    def _lv_mvaov_set_ask(self) -> None:
+        """MV-AoV Set: the MV-AoV point at the current centreline crossing?"""
+        if getattr(self, "_center", None) is None:
+            return
+        ans = self._lv_ask_set_adjust(
+            t("MV-AoV Set"),
+            t("このセンターライン交点位置にMV-AoV点を設定しますか？"))
+        if ans == "set":
+            self._lv_mvaov_set_at_cross()
+        elif ans == "adjust":
+            self._lv_info(t("MV-AoV Set"), t(
+                "センターライン交点をMV-AoV点の位置に移動して再度 MV-AoV Set"
+                "ボタンをクリックしてください。"))
+        self._lv_update_submode_ui()
+
+    def _lv_apex_put(self, P) -> None:
+        """Set the common apex at *P* (one Ctrl+Z step)."""
+        before = self._lv_vset_snap()
+        self._lv_apex = np.asarray(P, float).copy()
+        self._lv_apex_shown = True
+        self._lv_apex_marker_draw()
+        self._lv_mvaov_sync()                    # normal = apex → point
+        self._lv_vset_record(before)
+        self._lv_update_submode_ui()
+
+    def _lv_ask_apex_mode(self):
+        """'auto' / 'manual' / 'adjust' / None (Cancel) — Apex Set's choice."""
+        from PyQt6.QtWidgets import QMessageBox
+        box = QMessageBox(self.window())
+        box.setWindowTitle(t("Apex Set"))
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(t(
+            "このセンターライン交点位置で Apex 点を設定します。\n\n"
+            "Set Auto：交点を仮Apex点として、真Apexを自動で求めます。\n"
+            "Set Manual：交点の位置をそのまま Apex 点にします。\n"
+            "Adjust：交点を動かしてからやり直します。"))
+        b_auto = box.addButton(t("Set Auto"), QMessageBox.ButtonRole.AcceptRole)
+        b_man = box.addButton(t("Set Manual"), QMessageBox.ButtonRole.ActionRole)
+        b_adj = box.addButton(t("Adjust"), QMessageBox.ButtonRole.ActionRole)
+        b_can = box.addButton(t("Cancel"), QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(b_auto)
+        box.setEscapeButton(b_can)
+        box.exec()
+        c = box.clickedButton()
+        return {b_auto: "auto", b_man: "manual", b_adj: "adjust"}.get(c)
+
+    def _lv_apex_set_ask(self) -> None:
+        """Apex Set at the crossing: Set Auto (provisional → the true apex),
+        Set Manual (the crossing itself, after a Yes/No check), Adjust, Cancel.
+        Needs the MV-AoV point (the auto search runs from it)."""
+        if getattr(self, "_center", None) is None:
+            return
+        if not self._lv_mvaov_on():
+            self._lv_info(t("Apex Set"),
+                          t("先に MV-AoV Set で MV-AoV点を設定してください。"))
+            return
+        from PyQt6.QtWidgets import QMessageBox
+        while True:
+            ans = self._lv_ask_apex_mode()
+            if ans == "manual":
+                go = QMessageBox.question(
+                    self.window(), t("Apex Set"),
+                    t("センターライン交点位置をApex点に設定していいですか？"),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes)
+                if go != QMessageBox.StandardButton.Yes:
+                    continue                     # No → back to the 4 choices
+                self._lv_apex_put(np.asarray(self._center, float).copy())
+                self._lvv_prompt(t("Apex点を交点に設定しました（手動）。"))
+                return
+            if ans == "adjust":
+                self._lv_info(t("Apex Set"), t(
+                    "センターライン交点をApex点の位置に移動して再度 Apex Set"
+                    "ボタンをクリックしてください。"))
+                return
+            if ans == "auto":
+                prov = np.asarray(self._center, float).copy()
+                self._lv_apex_put(prov)          # provisional, then the true apex
+                self._lv_true_apex_from(prov)
+            return
+
+    def _lv_true_apex_from(self, prov) -> None:
+        """The true apex from the provisional one (busy window); kept
+        provisional when the search fails or lands far from it."""
+        from multi_dicomviewer.core import valve_auto as va
+        P = self._lv_mvaov_point()
+        if P is None or getattr(self, "_vol", None) is None:
+            return
         vol = self._vol
         dims = tuple(float(d) for d in self._dims)
-        with self._lv_auto_running(self._lv_ve_auto_btn):
-            res = self._run_busy(t("Auto"), t("MV-AoV点と心尖部を検出中…"),
-                                 lambda: detect_mv_aov_point(vol, dims, P))
-        self._lv_valve_auto_seed = None
-        if res is None or (not res.ok and getattr(res, "aov", None) is None):
+        res = self._run_busy(
+            t("Apex Set"), t("真Apexを計算中…"),
+            lambda: va.apex_from_point(vol, dims, P, prov,
+                                       self._LV_APEX_MAX_SHIFT_MM))
+        if res is None or not res.ok:
             self._lvv_prompt(t(
-                "MV-AoV点を自動で検出できませんでした。Auto をもう一度押して大動脈"
-                "基部の中をクリックし直すか、交点を MV-AoV 移行点に合わせて Set で"
-                "設定してください。"))
+                "真Apexを自動で決められなかったため、仮Apex点をそのまま心尖部にしました。"
+                "必要なら交点を心尖部に合わせて Apex Set → Set Manual で設定して"
+                "ください。"))
             return
-        before = self._lv_vset_snap()
-        self._lv_set_mvaov(
-            res.point, apex=(res.apex if res.ok else None), aov=res.aov,
-            extra={"auto": True,
-                   "aov_c": [float(x) for x in res.aov_center],
-                   "aov_n": [float(x) for x in res.aov_normal]})
-        self._lv_vset_record(before)         # point + apex + AoV = one step
-        if hasattr(self, "_lv_view_mv_perpendicular"):
-            self._lv_view_mv_perpendicular(reset_cam=False)
-            for k in ("A", "B"):
-                self._redraw_meas(k)
-        self._lv_update_submode_ui()
-        if not res.ok:
-            self._lvv_prompt(t(
-                "MV-AoV点を自動設定しましたが、心尖部は検出できませんでした。交点を"
-                "心尖部に合わせて Apex Set で設定してください。"))
-            return
-        msg = t("MV-AoV点と心尖部（MV-AoV点から {d:.0f} mm）を自動設定しました。"
-                "確認して、ずれていれば交点を合わせて Set（MV-AoV点）/ Apex Set "
-                "（心尖部）で修正してください。").format(
-                    d=float(np.linalg.norm(res.apex - res.point)))
+        self._lv_apex_put(np.asarray(res.apex, float))
+        msg = t("真Apexを設定しました（仮Apex点から {d:.1f} mm、MV-AoV点から "
+                "{L:.0f} mm）。確認して、ずれていれば交点を合わせて Apex Set → "
+                "Set Manual で修正し、Save → Exit で Epi に進んでください。").format(
+                    d=float(np.linalg.norm(np.asarray(res.apex) - prov)),
+                    L=float(np.linalg.norm(np.asarray(res.apex) - P)))
         if str(getattr(res, "message", "")).startswith("estimated"):
             msg += "\n" + t(
                 "心尖部の外側に脂肪が見えないため（横隔膜・肝臓に接しているなど）、"
                 "心外膜側の心尖点は心内膜側の心尖点＋推定壁厚で設定しました。")
         self._lvv_prompt(msg)
+
+    # ----------------- Blood/Endo against the MV-AoV tent (no AoV plane)
+    def _lv_aov_eff(self, lvv=None):
+        """The AoV plane Blood / Endo / FullLV read: the set one (or the Blood
+        wizard's); in the MV-AoV mode there is none — the MV-AoV point's slot
+        stands in, and the Epi tent is the basal bound (_lv_blood_planes)."""
+        lvv = (getattr(self, "_lvv", None) or {}) if lvv is None else lvv
+        av = self._lv_valves.get("aortic") or lvv.get("aortic")
+        if av is None and self._lv_mvaov_on():
+            av = self._lv_valves.get("mitral")
+        return av
+
+    def _lv_blood_planes(self, av, mv, epi=None) -> list:
+        """Valve planes that clip the blood pool: none with the MV-AoV tent
+        (the Epi tent itself is the LV base), else the AoV + MV planes."""
+        if self._lv_mvaov_on():
+            if epi is not None and getattr(epi, "tent", False):
+                return []
+            return [(np.asarray(mv[0], float), np.asarray(mv[1], float))]
+        return [(np.asarray(av[0], float), np.asarray(av[1], float)),
+                (np.asarray(mv[0], float), np.asarray(mv[1], float))]
 
     def _lv_run_mv_apex_auto(self, mv_p, apex_p) -> None:
         from multi_dicomviewer.core import valve_auto as va

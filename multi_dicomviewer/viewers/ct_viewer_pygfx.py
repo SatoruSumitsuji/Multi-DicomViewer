@@ -11005,6 +11005,19 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                  for t in ths]
         color = "#ffd24d" if which == "aortic" else "#4dd0ff"
         hidden = not self._lv_valve_shown.get(which, True)
+        if which == "mitral" and self._lv_mvaov_on():
+            P = tuple(map(float, c))                 # MV-AoV point: a point
+            for k in ("A", "B"):
+                self._measures[k] = [mm for mm in self._measures.get(k, [])
+                                     if mm.get("_lv_valve") != which]
+                self._meas_seq += 1
+                self._measures[k].append({
+                    "id": self._meas_seq, "type": "point",
+                    "pts": [self._world3d_to_out(k, np.asarray(P))],
+                    "pts3d": [P], "color": color, "_lv_valve": which,
+                    "hidden": hidden})
+                self._redraw_meas(k)
+            return
         for k in ("A", "B"):
             self._measures[k] = [mm for mm in self._measures.get(k, [])
                                  if mm.get("_lv_valve") != which]
@@ -11253,9 +11266,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         Re-pressing Confirm updates it; it never toggles the ring's visibility
         (that is Hide/Show or the button's right-click)."""
         if (self._lv_valve_edit or "mitral") == "mitral":
-            self._lv_mvaov_set_at_cross()        # MV-AoV point at the crossing
+            self._lv_mvaov_set_ask()             # MV-AoV point at the crossing
             QTimer.singleShot(0, self._reset_pointer_state)
-            self._lv_update_submode_ui()
             return
         before = self._lv_vset_snap()
         self._lv_capture_valve_common(self._lv_valve_edit or "mitral",
@@ -12776,6 +12788,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 self._lv_ve_confirm_btn.setText(f"{vname} {t('Set')}")
                 # MV-AoV point: Auto or the crossing → Set (no ellipse Draw)
                 self._lv_ve_draw_btn.setVisible(not mvx)
+                self._lv_ve_auto_btn.setVisible(not mvx)
                 self._lv_ve_apex_set_btn.setVisible(mvx)
                 self._lv_ve_apex_set_btn.setEnabled(mvx)
                 self._lv_ve_save_btn.setEnabled(has)
@@ -13263,7 +13276,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._lv_ve_apex_set_btn = FitButton(t("Apex Set"))
         self._lv_ve_apex_set_btn.setHelpToolTip(
             t("Set the LV apex at the current centreline crossing."))
-        self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set)
+        self._lv_ve_apex_set_btn.clicked.connect(self._lv_apex_set_ask)
         # (No RePosition here: Apex Set at the moved crossing overwrites.)
         self._lv_ve_save_btn = FitButton(t("Save"))
         self._lv_ve_save_btn.clicked.connect(
@@ -13384,7 +13397,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # excluded so it is never force-shown.
         self._coro_group_widgets = [self._coro_cap, self._coronary_mpr_btn,
                                     self._coro_file_label]
-        self._lv_selectors = [self._lv_cap, self._lv_mv_btn, self._lv_aov_btn,
+        self._lv_selectors = [self._lv_cap, self._lv_mv_btn,
                               self._lv_epi_btn,
                               self._lvv_start_btn, self._full_lv_btn,
                               self._lv_file_label]
@@ -13764,8 +13777,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 # the same valves as Epi — no separate per-Blood valve capture.
                 if self._lv_valves.get("mitral") is not None:
                     self._lvv["mitral"] = self._lv_valves["mitral"]
-                if self._lv_valves.get("aortic") is not None:
-                    self._lvv["aortic"] = self._lv_valves["aortic"]
+                if self._lv_aov_eff({}) is not None:
+                    self._lvv["aortic"] = self._lv_aov_eff({})
                 # Blood/Endo evaluates HU on THIN slices — force BOTH panes' slab
                 # to 0 (the right pane often carried a 5mm MPR slab).
                 self._thick["A"] = 0.0
@@ -14648,7 +14661,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if av0 is not None:
                 planes.append((np.asarray(av0[0], float),
                                np.asarray(av0[1], float)))
-            if planes:
+            if planes and not self._lv_mvaov_on():
                 comp = clip_mask_by_planes(comp, mbbox, dims, apex, planes)
         except Exception:                                # noqa: BLE001
             pass
@@ -15267,12 +15280,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             epi = self._lvv_epi_surf
             apex = tuple(lvv["apex"])
             vol, dims = self._vol, self._dims
+            # MV-AoV tent: the Epi tent is the LV base (no valve-plane clip).
+            planes = self._lv_blood_planes(lvv["aortic"], lvv["mitral"], epi)
 
             def _job():
                 return bloodpool_volume_epi(
                     vol, dims, epi._all_ring_points(),
                     lambda p: epi.contains(p, extend_base=True),
-                    [(c_a, n_a), (c_m, n_m)], apex, hu_lo, hu_hi, seed)
+                    planes, apex, hu_lo, hu_hi, seed)
 
             # Busy progress bar while the (few-second) volume runs off-thread.
             dlg = QProgressDialog(t("Measuring LV volume…"), None, 0, 0,
@@ -15578,7 +15593,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if surf is None or self._vol is None:
             return None
         lvv = self._lvv or {}
-        av = lvv.get("aortic") or self._lv_valves.get("aortic")
+        av = lvv.get("aortic") or self._lv_aov_eff(lvv)
         mv = lvv.get("mitral") or self._lv_valves.get("mitral")
         apex = lvv.get("apex")
         if apex is None:

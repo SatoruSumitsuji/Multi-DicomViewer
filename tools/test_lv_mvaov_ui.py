@@ -1,6 +1,6 @@
 """LV mode MV-AoV point UI (2026-11-16) — source checks of both viewers.
 
-MV+Apex → MV-AoV+Apex (one click in the aortic root), the AoV button hidden,
+MV+Apex → MV-AoV+Apex (the point + apex at the crossing), the AoV button hidden,
 the gate accepts the MV-AoV point, the Epi plane count from Settings, the
 tent snap of the Epi basal ends, Fit = re-converge onto the point."""
 import sys
@@ -27,12 +27,12 @@ for f in ("ct_viewer.py", "ct_viewer_pygfx.py"):
     check(f"{f}: tent snap", "tent_terminal_ok(ax, P, c)" in s
           and "m.epi_tent = bool(tent)" in s)
     check(f"{f}: Fit → tent refit", "self._lv_tent_refit()" in s)
-    check(f"{f}: Set → point at the crossing", "self._lv_mvaov_set_at_cross()" in s)
+    check(f"{f}: Set → point at the crossing", "self._lv_mvaov_set_ask()" in s)
     check(f"{f}: apex moves re-aim the point", s.count("self._lv_mvaov_sync()") >= 2)
 mx = (ROOT / "multi_dicomviewer" / "viewers" / "valve_auto_mixin.py").read_text(
     encoding="utf-8")
-check("mixin: Auto runs the MV-AoV detection",
-      "detect_mv_aov_point(vol, dims, P)" in mx)
+check("mixin: MV-AoV+Apex has no Auto",
+      'is None or which == "mitral":' in mx)
 check("mixin: undo snapshot has mvaov", '"mvaov"' in mx)
 dlg = (ROOT / "multi_dicomviewer" / "ui" / "settings_dialog.py").read_text(
     encoding="utf-8")

@@ -1193,6 +1193,34 @@ def _apex_from_click(vol, dims, c, click, thr, step=0.5):
     return ApexResult(apex, endo_p, wall, message=msg)
 
 
+def apex_from_point(vol, dims, point, provisional,
+                    max_shift_mm: float = 20.0) -> ApexResult:
+    """The true (epicardial) LV apex from the MV-AoV *point* and the user's
+    *provisional* apex (the centreline crossing at Apex Set): the same
+    click-guided search as MV+Apex (_apex_from_click), cast from inside the LV
+    cavity a little apical of the point toward the provisional apex. A result
+    farther than *max_shift_mm* from the provisional apex is not trusted
+    (ok=False — the caller keeps the provisional apex)."""
+    vol = np.asarray(vol)
+    P = np.asarray(point, float)
+    Q = np.asarray(provisional, float)
+    d = Q - P
+    L = float(np.linalg.norm(d))
+    if L < 20.0:
+        return ApexResult(Q, Q, 0.0, ok=False,
+                          message="provisional apex too close to the MV-AoV point")
+    base = P + min(15.0, 0.25 * L) * (d / L)
+    thr = blood_threshold(vol, dims, base)
+    base = _snap_into_blood(vol, dims, base, thr)
+    res = _apex_from_click(vol, dims, base, Q, thr)
+    if not res.ok:
+        return res
+    if float(np.linalg.norm(np.asarray(res.apex, float) - Q)) > float(max_shift_mm):
+        return ApexResult(res.apex, res.endo, res.wall_mm, ok=False,
+                          message="far from the provisional apex")
+    return res
+
+
 def detect_apex(vol, dims, mv_center, mv_normal, toward=None,
                 click=None) -> ApexResult:
     """Epicardial LV apex from the MV plane: the farthest epicardial point from
