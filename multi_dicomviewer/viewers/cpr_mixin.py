@@ -126,6 +126,8 @@ class CPRMixin:
                 self._coro_edit_vid = ""
                 self._cpr_suggested_name = ""
         if ok:
+            if rearm:                            # SaveNext: Auto back on
+                self._cpr_resume_auto_restore()
             if headless:
                 # Saved from VR表示 (no short-axis): the line is done — it turns
                 # light blue on the VR and Draw stays armed for the next vessel.
@@ -417,6 +419,7 @@ class CPRMixin:
         automatically, so Exit need not be pressed separately. Shared by both
         viewers; _coronary_exit is each viewer's own."""
         if self._cpr_register_to_tree(rearm=False):
+            self._cpr_resume_auto_restore()      # Auto back on after a Resume
             self._coronary_exit()
 
     # ---- a set CPR line stays saveable after its short-axis is left ----------
@@ -959,6 +962,80 @@ class CPRMixin:
         start / via / end of a lumen-following centreline."""
         return bool(getattr(self, "_cpr_auto", True))
 
+    def _cpr_set_auto(self, on: bool) -> None:
+        """Set the Auto toggle (state + Draw-row button)."""
+        self._cpr_auto = bool(on)
+        b = getattr(self, "_cpr_auto_btn", None)
+        if b is not None and b.isChecked() != bool(on):
+            b.blockSignals(True)
+            b.setChecked(bool(on))
+            b.blockSignals(False)
+
+    # ---- Rotate / Paging while setting CPR lines: Draw on hold → ReDraw ------
+    _CPR_HOLD_TOOLS = ("ROTATE", "PAGING")
+
+    def _cpr_tool_hold_on(self) -> bool:
+        """True while Draw / edit is on hold for a view tool: picking Rotate or
+        Paging while setting CPR lines puts the left-click back on the TOOL in
+        every pane (no trace point added, no edit point grabbed — before, the
+        right pane often kept measuring, so Rotate / Paging seemed dead there).
+        Right-click ▸ ReDraw (or the Draw button) resumes drawing; an
+        unfinished trace is kept and continues."""
+        return bool(getattr(self, "_cpr_tool_hold", False)
+                    and getattr(self, "_coronary_mode", False)
+                    and getattr(self, "_meas_on", False))
+
+    def _cpr_tool_hold_check(self, name) -> None:
+        """_set_tool hook: Rotate / Paging selected (key or button) while
+        setting CPR lines → hold Draw."""
+        if (name in self._CPR_HOLD_TOOLS
+                and getattr(self, "_coronary_mode", False)
+                and getattr(self, "_meas_on", False)
+                and getattr(self, "_mode", "3D") == "3D"):
+            self._cpr_tool_hold = True
+            self._coronary_sync_ui()
+
+    def _cpr_redraw(self) -> None:
+        """Right-click ▸ ReDraw: end the hold — left-click draws / edits the
+        CPR line again, exactly as before the hold (an armed Draw / an
+        unfinished trace continues; the hold never changed them)."""
+        self._cpr_tool_hold = False
+        self._coronary_sync_ui()
+
+    def _cpr_redraw_menu(self) -> bool:
+        """Right-click while on hold → a menu with 「ReDraw」. True = shown."""
+        if not self._cpr_tool_hold_on():
+            return False
+        from PyQt6.QtGui import QCursor
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+        act = menu.addAction(t("ReDraw"))
+        if menu.exec(QCursor.pos()) is act:
+            self._cpr_redraw()
+        return True
+
+    def _cpr_auto_user_toggle(self, on) -> None:
+        """Auto button clicked by the user: their choice wins (a Resume's
+        automatic OFF is no longer undone on SaveNext / Save&Exit)."""
+        self._cpr_auto = bool(on)
+        self._cpr_auto_resume_off = False
+
+    def _cpr_resume_auto_off(self) -> None:
+        """Resume trace of an existing CPR line: Auto goes OFF, so finishing the
+        resumed trace does not re-trace (or auto-Fit) the whole line and wipe
+        the hand corrections made to it. SaveNext / Save&Exit turn it back on
+        (_cpr_resume_auto_restore)."""
+        self._cpr_tool_hold = False              # Resume = drawing again
+        if self._cpr_auto_on():
+            self._cpr_set_auto(False)
+            self._cpr_auto_resume_off = True
+
+    def _cpr_resume_auto_restore(self) -> None:
+        """Turn Auto back on if a Resume trace turned it off."""
+        if getattr(self, "_cpr_auto_resume_off", False):
+            self._cpr_auto_resume_off = False
+            self._cpr_set_auto(True)
+
     _CPR_AUTO_STAGE = {
         "enhance": "血管を強調中",
         "path": "経路を探索中",
@@ -980,11 +1057,10 @@ class CPRMixin:
                 return
             self._enter_cpr(pane, mi)
             if self._cpr is not None:
-                # Fit (fixed HU 200–700 disc, 2.5 mm) can pull a THIN auto-traced
-                # point onto a neighbouring vein; the auto trace is already
-                # centred sub-voxel, so only a hand-clicked trace is auto-Fitted.
-                if not m.get("_cpr_auto"):
-                    self._cpr_fit()
+                # No auto-Fit (user 2026-11-16, Fit removed): it re-centres EVERY
+                # point (HU 200–700 disc) and can move a hand-placed / hand-
+                # corrected point unintentionally; the auto trace is centred
+                # already and hand points are checked on the short axis.
                 self._cpr_jump_ctrl_end(False)   # most proximal edit point (|◀)
         self._cpr_auto_run(m, build)
 

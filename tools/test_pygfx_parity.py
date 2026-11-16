@@ -218,7 +218,7 @@ def main() -> int:
 
     # --------------------------------------------------------- 2. lumen snap
     print("\n2. Lumen snap")
-    check("_snap_lumen defaults on", v._snap_lumen is True)
+    check("_snap_lumen off (Snap removed 2026-11-16)", v._snap_lumen is False)
     # The bright cylinder runs ALONG z, so pane A (axial, normal = z) has no
     # depth peak to find — use pane B (coronal), whose normal crosses the
     # cylinder, exactly like tracing a vessel that dives through the slice.

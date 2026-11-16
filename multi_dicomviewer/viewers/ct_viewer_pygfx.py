@@ -3604,6 +3604,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 QTimer.singleShot(
                     0, lambda sx=x, sy=y: self._cpr_context_menu(sx, sy))
                 return
+            # Draw on hold (Rotate / Paging) → 「ReDraw」 resumes drawing.
+            # Deferred out of the pointer handler (modal safety).
+            if self._cpr_tool_hold_on():
+                self._reset_pointer_state()
+                QTimer.singleShot(0, self._cpr_redraw_menu)
+                return
             # The MV / AoV line (detected outline or ring) → 描き直す menu
             # (deferred out of the pointer handler, like the menus below).
             _vh = self._lv_valve_hit(key, x, y)
@@ -3701,7 +3707,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # (Windows) viewer. _alt_tool keeps _on_move on the tool path for the
         # rest of the drag (Alt may be released mid-gesture).
         _mods = ev.get("modifiers") or ()
-        _alt = "Alt" in _mods
+        # Draw on hold (Rotate / Paging picked while setting CPR lines) = Alt:
+        # the left-click runs the tool, never adds / grabs a point.
+        _alt = "Alt" in _mods or self._cpr_tool_hold_on()
         self._alt_tool = bool(self._meas_on and _alt and self._drag_btn == 1)
         if self._meas_on and not _alt:
             self._cross_grab = False
@@ -3773,7 +3781,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # There is no MPR crosshair on the cross-section, so never grab it.
         if self._cpr is not None and key == "A":
             if self._drag_btn == 1:
-                if self._cpr_grab(x, y):
+                if not self._cpr_tool_hold_on() and self._cpr_grab(x, y):
                     # A near-marker press grabs the edit point to drag. In EDIT
                     # mode (idle Measure, no Alt) ALSO jump it to the click right
                     # now, so even a SINGLE click very close to the marker moves
@@ -4171,7 +4179,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # the "hold Alt to adjust the view mid-trace" concept. A PLAIN
         # double-click in Measure mode still finishes the polyline draft.
         _mods = ev.get("modifiers") or ()
-        if self._meas_on and "Shift" not in _mods and "Alt" not in _mods:
+        if (self._meas_on and "Shift" not in _mods and "Alt" not in _mods
+                and not self._cpr_tool_hold_on()):
             # During a coronary CPR centreline trace, a PLAIN double-click must
             # NOT finish the polyline. Two deliberate point-clicks placed quickly
             # (click-release-click) can be read by the OS as a double-click, which
@@ -4852,6 +4861,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._tool = name
         for n, b in self._tool_btns.items():
             b.setChecked(n == name)
+        self._cpr_tool_hold_check(name)     # Rotate/Paging → Draw on hold
         self._refresh_tool_availability()
 
     def _refresh_tool_availability(self):
@@ -10419,6 +10429,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Guarded to coronary mode so ordinary measurement resumes are unaffected.
         if getattr(self, "_coronary_mode", False):
             self._coronary_mpr_pending = True
+            self._cpr_resume_auto_off()   # keep the hand corrections (no re-trace)
             self._coronary_sync_ui()
         self._redraw_meas(which)
 
@@ -19521,31 +19532,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row.addWidget(self._cpr_draw_btn)
         # (Open VR moved to the 「VR:」 group right of Coronary: CPR — see
         # _cpr_vr_build_group, built in _build_lv_bar.)
-        # Fit: rebuild the short-axis from the (edited) control points, keeping
-        # the display state — follows an in-place Measure edit of the centreline
-        # without a Save→Exit→Load round-trip.
-        self._cpr_fit_btn = FitButton(t("Fit"))
-        self._cpr_fit_btn.setHelpToolTip(t(
-            "編集したCPR中心点に短軸断面を再フィット（Save→Exit→Load と同等の "
-            "再構築、回転/反転/FOV/位置は保持）。Measureで点を修正した後に押す"))
-        self._cpr_fit_btn.clicked.connect(self._cpr_fit)
-        self._cpr_fit_btn.setStyleSheet(self._BTN_DIS)   # explicit grey when off
-        row.addWidget(self._cpr_fit_btn)
-        # Snap: toggle the trace-to-lumen auto-snap (green = on). Turn OFF to
-        # hand-place points through an occluded / low-HU segment near a bright
-        # chamber. (Editing an existing point never snaps, regardless.)
-        self._cpr_snap_btn = FitButton(t("Snap"))
-        self._cpr_snap_btn.setCheckable(True)
-        self._cpr_snap_btn.setChecked(self._snap_lumen)
-        self._cpr_snap_btn.setStyleSheet(
-            "QPushButton:checked{background:#2e8b57;color:white;}")
-        self._cpr_snap_btn.setHelpToolTip(t(
-            "トレース点を造影ルーメンへ自動スナップ（深さ補正）。閉塞部などで"
-            "腔へ引き寄せられる場合はオフに。太い高HV腔は自動で無視します。"
-            "既存点の編集移動は常にスナップしません"))
-        self._cpr_snap_btn.toggled.connect(
-            lambda on: setattr(self, "_snap_lumen", bool(on)))
-        row.addWidget(self._cpr_snap_btn)
+        # Fit / Snap buttons REMOVED (user 2026-11-16): every edit point is
+        # checked on the short axis and centred by hand, so the automatic
+        # re-centring (Fit: all points, Snap: each click) only risks moving a
+        # point unintentionally. Auto traces stay centred by themselves. The
+        # core (_cpr_fit / the lumen snap) is kept dormant; _snap_lumen is off.
+        self._cpr_fit_btn = None
+        self._cpr_snap_btn = None
+        self._snap_lumen = False
         # Auto: the clicked trace points (start, optional via points, end) are
         # joined by a centreline traced through the contrast lumen (green = on).
         self._cpr_auto_btn = FitButton(t("Auto"))
@@ -19557,8 +19551,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "自動トレース：始点と終点（必要なら途中の点も）をクリックして右クリックで"
             "確定すると、その間を造影された血管の中心に沿って自動でつなぎます。"
             "オフにすると、クリックした点をそのまま結びます"))
-        self._cpr_auto_btn.toggled.connect(
-            lambda on: setattr(self, "_cpr_auto", bool(on)))
+        self._cpr_auto_btn.toggled.connect(self._cpr_auto_user_toggle)
         row.addWidget(self._cpr_auto_btn)
         # Epi: the Epi border (LV mode / EpiLv / FullLv) on the short axis only.
         self._cpr_epi_show_btn = FitButton(t("Epi"))
@@ -19601,10 +19594,10 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # needed (the save-only path is still used internally by Save).
         self._cpr_save_btn = None             # (save-only button retired)
         self._cpr_overwrite_btn = None        # (Overwrite button retired)
-        # Next = save the confirmed line at once under a serial provisional name
+        # SaveNext = save the confirmed line at once under a serial provisional name
         # (01.cpr.json, 02.cpr.json … — named later in the Coronary Tree) and
         # arm Draw for the next vessel. No Save As dialog per line.
-        self._cpr_register_btn = FitButton(t("Next"))
+        self._cpr_register_btn = FitButton(t("SaveNext"))
         self._cpr_register_btn.setHelpToolTip(
             t("確定したCPR線を連番の仮名（01.cpr.json, 02.cpr.json …）で保存して "
               "Coronary Tree に登録し、続けて次の線を描けるようにします。"
@@ -19612,7 +19605,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
               "Coronary Tree の DetailName / FixName →「ファイル名更新」で付けます。"))
         self._cpr_register_btn.clicked.connect(
             lambda _c=False: self._cpr_register_to_tree())
-        # Next = save + next line: the Save outline (grey when disabled)
+        # SaveNext = save + next line: the Save outline (grey when disabled)
         self._cpr_register_btn.setStyleSheet(self._save_exit_sty("save"))
         row.addWidget(self._cpr_register_btn)
         # Save&Exit = Save (保存登録) followed by an automatic Exit, so the user
@@ -19751,8 +19744,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self._cpr_draw_btn.setChecked(pend)
             # Red "armed" background while tracing (matches the LV trace buttons)
             # so it's obvious Draw is active / a CPR is being created.
+            # On hold (Rotate / Paging picked): pale dashed = paused, resume
+            # with right-click ▸ ReDraw (or this button).
             self._cpr_draw_btn.setStyleSheet(
-                self._LV_STY["trace"] if pend else self._BTN_DIS)
+                ("background:#f6d5d0;color:#7a1f14;border:1px dashed #c0392b;" if self._cpr_tool_hold_on()
+                 else self._LV_STY["trace"]) if pend else self._BTN_DIS)
         if getattr(self, "_cpr_vr_btn", None) is not None:
             self._cpr_vr_btn.setEnabled(self._mode == "3D")
             self._cpr_vr_group_sync()
@@ -19798,10 +19794,15 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
     def _coronary_draw(self):
         """Draw button on the coronary row — arm (or disarm) Measure + Polyline
         so a left-drag traces the vessel centreline."""
+        if self._cpr_tool_hold_on() and getattr(
+                self, "_coronary_mpr_pending", False):
+            self._cpr_redraw()                       # on hold → resume, not disarm
+            return
         if self._vol is None or self._mode != "3D":
             self._coronary_sync_ui()
             return
         self._coronary_mode = True
+        self._cpr_tool_hold = False
         if getattr(self, "_coronary_mpr_pending", False):
             self._coronary_mpr_pending = False
             self._cpr_vr_stop()                      # VR始点 only while tracing
@@ -19828,6 +19829,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         DELETE the traced centreline polyline, and hide the row."""
         self._coronary_mode = False
         self._coronary_mpr_pending = False
+        self._cpr_tool_hold = False                   # no Draw hold left
         self._cpr_vr_stop()                           # close the VR始点 VR
         self._cpr_exclude = []                        # drop chamber-exclude masks
         self._cpr_exclude_seeding = False
