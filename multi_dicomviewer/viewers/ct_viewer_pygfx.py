@@ -16351,7 +16351,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Auto-advance to VR on the right pane (parity with Windows: dropping the
         # corotree + FullLv goes straight to the VR review). Deferred so it runs
         # after this apply + the pane's GL settle.
-        QTimer.singleShot(0, lambda: self._vr_set("B", True))
+        QTimer.singleShot(0, self._terr_vr_rotate)   # VR on + Rotate
         return True
 
     def _lvv_clear_markers(self) -> None:

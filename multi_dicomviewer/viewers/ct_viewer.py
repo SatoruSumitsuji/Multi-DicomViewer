@@ -10379,7 +10379,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_mark_full_lv()             # FullLv Epi → CPR VR; no EpiLv pick
         self._refresh_tool_availability()
         self._terr_bar_sync()                # swap LV/Coronary bars → Territory bar
-        QTimer.singleShot(0, lambda: self._vr_set("B", True))
+        QTimer.singleShot(0, self._terr_vr_rotate)   # VR on + Rotate
         return True
 
     def _lvv_clear_markers(self) -> None:

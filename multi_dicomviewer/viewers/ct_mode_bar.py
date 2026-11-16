@@ -148,6 +148,28 @@ class CTModeBarMixin:
             if style is not None and m in modes:
                 style(btn, modes[m][1], "black")
 
+    def _terr_vr_rotate(self, tries: int = 0) -> None:
+        """Territory review start: VR on the right pane, then make it the
+        active pane with the ROTATE tool — the first thing done there is
+        turning the VR (it used to start on Paging). Retries briefly while
+        the VR is still being built (Rotate is greyed on a non-VR pane)."""
+        from PyQt6.QtCore import QTimer
+        if not getattr(self, "_territory_display", False):
+            return
+        vr_on = getattr(self, "_vr_on", {}) or {}
+        if tries == 0 and not vr_on.get("B"):
+            self._vr_set("B", True)
+            vr_on = getattr(self, "_vr_on", {}) or {}
+        if not vr_on.get("B"):
+            if tries < 30:
+                QTimer.singleShot(100, lambda: self._terr_vr_rotate(tries + 1))
+            return
+        try:
+            self._set_active("B")
+            self._set_tool("ROTATE")
+        except Exception:                        # noqa: BLE001
+            pass
+
     # ---- LV: 壁厚3D / 壁厚短軸 / CoronaryTree (LVモード, row 2) --------------
     def _ct_targets_visible(self) -> bool:
         """Territory Target points (dots + numbers, MPR and VR) belong to the
@@ -752,7 +774,7 @@ class CTModeBarMixin:
             except Exception:                    # noqa: BLE001
                 pass
         self._ct_render()
-        QTimer.singleShot(0, lambda: self._vr_set("B", True))
+        QTimer.singleShot(0, self._terr_vr_rotate)   # VR on + Rotate
         return True
 
     def _ct_territory_leave(self) -> None:
