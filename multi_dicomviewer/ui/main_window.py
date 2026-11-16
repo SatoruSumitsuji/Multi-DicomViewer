@@ -7307,14 +7307,15 @@ class MainWindow(QMainWindow):
         paths = [p for p in paths if p not in cpr_files]
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if os.path.isfile(p)]
-        # A DICOM folder dropped on the Studies tree / window (open_in_pane is
-        # None) is IMPORTED ONLY — never opened in a pane — even when analysis
-        # JSONs (.cpr.json / MV・AoV・Apex・Epi・Blood) were saved inside it.
-        # The folder sweeps below are for JSON-only analysis folders; sweeping a
-        # CT folder used to open its CT in a pane and try to apply a partial LV
-        # (→ the "MV・AoV・Apex …" warning). Dropped analysis FILES still open.
+        # A folder that holds DICOM is loaded as DICOM ONLY — wherever it was
+        # dropped (Studies tree / window / an image pane): the analysis JSONs
+        # saved beside the CT (.cpr.json / corotree / FullLv / MV・AoV・Apex・Epi・
+        # Blood) are NOT read. LV / Territory / CPR data is loaded only when the
+        # user asks for it (drops the FILE or loads it) — sweeping it in with the
+        # CT wasted time on data the user wasn't using. The folder sweeps below
+        # are for JSON-only analysis folders (dropped on purpose).
         plain_dicom = set()
-        if open_in_pane is None and not dicom_only:
+        if not dicom_only:
             plain_dicom = {d for d in dirs if self._folder_holds_dicom(d)}
         # A dropped FOLDER that holds .cpr.json files (a vessel collection) →
         # load them into the Coronary Tree, and DON'T DICOM-scan that folder

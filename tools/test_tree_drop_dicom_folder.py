@@ -1,8 +1,9 @@
 """A DICOM folder dropped on the Studies tree / window is IMPORTED ONLY, even
 when LV-analysis / .cpr.json files were saved inside it — no pane opens and no
 partial LV is applied (that raised the "MV・AoV・Apex …" warning on a plain
-drop). JSON-only analysis folders, analysis FILE drops and pane drops behave as
-before. Synthetic DICOM only.
+drop). JSON-only analysis folders and analysis FILE drops behave as before. A
+pane drop of a CT folder is DICOM-only too (2026-11-16: analysis data loads only
+when the user asks for it). Synthetic DICOM only.
 """
 import os
 import sys
@@ -117,8 +118,8 @@ check("JSON-only CPR folder: still loaded like before",
 o, c = make()
 pane = object()
 o._load_paths([ct], pane)                            # dropped ON a pane
-check("pane drop: unchanged (folder sweep still runs)",
-      c.cpr == [["LAD.cpr.json"]], str((c.cpr, c.lv)))
+check("pane drop of a CT folder: DICOM only (no .cpr / LV sweep)",
+      c.cpr == [] and c.lv == [] and c.index == [pane], str((c.cpr, c.lv, c.index)))
 
 print("ALL PASS" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)
