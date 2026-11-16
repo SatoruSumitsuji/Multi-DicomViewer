@@ -321,10 +321,11 @@ check("Territory計算 visible in CoronaryTreeモード, enabled (tree + LV read
 check("Territoryモード not selectable before a result",
       not b["territory"].isEnabled())
 v._ct_mode_clicked("lv")
-check("Territory: Calc disabled in LVモード (group still shown)",
-      not tb.isEnabled() and tb.isVisibleTo(v._ct_terr_wrap))
+check("Territory: Calc disabled in LVモード (group hidden there)",
+      not tb.isEnabled() and v._ct_terr_wrap.isHidden())
 v._ct_mode_clicked("standard")
-check("Territory: Calc disabled in 標準モード", not tb.isEnabled())
+check("Territory: Calc enabled in Simple View (2026-11-17, tree + LV ready)",
+      tb.isEnabled() and not v._ct_terr_wrap.isHidden())
 check("Territory Load always enabled; Save disabled without a result",
       v._ct_terr_load_btn.isEnabled() and not v._ct_terr_save_btn.isEnabled())
 v._ct_terr_load_btn.click()

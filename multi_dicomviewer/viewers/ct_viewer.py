@@ -4474,6 +4474,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         row1.addSpacing(12)
         row1.addWidget(self._ct_terr_button())
         row1.addStretch(1)
+        # Row order = the row-1 mode order: LV → CoronaryTree → Territory.
+        self._ct_bar_reorder(row1)
 
         # ================= Row 2: shared file / measure controls =========
         # Epi/Endo row 3 (guided order): Draw, Save, Load, Clear, Exit, Epi-Area,
@@ -4952,16 +4954,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if getattr(self, "_coronary_mpr_btn", None) is None \
                 or not hasattr(self, "_coro_group_widgets"):
             return
-        ctx = getattr(self, "_bottom_ctx", "both")
-        # A loaded corotree / FullLv narrows the bar to its half — but once the
-        # user PICKS 標準 / LVモード the LV steps (MV-AoV+Apex, Epi, Blood/Endo)
-        # must be reachable again (a corotree Load used to leave them hidden
-        # in every mode). 標準 shows the full bar.
-        sel = getattr(self, "_ct_mode_sel", None)
-        if sel == "standard" or (sel == "lv" and ctx == "coronary"):
-            ctx = "both"
+        # The bar follows the MODE (user 2026-11-17): Simple View shows the
+        # entry steps of every mode (道しるべ: LV MV-AoV+Apex…FullLV,
+        # CoronaryTree Load / CPR, Territory Calc / Load); LV / CoronaryTree
+        # show only their own tools (no crossing into another mode).
+        ctx = self._ct_bar_ctx()
+        simple = self._ct_current_mode() == "standard"
         self.refresh_ct_mode_bar()
-        sig = (ctx, getattr(self, "_coro_file_name", ""),
+        sig = (ctx, simple, getattr(self, "_coro_file_name", ""),
                getattr(self, "_lv_file_name", ""))
         changed = sig != getattr(self, "_file_ctx_sig", None)
         self._file_ctx_sig = sig
@@ -4982,10 +4982,12 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         # Filename labels (only when their half shows AND a name is linked).
         cname = getattr(self, "_coro_file_name", "") or ""
         self._coro_file_label.setText(cname)
-        self._coro_file_label.setVisible(show_coro and bool(cname))
+        self._coro_file_label.setVisible(show_coro and not simple
+                                         and bool(cname))
         lname = getattr(self, "_lv_file_name", "") or ""
         self._lv_file_label.setText(lname)
-        self._lv_file_label.setVisible(show_lv and bool(lname))
+        self._lv_file_label.setVisible(show_lv and not simple
+                                       and bool(lname))
         self._cpr_vr_group_sync()                # 「VR:」 group + Epi file name
         # CPR reads as the active mode (amber) in CoronaryTreeモード.
         btn = self._coronary_mpr_btn

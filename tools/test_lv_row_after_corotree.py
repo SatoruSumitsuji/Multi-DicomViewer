@@ -69,7 +69,7 @@ v._ct_switch_inplace("lv")
 check("→ LVモード: LV row back", lv_row_shown())
 mac = (ROOT / "multi_dicomviewer/viewers/ct_viewer_pygfx.py").read_text(encoding="utf-8")
 check("Mac: same rule",
-      'if sel == "standard" or (sel == "lv" and ctx == "coronary"):' in mac)
+      "ctx = self._ct_bar_ctx()" in mac)
 
 print("ALL PASS" if not fails else f"{len(fails)} FAIL: {fails}")
 sys.stdout.flush()

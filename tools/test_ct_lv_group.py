@@ -155,15 +155,21 @@ check("internal marker (LV apex) → no #id",
       ctv._internal_marker({"_lvv": "apex"}) and ctv._internal_marker({"_lv_valve": "mitral"})
       and not ctv._internal_marker({"type": "point"}))
 
-# Open VR / 回転連動 with the CoronaryTree: group, before CPR
+# Open VR / 回転連動: CoronaryTreeモード tools (before CPR too); not in
+# Simple View (2026-11-17: there only the Load / CPR entry shows).
 v._territory_display = False
 v._coronary_mode = False
 v._cpr = None
 v._bottom_ctx = "both"
 v._coronary_mpr_btn.setVisible(True)
+mode["m"] = "coronary"
 v._cpr_vr_group_sync()
-check("Open VR / 回転連動 shown before entering CPR",
+check("Open VR / 回転連動 shown before entering CPR (CoronaryTreeモード)",
       not v._cpr_vr_btn.isHidden() and not v._cpr_vr_rot_btn.isHidden())
+mode["m"] = "standard"
+v._cpr_vr_group_sync()
+check("…not in Simple View", v._cpr_vr_btn.isHidden())
+mode["m"] = "coronary"
 v._territory_display = True
 v._cpr_vr_group_sync()
 check("…not in the Territory review", v._cpr_vr_btn.isHidden())

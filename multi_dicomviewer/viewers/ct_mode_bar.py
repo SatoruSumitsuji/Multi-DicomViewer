@@ -249,6 +249,81 @@ class CTModeBarMixin:
             if style is not None:
                 style(tb, "#b8860b", "white")
 
+    # ---- row order + per-mode visibility (user 2026-11-17) ------------------
+    def _ct_bar_reorder(self, row) -> None:
+        """Re-lay the LV bar's row *row* in the row-1 mode order — LV →
+        CoronaryTree → Territory — with ONE 「LV:」 caption: the LVモード view
+        tools (壁厚3D / 壁厚短軸 / CoronaryTree) follow the LV steps
+        (MV-AoV+Apex … FullLV). Built order was [LV view tools] [CoronaryTree]
+        [LV steps + edit groups] [Territory]."""
+        from PyQt6.QtWidgets import QSpacerItem, QSizePolicy as _SP
+        items = []
+        while row.count():
+            items.append(row.takeAt(0))
+
+        def idx(w, seq):
+            for i, it in enumerate(seq):
+                if it is not None and it.widget() is w:
+                    return i
+            return -1
+        i_cor = idx(getattr(self, "_coro_cap", None), items)
+        i_sp = idx(getattr(self, "_coro_spacer_w", None), items)
+        i_terr = idx(getattr(self, "_ct_terr_wrap", None), items)
+        if min(i_cor, i_sp, i_terr) < 0 or not (i_cor < i_sp < i_terr):
+            for it in items:                     # unexpected layout → unchanged
+                row.addItem(it)
+            return
+        view = [it for it in items[:i_cor]
+                if it.widget() is not None
+                and it.widget() is not getattr(self, "_ctlv_cap", None)]
+        coro = items[i_cor:i_sp]
+        spacer = items[i_sp]
+        t_start = i_terr - 1 if (i_terr > 0 and items[i_terr - 1].widget()
+                                 is None) else i_terr
+        lv = items[i_sp + 1:t_start]
+        terr = items[t_start:]
+        at = idx(getattr(self, "_lv_file_label", None), lv)
+        if at < 0:
+            at = len(lv) - 1
+        at += 1
+        if at < len(lv) and lv[at].widget() is getattr(self, "_lv_endo_btn", None):
+            at += 1
+        gap = QSpacerItem(8, 0, _SP.Policy.Fixed, _SP.Policy.Minimum)
+        order = lv[:at] + [gap] + view + lv[at:] + [spacer] + coro + terr
+        for it in order:
+            row.addItem(it)
+        cap = getattr(self, "_ctlv_cap", None)
+        if cap is not None:                      # the LV steps' 「LV:」 is the one
+            cap.setVisible(False)
+            grp = getattr(self, "_ctlv_group", None)
+            if grp and cap in grp:
+                grp.remove(cap)
+
+    def _ct_bar_ctx(self) -> str:
+        """The bar half shown for the current mode: Simple View = the 道しるべ
+        (entry steps of every mode, "both"); LV / CoronaryTree = that mode's
+        tools only (no crossing into another mode's sub-menus)."""
+        m = self._ct_current_mode()
+        return m if m in ("lv", "coronary") else "both"
+
+    def _ct_terr_group_sync(self) -> None:
+        """「Territory:」 group in the LV bar: Simple View = Calc + Load,
+        CoronaryTreeモード = Calc (the tree's next step), LVモード = hidden;
+        Save lives in the Territory review bar."""
+        wrap = getattr(self, "_ct_terr_wrap", None)
+        if wrap is None:
+            return
+        m = self._ct_current_mode()
+        show = m in ("standard", "coronary")
+        if wrap.isHidden() == show:
+            wrap.setVisible(show)
+        lb = getattr(self, "_ct_terr_load_btn", None)
+        if lb is not None and lb.isHidden() == (m == "standard"):
+            lb.setVisible(m == "standard")
+        sb = getattr(self, "_ct_terr_save_btn", None)
+        if sb is not None and not sb.isHidden():
+            sb.setVisible(False)
+
     def _ct_terr_button(self):
         """The 「Territory: Calc / Load / Save」 group, made once and placed by the
         viewer at the right end of its Coronary / VR / LV row. Calc (=
@@ -395,8 +470,8 @@ class CTModeBarMixin:
                 b.setChecked(key == cur)
         tb = getattr(self, "_ct_terr_btn", None)
         if tb is not None:
-            # Calc: CoronaryTreeモード only (+ a tree and an LV / FullLv).
-            tb.setEnabled(cur == "coronary" and avail["coronary"] and bool(
+            # Calc: Simple View / CoronaryTreeモード (+ a tree and an LV / FullLv).
+            tb.setEnabled(cur in ("coronary", "standard") and bool(
                 state.get("tree") or state.get("tree_mem"))
                 and (self._ct_lv_ready() or bool(full)
                      or bool(state.get("full_mem"))))
@@ -404,6 +479,7 @@ class CTModeBarMixin:
             b = getattr(self, nm, None)
             if b is not None:
                 b.setEnabled(bool(state.get("terr")))     # a computed Territory
+        self._ct_terr_group_sync()
         lbl = getattr(self, "_ct_files_lbl", None)
         if lbl is not None:
             none = t("なし")
