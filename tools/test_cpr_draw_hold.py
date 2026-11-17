@@ -105,6 +105,49 @@ check("ReDraw: hold ended, Draw still armed, trace kept",
 press()
 check("after ReDraw: left-click draws again", len(called) == 1)
 
+# Right DOUBLE-click (user 2026-11-18): the 2nd right-click right after the
+# menu opened — anywhere (the mouse moved) — closes it and ReDraws.
+from PyQt6.QtCore import QEvent, QPointF  # noqa: E402
+from PyQt6.QtGui import QMouseEvent  # noqa: E402
+
+
+def right_press_at(menu, x, y, kind=QEvent.Type.MouseButtonPress):
+    ev = QMouseEvent(kind, QPointF(x, y), QPointF(x, y),
+                     Qt.MouseButton.RightButton, Qt.MouseButton.RightButton,
+                     Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(menu, ev)
+
+
+def exec_second_right(self, *a, **k):
+    right_press_at(self, 400, 300)                # far off the menu item
+    return None                                   # nothing picked
+
+
+v._set_tool("ROTATE")
+check("(setup) on hold again", v._cpr_tool_hold_on())
+QMenu.exec = exec_second_right
+v._cpr_redraw_menu()
+QMenu.exec = orig_exec
+check("right double-click → ReDraw (hold ended, Draw armed)",
+      not v._cpr_tool_hold_on() and v._coronary_mpr_pending)
+
+
+def exec_left(self, *a, **k):
+    ev = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(400, 300),
+                     QPointF(400, 300), Qt.MouseButton.LeftButton,
+                     Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(self, ev)
+    return None
+
+
+v._set_tool("ROTATE")
+QMenu.exec = exec_left
+v._cpr_redraw_menu()
+QMenu.exec = orig_exec
+check("a left-click off the menu just closes it (still on hold)",
+      v._cpr_tool_hold_on())
+v._cpr_redraw()
+
 # Paging (button) → hold; Draw button resumes instead of disarming
 v._tool_btns["PAGING"].click() if "PAGING" in v._tool_btns else v._set_tool("PAGING")
 check("Paging (button): Draw on hold", v._cpr_tool_hold_on())

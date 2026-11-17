@@ -1068,14 +1068,39 @@ class CPRMixin:
         self._coronary_sync_ui()
 
     def _cpr_redraw_menu(self) -> bool:
-        """Right-click while on hold → a menu with 「ReDraw」. True = shown."""
+        """Right-click while on hold → a menu with 「ReDraw」. True = shown.
+
+        Right DOUBLE-click = ReDraw at once (user 2026-11-18): a second
+        right-click within the double-click interval of the menu opening —
+        anywhere, the mouse may have moved — closes the menu and resumes
+        drawing (no right-click ▸ aim ▸ left-click)."""
         if not self._cpr_tool_hold_on():
             return False
+        from PyQt6.QtCore import QElapsedTimer, QEvent, QObject, Qt
         from PyQt6.QtGui import QCursor
-        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtWidgets import QApplication, QMenu
         menu = QMenu(self)
         act = menu.addAction(t("ReDraw"))
-        if menu.exec(QCursor.pos()) is act:
+        clock = QElapsedTimer()
+        clock.start()
+        dbl = max(200, int(QApplication.doubleClickInterval()))
+        hit = {"dbl": False}
+
+        class _DoubleRight(QObject):
+            def eventFilter(self_, obj, ev):             # noqa: N802, N805
+                if (ev.type() in (QEvent.Type.MouseButtonPress,
+                                  QEvent.Type.MouseButtonDblClick)
+                        and ev.button() == Qt.MouseButton.RightButton
+                        and clock.elapsed() <= dbl):
+                    hit["dbl"] = True
+                    menu.close()
+                    return True
+                return False
+
+        flt = _DoubleRight(menu)
+        menu.installEventFilter(flt)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is act or hit["dbl"]:
             self._cpr_redraw()
         return True
 
