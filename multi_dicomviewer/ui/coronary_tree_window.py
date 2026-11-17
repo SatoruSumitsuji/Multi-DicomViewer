@@ -346,7 +346,74 @@ class CoronaryTreeWindow(SnapDock):
     @property
     def _last_path(self): return self._bundle()["last_path"]
     @_last_path.setter
-    def _last_path(self, v): self._bundle()["last_path"] = v
+    def _last_path(self, v):
+        b = self._bundle()
+        b["last_path"] = v
+        # Every load / save sets the path: the tree as it is NOW is the file's
+        # content → the baseline for the 「変更あり・未保存」 readout.
+        try:
+            b["coro_base"] = self._tree_sig(b.get("tree"))
+        except Exception:                                # noqa: BLE001
+            b["coro_base"] = None
+        b["coro_cur"] = b["coro_base"]
+
+    @staticmethod
+    def _tree_sig(tree):
+        """The SAVED content of *tree* (what .corotree.json holds) as a string —
+        display-only state (hidden vessels, selection) is not part of it."""
+        if tree is None:
+            return None
+        return json.dumps(tree.to_json().get("vessels") or [],
+                          sort_keys=True, ensure_ascii=False)
+
+    def _tree_changed_mark(self) -> None:
+        """treeChanged → the active tree's current signature is stale."""
+        try:
+            self._bundle()["coro_cur"] = None
+        except Exception:                                # noqa: BLE001
+            pass
+
+    def corotree_dirty_for_series(self, series_uid: str) -> bool:
+        """True when *series_uid*'s tree was changed since its .corotree.json
+        was loaded / saved (unsaved edits)."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        if not b or b.get("coro_base") is None:
+            return False
+        cur = b.get("coro_cur")
+        if cur is None:
+            try:
+                cur = self._tree_sig(b.get("tree"))
+            except Exception:                            # noqa: BLE001
+                return False
+            b["coro_cur"] = cur
+        return cur != b["coro_base"]
+
+    def _terr_sig(self):
+        """Territory settings saved in .territory.json besides the two links."""
+        return json.dumps(
+            {"targets": [{"vid": tg.get("vid"), "idx": int(tg.get("idx", 0)),
+                          "hidden": bool(tg.get("hidden", False))}
+                         for tg in (self._targets or []) if tg.get("vid")],
+             "alpha": round(float(getattr(self, "_terr_alpha", 0.45)), 3),
+             "shown": bool(getattr(self, "_targets_shown", True))},
+            sort_keys=True)
+
+    def territory_changed_for_series(self, series_uid: str) -> bool:
+        """True when the Targets / opacity differ from the loaded / saved
+        .territory.json (the tree / FullLv sides are checked separately)."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        if not b or not b.get("terr_path") or b.get("terr_base") is None:
+            return False
+        if u != self._active_uid:
+            return False                 # Targets live on the active bundle only
+        try:
+            return self._terr_sig() != b["terr_base"]
+        except Exception:                                # noqa: BLE001
+            return False
 
     @property
     def _ct_uid(self): return self._active_uid
@@ -631,6 +698,7 @@ class CoronaryTreeWindow(SnapDock):
 
         # Push the on-image overlay whenever the tree, selection or a vessel's
         # visibility changes (the shell fans it out to every CT viewer).
+        self.treeChanged.connect(self._tree_changed_mark)   # 変更あり readout
         self.treeChanged.connect(self._push_overlay)
         self.treeChanged.connect(self._compute_territory)   # tree edit → re-assign
         self.vesselSelected.connect(lambda *_: self._push_overlay())
@@ -1785,6 +1853,14 @@ class CoronaryTreeWindow(SnapDock):
         b = self._by_uid.get(u) if u else None
         return bool(b and b.get("territory") is not None)
 
+    def territory_path_for_series(self, series_uid: str) -> str:
+        """The .territory.json path loaded / saved for *series_uid*'s CT (for
+        the bottom-bar readout), or "" (none, or a fresh unsaved Calc)."""
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        b = self._by_uid.get(u) if u else None
+        return (b.get("terr_path") or "") if b else ""
+
     def full_lv_path_for_series(self, series_uid: str) -> str:
         """The .FullLv.json path the dock loaded for *series_uid*'s CT (for the
         bottom-bar filename readout), or ""."""
@@ -1998,6 +2074,7 @@ class CoronaryTreeWindow(SnapDock):
             self._warn(t("保存に失敗しました: {e}", e=str(exc)))
             return False
         self._bundle()["terr_path"] = path
+        self._bundle()["terr_base"] = self._terr_sig()
         self._hint.setText(t("Territory を保存しました: {p}",
                              p=os.path.basename(path)))
         return True
@@ -2043,6 +2120,7 @@ class CoronaryTreeWindow(SnapDock):
                          if tg.get("vid")]
         self._populate()
         self._compute_territory()            # engine + targets + overlay
+        self._bundle()["terr_base"] = self._terr_sig()
         self._hint.setText(t("Territory を読込みました: {p}",
                              p=os.path.basename(path) if path else "territory"))
         return self._territory is not None

@@ -15723,6 +15723,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             self.refresh_ct_mode_bar()   # readout: 計測済み（保存済 / 未保存）
         except Exception:                                # noqa: BLE001
             pass
+        # Green = saved AND unchanged since (a later LV edit → plain again).
+        saved = (bool(getattr(self, "_full_lv_saved", False))
+                 and not self._full_lv_modified())
         b = getattr(self, "_full_lv_btn", None)
         if b is None:
             return
@@ -15730,14 +15733,14 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         b.setEnabled(not miss)
         # Green background once a .FullLv.json has been saved, so "保存済み" is
         # obvious at a glance; plain grey otherwise.
-        if getattr(self, "_full_lv_saved", False):
+        if saved:
             b.setStyleSheet("QPushButton{background:#2e8b57;color:white;}"
                             + self._BTN_DIS)
         else:
             b.setStyleSheet(self._BTN_DIS)
         b.setHelpToolTip(       # FitButton keeps this as the hover tooltip
             (t("FullLv 保存済み — 再保存で上書きできます")
-             if getattr(self, "_full_lv_saved", False) else
+             if saved else
              t("FullLv を保存（Epi + Endo/Blood バンドル → Tools ▸ Territory）"))
             if not miss else
             t("FullLV は準備できていません — 不足: {m}", m=" / ".join(miss)))
@@ -15802,6 +15805,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(full, f, ensure_ascii=False)
                 self._full_lv_saved = True   # flip FullLV button to its saved colour
+                self._full_lv_mark_clean()   # 変更あり baseline = the saved file
                 self._full_lv_refresh_btn()
         except Exception as exc:                        # noqa: BLE001
             traceback.print_exc()

@@ -3425,10 +3425,18 @@ class MainWindow(QMainWindow):
             if hasattr(w, "territory_for_series") and \
                     w.territory_for_series(uid):
                 out["terr"] = True
+                tp = (w.territory_path_for_series(uid)
+                      if hasattr(w, "territory_path_for_series") else "")
+                out["terr_file"] = os.path.basename(tp or "")
+                if hasattr(w, "territory_changed_for_series"):
+                    out["terr_changed"] = bool(
+                        w.territory_changed_for_series(uid))
             path = w.corotree_path_for_series(uid) or ""
             has_tree = bool(w.tree_vessels_for_series(uid))
             if path.lower().endswith(".corotree.json") and has_tree:
                 out["tree"] = os.path.basename(path)
+                if hasattr(w, "corotree_dirty_for_series"):
+                    out["tree_dirty"] = bool(w.corotree_dirty_for_series(uid))
             elif has_tree:
                 out["tree_mem"] = True       # registered, not yet saved
         except Exception:                                # noqa: BLE001
@@ -3494,6 +3502,10 @@ class MainWindow(QMainWindow):
             traceback.print_exc()
             return False
         w._full_lv_path = src                # "" = in-session (no file)
+        try:
+            w._bundle()["terr_path"] = ""    # a fresh Calc: not that file any more
+        except Exception:                                # noqa: BLE001
+            pass
         if getattr(w, "_territory", None) is None:
             return False                     # the dock shows why (Territory: …)
         return self._ct_territory_open(viewer, full)
@@ -4616,6 +4628,8 @@ class MainWindow(QMainWindow):
                     v.set_bottom_file_context("lv", fname)
                 except Exception:                        # noqa: BLE001
                     pass
+            if hasattr(v, "_full_lv_mark_clean"):
+                v._full_lv_mark_clean()          # 変更あり baseline = the dropped file
             pend = getattr(self, "_full_lv_edit_pending", None)
             if pend:
                 pend.discard((uid or "").split("#", 1)[0])

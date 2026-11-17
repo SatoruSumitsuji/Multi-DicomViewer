@@ -79,6 +79,7 @@ class Fake:
     territory_default_path = CoronaryTreeWindow.territory_default_path
     save_territory = CoronaryTreeWindow.save_territory
     load_territory = CoronaryTreeWindow.load_territory
+    _terr_sig = CoronaryTreeWindow._terr_sig
 
     def __init__(self):
         self._tree = tree

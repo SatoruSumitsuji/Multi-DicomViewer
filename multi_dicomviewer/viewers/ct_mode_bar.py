@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QSizePolicy, QWidget
+from PyQt6.QtCore import Qt
 
 from multi_dicomviewer.i18n import t
 from multi_dicomviewer.ui.study_browser import FitButton
@@ -468,6 +469,7 @@ class CTModeBarMixin:
         self._ct_terr_snap = None         # the view before the Territory review
         self._ct_terr_lvd = None          # LVD shown before the review
         self._full_lv_saved_path = ""     # this CT's last saved .FullLv.json
+        self._full_lv_sig_base = None     # 変更あり baseline (loaded / saved)
 
     def _ct_lv_data(self) -> bool:
         """Any LV analysis on this CT — measured in this session or loaded."""
@@ -561,20 +563,45 @@ class CTModeBarMixin:
         self._ct_terr_group_sync()
         lbl = getattr(self, "_ct_files_lbl", None)
         if lbl is not None:
+            import html
+            import os
             none = t("なし")
+            full_file = bool(full)
             if not full and lv_mem:
-                import os
                 sp = getattr(self, "_full_lv_saved_path", "") or ""
                 if getattr(self, "_full_lv_saved", False) and sp:
                     full = os.path.basename(sp)
+                    full_file = True
                 else:
                     full = (t("計測済み（保存済）")
                             if getattr(self, "_full_lv_saved", False)
                             else t("計測済み（未保存）"))
+            tree_file = bool(tree)
             if not tree and state.get("tree_mem"):
                 tree = t("ツリーあり（未保存）")
-            lbl.setText(t("読込ファイル") + ":  FullLv: " + (full or none)
-                        + "  ／  corotree: " + (tree or none))
+            terr = state.get("terr_file", "") or ""
+            terr_file = bool(terr)
+            if not terr and state.get("terr"):
+                terr = t("計算済み（未保存）")
+            # 「変更あり・未保存」: a named file whose content was changed after
+            # it was loaded / saved (user 2026-11-17).
+            full_mod = full_file and self._full_lv_modified()
+            tree_mod = tree_file and bool(state.get("tree_dirty"))
+            terr_mod = terr_file and (bool(state.get("terr_changed"))
+                                      or tree_mod or full_mod)
+            mod = html.escape(t("変更あり・未保存"))
+
+            def part(name, text, modified):
+                s_ = html.escape(text or none)
+                if modified:
+                    s_ += ("<span style='color:#d2691e;'>（" + mod
+                           + "）</span>")
+                return html.escape(name) + ": " + s_
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setText(html.escape(t("読込ファイル")) + ":&nbsp; "
+                        + part("FullLv", full, full_mod)
+                        + " &nbsp;／&nbsp; " + part("corotree", tree, tree_mod)
+                        + " &nbsp;／&nbsp; " + part("territory", terr, terr_mod))
         self._ctlv_sync()
 
     def _ct_mode_clicked(self, key: str) -> None:
@@ -879,6 +906,97 @@ class CTModeBarMixin:
         if hasattr(self, "_refresh"):
             self._refresh(reset_cam=True)        # fit both panes on the restored view
 
+    # ---- FullLv 「変更あり・未保存」 (user 2026-11-17) ------------------------
+    def _full_lv_sig(self):
+        """A cheap fingerprint of what a .FullLv.json holds — the three LV
+        steps: MV-AoV + Apex, Epi, Blood/Endo. Results are identified by their
+        objects (a re-trace / re-Calc makes new ones), the small values by
+        value. No mask is copied or hashed (cheap on every bar refresh)."""
+        def r(a):
+            if a is None:
+                return None
+            try:
+                return tuple(np.round(np.asarray(a, float).ravel(), 3).tolist())
+            except Exception:                    # noqa: BLE001
+                return repr(a)
+        vs = getattr(self, "_lv_valves", None) or {}
+        valves = tuple(
+            (k, None if v is None else tuple(r(x) for x in v))
+            for k, v in sorted(vs.items()))
+        mvaov = getattr(self, "_lv_mvaov", None)
+        try:
+            import json
+            mvaov = json.dumps(mvaov, sort_keys=True, default=str)
+        except Exception:                        # noqa: BLE001
+            mvaov = repr(mvaov)
+        def spin(n):
+            w = getattr(self, n, None)
+            try:
+                return float(w.value()) if w is not None else None
+            except Exception:                    # noqa: BLE001
+                return None
+        return (
+            valves, r(getattr(self, "_lv_apex", None)), mvaov,           # step 1
+            id(getattr(self, "_lvv_epi_surf", None)),                    # step 2
+            id(getattr(self, "_lvv_epi_model_dict", None)),
+            bool(getattr(self, "_lv_dirty", False)),
+            id(getattr(self, "_lvv_blood_comp", None)),                  # step 3
+            id(getattr(self, "_lv_endo_mask_comp", None)),
+            spin("_lvv_lo_spin"), spin("_lvv_hi_spin"),
+            getattr(self, "_lvv_lvd_level", None),
+            r(getattr(self, "_lvv_blood_apex", None)),
+        )
+
+    def _full_lv_mark_clean(self) -> None:
+        """The LV now equals a .FullLv.json (just loaded / saved)."""
+        try:
+            self._full_lv_sig_base = self._full_lv_sig()
+        except Exception:                        # noqa: BLE001
+            self._full_lv_sig_base = None
+
+    def _full_lv_modified(self) -> bool:
+        base = getattr(self, "_full_lv_sig_base", None)
+        if base is None:
+            return False
+        try:
+            return self._full_lv_sig() != base
+        except Exception:                        # noqa: BLE001
+            return False
+
+    def _ct_restore_blood_panes(self) -> None:
+        """Leaving the Territory review: the RIGHT pane was the VR there (no
+        blood drawn on it). Put the blood overlays back on BOTH MPR panes — the
+        tint / LV-Blood layers visible, the LV-Blood volume wired to both mask
+        reslices, the LUTs re-applied — so LV / Simple View / CoronaryTree show
+        the blood on the right pane again (user 2026-11-17: it stayed off there
+        after a .territory.json load). VTK panes only; no-op elsewhere."""
+        panes = getattr(self, "pane", None)
+        if not isinstance(panes, dict):
+            return
+        mv = getattr(self, "_lvv_mask_vol", None)
+        vr_on = getattr(self, "_vr_on", {}) or {}
+        for k in ("A", "B"):
+            p = panes.get(k)
+            if p is None or vr_on.get(k):
+                continue
+            for n in ("actor", "actor_hl", "actor_mask"):
+                a = getattr(p, n, None)
+                if a is not None and hasattr(a, "SetVisibility"):
+                    a.SetVisibility(True)
+            rm = getattr(p, "reslice_mask", None)
+            if mv is not None and rm is not None and rm.GetInput() is not mv:
+                rm.SetInputData(mv)
+        try:
+            if hasattr(self, "_refresh"):
+                self._refresh(reset_cam=False)   # reslice the mask on each plane
+            for fn in ("_lvv_update_mask", "_lvv_update_highlight"):
+                f = getattr(self, fn, None)
+                if callable(f):
+                    f()
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+
     def _ct_lv_load_editable(self, full) -> bool:
         """Apply a FullLv bundle as the EDITABLE LV (MV-AoV / Apex / Epi /
         Blood-Endo — apply_lv_analysis, as a lone .FullLv.json drop does), not
@@ -897,6 +1015,7 @@ class CTModeBarMixin:
             return False
         if ok:
             self._full_lv_saved = True
+            self._full_lv_mark_clean()
             w = getattr(shell, "_corotree_win", None)
             p = getattr(w, "_full_lv_path", "") or "" if w is not None else ""
             if p:
@@ -939,6 +1058,8 @@ class CTModeBarMixin:
             light = _light()
         if not light:
             ok = bool(hasattr(self, "apply_full_lv") and self.apply_full_lv(full))
+            if ok:
+                self._full_lv_mark_clean()
             if not ok:
                 self._ct_terr_snap = None
             self.refresh_ct_mode_bar()
@@ -1002,3 +1123,4 @@ class CTModeBarMixin:
                 shell.ct_territory_left(self)
             except Exception:                    # noqa: BLE001
                 pass
+        self._ct_restore_blood_panes()
