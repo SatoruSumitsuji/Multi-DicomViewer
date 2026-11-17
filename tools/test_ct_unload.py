@@ -96,11 +96,26 @@ w._full_lv_data = {"format": "MDV-FullLv", "new": 1}   # a FullLv loaded
 check("a FullLv loaded → back (replaced)",
       w.full_lv_for_series(uid) == {"format": "MDV-FullLv", "new": 1})
 w.unload_for_series(uid, "terr")
+check("Unloaded names kept for the greyed readout",
+      w.unloaded_name_for_series(uid, "terr") == "case.territory.json"
+      and w.unloaded_name_for_series(uid, "tree") is None)
 check("territory Unloaded only: tree + FullLv kept loaded",
       not w.territory_for_series(uid) and w.tree_vessels_for_series(uid)
       and w.full_lv_for_series(uid) is not None)
 w._territory = object()               # a Calc / load
 check("Calc / load → Territory back", w.territory_for_series(uid))
+w.unload_for_series(uid, "tree")
+check("tree Unloaded → its name kept; Territory greyed as well",
+      w.unloaded_name_for_series(uid, "tree") == "case.corotree.json"
+      and w.unloaded_name_for_series(uid, "terr") == "case.territory.json")
+w.reload_for_series(uid, "terr")
+check("↻ territory → it and its corotree / FullLv loaded again at once",
+      w.territory_for_series(uid) and w.tree_vessels_for_series(uid)
+      and w.full_lv_for_series(uid) is not None
+      and w.unloaded_name_for_series(uid, "tree") is None)
+w.unload_for_series(uid, "tree")
+w.reload_for_series(uid, "tree")
+check("↻ corotree → loaded again", w.tree_vessels_for_series(uid))
 
 # ---- viewer: ⊗ buttons, FullLv Unload --------------------------------------
 vol = np.full((40, 48, 48), 100.0, np.float32)
@@ -125,6 +140,9 @@ class Shell:
     def ct_unload_file(self, viewer, kind):
         self.calls.append(kind)
 
+    def ct_reload_file(self, viewer, kind):
+        self.calls.append("re:" + kind)
+
 
 sh = Shell()
 v._ct_mode_shell = lambda: sh
@@ -146,6 +164,18 @@ check("no ⊗ for なし / 未保存",
 vis({"full": "a.FullLv.json", "tree": "a.corotree.json"})
 v._ct_unload_btns["tree"].click()
 check("⊗ click → shell.ct_unload_file(kind)", sh.calls == ["tree"], sh.calls)
+vis({"full": "a.FullLv.json", "tree": "", "tree_off": "a.corotree.json"})
+txt = v._ct_files_text()
+check("Unloaded: the name stays, greyed, with ↻ (not なし)",
+      "a.corotree.json" in txt and "#a0a0a0" in txt
+      and not v._ct_unload_btns["tree"].isHidden()
+      and v._ct_file_off.get("tree") is True, txt)
+v._ct_unload_btns["tree"].click()
+check("↻ click → shell.ct_reload_file(kind)", sh.calls[-1] == "re:tree",
+      sh.calls)
+vis({"full": "a.FullLv.json", "tree": "a.corotree.json"})
+check("loaded again → ⊗ (not greyed)", v._ct_file_off.get("tree") is False
+      and "#a0a0a0" not in v._ct_files_text())
 check("caption reads 「Loaded Files」 in English",
       json.loads((ROOT / "multi_dicomviewer/resources/i18n/en.json")
                  .read_text(encoding="utf-8"))["読込ファイル"] == "Loaded Files")
@@ -203,15 +233,36 @@ class FakeShell:
 fs = FakeShell()
 fs.st = {"tree": "a.corotree.json", "tree_dirty": True}
 asked.clear()
-check("unsaved changes → asked; No keeps it",
-      fs.ct_unload_file(v, "tree") is False and len(asked) == 1
-      and FakeW.unloaded == [])
-fs.st = {"tree": "a.corotree.json"}
-asked.clear()
 ok = fs.ct_unload_file(v, "tree")
-check("unchanged → no question, Unloaded, overlay re-pushed",
+check("Unload never asks (data kept, ↻ brings it back) and Unloads",
       ok and not asked and FakeW.unloaded == ["tree"]
       and FakeShell.refreshed == 1)
+src_mw = (ROOT / "multi_dicomviewer/ui/main_window.py").read_text(
+    encoding="utf-8")
+check("↻ enters the file's mode (corotree → CoronaryTree, FullLv → LV, "
+      "territory → Territory)",
+      '{"full": "lv", "tree": "coronary", "terr": "territory"}[kind]' in src_mw)
+
+# ---- shell ↻ on a real viewer: FullLv back + LVモード ------------------------
+
+
+class FakeShellR(FakeShell):
+    ct_reload_file = MainWindow.ct_reload_file
+
+    def ct_tree_show(self, *a, **k):
+        pass
+
+
+fr = FakeShellR()
+v._ct_mode_sel = "lv"
+v._ct_lv_unload()
+check("(setup) FullLv Unloaded on the viewer", v._ct_lv_unloaded
+      and v._ct_current_mode() == "standard")
+fr.ct_reload_file(v, "full")
+check("↻ FullLv → LV counts again, LVモード, overlays not hidden",
+      not v._ct_lv_unloaded and v._ct_lv_data()
+      and v._ct_current_mode() == "lv" and not v._ct_lv_hidden,
+      (v._ct_current_mode(), v._ct_lv_hidden))
 
 # ---- shell: the CoronaryTree tab closed → no tree pushed -------------------
 

@@ -3442,6 +3442,12 @@ class MainWindow(QMainWindow):
                     out["tree_dirty"] = bool(w.corotree_dirty_for_series(uid))
             elif has_tree:
                 out["tree_mem"] = True       # registered, not yet saved
+            # ⊗ Unloaded (kept): the greyed name + ↻ in the readout.
+            if hasattr(w, "unloaded_name_for_series"):
+                for k in ("full", "tree", "terr"):
+                    nm = w.unloaded_name_for_series(uid, k)
+                    if nm:
+                        out[k + "_off"] = nm
         except Exception:                                # noqa: BLE001
             pass
         return out
@@ -3903,29 +3909,11 @@ class MainWindow(QMainWindow):
     def ct_unload_file(self, viewer, kind: str) -> bool:
         """⊗ Unload in the Loaded Files readout (user 2026-11-17): *kind* =
         "full" / "tree" / "terr". The data is KEPT but no longer counts as
-        loaded, and nothing of it is shown (the Territory goes with its
-        corotree / FullLv). Loading a file of that kind shows it again (a
-        different file replaces the data). Asks first when it has unsaved
-        changes (re-loading the file drops them)."""
-        from PyQt6.QtWidgets import QMessageBox
-        names = {"full": "FullLv", "tree": "corotree", "terr": "territory"}
-        if kind not in names:
-            return False
-        st = self.ct_mode_state(viewer) or {}
-        if kind == "full":
-            f = getattr(viewer, "_full_lv_modified", None)
-            modified = bool(f()) if callable(f) else False
-        elif kind == "tree":
-            modified = bool(st.get("tree_dirty"))
-        else:
-            modified = bool(st.get("terr_changed"))
-        if modified and QMessageBox.question(
-                self, t("Unload"),
-                t("{f} には保存されていない変更があります。Unload しますか？\n"
-                  "（データは残りますが表示されなくなります。再表示するには"
-                  "ファイルを読み込み直してください。その時点で未保存の変更は"
-                  "失われます。）", f=names[kind])) \
-                != QMessageBox.StandardButton.Yes:
+        loaded and nothing of it is shown (the Territory goes with its
+        corotree / FullLv); the name stays greyed with a ↻ button that loads
+        it again at once (ct_reload_file). Loading another file of that kind
+        replaces the data. Nothing is lost → no question."""
+        if kind not in ("full", "tree", "terr"):
             return False
         self._ct_leave_to_standard(viewer, {kind})
         w = getattr(self, "_corotree_win", None)
@@ -3946,6 +3934,36 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 pass
         self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        return True
+
+    def ct_reload_file(self, viewer, kind: str) -> bool:
+        """↻ next to an Unloaded (greyed) file: load it again — the data was
+        kept, so it is shown at once — and enter its mode (corotree →
+        CoronaryTree, FullLv → LV, territory → Territory, which brings its
+        corotree + FullLv back too)."""
+        if kind not in ("full", "tree", "terr"):
+            return False
+        w = getattr(self, "_corotree_win", None)
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        if w is not None and uid and hasattr(w, "reload_for_series"):
+            w.reload_for_series(uid, kind)
+        if kind in ("full", "terr"):
+            viewer._ct_lv_unloaded = False
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        key = {"full": "lv", "tree": "coronary", "terr": "territory"}[kind]
+        try:
+            if viewer._ct_current_mode() == key and key == "coronary":
+                self.ct_tree_show(viewer, True, raise_tab=True)
+            elif viewer._ct_current_mode() == key and key == "lv":
+                viewer._ct_show_lv(True)
+            else:
+                viewer._ct_mode_clicked(key)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
         self.refresh_ct_mode_bars()
         return True
 

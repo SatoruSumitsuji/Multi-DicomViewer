@@ -1861,6 +1861,40 @@ class CoronaryTreeWindow(SnapDock):
         self._push_territory()
         return True
 
+    def unloaded_name_for_series(self, series_uid: str, kind: str):
+        """The file name of an Unloaded *kind* (shown greyed with ↻), "*"
+        for an unsaved one (a computed Territory without a file), None when
+        it isn't Unloaded."""
+        b = self._bundle_for_series(series_uid)
+        if b is None or not self.is_unloaded(series_uid, kind):
+            return None
+        if kind == "tree":
+            ok = bool(getattr(b.get("tree"), "vessels", None))
+            path = b.get("last_path") or ""
+        elif kind == "full":
+            ok = b.get("full_lv") is not None
+            path = b.get("full_lv_path") or ""
+        else:
+            ok = b.get("territory") is not None
+            path = b.get("terr_path") or ""
+        if not ok:
+            return None
+        return os.path.basename(path) if path else "*"
+
+    def reload_for_series(self, series_uid: str, kind: str) -> bool:
+        """↻ next to an Unloaded file: it is loaded (shown) again from the
+        kept data at once. The Territory brings its corotree + FullLv back."""
+        b = self._bundle_for_series(series_uid)
+        if b is None:
+            return False
+        u = self._unloaded(b)
+        if kind == "terr":
+            u.difference_update({"terr", "tree", "full"})
+        else:
+            u.discard(kind)
+        self._push_overlay()
+        return True
+
     def uid_for_series(self, series_uid: str) -> str:
         """Which loaded-CT bundle a pane's shown SeriesUID belongs to (base match,
         tolerating the "#…" suffix); "" if none. Lets the shell push each pane the

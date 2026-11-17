@@ -458,6 +458,7 @@ class CTModeBarMixin:
         row.addWidget(self._ct_files_lbl)
         self._ct_file_lbls = {}
         self._ct_unload_btns = {}
+        self._ct_file_off = {}                   # kind → Unloaded (↻ shown)
         icon = self._ct_unload_icon()
         for i, kind in enumerate(("full", "tree", "terr")):
             if i:
@@ -484,22 +485,34 @@ class CTModeBarMixin:
         return w
 
     @staticmethod
-    def _ct_unload_icon():
-        """A red disc with a white ✕ (the Unload button)."""
-        from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+    def _ct_unload_icon(reload: bool = False):
+        """The Unload button: a red disc with a white ✕. Its pair, the reload
+        button of an Unloaded file: a green disc with a white ↻ (same size and
+        stroke, so the two read as one on / off control)."""
+        from PyQt6.QtCore import QPointF, QRectF
+        from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
         pm = QPixmap(32, 32)
         pm.fill(QColor(0, 0, 0, 0))
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#d32f2f"))
+        p.setBrush(QColor("#2e8b57" if reload else "#d32f2f"))
         p.drawEllipse(2, 2, 28, 28)
         pen = QPen(QColor("white"))
         pen.setWidth(4)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
-        p.drawLine(10, 10, 22, 22)
-        p.drawLine(22, 10, 10, 22)
+        if reload:
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            # ↻: a 300° arc open at the top right, arrow head at its end
+            p.drawArc(QRectF(9, 9, 14, 14), 60 * 16, 290 * 16)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor("white"))
+            p.drawPolygon(QPolygonF([QPointF(19.5, 5.5), QPointF(26.5, 10.5),
+                                     QPointF(18.5, 14.0)]))
+        else:
+            p.drawLine(10, 10, 22, 22)
+            p.drawLine(22, 10, 10, 22)
         p.end()
         return QIcon(pm)
 
@@ -513,12 +526,15 @@ class CTModeBarMixin:
 
     def _ct_unload_clicked(self, kind: str) -> None:
         """⊗ next to a loaded file: Unload it — its data is kept but nothing of
-        it is shown any more (loading a file of that kind shows it again)."""
+        it is shown (the name greys, the button turns ↻). ↻: load it again
+        (shown at once from the kept data)."""
         shell = self._ct_mode_shell()
-        if shell is None or not hasattr(shell, "ct_unload_file"):
+        off = bool((getattr(self, "_ct_file_off", None) or {}).get(kind))
+        fn = "ct_reload_file" if off else "ct_unload_file"
+        if shell is None or not hasattr(shell, fn):
             return
         try:
-            shell.ct_unload_file(self, kind)
+            getattr(shell, fn)(self, kind)
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
@@ -677,7 +693,29 @@ class CTModeBarMixin:
                                       or tree_mod or full_mod)
             mod = html.escape(t("変更あり・未保存"))
 
-            def part(name, text, modified):
+            # ⊗ Unloaded files: the name stays, greyed, with ↻ (reload).
+            off = {}
+            if getattr(self, "_ct_lv_unloaded", False):
+                nm = state.get("full_off") or ""
+                sp = getattr(self, "_full_lv_saved_path", "") or ""
+                if not nm and sp and getattr(self, "_full_lv_saved", False):
+                    nm = os.path.basename(sp)
+                if nm:
+                    off["full"] = nm
+            elif not full_file and state.get("full_off"):
+                off["full"] = state["full_off"]
+            if not tree_file and state.get("tree_off"):
+                off["tree"] = state["tree_off"]
+            if not terr_file and state.get("terr_off"):
+                off["terr"] = state["terr_off"]
+            for k_, v_ in list(off.items()):
+                if v_ == "*":
+                    off[k_] = t("計算済み（未保存）")
+
+            def part(name, text, modified, grey=None):
+                if grey:
+                    return ("<span style='color:#a0a0a0;'>" + html.escape(name)
+                            + ": " + html.escape(grey) + "</span>")
                 s_ = html.escape(text or none)
                 if modified:
                     s_ += ("<span style='color:#d2691e;'>（" + mod
@@ -691,11 +729,24 @@ class CTModeBarMixin:
                     ("full", "FullLv", full, full_mod, full_file),
                     ("tree", "corotree", tree, tree_mod, tree_file),
                     ("terr", "territory", terr, terr_mod, terr_file)):
+                grey = off.get(kind) if not is_file else None
                 if kind in lbls:
-                    lbls[kind].setText(part(name, text, modified))
+                    lbls[kind].setText(part(name, text, modified, grey))
                 if kind in btns:
-                    # ⊗ only next to a loaded FILE (not 未保存 / なし).
-                    btns[kind].setVisible(bool(is_file))
+                    # ⊗ next to a loaded FILE; ↻ next to an Unloaded one;
+                    # nothing for 未保存 / なし.
+                    b_ = btns[kind]
+                    fo = self.__dict__.setdefault("_ct_file_off", {})
+                    was = bool(fo.get(kind))
+                    now = bool(grey)
+                    fo[kind] = now
+                    if was != now or b_.property("ct_icon_set") is None:
+                        b_.setIcon(self._ct_unload_icon(reload=now))
+                        b_.setToolTip(
+                            t("再読込（もう一度表示）") if now
+                            else t("このファイルをUnload（表示しない）"))
+                        b_.setProperty("ct_icon_set", True)
+                    b_.setVisible(bool(is_file) or now)
         self._ctlv_sync()
 
     def _ct_mode_clicked(self, key: str) -> None:
