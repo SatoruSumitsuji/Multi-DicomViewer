@@ -387,6 +387,32 @@ v._ct_mode_clicked("standard")
 check("Territory → 標準: plain, view restored",
       v._ct_current_mode() == "standard" and v._ct_lv_hidden
       and np.allclose(v._center, pre_center))
+# 2026-11-17: a viewer with the EDITABLE loader takes the FullLv editably
+# first (so LVモード continues it without recomputing), then the light path.
+edit_calls = []
+sh._full_lv_to_files = lambda full: {"blood": {"from": full}}
+
+
+def _apply_lv_analysis(files):
+    edit_calls.append(files)
+    v._lv_missing = []                    # the LV is complete now
+    return True
+
+
+v.apply_lv_analysis = _apply_lv_analysis
+v._full_lv_saved = False
+v._lv_missing = ["Blood/Endo"]
+n_disp = len(v._applied)
+run_deferred(v._ct_mode_clicked, "territory")
+check("no in-session LV + editable loader → FullLv loaded EDITABLY (no "
+      "display-only apply), review on, FullLV reads 保存済",
+      edit_calls == [{"blood": {"from": {"file": 1}}}]
+      and len(v._applied) == n_disp
+      and v._ct_current_mode() == "territory" and v._full_lv_saved)
+v._ct_mode_clicked("lv")
+check("→ LVモード afterwards: the LV is there (no recompute needed)",
+      v._ct_current_mode() == "lv" and v._ct_lv_ready())
+del v.apply_lv_analysis
 v._lv_missing = []
 
 # a fresh series resets

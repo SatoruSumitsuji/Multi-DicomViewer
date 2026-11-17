@@ -4654,7 +4654,13 @@ class MainWindow(QMainWindow):
                                    or getattr(v, "_vol", None) is not None)
         if shown and ready and hasattr(v, "apply_full_lv"):
             try:
-                v.apply_full_lv(data)
+                # Through the in-place Territory entry: the FullLv is loaded
+                # EDITABLY first, so LVモード after the review continues the LV
+                # without recomputing (user 2026-11-17); display-only fallback.
+                if hasattr(v, "_ct_territory_enter"):
+                    v._ct_territory_enter(data)
+                else:
+                    v.apply_full_lv(data)
             except Exception:                            # noqa: BLE001
                 import traceback
                 traceback.print_exc()

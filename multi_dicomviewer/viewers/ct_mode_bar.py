@@ -800,6 +800,36 @@ class CTModeBarMixin:
         if hasattr(self, "_refresh"):
             self._refresh(reset_cam=True)        # fit both panes on the restored view
 
+    def _ct_lv_load_editable(self, full) -> bool:
+        """Apply a FullLv bundle as the EDITABLE LV (MV-AoV / Apex / Epi /
+        Blood-Endo — apply_lv_analysis, as a lone .FullLv.json drop does), not
+        the display-only review apply. It came from a saved file → FullLV reads
+        保存済. Returns True if anything was applied."""
+        shell = self._ct_mode_shell()
+        conv = getattr(shell, "_full_lv_to_files", None) if shell else None
+        if conv is None or not hasattr(self, "apply_lv_analysis"):
+            return False
+        try:
+            files = conv(full)
+            ok = bool(files) and bool(self.apply_lv_analysis(files))
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+            return False
+        if ok:
+            self._full_lv_saved = True
+            w = getattr(shell, "_corotree_win", None)
+            p = getattr(w, "_full_lv_path", "") or "" if w is not None else ""
+            if p:
+                self._full_lv_saved_path = p
+            f = getattr(self, "_full_lv_refresh_btn", None)
+            if callable(f):
+                try:
+                    f()
+                except Exception:                # noqa: BLE001
+                    pass
+        return ok
+
     def _ct_territory_enter(self, full) -> bool:
         """Enter the Territory review IN PLACE. With a complete in-session LV the
         LV state is kept as is (only the layout changes: LV-axis panes + VR);
@@ -818,9 +848,16 @@ class CTModeBarMixin:
         self._ct_tree_apply()
         self._ct_terr_snap = self._ct_view_snap()
         self._ct_terr_lvd = bool(getattr(self, "_lvv_lvd_shown", False))
-        light = (self._ct_lv_ready()
-                 and getattr(self, "_lvv", None) is not None
-                 and getattr(self, "_lvv_epi_surf", None) is not None)
+        def _light():
+            return (self._ct_lv_ready()
+                    and getattr(self, "_lvv", None) is not None
+                    and getattr(self, "_lvv_epi_surf", None) is not None)
+        light = _light()
+        # No in-session LV: load the FullLv EDITABLY first (the FullLv-drop
+        # loader), so LVモード afterwards continues it without recomputing
+        # Epi / Blood / Endo (user 2026-11-17) — then enter the light path.
+        if not light and full and self._ct_lv_load_editable(full):
+            light = _light()
         if not light:
             ok = bool(hasattr(self, "apply_full_lv") and self.apply_full_lv(full))
             if not ok:
