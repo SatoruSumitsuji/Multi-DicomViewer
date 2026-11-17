@@ -321,7 +321,11 @@ class CoronaryTreeWindow(SnapDock):
     @property
     def _full_lv_data(self): return self._bundle()["full_lv"]
     @_full_lv_data.setter
-    def _full_lv_data(self, v): self._bundle()["full_lv"] = v
+    def _full_lv_data(self, v):
+        b = self._bundle()
+        b["full_lv"] = v
+        if v is not None:
+            self._unloaded(b).discard("full")    # a FullLv load shows it again
 
     @property
     def _full_lv_path(self): return self._bundle().get("full_lv_path", "")
@@ -331,7 +335,11 @@ class CoronaryTreeWindow(SnapDock):
     @property
     def _territory(self): return self._bundle()["territory"]
     @_territory.setter
-    def _territory(self, v): self._bundle()["territory"] = v
+    def _territory(self, v):
+        b = self._bundle()
+        b["territory"] = v
+        if v is not None:
+            self._unloaded(b).discard("terr")    # a load / Calc shows it again
 
     @property
     def _myo_ml(self): return self._bundle()["myo_ml"]
@@ -349,6 +357,8 @@ class CoronaryTreeWindow(SnapDock):
     def _last_path(self, v):
         b = self._bundle()
         b["last_path"] = v
+        if v:
+            self._unloaded(b).discard("tree")    # a load / save shows it again
         # Every load / save sets the path: the tree as it is NOW is the file's
         # content → the baseline for the 「変更あり・未保存」 readout.
         try:
@@ -1796,6 +1806,61 @@ class CoronaryTreeWindow(SnapDock):
             self._sync_subtree_check(ch)
 
     # --------------------------------------------------------- overlay
+    # ---- the tab closed (×) / opened: shown on the CT only while open --------
+    def _notify_shown_changed(self) -> None:
+        from PyQt6.QtCore import QTimer
+        sh = getattr(self, "_shell", None)
+        if sh is not None and hasattr(sh, "corotree_dock_shown_changed"):
+            QTimer.singleShot(0, sh.corotree_dock_shown_changed)
+
+    def hideEvent(self, e):  # noqa: N802 (Qt override)
+        super().hideEvent(e)
+        self._notify_shown_changed()
+
+    def showEvent(self, e):  # noqa: N802 (Qt override)
+        super().showEvent(e)
+        self._notify_shown_changed()
+
+    # ---- ⊗ Unload (user 2026-11-17) -----------------------------------------
+    @staticmethod
+    def _unloaded(b) -> set:
+        """The kinds ("tree" / "full" / "terr") Unloaded for bundle *b*: their
+        data is kept but they count as not loaded and nothing of them shows
+        until a file of that kind is loaded again."""
+        u = b.get("unloaded")
+        if not isinstance(u, set):
+            u = b["unloaded"] = set()
+        return u
+
+    def _bundle_for_series(self, series_uid: str):
+        u = self.uid_for_series(series_uid) or (
+            series_uid if series_uid in self._by_uid else "")
+        return self._by_uid.get(u) if u else None
+
+    def is_unloaded(self, series_uid: str, kind: str) -> bool:
+        b = self._bundle_for_series(series_uid)
+        if b is None:
+            return False
+        u = self._unloaded(b)
+        if kind == "terr":                   # built from the tree + FullLv
+            return bool(u & {"terr", "tree", "full"})
+        return kind in u
+
+    def unload_for_series(self, series_uid: str, kind: str) -> bool:
+        """Unload *kind* for *series_uid*'s CT (the Territory goes with its
+        corotree / FullLv). Data kept, only no longer loaded / shown."""
+        b = self._bundle_for_series(series_uid)
+        if b is None or kind not in ("tree", "full", "terr"):
+            return False
+        self._unloaded(b).add(kind)
+        if kind == "tree" and b is self._by_uid.get(self._active_uid):
+            self._overlay_on = False
+            if self._overlay_btn is not None:
+                self._overlay_btn.setText(t("表示"))
+        self._push_overlay()
+        self._push_territory()
+        return True
+
     def uid_for_series(self, series_uid: str) -> str:
         """Which loaded-CT bundle a pane's shown SeriesUID belongs to (base match,
         tolerating the "#…" suffix); "" if none. Lets the shell push each pane the
@@ -1818,6 +1883,8 @@ class CoronaryTreeWindow(SnapDock):
         if not u:
             return None
         b = self._by_uid.get(u)
+        if b and "full" in self._unloaded(b):
+            return None                      # Unloaded: kept, not loaded
         return b.get("full_lv") if b else None
 
     def active_uid(self) -> str:
@@ -1834,6 +1901,8 @@ class CoronaryTreeWindow(SnapDock):
         if not u:
             return False
         b = self._by_uid.get(u)
+        if b and "tree" in self._unloaded(b):
+            return False                     # Unloaded: kept, not loaded
         tree = b.get("tree") if b else None
         return bool(tree is not None and getattr(tree, "vessels", None))
 
@@ -1843,6 +1912,8 @@ class CoronaryTreeWindow(SnapDock):
         u = self.uid_for_series(series_uid) or (
             series_uid if series_uid in self._by_uid else "")
         b = self._by_uid.get(u) if u else None
+        if b and "tree" in self._unloaded(b):
+            return ""
         return (b.get("last_path") or "") if b else ""
 
     def territory_for_series(self, series_uid: str) -> bool:
@@ -1851,6 +1922,8 @@ class CoronaryTreeWindow(SnapDock):
         u = self.uid_for_series(series_uid) or (
             series_uid if series_uid in self._by_uid else "")
         b = self._by_uid.get(u) if u else None
+        if b and self._unloaded(b) & {"terr", "tree", "full"}:
+            return False                     # Unloaded (or its sources were)
         return bool(b and b.get("territory") is not None)
 
     def territory_path_for_series(self, series_uid: str) -> str:
@@ -1859,6 +1932,8 @@ class CoronaryTreeWindow(SnapDock):
         u = self.uid_for_series(series_uid) or (
             series_uid if series_uid in self._by_uid else "")
         b = self._by_uid.get(u) if u else None
+        if b and self._unloaded(b) & {"terr", "tree", "full"}:
+            return ""
         return (b.get("terr_path") or "") if b else ""
 
     def full_lv_path_for_series(self, series_uid: str) -> str:
@@ -1867,6 +1942,8 @@ class CoronaryTreeWindow(SnapDock):
         u = self.uid_for_series(series_uid) or (
             series_uid if series_uid in self._by_uid else "")
         b = self._by_uid.get(u) if u else None
+        if b and "full" in self._unloaded(b):
+            return ""
         return (b.get("full_lv_path") or "") if b else ""
 
     def overlay_spec(self, force: bool = False, uid: str | None = None) -> list:
@@ -1885,6 +1962,8 @@ class CoronaryTreeWindow(SnapDock):
         b = self._by_uid.get(uid)
         if b is None or not b.get("visible", True):
             return []
+        if "tree" in self._unloaded(b):
+            return []                        # Unloaded corotree: not drawn
         saved = self._active_uid
         self._active_uid = uid
         try:

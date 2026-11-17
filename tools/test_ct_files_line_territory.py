@@ -64,7 +64,7 @@ v._ct_mode_shell = lambda: sh
 def line(state):
     sh.state = state
     v.refresh_ct_mode_bar()
-    return v._ct_files_lbl.text()
+    return v._ct_files_text()
 
 
 txt = line({"full": "a.FullLv.json", "tree": "a.corotree.json", "terr": True,

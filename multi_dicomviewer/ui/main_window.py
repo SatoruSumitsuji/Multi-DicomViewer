@@ -2632,6 +2632,9 @@ class MainWindow(QMainWindow):
         # CT's coronaries never bleed onto the 1st. Falls back to the active tree
         # when the panel can't map series→bundle (older single-CT path).
         has_map = w is not None and hasattr(w, "uid_for_series")
+        # The CoronaryTree tab closed (×): its tree is not loaded → nothing of
+        # it is drawn on any CT (user 2026-11-17; the dock-closed rule).
+        dock_closed = self._corotree_dock_hidden()
         for p in self._panes:
             try:
                 v = p.current_viewer()
@@ -2644,7 +2647,7 @@ class MainWindow(QMainWindow):
             except Exception:                            # noqa: BLE001
                 su = ""
             pane_uid = w.uid_for_series(su) if has_map else ""
-            match = bool(pane_uid)
+            match = bool(pane_uid) and not dock_closed
             this_spec = None
             if w is not None and hasattr(w, "overlay_spec"):
                 try:
@@ -3881,6 +3884,101 @@ class MainWindow(QMainWindow):
         except Exception:                                # noqa: BLE001
             import traceback
             traceback.print_exc()
+
+    def _ct_leave_to_standard(self, viewer, kinds) -> None:
+        """Before *kinds* stop being loaded on *viewer*: leave a mode that
+        shows them (Territory always; CoronaryTree for the tree; LV for the
+        FullLv) for 標準 (Simple View)."""
+        try:
+            cur = viewer._ct_current_mode()
+        except Exception:                                # noqa: BLE001
+            return
+        if cur == "territory":
+            viewer._ct_territory_leave()
+            viewer._ct_switch_inplace("standard", auto=True)
+        elif (cur == "coronary" and "tree" in kinds) or (
+                cur == "lv" and "full" in kinds):
+            viewer._ct_switch_inplace("standard", auto=True)
+
+    def ct_unload_file(self, viewer, kind: str) -> bool:
+        """⊗ Unload in the Loaded Files readout (user 2026-11-17): *kind* =
+        "full" / "tree" / "terr". The data is KEPT but no longer counts as
+        loaded, and nothing of it is shown (the Territory goes with its
+        corotree / FullLv). Loading a file of that kind shows it again (a
+        different file replaces the data). Asks first when it has unsaved
+        changes (re-loading the file drops them)."""
+        from PyQt6.QtWidgets import QMessageBox
+        names = {"full": "FullLv", "tree": "corotree", "terr": "territory"}
+        if kind not in names:
+            return False
+        st = self.ct_mode_state(viewer) or {}
+        if kind == "full":
+            f = getattr(viewer, "_full_lv_modified", None)
+            modified = bool(f()) if callable(f) else False
+        elif kind == "tree":
+            modified = bool(st.get("tree_dirty"))
+        else:
+            modified = bool(st.get("terr_changed"))
+        if modified and QMessageBox.question(
+                self, t("Unload"),
+                t("{f} には保存されていない変更があります。Unload しますか？\n"
+                  "（データは残りますが表示されなくなります。再表示するには"
+                  "ファイルを読み込み直してください。その時点で未保存の変更は"
+                  "失われます。）", f=names[kind])) \
+                != QMessageBox.StandardButton.Yes:
+            return False
+        self._ct_leave_to_standard(viewer, {kind})
+        w = getattr(self, "_corotree_win", None)
+        if w is not None and hasattr(w, "set_territory_color"):
+            try:
+                w.set_territory_color(False)             # the Territory goes too
+            except Exception:                            # noqa: BLE001
+                pass
+        if kind == "full" and hasattr(viewer, "_ct_lv_unload"):
+            viewer._ct_lv_unload()
+        pane = self._pane_of_viewer(viewer)
+        uid = (pane.shown_series_uid() or "") if pane is not None else ""
+        if w is not None and uid and hasattr(w, "unload_for_series"):
+            w.unload_for_series(uid, kind)
+        if kind == "terr" and hasattr(viewer, "set_territory_source_names"):
+            try:
+                viewer.set_territory_source_names("", "")
+            except Exception:                            # noqa: BLE001
+                pass
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
+        return True
+
+    def corotree_dock_shown_changed(self) -> None:
+        """The CoronaryTree tab was closed (×) or opened again. Closed: its
+        tree / Territory are not loaded → leave CoronaryTree / Territory on
+        every CT and draw nothing of them; opened: drawn again."""
+        hidden = self._corotree_dock_hidden()
+        if getattr(self, "_corotree_dock_was_hidden", None) is hidden:
+            return
+        self._corotree_dock_was_hidden = hidden
+        if hidden:
+            w = getattr(self, "_corotree_win", None)
+            for p in self._panes:
+                try:
+                    viewers = list(p.all_viewers())
+                except Exception:                        # noqa: BLE001
+                    viewers = []
+                for v in viewers:
+                    if hasattr(v, "_ct_current_mode"):
+                        try:
+                            self._ct_leave_to_standard(v, {"tree", "terr"})
+                        except Exception:                # noqa: BLE001
+                            import traceback
+                            traceback.print_exc()
+            if (w is not None and getattr(w, "_territory_on", False)
+                    and hasattr(w, "set_territory_color")):
+                try:
+                    w.set_territory_color(False)
+                except Exception:                        # noqa: BLE001
+                    pass
+        self.coronary_overlay_refresh()
+        self.refresh_ct_mode_bars()
 
     def refresh_ct_mode_bars(self) -> None:
         """Re-sync every CT pane's mode buttons + file readout (after a FullLv /

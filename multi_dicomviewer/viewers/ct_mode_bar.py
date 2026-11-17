@@ -273,6 +273,7 @@ class CTModeBarMixin:
                 pass
         self._ctlv_sync()
         self._ct_render()
+        self._diag_b(f"show_toggle {key} -> {want}")   # diag (MDV_DIAG_BLOOD)
 
     def _ctlv_sync(self) -> None:
         """Show the LV group in LVモード only (3-D, no LV edit step open), with
@@ -443,20 +444,99 @@ class CTModeBarMixin:
         return wrap
 
     def _build_ct_files_line(self) -> QWidget:
-        """The row-3 readout of the loaded .FullLv.json / .corotree.json."""
+        """The row-3 readout of the loaded .FullLv.json / .corotree.json /
+        .territory.json — each name followed by an Unload (red ⊗) button
+        (user 2026-11-17)."""
+        from PyQt6.QtWidgets import QToolButton
         w = QWidget()
         row = QHBoxLayout(w)
         row.setContentsMargins(8, 0, 8, 0)
-        self._ct_files_lbl = QLabel("")
-        self._ct_files_lbl.setStyleSheet("color:#1a5fb4; font-weight:bold;")
-        # Take the row's full width (the text arrives after the bar is laid out,
-        # so a Preferred label stayed at its empty-text width and clipped).
-        self._ct_files_lbl.setSizePolicy(QSizePolicy.Policy.Expanding,
-                                         QSizePolicy.Policy.Preferred)
-        self._ct_files_lbl.setMinimumWidth(0)
-        row.addWidget(self._ct_files_lbl, 1)
+        row.setSpacing(2)
+        sty = "color:#1a5fb4; font-weight:bold;"
+        self._ct_files_lbl = QLabel("")          # the 「Loaded Files:」 caption
+        self._ct_files_lbl.setStyleSheet(sty)
+        row.addWidget(self._ct_files_lbl)
+        self._ct_file_lbls = {}
+        self._ct_unload_btns = {}
+        icon = self._ct_unload_icon()
+        for i, kind in enumerate(("full", "tree", "terr")):
+            if i:
+                sep = QLabel("&nbsp;／&nbsp;")
+                sep.setTextFormat(Qt.TextFormat.RichText)
+                sep.setStyleSheet(sty)
+                row.addWidget(sep)
+            lb = QLabel("")
+            lb.setStyleSheet(sty)
+            lb.setTextFormat(Qt.TextFormat.RichText)
+            row.addWidget(lb)
+            b = QToolButton()
+            b.setIcon(icon)
+            b.setAutoRaise(True)
+            b.setFixedSize(18, 18)
+            b.setToolTip(t("このファイルをUnload（表示しない）"))
+            b.setVisible(False)
+            b.clicked.connect(lambda _=False, k=kind: self._ct_unload_clicked(k))
+            row.addWidget(b)
+            self._ct_file_lbls[kind] = lb
+            self._ct_unload_btns[kind] = b
+        row.addStretch(1)
         self._ct_files_wrap = w
         return w
+
+    @staticmethod
+    def _ct_unload_icon():
+        """A red disc with a white ✕ (the Unload button)."""
+        from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+        pm = QPixmap(32, 32)
+        pm.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor("#d32f2f"))
+        p.drawEllipse(2, 2, 28, 28)
+        pen = QPen(QColor("white"))
+        pen.setWidth(4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.drawLine(10, 10, 22, 22)
+        p.drawLine(22, 10, 10, 22)
+        p.end()
+        return QIcon(pm)
+
+    def _ct_files_text(self) -> str:
+        """The whole readout as one string (caption + the three parts)."""
+        lbls = getattr(self, "_ct_file_lbls", None) or {}
+        parts = [lbls[k].text() for k in ("full", "tree", "terr") if k in lbls]
+        cap = getattr(self, "_ct_files_lbl", None)
+        return ((cap.text() if cap is not None else "")
+                + " &nbsp;／&nbsp; ".join(parts))
+
+    def _ct_unload_clicked(self, kind: str) -> None:
+        """⊗ next to a loaded file: Unload it — its data is kept but nothing of
+        it is shown any more (loading a file of that kind shows it again)."""
+        shell = self._ct_mode_shell()
+        if shell is None or not hasattr(shell, "ct_unload_file"):
+            return
+        try:
+            shell.ct_unload_file(self, kind)
+        except Exception:                                # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        self.refresh_ct_mode_bar()
+
+    def _ct_lv_unload(self) -> None:
+        """FullLv Unload on this viewer: leave LVモード, hide every LV overlay
+        and treat the LV as not loaded (data kept; a FullLv load / an LV step
+        brings it back)."""
+        cur = self._ct_current_mode()
+        if cur == "territory":
+            self._ct_territory_leave()
+            self._ct_switch_inplace("standard", auto=True)
+        elif cur == "lv":
+            self._ct_switch_inplace("standard", auto=True)
+        self._ct_show_lv(False)
+        self._ct_lv_unloaded = True
+        self._ct_render()
 
     # ------------------------------------------------------------- state
     def _ct_mode_reset(self) -> None:
@@ -470,9 +550,13 @@ class CTModeBarMixin:
         self._ct_terr_lvd = None          # LVD shown before the review
         self._full_lv_saved_path = ""     # this CT's last saved .FullLv.json
         self._full_lv_sig_base = None     # 変更あり baseline (loaded / saved)
+        self._ct_lv_unloaded = False      # FullLv ⊗ Unload: LV kept, not shown
 
     def _ct_lv_data(self) -> bool:
-        """Any LV analysis on this CT — measured in this session or loaded."""
+        """Any LV analysis on this CT — measured in this session or loaded
+        (not after a FullLv Unload: then it is kept but counts as absent)."""
+        if getattr(self, "_ct_lv_unloaded", False):
+            return False
         if (getattr(self, "_lv", None) is not None
                 or getattr(self, "_lvv", None) is not None
                 or getattr(self, "_lvv_epi_surf", None) is not None
@@ -483,7 +567,9 @@ class CTModeBarMixin:
 
     def _ct_lv_ready(self) -> bool:
         """The in-session LV is complete enough to build a FullLv (the FullLV
-        button's own readiness rule)."""
+        button's own readiness rule). Not after a FullLv Unload."""
+        if getattr(self, "_ct_lv_unloaded", False):
+            return False
         f = getattr(self, "_full_lv_missing", None)
         if f is None:
             return False
@@ -598,10 +684,18 @@ class CTModeBarMixin:
                            + "）</span>")
                 return html.escape(name) + ": " + s_
             lbl.setTextFormat(Qt.TextFormat.RichText)
-            lbl.setText(html.escape(t("読込ファイル")) + ":&nbsp; "
-                        + part("FullLv", full, full_mod)
-                        + " &nbsp;／&nbsp; " + part("corotree", tree, tree_mod)
-                        + " &nbsp;／&nbsp; " + part("territory", terr, terr_mod))
+            lbl.setText(html.escape(t("読込ファイル")) + ":&nbsp; ")
+            lbls = getattr(self, "_ct_file_lbls", None) or {}
+            btns = getattr(self, "_ct_unload_btns", None) or {}
+            for kind, name, text, modified, is_file in (
+                    ("full", "FullLv", full, full_mod, full_file),
+                    ("tree", "corotree", tree, tree_mod, tree_file),
+                    ("terr", "territory", terr, terr_mod, terr_file)):
+                if kind in lbls:
+                    lbls[kind].setText(part(name, text, modified))
+                if kind in btns:
+                    # ⊗ only next to a loaded FILE (not 未保存 / なし).
+                    btns[kind].setVisible(bool(is_file))
         self._ctlv_sync()
 
     def _ct_mode_clicked(self, key: str) -> None:
@@ -670,6 +764,8 @@ class CTModeBarMixin:
                 except Exception:                        # noqa: BLE001
                     pass
             self._ct_mode_sel = key
+            if key == "lv":
+                self._ct_lv_unloaded = False     # an LV step: the LV is back
             # What each mode shows (data is always kept, only hidden):
             #   標準         the 3DCT only
             #   LV           Epi / Blood / Endo only (no tree, no 領域色)
@@ -697,6 +793,7 @@ class CTModeBarMixin:
                 pass
         self.refresh_ct_mode_bar()
         self._ct_render()
+        self._diag_b(f"switch_inplace -> {key}")   # diag (MDV_DIAG_BLOOD)
 
     def _ct_tree_apply(self) -> None:
         """Re-apply the tree lines from the last requested spec (hidden while
@@ -963,6 +1060,89 @@ class CTModeBarMixin:
         except Exception:                        # noqa: BLE001
             return False
 
+    def _diag_b(self, tag: str) -> None:
+        """Opt-in diagnostics for the right-pane blood (2026-11-17): with the
+        environment variable MDV_DIAG_BLOOD=1, append the blood-overlay state
+        of both panes to %TEMP%/mdv_bdiag.txt. No patient data — only actor /
+        LUT / reslice / camera state. Off (a no-op) otherwise."""
+        import os as _os
+        if _os.environ.get("MDV_DIAG_BLOOD", "") != "1":
+            return
+        try:
+            import time
+            import tempfile as _tf
+            path = _os.path.join(_tf.gettempdir(), "mdv_bdiag.txt")
+            mv = getattr(self, "_lvv_mask_vol", None)
+            lines = [f"--- {time.strftime('%H:%M:%S')} {tag}  mode="
+                     f"{self._ct_current_mode()} terr="
+                     f"{getattr(self, '_territory_display', None)} "
+                     f"lvv={getattr(self, '_lvv', None) is not None} "
+                     f"mask_on={getattr(self, '_lvv_mask_on', None)} "
+                     f"hl_on={getattr(self, '_lvv_hl_on', None)} "
+                     f"mask_vol={None if mv is None else mv.GetDimensions()} "
+                     f"lv_hidden={getattr(self, '_ct_lv_hidden', None)} "
+                     f"vr_on={getattr(self, '_vr_on', None)}"]
+            for k in ("A", "B"):
+                p = self.pane[k]
+                rm = p.reslice_mask
+                inp = rm.GetInput()
+                rm.Update()
+                out = rm.GetOutput()
+                rng = out.GetScalarRange() if out is not None else None
+                lut = p.colors_mask.GetLookupTable()
+                lv = lut.GetTableValue(1) if lut is not None and \
+                    lut.GetNumberOfTableValues() > 1 else None
+                cam = p.ren.GetActiveCamera()
+                hidden = len((getattr(self, "_vr_hidden", {}) or {}).get(k, []))
+                lines.append(
+                    f"  {k}: vis actor={p.actor.GetVisibility()} hl="
+                    f"{p.actor_hl.GetVisibility()} mask="
+                    f"{p.actor_mask.GetVisibility()} | mask_in="
+                    f"{None if inp is None else inp.GetDimensions()} "
+                    f"same_vol={inp is mv} out_ext={out.GetExtent()} "
+                    f"out_range={rng} lut1={lv} | img_ext="
+                    f"{p.reslice.GetOutput().GetExtent()} | cam pp="
+                    f"{cam.GetParallelProjection()} pos="
+                    f"{tuple(round(c, 1) for c in cam.GetPosition())} fp="
+                    f"{tuple(round(c, 1) for c in cam.GetFocalPoint())} "
+                    f"clip={tuple(round(c, 1) for c in cam.GetClippingRange())} "
+                    f"| mask_pos={p.actor_mask.GetPosition()} "
+                    f"vr_hidden={hidden} | mask_bounds="
+                    f"{tuple(round(c, 1) for c in p.actor_mask.GetBounds())} "
+                    f"img_bounds="
+                    f"{tuple(round(c, 1) for c in p.actor.GetBounds())} "
+                    f"mask_um={p.actor_mask.GetUserMatrix() is not None} "
+                    f"cam_vup={tuple(round(c, 2) for c in cam.GetViewUp())} "
+                    f"peel={p.ren.GetUseDepthPeeling()}")
+                props = p.ren.GetViewProps()
+                props.InitTraversal()
+                vis = []
+                while True:
+                    a = props.GetNextProp()
+                    if a is None:
+                        break
+                    if a.GetVisibility():
+                        nm = a.GetClassName()
+                        for an in ("actor", "actor_hl", "actor_mask",
+                                   "actor_terr", "actor_thick", "vr_volume"):
+                            if getattr(p, an, None) is a:
+                                nm = an
+                        try:
+                            bb = tuple(round(c, 0) for c in a.GetBounds())
+                        except Exception:            # noqa: BLE001
+                            bb = None
+                        vis.append(f"{nm}{bb if bb and bb[0] < 1e30 else ''}")
+                lines.append(f"  {k} visible props ({len(vis)}): "
+                             + ", ".join(vis))
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as exc:                     # noqa: BLE001
+            try:
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write(f"diag error {tag}: {exc!r}\n")
+            except Exception:                        # noqa: BLE001
+                pass
+
     def _ct_restore_blood_panes(self) -> None:
         """Leaving the Territory review: the RIGHT pane was the VR there (no
         blood drawn on it). Put the blood overlays back on BOTH MPR panes — the
@@ -986,6 +1166,9 @@ class CTModeBarMixin:
             rm = getattr(p, "reslice_mask", None)
             if mv is not None and rm is not None and rm.GetInput() is not mv:
                 rm.SetInputData(mv)
+            f = getattr(self, "_vr_depth_peeling", None)
+            if callable(f):
+                f(p, False)                      # VR-only (it hid the blood)
         try:
             if hasattr(self, "_refresh"):
                 self._refresh(reset_cam=False)   # reslice the mask on each plane
@@ -1088,6 +1271,8 @@ class CTModeBarMixin:
                 pass
         self._ct_render()
         QTimer.singleShot(0, self._terr_vr_rotate)   # VR on + Rotate
+        self._diag_b("territory_enter(light)")   # diag (MDV_DIAG_BLOOD)
+        QTimer.singleShot(4000, lambda: self._diag_b("territory_enter+4s"))   # diag (MDV_DIAG_BLOOD)
         return True
 
     def _ct_territory_leave(self) -> None:
@@ -1124,3 +1309,4 @@ class CTModeBarMixin:
             except Exception:                    # noqa: BLE001
                 pass
         self._ct_restore_blood_panes()
+        self._diag_b("territory_leave")          # diag (MDV_DIAG_BLOOD)

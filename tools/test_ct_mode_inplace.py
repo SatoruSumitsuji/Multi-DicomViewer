@@ -209,8 +209,8 @@ check("LV measured in session (no file) → LVモード selected",
 check("enabled: 標準 + LV; CoronaryTree / Territory not (no tree)",
       b["standard"].isEnabled() and b["lv"].isEnabled()
       and not b["coronary"].isEnabled() and not b["territory"].isEnabled())
-check("readout says measured (unsaved)", t("計測済み（未保存）") in v._ct_files_lbl.text(),
-      v._ct_files_lbl.text())
+check("readout says measured (unsaved)", t("計測済み（未保存）") in v._ct_files_text(),
+      v._ct_files_text())
 
 # 標準: everything hidden, data kept
 v._ct_mode_clicked("standard")
@@ -243,7 +243,7 @@ v.set_coronary_overlay([{"vid": 1}])
 v.refresh_ct_mode_bar()
 check("tree registered → CoronaryTree selectable",
       b["coronary"].isEnabled()
-      and t("ツリーあり（未保存）") in v._ct_files_lbl.text())
+      and t("ツリーあり（未保存）") in v._ct_files_text())
 v._ct_mode_clicked("coronary")
 check("CoronaryTree: LV hidden, tab raised + ツリー表示 ON",
       v._ct_current_mode() == "coronary" and v._ct_lv_hidden

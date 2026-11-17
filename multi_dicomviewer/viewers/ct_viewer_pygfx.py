@@ -16193,6 +16193,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         then Blood (restores the combined overlay view). Returns True if applied."""
         if self._vol is None:
             return False
+        self._ct_lv_unloaded = False         # a FullLv load shows the LV again
+        self._ct_lv_hidden = False           # its overlays are drawn shown
+        self._ct_lv_snap = None
         # Entering the EDITABLE LV view (e.g. Territory bar 「LVモード」) must never
         # leave the Territory/VR review on screen — on Mac the right pane kept its
         # VR heart because this pygfx viewer is REUSED (its _vr_on / baked VR image
@@ -16307,6 +16310,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         screen, editing off, selector back). Returns True if applied."""
         if self._vol is None:
             return False
+        self._ct_lv_unloaded = False         # a FullLv load shows the LV again
+        self._ct_lv_hidden = False           # its overlays are drawn shown
+        self._ct_lv_snap = None
         fd = full_data or {}
         epi, bld = fd.get("epi"), fd.get("bld")
         if not isinstance(bld, dict):

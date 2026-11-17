@@ -10228,6 +10228,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         Returns True if anything was applied."""
         if self._image is None:
             return False
+        self._ct_lv_unloaded = False         # a FullLv load shows the LV again
+        self._ct_lv_hidden = False           # its overlays are drawn shown
+        self._ct_lv_snap = None
         # Epi / Blood require the MV plane, AoV plane AND apex to be set first
         # (the correct workflow) — either present in THIS drop or already loaded.
         # If any is missing, alert and apply NOTHING (don't open a partial LV).
@@ -10332,6 +10335,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         screen, editing off, selector back). Returns True if applied."""
         if self._image is None:
             return False
+        self._ct_lv_unloaded = False         # a FullLv load shows the LV again
+        self._ct_lv_hidden = False           # its overlays are drawn shown
+        self._ct_lv_snap = None
         fd = full_data or {}
         epi, bld = fd.get("epi"), fd.get("bld")
         if not isinstance(bld, dict):
@@ -12606,11 +12612,25 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             if rw is not None:
                 rw.SetAlphaBitPlanes(1)
                 rw.SetMultiSamples(0)
-            p.ren.SetUseDepthPeeling(True)
             p.ren.SetMaximumNumberOfPeels(8)
             p.ren.SetOcclusionRatio(0.0)
+        except Exception:                                # noqa: BLE001
+            pass
+        self._vr_depth_peeling(p, True)
+
+    @staticmethod
+    def _vr_depth_peeling(p, on: bool) -> None:
+        """Depth peeling ONLY while the pane shows the VR. Left on after VR off
+        (it used to be set once, for good, when the VR was first built), the
+        MPR pane's near-coplanar TRANSLUCENT layers — the HU tint (z 0.05) and
+        the LV-Blood fill (z 0.10) over the image — were peeled away: the right
+        pane (the Territory review's VR) showed no blood, or only a band of it,
+        in every mode afterwards and the 血流 toggle did nothing there (user
+        2026-11-17)."""
+        try:
+            p.ren.SetUseDepthPeeling(bool(on))
             if hasattr(p.ren, "SetUseDepthPeelingForVolumes"):
-                p.ren.SetUseDepthPeelingForVolumes(True)   # VTK ≥ 8.1
+                p.ren.SetUseDepthPeelingForVolumes(bool(on))   # VTK ≥ 8.1
         except Exception:                                # noqa: BLE001
             pass
 
@@ -13501,6 +13521,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         cam = p.ren.GetActiveCamera()
         if on:
             self._vr_ensure(p)
+            self._vr_depth_peeling(p, True)         # translucent VR overlays
             p.vr_mapper.SetInputData(self._image)   # FULL CT (real scalars)
             # The crop mask (scipy EDT shell) is the slow part of turning VR on —
             # build it behind an ANIMATED busy window so it doesn't look hung.
@@ -13647,6 +13668,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             for a in self._vr_hidden.get(key, []):
                 a.SetVisibility(True)
             self._vr_hidden[key] = []
+            self._vr_depth_peeling(p, False)        # MPR: plain alpha blending
             snap = self._vr_prev_cam.get(key)
             if snap is not None:
                 pp, pos, fp, up, ps = snap
