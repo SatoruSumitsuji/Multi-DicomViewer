@@ -205,6 +205,74 @@ class CTModeBarMixin:
             self._ct_render()
         self._ctlv_sync()
 
+    # ---- LV: Epi境界 / Endo境界 / 血流 — plain show/hide toggles (LVモード) ----
+    # (Epi / Blood/Endo open their detail rows; these only switch the overlay.)
+    _CTLV_SHOW = (("epi", "Epi境界", "#50dc50",
+                   "Epi 境界の表示 / 非表示（データは保持）"),
+                  ("endo", "Endo境界", "#ff8c28",
+                   "Endo 境界（自動 Endo）の表示 / 非表示（データは保持）"),
+                  ("blood", "血流", "#40e0ff",
+                   "血流（LV-Blood）の表示 / 非表示（データは保持）"))
+
+    def _ctlv_build_show_toggles(self, row) -> None:
+        """Add the Epi境界 / Endo境界 / 血流 toggles to *row* (LVモード view
+        tools; shown with 壁厚3D / 壁厚短軸 / CoronaryTree)."""
+        self._ctlv_show_btns = {}
+        for key, label, _c, tip in self._CTLV_SHOW:
+            b = FitButton(t(label))
+            b.setCheckable(True)
+            b.setHelpToolTip(t(tip))
+            b.clicked.connect(lambda _=False, k=key: self._ctlv_show_toggle(k))
+            b.setVisible(False)
+            row.addWidget(b)
+            self._ctlv_show_btns[key] = b
+
+    def _ctlv_show_state(self, key) -> tuple:
+        """(available, shown) of one LV overlay."""
+        g = lambda a: bool(getattr(self, a, False))      # noqa: E731
+        lvv = getattr(self, "_lvv", None)
+        if key == "epi":
+            m = (getattr(self, "_lv", None) or {}).get("model") \
+                if isinstance(getattr(self, "_lv", None), dict) else None
+            avail = (getattr(self, "_lvv_epi_surf", None) is not None
+                     or (m is not None
+                         and len(getattr(m, "epi_contours", []) or []) >= 3))
+            return avail, g("_lvv_epi_show") or g("_lv_border_show")
+        if key == "endo":
+            b = getattr(self, "_lvv_auto_endo_btn", None)
+            avail = lvv is not None and b is not None and b.isEnabled()
+            return avail, g("_lvv_endo_show")
+        avail = (lvv is not None
+                 and getattr(self, "_lvv_blood_comp", None) is not None)
+        return avail, g("_lvv_mask_on") or g("_lvv_hl_on")
+
+    def _ctlv_show_toggle(self, key) -> None:
+        btn = (getattr(self, "_ctlv_show_btns", None) or {}).get(key)
+        want = bool(btn.isChecked()) if btn is not None else True
+        try:
+            if key == "epi":
+                if getattr(self, "_lvv", None) is not None \
+                        or getattr(self, "_lvv_epi_surf", None) is not None:
+                    self._lv_set_epi_blood_border(want)
+                if not want or getattr(self, "_lvv", None) is None:
+                    if hasattr(self, "set_lv_border_visible"):
+                        self.set_lv_border_visible(want)
+            elif key == "endo":
+                self._lv_set_auto_endo(want)
+            else:
+                self._lv_set_blood("lv" if want else None)
+        except Exception:                        # noqa: BLE001
+            import traceback
+            traceback.print_exc()
+        f = getattr(self, "_lv_style_selectors", None)
+        if callable(f):
+            try:
+                f()
+            except Exception:                    # noqa: BLE001
+                pass
+        self._ctlv_sync()
+        self._ct_render()
+
     def _ctlv_sync(self) -> None:
         """Show the LV group in LVモード only (3-D, no LV edit step open), with
         coloured backgrounds while ON and 壁厚3D ⇔ 壁厚短軸 exclusive."""
@@ -238,6 +306,17 @@ class CTModeBarMixin:
             btn.setEnabled(tm is None or tm == m)
             if style is not None and m in modes:
                 style(btn, modes[m][1], "black")
+        for key, _l, color, _tip in self._CTLV_SHOW:
+            btn = (getattr(self, "_ctlv_show_btns", None) or {}).get(key)
+            if btn is None:
+                continue
+            avail, on = self._ctlv_show_state(key)
+            btn.blockSignals(True)
+            btn.setChecked(bool(on and avail))
+            btn.blockSignals(False)
+            btn.setEnabled(avail)
+            if style is not None:
+                style(btn, color, "black")
         tb = getattr(self, "_ctlv_tree_btn", None)
         if tb is not None:
             avail = self._ctlv_tree_available()

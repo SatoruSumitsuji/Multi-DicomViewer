@@ -4091,6 +4091,7 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._ctlv_cap = QLabel(t("LV:"))
         _lf = self._ctlv_cap.font(); _lf.setBold(True); self._ctlv_cap.setFont(_lf)
         row1.addWidget(self._ctlv_cap)
+        self._ctlv_build_show_toggles(row1)   # Epi境界 / Endo境界 / 血流
         self._ctlv_thick3d_btn = FitButton(t("壁厚3D"))
         self._ctlv_thick3d_btn.setCheckable(True)
         self._ctlv_thick3d_btn.setHelpToolTip(t(
@@ -4112,7 +4113,9 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._ctlv_tree_btn.clicked.connect(
             lambda _=False: self._ctlv_tree_toggle())
         row1.addWidget(self._ctlv_tree_btn)
-        self._ctlv_group = [self._ctlv_cap, self._ctlv_thick3d_btn,
+        self._ctlv_group = [self._ctlv_cap,
+                            *self._ctlv_show_btns.values(),
+                            self._ctlv_thick3d_btn,
                             self._ctlv_thicksax_btn, self._ctlv_tree_btn]
         for _w in self._ctlv_group:
             _w.setVisible(False)

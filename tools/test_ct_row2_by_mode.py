@@ -119,6 +119,43 @@ st = state()
 check("back to Simple View: the 道しるべ again",
       st["lv"] and st["coro"] and st["terr_load"] and not st["vr"], st)
 
+# ---- LVモード: Epi境界 / Endo境界 / 血流 show toggles ----------------------
+sb = v._ctlv_show_btns
+check("toggles placed after FullLV, before 壁厚3D",
+      pos["full"] < row1.indexOf(sb["epi"]) < row1.indexOf(sb["endo"])
+      < row1.indexOf(sb["blood"]) < row1.indexOf(v._ctlv_thick3d_btn),
+      [row1.indexOf(sb[k]) for k in ("epi", "endo", "blood")])
+v._ct_switch_inplace("lv")
+app.processEvents()
+check("LVモード: the three toggles shown (no LV data → greyed)",
+      all(shown(sb[k]) for k in sb)
+      and not any(sb[k].isEnabled() for k in sb))
+v._ct_switch_inplace("standard")
+app.processEvents()
+check("Simple View: toggles hidden", not any(shown(sb[k]) for k in sb))
+calls = []
+v._lv_set_epi_blood_border = lambda on: calls.append(("epi", on))
+v.set_lv_border_visible = lambda on: calls.append(("border", on))
+v._lv_set_auto_endo = lambda on: calls.append(("endo", on))
+v._lv_set_blood = lambda m: calls.append(("blood", m))
+v._lvv = {"observe": True}
+v._lvv_epi_surf = object()
+v._lvv_blood_comp = object()
+v._ct_switch_inplace("lv")
+for k in ("epi", "endo", "blood"):
+    sb[k].setChecked(True)
+    v._ctlv_show_toggle(k)
+    sb[k].setChecked(False)
+    v._ctlv_show_toggle(k)
+check("toggles drive the existing show/hide (blood = LV-Blood / off)",
+      ("epi", True) in calls and ("epi", False) in calls
+      and ("border", False) in calls
+      and ("endo", True) in calls and ("endo", False) in calls
+      and ("blood", "lv") in calls and ("blood", None) in calls, calls)
+v._lvv = None
+v._lvv_epi_surf = None
+v._lvv_blood_comp = None
+
 # ---- Calc enable rule + Mac parity ----------------------------------------
 src = (ROOT / "multi_dicomviewer/viewers/ct_mode_bar.py").read_text(encoding="utf-8")
 check("Calc enabled in Simple View + CoronaryTreeモード",
