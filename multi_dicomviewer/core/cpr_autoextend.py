@@ -21,10 +21,12 @@ Predict → search → correct (user 2026-11-18, rebuilt):
 4. Correct: the course is re-measured from the found centre and the centre
    taken again in the section ⟂ that course (an oblique cut in a bend is
    off-centre). Then the next course = the last 3 mm of the traced line.
-5. Nothing at 3 mm → try 1.5 mm (a tight bend / the vessel's end); still
-   nothing → a SHORT narrowing is bridged at 4.5 mm only when the region
-   there lies on the course, is the same size, and the gap is not fat
-   (its weakest sample ≥ bg + 25 % of the contrast). Else the line ends.
+5. Every step is the section 3 mm ahead (edit points 3 mm apart).
+   Nothing there → connected lumen sideways (a hairpin); still nothing →
+   a SHORT narrowing is bridged with the section 6 mm ahead (the 3 mm
+   point put on the straight line) only when the region there lies on
+   the course, is the same size, and the gap is not fat (its weakest
+   sample ≥ bg + 25 % of the contrast). Else the line ends.
 
 At the trunk's start (and on every step for side branches leaving at
 55–120°) rays from the centre look for lumen that leaves sideways — a line
@@ -48,8 +50,11 @@ from scipy import ndimage
 @dataclass
 class ExtendParams:
     step_mm: float = 3.0           # predicted point ahead (the user's 3 mm)
-    short_step_mm: float = 1.5     # retry when nothing at step_mm
-    bridge_mm: float = 4.5         # a short narrowing is bridged up to this
+    bridge_steps: int = 2          # a short narrowing is bridged: the
+    #                                section 2 steps (6 mm) ahead, the point
+    #                                3 mm ahead put on the straight line
+    conn_frac: float = 0.4         # "connected": the segment's 0.75 mm
+    #                                running mean ≥ bg + f·(lumen − bg)
     dir_mm: float = 3.0            # course = the line's last dir_mm vector
     search_mm: float = 5.0         # search radius in the section
     grid_mm: float = 0.25
@@ -225,13 +230,26 @@ def _regions(V, Q, d, thr, R=5.0, h=0.25):
     return out
 
 
+def _smooth_min(val, k=3):
+    """Weakest value of a 1-D profile after a k-sample running mean (one
+    noisy voxel does not break a lumen; a fat gap ≥ 0.75 mm still does)."""
+    val = np.asarray(val, float)
+    if val.shape[-1] < k:
+        return val.min(axis=-1)
+    ker = np.ones(k) / k
+    if val.ndim == 1:
+        return float(np.convolve(val, ker, mode="valid").min())
+    return np.array([np.convolve(v, ker, mode="valid").min() for v in val])
+
+
 def _seg_min(V, P, C, n=None):
-    """Weakest HU along the straight segment P → C (ends excluded)."""
+    """Weakest (0.75 mm running-mean) HU along the straight segment
+    P → C (ends excluded)."""
     L = float(np.linalg.norm(np.asarray(C) - np.asarray(P)))
     n = n or max(6, int(L / 0.25))
     t = np.linspace(0.0, 1.0, n + 2)[1:-1]
     pts = np.asarray(P)[None] + t[:, None] * (np.asarray(C) - np.asarray(P))
-    return float(V.sample(pts).min())
+    return _smooth_min(V.sample(pts))
 
 
 class _Tracer:
@@ -292,7 +310,7 @@ class _Tracer:
             ang = _angle(w, d)
             if ang > prm.max_ang_deg:
                 continue
-            if _seg_min(self.V, P, c) <= thr:
+            if _seg_min(self.V, P, c) <= self._conn(lumen):
                 continue                         # not connected (fat gap)
             if g["big"] or g["r"] > prm.max_radius_mm * 1.3:
                 if np.linalg.norm(c - Q) < max(2.5, 2.0 * r):
@@ -336,8 +354,8 @@ class _Tracer:
             return []
         ts = np.linspace(0.4, prm.ray_mm, 10)
         val = self.V.sample(P + ts[None, :, None] * W[:, None, :])
-        score = val.min(axis=1)
-        okm = score > thr
+        score = _smooth_min(val)
+        okm = score > self._conn(lumen)
         if not okm.any():
             return []
         order = np.argsort(-score)
@@ -358,7 +376,8 @@ class _Tracer:
             if np.linalg.norm(g["c"] - Qr) > 1.5 or g["big"]:
                 continue
             c = g["c"]
-            if _seg_min(self.V, P, c) <= thr or self._traced(c, own) \
+            if _seg_min(self.V, P, c) <= self._conn(lumen) \
+                    or self._traced(c, own) \
                     or g["hu"] < hu_min:
                 continue
             w = _unit(c - P)
@@ -382,7 +401,10 @@ class _Tracer:
             return a[0], a[1:], False
         return None, cands, True
 
-    def _refine(self, P, c, thr):
+    def _conn(self, lumen) -> float:
+        return self.bg + self.p.conn_frac * (lumen - self.bg)
+
+    def _refine(self, P, c, thr, lumen):
         """Re-take the centre in the section ⟂ the corrected course."""
         w = _unit(c - P)
         s = float(np.linalg.norm(c - P))
@@ -392,7 +414,7 @@ class _Tracer:
         g = min(regs, key=lambda x: np.linalg.norm(x["c"] - c))
         if np.linalg.norm(g["c"] - c) > 1.5 or g["big"]:
             return None
-        if _seg_min(self.V, P, g["c"]) <= thr:
+        if _seg_min(self.V, P, g["c"]) <= self._conn(lumen):
             return None
         return g
 
@@ -416,7 +438,8 @@ class _Tracer:
 
     def _bridge(self, P, d, thr, lumen, r, own):
         prm = self.p
-        Q = P + prm.bridge_mm * d
+        far = prm.bridge_steps * prm.step_mm
+        Q = P + far * d
         regs = _regions(self.V, Q, d, thr, 2.5, prm.grid_mm)
         floor = self.bg + prm.bridge_frac * (lumen - self.bg)
         hu_min = self.bg + prm.hu_frac * (lumen - self.bg)
@@ -431,8 +454,12 @@ class _Tracer:
             if _seg_min(self.V, P, c) < floor:
                 continue                         # fat in between: not ours
             w = _unit(c - P)
+            # the in-between points on the straight line, step_mm apart
+            via = [P + (k * prm.step_mm) * w
+                   for k in range(1, prm.bridge_steps)]
             return {"c": c, "w": w, "r": g["r"], "hu": g["hu"],
-                    "ang": _angle(w, d), "s": prm.bridge_mm, "how": "bridge"}
+                    "ang": _angle(w, d), "s": far, "how": "bridge",
+                    "via": via}
         return None
 
     # ---- one line ----------------------------------------------------------
@@ -471,11 +498,9 @@ class _Tracer:
                    "thr": round(thr, 1)}
             starting = depth > 0 and length < 4.0
             cands, chamber, n_tr = [], False, 0
-            for s in (prm.step_mm, prm.short_step_mm):
-                cands, chamber, n_tr = self._cands(P, d, s, thr, lumen, r,
-                                                   own)
-                if cands or chamber:
-                    break
+            # always the section step_mm (3 mm) ahead
+            cands, chamber, n_tr = self._cands(P, d, prm.step_mm, thr, lumen,
+                                               r, own)
             if depth == 0 and length < 1e-6 and not chamber:
                 # the trunk's start: lumen leaving sideways (carina)
                 for c in self._ray_cands(P, d, thr, lumen, 0.0,
@@ -530,8 +555,8 @@ class _Tracer:
                         and not self._seed_known(seeds, P, c["w"], c["c"]):
                     seeds.append({"P": P.copy(), "w": c["w"], "r": c["r"],
                                   "Q": c["c"]})
-            g = self._refine(P, main["c"], thr) if main["how"] != "bridge" \
-                else None
+            g = (self._refine(P, main["c"], thr, lumen)
+                 if main["how"] != "bridge" else None)
             C = g["c"] if g is not None else main["c"]
             rn = g["r"] if g is not None else main["r"]
             hu = g["hu"] if g is not None else main["hu"]
@@ -574,6 +599,14 @@ class _Tracer:
                                       "r": c["r"], "Q": c["c"]})
                         rec.setdefault("side", []).append(_r3(c["c"]))
             self.log.append(rec)
+            for Vp in main.get("via") or []:
+                Vp = np.asarray(Vp, float)
+                seg = float(np.linalg.norm(Vp - P))
+                length += seg
+                self.total += seg
+                P = Vp
+                path.append(P.copy())
+                hist.append(P.copy())
             seg = float(np.linalg.norm(C - P))
             length += seg
             self.total += seg

@@ -384,6 +384,24 @@ n_pts = len(sh_._measures["B"][0]["pts3d"])
 check("停止: stops at once, keeps the trace so far (one undo step)",
       rs is not None and rs["stop"] == "cancel" and 3 < n_pts < 20
       and len(sh_.undo) == 1 and not rs["branches"], (rs, n_pts))
+# every step = the section 3 mm ahead: edit points / sections 3 mm apart
+sp_ = np.linalg.norm(np.diff(extend_vessel(VY, D3, ctrl).trunk.path,
+                             axis=0), axis=1)
+check("steps are 3 mm apart (no shorter retry steps)",
+      len(sp_) > 10 and sp_.min() > 2.8 and sp_.max() < 3.4,
+      (round(float(sp_.min()), 2), round(float(sp_.max()), 2)))
+# a short narrowing (2.5 mm of faint lumen) is bridged — still 3 mm apart
+v = new()
+tube(v, [30, 30, 5], [30, 30, 40], 1.5)
+tube(v, [30, 30, 40], [30, 30, 42.5], 1.5, hu=180.0)
+tube(v, [30, 30, 42.5], [30, 30, 75], 1.5)
+rn_ = extend_vessel(noise(v, 5), D3, ctrl)
+tpn = rn_.trunk.path if rn_.trunk is not None else np.zeros((2, 3))
+spn = np.linalg.norm(np.diff(tpn, axis=0), axis=1)
+check("a short narrowing is bridged, steps still 3 mm",
+      tpn[-1][2] > 70 and spn.max() < 3.4
+      and any(e.get("event") == "bridged a narrowing" for e in rn_.log),
+      (tpn[-1].round(1), round(float(spn.max()), 2)))
 # progress reported while tracing (trunk mm, then branch k / n)
 stages = []
 extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(
