@@ -1970,6 +1970,7 @@
   "設定した Target/灌流域の表示を切替": "Alterna la visualización de los Target/territorios definidos",
   "設定をインポートしました: {p}": "Se importaron los ajustes: {p}",
   "設定を書き出しました:\n{p}": "Se exportaron los ajustes:\n{p}",
+  "診断ログ: {p}": "Registro de diagnóstico: {p}",
   "読み込みました: {p}": "Cargado: {p}",
   "読み込みエラー": "Error de lectura",
   "読み込めませんでした: {e}": "No se pudo cargar: {e}",

@@ -243,6 +243,83 @@ check("viewer: the line is extended in place (one undo step)",
 check("viewer: saved + its branch registered on it",
       h.saved == 1 and ("branches", p01, 1) in h.sh.calls
       and res["branches"] == ["x1"], h.sh.calls)
+# a tight bend (curvature radius 3.5 mm, r 1.6) is followed, not stopped as
+# "turn"; a 2-point start drawn 25° off the vessel still calibrates
+def _bend_vol(Rc, r):
+    sx_, sy_, sz_ = 0.4, 0.4, 0.5
+    zz, yy, xx = np.mgrid[0:120, 0:200, 0:150].astype(np.float32)
+    Xb, Yb, Zb = xx * sx_, yy * sy_, zz * sz_
+    vb = np.full(Xb.shape, -80.0, np.float32)
+    cen = [(10 + t, 30, 30) for t in np.arange(0, 15, 0.2)]
+    cen += [(25 + Rc * np.sin(a), 30 + Rc * (1 - np.cos(a)), 30)
+            for a in np.arange(0, np.pi, 0.2 / Rc)]
+    cen += [(25 - t, 30 + 2 * Rc, 30) for t in np.arange(0, 15, 0.2)]
+    for c in cen:
+        sl = (slice(int((c[2] - r - 1) / sz_), int((c[2] + r + 1) / sz_) + 1),
+              slice(int((c[1] - r - 1) / sy_), int((c[1] + r + 1) / sy_) + 1),
+              slice(int((c[0] - r - 1) / sx_), int((c[0] + r + 1) / sx_) + 1))
+        m = ((Xb[sl] - c[0]) ** 2 + (Yb[sl] - c[1]) ** 2
+             + (Zb[sl] - c[2]) ** 2 <= r * r)
+        vb[sl][m] = 380
+    vb += np.random.default_rng(3).normal(0, 25, vb.shape).astype(np.float32)
+    return vb, (sx_, sy_, sz_), 5 + np.pi * Rc + 15
+for off in (0, 25):
+    vb, db, full = _bend_vol(3.5, 1.6)
+    o = np.radians(off)
+    p2 = np.array([20.0, 30, 30])
+    p1 = p2 - 8 * np.array([np.cos(o), np.sin(o), 0])
+    rb = extend_vessel(vb, db, np.array([p1, p2]))
+    Lb = (0.0 if rb.trunk is None else float(np.linalg.norm(
+        np.diff(rb.trunk.path, axis=0), axis=1).sum()))
+    check(f"tight bend followed (start {off}° off): {Lb:.0f}/{full:.0f} mm",
+          rb.stop != "turn" and Lb > 0.85 * full, rb.stop)
+# a line ending AT / past the LM carina (LAD 45°, LCX 90° off its axis):
+# was 0 mm 「急カーブ」; now both found as branches, no duplicate
+def _carina_vol():
+    sx_, sy_, sz_ = 0.4, 0.4, 0.5
+    zz, yy, xx = np.mgrid[0:120, 0:200, 0:200].astype(np.float32)
+    Xc, Yc, Zc = xx * sx_, yy * sy_, zz * sz_
+    vc = np.full(Xc.shape, -80.0, np.float32)
+    def tb(P0, P1, r):
+        P0 = np.asarray(P0, float); P1 = np.asarray(P1, float)
+        dd = P1 - P0; LL = np.linalg.norm(dd); dd /= LL
+        Qq = np.stack([Xc - P0[0], Yc - P0[1], Zc - P0[2]], -1)
+        tt = np.clip(Qq @ dd, 0, LL)
+        vc[np.linalg.norm(Qq - tt[..., None] * dd, axis=-1) <= r] = 380
+    Bc = np.array([40.0, 40, 30])
+    tb([20, 40, 30], Bc, 2.3)
+    tb(Bc, Bc + 35 * np.array([np.cos(np.radians(45)),
+                               np.sin(np.radians(45)), 0]), 1.8)
+    tb(Bc, Bc + 34 * np.array([0, -1.0, 0]), 1.6)
+    vc += np.random.default_rng(1).normal(0, 25, vc.shape).astype(np.float32)
+    return vc, (sx_, sy_, sz_)
+vc, dc = _carina_vol()
+rc = extend_vessel(vc, dc, np.array([[23.0, 40, 30], [30, 40, 30],
+                                     [41.0, 40, 30]]))
+ends = [b.path[-1] for b in rc.branches]
+check("line ending at the carina: LAD + LCX as branches (not 「急カーブ」)",
+      rc.stop != "turn" and len(rc.branches) == 2
+      and any(e[0] > 60 and e[1] > 60 for e in ends)
+      and any(e[1] < 10 for e in ends),
+      (rc.stop, [np.round(e, 0) for e in ends]))
+# diagnostic log: every step recorded, saved under the (fake) home only
+from multi_dicomviewer.core.cpr_autoextend import save_log  # noqa: E402
+rl = extend_vessel(VY, D3, ctrl)
+steps = [e for e in rl.log if "step" in e]
+lp = save_log(rl.log)
+with open(lp, encoding="utf-8") as f:
+    jl = json.load(f)
+check("diagnostic log: steps with position / radius / candidates, saved "
+      "under the settings folder",
+      len(steps) >= 10 and all("P" in e and "r" in e and "cands" in e
+                               for e in steps)
+      and os.path.abspath(lp).startswith(os.path.abspath(HOME))
+      and jl["format"] == "MDV-AutoTrackLog"
+      and not any(k in json.dumps(jl).lower()
+                  for k in ("patient", "name\"")), lp)
+txt = CoronaryTreeWindow.auto_extend_text(
+    "x", {"trunk_mm": 5.0, "branches": [], "stop": "lumen", "log_path": lp})
+check("result text names the log file", lp in txt)
 # progress reported while tracing (trunk mm, then branch k / n)
 stages = []
 extend_vessel(VY, D3, ctrl, progress=lambda st, a, tot, k, n: stages.append(

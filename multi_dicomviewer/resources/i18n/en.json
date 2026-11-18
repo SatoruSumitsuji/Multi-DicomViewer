@@ -788,6 +788,7 @@
   "設定した Target/灌流域の表示を切替": "Toggle display of the set Targets/perfusion territories",
   "設定をインポートしました: {p}": "Settings imported: {p}",
   "設定を書き出しました:\n{p}": "Settings exported:\n{p}",
+  "診断ログ: {p}": "Diagnostic log: {p}",
   "読み込みました: {p}": "Loaded: {p}",
   "読み込みエラー": "Load error",
   "読み込めませんでした: {e}": "Could not load: {e}",

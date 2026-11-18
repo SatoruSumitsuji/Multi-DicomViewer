@@ -2396,7 +2396,8 @@ class CPRMixin:
         the trace (中止 stops it); the result — also "nothing found" with its
         reason, or an error — is always shown in a dialog."""
         import traceback
-        from multi_dicomviewer.core.cpr_autoextend import extend_vessel
+        from multi_dicomviewer.core.cpr_autoextend import (extend_vessel,
+                                                           save_log)
         from multi_dicomviewer.ui.autotrack_progress import (
             AutoTrackProgress, show_result)
         m = self._measures[which][mi]
@@ -2446,7 +2447,8 @@ class CPRMixin:
                         ok=False)
             return None
         out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
-               "found": len(res.branches), "lost": lost}
+               "found": len(res.branches), "lost": lost,
+               "log_path": save_log(res.log)}
         if shell is not None and hasattr(shell, "coronary_auto_extend_report"):
             shell.coronary_auto_extend_report(self, out)
         else:

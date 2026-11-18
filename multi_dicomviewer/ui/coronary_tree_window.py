@@ -3425,6 +3425,8 @@ class CoronaryTreeWindow(SnapDock):
         ctrl = np.asarray(v.ctrl if v.ctrl is not None and len(v.ctrl) >= 2
                           else v.points, float)
         res = extend_vessel(vol, dims, ctrl, cancel=cancel, progress=progress)
+        from multi_dicomviewer.core.cpr_autoextend import save_log
+        log_path = save_log(res.log)
         trunk_mm = 0.0
         if res.trunk is not None:
             add = np.asarray(res.trunk.ctrl, float)[1:]
@@ -3447,7 +3449,7 @@ class CoronaryTreeWindow(SnapDock):
             self._push_overlay()
         out = {"trunk_mm": trunk_mm, "branches": made, "stop": res.stop,
                "found": len(res.branches),
-               "lost": len(res.branches) - len(made)}
+               "lost": len(res.branches) - len(made), "log_path": log_path}
         self._hint.setText(self.auto_extend_text(v.name, out))
         return out
 
@@ -3456,6 +3458,8 @@ class CoronaryTreeWindow(SnapDock):
         lost = int(out.get("lost", 0) or 0)
         tail = ("\n" + t("⚠ 見つかった分枝 {k} 本を登録できませんでした。", k=lost)
                 if lost else "")
+        if out.get("log_path"):
+            tail += "\n" + t("診断ログ: {p}", p=out["log_path"])
         if not out["trunk_mm"] and not out["branches"]:
             return t("「{n}」: 追跡できる内腔が見つかりませんでした（{s}）。",
                      n=name, s=cls.stop_text(out["stop"])) + tail
