@@ -370,12 +370,13 @@ seen = lh.__dict__.get("seen", [])
 grow = [b - a for a, b in zip(seen, seen[1:])]
 check("live: the line grows step by step (one point per refresh)",
       len(seen) >= 10 and max(grow) <= 1 and seen[-1] > 3, seen[:12])
-okv = all(abs(abs(float(fr[0] @ (dc / np.linalg.norm(dc)))) - 1) < 1e-6
-          and np.linalg.norm(lh._pc["B"] - lh.views[-1][0]) < 1e-9
-          for (P_, dc, fr) in lh.views[-1:])
-check("live: the right pane contains the course, centred on the new point",
-      lh.views and okv and all(abs(float(fr[2] @ np.array([0, -1.0, 0])))
-                               > 0.9 for (_, _, fr) in lh.views))
+F0 = (np.eye(3)[0], np.eye(3)[2], -np.eye(3)[1])
+okv = all(np.linalg.norm(lh._pc["B"] - lh.views[-1][0]) < 1e-9
+          for _ in lh.views[-1:])
+check("live: the right pane only pans to the new point (never rotated)",
+      lh.views and okv and all(
+          all(np.allclose(fr[k], F0[k]) for k in range(3))
+          for (_, _, fr) in lh.views))
 # 停止 mid-way: the trace so far is kept, no branches traced after it
 import multi_dicomviewer.ui.autotrack_progress as _atp  # noqa: E402
 _orig_c = _atp.AutoTrackProgress.cancelled

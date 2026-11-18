@@ -2675,32 +2675,16 @@ class CPRMixin:
 
     def _cpr_autotrack_view(self, which, P, course) -> None:
         """Auto-Track live view: the long-axis pane (the line's map pane,
-        normally the right pane B) turns to CONTAIN the current course (its
-        normal kept as close as possible to the current one, the vessel
-        running left → right as before) and centres on the new point *P*."""
+        normally the right pane B) PANS so the new point *P* sits at its
+        centre. Its orientation is never changed (user 2026-11-19: turning
+        the plane with the course rotated the image 90° unexpectedly)."""
         key = which
         c = getattr(self, "_cpr", None)
         if c is not None and c.get("src") in ("A", "B"):
             key = c.get("src")
-        if key != "B" or not hasattr(self, "_frame"):
+        if key != "B" or not hasattr(self, "_pc"):
             return
-        d = np.asarray(course, float)
-        nd = float(np.linalg.norm(d))
-        if nd < 1e-9:
-            return
-        d = d / nd
-        u0, v0, n0 = (np.asarray(x, float) for x in self._frame["B"])
-        n1 = n0 - float(n0 @ d) * d
-        if float(np.linalg.norm(n1)) < 1e-3:
-            n1 = v0 - float(v0 @ d) * d
-        n1 = n1 / (float(np.linalg.norm(n1)) or 1.0)
-        u1 = d if float(d @ u0) >= 0.0 else -d
-        v1 = np.cross(n1, u1)
-        self._frame["B"] = self._ortho(u1, v1)
-        if hasattr(self, "_cross_ang"):
-            self._cross_ang["B"] = 0.0
         P = np.asarray(P, float)
-        self._center = P.copy()
         if hasattr(self, "_cpr_recenter_map_pane"):
             self._cpr_recenter_map_pane("B", P)
         else:

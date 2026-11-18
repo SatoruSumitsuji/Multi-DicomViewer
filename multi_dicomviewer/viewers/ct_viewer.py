@@ -20797,6 +20797,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "ref_up": np.asarray(nrm, float),     # RMF seed (kept for rebuilds)
         }
         # Show both panes: A = cross-section, the traced pane = map.
+        # The map pane B keeps the image it was showing (user 2026-11-19:
+        # 「なにかするときにそれまで使っていた画像が変化しないように」).
+        keep_b = (self._side != "Lt" and which == "B"
+                  and not getattr(self, "_view_initial", False))
+        cam_b = self._cam_of("B") if keep_b else None
         self.set_side("Bi")
         self.pane["A"].set_overlay_visible(False)   # no crosshair on the disc
         for b in self._t2d_btns:                    # Rt90/Lt90/Flip work on CPR
@@ -20815,6 +20820,52 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_sync_bar()
         self._coronary_sync_ui()                     # show scrub, enable Save
         self._refresh(reset_cam=not keep_view)
+        if cam_b is not None and not keep_view:
+            self._cam_set("B", cam_b)                # B as it was; A fitted
+            self._refresh(reset_cam=False)
+
+    def _cam_of(self, k) -> dict:
+        c = self.pane[k].ren.GetActiveCamera()
+        return {"vu": tuple(c.GetViewUp()), "fp": tuple(c.GetFocalPoint()),
+                "pos": tuple(c.GetPosition()),
+                "ps": float(c.GetParallelScale())}
+
+    def _cam_set(self, k, cc) -> None:
+        c = self.pane[k].ren.GetActiveCamera()
+        c.SetViewUp(*cc["vu"])
+        c.SetFocalPoint(*cc["fp"])
+        c.SetPosition(*cc["pos"])
+        c.SetParallelScale(max(1e-3, cc["ps"]))
+
+    def _view_merge_b(self, prev):
+        """*prev* (a view snapshot) with pane B as it is NOW: leaving the
+        short-axis restores pane A's MPR, the map pane B stays unchanged."""
+        try:
+            now = self._view_snapshot()
+            snap = dict(prev)
+            for key in ("frame", "pc", "cam", "wl", "thick", "ps", "pan",
+                        "roll", "cross_ang"):
+                if isinstance(prev.get(key), dict) and \
+                        isinstance(now.get(key), dict) and "B" in now[key]:
+                    d = dict(prev[key])
+                    d["B"] = now[key]["B"]
+                    snap[key] = d
+            # pane A's MPR (its orientation as before) and the crossing go
+            # to where the work is now — the map pane's centre (e.g. the
+            # distal point Auto-Track reached), not back to the proximal view
+            pcb = np.asarray(now["pc"]["B"], float).copy()
+            snap["pc"] = dict(snap["pc"])
+            snap["pc"]["A"] = pcb.copy()
+            snap["center"] = pcb.copy()
+            if isinstance(snap.get("cam"), dict) and "A" in snap["cam"]:
+                ca = dict(snap["cam"]["A"])
+                ca["fp"] = (0.0, 0.0, float(ca["fp"][2]))
+                ca["pos"] = (0.0, 0.0, float(ca["pos"][2]))
+                snap["cam"] = dict(snap["cam"])
+                snap["cam"]["A"] = ca
+            return snap
+        except Exception:                                # noqa: BLE001
+            return prev
 
     def _exit_cpr(self, keep_view=False):
         """Leave short-axis mode and restore pane A's normal MPR. The coronary
@@ -20830,13 +20881,17 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         if self._cpr is None:
             self._coronary_sync_ui()
             return
+        merged = (self._view_merge_b(self._cpr_prev_view)
+                  if keep_view and getattr(self, "_cpr_prev_view", None)
+                  is not None else None)
         self._cpr = None
         self.pane["A"].set_overlay_visible(self._cl_btn.isChecked())
         for b in self._t2d_btns:                  # 2-D-only again once out of CPR
             b.setEnabled(self._mode == "2D")
         self._coronary_sync_ui()                  # hide scrub; row per _coronary_mode
-        if keep_view and getattr(self, "_cpr_prev_view", None) is not None:
-            self._view_restore(self._cpr_prev_view)   # back to the traced MPR view
+        if merged is not None:
+            # pane A back to the traced MPR; the map pane B unchanged
+            self._view_restore(merged)
         else:
             self._init_frames()                   # rebuild pane A's MPR frame
             self._refresh(reset_cam=True)

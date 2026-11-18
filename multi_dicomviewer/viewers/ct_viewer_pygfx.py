@@ -20015,6 +20015,11 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             "half": 25.0, "src": which, "src_mi": mi,
             "ref_up": np.asarray(nrm, float),
         }
+        # the map pane B keeps the image it was showing (no re-fit)
+        cam_b = ((float(self._ps["B"]), self._pan["B"].copy(),
+                  float(self._roll["B"]))
+                 if (self._side != "Lt" and which == "B"
+                     and not getattr(self, "_view_initial", False)) else None)
         self.set_side("Bi")                        # A = cross-section, src = map
         for b in self._t2d_btns:                   # Rt90/Lt90/Flip work in CPR
             b.setEnabled(True)
@@ -20034,6 +20039,35 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
         self._cpr_sync_bar()
         self._coronary_sync_ui()                   # show scrub, enable Save
         self._refresh(reset_cam=not keep_view)
+        if cam_b is not None and not keep_view:
+            # the map pane B keeps the image it was showing; only A is fitted
+            self._ps["B"], self._pan["B"], self._roll["B"] = cam_b
+            self._refresh(reset_cam=False)
+
+    def _view_merge_b(self, prev):
+        """*prev* (a view snapshot) with pane B as it is NOW."""
+        try:
+            now = self._view_snapshot()
+            snap = dict(prev)
+            for key in ("frame", "pc", "wl", "thick", "ps", "pan", "roll",
+                        "cross_ang"):
+                if isinstance(prev.get(key), dict) and \
+                        isinstance(now.get(key), dict) and "B" in now[key]:
+                    d = dict(prev[key])
+                    d["B"] = now[key]["B"]
+                    snap[key] = d
+            # pane A's MPR and the crossing go to the map pane's centre
+            # (where the work is now), not back to the proximal view
+            pcb = np.asarray(now["pc"]["B"], float).copy()
+            snap["pc"] = dict(snap["pc"])
+            snap["pc"]["A"] = pcb.copy()
+            snap["center"] = pcb.copy()
+            if isinstance(snap.get("pan"), dict):
+                snap["pan"] = dict(snap["pan"])
+                snap["pan"]["A"] = np.zeros(2)
+            return snap
+        except Exception:                                # noqa: BLE001
+            return prev
 
     def _exit_cpr(self, keep_view=False):
         """Leave short-axis mode and restore pane A's normal MPR. The coronary
@@ -20058,7 +20092,8 @@ class CTViewer(CPRMixin, ValveAutoMixin, CTModeBarMixin, AbstractViewer):
             b.setEnabled(True)
         self._coronary_sync_ui()                   # hide scrub; row per _coronary_mode
         if keep_view and getattr(self, "_cpr_prev_view", None) is not None:
-            self._view_restore(self._cpr_prev_view)   # back to the traced MPR view
+            # pane A back to the traced MPR; the map pane B unchanged
+            self._view_restore(self._view_merge_b(self._cpr_prev_view))
         else:
             self._init_frames()                    # rebuild pane A's MPR frame
             self._refresh(reset_cam=True)
